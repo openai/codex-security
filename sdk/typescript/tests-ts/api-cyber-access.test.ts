@@ -3,7 +3,11 @@ import { join } from "node:path";
 import type { CodexOptions, ThreadEvent, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { resolveCodexProfile, type JsonObject } from "../src/config.js";
+import {
+  resolveCodexProfile,
+  scanCyberAccessConfig,
+  type JsonObject,
+} from "../src/config.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { codexFactory, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -17,10 +21,64 @@ async function* deniedEvents(): AsyncGenerator<ThreadEvent> {
 }
 
 test.each([
+  [true, false, false],
+  [false, true, true],
+  [false, null, false],
+] as const)(
+  "preserves root gate %s with profile override %s",
+  (root, selected, expected) => {
+    const gate = "api_key_cyber_access_programs";
+    const config = scanCyberAccessConfig(
+      {
+        profile: "selected",
+        features: { [gate]: root },
+        profiles: { selected: { features: { [gate]: selected } } },
+      },
+      "daybreak_blue",
+    );
+    expect(config["features"]).toEqual({ [gate]: root });
+    expect(resolveCodexProfile(config)["features"]).toEqual({
+      [gate]: expected,
+    });
+  },
+);
+
+test.each([
   [undefined, {}],
   ["standard", {}],
   ["daybreak_blue", {}],
   ["daybreak_red", {}],
+  [undefined, { daybreak: true }],
+  [undefined, { daybreak: false }],
+  ["standard", { daybreak: true }],
+  ["daybreak_blue", { daybreak: false }],
+  [undefined, { daybreak: true, features: { cli_daybreak: false } }],
+  [
+    undefined,
+    {
+      daybreak: true,
+      features: { cli_daybreak: true },
+      profile: "selected",
+      profiles: { selected: { features: { cli_daybreak: false } } },
+    },
+  ],
+  [
+    undefined,
+    {
+      daybreak: false,
+      features: { cli_daybreak: false },
+      profile: "selected",
+      profiles: { selected: { features: { cli_daybreak: true } } },
+    },
+  ],
+  [
+    undefined,
+    {
+      daybreak: false,
+      profile: "selected",
+      profiles: { selected: { daybreak: true } },
+    },
+  ],
   ["daybreak_blue", { features: { api_key_cyber_access_programs: false } }],
   [
     "daybreak_blue",
@@ -81,6 +139,24 @@ test.each([
       expect(recipe?.["cyberAccessProgram"]).toBe(program);
       expect(clientOptions?.apiKey).toBe("synthetic-api-key");
       const config = parseToml(await readFile(runtime.configPath, "utf8"));
+      const resolved = resolveCodexProfile(overrides as JsonObject);
+      const daybreak = resolved["daybreak"] as boolean | undefined;
+      expect(config["daybreak"]).toBe(daybreak);
+      expect(clientOptions?.config?.["daybreak"]).toBe(daybreak);
+      expect((recipe?.["config"] as JsonObject | undefined)?.["daybreak"]).toBe(
+        daybreak,
+      );
+      for (const snapshot of [
+        config,
+        clientOptions?.config,
+        recipe?.["config"] as JsonObject,
+      ]) {
+        expect(
+          (snapshot?.["features"] as JsonObject | undefined)?.["cli_daybreak"],
+        ).toBe(
+          (resolved["features"] as JsonObject | undefined)?.["cli_daybreak"],
+        );
+      }
       if (program === undefined) {
         expect(config).not.toHaveProperty("codex_security");
         expect(config["features"]).not.toHaveProperty(

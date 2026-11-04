@@ -3,54 +3,49 @@ import assert from "assert";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import { parse } from "yaml";
 import triageIo from "../assertions/triage-io.mts";
 import type { TriageFinding } from "../types.ts";
 
-function outputFor({
-  inputId,
-  verdict,
-  sourceType = "cve",
-}: {
-  inputId: string;
-  verdict: string;
-  sourceType?: string;
-}) {
-  const stackRank = {
-    rank_queue: verdict === "not_actionable" ? null : verdict,
-    rank: verdict === "not_actionable" ? null : 1,
-    rationale:
-      verdict === "not_actionable" ? "not actionable" : "Example ranking",
-    drivers: [],
+function findingFor(
+  inputId: string,
+  verdict: string,
+  rank: number | null = verdict === "not_actionable" ? null : 1,
+  rankQueue: string | null = verdict === "not_actionable" ? null : verdict,
+) {
+  return {
+    triage_item_id: "triage-001",
+    input_id: inputId,
+    source_type: "cve",
+    title: "Example finding",
+    normalized_input: {},
+    verdict,
+    confidence: "high",
+    exploitability_stack_rank: {
+      rank,
+      rank_queue: rankQueue,
+      rationale:
+        verdict === "not_actionable" ? "not actionable" : "Example ranking",
+      drivers: [],
+    },
+    affected_locations: [],
+    reachable_path: [],
+    evidence: [],
+    counterevidence: [],
+    proof_gaps: [],
+    recommended_next_step: "No action",
+    fix_finding_handoff: verdict === "confirmed" ? "Fix handoff" : null,
   };
-  return `\`\`\`json
-{
-  "schema_version": "triage-finding/v0",
-  "repository": {
-    "path": "/tmp/repo",
-    "revision": "abc123"
-  },
-  "findings": [
-    {
-      "triage_item_id": "triage-001",
-      "input_id": "${inputId}",
-      "source_type": "${sourceType}",
-      "title": "Example finding",
-      "normalized_input": {},
-      "verdict": "${verdict}",
-      "confidence": "high",
-      "exploitability_stack_rank": ${JSON.stringify(stackRank)},
-      "affected_locations": [],
-      "reachable_path": [],
-      "evidence": [],
-      "counterevidence": [],
-      "proof_gaps": [],
-      "recommended_next_step": "No action",
-      "fix_finding_handoff": ${verdict === "confirmed" ? JSON.stringify("Fix handoff") : "null"}
-    }
-  ]
 }
-\`\`\``;
-}
+
+const documentFor = (findings: TriageFinding[]) => ({
+  schema_version: "triage-finding/v0",
+  repository: { path: "/tmp/repo", revision: "abc123" },
+  findings,
+});
+
+const queueOutput = (findings: TriageFinding[]) =>
+  JSON.stringify({ schema_version: "triage-finding/v0", findings });
 
 function assertPasses(
   name: string,
@@ -76,75 +71,42 @@ function assertFails(
   );
 }
 
-const sourceType = "cve";
-
-assertPasses(
-  "vulnerable scanbench cases map to confirmed/positive",
-  outputFor({
-    inputId: "GHSA-example-000-vulnerable",
-    verdict: "confirmed",
-  }),
-  {
+for (const [id, verdict, label, error] of [
+  ["input-001", "confirmed", "positive", null],
+  ["input-002", "not_actionable", "negative", null],
+  ["input-002", "confirmed", "negative", /fixed.*not_actionable|negative/],
+] as const) {
+  const finding = findingFor(id, verdict);
+  const output =
+    "```json\n" +
+    JSON.stringify(
+      documentFor([
+        {
+          ...finding,
+          evidence: label === "positive" ? ["Inline ``` fence in source."] : [],
+        },
+      ]),
+      null,
+      2,
+    ) +
+    "\n```";
+  const context = {
     vars: {
-      case_id: "ghsa-example-vulnerable",
-      expected_ids: "GHSA-example-000-vulnerable",
-      expected_source_types: sourceType,
-      expected_verdicts: "confirmed",
-      expected_binary_label: "positive",
+      case_id: label === "positive" ? "case-001" : "case-002",
+      expected_ids: id,
+      expected_source_types: "cve",
+      expected_verdicts: verdict,
+      expected_binary_label: label,
     },
-  },
-);
-
-assertPasses(
-  "fixed scanbench cases map to not_actionable/negative",
-  outputFor({
-    inputId: "GHSA-example-000-fixed",
-    verdict: "not_actionable",
-  }),
-  {
-    vars: {
-      case_id: "ghsa-example-fixed",
-      expected_ids: "GHSA-example-000-fixed",
-      expected_source_types: sourceType,
-      expected_verdicts: "not_actionable",
-      expected_binary_label: "negative",
-    },
-  },
-);
-
-assertFails(
-  "fixed scanbench cases cannot be labeled confirmed",
-  outputFor({
-    inputId: "GHSA-example-000-fixed",
-    verdict: "confirmed",
-  }),
-  {
-    vars: {
-      case_id: "ghsa-example-fixed",
-      expected_ids: "GHSA-example-000-fixed",
-      expected_source_types: sourceType,
-      expected_verdicts: "confirmed",
-      expected_binary_label: "positive",
-    },
-  },
-  /fixed.*not_actionable|negative/,
-);
-
-function findingFor(
-  inputId: string,
-  verdict: string,
-  rank: number | null,
-  rankQueue: string | null = verdict,
-) {
-  const finding: TriageFinding = JSON.parse(
-    outputFor({ inputId, verdict }).split("```json")[1].split("```")[0],
-  ).findings[0];
-  finding.exploitability_stack_rank = {
-    ...finding.exploitability_stack_rank,
-    rank,
-    rank_queue: rankQueue,
   };
-  return finding;
+  if (error)
+    assertFails(
+      "fixed scanbench case cannot be confirmed",
+      output,
+      context,
+      error,
+    );
+  else assertPasses(`${verdict} maps to ${label}`, output, context);
 }
 
 const queueFindings = [
@@ -161,8 +123,6 @@ const contextFor = (findings: TriageFinding[]) => ({
   },
 });
 const queueContext = contextFor(queueFindings);
-const queueOutput = (findings: TriageFinding[]) =>
-  JSON.stringify({ schema_version: "triage-finding/v0", findings });
 assertPasses(
   "independent verdict queues",
   queueOutput(queueFindings),
@@ -242,39 +202,29 @@ const inputCases = fs.readFileSync(
   path.resolve(import.meta.dirname, "../tests/input-types.yaml"),
   "utf8",
 );
-const scannerCase = inputCases.match(
-  /case_id: scanner-query[\s\S]*?(?=\n- description:|$)/,
-)![0];
-const scannerVars: Record<string, string> = { case_id: "scanner-query" };
-const scannerContext = { vars: scannerVars };
-for (const field of [
-  "expected_ids",
-  "expected_source_types",
-  "expected_verdicts",
-]) {
-  scannerVars[field] = scannerCase.match(new RegExp(field + ": (.+)"))![1];
-}
-function queryVerdict(inputId: string, verdict: string) {
-  return JSON.parse(
-    outputFor({ inputId, sourceType: "scanner_ticket", verdict }).match(
-      /```json\n([\s\S]*?)\n```/,
-    )![1],
-  );
-}
-const queryOutput = queryVerdict("SCAN-SQL-001", "not_actionable");
-queryOutput.findings.push(
-  queryVerdict("SCAN-SQL-TEST-ONLY", "not_actionable").findings[0],
-);
-queryOutput.findings[1].triage_item_id = "triage-002";
+const scannerContext = (
+  parse(inputCases) as { vars: Record<string, string> }[]
+).find((item) => item.vars.case_id === "scanner-query")!;
+const scannerFinding = (id: string, verdict: string) => ({
+  ...findingFor(id, verdict),
+  source_type: "scanner_ticket",
+});
+const queryFindings = [
+  scannerFinding("SCAN-SQL-001", "not_actionable"),
+  {
+    ...scannerFinding("SCAN-SQL-TEST-ONLY", "not_actionable"),
+    triage_item_id: "triage-002",
+  },
+];
 assertPasses(
   "a SQL text response is not confirmed SQL injection",
-  JSON.stringify(queryOutput),
+  JSON.stringify(documentFor(queryFindings)),
   scannerContext,
 );
-queryOutput.findings[0] = queryVerdict("SCAN-SQL-001", "confirmed").findings[0];
+queryFindings[0] = scannerFinding("SCAN-SQL-001", "confirmed");
 assertFails(
   "a missing SQL sink cannot earn a confirmed verdict",
-  JSON.stringify(queryOutput),
+  JSON.stringify(documentFor(queryFindings)),
   scannerContext,
   /expected verdict not_actionable/,
 );

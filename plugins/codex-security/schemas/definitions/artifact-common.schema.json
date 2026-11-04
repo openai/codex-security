@@ -5,38 +5,20 @@
     "nonEmptyText": {
       "type": "string",
       "minLength": 1,
-      "pattern": "\\S"
+      "pattern": "[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
     },
-    "scanId": {
-      "type": "string",
-      "format": "uuid"
-    },
+    "scanId": { "type": "string", "format": "uuid" },
     "repositoryPath": {
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
-      "pattern": "^(?:\\./)?(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*//)(?!.*[\\u0000-\\u001f\\u007f])(?!.*\\/$).+$"
+      "pattern": "^(?:\\./)?(?!/)(?![A-Za-z]:)(?![\\s\\S]*\\\\)(?![\\s\\S]*(?:^|/)\\.\\.?(/|$))(?![\\s\\S]*//)(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?![\\s\\S]*\\/$)[\\s\\S]+$"
     },
     "candidateId": {
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
       "pattern": "^(?!\\.{1,2}$)(?!.*[\\u0000-\\u001f\\u007f])(?=.*\\S)[^/\\\\]+$"
-    },
-    "page": {
-      "type": "object",
-      "properties": {
-        "cursor": {
-          "type": "string",
-          "pattern": "^(?:0|[1-9][0-9]*)$"
-        },
-        "limit": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1000
-        }
-      },
-      "additionalProperties": false
     }
   }
 }

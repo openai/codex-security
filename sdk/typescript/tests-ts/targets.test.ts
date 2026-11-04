@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { getEventListeners } from "node:events";
 import { existsSync } from "node:fs";
 import {
   chmod,
@@ -6,6 +7,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   utimes,
@@ -24,11 +26,14 @@ import {
   type ScanTarget,
 } from "../src/index.js";
 import {
+  abortable,
   enclosingGitWorktreeRoot,
   gitMarkerRoot,
+  isGitMetadataDirectory,
   gitProtectionRoots,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runCommand } from "./support/shell.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -43,12 +48,108 @@ const { temporaryDirectory, cleanup, temporaryDirectories } =
 
 afterEach(cleanup);
 
+describe("abortable", () => {
+  test.each([
+    { label: "error", reason: new Error("Canceled before execution") },
+    { label: "object", reason: { message: "Canceled before execution" } },
+    { label: "string", reason: "Canceled before execution" },
+    { label: "zero", reason: 0 },
+    { label: "false", reason: false },
+    { label: "null", reason: null },
+    { label: "default", reason: undefined },
+  ])(
+    "does not start canceled work with a $label reason",
+    async ({ reason }) => {
+      for (const beforeAdmission of [true, false]) {
+        const controller = new AbortController();
+        let calls = 0;
+        if (beforeAdmission) controller.abort(reason);
+        const pending = abortable(async () => {
+          calls++;
+          return "unused";
+        }, controller.signal);
+        if (!beforeAdmission) controller.abort(reason);
+        if (reason === null)
+          await expect(pending).rejects.toMatchObject({
+            name: "AbortError",
+            message: "The operation was aborted.",
+          });
+        else await expect(pending).rejects.toBe(controller.signal.reason);
+        expect(calls).toBe(0);
+        expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "preserves operation ordering with a signal: %p",
+    async (withSignal) => {
+      const controller = new AbortController();
+      const order: string[] = [];
+      const result = { completed: true };
+      const pending = abortable(
+        async () => {
+          order.push("operation");
+          return result;
+        },
+        withSignal ? controller.signal : undefined,
+      );
+      order.push("returned");
+      expect(await pending).toBe(result);
+      expect(order).toEqual(
+        withSignal ? ["returned", "operation"] : ["operation", "returned"],
+      );
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+      controller.abort(new Error("Canceled after completion"));
+      expect(await pending).toBe(result);
+    },
+  );
+
+  test("cancels started work without awaiting its late failure", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const operation = Promise.withResolvers<void>();
+    const pending = abortable(() => {
+      started.resolve();
+      return operation.promise;
+    }, controller.signal);
+    await started.promise;
+    const reason = new Error("Canceled while running");
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    operation.reject(new Error("Late operation failure"));
+    await expect(pending).rejects.toBe(reason);
+  });
+
+  test.each(["resolve", "reject"])(
+    "preserves cancellation before a queued %s is observed",
+    async (settlement) => {
+      const controller = new AbortController();
+      const started = Promise.withResolvers<void>();
+      const operation = Promise.withResolvers<number>();
+      const pending = abortable(() => {
+        started.resolve();
+        return operation.promise;
+      }, controller.signal);
+      await started.promise;
+      if (settlement === "resolve") operation.resolve(7);
+      else operation.reject(new Error("Queued operation failure"));
+      const reason = new Error("Canceled before settlement");
+      controller.abort(reason);
+      await expect(pending).rejects.toBe(reason);
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    },
+  );
+});
+
 async function repository(name = "repo"): Promise<string> {
   const root = await temporaryDirectory();
   const repo = join(root, name);
   await mkdir(join(repo, "src"), { recursive: true });
   await writeFile(join(repo, "src", "app.ts"), "export const ok = true;\n");
   git(repo, "init", "-b", "main");
+  git(repo, "config", "--local", "core.autocrlf", "false");
   git(repo, "config", "user.email", "test@example.com");
   git(repo, "config", "user.name", "Test");
   git(repo, "add", ".");
@@ -58,6 +159,27 @@ async function repository(name = "repo"): Promise<string> {
 
 function git(repo: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+}
+
+function validateCommittedDiffWithCredentialConfig(repo: string) {
+  return spawnSync(
+    process.execPath,
+    [
+      "-e",
+      "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
+      fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+      repo,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.extraHeader",
+        GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
+      },
+    },
+  );
 }
 
 async function createRepositoryGitShim(
@@ -104,13 +226,14 @@ function environmentWithPath(entries: readonly string[]): NodeJS.ProcessEnv {
 }
 
 describe("scan target normalization", () => {
-  test("tolerates a temporary repository removed before cleanup", async () => {
-    const repo = await repository();
-    await rm(join(repo, ".."), { recursive: true, force: true });
-  });
-
   test("normalizes repository and path targets", async () => {
     const repo = await repository();
+    const alias = join(repo, "source-link");
+    await symlink(
+      join(repo, "src"),
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     expect(await normalizeTarget(repo, "repository")).toEqual({
       kind: "repository",
       paths: [],
@@ -121,6 +244,7 @@ describe("scan target normalization", () => {
         join(repo, "src", "app.ts"),
         join(repo, "src"),
         "src/app.ts",
+        alias,
       ]),
     ).toEqual({
       kind: "paths",
@@ -163,13 +287,80 @@ describe("scan target normalization", () => {
     },
   );
 
-  test("rejects empty and escaping paths", async () => {
+  test("rejects empty, missing, and escaping paths", async () => {
     const repo = await repository();
     await expect(normalizeTarget(repo, [""])).rejects.toThrow("empty path");
+    await expect(normalizeTarget(repo, ["missing.ts"])).rejects.toThrow(
+      "Path target does not exist: missing.ts",
+    );
     await expect(normalizeTarget(repo, [join(repo, "..")])).rejects.toThrow(
       "outside the repository",
     );
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects special filesystem targets the scan scope resolver cannot read",
+    async () => {
+      const repo = await repository();
+      const fifo = join(repo, "src", "pending.fifo");
+      execFileSync("mkfifo", [fifo]);
+      await expect(normalizeTarget(repo, [fifo])).rejects.toThrow(
+        "not a regular file or directory",
+      );
+    },
+  );
+
+  test("keeps repository and target paths distinct from their UTF-8 replacements", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repo-\uFFFD");
+    const file = "sibling-\uFFFD.ts";
+    await mkdir(repository);
+    await writeFile(join(repository, file), "");
+    await expect(
+      normalizeTarget(join(root, "repo-") + "\uD800", [file]),
+    ).rejects.toThrow("Repository path cannot be represented as UTF-8");
+    await expect(
+      normalizeTarget(repository, ["sibling-\uDC00.ts"]),
+    ).rejects.toThrow("Path target cannot be represented as UTF-8");
+    expect((await normalizeTarget(repository, [file])).paths).toEqual([file]);
+    if (process.platform === "linux") {
+      const raw = Buffer.concat([
+        Buffer.from(join(root, "repo-")),
+        Buffer.from([0xff]),
+      ]);
+      const alias = join(root, "selected");
+      await mkdir(raw);
+      try {
+        await symlink(raw, alias);
+        await expect(normalizeTarget(alias, [file])).rejects.toThrow(
+          "Repository path cannot be represented as UTF-8",
+        );
+      } finally {
+        await rm(raw, { recursive: true });
+      }
+    }
+  });
+
+  test.skipIf(process.platform === "win32").each(["node", "bun"])(
+    "identifies special file targets and their links in %s",
+    async (runtime) => {
+      const root = await temporaryDirectory("cs-target-");
+      const build = await Bun.build({
+        entrypoints: [
+          fileURLToPath(
+            new URL("./fixtures/socket-target.ts", import.meta.url),
+          ),
+        ],
+        outdir: root,
+        naming: "socket-target.mjs",
+        target: "node",
+      });
+      const result = await runCommand(runtime, [build.outputs[0]!.path, root], {
+        cwd: root,
+      });
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "rejects NTFS alternate streams before runtime initialization",
@@ -198,19 +389,44 @@ describe("scan target normalization", () => {
     },
   );
 
-  test("reports a path that disappears during normalization as invalid", async () => {
+  test.each(
+    process.platform === "win32"
+      ? ["removed"]
+      : ["removed", "retargeted", "replaced after resolution"],
+  )("rejects a path %s during canonical resolution", async (change) => {
     const repo = await repository();
+    const target = join(repo, "src", "app.ts");
+    if (change === "retargeted") {
+      const pending = join(repo, "pending");
+      execFileSync("mkfifo", [pending]);
+      if (process.platform === "linux") {
+        const raw = Buffer.concat([Buffer.from(pending), Buffer.from([0xff])]);
+        await rename(pending, raw);
+        await symlink(raw, pending);
+        await writeFile(raw.toString(), "regular sibling");
+      }
+    }
+    if (change === "replaced after resolution")
+      await writeFile(join(repo, "..", "outside-file"), "outside");
     const script = `
       import { mockFs } from ${JSON.stringify(fileURLToPath(new URL("./support/module-mocks.ts", import.meta.url)))};
-      import { rmSync } from "node:fs";
+      import { rmSync, symlinkSync } from "node:fs";
       import * as original from "node:fs/promises";
       import { join } from "node:path";
-      const [repo, targets] = process.argv.slice(1);
-      const target = join(repo, "src", "app.ts");
+      const [repo, targets, target, change] = process.argv.slice(1);
       const actualRealpath = original.realpath;
       mockFs(() => ({
         realpath: async (path, ...args) => {
-          if (path === target) rmSync(target);
+          if (path === target && change === "replaced after resolution") {
+            const canonical = await actualRealpath(path, ...args);
+            rmSync(target);
+            symlinkSync(join(repo, "..", "outside-file"), target);
+            return canonical;
+          }
+          if (path === target) {
+            rmSync(target);
+            if (change === "retargeted") symlinkSync(join(repo, "pending"), target);
+          }
           return await actualRealpath(path, ...args);
         },
       }));
@@ -234,11 +450,17 @@ describe("scan target normalization", () => {
         script,
         repo,
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        target,
+        change,
       ],
       { encoding: "utf8" },
     );
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("REJECTED true Path target does not exist");
+    expect(result.stdout).toContain(
+      change === "removed"
+        ? "REJECTED true Path target does not exist"
+        : "REJECTED true Path target is not a regular file or directory",
+    );
   });
 
   test("binds ref and working-tree targets to commit IDs", async () => {
@@ -359,24 +581,7 @@ describe("scan target normalization", () => {
     await chmod(hook, 0o700);
     git(repo, "config", "core.fsmonitor", hook);
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        "-e",
-        "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
-        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
-        repo,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_CONFIG_COUNT: "1",
-          GIT_CONFIG_KEY_0: "http.extraHeader",
-          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
-        },
-      },
-    );
+    const result = validateCommittedDiffWithCredentialConfig(repo);
 
     expect(result.status).toBe(0);
     expect(existsSync(leaked)).toBe(false);
@@ -411,24 +616,7 @@ describe("scan target normalization", () => {
     );
     await utimes(join(repo, "src", "app.ts"), new Date(0), new Date(0));
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        "-e",
-        "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
-        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
-        repo,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_CONFIG_COUNT: "1",
-          GIT_CONFIG_KEY_0: "http.extraHeader",
-          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
-        },
-      },
-    );
+    const result = validateCommittedDiffWithCredentialConfig(repo);
 
     expect(result.status).toBe(0);
     expect(existsSync(executed)).toBe(true);
@@ -648,6 +836,24 @@ describe("scan target normalization", () => {
     ).rejects.toThrow("cannot specify a head");
   });
 
+  test("revalidates a forged diff head after resolving the base", async () => {
+    const repo = await repository();
+    let headReads = 0;
+    const forged: DiffTarget = Object.assign(
+      Object.create(DiffTarget.prototype),
+      { kind: "refs", base: "HEAD" },
+    );
+    Object.defineProperty(forged, "head", {
+      get: () => (++headReads <= 2 ? "HEAD" : undefined),
+    });
+
+    const normalized = normalizeTarget(repo, forged);
+    await expect(normalized).rejects.toThrow(InvalidTargetError);
+    await expect(normalized).rejects.toThrow(
+      "Git diff refs must include a non-empty head ref.",
+    );
+  });
+
   test("honors cancellation before repository and Git validation", async () => {
     const repo = await repository();
     const controller = new AbortController();
@@ -732,6 +938,35 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
   expect(
     await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
   ).toBe(repo);
+});
+
+test("ordinary storage folders with malformed config are not Git metadata", async () => {
+  const root = await temporaryDirectory();
+  await mkdir(join(root, "objects"));
+  await mkdir(join(root, "refs"));
+  await writeFile(join(root, "config"), "ordinary application configuration\n");
+  expect(await isGitMetadataDirectory(root)).toBe(false);
+  expect(await normalizeRepository(root)).toBe(await realpath(root));
+});
+
+test("invalid diff refs retain the Git diagnostic", async () => {
+  const repo = await repository();
+  const original = spawnSync(
+    "git",
+    [
+      "-C",
+      repo,
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      "missing-fixture-ref^{commit}",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(original.status).not.toBe(0);
+  await expect(
+    normalizeTarget(repo, DiffTarget.refs({ base: "missing-fixture-ref" })),
+  ).rejects.toThrow(original.stderr.trim());
 });
 
 test("executable protection retains lexical and canonical checkout roots", async () => {

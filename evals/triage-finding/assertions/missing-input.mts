@@ -1,4 +1,4 @@
-import { outputText, hasTriageJson } from "./output.mts";
+import { gradeFailures, outputText, hasTriageJson } from "./output.mts";
 
 function matchedFormatNames(text: string) {
   const supportedFormats: [string, RegExp][] = [
@@ -46,12 +46,8 @@ export default (output: unknown) => {
     );
   }
 
-  return {
-    pass: failures.length === 0,
-    score: failures.length === 0 ? 1 : 0,
-    reason:
-      failures.length === 0
-        ? "Missing-input response asks for a finding and names supported formats without triage JSON."
-        : failures.join("; "),
-  };
+  return gradeFailures(
+    failures,
+    "Missing-input response asks for a finding and names supported formats without triage JSON.",
+  );
 };

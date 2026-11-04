@@ -92,7 +92,10 @@ export async function inspectTrustedExecutable(
   const candidates = pathLike
     ? extensions.map((extension) => ({
         entry: null,
-        path: resolve(`${candidate}${extension.suffix}`),
+        path:
+          process.platform === "win32"
+            ? resolve(`${candidate}${extension.suffix}`)
+            : candidate,
         runnable: extension.runnable,
       }))
     : entries.flatMap((entry) =>

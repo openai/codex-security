@@ -1,4 +1,4 @@
-// Runs the SHIPPED action in a temporary checkout with dry-run and no secrets.
+// Runs the shipped Action and its real sandbox probe with dry-run and no secrets.
 import { mkdir, mkdtemp, writeFile, readFile, rm, lstat } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -21,16 +21,20 @@ try {
     for (const name of ['output','state','summary']) await writeFile(join(commandRoot,name),'');
     await writeFile(join(commandRoot,'event.json'),'{}');
     const action = resolve(repositoryRoot, metadata.runs.main);
-    const run = spawnSync(process.execPath,[action], {cwd:root, encoding:'utf8', timeout:600_000,maxBuffer:8*1024*1024,env:{...baseEnv,
+    const runAction = (inputs = {}) => spawnSync(process.execPath,[action], {cwd:root, encoding:'utf8', timeout:600_000,maxBuffer:8*1024*1024,env:{...baseEnv,
       GITHUB_ACTIONS:'true',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_EVENT_PATH:join(commandRoot,'event.json'),
       GITHUB_REPOSITORY:'example/smoke',GITHUB_SHA:sha,GITHUB_REF:'refs/heads/main',GITHUB_ACTOR:'smoke',GITHUB_SERVER_URL:'https://github.com',
       GITHUB_WORKSPACE:root,RUNNER_TEMP:commandRoot,RUNNER_TRACKING_ID:'synthetic-smoke-job',GITHUB_OUTPUT:join(commandRoot,'output'),GITHUB_STATE:join(commandRoot,'state'),GITHUB_STEP_SUMMARY:join(commandRoot,'summary'),
-      'INPUT_DRY-RUN':'true',INPUT_VERBOSE:'true',
+      RUNNER_ENVIRONMENT:process.env.RUNNER_ENVIRONMENT,ImageOS:process.env.ImageOS,
+      'INPUT_DRY-RUN':'true',INPUT_VERBOSE:'true',...inputs,
     }});
+    const run = runAction();
     if (run.status !== 0) {
       console.error(run.stdout); console.error(run.stderr);
       throw run.error ?? new Error(`Packaged action exited ${run.status}`);
     }
+    assert.match(run.stdout, /Codex sandbox probe succeeded without model calls\./,
+      'The packaged Action must exercise the shipped SDK sandbox probe, not just CLI input validation');
     const output=await readFile(join(commandRoot,'output'),'utf8');
     assert.match(output,/scan-status<<[^\n]+\nskipped\n/);
     assert.match(output,/skip-reason<<[^\n]+\ndry-run\n/);
@@ -55,6 +59,11 @@ try {
     await writeFile(join(runtimeRoot, '.codex-security-action-owned'), 'codex-security-action-v1\n', {mode: 0o600});
     await writeFile(join(runtimeRoot, 'home', 'auth.json'), '{"token":"synthetic-smoke-token"}\n', {mode: 0o600});
     await runPost();
-    console.log('Packaged Linux action installed the locked CLI, passed dry-run, and verified post cleanup for absent and leftover runtimes without credentials or model calls.');
+    await writeFile(join(commandRoot, 'output'), '');
+    const invalidProvider = runAction({INPUT_PROVIDER:'openrouter', INPUT_MODEL:''});
+    assert.equal(invalidProvider.status, 1, invalidProvider.stderr);
+    assert.match(invalidProvider.stdout, /--model is required when using --provider openrouter/);
+    assert.match(await readFile(join(commandRoot, 'output'), 'utf8'), /exit-code<<[^\n]+\n2\n/);
+    console.log('Packaged Linux action installed the locked CLI, passed the sandbox probe and dry-run, preserved the missing-model exit code, and verified post cleanup without credentials or model calls.');
   } finally { await rm(commandRoot,{recursive:true,force:true}); }
 } finally { await rm(root,{recursive:true,force:true}); }
