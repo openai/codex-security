@@ -10524,6 +10524,42 @@ async function checkDeinitializedPatchSubmodules(
   }
 }
 
+async function checkPatchReflogs(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const directories = new Set<string>();
+  for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
+    const output = await dependencies.runRepositoryCommand(
+      "git",
+      ["rev-parse", "--path-format=absolute", argument],
+      repository,
+      { trim: false },
+    );
+    directories.add(await realpath(output.replace(/\n$/u, "")));
+  }
+  // Git appends in place to existing logs. Check both worktree and shared refs.
+  const pending = [...directories].map((path) =>
+    Buffer.from(join(path, "logs")),
+  );
+  while (pending.length) {
+    const path = pending.pop()!;
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    });
+    if (metadata === undefined) continue;
+    if (metadata.isDirectory()) {
+      for (const name of await readdir(path, { encoding: "buffer" }))
+        pending.push(Buffer.concat([path, Buffer.from(sep), name]));
+    } else if (!metadata.isFile() || metadata.nlink !== 1) {
+      throw new CodexSecurityError(
+        "Patch publication requires regular, unlinked Git reflogs.",
+      );
+    }
+  }
+}
+
 async function publishPatchBranch(
   repository: string,
   branch: string,
@@ -10619,34 +10655,42 @@ async function publishPatchBranch(
           throw error;
         })
       ).filter(Boolean);
-      const enabledRecursion = new Set([
+      const supportedRecursion = new Set([
         "push.recursesubmodules\ncheck",
         "push.recursesubmodules\non-demand",
         "push.recursesubmodules\nonly",
-        "submodule.recurse\ntrue",
-      ]);
-      const disabledRecursion = new Set([
         "push.recursesubmodules\nfalse",
+        "submodule.recurse\ntrue",
         "submodule.recurse\nfalse",
       ]);
-      const knownSettings = recursionSettings.every(
-        (setting) =>
-          enabledRecursion.has(setting) || disabledRecursion.has(setting),
-      );
-      const disabled =
-        knownSettings && disabledRecursion.has(recursionSettings.at(-1) ?? "");
-      if (knownSettings && !disabled)
+      if (recursionSettings.some((entry) => !supportedRecursion.has(entry)))
+        throw new CodexSecurityError(
+          "Invalid Git submodule recursion configuration. Correct the settings before resuming patch publication.",
+        );
+      const recursion = recursionSettings.at(-1);
+      if (recursion === "push.recursesubmodules\nonly")
+        throw new CodexSecurityError(
+          "Automatic patch publication cannot publish child repositories. Publish the submodule commits separately, then resume the parent with push.recurseSubmodules=check.",
+        );
+      const skipSubmoduleCheck =
+        recursion === "push.recursesubmodules\nfalse" ||
+        recursion === "submodule.recurse\nfalse";
+      // Child remotes have their own transport configuration. Never start a
+      // nested push from a parent-only publication, including on resume.
+      if (!skipSubmoduleCheck)
         await checkDeinitializedPatchSubmodules(
           repository,
           branch,
           dependencies,
         );
+      await checkPatchReflogs(repository, dependencies);
       await dependencies.runRepositoryCommand(
         "git",
         [
           "push",
-          // Nested transports have separate configuration from the validated parent.
-          disabled ? "--recurse-submodules=no" : "--recurse-submodules=check",
+          skipSubmoduleCheck
+            ? "--recurse-submodules=no"
+            : "--recurse-submodules=check",
           "--set-upstream",
           `--force-with-lease=refs/heads/${branch}:`,
           "origin",
@@ -11242,6 +11286,7 @@ async function createPatchPullRequest(
   };
   let committed = false;
   try {
+    await checkPatchReflogs(repository, dependencies);
     await run(["switch", "-c", branch]);
     await withPatchGitIndex(
       indexCommand(false),
