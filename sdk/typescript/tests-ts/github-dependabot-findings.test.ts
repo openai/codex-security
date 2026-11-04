@@ -36,6 +36,28 @@ function retainedRepository(
   });
 }
 
+test.each(["local", "cloud"] as const)(
+  "validates a boxed score only when its array exports it on %s",
+  (target) => {
+    const alert = githubDependabotAlert();
+    const samples = Object.assign([1], { label: new Number(Infinity) });
+    const accepted = normalizeGitHubDependabotAlerts(
+      [{ ...alert, samples }],
+      target,
+    );
+    expect(accepted.excluded).toEqual([]);
+    expect(
+      JSON.parse(JSON.stringify(accepted.findings[0]!.evidence.source_data))
+        .samples,
+    ).toEqual([1]);
+    const rejected = normalizeGitHubDependabotAlerts(
+      [{ ...alert, samples: [samples.label] }],
+      target,
+    );
+    expect(rejected.excluded[0]!.reason).toContain("finite JSON numbers");
+  },
+);
+
 test("matches the affected dependency, retains the original alert, and never invents an installed version or revision", () => {
   const alert = githubDependabotAlert();
   alert.security_advisory.vulnerabilities.push({
@@ -554,10 +576,17 @@ test("file reader dispatches native lists, selected JSONL and gzip while preserv
         `/${repository}/code-scanning/12/`,
       );
     }
-    await writeFile(file, JSON.stringify([importedAlert(), []]));
+    const badAlert = { ...importedAlert(), repository: "example/other" };
+    await writeFile(file, JSON.stringify([importedAlert(), [], badAlert]));
     const legacyWithMalformedSibling = await readGitHubFindings(file);
     expect(legacyWithMalformedSibling.findings).toHaveLength(1);
-    expect(legacyWithMalformedSibling.excluded).toHaveLength(1);
+    expect(legacyWithMalformedSibling.excluded).toHaveLength(2);
+    expect(legacyWithMalformedSibling.excluded[1]).toEqual({
+      position: 3,
+      source_finding_id: badAlert.url,
+      reason:
+        "GitHub alert URL does not match the selected repository and alert.",
+    });
     for (const invalid of [
       JSON.stringify([alerts[0], importedAlert()]),
       '{"number":1',

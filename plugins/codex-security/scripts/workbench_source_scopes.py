@@ -17,7 +17,7 @@ from unicodedata import normalize
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_target import (
     clean_worktree_content_digest,
-    git_bytes,
+    git_command,
     git_worktree_context,
 )
 from workbench_validation import reject_non_finite_json
@@ -74,19 +74,14 @@ def safe_source_path(target: Path, value: str) -> Path | None:
 
 
 def offline_git_bytes(repository: Path, *arguments: str) -> bytes | None:
-    names = ("GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL", "GIT_NO_REPLACE_OBJECTS")
-    previous = {name: os.environ.get(name) for name in names}
-    os.environ["GIT_NO_LAZY_FETCH"] = "1"
-    os.environ["GIT_ALLOW_PROTOCOL"] = ""
-    os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
-    try:
-        return git_bytes(repository, *arguments)
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+    result = git_command(
+        repository,
+        *arguments,
+        text=False,
+        offline=True,
+        environment_overrides={"GIT_NO_REPLACE_OBJECTS": "1"},
+    )
+    return result.stdout if result.returncode == 0 else None
 
 
 @cache
@@ -120,9 +115,7 @@ def tree_entries(repository: Path, tree: str) -> dict[str, tuple[tuple[str, str,
     return {name: tuple(matches) for name, matches in entries.items()}
 
 
-def exact_tree_path(
-    repository: Path, tree: str, value: str, *, require_unambiguous: bool = False
-) -> tuple[str, str, str] | None:
+def exact_tree_path(repository: Path, tree: str, value: str) -> tuple[str, str, str] | None:
     path = relative_path(value)
     if path is None:
         return None
@@ -132,12 +125,11 @@ def exact_tree_path(
             return None
         entries = tree_entries(repository, object_id) or {}
         aliases = entries.get(normalized_path_component(name), ())
-        if require_unambiguous and len(aliases) != 1:
+        if len(aliases) != 1:
             return None
-        entry = next((entry for entry in aliases if entry[0] == name), None)
-        if entry is None:
+        entry_name, kind, object_id = aliases[0]
+        if entry_name != name:
             return None
-        _, kind, object_id = entry
     return path.as_posix(), kind, object_id
 
 
@@ -329,7 +321,7 @@ def load_source_scopes(
     repository, tree = context
     scopes = []
     for path in paths:
-        entry = exact_tree_path(repository, tree, path, require_unambiguous=True)
+        entry = exact_tree_path(repository, tree, path)
         if entry is None or entry[1] not in {"file", "directory"}:
             continue
         kind = entry[1]
@@ -375,7 +367,7 @@ def source_object_for_path(
     if scope["kind"] == "file":
         return scope["objectId"] if not suffix else None
     relative = PurePosixPath(*suffix).as_posix()
-    entry = exact_tree_path(repository, scope["objectId"], relative, require_unambiguous=True)
+    entry = exact_tree_path(repository, scope["objectId"], relative)
     if entry is None:
         selected = safe_source_path(target, scope["canonicalPath"])
         if selected is not None:

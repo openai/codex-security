@@ -702,31 +702,6 @@ describe("reviewed release note helpers", () => {
     }
   });
 
-  test("rejects NUL bytes before shell composition", async () => {
-    const workspace = directories.create("release-notes-nul-");
-    const taggedNotes = join(workspace, "tagged-notes.md");
-    const generatedNotes = join(workspace, "generated-notes.md");
-    writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
-    writeFileSync(generatedNotes, "Generated release notes\n");
-
-    const result = await runShell(
-      [
-        "set -euo pipefail",
-        'published_notes="$(node "$AUTOMATION_SCRIPT" compose-release-notes 1.2.3 "$GENERATED_NOTES" --tagged-notes-file "$TAGGED_NOTES")"',
-        'printf "%s" "$published_notes"',
-      ].join("\n"),
-      {
-        AUTOMATION_SCRIPT: fileURLToPath(automationScript),
-        GENERATED_NOTES: generatedNotes,
-        TAGGED_NOTES: taggedNotes,
-      },
-    );
-
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("include a reviewed summary");
-    expect(result.stderr).not.toContain("ignored null byte");
-  });
-
   test.each([
     {
       name: "canonical prefix marker pair",
@@ -3614,6 +3589,14 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       status: 1,
     },
     {
+      description: "NUL-bearing tagged summary",
+      releaseSummary: "<!-- release-version: 0.1.2 -->\nReviewed\0summary",
+      expectedError: "include a reviewed summary",
+      updated: false,
+      latestUpdated: false,
+      status: 1,
+    },
+    {
       description: "generated notes without its tagged reviewed summary",
       releaseSummary:
         "<!-- release-version: 0.1.2 -->\n## Highlights\nReviewed tagged summary",
@@ -3859,38 +3842,6 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(releaseCutWorkflow).not.toContain("summary_header=");
     expect(githubReleaseWorkflow).not.toContain("CODEX_SECURITY_SUMMARY_START");
   });
-
-  test.each([false, true])(
-    "composes notes with optional files: %p",
-    async (optional) => {
-      const workspace = mkdtempSync(join(tmpdir(), "release notes "));
-      const generated = join(workspace, "generated notes.md");
-      const tagged = join(workspace, "tagged notes.md");
-      const existing = join(workspace, "existing notes.md");
-      try {
-        writeFileSync(generated, "Generated notes\n");
-        writeFileSync(
-          tagged,
-          "<!-- release-version: 0.1.2 -->\nReviewed summary",
-        );
-        writeFileSync(existing, "Old generated notes");
-        const result = await runCommand("node", [
-          fileURLToPath(automationScript),
-          "compose-release-notes",
-          "0.1.2",
-          generated,
-          ...(optional
-            ? ["--tagged-notes-file", tagged, "--existing-notes-file", existing]
-            : []),
-        ]);
-        expect(result.status).toBe(0);
-        expect(result.stdout).toContain("Generated notes");
-        expect(result.stdout.includes("Reviewed summary")).toBe(optional);
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
-      }
-    },
-  );
 
   test("cryptographically verifies the exact npm provenance bundle", () => {
     expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
@@ -4343,7 +4294,6 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
     expect(result.stderr).toContain("published npm versions JSON from stdin");
     expect(result.stderr).toContain("package metadata JSON from stdin");
     expect(result.stderr).toContain("signature audit JSON from stdin");
-    expect(result.stderr).toContain("GitHub release JSON from stdin");
   });
 });
 

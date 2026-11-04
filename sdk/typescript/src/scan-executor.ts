@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { severityRubricSnapshotSchema } from "./classify-severity-records.js";
 import { CodexSecurityError } from "./errors.js";
 import type { ScanActivity } from "./scan-activity.js";
 import { scanPhaseSchema, type ScanProgress } from "./worker-progress.js";
@@ -12,6 +13,7 @@ export interface ScanExecutionRequest {
   revision: string;
   scope: { paths: string[] };
   identity: { runId: string; attemptId: string; buildId: string };
+  severityRubric?: z.infer<typeof severityRubricSnapshotSchema>;
   prompt: string;
   model: string;
   reasoningEffort: string;
