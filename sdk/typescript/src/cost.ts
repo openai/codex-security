@@ -2321,10 +2321,14 @@ export class ScanCostTracker {
     }
     // Retry one denied open per poll, all after recovery, and all at stop.
     let retryDenied = this.#stopping || !observeHealthySessions;
+    const skippedDenials = new Set<string>();
     const read = async (...args: Parameters<typeof readSessionUsage>) => {
       const path = args[0];
       const denied = this.#deniedOpens.get(path);
-      if (denied && !retryDenied && path !== nextDenied?.[0]) throw denied;
+      if (denied && !retryDenied && path !== nextDenied?.[0]) {
+        skippedDenials.add(path);
+        throw denied;
+      }
       try {
         const result = await readSessionUsage(...args);
         if (result !== "unchanged") {
@@ -2581,6 +2585,17 @@ export class ScanCostTracker {
     }
     // Healthy sessions can report activity even when a read blocks the total.
     if (blocked) {
+      // A probe can recover during replay, after discovery skipped other paths.
+      // Retry them immediately unless this refresh must report a genuine error.
+      if (retryDenied && skippedDenials.size > 0) {
+        for (const path of skippedDenials) this.#deniedOpens.delete(path);
+        if (
+          failures.every(
+            ({ path }) => path !== undefined && skippedDenials.has(path),
+          )
+        )
+          return this.#readSessions();
+      }
       reportSecondary(blocked);
       return rejectPrimary(blocked);
     }

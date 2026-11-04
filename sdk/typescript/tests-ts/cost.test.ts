@@ -3339,6 +3339,68 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test.each([false, true])(
+    "recovers all unchanged worker histories, one-time concurrent failure: %p",
+    async (failParent) => {
+      const home = await codexHome();
+      const usage = { input_tokens: 10, output_tokens: 1 };
+      const parent = await writeSession(home, "scan-thread", usage);
+      const ids = ["worker-a", "worker-b", "worker-c", "worker-d"];
+      const workers = await Promise.all(
+        ids.map((id) =>
+          writeSession(home, id, usage, { parent: "scan-thread" }),
+        ),
+      );
+      const replayed: string[] = [];
+      const { tracker } = manualCostTracker(home, {
+        onSessionEvent: ({ threadId, event }) => {
+          if (ids.includes(threadId) && event["type"] === "event_msg")
+            replayed.push(threadId);
+        },
+      });
+      const discovered = new Set<string>();
+      const parentError = logFailure("EIO", "open", parent);
+      let failNextParentRead = false;
+      let denied = true;
+      let attempts = 0;
+      try {
+        using _order = orderedLogDirectory(dirname(parent));
+        using _opening = failLogReads((path) => {
+          if (path === parent && failNextParentRead) {
+            failNextParentRead = false;
+            return parentError;
+          }
+          if (!denied || !workers.includes(path)) return;
+          if (!discovered.has(path)) {
+            discovered.add(path);
+            return;
+          }
+          attempts++;
+          return logFailure("EACCES", "open", path);
+        });
+        const blocked = () =>
+          expect(tracker.refresh()).rejects.toMatchObject({ code: "EACCES" });
+        await blocked();
+        expect(attempts).toBe(workers.length);
+        await blocked();
+        expect(attempts).toBe(workers.length + 1);
+        expect(replayed).toEqual([]);
+        denied = false;
+        if (failParent) {
+          await appendFile(parent, "{}\n");
+          failNextParentRead = true;
+          await expect(tracker.refresh()).rejects.toBe(parentError);
+        }
+        const snapshot = await tracker.refresh();
+        expect(replayed.toSorted()).toEqual(ids);
+        expect(snapshot.cost?.inputTokens).toBe(50);
+        expect(snapshot.usage).toMatchObject({ input_tokens: 50 });
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test("rotates denied-open probes while delivering healthy output and recovering accounting", async () => {
     const { home, worker, usage } = await workerSessionFixture();
     const directory = join(home, "sessions", "denied");
@@ -3375,8 +3437,6 @@ describe("live scan cost tracking", () => {
       expect(new Set(attempts).size).toBe(3);
       expect(activities).toEqual([text]);
       denied = false;
-      // The first recovered probe unlocks the remaining histories for the next poll.
-      await tracker.refresh().catch(() => {});
       expect((await tracker.refresh()).cost?.inputTokens).toBe(
         2 * usage.input_tokens,
       );
