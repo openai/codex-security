@@ -69,6 +69,7 @@ const originalReport = z.looseObject({
     .optional(),
 });
 function claim({
+  ruleId,
   title,
   summary,
   rootCause,
@@ -81,6 +82,7 @@ function claim({
   taxonomy,
 }: z.infer<typeof originalReport>) {
   return {
+    ruleId,
     title,
     summary,
     rootCause,
@@ -190,18 +192,18 @@ export async function checkSameFix(
       ...new Set(pairs.flatMap(({ left, right }) => [left, right])),
     ].map((id) => {
       const { finding } = groups[id]!;
-      const { title, summary, rootCause, remediation } = finding;
+      const first = claim(originalReport.parse(finding));
+      const { codeEvidence: _codeEvidence, ...primary } = first;
+      const key = JSON.stringify(first);
       return {
         id,
         primary: {
-          title,
-          summary,
-          rootCause,
-          remediation,
-          locations: groups[id]!.finding.locations,
+          ...primary,
           evidence: evidence[id]!.map((excerpt, id) => ({ id, ...excerpt })),
         },
-        attached: claimsFor(id),
+        attached: claimsFor(id).filter(
+          (source) => JSON.stringify(source) !== key,
+        ),
       };
     });
     const result = reviews.parse(

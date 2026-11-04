@@ -30,6 +30,8 @@ Every scan mode uses the same final report pipeline. Workbench-owned Standard an
 Preserve each finding's explicit `identity` and each surface or deferred row's `id` on later updates. Findings and surfaces without IDs introduce new rows; deferred work does so when both `id` and `candidateId` are absent. Use persisted IDs to revise or resolve existing rows. The host does not match changed text to old rows. Resume snapshots without stable IDs require their original version or a new scan.
 Use `scope` for reviewed context, artifacts, runtime/test status, validation mode, and limitations. Preserve the completed canonical `threatModel`, including source citations and uncertainty; do not reconstruct it from the final findings. A supplied or completed Markdown model is retained as `{ "format": "markdown", "content": "<exact model text>" }`. A historical context file can supply missing content but must not replace a newer canonical model.
 
+The generated `report.md` counts informational findings and omits their details. Read those findings in `findings.json` or export them as SARIF or CSV.
+
 ## Review State And Pending Work
 
 Keep unfinished requested work and essential in-scope proof gaps in `reviewState.deferred`. Retain optional follow-up in `reviewState.openQuestions`. These notes are checkpoint bookkeeping, not measured file coverage, and do not change the scan execution outcome.

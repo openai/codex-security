@@ -263,6 +263,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument("--cost-json")
     cancel_scan.add_argument(
         "--defer-publication", action="store_true", help=defer_publication_help
     )

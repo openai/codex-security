@@ -109,7 +109,10 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
-import type { DeepScanProgress } from "./scan-progress.js";
+import {
+  formatDeepScanReviews,
+  type DeepScanProgress,
+} from "./scan-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -300,6 +303,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  selectedComparisonContext,
   comparisonForScan,
   matchScanFindingsInternal,
   unionFindingGroups,
@@ -8125,6 +8129,7 @@ async function matchAllScans(
     const input: ScanComparisonInput = {
       before,
       after: afterFindings,
+      ...selectedComparisonContext(beforeScans),
       ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
     };
     const matching =
@@ -10203,9 +10208,7 @@ async function executeScan(
         );
       }
       if (deepProgress !== null) {
-        details.push(
-          `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
-        );
+        details.push(formatDeepScanReviews(deepProgress));
       } else if (fileProgress !== null) {
         details.push(formatScanProgressCount(fileProgress, "status"));
       }
@@ -10518,7 +10521,7 @@ async function executeScan(
           update.consolidating === true ||
           (deepConsolidating && update.active === 0);
         phase = deepConsolidating ? "consolidating results" : "discovery";
-        const message = `Scan phase: ${phase} | Reviews: ${update.completed} completed, ${update.active} active, cap ${update.maximum}`;
+        const message = `Scan phase: ${phase} | ${formatDeepScanReviews(update)}`;
         if (dashboard !== null) {
           dashboard.setStage(phase);
           dashboard.note(message);
@@ -10868,6 +10871,12 @@ async function executeScan(
       data: {
         dryRun: true,
         ...effectivePreflight,
+        ...(effectivePreflight.maxCostUsd === undefined
+          ? {}
+          : {
+              costLimitNote:
+                "The limit uses reported token usage at short-context API prices. In-flight requests can push the estimate above the limit. Actual charges and ChatGPT allowance depend on your account.",
+            }),
         ...(arguments_.projectConfig === undefined
           ? {}
           : {
@@ -11588,6 +11597,12 @@ function componentScanEventLine(
     const progress = event.value;
     const count = formatScanProgressCount(progress, "status");
     return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count}\n`;
+  }
+  if (event.type === "deep-progress") {
+    const phase = event.value.consolidating
+      ? "consolidating results"
+      : "discovery";
+    return `codex-security: ${componentName} ${phase} | ${formatDeepScanReviews(event.value)}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);

@@ -2722,6 +2722,9 @@ def test_completion_recovers_replaced_child_scan_threads(tmp_path: Path) -> None
                 [_token_event(counted, 20, 5), _token_event(counted, 30, 8)],
                 session_started_at=before_scan,
             ),
+            "finding-comparison": _rollout(
+                tmp_path, "finding-comparison", [_token_event(counted, 12, 4)]
+            ),
             "other-scan-worker": _rollout(
                 tmp_path, "other-scan-worker", [_token_event(counted, 80_000, 20_000)]
             ),
@@ -2751,6 +2754,11 @@ def test_completion_recovers_replaced_child_scan_threads(tmp_path: Path) -> None
         connection.executemany(
             "UPDATE threads SET cwd = ?, created_at = ? WHERE id = ?",
             [
+                (
+                    str(fixture.scan_dir / "artifacts" / "deep_discovery"),
+                    int(counted.timestamp()),
+                    "finding-comparison",
+                ),
                 (str(working_directory), int(counted.timestamp()), "sdk-first-attempt"),
                 (str(working_directory), int(counted.timestamp()), "sdk-first-child"),
                 (str(working_directory), int(counted.timestamp()), "sdk-current-attempt"),
@@ -2770,16 +2778,73 @@ def test_completion_recovers_replaced_child_scan_threads(tmp_path: Path) -> None
                 (str(working_directory), int(after_scan.timestamp()), "later-missing-worker"),
             ],
         )
-    usage = _complete_scan(fixture)["scan"]["usage"]
+    arguments = ("--thread-id", "scan-parent", "--turn-id", "turn-scan-parent")
+    completed = _complete_scan(fixture, *arguments)["scan"]
+    usage = completed["usage"]
     assert (
         usage.items()
         >= {
-            "coverage": "complete",
+            "coverage": "partial",
+            "warnings": ["turn_in_progress"],
             "source": "codex_rollout",
-            **_counts(67, 0, 18),
-            "threadCount": 4,
+            **_counts(79, 0, 22),
+            "threadCount": 5,
         }.items()
     )
+    run_workbench(
+        fixture.state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(fixture.target),
+        "--scan-dir",
+        str(fixture.scan_dir),
+        "--archive-existing",
+        "--recipe-json",
+        json.dumps(
+            {
+                "config": {},
+                "mode": "deep",
+                "repository": str(fixture.target),
+                "target": {"kind": "repository", "paths": []},
+            }
+        ),
+        environment=fixture.environment,
+    )
+    ended = datetime.fromisoformat(completed["usage"]["window"]["endedAt"])
+    replacement_started = ended + timedelta(microseconds=1)
+    replacement = _rollout(
+        tmp_path,
+        "new-comparison",
+        [_token_event(replacement_started, 100, 10)],
+        session_started_at=replacement_started,
+    )
+    with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
+        db.execute(
+            "INSERT INTO threads (id, rollout_path, cwd, created_at) VALUES (?, ?, ?, ?)",
+            (
+                "new-comparison",
+                str(replacement),
+                str(fixture.scan_dir / "artifacts" / "deep_discovery"),
+                int(ended.timestamp()),
+            ),
+        )
+    finalized = fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"]
+    assert finalized["completion"]["finalized"] is True
+    assert (finalized["totalTokens"], finalized["threadCount"]) == (101, 5)
+
+
+@pytest.mark.parametrize("missing", ["cwd", "created_at"])
+def test_deep_usage_retains_bound_sessions_without_directory_metadata(
+    tmp_path: Path, missing: str
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    fixture.write_parent_rollout([_token_event(fixture.started_at, 10, 3)])
+    with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
+        db.execute(f"ALTER TABLE threads DROP COLUMN {missing}")
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "partial"
+    assert usage["warnings"] == ["worker_directories_unavailable"]
+    assert (usage["totalTokens"], usage["threadCount"]) == (13, 1)
 
 
 @pytest.mark.cross_platform

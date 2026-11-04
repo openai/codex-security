@@ -686,6 +686,7 @@ export async function runDeepScans(
     );
     let merged: Awaited<ReturnType<typeof mergeScans>>;
     let validationError: unknown;
+    let comparisonStop: unknown;
     const retryMerge = async () => {
       state.mergeFailures = (state.mergeFailures ?? 0) + 1;
       await save();
@@ -700,6 +701,7 @@ export async function runDeepScans(
           state.aggregate,
           executionSignal,
           async (prompt, signal, outputSchema) => {
+            if (comparisonStop !== undefined) throw comparisonStop;
             const previousMergeStarted = state.mergeStarted;
             if (previousMergeStarted !== true) {
               state.mergeStarted = true;
@@ -740,10 +742,11 @@ export async function runDeepScans(
                 error instanceof ScanTransportClosedError ||
                 error instanceof ScanPermissionError ||
                 error instanceof ScanCostLimitExceededError ||
-                error instanceof ScanCostTrackingError ||
-                isCodexNonRetryableFailure(error)
+                error instanceof ScanCostTrackingError
               )
                 throw error;
+              // Keep disputed findings separate and checkpoint the completed scans.
+              if (isCodexNonRetryableFailure(error)) comparisonStop ??= error;
             },
           },
         );
@@ -790,6 +793,7 @@ export async function runDeepScans(
       retainedFindings: merged.aggregate.findings.length,
     });
     await publish();
+    if (comparisonStop !== undefined) throw comparisonStop;
   };
   const runPass = async (
     pass: DeepScanCheckpoint["passes"][number],
@@ -1175,6 +1179,7 @@ export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
     "Request blocked by cyberPolicy.",
     "Request blocked by a safety policy violation.",
     "This content was flagged for possible cybersecurity risk.",
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
     "This content was flagged for potentially high-risk cyber activity.",
     "This request has been flagged for possible cybersecurity risk.",
     "This request has been flagged for potentially high-risk cyber activity.",

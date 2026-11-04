@@ -444,6 +444,10 @@ show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
 
+When a cost limit is configured, `scan --dry-run` shows the resolved
+`maxCostUsd` and a `costLimitNote` explaining how the scan measures usage
+against the limit and why in-flight requests can exceed it.
+
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.
 
@@ -786,7 +790,8 @@ individual scan folder.
 Failures do not stop other components. Failed scans or
 failed matching return `2`; severity-policy violations return `1`. Retry with
 `--components-file retry-components.json` and a new empty output directory.
-The retry report covers only those components.
+The retry report covers only those components. Each registered component keeps its
+scan ID in the summary, including when the scan fails.
 
 `--max-cost` applies per component, excluding planning and matching. `--model`
 and `--effort` also apply to matching; `--auth` applies throughout. Planning and
@@ -1032,6 +1037,9 @@ findings. Use `codex-security scans list --json` for the current repository.
 To find an offline import, use `codex-security scans list --scan-root <DIR> --json`
 with its output directory. Imported scans have lifecycle mode `import`. The SDK
 exposes `onLifecycle`, and the CLI includes observations in verbose diagnostics.
+Canceling a newly registered SDK scan through its abort signal, closing the
+client during the scan, or receiving a canceled hosted execution records
+`canceled`. A scan that has already completed keeps its committed outcome.
 Applications can choose how to collect and export these observations.
 
 For filesystem and approval behavior, see the
@@ -1170,8 +1178,12 @@ report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report returns `0` by default, or `1` if findings
 meet a configured failure threshold.
 
-When Codex reports an exhausted usage limit, Deep Scan cancels active workers
-and stops retrying or launching replacements. Completed worker artifacts are retained.
+When a worker turn fails with a known cybersecurity policy refusal or an
+exhausted usage limit, Deep Scan stops retries and replacements, cancels active
+siblings, and retains completed worker artifacts. A capability check can succeed
+before a later request is refused. Use `scans show SCAN_ID` to inspect the failed
+scan and its retained results. To run it again from a saved recipe, use
+`scans rerun SCAN_ID`, which starts fresh discovery.
 
 At 80% of a single interactive scan's limit, the dashboard offers a higher total
 budget. Enter a larger total, or leave it blank/press Escape to keep the limit.
@@ -1312,10 +1324,12 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
-If a nonempty committed line in `results.jsonl` contains invalid JSON or lacks
-a string task ID, the command reports its line number and leaves the ledger untouched.
-Restore a complete ledger backup that includes every committed attempt, or start
-a separate campaign in a new `--output-dir`.
+Each nonempty committed line in `results.jsonl` must be valid JSON with a string
+task ID and a positive safe integer attempt number. If a line fails these checks,
+the command reports its line number and preserves the ledger. Restore a complete
+ledger backup that includes every committed attempt, or start a separate campaign
+in a new `--output-dir`. If a repository exhausts its attempt numbers, starting
+a fresh attempt requires a new campaign.
 
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
@@ -1418,6 +1432,9 @@ To [collect a full Semgrep project and branch](https://github.com/openai/codex-s
 
 For completed scans exported in the Codex Security JSON or CSV format, use
 [scan import](#import-findings-as-a-saved-scan).
+
+For Checkmarx One CLI JSON or CxSAST XML, use `--provider checkmarx` and pass the
+verified Git URL with `--source-repository-url`. See the [Checkmarx SAST guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md).
 
 ## Import Endor Labs findings
 
@@ -2195,6 +2212,13 @@ One comparison ID is compared with the latest completed scan.
 ```bash
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
 ```
+
+When a saved Standard scan and a Deep scan have the same recorded target,
+revision, and snapshot digest, matching flags findings that have different
+anchors but share a unique rule, first displayed source range, and optional
+instance. Matching preserves the case of saved paths. Codex can request the
+saved evidence to distinguish separate causes at that site. Automatic matching
+under a cost limit keeps its single comparison call.
 
 Only high-confidence root-cause matches are grouped. Uncertain and related
 findings remain separate. Rebuilding retains stable identities, triage, and

@@ -246,3 +246,45 @@ def test_canonical_finding_validation_survives_frozen_publication_retry(tmp_path
     assert any("duplicate logical finding" in warning for warning in recovered["warnings"])
     assert any("identity" in warning for warning in recovered["warnings"])
     assert all(path.read_bytes() == content for path, content in frozen.items())
+
+
+def test_stopped_scan_recovers_latest_numbered_iteration_after_upgrade(
+    historical_publication_scan,
+) -> None:
+    scan = historical_publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    results = []
+    # Tied completion timestamps and reversed worker IDs must defer to the iteration number.
+    originals = sorted([scan.add_worker(), scan.add_worker()], reverse=True)
+    for number, original in enumerate(originals, 1):
+        directory = original.parent.with_name(f"dedup-{number:04d}")
+        original.parent.rename(directory)
+        result = directory / "result.json"
+        with scan.connection:
+            scan.connection.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup', artifact_dir = ?, "
+                "result_manifest_path = ? WHERE id = ?",
+                (str(directory), str(result), original.parent.name),
+            )
+        results.append(result)
+    first, latest = results
+    earlier = {"scanId": scan.scan_id, "findings": []}
+    first.write_text(json.dumps(earlier))
+    write_checkpoint(first.parent / "checkpoints", earlier)
+    finding = copy.deepcopy(scan.findings[0])
+    finding["provenance"]["deepScanRepairGroups"] = [
+        {"order": 0, "sources": ["review-1:candidate-1"]}
+    ]
+    model = {"summary": "The most recent scan found another trust boundary."}
+    latest.write_text(
+        json.dumps({"scanId": scan.scan_id, "findings": [finding], "threatModel": model})
+    )
+
+    scan.fail()
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["threatModel"] == model
+    retained = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == 1
+    assert retained[0]["summary"] == finding["summary"]
+    assert "deepScanRepairGroups" not in retained[0]["provenance"]
+    assert json.loads(latest.read_text())["findings"] == [finding]

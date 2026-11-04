@@ -107,3 +107,28 @@ test("composed discovery and canonical draft admission require typed surface IDs
     /Invalid string/,
   );
 });
+
+test("retained coverage accepts repository paths and validates closure text", async () => {
+  const { validateRetainedCoverage } = await importSource(
+    "../src/coverage-publication.ts",
+    { absWorkingDir: import.meta.dirname },
+  );
+  const coverage = {
+    deferred: [{ paths: ["K:notes"] }],
+    resolvedDeferred: [{ reason: "Reviewed" }],
+  };
+  validateRetainedCoverage(coverage);
+  assert.throws(
+    () =>
+      validateRetainedCoverage({ ...coverage, deferred: [{ paths: ["K:notes"] }] }),
+    /repository-relative POSIX path/,
+  );
+  assert.throws(
+    () =>
+      validateRetainedCoverage({
+        ...coverage,
+        resolvedDeferred: [{ reason: "\ud800" }],
+      }),
+    /well-formed Unicode/,
+  );
+});

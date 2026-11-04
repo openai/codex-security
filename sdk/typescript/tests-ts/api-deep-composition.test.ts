@@ -119,7 +119,7 @@ test("ordinary children and reducer share one immutable preparation and knowledg
       model: "gpt-6-astra",
       model_reasoning_effort: "high",
       mcp_servers: {
-        "codex-security": { command: "node", enabled: false },
+        "codex-security": { command: "synthetic-workbench", enabled: false },
         "synthetic.server": { command: "synthetic-command" },
       },
       permissions: {

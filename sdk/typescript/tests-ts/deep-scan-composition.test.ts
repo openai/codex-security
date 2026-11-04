@@ -1491,6 +1491,65 @@ test("accepted matches replay publication without repeating matching or losing e
   );
 });
 
+test("checkpoints distinct findings when optional comparison exhausts the quota", async () => {
+  const h = await fixture({ maxDiscoveryRuns: 4 });
+  const project = h.input.projectChild;
+  h.input.projectChild = async (...args) => {
+    const child = await project(...args);
+    const finding = semanticFinding({
+      summary: `Observed in ${child.scanId}`,
+      provenance: child.draft.findings[0]!.provenance,
+      codeEvidence: [
+        {
+          id: "line",
+          label: "Renderer",
+          path: "src/render.js",
+          startLine: 1,
+          code: "render(data)",
+          explanation: "Both reports cite this renderer.",
+        },
+      ],
+    });
+    return {
+      ...child,
+      sourceFindings: [finding],
+      draft: { ...child.draft, findings: [finding] },
+    };
+  };
+  const quota = new Error(
+    "Quota exceeded. Check your plan and billing details.",
+  );
+  let reviews = 0;
+  h.input.merge = async (prompt) => {
+    const catalogue = JSON.parse(prompt.split("\n").at(-1)!);
+    if (catalogue.pairs) {
+      reviews++;
+      throw quota;
+    }
+    return {
+      matches: [
+        {
+          beforeOccurrenceIds: [catalogue.findings.before[0].occurrenceId],
+          afterOccurrenceIds: [catalogue.findings.after[0].occurrenceId],
+          confidence: "high",
+          reason: "The same renderer appears in both reports.",
+        },
+      ],
+      uncertain: [],
+      related: [],
+      request: null,
+    };
+  };
+  await expect(runDeepScans(h.input)).rejects.toBe(quota);
+  const saved = await loadDeepScanCheckpoint(h.input.scanDir);
+  expect(reviews).toBe(1);
+  expect(h.calls).toHaveLength(2);
+  expect(saved!.terminalReason).toBe("failed");
+  expect(saved!.mergedScanIds).toHaveLength(2);
+  expect(saved!.aggregate!.findings).toHaveLength(2);
+  expect(h.publications.at(-1)!.findings).toHaveLength(2);
+});
+
 test("invalid matching leaves accepted findings and source evidence unchanged", async () => {
   const h = await fixture({
     workers: 1,
@@ -1826,6 +1885,7 @@ test("merge transport loss does not consume retries or repeat completed passes",
 
 const runtimeRefusals = [
   "Request blocked by cyberPolicy.",
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
   "Request flagged for possible cybersecurity risk.",
   "Request flagged for potentially high-risk cyber activity.",
   "Request rejected: cyber_policy.",

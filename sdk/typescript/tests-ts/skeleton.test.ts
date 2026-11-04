@@ -10,41 +10,12 @@ import {
   CodexSecurityError,
 } from "../src/index.js";
 import { bashCommand, runCommand } from "./support/shell.js";
-
-interface WorkflowStep {
-  name?: string;
-  id?: string;
-  uses?: string;
-  with?: Record<string, unknown>;
-  run?: string;
-  if?: string;
-  shell?: string;
-  env?: Record<string, unknown>;
-  "continue-on-error"?: boolean;
-}
-
-interface WorkflowJob {
-  name?: string;
-  needs?: string | string[];
-  env?: Record<string, unknown>;
-  strategy?: { matrix: Record<string, unknown> | string };
-  steps?: WorkflowStep[];
-}
-
-async function workflow(name: string) {
-  return Bun.YAML.parse(
-    await readFile(
-      new URL(`../../../.github/workflows/${name}`, import.meta.url),
-      "utf8",
-    ),
-  ) as {
-    on: Record<string, unknown>;
-    env?: Record<string, unknown>;
-    jobs: Record<string, WorkflowJob>;
-  };
-}
+import { workflow } from "./support/workflow.js";
 
 describe("TypeScript package skeleton", () => {
+  const ci = workflow("node-ci");
+  const quality = workflow("test-quality");
+
   test("exports typed attack-path aliases", () => {
     const dataflow: AttackPathDataflow = {
       transformations: ["decode archive entry"],
@@ -88,20 +59,19 @@ describe("TypeScript package skeleton", () => {
     ).toEqual([]);
   });
 
-  test("runs Bun once per OS and checks every supported Node runtime with the installed package", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    expect(jobs["test"]?.strategy?.matrix).toEqual({
+  test("runs Bun once per OS and checks every supported Node runtime with the installed package", () => {
+    expect(ci.jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
       shard: [1, 2, 3, 4, 5, 6],
     });
-    expect(jobs["compatibility"]?.strategy?.matrix).toBe(
+    expect(ci.jobs["compatibility"]?.strategy?.matrix).toBe(
       "${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}",
     );
-    expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
+    expect(ci.jobs["windows-test"]?.strategy?.matrix).toEqual({
       shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     });
-    const verificationSteps = jobs["compatibility"]!.steps!;
-    const shardPython = jobs["windows-test"]!.steps!.find(({ uses }) =>
+    const verificationSteps = ci.jobs["compatibility"]!.steps!;
+    const shardPython = ci.jobs["windows-test"]!.steps!.find(({ uses }) =>
       uses?.startsWith("actions/setup-python@"),
     );
     const pythonSetup = verificationSteps.findIndex(({ uses }) =>
@@ -130,9 +100,8 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
-  test("reuses npm downloads after lockfile changes without skipping package installation", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    const steps = jobs["compatibility"]!.steps!;
+  test("reuses npm downloads after lockfile changes without skipping package installation", () => {
+    const steps = ci.jobs["compatibility"]!.steps!;
     const setup = steps.findIndex(({ id }) => id === "node");
     const resolver = steps.findIndex(({ id }) => id === "npm-cache");
     const restore = steps.findIndex(({ uses }) =>
@@ -161,8 +130,7 @@ describe("TypeScript package skeleton", () => {
   });
 
   test("npm cache fallback shares lockfile versions within each platform and architecture", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    const script = jobs["compatibility"]!.steps!.find(
+    const script = ci.jobs["compatibility"]!.steps!.find(
       ({ id }) => id === "npm-cache",
     )!.run!;
     const directory = await mkdtemp(join(tmpdir(), "npm-cache-workflow-"));
@@ -211,7 +179,6 @@ describe("TypeScript package skeleton", () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
-    const { jobs } = await workflow("node-ci.yml");
     const bunConfig = parse(
       await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
     );
@@ -221,18 +188,17 @@ describe("TypeScript package skeleton", () => {
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(
-      jobs["test"]?.steps?.find(({ name }) => name === "Test")?.run,
+      ci.jobs["test"]?.steps?.find(({ name }) => name === "Test")?.run,
     ).toContain("--seed=${{ github.run_number }}");
-    expect(jobs["windows-test"]?.steps).toContainEqual(
+    expect(ci.jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
         run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}",
       }),
     );
   });
 
-  test("covers the Python runtime floor and native platform paths", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    const job = jobs["plugin-source"]!;
+  test("covers the Python runtime floor and native platform paths", () => {
+    const job = ci.jobs["plugin-source"]!;
     expect(job.strategy?.matrix).toBe(
       "${{ fromJSON(needs.classify-changes.outputs.python-matrix) }}",
     );
@@ -256,9 +222,8 @@ describe("TypeScript package skeleton", () => {
     ).toBe("matrix.os == 'ubuntu-latest'");
   });
 
-  test("requires a nonempty native Python report without skips", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    const step = jobs["plugin-source"]!.steps!.find(
+  test("requires a nonempty native Python report without skips", () => {
+    const step = ci.jobs["plugin-source"]!.steps!.find(
       ({ name }) => name === "Require native platform coverage",
     )!;
     expect(step).toMatchObject({
@@ -268,9 +233,8 @@ describe("TypeScript package skeleton", () => {
     expect(step).not.toHaveProperty("continue-on-error");
   });
 
-  test("requires the deterministic eval suites and their cross-project dependency pin", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    const requiredSteps = jobs["eval-contracts"]!.steps!.filter(
+  test("requires the deterministic eval suites and their cross-project dependency pin", () => {
+    const requiredSteps = ci.jobs["eval-contracts"]!.steps!.filter(
       (step) => !step.if && !step["continue-on-error"],
     );
     expect(requiredSteps).toContainEqual(
@@ -303,9 +267,8 @@ describe("TypeScript package skeleton", () => {
     ]);
   });
 
-  test("checks one archive and restores its plugin before every test shard", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    const uploads = jobs["package"]!.steps!;
+  test("checks one archive and restores its plugin before every test shard", () => {
+    const uploads = ci.jobs["package"]!.steps!;
     const inspection = uploads.findIndex(
       ({ name }) => name === "Inspect archive contents",
     );
@@ -320,7 +283,7 @@ describe("TypeScript package skeleton", () => {
     });
     expect(uploads[upload]).not.toHaveProperty("continue-on-error");
     for (const name of ["test", "windows-test", "mcp", "compatibility"]) {
-      const job = jobs[name]!;
+      const job = ci.jobs[name]!;
       expect(job.needs).toContain("package");
       expect(
         job.steps!.find(
@@ -329,7 +292,7 @@ describe("TypeScript package skeleton", () => {
       ).toEqual({ name: "package-${{ github.sha }}", path: "dist" });
     }
     for (const name of ["test", "windows-test", "mcp"]) {
-      const steps = jobs[name]!.steps!;
+      const steps = ci.jobs[name]!.steps!;
       const restore = steps.findIndex(
         ({ name }) => name === "Restore bundled plugin",
       );
@@ -346,11 +309,10 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("runs static checks independently and keeps diagnostic uploads non-blocking", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    const steps = Object.values(jobs).flatMap((job) => job.steps ?? []);
-    expect(jobs["static-checks"]?.needs).toBe("classify-changes");
-    expect(jobs["package"]?.needs).toEqual(["classify-changes", "native"]);
+  test("runs static checks independently and keeps diagnostic uploads non-blocking", () => {
+    const steps = Object.values(ci.jobs).flatMap((job) => job.steps ?? []);
+    expect(ci.jobs["static-checks"]?.needs).toBe("classify-changes");
+    expect(ci.jobs["package"]?.needs).toEqual(["classify-changes", "native"]);
     for (const [name, job] of [
       ["Check plugin source boundary", "package"],
       ["Typecheck", "static-checks"],
@@ -359,7 +321,7 @@ describe("TypeScript package skeleton", () => {
       ["Audit production dependencies", "static-checks"],
     ] as const) {
       expect(
-        jobs[job]!.steps!.filter((step) => step.name === name),
+        ci.jobs[job]!.steps!.filter((step) => step.name === name),
       ).toHaveLength(1);
     }
     for (const name of [
@@ -375,8 +337,8 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("runs Windows native proofs with and without symbolic-link privileges", async () => {
-    const { jobs } = await workflow("native-windows.yml");
+  test("runs Windows native proofs with and without symbolic-link privileges", () => {
+    const { jobs } = workflow("native-windows");
     const job = jobs["primitives"]!;
     expect(job.env?.["CODEX_SECURITY_TEST_WINDOWS_SYMLINKS"]).toBe("required");
     const restricted = job.steps!.find(
@@ -388,8 +350,7 @@ describe("TypeScript package skeleton", () => {
     expect(restricted).not.toHaveProperty("continue-on-error");
   });
 
-  test("keeps machine-wide policy changes out of shared and diagnostic shards", async () => {
-    const ci = await workflow("node-ci.yml");
+  test("keeps machine-wide policy changes out of shared and diagnostic shards", () => {
     const windows = ci.jobs["windows-test"]!.steps!;
     expect(
       windows.find((step) => step.name === "Test shard ${{ matrix.shard }}")
@@ -405,7 +366,6 @@ describe("TypeScript package skeleton", () => {
       "timeout-minutes": 7,
       run: "bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts",
     });
-    const quality = await workflow("test-quality.yml");
     expect(Object.keys(quality.on).sort()).toEqual([
       "schedule",
       "workflow_call",
@@ -418,9 +378,7 @@ describe("TypeScript package skeleton", () => {
     expect(quality.env?.["CODEX_SECURITY_INTEGRATION"]).toBe("0");
   });
 
-  test("keeps shard layouts reproducible and report uploads rerunnable", async () => {
-    const ci = await workflow("node-ci.yml");
-    const quality = await workflow("test-quality.yml");
+  test("keeps shard layouts reproducible and report uploads rerunnable", () => {
     const runner = quality.jobs["runner"]!;
     const seed =
       "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
@@ -560,9 +518,8 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
-  test("blocks CI and releases when the production dependency audit fails", async () => {
-    for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
-      const { jobs } = await workflow(workflowName);
+  test("blocks CI and releases when the production dependency audit fails", () => {
+    for (const { jobs } of [ci, workflow("node-release")]) {
       const audits = Object.values(jobs)
         .flatMap((job) => job.steps ?? [])
         .filter((step) => step.name === "Audit production dependencies");

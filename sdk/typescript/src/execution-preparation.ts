@@ -679,11 +679,15 @@ function preserveConfigFileOrigin(config: JsonObject, directory: string): void {
 
 function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {
   const config = structuredClone(sessionConfig);
+  const servers = isRecord(config["mcp_servers"]) ? config["mcp_servers"] : {};
+  const server = servers["codex-security"];
   config["mcp_servers"] = {
-    ...(isRecord(config["mcp_servers"]) ? config["mcp_servers"] : {}),
-    // The SDK owns scan artifacts and lifecycle; workers use canonical files.
-    // A disabled server still needs a transport during plugin resolution.
-    "codex-security": { command: "node", enabled: false },
+    ...servers,
+    // A disabled server still needs a valid transport during plugin resolution.
+    "codex-security": {
+      ...(isRecord(server) ? server : { command: "node" }),
+      enabled: false,
+    },
   };
   return config;
 }
