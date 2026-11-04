@@ -21,7 +21,9 @@ New drafts and imports use `codeEvidence`, `rootCause`, `attackPath.dataflow`, a
 - Attack-path analysis must be concise. Record the realistic attacker boundary, the minimum trigger sequence, and the concrete outcome. Use code evidence for the important transitions instead of repeating the full validation narrative.
 - Populate only evidence-backed fields. Omit unknown values instead of adding placeholders.
 
-For a credential exposed in source, identify its type, location, and who could read it. Keep the value out of titles and prose. State in `validation.limitations` when live validity is unchecked. Base severity on the access and impact supported by the evidence. In `remediation`, give the owner the steps to retire the old credential at its issuer or consuming system and update dependent code or deployments. Removing a literal from source cannot establish that the old credential stopped working.
+For a credential exposed in source, identify its type, location, and who could read it. Keep the value out of titles and prose. State in `validation.limitations` when live validity is unchecked. Base severity on the access and impact supported by the evidence.
+
+In `remediation`, name the issuer or affected service when known. Tell the credential owner how to revoke or replace the old credential, update consumers, and confirm the old value has been disabled. Recommend reviewing prior use when audit logs are available. Give the developer a separate source change. Removing the literal cannot establish that the old credential stopped working.
 
 ## Concise Workspace Projection
 
