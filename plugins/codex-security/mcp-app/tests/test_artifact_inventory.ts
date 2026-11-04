@@ -95,6 +95,8 @@ async function testSchemasAreBoundAndExact() {
 
 async function testPrepareUsesTheExistingStandardGenerator() {
   const fixture = await createFixture("standard repository");
+  // Sandbox writable roots can have empty .git placeholders above an ordinary directory.
+  await mkdir(path.join(fixture.root, ".git"));
   await fixture.writeRepositoryFile("src/a.ts", "export const a = 1;\n");
   await fixture.writeRepositoryFile("-source.py", "source\n");
   await fixture.writeRepositoryFile("src/résumé.ts", "export const b = 2;\n");

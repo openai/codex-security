@@ -295,7 +295,17 @@ export async function generateInventory(
         `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
       );
     let bytes = result.stdout;
-    if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
+    const inWorktree = [...ancestors(repo)].some((path) => {
+      const marker = append(path, ".git");
+      // An empty .git directory can be a sandbox placeholder.
+      return (
+        exists(marker) &&
+        (!directory(marker) ||
+          exists(append(marker, "HEAD")) ||
+          regular(append(marker, "index")))
+      );
+    });
+    if (inWorktree) {
       const paths = (await ignoredTrackedPaths(repo, requested)).filter(
         (path) => regular(append(repo, path)),
       );
