@@ -2038,6 +2038,7 @@ export class CodexSecurity {
       status: "pending" as "pending" | "running" | "complete",
     };
     let completionCost: ScanCost | null = null;
+    let nativeTurnFailure: string | undefined;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -3268,8 +3269,16 @@ export class CodexSecurity {
         modelProvider,
         workbenchValidated: true,
         model,
-        onTurnStatus: (status) => {
+        onTurnStatus: (status, message) => {
           scanTurnStatus = status;
+          // A later caller abort during iterator cleanup cannot undo a reported failure.
+          if (
+            status === "failed" &&
+            !directDeepScan &&
+            !this.#dependencies.hostedScan &&
+            !signal.aborted
+          )
+            nativeTurnFailure = message;
         },
         onThreadStarted: async (threadId) => {
           if (resumeThreadId !== undefined && threadId !== resumeThreadId) {
@@ -3662,6 +3671,9 @@ export class CodexSecurity {
         callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)
           ? callerSignal
           : undefined;
+      const priorTurnFailure = callerCancellation
+        ? nativeTurnFailure
+        : undefined;
       let failure =
         signal.aborted && callerCancellation === undefined
           ? signal.reason
@@ -3804,8 +3816,9 @@ export class CodexSecurity {
             this.#dependencies.hostedScan
               ? hostedScanFailureStatus(failure, callerCancellation) ===
                   "canceled"
-              : explicitlyCanceled(callerCancellation),
-            failure,
+              : priorTurnFailure === undefined &&
+                  explicitlyCanceled(callerCancellation),
+            priorTurnFailure ?? failure,
             snapshot?.cost,
           );
           activeScan = null;
@@ -5265,7 +5278,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   workbenchValidated?: boolean;
   model?: string;
   onFinalize?: (usage: unknown) => Promise<unknown>;
-  onTurnStatus?: (status: "completed" | "failed") => void;
+  onTurnStatus?: (status: "completed" | "failed", message?: string) => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -5291,7 +5304,8 @@ export async function runScanEvents(
       onEvent: async (event) => {
         if (event.type === "turn.completed")
           options.onTurnStatus?.("completed");
-        if (event.type === "turn.failed") options.onTurnStatus?.("failed");
+        if (event.type === "turn.failed")
+          options.onTurnStatus?.("failed", turnFailureMessage(event["error"]));
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&
