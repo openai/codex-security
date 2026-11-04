@@ -58,7 +58,8 @@ an integer from 1 through 10 (default: 3), validated before any host work.
 For each record the CLI emits that many sequential `method: "review.run"` requests,
 each with a unique request ID and params containing `requestId`, `stage: "severity-classification"`, explicit
 `model` and `effort`, `trustedInstructions`, untrusted report/rubric `prompt`, and
-an output JSON `schema`. The host must authorize the requested model and effort,
+an output JSON `schema`. The SDK and CLI forward the `effort` string unchanged.
+The host must authorize the requested model and effort,
 create a fresh independent review context, preserve the instruction/data boundary,
 and disable tools, repository access, browsing, and source inspection.
 A managed-agent host can execute this request directly in its existing session
