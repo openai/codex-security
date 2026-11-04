@@ -54,11 +54,6 @@ import {
 import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
-import {
-  scannerDisplayReports,
-  withScannerDisplayReport,
-  type ScannerDisplayReport,
-} from "./scanner-import.js";
 import { previousReaderSelection } from "./reader-selection.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -66,7 +61,6 @@ import {
   readSemgrepReport,
 } from "./semgrep-findings.js";
 import {
-  normalizeSnykGitRepositoryUrl,
   normalizeSnykFile,
   readSnykReport,
   snykRepositoryUrls,
@@ -603,7 +597,6 @@ export async function prepareExternalPublication(
   );
   const provider = EXTERNAL_FINDINGS_PROVIDERS[settings.provider];
   let input: PreparePublicationInput;
-  let display: ScannerDisplayReport | undefined;
   if (settings.provider === "semgrep" || settings.provider === "snyk") {
     const semgrep = settings.provider === "semgrep";
     const report = await (semgrep
@@ -625,7 +618,6 @@ export async function prepareExternalPublication(
             "cloud",
           )
         : await normalizeSnykFile(report, "cloud", references);
-      display = scannerDisplayReports.get(findings);
       return normalizedPublicationInput(findings, provider);
     };
     const hosted =
@@ -671,7 +663,6 @@ export async function prepareExternalPublication(
   } else {
     const parsed = await readExternalFindings(path, settings);
     rejectGuardianSelection(parsed.findings);
-    display = scannerDisplayReports.get(parsed.findings);
     input =
       parsed.publication ??
       normalizedPublicationInput(parsed.findings, provider);
@@ -683,7 +674,6 @@ export async function prepareExternalPublication(
     readerSources,
     settings.sourceRepositoryUrl,
     path,
-    display,
   );
 }
 
@@ -1389,7 +1379,6 @@ async function preparePublicationInput(
   readerSources: readonly ExternalSourceRepository[],
   declaredUrl?: string,
   nativePath?: string,
-  display?: ScannerDisplayReport,
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
   const progress = (event: ExternalPublicationProgress): void =>
@@ -1407,11 +1396,6 @@ async function preparePublicationInput(
   dependencies.signal?.throwIfAborted();
   requireExternalImports(environment);
   progress({ phase: "reading", completed: 0 });
-  function noFindings(parsed: ExternalFindings): never {
-    throw new NoPublishableFindingsError(
-      withScannerDisplayReport(parsed, display),
-    );
-  }
   function checkSelection(input: PublicationSelection) {
     const parsed = input.current;
     if (
@@ -1423,7 +1407,7 @@ async function preparePublicationInput(
       !input.unprovenOccurrenceCount &&
       !input.unprovenIdPrefixes?.length
     )
-      noFindings(parsed);
+      throw new NoPublishableFindingsError(parsed);
   }
   if (typeof supplied !== "function") checkSelection(supplied);
   progress({ phase: "discovering", completed: 0 });
@@ -2589,10 +2573,7 @@ async function preparePublicationInput(
   }
   const saved = selected?.content ?? recovered;
   if (historicalOnly && !saved) throw unmatchedPreviousNumbers();
-  if (!parsed.findings.length)
-    throw new NoPublishableFindingsError(
-      withScannerDisplayReport(parsed, display),
-    );
+  if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
   if (saved) {
     await retireIfReset(saved, () =>
       underLocks(lockKeys, async () => {
@@ -2745,13 +2726,6 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
-    for (const url of display?.repositories ?? [])
-      requireDestination(
-        "SARIF scanner notification",
-        options.provider === "snyk"
-          ? normalizeSnykGitRepositoryUrl(url, destination.url)
-          : url,
-      );
     // Historical checkpoints already fixed the provider and request bytes.
     // Recheck any projected source against the destination discovered for this retry.
     const replay = saved && options.provider !== "blackduck";
@@ -2963,7 +2937,7 @@ async function preparePublicationInput(
       ...(retryOfJobId ? { retryOfJobId } : {}),
     };
     const preview: ExternalPublicationPreview = {
-      ...withScannerDisplayReport(parsed, display),
+      ...parsed,
       cloudApiUrl: `${apiBaseUrl}/finding-imports`,
       accountId: credentials.account_id,
       destination,
@@ -3007,7 +2981,7 @@ async function preparePublicationInput(
             status: "interrupted",
             read: parsed.read,
             ready: parsed.findings.length,
-            report: preview.report,
+            report: parsed.report,
             excluded: parsed.excluded,
             receipts: [],
             counts: { created: 0, updated: 0, unchanged: 0, error: 0 },
@@ -3215,7 +3189,7 @@ async function preparePublicationInput(
     submission.approvedRepositoryPlatform = "other";
   if (inspectorProjectMap) submission.inspectorProjectMapRequired = true;
   const preview: ExternalPublicationPreview = {
-    ...withScannerDisplayReport(parsed, display),
+    ...parsed,
     findings: submissionFindings(requests),
     cloudApiUrl,
     cloudUrl: cloudFindingsUrl(environment, destination.id),
@@ -3257,9 +3231,9 @@ async function preparePublicationInput(
           status:
             parsed.excluded.length || counts.error ? "partial" : "complete",
           read: parsed.read,
-          ...(preview.report === undefined
+          ...(parsed.report === undefined
             ? {}
-            : snapshotNormalizedFindings({ report: preview.report })),
+            : snapshotNormalizedFindings({ report: parsed.report })),
           ready: parsed.findings.length,
           excluded: parsed.excluded,
           receipts: acknowledged,

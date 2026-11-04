@@ -25,13 +25,10 @@ report_dir=$(mktemp -d) &&
   opengrep_report="$report_dir/opengrep.json"
 ```
 
-The reader accepts native JSON only. A report can contain matches alongside
-parse errors or timeouts. Check the scanner's exit status and retain the
-original JSON for run-wide details. The preview includes run metadata in
-`report`. Stored findings keep the version, raw observations in
-`source_data.results` and the diagnostic count in `source_data.scan_error_count`.
-A report with zero records and no diagnostics exits successfully without uploading.
-If a zero-record report includes diagnostics, the importer reports them as a failure.
+A zero-result report succeeds only when its `errors` array is empty. Parse
+errors or timeouts in an otherwise empty report fail the import. Keep the
+scanner's exit status and original JSON; an empty export alone does not prove
+complete scan coverage.
 
 **Preview the report.** Replace the example URL with the checkout's
 credential-free HTTP(S) URL. Choose a distinct OpenGrep source key for your
@@ -44,7 +41,7 @@ codex-security publish findings "$opengrep_report" --to local --repository . \
 ```
 
 Check the findings, exclusions and `report.errors`, even if the findings list
-is empty. A clean empty report uploads nothing. Keep `--provider opengrep`
+is empty. Keep `--provider opengrep`
 when you [save locally or publish to Cloud](README.md#save-or-publish-and-verify).
 
 ## Provider identity and evidence

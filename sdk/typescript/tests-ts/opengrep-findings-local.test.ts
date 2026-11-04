@@ -84,7 +84,7 @@ test("OpenGrep grouped traces survive SQLite import, replay, and evidence update
   );
 });
 
-test("empty OpenGrep local imports retain scanner diagnostics without creating findings", async () => {
+test("empty OpenGrep local imports reject scanner errors and accept clean reports", async () => {
   await using fixture = await localReportFixture(
     "opengrep.json",
     {

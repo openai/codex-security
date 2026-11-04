@@ -25,110 +25,96 @@ export function optionalArray(value: unknown, label: string): unknown[] {
   return value === undefined ? [] : array(value, label);
 }
 
-// SARIF references select the driver by default, then use a component's
-// descriptor index or GUID. Older exports can also reference a descriptor by ID.
-function notificationDescriptors(value: unknown) {
-  const tool = isRecord(value) ? value : {};
-  const extensions = optionalArray(tool["extensions"], "SARIF tool extensions");
-  const components = new Map<string, Record<string, unknown>>();
-  const descriptors = new Map<
-    Record<string, unknown>,
-    {
-      entries: unknown[];
-      byGuid: Map<unknown, Record<string, unknown>>;
-      byId: Map<unknown, Record<string, unknown>>;
-    }
-  >();
-  const driver = tool["driver"];
-  for (const component of [driver, ...extensions]) {
-    if (!isRecord(component)) continue;
-    if (typeof component["guid"] === "string")
-      components.set(component["guid"].toLowerCase(), component);
-    const entries = optionalArray(
-      component["notifications"],
-      "SARIF notification descriptors",
-    );
-    const byGuid = new Map<unknown, Record<string, unknown>>();
-    const byId = new Map<unknown, Record<string, unknown>>();
-    for (const entry of entries) {
-      if (!isRecord(entry)) continue;
-      if (typeof entry["guid"] === "string")
-        byGuid.set(entry["guid"].toLowerCase(), entry);
-      if (typeof entry["id"] === "string") byId.set(entry["id"], entry);
-    }
-    descriptors.set(component, { entries, byGuid, byId });
-  }
-  return (ref: unknown) => {
-    const target = isRecord(ref) ? ref["toolComponent"] : undefined;
-    let component = driver;
-    if (isRecord(target)) {
-      if (typeof target["index"] === "number" && target["index"] >= 0)
-        component = extensions[target["index"]];
-      else if (typeof target["guid"] === "string")
-        component = components.get(target["guid"].toLowerCase());
-    }
-    if (!isRecord(component) || !isRecord(ref)) return { component };
-    const lookup = descriptors.get(component);
-    const descriptor =
-      typeof ref["index"] === "number" && ref["index"] >= 0
-        ? lookup?.entries[ref["index"]]
-        : typeof ref["guid"] === "string"
-          ? lookup?.byGuid.get(ref["guid"].toLowerCase())
-          : lookup?.byId.get(ref["id"]);
-    return {
-      component,
-      descriptor: isRecord(descriptor) ? descriptor : undefined,
-    };
+// A notification may omit its level and refer to a descriptor by index, GUID or ID.
+function sarifDescriptorIndex(entries: unknown[], firstIndex = 0) {
+  const byRef = new Map<string | number, Record<string, unknown>>();
+  entries.forEach((item, index) => {
+    if (!isRecord(item)) return;
+    byRef.set(firstIndex + index, item);
+    if (typeof item["guid"] === "string")
+      byRef.set("guid:" + item["guid"].toLowerCase(), item);
+    if (typeof item["id"] === "string") byRef.set("id:" + item["id"], item);
+  });
+  return (ref: Record<string, unknown>) => {
+    if (typeof ref["index"] === "number" && ref["index"] >= 0)
+      return byRef.get(ref["index"]);
+    if (typeof ref["guid"] === "string")
+      return byRef.get("guid:" + ref["guid"].toLowerCase());
+    if (typeof ref["id"] === "string") return byRef.get("id:" + ref["id"]);
+    if (firstIndex === -1) return byRef.get(-1);
   };
 }
 
-export interface ScannerDisplayReport {
-  report: NonNullable<ExternalFindings["report"]>;
-  repositories?: Set<string>;
-}
-
-// Scanner summaries describe the selected file. Keep them outside the SDK rows
-// used for immutable Cloud requests, including when callers round-trip JSON.
-export const scannerDisplayReports = new WeakMap<
-  ExternalFindings,
-  ScannerDisplayReport
->();
-
-export function withScannerDisplayReport<T extends ExternalFindings>(
-  selection: T,
-  display?: ScannerDisplayReport,
-): T {
-  return display
-    ? { ...selection, report: { ...selection.report, ...display.report } }
-    : selection;
+function notificationDescriptors(tool: unknown) {
+  const metadata = isRecord(tool) ? tool : {};
+  const extensions = optionalArray(
+    metadata["extensions"],
+    "SARIF tool extensions",
+  );
+  // The driver is the default component (index -1); extension indexes start at 0.
+  const component = sarifDescriptorIndex(
+    [metadata["driver"], ...extensions],
+    -1,
+  );
+  const descriptors = new Map<
+    Record<string, unknown>,
+    ReturnType<typeof sarifDescriptorIndex>
+  >();
+  return (ref: unknown) => {
+    if (!isRecord(ref)) return;
+    const target = ref["toolComponent"];
+    const owner = component(isRecord(target) ? target : {});
+    if (!owner) return;
+    let lookup = descriptors.get(owner);
+    if (!lookup) {
+      lookup = sarifDescriptorIndex(
+        optionalArray(owner["notifications"], "SARIF notification descriptors"),
+      );
+      descriptors.set(owner, lookup);
+    }
+    return lookup(ref);
+  };
 }
 
 export function successfulSarifInvocations(
   run: Record<string, unknown>,
   producer: string,
-  retained?: { notifications: unknown[]; repositories: Set<string> },
+  notifications?: unknown[],
 ): Record<string, unknown>[] {
-  function validateInvocation(
+  function validate(
     value: unknown,
     resolve: ReturnType<typeof notificationDescriptors>,
-  ): Record<string, unknown> {
+  ) {
     const invocation = record(value, `${producer} invocation`);
-    const successful = invocation["executionSuccessful"];
-    if (typeof successful !== "boolean")
+    if (typeof invocation["executionSuccessful"] !== "boolean")
       throw new Error(
         `${producer} SARIF executionSuccessful must be a boolean.`,
       );
+    if (!invocation["executionSuccessful"]) {
+      const details = [
+        "processStartFailureMessage",
+        "exitCodeDescription",
+        "exitCode",
+        "exitSignalName",
+        "toolExecutionNotifications",
+        "toolConfigurationNotifications",
+      ].flatMap((key) =>
+        invocation[key] === undefined ? [] : [invocation[key]],
+      );
+      throw new Error(
+        `${producer} SARIF contains an unsuccessful invocation.${details.length ? " " + JSON.stringify(details) : ""}`,
+      );
+    }
     const levels = new Map<Record<string, unknown>, unknown>();
     for (const override of optionalArray(
       invocation["notificationConfigurationOverrides"],
       "SARIF notification overrides",
     )) {
       if (!isRecord(override) || !isRecord(override["configuration"])) continue;
-      const descriptor = resolve(override["descriptor"]).descriptor;
+      const descriptor = resolve(override["descriptor"]);
       if (descriptor && override["configuration"]["level"] !== undefined)
         levels.set(descriptor, override["configuration"]["level"]);
     }
-    const messages: Record<string, unknown>[] = [];
     for (const property of [
       "toolExecutionNotifications",
       "toolConfigurationNotifications",
@@ -137,74 +123,33 @@ export function successfulSarifInvocations(
         invocation[property],
         `${producer} ${property}`,
       )) {
-        const notification = record(entry, `${producer} notification`);
-        const { descriptor, component } = resolve(notification["descriptor"]);
+        const notice = record(entry, `${producer} notification`);
+        const descriptor = resolve(notice["descriptor"]);
         const defaults = descriptor?.["defaultConfiguration"];
         const level =
-          notification["level"] ??
+          notice["level"] ??
           (descriptor && levels.get(descriptor)) ??
-          (isRecord(defaults) ? defaults["level"] : undefined) ??
-          "warning";
-        const msg = notification["message"];
-        const key =
-          isRecord(msg) && typeof msg["id"] === "string"
-            ? msg["id"]
-            : undefined;
-        const local = descriptor?.["messageStrings"];
-        const global = isRecord(component)
-          ? component["globalMessageStrings"]
-          : undefined;
-        const template =
-          key === undefined
-            ? undefined
-            : ((isRecord(local) && Object.hasOwn(local, key)
-                ? local[key]
-                : undefined) ??
-              (isRecord(global) && Object.hasOwn(global, key)
-                ? global[key]
-                : undefined));
-        const diagnostic = {
-          ...notification,
-          level,
-          ...(template === undefined ? {} : { messageTemplate: template }),
-        };
-        messages.push(diagnostic);
+          (isRecord(defaults) ? defaults["level"] : undefined);
+        if (level === "error")
+          throw new Error(
+            `${producer} SARIF contains scan error notifications: ${JSON.stringify(notice)}`,
+          );
+        notifications?.push(notice);
       }
-    }
-    if (!successful) {
-      const diagnostics = [
-        ...messages,
-        invocation["processStartFailureMessage"],
-        invocation["exitCodeDescription"],
-        invocation["exitCode"],
-        invocation["exitSignalName"],
-      ].filter((detail) => detail !== undefined);
-      throw new Error(
-        `${producer} SARIF contains an unsuccessful invocation.${diagnostics.length ? " " + JSON.stringify(diagnostics) : ""}`,
-      );
-    }
-    if (messages.some((message) => message["level"] === "error"))
-      throw new Error(
-        `${producer} SARIF contains scan error notifications: ${JSON.stringify(messages)}`,
-      );
-    if (retained && messages.length) {
-      for (const message of messages) retained.notifications.push(message);
-      for (const url of sarifRepositoryUrls(run, producer))
-        retained.repositories.add(url);
     }
     return invocation;
   }
   if (run["conversion"] !== undefined) {
     const conversion = record(run["conversion"], `${producer} conversion`);
     if (conversion["invocation"] !== undefined)
-      validateInvocation(
+      validate(
         conversion["invocation"],
         notificationDescriptors(conversion["tool"]),
       );
   }
   const resolve = notificationDescriptors(run["tool"]);
   return optionalArray(run["invocations"], `${producer} invocations`).map(
-    (invocation) => validateInvocation(invocation, resolve),
+    (value) => validate(value, resolve),
   );
 }
 
@@ -219,20 +164,29 @@ export function requiredText(value: unknown, label: string): string {
 }
 
 /** SARIF repository claims must be checked even when a run has no results. */
-export function sarifRepositoryUrls(run: unknown, producer: string): string[] {
+export function sarifRunRepositories(
+  run: unknown,
+  producer: string,
+): { url: string; branch?: string }[] {
   if (run == null) return [];
   return array(
     record(run, `${producer} run context`)["versionControlProvenance"] ?? [],
     `${producer} version control provenance`,
   ).flatMap((entry) => {
-    const uri = record(entry, `${producer} repository provenance`)[
-      "repositoryUri"
-    ];
+    const ref = record(entry, `${producer} repository provenance`);
     const url =
       producer === "Semgrep"
-        ? text(uri)
-        : requiredText(uri, `${producer} repository URI`);
-    return url === null ? [] : [url];
+        ? text(ref["repositoryUri"])
+        : requiredText(ref["repositoryUri"], `${producer} repository URI`);
+    return url === null
+      ? []
+      : [
+          {
+            url,
+            ...(producer === "Semgrep" &&
+              typeof ref["branch"] === "string" && { branch: ref["branch"] }),
+          },
+        ];
   });
 }
 
@@ -642,7 +596,7 @@ export function normalizeRecords<T>(
   target: "local" | "cloud" = "cloud",
   options: {
     report?: ExternalFindings["report"];
-    coverage?: { notifications: unknown[]; repositories: Set<string> };
+    notifications?: unknown[];
     filter?: SelectionFilter;
   } = {},
 ): ExternalFindings {
@@ -691,16 +645,7 @@ export function normalizeRecords<T>(
     selection.append(position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  const normalized = selection.finish(options.filter);
-  const coverage = options.coverage;
-  if (coverage?.notifications.length) {
-    const report = { notifications: coverage.notifications };
-    if (!normalized.read) normalized.report = report;
-    else
-      scannerDisplayReports.set(normalized, {
-        report,
-        repositories: coverage.repositories,
-      });
-  }
-  return normalized;
+  if (!records.length && options.notifications?.length)
+    result.report = { ...result.report, notifications: options.notifications };
+  return selection.finish(options.filter);
 }

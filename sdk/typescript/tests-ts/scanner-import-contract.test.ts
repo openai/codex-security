@@ -291,6 +291,12 @@ test.each([
       excluded: [],
     });
     const run = report.runs[0];
+    run.results = [];
+    expect(normalize(report)).toMatchObject({
+      read: 0,
+      findings: [],
+      excluded: [],
+    });
     delete run.results;
     expect(normalize(report)).toMatchObject({
       read: 0,
@@ -313,6 +319,14 @@ test.each([
       },
     ];
     expect(() => normalize(report)).toThrow("Synthetic scan failure");
+    run.invocations = [];
+    run.conversion = {
+      invocation: {
+        executionSuccessful: false,
+        processStartFailureMessage: "Synthetic converter failure",
+      },
+    };
+    expect(() => normalize(report)).toThrow("Synthetic converter failure");
     for (const runs of [null, {}, "invalid"])
       expect(() => normalize({ ...report, runs })).toThrow("must be an array");
   },

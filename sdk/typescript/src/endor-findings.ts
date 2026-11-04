@@ -10,7 +10,7 @@ import {
   record,
   relativePath,
   requiredText,
-  sarifRepositoryUrls,
+  sarifRunRepositories,
   sarifRunResults,
   strings,
   successfulSarifInvocations,
@@ -21,7 +21,9 @@ import {
 /** @internal Repository claims retained in the adapter's original SARIF context. */
 export function endorRepositoryUrls(sourceData: unknown): string[] {
   return isRecord(sourceData)
-    ? sarifRepositoryUrls(sourceData["runContext"], "Endor")
+    ? sarifRunRepositories(sourceData["runContext"], "Endor").map(
+        (ref) => ref.url,
+      )
     : [];
 }
 
@@ -225,13 +227,10 @@ export function normalizeEndorSarif(
   const document = record(input, "Endor SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Endor SARIF 2.1.0.");
-  const coverage = {
-    notifications: [] as unknown[],
-    repositories: new Set<string>(),
-  };
+  const notifications: unknown[] = [];
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
-    successfulSarifInvocations(run, "Endor", coverage);
+    successfulSarifInvocations(run, "Endor", notifications);
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
     if (driver["name"] !== "endorctl")
@@ -343,7 +342,7 @@ export function normalizeEndorSarif(
         "Endor finding-uuid",
       ),
     target,
-    { coverage },
+    { notifications },
   );
 }
 

@@ -933,6 +933,20 @@ test("a zero-record report needs no Cloud account, destination lookup, confirmat
   );
 });
 
+test("an empty monitored Snyk capture finishes without an upload after catalog lookup", async () => {
+  const report = snykRestFixture("open-source");
+  report.pages = [{ startingAfter: null, responseJson: '{"data":[]}' }];
+  const f = await fixture(report, report.sourceRepositoryUrl);
+  const cli = createCliTest(main);
+  const args = f.command.map((arg) => (arg === "wiz" ? "snyk" : arg));
+  expect(await cli.runCli(args, f.cliDeps)).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "empty",
+    published: false,
+  });
+  expect(f.posts).toHaveLength(0);
+});
+
 test("an entirely excluded report fails with all positions intact and a short diagnostic", async () => {
   const f = await fixture(
     Array.from({ length: 500 }, (_, index) =>
@@ -1020,20 +1034,14 @@ test("normalized SDK callers can distinguish an empty report from exclusions wit
       ],
     },
   ]) {
-    try {
-      await prepareNormalizedExternalPublication(selection, options, {
-        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
-        credentials: async () => {
-          throw new Error("Unexpected credential read");
-        },
-      });
-      throw new Error("Unexpected upload preparation");
-    } catch (error) {
-      expect(error).toBeInstanceOf(NoPublishableFindingsError);
-      expect((error as NoPublishableFindingsError).selection).toEqual(
-        selection,
-      );
-    }
+    const prepared = prepareNormalizedExternalPublication(selection, options, {
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+      credentials: async () => {
+        throw new Error("Unexpected credential read");
+      },
+    });
+    await expect(prepared).rejects.toBeInstanceOf(NoPublishableFindingsError);
+    await expect(prepared).rejects.toMatchObject({ selection });
   }
 });
 
@@ -1063,312 +1071,6 @@ test("a failed scanner run is not an empty successful import", async () => {
     error: expect.stringContaining("scan errors"),
   });
   expect(f.posts).toHaveLength(0);
-});
-
-test("failed or malformed vendor collections never report a successful empty import", async () => {
-  const { snykSarif, snykPluginExport, snykJson } =
-    await import("./support/snyk-import-fixtures.js");
-  const { endorSarif } = await import("./support/endor-import-fixtures.js");
-  const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
-  const f = await fixture();
-  await rm(f.environment.CODEX_HOME, { recursive: true });
-  const plugin = snykPluginExport();
-  const badPlugin = (outcome: string) => ({
-    ...plugin,
-    findings: [],
-    collection: {
-      ...plugin.collection,
-      scans: [
-        {
-          category: "sca",
-          outcome,
-          error: "Synthetic diagnostic",
-          issueCount: 0,
-        },
-      ],
-    },
-  });
-  const cases: [string, unknown, string][] = [
-    ...[
-      ["snyk", snykSarif()],
-      ["endor", endorSarif()],
-      ["semgrep", semgrepSarif()],
-    ].flatMap(([provider, report]) => {
-      const doc = report as ReturnType<typeof snykSarif>;
-      const invocationCases = [
-        [{ executionSuccessful: false }, "unsuccessful invocation"],
-        [{ exitCode: 2 }, "executionSuccessful must be a boolean"],
-        ...["toolExecutionNotifications", "toolConfigurationNotifications"].map(
-          (property) => [
-            {
-              executionSuccessful: true,
-              [property]: [
-                { level: "error", message: { text: "Synthetic scan error" } },
-              ],
-            },
-            "scan error notifications",
-          ],
-        ),
-      ].map(
-        ([invocation, reason]) =>
-          [
-            provider,
-            {
-              ...doc,
-              runs: [
-                { ...doc.runs[0], results: [], invocations: [invocation] },
-              ],
-            },
-            reason,
-          ] as [string, unknown, string],
-      );
-      return [
-        ...invocationCases,
-        [
-          provider,
-          { ...doc, runs: [{ ...doc.runs[0], results: null }] },
-          "must be an array",
-        ],
-      ] as [string, unknown, string][];
-    }),
-    ...["failed", "denied", "unavailable", "not_requested"].map(
-      (outcome) =>
-        ["snyk", badPlugin(outcome), outcome] as [string, unknown, string],
-    ),
-    ["snyk", { ...plugin, findings: [] }, "reported issues"],
-    [
-      "snyk",
-      { ...snykJson(), ok: false, uniqueCount: 1, vulnerabilities: [] },
-      "reported issues",
-    ],
-    ...[undefined, 0].map(
-      (uniqueCount) =>
-        [
-          "snyk",
-          { ...snykJson(), ok: false, uniqueCount, vulnerabilities: [] },
-          "reported issues",
-        ] as [string, unknown, string],
-    ),
-    [
-      "snyk",
-      {
-        ...plugin,
-        findings: [],
-        collection: {
-          ...plugin.collection,
-          scans: [{ category: "sca", outcome: "succeeded", issueCount: "3" }],
-        },
-      },
-      "nonnegative integer",
-    ],
-    [
-      "snyk",
-      {
-        ...plugin,
-        findings: [],
-        collection: { target: plugin.collection.target },
-      },
-      "successful SCA scan",
-    ],
-    ["endor", { list: { objects: {} } }, "must be an array"],
-    [
-      "semgrep",
-      {
-        ...semgrepSarif(),
-        runs: [{ ...semgrepSarif().runs[0], results: null }],
-      },
-      "must be an array",
-    ],
-    [
-      "wiz",
-      {
-        data: {
-          vulnerabilityFindings: { nodes: [] },
-          sastFindings: [{ id: "known-record" }],
-        },
-      },
-      "sastFindings must be an object",
-    ],
-  ];
-  for (const [provider, report, diagnostic] of cases) {
-    await writeFile(f.file, JSON.stringify(report));
-    const command = f.command.map((argument) =>
-      argument === "wiz" ? provider : argument,
-    );
-    const cli = createCliTest(main);
-    expect(
-      await cli.runCli(
-        [
-          ...command,
-          "--source-repository-url",
-          "https://github.com/example/project",
-          "--yes",
-        ],
-        f.cliDeps,
-      ),
-    ).toBe(2);
-    expect(JSON.parse(cli.stdout.text()), provider).toMatchObject({
-      status: "failed",
-      error: expect.stringContaining(diagnostic),
-    });
-  }
-  const partialCollection = {
-    ...plugin.collection,
-    completeness: {
-      collection: "partial",
-      analysis: "Code denied; \u001b[31mSCA succeeded",
-    },
-    scans: [
-      { category: "sca", outcome: "succeeded", issueCount: 0 },
-      { category: "code", outcome: "denied", error: "Code scan denied" },
-    ],
-  };
-  await writeFile(
-    f.file,
-    JSON.stringify({ ...plugin, findings: [], collection: partialCollection }),
-  );
-  const cleanSca = createCliTest(main);
-  expect(
-    await cleanSca.runCli(
-      f.command.map((argument) => (argument === "wiz" ? "snyk" : argument)),
-      f.cliDeps,
-    ),
-  ).toBe(0);
-  expect(JSON.parse(cleanSca.stdout.text())).toMatchObject({
-    status: "empty",
-    report: {
-      collection: {
-        completeness: { collection: "partial" },
-        scans: [
-          { category: "sca", outcome: "succeeded" },
-          { category: "code", outcome: "denied", error: "Code scan denied" },
-        ],
-      },
-    },
-  });
-  const terminal = createCliTest(main);
-  expect(
-    await terminal.runCli(
-      f.command
-        .slice(0, -2)
-        .map((argument) => (argument === "wiz" ? "snyk" : argument)),
-      f.cliDeps,
-    ),
-  ).toBe(0);
-  expect(terminal.stdout.text() + terminal.stderr.text()).toContain(
-    "Code scan denied",
-  );
-  const withFindings = await fixture({
-    ...plugin,
-    collection: {
-      ...partialCollection,
-      scans: [...plugin.collection.scans, partialCollection.scans[1]],
-    },
-  });
-  const nonempty = createCliTest(main);
-  expect(
-    await nonempty.runCli(
-      [
-        ...withFindings.command
-          .slice(0, -2)
-          .map((argument) => (argument === "wiz" ? "snyk" : argument)),
-        "--dry-run",
-      ],
-      withFindings.cliDeps,
-    ),
-  ).toBe(0);
-  expect(nonempty.stderr.text()).toContain("Code scan denied");
-  const markdown = createCliTest(main);
-  expect(
-    await markdown.runCli(
-      [
-        ...withFindings.command.map((arg) =>
-          arg === "wiz" ? "snyk" : arg === "json" ? "md" : arg,
-        ),
-        "--dry-run",
-      ],
-      withFindings.cliDeps,
-    ),
-  ).toBe(0);
-  expect(markdown.stdout.text()).toContain("SCA succeeded");
-  expect(markdown.stdout.text()).not.toContain("\u001b[31m");
-  const excludedReport = endorSarif();
-  const run = excludedReport.runs[0]!;
-  await writeFile(
-    f.file,
-    JSON.stringify({
-      ...excludedReport,
-      runs: [
-        {
-          ...run,
-          results: [{ ...run.results[0], properties: {} }],
-          invocations: [
-            {
-              executionSuccessful: true,
-              toolExecutionNotifications: [
-                { level: "warning", message: { text: "Manifest skipped" } },
-              ],
-            },
-          ],
-        },
-      ],
-    }),
-  );
-  const excludedTerminal = createCliTest(main);
-  expect(
-    await excludedTerminal.runCli(
-      [
-        ...f.command
-          .slice(0, -2)
-          .map((argument) => (argument === "wiz" ? "endor" : argument)),
-        "--yes",
-      ],
-      f.cliDeps,
-    ),
-  ).toBe(2);
-  expect(excludedTerminal.stderr.text()).toContain("Manifest skipped");
-  const unsupported = plugin.findings[0]!;
-  await writeFile(
-    f.file,
-    JSON.stringify({
-      ...badPlugin("not_requested"),
-      findings: [
-        {
-          ...unsupported,
-          originatingScanner: "snyk-code",
-          category: "code_issue",
-          observation: { ...unsupported.observation, scan: "code" },
-        },
-      ],
-    }),
-  );
-  const onlyCode = createCliTest(main);
-  expect(
-    await onlyCode.runCli(
-      f.command.map((argument) => (argument === "wiz" ? "snyk" : argument)),
-      f.cliDeps,
-    ),
-  ).toBe(2);
-  expect(JSON.parse(onlyCode.stdout.text())).toMatchObject({
-    read: 1,
-    ready: 0,
-    excluded: [
-      { position: 1, reason: expect.stringContaining("Only Snyk Open Source") },
-    ],
-  });
-  const excludedPlugin = JSON.parse(await readFile(f.file, "utf8"));
-  await writeFile(
-    f.file,
-    JSON.stringify({ ...excludedPlugin, collection: partialCollection }),
-  );
-  const onlyExcluded = createCliTest(main);
-  expect(
-    await onlyExcluded.runCli(
-      f.command.slice(0, -2).map((arg) => (arg === "wiz" ? "snyk" : arg)),
-      f.cliDeps,
-    ),
-  ).toBe(2);
-  expect(onlyExcluded.stderr.text()).toContain("Code scan denied");
 });
 
 async function hostedFixture(
@@ -9186,90 +8888,6 @@ for (const [provider, report, normalize, dryRunTitle] of [
     "Endor CLI dry-run recognizes SARIF without writing imports",
   ],
 ] as const) {
-  test(`${provider} SARIF warnings preserve interrupted requests and appear in the terminal preview`, async () => {
-    const source = report();
-    const notification = {
-      level: "warning",
-      message: { text: "Example manifest was skipped" },
-    };
-    const input = {
-      ...source,
-      runs: source.runs.map((run) => ({
-        ...run,
-        invocations: [
-          {
-            executionSuccessful: true,
-            toolExecutionNotifications: [notification],
-          },
-        ],
-      })),
-    };
-    const f = await fixture(input);
-    const settings = { ...options, provider };
-    const command = [...f.command, "--dry-run"];
-    command[command.indexOf("--provider") + 1] = provider;
-    command[command.indexOf("--format") + 1] = "toon";
-    const cli = createCliTest(main);
-    expect(await cli.runCli(command, f.cliDeps)).toBe(0);
-    expect(cli.stderr.text()).toContain("Example manifest was skipped");
-    const rows = normalize(input);
-    expect(rows.report).toBeUndefined();
-    const original = await prepareNormalizedExternalPublication(
-      rows,
-      settings,
-      f.deps,
-    );
-    f.state.loseResponse = true;
-    await expect(original.publish()).rejects.toThrow();
-    const retry = await prepareExternalPublication(f.file, settings, f.deps);
-    expect(retry.preview.resumed).toBe(true);
-    expect(retry.preview.requests).toEqual(original.preview.requests);
-    const restored = await prepareNormalizedExternalPublication(
-      JSON.parse(JSON.stringify(rows)),
-      settings,
-      f.deps,
-    );
-    expect(restored.preview.resumed).toBe(true);
-    expect(restored.preview.requests).toEqual(original.preview.requests);
-    expect(restored.preview.findings).toEqual(original.preview.findings);
-    expect(JSON.stringify(restored.preview.findings)).toContain(
-      notification.message.text,
-    );
-    expect(restored.preview.report).toEqual(original.preview.report);
-    const result = await retry.publish();
-    expect(result.report?.["notifications"]).toMatchObject([notification]);
-
-    await writeFile(
-      f.file,
-      JSON.stringify({
-        ...input,
-        runs: input.runs.map((run) => ({ ...run, results: [] })),
-      }),
-    );
-    const markdown = createCliTest(main);
-    expect(
-      await markdown.runCli(
-        command.map((arg) => (arg === "toon" ? "md" : arg)),
-        f.cliDeps,
-      ),
-    ).toBe(0);
-    expect(markdown.stdout.text()).toContain("Example manifest was skipped");
-
-    const otherRun = {
-      ...input.runs[0],
-      results: [],
-      versionControlProvenance: [
-        { repositoryUri: "https://github.com/other/project" },
-      ],
-    };
-    await writeFile(
-      f.file,
-      JSON.stringify({ ...input, runs: [...input.runs, otherRun] }),
-    );
-    await expect(
-      prepareExternalPublication(f.file, settings, f.deps),
-    ).rejects.toThrow("does not match the selected Cloud repository");
-  });
   test(dryRunTitle, async () => {
     const f = await fixture(report());
     const command = [...f.command, "--dry-run"];
@@ -10803,16 +10421,6 @@ test.each([
 ] as const)(
   "a signed-in $provider private import resumes lost upload and job responses",
   async ({ provider, format, raw }) => {
-    const warning = {
-      level: "warning",
-      message: { text: "Incomplete coverage" },
-    };
-    if (provider === "snyk")
-      Object.assign(raw.runs[0]!, {
-        invocations: [
-          { executionSuccessful: true, toolExecutionNotifications: [warning] },
-        ],
-      });
     const f = await fixture(raw);
     const originalBytes = await readFile(f.file, "utf8");
     const settings = { ...options, provider };
@@ -10975,10 +10583,6 @@ test.each([
     const original = await prepare();
     expect(original.preview.privateImport?.sha256).toBeTruthy();
     expect(original.preview.privateImport?.format).toBe(format);
-    if (provider === "snyk")
-      expect(original.preview.report?.["notifications"]).toMatchObject([
-        warning,
-      ]);
     const cli = createCliTest(main);
     const dryRun = [...f.command, "--dry-run"];
     dryRun[dryRun.indexOf("--provider") + 1] = provider;
@@ -11008,7 +10612,6 @@ test.each([
     );
     const completed = await (await prepare()).publish();
     expect(completed.privateJob?.counts.created).toBe(1);
-    expect(completed.report).toEqual(original.preview.report);
     expect(completed.receipts).toEqual([]);
     expect(completed.verified).toBe(0);
     expect(

@@ -1455,22 +1455,24 @@ review the new submission before confirming.
 
 ### Results and exit codes
 
-| Status        | Exit code | Meaning                                                                      |
-| ------------- | --------- | ---------------------------------------------------------------------------- |
-| `empty`       | 0         | No records were available to upload. Check the report for coverage warnings. |
-| `complete`    | 0         | The inbox processed every record, or the publisher verified each one.        |
-| `partial`     | 1         | The import had exclusions or record errors, or the inbox job failed.         |
-| `interrupted` | 2         | Upload, verification, or receipt persistence stopped after preparation.      |
-| `failed`      | 2         | Preparation failed before upload.                                            |
+| Status        | Exit code | Meaning                                                                                |
+| ------------- | --------- | -------------------------------------------------------------------------------------- |
+| `empty`       | 0         | No records were available to upload.                                                   |
+| `complete`    | 0         | The inbox job processed every record successfully, or the publisher verified each one. |
+| `partial`     | 1         | The import had exclusions or record errors, or the inbox job failed or was cancelled.  |
+| `interrupted` | 2         | The CLI stopped while uploading, checking the result or saving a receipt.              |
+| `failed`      | 2         | Preparation failed before upload.                                                      |
 
-For a clean zero-record report, the CLI returns `empty` before checking a Cloud
-destination or asking for confirmation. Local imports still validate the checkout
-and create no workbench database. Failed scans and selections containing only
-excluded records return an error. Existing findings stay open. SARIF reports may
-contain no runs or omit a run’s results. An empty selection describes the report,
-not whether a scan completed. Null or malformed arrays, unsuccessful
-invocations and error notifications stop the import. JSON output includes every
-excluded record and its reason.
+A clean empty report needs no confirmation. Self-contained file imports can
+finish before Cloud sign-in; Semgrep Platform and Snyk REST captures use the
+Cloud catalog to verify their repository. Local imports still validate the
+checkout and create no workbench database. Explicit scanner errors
+and selections containing only excluded records fail; JSON output retains their
+diagnostics and exclusion reasons. Existing findings stay open.
+
+For automation, check the scanner's exit status as well as the import's. SARIF
+can contain no runs or omit results in a rules-only export. `empty` describes
+the selected report, not whether a scan completed successfully.
 
 For a partial or interrupted import, check `excluded` and any `error` before
 retrying. Some records may already have reached Cloud.

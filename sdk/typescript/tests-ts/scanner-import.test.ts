@@ -95,6 +95,48 @@ test.each(["toolExecutionNotifications", "toolConfigurationNotifications"])(
   },
 );
 
+test("SARIF extension descriptors retain error severity across index, ID and GUID references", () => {
+  const guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const componentGuid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+  const tool = {
+    extensions: [
+      {
+        guid: componentGuid,
+        notifications: [
+          { id: "coverage", guid, defaultConfiguration: { level: "error" } },
+        ],
+      },
+    ],
+  };
+  for (const reference of [
+    { index: 0 },
+    { id: "coverage" },
+    { guid: guid.toUpperCase() },
+  ]) {
+    const notification = {
+      descriptor: {
+        ...reference,
+        toolComponent: { guid: componentGuid.toUpperCase() },
+      },
+      message: { text: "Synthetic descriptor failure" },
+    };
+    expect(() =>
+      successfulSarifInvocations(
+        {
+          tool,
+          invocations: [
+            {
+              executionSuccessful: true,
+              toolConfigurationNotifications: [notification],
+            },
+          ],
+        },
+        "Example",
+      ),
+    ).toThrow("Synthetic descriptor failure");
+  }
+});
+
 test("malformed SARIF notifications cannot hide a scanner error", () => {
   for (const [notifications, message] of [
     [{ level: "error" }, "must be an array"],

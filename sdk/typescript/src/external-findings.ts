@@ -40,17 +40,22 @@ export interface ExternalFindings {
   }[];
 }
 
-export function hasScannerDiagnostics(input: ExternalFindings): boolean {
-  const errors = input.report?.["errors"];
-  return Array.isArray(errors) && errors.length > 0;
-}
-
 export function hasNoExternalRecords(input: ExternalFindings): boolean {
   return input.read === 0 && !input.findings.length && !input.excluded.length;
 }
 
 export function isEmptyExternalReport(input: ExternalFindings): boolean {
-  return hasNoExternalRecords(input) && !hasScannerDiagnostics(input);
+  const errors = input.report?.["errors"];
+  return (
+    hasNoExternalRecords(input) && !(Array.isArray(errors) && errors.length)
+  );
+}
+
+/** Empty imports can skip storage; dropping every selected finding is an error. */
+export function hasFindingsToImport(input: ExternalFindings): boolean {
+  if (input.findings.length) return true;
+  if (isEmptyExternalReport(input)) return false;
+  throw new NoPublishableFindingsError(cloneImportPreview(input));
 }
 
 /** No findings can be imported. The selection retains every reader exclusion and diagnostic. */

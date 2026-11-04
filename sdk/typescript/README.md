@@ -722,13 +722,11 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
-If there is no upload to prepare, both SDK methods throw
-`NoPublishableFindingsError`. When the SDK can rule out a previously saved
-submission, preparation stops before Cloud discovery. Historical selections
-may require the account and repository to check for a pending submission. Its `selection` contains
-`read`, `findings`, every `excluded` record, and any scanner metadata in
-`report`. For a zero-record report, inspect scanner diagnostics before treating
-the selection as empty. An empty import leaves previously imported findings open.
+When a parsed selection has no publishable findings, preparation throws
+`NoPublishableFindingsError`. Inspect its `selection` for the read count,
+exclusions and scanner diagnostics. A clean empty report needs no upload;
+failed scans and excluded records need attention. Previously imported findings
+remain open.
 
 For CLI examples and supported input formats, see the
 [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).

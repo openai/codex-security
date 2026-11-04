@@ -17,12 +17,11 @@ import {
   hasSarifExternalPropertyReferences,
   indexSarifRules,
   normalizeRecords,
-  scannerDisplayReports,
   optionalArray,
   readScannerJson,
   record,
   requiredText,
-  sarifRepositoryUrls,
+  sarifRunRepositories,
   sarifRunContextSelector,
   stableId,
   strings,
@@ -185,14 +184,7 @@ export function normalizeSnykFindingsExport(
     }
     successfulSca = true;
   }
-  if (parsed.read) {
-    const completeness = collection["completeness"];
-    if (isRecord(completeness) && completeness["collection"] === "partial")
-      scannerDisplayReports.set(parsed, {
-        report: { collection: structuredClone(collection) },
-      });
-    return parsed;
-  }
+  if (parsed.read) return parsed;
   if (!successfulSca)
     throw new Error(
       "An empty Snyk plugin bundle must identify a successful SCA scan.",
@@ -200,7 +192,7 @@ export function normalizeSnykFindingsExport(
   return { ...parsed, report: { collection: structuredClone(collection) } };
 }
 
-export function normalizeSnykGitRepositoryUrl(
+function normalizeGitRepositoryUrl(
   repository: string,
   cloudRepositoryUrl?: string,
 ): string {
@@ -239,8 +231,7 @@ export function normalizeSnykGitRepositoryUrl(
   return repository;
 }
 
-/** @internal Read a repository claim from a native Snyk TestResult. */
-export function snykJsonProjectRepository(
+function snykJsonProjectRepository(
   project: Record<string, unknown>,
 ): string | undefined {
   // A remote Snyk test puts its GitHub URL and optional ref in the same
@@ -253,6 +244,18 @@ export function snykJsonProjectRepository(
     )
   )
     return repository;
+}
+
+/** Empty plugin and CLI JSON exports have no rows to carry their repository. */
+export function emptySnykReportRepositories(input: unknown): { url: string }[] {
+  if (isRecord(input) && input["format"] === "snyk-findings-export/v1")
+    return snykRepositoryUrls(input, { normalizeGitRemote: false }).map(
+      (url) => ({ url }),
+    );
+  return (Array.isArray(input) ? input : [input]).flatMap((project) => {
+    const url = isRecord(project) && snykJsonProjectRepository(project);
+    return url ? [{ url }] : [];
+  });
 }
 
 /** @internal Repository claims retained in original Snyk evidence. */
@@ -281,7 +284,7 @@ export function snykRepositoryUrls(
     if (repository === null || repository === "unknown") return [];
     return [
       normalizeGitRemote
-        ? normalizeSnykGitRepositoryUrl(repository, cloudRepositoryUrl)
+        ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
         : repository,
     ];
   }
@@ -305,9 +308,11 @@ export function snykRepositoryUrls(
     driver["name"] !== "Snyk Open Source"
   )
     return [];
-  const urls = sarifRepositoryUrls(source["run"], "Snyk");
+  const urls = sarifRunRepositories(source["run"], "Snyk").map(
+    (ref) => ref.url,
+  );
   return normalizeGitRemote
-    ? urls.map((url) => normalizeSnykGitRepositoryUrl(url, cloudRepositoryUrl))
+    ? urls.map((url) => normalizeGitRepositoryUrl(url, cloudRepositoryUrl))
     : urls;
 }
 
@@ -319,13 +324,10 @@ export function normalizeSnykSarif(
   const document = record(input, "Snyk SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Snyk Open Source SARIF 2.1.0.");
-  const coverage = {
-    notifications: [] as unknown[],
-    repositories: new Set<string>(),
-  };
+  const notifications: unknown[] = [];
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
-    successfulSarifInvocations(run, "Snyk", coverage);
+    successfulSarifInvocations(run, "Snyk", notifications);
     const driver = record(
       record(run["tool"], "SARIF tool")["driver"],
       "SARIF driver",
@@ -468,7 +470,7 @@ export function normalizeSnykSarif(
     },
     ({ result, project }) => snykIdentity(result, project),
     target,
-    { coverage },
+    { notifications },
   );
 }
 

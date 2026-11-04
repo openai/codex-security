@@ -1,5 +1,4 @@
 import { snykPluginExport } from "./support/snyk-import-fixtures.js";
-import { endorSarif } from "./support/endor-import-fixtures.js";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
@@ -404,6 +403,24 @@ test("CLI imports OpenGrep evidence locally without assessing it", async () => {
   });
 });
 
+test("local dry runs and imports reject an entirely excluded report before opening the workbench", async () => {
+  const f = await fixture();
+  await writeFile(
+    f.file,
+    JSON.stringify([{ ...f.record, vendorSeverity: "unsupported" }]),
+  );
+  for (const flags of [["--dry-run"], ["--yes"]]) {
+    const cli = createCliTest(main);
+    expect(await cli.runCli([...f.command, ...flags], f.deps)).toBe(2);
+    expect(JSON.parse(cli.stdout.text())).toMatchObject({
+      read: 1,
+      ready: 0,
+      excluded: [{ position: 1, reason: expect.any(String) }],
+    });
+    await expect(readdir(f.state)).rejects.toThrow("ENOENT");
+  }
+});
+
 test("local import confirms exclusions and returns partial status after storing ready records", async () => {
   const f = await fixture();
   await writeFile(
@@ -560,31 +577,6 @@ test("finding import requires an explicit destination and advertises local repos
     ),
   ).not.toBe(0);
   expect(missing.stderr.text()).toContain("to");
-});
-
-test("empty SARIF terminal previews retain coverage warnings for either destination", async () => {
-  const f = await fixture();
-  const input: any = endorSarif();
-  input.runs[0].results = [];
-  input.runs[0].invocations = [
-    {
-      executionSuccessful: true,
-      toolExecutionNotifications: [
-        { level: "warning", message: { text: "A manifest was skipped" } },
-      ],
-    },
-  ];
-  await writeFile(f.file, JSON.stringify(input));
-  for (const destination of ["local", "cloud"]) {
-    const command = f.command.slice(0, f.command.indexOf("--format"));
-    command[command.indexOf("--to") + 1] = destination;
-    command[command.indexOf("--provider") + 1] = "endor";
-    const cli = createCliTest(main);
-    expect(await cli.runCli([...command, "--dry-run"], f.deps)).toBe(0);
-    expect(cli.stdout.text() + cli.stderr.text()).toContain(
-      "A manifest was skipped",
-    );
-  }
 });
 
 test("local previews and imports fail with the SCA error when every occurrence is excluded", async () => {

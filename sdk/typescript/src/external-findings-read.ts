@@ -5,14 +5,14 @@ import type {
   ExternalSourceRepository,
 } from "./external-findings.js";
 import { hasNoExternalRecords } from "./external-findings.js";
-import { readScannerJson, sarifRepositoryUrls } from "./scanner-import.js";
+import { readScannerJson, sarifRunRepositories } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   normalizeSnykFile,
   readSnykReport,
-  snykJsonProjectRepository,
+  emptySnykReportRepositories,
   snykRepositoryUrls,
 } from "./snyk-findings.js";
 import {
@@ -139,6 +139,19 @@ export function semgrepSarifRepositories(
     : [];
 }
 
+/** A run can name a repository even when none of its results produce a row. */
+function sarifFileRepositories(
+  input: unknown,
+  producer: "Endor" | "Semgrep" | "Snyk",
+) {
+  if (
+    isRecord(input) &&
+    input["version"] === "2.1.0" &&
+    Array.isArray(input["runs"])
+  )
+    return input["runs"].flatMap((run) => sarifRunRepositories(run, producer));
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
@@ -166,75 +179,50 @@ export async function readExternalFindings(
       sourceRepositories: [{ url: sourceRepositoryUrl }],
     };
   }
-  if (
-    options.provider === "snyk" ||
-    options.provider === "semgrep" ||
-    options.provider === "endor"
-  ) {
-    const input = await (options.provider === "snyk"
-      ? readSnykReport(path)
-      : options.provider === "semgrep"
-        ? readSemgrepReport(path)
-        : readScannerJson(path));
-    let findings: ExternalFindings;
-    let sourceRepositories: ExternalSourceRepository[];
-    if (options.provider === "snyk") {
-      findings = await normalizeSnykFile(input, target, references);
-      sourceRepositories = findings.findings.flatMap((finding) =>
-        localFindingRepositories("snyk", finding),
-      );
-    } else if (options.provider === "endor") {
-      findings = normalizeEndorFindings(input, target);
-      sourceRepositories = findings.findings.flatMap((finding) =>
-        localFindingRepositories("endor", finding),
-      );
-    } else {
-      findings = normalizeSemgrepFindings(
-        input,
-        {
-          sourceRepositoryUrl: options.sourceRepositoryUrl,
-          sourceRepositories: references,
-        },
-        target,
-      );
-      if (semgrepPlatformReportRepository(findings)) return { findings };
-      sourceRepositories = findings.findings.flatMap((finding) =>
-        semgrepSarifRepositories(finding),
-      );
-    }
-    const emptySnyk =
-      options.provider === "snyk" && hasNoExternalRecords(findings);
-    if (
-      emptySnyk &&
-      isRecord(input) &&
-      input["format"] === "snyk-findings-export/v1"
-    ) {
-      sourceRepositories = snykRepositoryUrls(input, {
-        normalizeGitRemote: false,
-      }).map((url) => ({ url }));
-    } else if (
-      isRecord(input) &&
-      input["version"] === "2.1.0" &&
-      Array.isArray(input["runs"])
-    ) {
-      const producer = (
-        { endor: "Endor", snyk: "Snyk", semgrep: "Semgrep" } as const
-      )[options.provider];
-      const urls = new Set(sourceRepositories.map(({ url }) => url));
-      for (const run of input["runs"])
-        for (const url of sarifRepositoryUrls(run, producer))
-          if (!urls.has(url)) {
-            urls.add(url);
-            sourceRepositories.push({ url });
-          }
-    } else if (emptySnyk) {
-      for (const project of Array.isArray(input) ? input : [input]) {
-        if (!isRecord(project)) continue;
-        const url = snykJsonProjectRepository(project);
-        if (url) sourceRepositories.push({ url });
-      }
-    }
-    return { findings, sourceRepositories };
+  if (options.provider === "snyk") {
+    const input = await readSnykReport(path);
+    const findings = await normalizeSnykFile(input, target, references);
+    let sourceRepositories = sarifFileRepositories(input, "Snyk");
+    if (!sourceRepositories && hasNoExternalRecords(findings))
+      sourceRepositories = emptySnykReportRepositories(input);
+    return {
+      findings,
+      sourceRepositories:
+        sourceRepositories ??
+        findings.findings.flatMap((row) =>
+          localFindingRepositories("snyk", row),
+        ),
+    };
+  }
+  if (options.provider === "endor") {
+    const input = await readScannerJson(path);
+    const findings = normalizeEndorFindings(input, target);
+    return {
+      findings,
+      sourceRepositories:
+        sarifFileRepositories(input, "Endor") ??
+        findings.findings.flatMap((row) =>
+          localFindingRepositories("endor", row),
+        ),
+    };
+  }
+  if (options.provider === "semgrep") {
+    const input = await readSemgrepReport(path);
+    const findings = normalizeSemgrepFindings(
+      input,
+      {
+        sourceRepositoryUrl: options.sourceRepositoryUrl,
+        sourceRepositories: references,
+      },
+      target,
+    );
+    if (semgrepPlatformReportRepository(findings)) return { findings };
+    return {
+      findings,
+      sourceRepositories:
+        sarifFileRepositories(input, "Semgrep") ??
+        findings.findings.flatMap((row) => semgrepSarifRepositories(row)),
+    };
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };

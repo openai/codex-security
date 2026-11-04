@@ -50,13 +50,9 @@ out=$(mktemp -d) &&
 Keep `--list-all` to fetch every page. Omit `--field-mask` to keep every field.
 [Endor CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api)
 
-The importer accepts a single Finding, an array, or a `ListFindingsResponse`
-containing `list.objects`. An empty response can omit the `objects` field.
-An unfinished paginated response is rejected. Native
-JSON retains the complete Finding and maps severity, dependency and advisory
-details, scanned commit SHA, and primary SAST or AI SAST locations when
-available. See the [Endor CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api)
-and [Finding model](https://github.com/endorlabs/endorlabs-sdk/blob/8a41756890c2dee3bb089fee881cae4f2adbde03/src/endorlabs/generated/models/finding_service.py).
+A complete empty `ListFindingsResponse` may omit `list.objects`. The importer
+rejects unfinished pagination and summaries that claim findings without their
+objects. Keep the scanner's exit status alongside the export.
 
 **Preview the report.**
 

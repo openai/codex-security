@@ -133,8 +133,7 @@ import {
   EXTERNAL_FINDINGS_READERS,
 } from "./external-findings-read.js";
 import {
-  hasNoExternalRecords,
-  hasScannerDiagnostics,
+  hasFindingsToImport,
   isEmptyExternalReport,
   type ExternalFindings,
 } from "./external-findings.js";
@@ -2141,7 +2140,7 @@ export async function main(
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
-  let escapeHostedOutput = false;
+  let escapeFrameworkOutput = false;
   let batchedVerification = false;
   let deferredVerificationDiagnostic: string | undefined;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
@@ -3723,6 +3722,7 @@ export async function main(
           const writeDiagnostic = (message: string): void =>
             notify(() => errorOutput.write(message));
           const machineFormat = format === "json" || format === "jsonl";
+          escapeFrameworkOutput = !machineFormat;
           if (argv.includes("--full-output") && !machineFormat) {
             structuredError = true;
             exitCode = 2;
@@ -3740,46 +3740,6 @@ export async function main(
             format === "toon" &&
             !formatExplicit &&
             !argv.some((argument) => OUTPUT_OPTION.test(argument));
-          const displaySelection = <
-            T extends { report?: ExternalFindings["report"] },
-          >(
-            selection: T,
-          ) => {
-            const { report } = selection;
-            if (machineFormat || !report) return selection;
-            const notifications = report["notifications"];
-            // Markdown table cells cannot render nested SARIF message objects.
-            const display =
-              format === "md" && Array.isArray(notifications)
-                ? {
-                    ...report,
-                    notifications: notifications.map((item) =>
-                      JSON.stringify(item),
-                    ),
-                  }
-                : report;
-            return { ...selection, report: terminalReportValue(display) };
-          };
-          const coverageWarnings = (selection: ExternalFindings): string => {
-            const notifications = selection.report?.["notifications"];
-            const messages = Array.isArray(notifications)
-              ? notifications.map(
-                  (entry) =>
-                    `Scanner notification: ${diagnosticValue(JSON.stringify(entry))}\n`,
-                )
-              : [];
-            const collection = selection.report?.["collection"];
-            if (
-              isJsonObject(collection) &&
-              isJsonObject(collection["completeness"]) &&
-              collection["completeness"]["collection"] === "partial"
-            ) {
-              messages.push(
-                `Scanner coverage: ${diagnosticValue(JSON.stringify({ completeness: collection["completeness"], scans: collection["scans"] }))}\n`,
-              );
-            }
-            return messages.join("");
-          };
           const showExclusions = (excluded: ExternalFindings["excluded"]) => {
             const sample = excluded.slice(0, 5);
             for (const item of sample)
@@ -3815,11 +3775,6 @@ export async function main(
             );
           };
           const showScannerReport = (preview: ExternalFindings) => {
-            if (
-              preview.read > 0 &&
-              !(humanSummary && options.to === "local" && options.dryRun)
-            )
-              writeDiagnostic(coverageWarnings(preview));
             if (options.provider !== "opengrep") return;
             writeDiagnostic("Reader: OpenGrep (stored provider: semgrep)\n");
             const diagnostics = preview.report?.["errors"];
@@ -3904,37 +3859,25 @@ export async function main(
                   `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
                 );
               };
+              const hasFindings = hasFindingsToImport(preview);
               if (!structured) showPreview();
-              if (!preview.findings.length && hasScannerDiagnostics(preview))
-                throw new NoPublishableFindingsError(preview);
               if (options.dryRun) {
                 if (humanSummary)
-                  renderedOutput =
-                    "Dry run complete. No findings stored.\n" +
-                    coverageWarnings(preview);
-                return {
-                  ...displaySelection(preview),
-                  dryRun: true,
-                };
+                  renderedOutput = "Dry run complete. No findings stored.\n";
+                return { ...preview, dryRun: true };
               }
-              if (hasNoExternalRecords(preview)) {
-                const result = await prepared.import();
-                if (humanSummary)
-                  renderedOutput =
-                    "The report contains no findings. Nothing was stored.\n" +
-                    coverageWarnings(preview);
-                return { ...displaySelection(result) };
-              }
-              if (!(await confirmImport(preview, showPreview))) {
+              if (hasFindings && !(await confirmImport(preview, showPreview))) {
                 if (humanSummary) renderedOutput = "No findings stored.\n";
-                return { imported: false, preview: displaySelection(preview) };
+                return { imported: false, preview };
               }
               const result = await prepared.import();
               if (result.excluded.length > 0) exitCode = 1;
-              const summary = `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
+              const summary = !hasFindings
+                ? "The report contains no findings. Nothing was stored.\n"
+                : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
               if (humanSummary) renderedOutput = summary;
               else if (!structured) writeDiagnostic(summary);
-              return { ...displaySelection(result) };
+              return { ...result };
             }
             const prepared = await prepareExternalPublication(
               report,
@@ -3985,11 +3928,11 @@ export async function main(
             if (options.dryRun) {
               if (humanSummary)
                 renderedOutput = "Dry run complete. No findings uploaded.\n";
-              return { ...displaySelection(preview), dryRun: true };
+              return { ...preview, dryRun: true };
             }
             if (!(await confirmImport(preview, showPreview))) {
               if (humanSummary) renderedOutput = "No findings published.\n";
-              return { published: false, preview: displaySelection(preview) };
+              return { published: false, preview };
             }
             const result = await prepared.publish();
             if (result.status === "partial") exitCode = 1;
@@ -3997,7 +3940,7 @@ export async function main(
               renderedOutput = renderExternalPublicationSummary(result);
             else if (!structured)
               writeDiagnostic(renderExternalPublicationSummary(result));
-            return { ...displaySelection(result) };
+            return { ...result };
           } catch (error) {
             const selection =
               error instanceof NoPublishableFindingsError
@@ -4009,23 +3952,18 @@ export async function main(
               !controller.signal.aborted
             ) {
               const message =
-                "The report contains no findings. Nothing was uploaded; the Cloud destination was not checked.\n" +
-                coverageWarnings(selection);
+                "The report contains no findings. Nothing was uploaded.\n";
               if (humanSummary) renderedOutput = message;
               else if (!structured) writeDiagnostic(message);
               return {
-                ...displaySelection(selection),
+                ...selection,
                 status: "empty",
                 published: false,
                 ready: 0,
-                repository: machineFormat
-                  ? options.repository
-                  : diagnosticValue(options.repository),
+                repository: options.repository,
                 source: {
                   provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
-                  source_key: machineFormat
-                    ? options.sourceKey
-                    : diagnosticValue(options.sourceKey),
+                  source_key: options.sourceKey,
                 },
                 ...(options.dryRun ? { dryRun: true } : {}),
               };
@@ -4039,7 +3977,7 @@ export async function main(
               failedResultOutput = {
                 format,
                 code: "IMPORT_FAILED",
-                message: message,
+                message,
               };
             reportPublicationError(
               message,
@@ -4048,12 +3986,9 @@ export async function main(
             if (error instanceof ExternalPublicationError) {
               if (humanSummary)
                 renderedOutput = renderExternalPublicationSummary(error.result);
-              return { ...displaySelection(error.result) };
+              return { ...error.result };
             }
-            if (selection && !machineFormat) {
-              showExclusions(selection.excluded);
-              writeDiagnostic(coverageWarnings(selection));
-            }
+            if (selection && !machineFormat) showExclusions(selection.excluded);
             const failure = {
               status: "failed",
               error: message,
@@ -4313,7 +4248,7 @@ export async function main(
       fetch: dependencies.hostedScannerFetch,
     };
     function setHostedOutputFormat(format?: string) {
-      escapeHostedOutput =
+      escapeFrameworkOutput =
         format === "md" || (format === "toon" && output.isTTY === true);
     }
     const semgrepReport = z
@@ -7746,7 +7681,7 @@ export async function main(
         });
     } else renderedOutput = failureOutput.text();
   }
-  if (escapeHostedOutput)
+  if (escapeFrameworkOutput)
     frameworkOutput = escapeTerminalText(frameworkOutput, true);
   const writeUpdateNotice = () => {
     if (notice === undefined || batchedVerification) return;
@@ -9894,19 +9829,6 @@ type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function diagnosticLines(value: unknown): string {
   return errorMessage(value).split("\n").map(diagnosticValue).join("\n");
-}
-
-function terminalReportValue(value: unknown): unknown {
-  if (typeof value === "string") return diagnosticValue(value);
-  if (Array.isArray(value)) return value.map(terminalReportValue);
-  if (isJsonObject(value))
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [
-        diagnosticValue(key),
-        terminalReportValue(item),
-      ]),
-    );
-  return value;
 }
 
 function diagnosticValue(value: unknown): string {

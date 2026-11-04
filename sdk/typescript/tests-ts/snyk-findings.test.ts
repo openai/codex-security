@@ -446,6 +446,39 @@ test("empty plugin bundles cannot omit issues counted by another successful scan
   expect(() => normalizeSnykFindingsExport(input)).toThrow("reported issues");
 });
 
+test("empty plugin reports require a successful zero-issue SCA scan", () => {
+  const input: any = snykPluginExport();
+  input.findings = [];
+  const scan = input.collection.scans[0];
+  scan.issueCount = 0;
+  expect(normalizeSnykFindingsExport(input)).toMatchObject({
+    read: 0,
+    findings: [],
+    excluded: [],
+  });
+  for (const outcome of ["failed", "denied", "unavailable", "not_requested"]) {
+    scan.outcome = outcome;
+    expect(() => normalizeSnykFindingsExport(input)).toThrow("did not succeed");
+  }
+  scan.outcome = "succeeded";
+  for (const issueCount of [1, "1", -1]) {
+    scan.issueCount = issueCount;
+    expect(() => normalizeSnykFindingsExport(input)).toThrow();
+  }
+  scan.issueCount = 0;
+  input.collection.completeness = {
+    collection: "partial",
+    reason: "Other products were not selected",
+  };
+  expect(normalizeSnykFindingsExport(input).report).toMatchObject({
+    collection: input.collection,
+  });
+  input.collection.scans = [];
+  expect(() => normalizeSnykFindingsExport(input)).toThrow(
+    "successful SCA scan",
+  );
+});
+
 test("mixed plugin bundles explicitly exclude other products and licenses", () => {
   const input = snykPluginExport();
   for (const [scanner, category, scan] of [
@@ -618,6 +651,16 @@ test("native project errors stop import, including partial all-projects output",
     error: "Synthetic dependency resolution failed",
     path: "/work/example/worker",
   };
+  for (const uniqueCount of [undefined, 0, 1]) {
+    expect(() =>
+      normalizeSnykJson({
+        ...snykJson(),
+        ok: false,
+        vulnerabilities: [],
+        uniqueCount,
+      }),
+    ).toThrow("reported issues");
+  }
   for (const input of [failed, [snykJson(), failed]]) {
     expect(() => normalizeSnykJson(input)).toThrow(
       "Synthetic dependency resolution failed",

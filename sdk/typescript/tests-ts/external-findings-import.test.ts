@@ -151,56 +151,20 @@ test.each(["snyk", "endor"] as const)(
     );
     const sarif = provider === "snyk" ? snykSarif() : endorSarif();
     const run = sarif.runs[0]!;
+    const repo = { repositoryUri: "https://github.com/example/project" };
     for (const results of [run.results, []]) {
       await fixture.writeJson({
         ...sarif,
-        runs: [
-          {
-            ...run,
-            results,
-            versionControlProvenance: {
-              repositoryUri: "https://github.com/example/project",
-            },
-          },
-        ],
+        runs: [{ ...run, results, versionControlProvenance: repo }],
       });
       await expect(fixture.prepare()).rejects.toThrow(
         "version control provenance must be an array",
       );
     }
-    const notification = {
-      level: "warning",
-      message: { text: "Example manifest skipped" },
-    };
     await fixture.writeJson({
       ...sarif,
       runs: [
-        {
-          ...run,
-          results: [{}],
-          invocations: [
-            {
-              executionSuccessful: true,
-              toolExecutionNotifications: [notification],
-            },
-          ],
-        },
-      ],
-    });
-    const excluded = await fixture.prepare();
-    expect(excluded.preview.excluded).toHaveLength(1);
-    expect(excluded.preview.report?.["notifications"]).toMatchObject([
-      notification,
-    ]);
-    await fixture.writeJson({
-      ...sarif,
-      runs: [
-        {
-          ...run,
-          versionControlProvenance: [
-            { repositoryUri: "https://github.com/example/project" },
-          ],
-        },
+        { ...run, versionControlProvenance: [repo] },
         {
           ...run,
           results: [],
@@ -215,39 +179,30 @@ test.each(["snyk", "endor"] as const)(
 );
 
 test("an empty Semgrep file still binds the declared source to the local checkout", async () => {
-  await using fixture = await localFindingsFixture({
-    remote: "https://github.com/example/project",
-  });
-  const file = join(fixture.root, "semgrep.json");
-  await writeFile(
-    file,
-    JSON.stringify({ version: "1.100.0", results: [], errors: [] }),
+  const url = "https://github.com/example/project";
+  await using fixture = await localReportFixture(
+    "semgrep.json",
+    {
+      provider: "semgrep",
+      sourceKey: "example/main",
+      sourceRepositoryUrl: url,
+    },
+    { remote: url },
   );
-  const options = {
-    repository: fixture.repository,
-    provider: "semgrep" as const,
-    sourceKey: "example/main",
-  };
-  const dependencies = { environment: fixture.environment };
+  await fixture.writeJson({ version: "1.100.0", results: [], errors: [] });
   await expect(
-    prepareLocalExternalImport(
-      file,
-      { ...options, sourceRepositoryUrl: "https://github.com/example/other" },
-      dependencies,
-    ),
+    fixture.prepare({
+      sourceRepositoryUrl: "https://github.com/example/other",
+    }),
   ).rejects.toThrow("does not match a configured remote");
-  const prepared = await prepareLocalExternalImport(
-    file,
-    { ...options, sourceRepositoryUrl: "https://github.com/example/project" },
-    dependencies,
-  );
-  expect((await prepared.import()).counts).toEqual({
+  expect((await (await fixture.prepare()).import()).counts).toEqual({
     created: 0,
     updated: 0,
     unchanged: 0,
   });
   await expect(access(fixture.stateDirectory)).rejects.toThrow();
 });
+
 const wizSource = {
   provider: "wiz",
   sourceKey: "example-project/main",

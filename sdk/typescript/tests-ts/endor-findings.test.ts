@@ -651,7 +651,7 @@ test.each([
   },
 );
 
-test("zero-result SARIF retains coverage warnings and resolves notification severity", () => {
+test("SARIF descriptor defaults and overrides distinguish scan failures from warnings", () => {
   const report: any = endorSarif();
   const run = report.runs[0];
   run.results = [];
@@ -659,93 +659,23 @@ test("zero-result SARIF retains coverage warnings and resolves notification seve
     { id: "coverage", defaultConfiguration: { level: "error" } },
   ];
   const notification = {
-    descriptor: { index: 0, toolComponent: {} },
-    message: { text: "File skipped" },
+    descriptor: { index: 0 },
+    message: { text: "Synthetic coverage failure" },
   };
-  const invocation = {
-    executionSuccessful: true,
-    toolExecutionNotifications: [notification],
-  };
-  run.invocations = [invocation];
-  expect(() => normalizeEndorSarif(report)).toThrow("File skipped");
+  run.invocations = [
+    { executionSuccessful: true, toolExecutionNotifications: [notification] },
+  ];
+  expect(() => normalizeEndorSarif(report)).toThrow(
+    "Synthetic coverage failure",
+  );
   run.invocations[0].notificationConfigurationOverrides = [
     { descriptor: { index: 0 }, configuration: { level: "warning" } },
   ];
   expect(normalizeEndorSarif(report)).toMatchObject({
-    findings: [],
-    report: { notifications: [notification] },
-  });
-  const mixed = normalizeEndorSarif({
-    ...report,
-    runs: [run, endorSarif().runs[0]],
-  });
-  expect(mixed.findings.length).toBeGreaterThan(0);
-  expect(mixed.report).toBeUndefined();
-  run.tool.driver.globalMessageStrings = {
-    skipped: { text: "File {0} was skipped" },
-  };
-  run.invocations[0].toolExecutionNotifications[0].message = {
-    id: "skipped",
-    arguments: ["example.js"],
-  };
-  expect(normalizeEndorSarif(report).report?.["notifications"]).toMatchObject([
-    {
-      level: "warning",
-      message: { id: "skipped" },
-      messageTemplate: { text: "File {0} was skipped" },
-    },
-  ]);
-  run.invocations = [
-    { executionSuccessful: false, exitCodeDescription: "Scanner timed out" },
-  ];
-  expect(() => normalizeEndorSarif(report)).toThrow("Scanner timed out");
-  expect(normalizeEndorSarif({ ...report, runs: [] })).toMatchObject({
     read: 0,
     findings: [],
     excluded: [],
   });
-});
-
-test("covered SARIF diagnostics survive exclusions and retain unsuccessful invocation details", () => {
-  const input: any = endorSarif();
-  const run = input.runs[0];
-  delete run.results[0].properties["finding-uuid"];
-  const guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-  const componentGuid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
-  run.tool.extensions = [
-    {
-      name: "example",
-      guid: componentGuid,
-      globalMessageStrings: { constructor: { text: "File skipped" } },
-      notifications: [
-        {
-          id: "coverage",
-          guid,
-          messageStrings: {},
-          defaultConfiguration: { level: "error" },
-        },
-      ],
-    },
-  ];
-  const descriptor = {
-    guid: guid.toUpperCase(),
-    toolComponent: { guid: componentGuid.toUpperCase() },
-  };
-  const message = { id: "constructor" };
-  const invocation = {
-    executionSuccessful: false,
-    toolExecutionNotifications: [{ descriptor, message }],
-    exitCodeDescription: "Scanner timed out",
-  };
-  run.invocations = [invocation];
-  expect(() => normalizeEndorSarif(input)).toThrow("Scanner timed out");
-  invocation.executionSuccessful = true;
-  expect(() => normalizeEndorSarif(input)).toThrow("File skipped");
-  run.tool.extensions[0].notifications[0].defaultConfiguration.level =
-    "warning";
-  const selection = normalizeEndorSarif(input);
-  expect(selection.excluded).toHaveLength(1);
-  expect(selection.report).toBeUndefined();
 });
 
 test("Endor accepts a nullable native list with no remaining page", () => {
