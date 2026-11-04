@@ -1,4 +1,3 @@
-import { DeepScanNonRetryableError } from "../src/deep-scan/errors.js";
 import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import {
@@ -39,6 +38,7 @@ import {
 } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
+  DeepScanNonRetryableError,
   WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
   AsyncLock,
