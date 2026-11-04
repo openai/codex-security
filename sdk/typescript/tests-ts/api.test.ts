@@ -3793,23 +3793,14 @@ if __name__ == "__main__":
       await Promise.all(logs.map((path) => writeFile(path, "{}\n")));
       const denied = new Set([logs[0]!]);
       const attempts = new Map<string, number>();
-      let firstRepeated!: () => void;
-      let secondRepeated!: () => void;
-      const first = new Promise<void>((resolve) => {
-        firstRepeated = resolve;
-      });
-      const second = new Promise<void>((resolve) => {
-        secondRepeated = resolve;
-      });
+      const first = Promise.withResolvers<void>();
+      const second = Promise.withResolvers<void>();
       const open = fsPromises.open;
       const opening = spyOn(fsPromises, "open").mockImplementation(
         async (...args: Parameters<typeof fsPromises.open>) => {
           const path = String(args[0]);
           if (denied.has(path)) {
-            const count = (attempts.get(path) ?? 0) + 1;
-            attempts.set(path, count);
-            if (count === 3)
-              (path === logs[0] ? firstRepeated : secondRepeated)();
+            attempts.set(path, (attempts.get(path) ?? 0) + 1);
             throw Object.assign(
               new Error(`Synthetic ${code} for ${basename(path)}`),
               { code, syscall: "open", path },
@@ -3828,11 +3819,11 @@ if __name__ == "__main__":
               await copyCompletedScan(root);
               async function* events(): AsyncGenerator<ThreadEvent> {
                 yield { type: "thread.started", thread_id: "thread-1" };
-                await first;
+                await first.promise;
                 denied.delete(logs[0]!);
                 denied.add(logs[1]!);
                 await fsPromises.appendFile(logs[1]!, "{}\n");
-                await second;
+                await second.promise;
                 denied.delete(logs[1]!);
                 for await (const event of completedEvents()) {
                   if (event.type !== "thread.started") yield event;
@@ -3847,7 +3838,18 @@ if __name__ == "__main__":
       const keepAlive = setTimeout(() => {}, 10_000);
       const operation = client.run(repository, {
         onActivity: () => {},
-        onWarning: (warning) => warnings.push(warning),
+        onWarning: (warning) => {
+          warnings.push(warning);
+          // The open attempt precedes asynchronous warning delivery. Keep the
+          // error in place until each log has produced its repeated diagnostics.
+          const path = logs.find((log) => warning.includes(basename(log)));
+          if (
+            path &&
+            warnings.filter((message) => message.includes(basename(path)))
+              .length === 3
+          )
+            (path === logs[0] ? first : second).resolve();
+        },
       });
       try {
         expect(await operation).toMatchObject({
@@ -3864,8 +3866,8 @@ if __name__ == "__main__":
       } finally {
         clearTimeout(keepAlive);
         denied.clear();
-        firstRepeated();
-        secondRepeated();
+        first.resolve();
+        second.resolve();
         await operation.catch(() => {});
         await client.close();
         opening.mockRestore();
