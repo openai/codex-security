@@ -2430,8 +2430,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               "worker",
             "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_BOARD_ROOT":
               path.join(fixture.root, `board-${index}`),
-            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_WORKER":
-              `discovery-${index}`,
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_WORKER": `discovery-${index}`,
           });
           const servers = nativeConfigOverrides(invocation.argv)
             .map((value) => parseToml(value))
