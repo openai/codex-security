@@ -5,6 +5,7 @@ updates:
     directories:
       - /github-action
       - /sdk/typescript
+      - /sdk/mutation
       - /plugins/codex-security/mcp-app
       - /evals/triage-finding
     schedule:
