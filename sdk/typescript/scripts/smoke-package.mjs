@@ -865,17 +865,6 @@ try {
   run(
     process.execPath,
     [
-      "--max-old-space-size=96",
-      join(packageRoot, "scripts", "fixtures", "package-cost-memory.mjs"),
-      installedRoot,
-      consumer,
-    ],
-    { cwd: consumer },
-  );
-
-  run(
-    process.execPath,
-    [
       join(packageRoot, "scripts", "fixtures", "package-deep-scan.mjs"),
       installedRoot,
     ],

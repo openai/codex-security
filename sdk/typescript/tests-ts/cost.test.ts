@@ -98,76 +98,6 @@ function costTracker(
   });
 }
 
-type TrackerOptions = ConstructorParameters<typeof ScanCostTracker>[0];
-
-function manualCostTracker(home: string, settings: Partial<TrackerOptions>) {
-  const options: TrackerOptions = { codexHome: home, model: "gpt-5.6-sol" };
-  const tracker = new ScanCostTracker(options);
-  // Install observers after start so only explicit refreshes exercise the injected errors.
-  tracker.start("scan-thread");
-  Object.assign(options, settings);
-  return { tracker, options };
-}
-
-function logFailure(
-  code: string,
-  syscall: string,
-  path?: string,
-  message?: string,
-): NodeJS.ErrnoException {
-  return Object.assign(
-    new Error(message ?? `Synthetic ${code} during ${syscall}`),
-    {
-      code,
-      syscall,
-      ...(path === undefined ? {} : { path }),
-    },
-  );
-}
-
-function failLogReads(
-  failureFor: (path: string) => NodeJS.ErrnoException | undefined,
-) {
-  const open = filesystem.open;
-  return spyOn(filesystem, "open").mockImplementation(
-    async (...args: Parameters<typeof open>) => {
-      const error = failureFor(String(args[0]));
-      if (!error) return open(...args);
-      if (error.syscall !== "read") throw error;
-      const handle = await open(...args);
-      handle.read = async () => {
-        throw error;
-      };
-      return handle;
-    },
-  );
-}
-
-function orderedLogDirectory(
-  directory: string,
-  failure?: NodeJS.ErrnoException,
-) {
-  const readdir = filesystem.readdir;
-  return spyOn(filesystem, "readdir").mockImplementation(async (...args) => {
-    if (failure && String(args[0]) === failure.path) throw failure;
-    const entries = await Reflect.apply(readdir, filesystem, args);
-    if (String(args[0]) === directory)
-      entries.sort((left: { name: string }, right: { name: string }) =>
-        left.name.localeCompare(right.name),
-      );
-    return entries;
-  });
-}
-
-function workerMessage(text: string) {
-  return {
-    id: "worker-output",
-    type: "message",
-    role: "assistant",
-    content: [{ type: "output_text", text }],
-  };
-}
-
 function activityTracker(home: string) {
   const activities: ScanActivity[] = [];
   const tracker = costTracker(home, {
@@ -3001,725 +2931,6 @@ describe("live scan cost tracking", () => {
     }
   });
 
-  test.each([
-    ["new", false, true],
-    ["new", true, true],
-    ["new", false, false],
-    ["new", true, false],
-    ["known", false, true],
-    ["known", true, true],
-  ] as const)(
-    "preserves traversal error order and healthy observations for %s workers, budget=%s, earlier file error=%s",
-    async (history, budget, earlierFileError) => {
-      const { home, worker: healthy, usage } = await workerSessionFixture();
-      const blocked = await writeSession(home, "z-blocked", usage, {
-        parent: "scan-thread",
-      });
-      const activities: string[] = [];
-      const progress: number[] = [];
-      const rawOutput: unknown[] = [];
-      const diagnostics: unknown[] = [];
-      const output = workerMessage("Healthy worker output.");
-      const { tracker } = manualCostTracker(home, {
-        repository: home,
-        maxCostUsd: budget ? 5 : undefined,
-        onActivity: ({ description }) => {
-          if (description === "Healthy worker output.")
-            activities.push(description);
-        },
-        onProgress: (update) => progress.push(update.filesCompleted),
-        onSessionEvent: ({ event }) => {
-          if (JSON.stringify(event["payload"]) === JSON.stringify(output))
-            rawOutput.push(event);
-        },
-        onError: (error) => diagnostics.push(error),
-      });
-      if (history === "known") await tracker.refresh();
-      await appendSessionItem(healthy, output);
-      await appendSessionItem(healthy, progressMessage(1));
-      await appendFile(blocked, "{}\n");
-      const tail = join(dirname(healthy), "zz-next");
-      await filesystem.mkdir(tail);
-      const fileError = logFailure("EACCES", "open", blocked);
-      const directoryError = logFailure(
-        history === "new" ? "EMFILE" : "EIO",
-        "scandir",
-        tail,
-      );
-      const first =
-        earlierFileError && !(budget && history === "known")
-          ? fileError
-          : directoryError;
-      try {
-        using _listing = orderedLogDirectory(dirname(healthy), directoryError);
-        using _opening = failLogReads((path) =>
-          earlierFileError && path === blocked ? fileError : undefined,
-        );
-        await expect(tracker.refresh()).rejects.toBe(first);
-        await expect(tracker.refresh()).rejects.toBe(first);
-        const delivered = earlierFileError && !budget ? 1 : 0;
-        expect(activities).toHaveLength(delivered);
-        expect(progress).toHaveLength(delivered);
-        expect(rawOutput).toHaveLength(delivered);
-        if (history === "known")
-          expect(diagnostics).toEqual(budget ? [] : [directoryError]);
-      } finally {
-        await tracker.stop();
-      }
-      expect(activities).toHaveLength(1);
-      expect(rawOutput).toHaveLength(1);
-    },
-  );
-
-  test("reports a recurring secondary traversal error after a different sole traversal failure", async () => {
-    const { home, parent } = await workerSessionFixture();
-    const tail = join(dirname(parent), "zz-next");
-    await filesystem.mkdir(tail);
-    const denied = logFailure("EACCES", "open", parent);
-    const io = logFailure("EIO", "scandir", tail);
-    const stale = logFailure("ESTALE", "scandir", tail);
-    const warnings: unknown[] = [];
-    const { tracker } = manualCostTracker(home, {
-      onActivity: () => {},
-      onError: (error) => warnings.push(error),
-    });
-    const poll = async (
-      directoryError: NodeJS.ErrnoException,
-      blockFile = false,
-    ) => {
-      await appendFile(parent, "{}\n");
-      using _listing = orderedLogDirectory(dirname(parent), directoryError);
-      using _opening = failLogReads((path) =>
-        path === parent && blockFile ? denied : undefined,
-      );
-      await tracker.refresh().catch((error) => {
-        if (tracker.recordTrackingError(error)) warnings.push(error);
-      });
-    };
-    try {
-      await tracker.refresh();
-      await poll(io, true);
-      await poll(stale);
-      await poll(io, true);
-      await poll(io, true);
-      expect(warnings).toEqual([io, denied, stale, io, denied]);
-    } finally {
-      await tracker.stop();
-    }
-  });
-
-  test.each([
-    ["EIO", "stat"],
-    ["EACCES", "stat"],
-    ["EACCES", "statx"],
-  ] as const)(
-    "an unidentified %s during %s stops metadata traversal",
-    async (code, syscall) => {
-      const { home } = await workerSessionFixture();
-      const observed: ScanActivity[] = [];
-      const { tracker } = manualCostTracker(home, {
-        onActivity: (value) => observed.push(value),
-      });
-      const failure = logFailure(code, syscall);
-      try {
-        using stat = spyOn(filesystem, "stat").mockRejectedValue(failure);
-        await expect(tracker.refresh()).rejects.toBe(failure);
-        expect(stat).toHaveBeenCalledTimes(1);
-        stat.mockClear();
-        await expect(tracker.stop()).rejects.toBe(failure);
-        expect(stat).toHaveBeenCalledTimes(1);
-        expect(observed).toEqual([]);
-      } finally {
-        await tracker.stop();
-      }
-    },
-  );
-
-  test.each([false, true])("groups pathless reads %s", async (first) => {
-    const { home, parent, worker, usage } = await workerSessionFixture();
-    const other = await writeSession(home, "z-worker", usage, {
-      parent: "scan-thread",
-    });
-    const primary = logFailure("EACCES", "open", parent);
-    const secondary = logFailure("EIO", "read");
-    const stale = logFailure("ESTALE", "read");
-    const stableWorker = first ? other : worker;
-    let stableError: NodeJS.ErrnoException | undefined = secondary;
-    let changingError = secondary;
-    const diagnostics: unknown[] = [];
-    const { tracker } = manualCostTracker(home, {
-      onSessionEvent: () => {},
-      onError: (error) => diagnostics.push(error),
-    });
-    const reads: string[] = [];
-    const refresh = () => expect(tracker.refresh()).rejects.toBe(primary);
-    try {
-      using _listing = orderedLogDirectory(dirname(parent));
-      using _opening = failLogReads((path) => {
-        if (path === parent) return primary;
-        reads.push(path);
-        return path === stableWorker ? stableError : changingError;
-      });
-      await refresh();
-      expect(reads.toSorted()).toEqual([worker, other].toSorted());
-      expect(diagnostics).toEqual([secondary]);
-      // Identify the stable worker so its ESTALE does not end the directory walk.
-      stableError = undefined;
-      await refresh();
-      await appendFile(stableWorker, "{}\n");
-      stableError = stale;
-      await refresh();
-      changingError = stale;
-      await refresh();
-      const count = diagnostics.length;
-      await refresh();
-      expect(diagnostics).toHaveLength(count);
-      changingError = secondary;
-      await refresh();
-      expect(diagnostics).toEqual([secondary, stale, stale, secondary]);
-    } finally {
-      await tracker.stop();
-    }
-  });
-
-  test.each(["EACCES", "EIO"])(
-    "reports secondary %s once per file until the diagnostic changes or a read succeeds",
-    async (code) => {
-      const { home, parent, worker, usage } = await workerSessionFixture();
-      const other = await writeSession(home, "z-worker", usage, {
-        parent: "scan-thread",
-      });
-      const primary = logFailure(code, "open", parent);
-      const workerError = logFailure(code, "open", worker);
-      const otherError = logFailure(code, "open", other);
-      const changed = logFailure(code, "open", other, "Changed diagnostic");
-      const failures = new Map([
-        [parent, primary],
-        [worker, workerError],
-        [other, otherError],
-      ]);
-      const diagnostics: unknown[] = [];
-      const { tracker } = manualCostTracker(home, {
-        onSessionEvent: () => {},
-        onError: (error, secondary) => {
-          expect(secondary).toBe(true);
-          diagnostics.push(error);
-        },
-      });
-      const refresh = () => expect(tracker.refresh()).rejects.toBe(primary);
-      try {
-        using _listing = orderedLogDirectory(dirname(parent));
-        using _opening = failLogReads((path) => failures.get(path));
-        await refresh();
-        await refresh();
-        expect(diagnostics).toEqual([workerError, otherError]);
-        failures.delete(worker);
-        failures.set(other, changed);
-        await appendFile(other, "{}\n");
-        await appendFile(worker, "{}\n");
-        await refresh();
-        expect(diagnostics).toEqual([workerError, otherError, changed]);
-        failures.set(worker, workerError);
-        await appendFile(worker, "{}\n");
-        await refresh();
-        expect(diagnostics).toEqual([
-          workerError,
-          otherError,
-          changed,
-          workerError,
-        ]);
-      } finally {
-        await tracker.stop();
-      }
-    },
-  );
-
-  test.each([
-    ["EACCES", "EIO", "open"],
-    ["EACCES", "EIO", "read"],
-    ["EIO", "ESTALE", "read"],
-  ] as const)(
-    "reports a worker %s again after a sole %s during %s without recovery",
-    async (code, soleCode, syscall) => {
-      const { home, parent, worker } = await workerSessionFixture();
-      const parentDenied = logFailure("EACCES", "open", parent);
-      const workerError =
-        code === "EACCES"
-          ? logFailure(code, "open", worker)
-          : logFailure(code, "read");
-      const soleError = logFailure(
-        soleCode,
-        syscall,
-        syscall === "open" ? worker : undefined,
-      );
-      const failures = new Map([
-        [parent, parentDenied],
-        [worker, workerError],
-      ]);
-      const warnings: unknown[] = [];
-      const { tracker } = manualCostTracker(home, {
-        onSessionEvent: () => {},
-        onError: (error) => warnings.push(error),
-      });
-      const refresh = () =>
-        tracker.refresh().catch((error) => {
-          if (tracker.recordTrackingError(error)) warnings.push(error);
-        });
-      try {
-        if (code === "EIO") {
-          // Identify both logs first so the changed parent will be primary again.
-          await tracker.refresh();
-          await Promise.all(
-            [parent, worker].map((path) => appendFile(path, "{}\n")),
-          );
-        }
-        using _listing = orderedLogDirectory(dirname(parent));
-        using _opening = failLogReads((path) => failures.get(path));
-        await refresh();
-        expect(warnings.splice(0)).toEqual([workerError, parentDenied]);
-        failures.delete(parent);
-        failures.set(worker, soleError);
-        await refresh();
-        await refresh();
-        expect(warnings.splice(0)).toEqual([soleError, soleError]);
-        if (code === "EIO") {
-          // Make the original pathless read error secondary again.
-          await appendFile(parent, "{}\n");
-          failures.set(parent, parentDenied);
-        }
-        failures.set(worker, workerError);
-        await refresh();
-        await refresh();
-        expect(warnings).toEqual(
-          code === "EIO" ? [workerError, parentDenied] : [workerError],
-        );
-      } finally {
-        await tracker.stop();
-      }
-    },
-  );
-
-  test("shares a permission failure across replay and growth until a read succeeds", async () => {
-    const { home, worker } = await workerSessionFixture();
-    const diagnostics: unknown[] = [];
-    const { tracker, options } = manualCostTracker(home, {
-      onActivity: () => {},
-      onError: (error) => diagnostics.push(error),
-    });
-    await tracker.refresh();
-    const blocker = join(home, "sessions", "a-blocker.jsonl");
-    await writeFile(blocker, "{}\n");
-    const primary = logFailure("EIO", "open", blocker);
-    const workerError = logFailure("EACCES", "open", worker);
-    let denied = true;
-    const replayed: string[] = [];
-    options.onSessionEvent = ({ threadId, event }) => {
-      if (event["type"] === "session_meta") replayed.push(threadId);
-    };
-    const refresh = () => expect(tracker.refresh()).rejects.toBe(primary);
-    try {
-      using _opening = failLogReads((path) => {
-        if (path === blocker) return primary;
-        if (path === worker && denied) return workerError;
-      });
-      await refresh();
-      await appendFile(worker, "{}\n");
-      await refresh();
-      await refresh();
-      expect(diagnostics).toEqual([workerError]);
-      denied = false;
-      await refresh();
-      expect(replayed.filter((id) => id === "worker-thread")).toHaveLength(1);
-      denied = true;
-      await appendFile(worker, "{}\n");
-      await refresh();
-      expect(diagnostics).toEqual([workerError, workerError]);
-    } finally {
-      await tracker.stop();
-    }
-  });
-
-  test.each([false, true])(
-    "recovers all unchanged worker histories, one-time concurrent failure: %p",
-    async (failParent) => {
-      const home = await codexHome();
-      const usage = { input_tokens: 10, output_tokens: 1 };
-      const parent = await writeSession(home, "scan-thread", usage);
-      const ids = ["worker-a", "worker-b", "worker-c", "worker-d"];
-      const workers = await Promise.all(
-        ids.map((id) =>
-          writeSession(home, id, usage, { parent: "scan-thread" }),
-        ),
-      );
-      const replayed: string[] = [];
-      const { tracker } = manualCostTracker(home, {
-        onSessionEvent: ({ threadId, event }) => {
-          if (ids.includes(threadId) && event["type"] === "event_msg")
-            replayed.push(threadId);
-        },
-      });
-      const discovered = new Set<string>();
-      const parentError = logFailure("EIO", "open", parent);
-      let failNextParentRead = false;
-      let denied = true;
-      let attempts = 0;
-      try {
-        using _order = orderedLogDirectory(dirname(parent));
-        using _opening = failLogReads((path) => {
-          if (path === parent && failNextParentRead) {
-            failNextParentRead = false;
-            return parentError;
-          }
-          if (!denied || !workers.includes(path)) return;
-          if (!discovered.has(path)) {
-            discovered.add(path);
-            return;
-          }
-          attempts++;
-          return logFailure("EACCES", "open", path);
-        });
-        const blocked = () =>
-          expect(tracker.refresh()).rejects.toMatchObject({ code: "EACCES" });
-        await blocked();
-        expect(attempts).toBe(workers.length);
-        await blocked();
-        expect(attempts).toBe(workers.length + 1);
-        expect(replayed).toEqual([]);
-        denied = false;
-        if (failParent) {
-          await appendFile(parent, "{}\n");
-          failNextParentRead = true;
-          await expect(tracker.refresh()).rejects.toBe(parentError);
-        }
-        const snapshot = await tracker.refresh();
-        expect(replayed.toSorted()).toEqual(ids);
-        expect(snapshot.cost?.inputTokens).toBe(50);
-        expect(snapshot.usage).toMatchObject({ input_tokens: 50 });
-      } finally {
-        await tracker.stop();
-      }
-    },
-  );
-
-  test("rotates denied-open probes while delivering healthy output and recovering accounting", async () => {
-    const { home, worker, usage } = await workerSessionFixture();
-    const directory = join(home, "sessions", "denied");
-    await filesystem.mkdir(directory);
-    const histories = Array.from({ length: 8 }, (_, i) =>
-      join(directory, `${i}.jsonl`),
-    );
-    for (const path of histories) await writeFile(path, "{}\n");
-    const activities: string[] = [];
-    const text = "Healthy output during denied history retries.";
-    const { tracker } = manualCostTracker(home, {
-      repository: home,
-      onActivity: ({ description }) => {
-        if (description === text) activities.push(description);
-      },
-    });
-    const attempts: string[] = [];
-    let denied = true;
-    try {
-      using _opening = failLogReads((path) => {
-        if (denied && histories.includes(path)) {
-          attempts.push(path);
-          return logFailure("EACCES", "open", path);
-        }
-      });
-      const refresh = () =>
-        expect(tracker.refresh()).rejects.toMatchObject({ code: "EACCES" });
-      await refresh();
-      expect(attempts).toHaveLength(histories.length);
-      attempts.length = 0;
-      await appendSessionItem(worker, workerMessage(text));
-      for (let i = 0; i < 3; i++) await refresh();
-      expect(attempts).toHaveLength(3);
-      expect(new Set(attempts).size).toBe(3);
-      expect(activities).toEqual([text]);
-      denied = false;
-      expect((await tracker.refresh()).cost?.inputTokens).toBe(
-        2 * usage.input_tokens,
-      );
-      expect(activities).toEqual([text]);
-    } finally {
-      await tracker.stop();
-    }
-  });
-
-  test("recovers live cost in one poll when denied logs become readable and empty", async () => {
-    const { home, parent, usage } = await workerSessionFixture();
-    const first = join(dirname(parent), "a.jsonl");
-    const second = join(dirname(parent), "b.jsonl");
-    const logs = [first, second];
-    for (const path of logs) await writeFile(path, "{}\n");
-    const costs: number[] = [];
-    const { tracker } = manualCostTracker(home, {
-      onWorkerEvent: () => {},
-      onCost: (cost) => costs.push(cost.inputTokens),
-    });
-    const denied = new Set(logs);
-    const opens: string[] = [];
-    try {
-      using _ordering = orderedLogDirectory(dirname(parent));
-      using _opening = failLogReads((path) => {
-        if (!logs.includes(path)) return;
-        opens.push(path);
-        if (denied.has(path)) return logFailure("EACCES", "open", path);
-      });
-      const blocked = () =>
-        expect(tracker.refresh()).rejects.toMatchObject({ code: "EACCES" });
-      await blocked();
-      expect(opens).toEqual(logs);
-      for (const path of logs) await writeFile(path, "");
-      opens.length = 0;
-      for (let poll = 0; poll < 3; poll++) await blocked();
-      expect(opens).toEqual([first, second, first]);
-      // The rotating probe reaches B after the traversal already skipped A.
-      denied.delete(second);
-      opens.length = 0;
-      await expect(tracker.refresh()).rejects.toMatchObject({ path: first });
-      expect(opens).toEqual([second, first]);
-      expect(costs).toEqual([]);
-      denied.clear();
-      opens.length = 0;
-      const total = 2 * usage.input_tokens;
-      expect((await tracker.refresh()).cost?.inputTokens).toBe(total);
-      expect(costs).toEqual([total]);
-      expect(opens).toEqual([first]);
-      opens.length = 0;
-      await tracker.refresh();
-      expect(opens).toEqual([]);
-    } finally {
-      await tracker.stop();
-    }
-  });
-
-  test.each(["EMFILE", "ENFILE"])(
-    "probes one more changed log under %s pressure and resumes after recovery",
-    async (code) => {
-      const home = await codexHome();
-      const usage = { input_tokens: 10 };
-      await writeSession(home, "scan-thread", usage);
-      const workers = await Promise.all(
-        ["a", "b", "c", "d"].map((id) =>
-          writeSession(home, id, usage, { parent: "scan-thread" }),
-        ),
-      );
-      const first = workers[0]!;
-      const third = workers[2]!;
-      const activity: string[] = [];
-      const { tracker } = manualCostTracker(home, {
-        repository: home,
-        onActivity: ({ description }) => activity.push(description),
-      });
-      await tracker.refresh();
-      for (const file of workers)
-        await appendSessionItem(file, workerMessage(basename(file)));
-      const primary = logFailure(code, "open", first);
-      const attempts: string[] = [];
-      let sustained = false;
-      try {
-        using _listing = orderedLogDirectory(dirname(first));
-        using _opening = failLogReads((path) => {
-          attempts.push(path);
-          if (path === first) return primary;
-          if (sustained || path === third)
-            return logFailure(code, "open", path);
-        });
-        await expect(tracker.refresh()).rejects.toBe(primary);
-        expect(attempts).toEqual(workers);
-        expect(activity.toSorted()).toEqual([
-          "rollout-b.jsonl",
-          "rollout-d.jsonl",
-        ]);
-
-        attempts.length = 0;
-        sustained = true;
-        for (const file of workers) await appendFile(file, "{}\n");
-        await expect(tracker.refresh()).rejects.toBe(primary);
-        expect(attempts).toEqual(workers.slice(0, 2));
-      } finally {
-        await tracker.stop();
-      }
-      expect(activity.toSorted()).toEqual(
-        workers.map((file) => basename(file)),
-      );
-    },
-  );
-
-  test.each(["EMFILE", "ENFILE"])(
-    "keeps explicit budget accounting available when %s affects only identified unrelated logs",
-    async (code) => {
-      const { home, worker, usage } = await workerSessionFixture();
-      const unrelated = await Promise.all(
-        ["a", "b", "c"].map((id) => writeSession(home, id, usage)),
-      );
-      const { tracker } = manualCostTracker(home, {
-        maxCostUsd: 5,
-        onActivity: () => {},
-      });
-      await tracker.refresh();
-      for (const file of unrelated) await appendFile(file, "{}\n");
-      await appendFile(
-        worker,
-        JSON.stringify(
-          legacyUsageRecord({ input_tokens: 500, output_tokens: 10 }),
-        ) + "\n",
-      );
-      try {
-        using _listing = orderedLogDirectory(dirname(worker));
-        using _opening = failLogReads((path) =>
-          unrelated.includes(path) ? logFailure(code, "open", path) : undefined,
-        );
-        expect((await tracker.refresh()).cost?.inputTokens).toBe(
-          usage.input_tokens + 500,
-        );
-      } finally {
-        await tracker.stop();
-      }
-    },
-  );
-
-  test.each(["EMFILE", "ENFILE"])(
-    "preserves the earlier directory %s diagnostic if a pending replay exhausts descriptors",
-    async (code) => {
-      const { home, worker } = await workerSessionFixture();
-      const diagnostics: unknown[] = [];
-      const { tracker, options } = manualCostTracker(home, {
-        onActivity: () => {},
-        onError: (error) => diagnostics.push(error),
-      });
-      await tracker.refresh();
-      options.onSessionEvent = () => {};
-      await appendFile(worker, "{}\n");
-      const tail = join(dirname(worker), "zz-next");
-      await filesystem.mkdir(tail);
-      const denied = logFailure("EACCES", "open", worker);
-      const directoryError = logFailure(code, "scandir", tail);
-      const replayError = logFailure(code, "open");
-      let replayAttempts = 0;
-      try {
-        using _listing = orderedLogDirectory(dirname(worker), directoryError);
-        using _opening = failLogReads((path) => {
-          if (path === worker) return denied;
-          replayAttempts++;
-          return replayError;
-        });
-        await expect(tracker.refresh()).rejects.toBe(denied);
-        expect(replayAttempts).toBe(1);
-        expect(diagnostics).toEqual([directoryError]);
-      } finally {
-        await tracker.stop();
-      }
-    },
-  );
-
-  test.each([
-    ["EMFILE", false],
-    ["ENFILE", true],
-  ] as const)(
-    "stops pending replay opens after %s, earlier file failure=%s",
-    async (code, earlier) => {
-      const { home, worker: healthy, usage } = await workerSessionFixture();
-      const denied = await writeSession(home, "a-denied", usage, {
-        parent: "scan-thread",
-      });
-      const legacy = await Promise.all(
-        [1, 2, 3].map((n) =>
-          writeSession(home, `legacy-${n}`, usage, { parent: "middle" }),
-        ),
-      );
-      const replayed: string[] = [];
-      const activities: string[] = [];
-      const diagnostics: unknown[] = [];
-      const text = "Buffered worker output.";
-      const { tracker } = manualCostTracker(home, {
-        repository: home,
-        onError: (error) => diagnostics.push(error),
-        onActivity: ({ description }) => {
-          if (description === text) activities.push(description);
-        },
-        onSessionEvent: ({ threadId, event }) => {
-          if (
-            event["type"] === "session_meta" &&
-            threadId.startsWith("legacy-")
-          )
-            replayed.push(threadId);
-        },
-      });
-      await tracker.refresh();
-      await writeSession(home, "middle", usage, { parent: "scan-thread" });
-      await appendSessionItem(healthy, workerMessage(text));
-      await appendFile(denied, "{}\n");
-      const first = logFailure("EACCES", "open", denied);
-      const exhausted = logFailure(code, "open");
-      let attempts = 0;
-      try {
-        using _opening = failLogReads((path) => {
-          if (earlier && path === denied) return first;
-          if (legacy.includes(path)) {
-            attempts++;
-            return exhausted;
-          }
-        });
-        await expect(tracker.refresh()).rejects.toBe(
-          earlier ? first : exhausted,
-        );
-        expect(attempts).toBe(1);
-        expect(diagnostics).toEqual(earlier ? [exhausted] : []);
-        expect(activities).toEqual([text]);
-      } finally {
-        await tracker.stop();
-      }
-      expect(replayed.toSorted()).toEqual(["legacy-1", "legacy-2", "legacy-3"]);
-      expect(activities).toEqual([text]);
-    },
-  );
-
-  test.each([
-    [true, false],
-    [false, false],
-    [false, true],
-  ] as const)(
-    "retains a fatal new-file error unless an earlier new log failed, budget=%s, earlier new log=%s",
-    async (budget, priorBlocker) => {
-      const { home, worker } = await workerSessionFixture();
-      const diagnostics: unknown[] = [];
-      const { tracker, options } = manualCostTracker(home, {
-        onSessionEvent: () => {},
-        onError: (error) => diagnostics.push(error),
-      });
-      await tracker.refresh();
-      if (budget) options.maxCostUsd = 5;
-      const directory = dirname(worker);
-      const denied = priorBlocker ? join(directory, "a-new.jsonl") : worker;
-      const fatalPath = join(directory, "z-fatal.jsonl");
-      await appendFile(denied, "{}\n");
-      await writeFile(fatalPath, "{}\n");
-      const first = logFailure("EACCES", "open", denied);
-      const fatal = logFailure("EIO", "stat", fatalPath);
-      const stat = filesystem.stat;
-      try {
-        using _listing = orderedLogDirectory(directory);
-        using _opening = failLogReads((path) =>
-          path === denied ? first : undefined,
-        );
-        using _stat = spyOn(filesystem, "stat").mockImplementation((async (
-          ...args: Parameters<typeof stat>
-        ) => {
-          if (String(args[0]) === fatalPath) throw fatal;
-          return Reflect.apply(stat, filesystem, args);
-        }) as typeof stat);
-        await expect(tracker.refresh()).rejects.toBe(
-          priorBlocker ? first : fatal,
-        );
-        expect(diagnostics).toEqual(priorBlocker ? [fatal] : []);
-      } finally {
-        await tracker.stop();
-      }
-    },
-  );
-
   test.each([...parentFields])(
     "observes worker metadata without status markers or usage via %s",
     async (parentField) => {
@@ -3966,22 +3177,56 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each(["EACCES", "EPERM", "EIO"])(
+    "stops at the first unidentified log whose stat fails with %s on each poll",
+    async (code) => {
+      const home = await codexHome();
+      await Promise.all(
+        ["a", "b", "c", "d"].map((id) =>
+          writeSession(home, id, { input_tokens: 10 }),
+        ),
+      );
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onSessionEvent = () => {};
+      try {
+        using stat = spyOn(filesystem, "stat").mockImplementation(
+          async (path) => {
+            throw Object.assign(new Error(`Synthetic ${code}`), {
+              code,
+              syscall: "stat",
+              path: String(path),
+            });
+          },
+        );
+        for (const poll of [1, 2]) {
+          await expect(tracker.refresh()).rejects.toMatchObject({ code });
+          expect(stat).toHaveBeenCalledTimes(poll);
+        }
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test.each([
-    ["EACCES", true, "budget", "open"],
-    ["EACCES", false, "budget", "open"],
-    ["EPERM", true, "budget", "open"],
-    ["EPERM", false, "budget", "open"],
-    ["EACCES", true, "observe", "open"],
-    ["EPERM", false, "observe", "open"],
-    ["EACCES", true, "both", "open"],
-    ["EPERM", false, "both", "open"],
-    ["EIO", false, "observe", "open"],
-    ["EIO", false, "observe", "read"],
-    ["EIO", false, "budget", "open"],
-    ["EIO", false, "both", "read"],
+    ["EACCES", true, "budget"],
+    ["EACCES", false, "budget"],
+    ["EPERM", true, "budget"],
+    ["EPERM", false, "budget"],
+    ["EACCES", true, "observe"],
+    ["EPERM", false, "observe"],
+    ["EACCES", true, "both"],
+    ["EPERM", false, "both"],
+    ["EIO", false, "observe"],
+    ["EIO", false, "both"],
   ] as const)(
-    "retains and retries a %s worker when its parent appears later (identified: %j, tracking: %s, syscall: %s)",
-    async (code, identified, tracking, syscall) => {
+    "retains and retries a %s worker when its parent appears later (identified: %j, tracking: %s)",
+    async (code, identified, tracking) => {
       const capped = tracking !== "observe";
       const home = await codexHome();
       const usage = (input_tokens: number) => ({
@@ -3995,27 +3240,30 @@ describe("live scan cost tracking", () => {
       let denied = !identified;
       let newLog: string | undefined;
       let attempts = 0;
-      using _opening = failLogReads((path) => {
-        if (denied && (path === worker || path === newLog)) {
-          attempts++;
-          return logFailure(code, syscall, path);
-        }
-      });
+      const opened = filesystem.open;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          const path = String(args[0]);
+          if (denied && (path === worker || path === newLog)) {
+            attempts += 1;
+            throw Object.assign(new Error(`Synthetic ${code}`), {
+              code,
+              syscall: "open",
+              path,
+            });
+          }
+          return await opened(...args);
+        },
+      );
       const reported: number[] = [];
       const observed: string[] = [];
       const progress: number[] = [];
-      const activities: string[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
-        repository: home,
         model: "gpt-5.6-sol",
         maxCostUsd: capped ? 1 : undefined,
         onCost: (cost) => reported.push(cost.inputTokens),
         ...(tracking !== "budget" && {
-          onActivity: (activity: ScanActivity) => {
-            if (activity.description === "Healthy worker output.")
-              activities.push(activity.id);
-          },
           onProgress: (update) => progress.push(update.filesCompleted),
           onSessionEvent: ({ threadId, event }) => {
             if (event["type"] === "session_meta") observed.push(threadId);
@@ -4045,14 +3293,9 @@ describe("live scan cost tracking", () => {
           capped ? 0 : 1,
         );
         await appendSessionItem(middle, progressMessage(1));
-        await appendSessionItem(
-          middle,
-          workerMessage("Healthy worker output."),
-        );
         if (!capped) await appendWorkerUsage();
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
         expect(progress).toEqual(capped ? [] : [1]);
-        expect(activities).toHaveLength(capped ? 0 : 1);
         expect(reported).not.toContain(30);
         if (!capped && identified) {
           const directory = parse(worker).dir;
@@ -4060,9 +3303,23 @@ describe("live scan cost tracking", () => {
           await writeFile(newLog, "{}\n");
           const tail = join(directory, "zz-directory");
           await filesystem.mkdir(tail);
-          using _knownFirst = orderedLogDirectory(
-            directory,
-            logFailure(code, "scandir", tail),
+          const entries = await filesystem.readdir(directory, {
+            withFileTypes: true,
+          });
+          entries.sort((left, right) => left.name.localeCompare(right.name));
+          const readdir = filesystem.readdir;
+          using _knownFirst = spyOn(filesystem, "readdir").mockImplementation(
+            async (...args) => {
+              if (args[0] === tail)
+                throw Object.assign(new Error("Cannot list later directory"), {
+                  code,
+                  syscall: "scandir",
+                  path: tail,
+                });
+              return args[0] === directory
+                ? entries
+                : Reflect.apply(readdir, filesystem, args);
+            },
           );
           await expect(tracker.refresh()).rejects.toMatchObject({
             code,
@@ -4078,7 +3335,6 @@ describe("live scan cost tracking", () => {
             "worker",
           ]);
           expect(progress).toEqual([1]);
-          expect(activities).toHaveLength(1);
         }
         expect(snapshot.cost?.inputTokens).toBe(1_000_030);
         expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
@@ -4087,6 +3343,7 @@ describe("live scan cost tracking", () => {
       } finally {
         denied = false;
         await tracker.stop().catch(() => {});
+        opening.mockRestore();
       }
     },
   );
