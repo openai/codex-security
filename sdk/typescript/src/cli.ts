@@ -1263,8 +1263,15 @@ const dryRunScanOutputSchema = z.looseObject({
   deepScanSources: z.record(z.string(), z.unknown()).optional(),
 });
 
-const scanOutputSchema: z.ZodType<Record<string, unknown> | undefined> = z
+const scanOutputSchema: z.ZodType<
+  Record<string, unknown> | number | undefined
+> = z
   .union([
+    z
+      .number()
+      .int()
+      .nonnegative()
+      .describe("Token count for the rendered scan output."),
     completedScanOutputSchema,
     dryRunScanOutputSchema,
     z.looseObject({
@@ -7290,14 +7297,14 @@ export async function main(
         );
         const resolved = resolveScanSettings(project, {}, directory);
         deepScanOptions(resolved.options);
-        requireExternalProviderModel(
-          resolved.config.codexOverrides,
-          scanModelProvider(resolved.config.codexOverrides),
+        const home = scanCodexHome(dependencies.environment);
+        const overrides = resolved.config.codexOverrides;
+        const effective = mergeCodexOverrides(
+          await readCodexFileProfile(overrides, home),
+          overrides,
         );
-        const codex = await mergedCodexConfig(
-          resolved.config,
-          scanCodexHome(dependencies.environment),
-        );
+        requireExternalProviderModel(effective, scanModelProvider(effective));
+        const codex = await mergedCodexConfig(resolved.config, home);
         const deep =
           resolved.options.mode === "deep"
             ? await resolveDeepScanConfig(
@@ -7592,6 +7599,18 @@ export async function main(
       return externalImportsDisabledMessage;
   }
   argv = normalizeScanImportArguments(defaultListCommand(argv));
+  const scanCommand =
+    argv[cliCommandIndex(argv)] === "scan" && !isScanImportCommand(argv);
+  if (scanCommand) {
+    for (const name of ["json", "full-output", "token-count"]) {
+      const disabled = argv.lastIndexOf(`--no-${name}`);
+      if (disabled < 0) continue;
+      argv = argv.filter(
+        (arg, index) =>
+          arg !== `--no-${name}` && (arg !== `--${name}` || index > disabled),
+      );
+    }
+  }
   const frameworkArgv = argv.flatMap((argument) => {
     const separator = argument.indexOf("=");
     if (
@@ -7602,8 +7621,6 @@ export async function main(
     return [argument.slice(0, separator), argument.slice(separator + 1)];
   });
   const frameworkFlags = frameworkOutputFlags(frameworkArgv);
-  const scanCommand =
-    argv[cliCommandIndex(argv)] === "scan" && !isScanImportCommand(argv);
   const scanJsonFormat = scanCommand ? jsonOutputFormat(argv) : undefined;
   const fullOutput = argv.includes("--full-output");
   const reportArgumentError = async (message: string): Promise<number> => {
@@ -7667,6 +7684,21 @@ export async function main(
   };
   const policyFullOutput =
     argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
+  if (scanCommand) {
+    for (let index = 0; index < frameworkArgv.length; index++) {
+      const flag = frameworkArgv[index];
+      if (flag !== "--token-limit" && flag !== "--token-offset") continue;
+      const value = frameworkArgv[++index];
+      if (
+        !value?.trim() ||
+        !Number.isSafeInteger(Number(value)) ||
+        Number(value) < 0
+      )
+        return reportArgumentError(
+          `Invalid value for ${flag}: "${value ?? ""}"`,
+        );
+    }
+  }
   const argumentError = validateCliArguments(argv, positionals);
   if (argumentError !== undefined && !policyFullOutput) {
     return reportArgumentError(argumentError);
@@ -7848,32 +7880,34 @@ export async function main(
           argumentFailure.includes("[truncated: showing tokens"))
       ) {
         // A rendered count or slice cannot retain the validation diagnostic.
-        // Validation already failed before the handler; replay it without the
-        // valid output transforms, then normalize and render the failure once.
+        // Replay only the scan's argument schema. The executable scan handler
+        // must never run a second time while rendering a validation diagnostic.
         const rawFailure = captureOutput();
         const validationArguments: string[] = [];
         for (let index = 0; index < frameworkArgv.length; index++) {
           const argument = frameworkArgv[index]!;
           if (argument === "--token-count") continue;
           if (argument === "--token-limit" || argument === "--token-offset") {
-            const value = frameworkArgv[index + 1];
-            // Keep malformed transform values so replay still rejects them.
-            if (
-              value !== undefined &&
-              value.trim() !== "" &&
-              Number.isFinite(Number(value))
-            ) {
-              index++;
-              continue;
-            }
+            index++;
+            continue;
           }
           validationArguments.push(argument);
         }
-        await cli.serve(validationArguments, {
-          stdout: rawFailure.stream.write,
-          exit: () => undefined,
-        });
-        argumentFailure = rawFailure.text();
+        const definition = commands.get("scan");
+        if (definition && "run" in definition) {
+          await Cli.create("codex-security")
+            .command("scan", {
+              args: definition.args,
+              options: definition.options,
+              alias: definition.alias,
+              run: () => undefined,
+            })
+            .serve(validationArguments, {
+              stdout: rawFailure.stream.write,
+              exit: () => undefined,
+            });
+        }
+        argumentFailure = rawFailure.text() || "Invalid scan arguments.";
       }
       return reportArgumentError(
         await incurErrorMessage(argumentFailure, scanCommand),
@@ -11990,10 +12024,7 @@ async function parseScanCodexOverrides(
   defaults: JsonObject | undefined,
   profileHome: string,
 ): Promise<JsonObject> {
-  if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
-    return parseCodexOverrides(values, model, effort, provider, defaults);
-  }
-  const explicit = parseCodexOverrides(values, model, effort);
+  const explicit = parseCodexOverrideValues(values, model, effort);
   const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
   const profile = await readCodexFileProfile(overrides, profileHome);
   const result = parseCodexOverrides(
@@ -12029,6 +12060,25 @@ async function parseScanCodexOverrides(
 }
 
 export function parseCodexOverrides(
+  values: readonly string[],
+  model?: string,
+  effort?: ModelCliOptions["effort"],
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
+  defaults?: JsonObject,
+): JsonObject {
+  const result = parseCodexOverrideValues(
+    values,
+    model,
+    effort,
+    provider,
+    defaults,
+  );
+  const effective = mergeCodexOverrides(defaults ?? {}, result);
+  requireExternalProviderModel(effective, scanModelProvider(effective));
+  return result;
+}
+
+function parseCodexOverrideValues(
   values: readonly string[],
   model?: string,
   effort?: ModelCliOptions["effort"],
@@ -12132,8 +12182,6 @@ export function parseCodexOverrides(
       );
     }
   }
-  const effective = mergeCodexOverrides(defaults ?? {}, result);
-  requireExternalProviderModel(effective, scanModelProvider(effective));
   return result;
 }
 

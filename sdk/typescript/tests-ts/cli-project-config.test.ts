@@ -251,6 +251,28 @@ test.each(
   },
 );
 
+test("info and dry-run load the project provider's model from its native file profile", async () => {
+  const input = await fixture({
+    codex: { profile: "review", model_provider: "openrouter" },
+  });
+  await writeFile(
+    join(input.root, "review.config.toml"),
+    'model = "synthetic-file-model"\n',
+  );
+  const deps = dependencies({
+    currentDirectory: input.repository,
+    environment: { CODEX_HOME: input.root, OPENROUTER_API_KEY: "synthetic" },
+  });
+  for (const args of [["info"], ["scan", "--dry-run"]]) {
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli([...args, "-c", input.config, "--json"], deps),
+      cli.stderr.text(),
+    ).toBe(0);
+    expect(JSON.parse(cli.stdout.text()).model).toBe("synthetic-file-model");
+  }
+});
+
 test("info ignores an external provider in an unselected profile", async () => {
   const input = await fixture({
     codex: { profiles: { unused: { model_provider: "openrouter" } } },

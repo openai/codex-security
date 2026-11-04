@@ -338,6 +338,56 @@ for (const flag of ["--token-limit", "--token-offset"] as const) {
   });
 }
 
+test("output option negation and invalid token ranges never start a scan", async () => {
+  const deps = dependencies({
+    onConfig: () => {
+      throw new Error("Scanner initialized for invalid arguments");
+    },
+  });
+  for (const flag of ["--token-limit", "--token-offset"]) {
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", "--json", "--token-count", flag, "-1"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(`Invalid value for ${flag}`);
+  }
+  const compact = capture();
+  expect(
+    await main(
+      [
+        "scan",
+        "--json",
+        "--full-output",
+        "--no-full-output",
+        "--token-count",
+        "--no-token-count",
+        "--unknown-option",
+      ],
+      compact.stream,
+      capture().stream,
+      deps,
+    ),
+  ).toBe(2);
+  expect(JSON.parse(compact.text()).status).toBe("failed");
+
+  const plain = capture();
+  expect(
+    await main(
+      ["scan", "--json", "--no-json", "--unknown-option"],
+      plain.stream,
+      capture().stream,
+      deps,
+    ),
+  ).toBe(2);
+  expect(plain.text()).toBe("");
+});
+
 test("recognizes scans preceded by the global JSON flag", async () => {
   const stdout = capture();
   const stderr = capture();
