@@ -355,6 +355,15 @@ export class DeepScanCoordinator {
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
 
+      if (isFreshRun(this.state) && this.state.scopeFileCount === 0) {
+        // The registered scope inventory is empty even though the target is
+        // physically present (only empty subdirectories or files the source
+        // inventory ignores). Admission's physical probe cannot see this, so
+        // stop with the same empty-target outcome before any dispatch.
+        throw new Error(
+          "Deep Scan target is empty; no security audit was performed.",
+        );
+      }
       if (this.options.checkFreshTarget && isFreshRun(this.state)) {
         await this.options.checkFreshTarget(
           this.state,

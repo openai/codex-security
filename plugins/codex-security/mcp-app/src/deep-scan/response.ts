@@ -95,6 +95,7 @@ export const runSchema = z
       scanDir: requiredString,
       workerUsageDirectory: optionalString,
       dispatchedCount: nonNegativeInteger,
+      scopeFileCount: optionalValue(nonNegativeInteger),
       completionSequence: nonNegativeInteger.optional(),
       noNewStreak: nonNegativeInteger,
       consecutiveErrors: nonNegativeInteger

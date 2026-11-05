@@ -7,6 +7,7 @@ import json
 import os
 import runpy
 import sqlite3
+import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -123,6 +124,32 @@ def test_target_admission_reads_one_entry_without_looking_up_its_type(
     monkeypatch.setattr(os, "scandir", scandir)
     check_selected_targets(tmp_path, ["."], [])
     assert events == ["read", "closed"]
+
+
+def test_deep_scan_state_surfaces_registered_scope_file_count(tmp_path: Path) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    assert deep.read("thread-deep-scan")["scopeFileCount"] == 0
+
+    state_dir = tmp_path / "state-nonempty"
+    codex_home = tmp_path / "codex-home-nonempty"
+    target = tmp_path / "target-nonempty"
+    (target / "sub").mkdir(parents=True)
+    (target / "source.py").write_text("x = 1\n")
+    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans-nonempty")["deepScan"]
+    assert run["scopeFileCount"] == 1
+
+
+def test_deep_scan_state_counts_an_ignored_only_target_as_zero(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    codex_home = tmp_path / "codex-home"
+    target = tmp_path / "target"
+    (target / "child").mkdir(parents=True)
+    (target / "child" / "ignored.py").write_text("x = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    # Exclude through .git/info/exclude so no ignore file joins the inventory.
+    (target / ".git" / "info" / "exclude").write_text("child/\n")
+    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
+    assert run["scopeFileCount"] == 0
 
 
 def restore_v53_schema(state_dir: Path) -> None:

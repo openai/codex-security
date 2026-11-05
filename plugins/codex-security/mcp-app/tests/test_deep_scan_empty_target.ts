@@ -318,3 +318,80 @@ test("prior dispatch history bypasses fresh admission", async () => {
   assert.equal(result?.status, "succeeded", result?.error);
   assert.equal(executor.discoveryCalls, 1);
 });
+
+test("a target holding only an empty subdirectory has no inventory to scan", async () => {
+  const fixture = await fixtureRun();
+  const { run } = fixture;
+  await mkdir(join(run.targetPath, "sub"), { recursive: true });
+  // The physical probe admits this target (the subdirectory is an entry),
+  // but the registered scope inventory counted zero regular files.
+  run.scopeFileCount = 0;
+  const executor = new FakeExecutor();
+  const result = await runCoordinator(fixture, new FakeStore(run), executor, {
+    checkFreshTarget: inspect,
+  });
+  assert.equal(result?.status, "failed");
+  assert.match(result.error, /target is empty.*no security audit/iu);
+  assert.equal(executor.discoveryCalls, 0);
+});
+
+test("a target holding only a Git-ignored file has no inventory to scan", async () => {
+  const fixture = await fixtureRun();
+  const { run } = fixture;
+  const child = join(run.targetPath, "child");
+  await mkdir(child, { recursive: true });
+  await writeFile(join(run.targetPath, ".gitignore"), "child/\n");
+  await writeFile(join(child, "ignored.py"), "x = 1\n");
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", run.targetPath, ...args], {
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+  git("init", "-q");
+  // The scan's own inventory excludes the ignored file from the scope.
+  assert.equal(
+    git(
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      "--",
+      "child",
+    ).trim(),
+    "",
+  );
+  run.scope = "child";
+  run.includePaths = ["child"];
+  run.scopeFileCount = 0;
+  const executor = new FakeExecutor();
+  const result = await runCoordinator(fixture, new FakeStore(run), executor, {
+    checkFreshTarget: inspect,
+  });
+  assert.equal(result?.status, "failed");
+  assert.match(result.error, /target is empty.*no security audit/iu);
+  assert.equal(executor.discoveryCalls, 0);
+});
+
+test("an explicitly selected Git-ignored file is not gated by its directory inventory", async () => {
+  const fixture = await fixtureRun();
+  const { run } = fixture;
+  const child = join(run.targetPath, "child");
+  await mkdir(child, { recursive: true });
+  await writeFile(join(run.targetPath, ".gitignore"), "child/\n");
+  await writeFile(join(child, "ignored.py"), "x = 1\n");
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", run.targetPath, ...args], { stdio: "pipe" });
+  git("init", "-q");
+  run.scope = "child";
+  run.includePaths = ["child/ignored.py"];
+  run.filePaths = ["child/ignored.py"];
+  // Registration counts an explicitly selected file itself, so the
+  // registered inventory for this selection is one, not zero.
+  run.scopeFileCount = 1;
+  const executor = new FakeExecutor();
+  const result = await runCoordinator(fixture, new FakeStore(run), executor, {
+    checkFreshTarget: inspect,
+  });
+  assert.equal(result?.status, "succeeded", result?.error);
+  assert.equal(executor.discoveryCalls, 1);
+});
