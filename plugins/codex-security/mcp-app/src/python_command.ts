@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { constants, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -114,15 +114,13 @@ export function runPythonWithInput(
   input: string | Buffer,
   label: string,
   signal?: AbortSignal,
-  spawnHelper: (
-    command: string,
-    args: string[],
-    signal?: AbortSignal,
-  ) => ChildProcessWithoutNullStreams = (command, args, signal) =>
-    spawn(command, args, { signal, killSignal: "SIGKILL", windowsHide: true }),
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawnHelper(python, ["-B", ...args], signal);
+    signal?.throwIfAborted();
+    const child = spawn(python, ["-B", ...args], {
+      detached: !!signal && process.platform !== "win32",
+      windowsHide: true,
+    });
     const output: string[] = [],
       errors: string[] = [];
     child.stdout
@@ -132,16 +130,42 @@ export function runPythonWithInput(
       .setEncoding("utf8")
       .on("data", (chunk: string) => errors.push(chunk));
     let inputError: Error | undefined;
-    child.on("error", (error) => {
-      if (signal?.aborted) {
-        // A killed helper can remain in a kernel filesystem call until its mount responds.
+    child.on("error", reject);
+    if (signal) {
+      // Stop the helper and any Git child still inspecting the filesystem.
+      const stop = () => {
+        if (child.pid !== undefined) {
+          if (process.platform === "win32") {
+            execFile(
+              path.join(
+                process.env.SystemRoot ?? "C:\\Windows",
+                "System32",
+                "taskkill.exe",
+              ),
+              ["/PID", String(child.pid), "/T", "/F"],
+              { windowsHide: true },
+              (error) => {
+                if (error) child.kill("SIGKILL");
+              },
+            );
+          } else {
+            try {
+              process.kill(-child.pid, "SIGKILL");
+            } catch {
+              child.kill("SIGKILL");
+            }
+          }
+        }
+        // A killed helper may remain in a kernel call until its mount responds.
         child.stdin.destroy();
         child.stdout.destroy();
         child.stderr.destroy();
         child.unref();
-      }
-      reject(error);
-    });
+        reject(signal.reason);
+      };
+      signal.addEventListener("abort", stop, { once: true });
+      child.once("close", () => signal.removeEventListener("abort", stop));
+    }
     child.stdin.on("error", (error: Error) => {
       inputError = error;
     });

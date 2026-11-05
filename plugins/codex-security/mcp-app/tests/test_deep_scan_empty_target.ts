@@ -44,8 +44,8 @@ test("a directory tree emptied after registration dispatches no workers", async 
   // A registration-time inventory count remains positive after its file is removed.
   Object.assign(fixture.run, { scopeFileCount: 1 });
   await rm(source);
-  const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-  const coordinator = createCoordinator(
+  const executor = new FakeExecutor();
+  const outcome = await runCoordinator(
     fixture,
     new FakeStore(fixture.run),
     executor,
@@ -53,23 +53,11 @@ test("a directory tree emptied after registration dispatches no workers", async 
       checkFreshTarget: inspect,
     },
   );
-  coordinator.start();
-  try {
-    const outcome = await Promise.race([
-      coordinator.settled(),
-      executor.discoveryStarted.promise.then(() =>
-        assert.fail("Empty directory tree dispatched a worker"),
-      ),
-    ]);
-    assert.equal(outcome.status, "failed", outcome.error);
-    assert.match(outcome.error ?? "", /target is empty.*no security audit/iu);
-    assert.equal(executor.discoveryCalls, 0);
-    await writeFile(source, "");
-    await inspect(fixture.run);
-  } finally {
-    coordinator.cancel("fixture cleanup");
-    await coordinator.settled();
-  }
+  assert.equal(outcome?.status, "failed", outcome?.error);
+  assert.match(outcome.error, /target is empty.*no security audit/iu);
+  assert.equal(executor.discoveryCalls, 0);
+  await writeFile(source, "");
+  await inspect(fixture.run);
 });
 
 test("only registered paths determine whether the target is empty", async () => {
@@ -101,7 +89,17 @@ test("only registered paths determine whether the target is empty", async () => 
   );
   await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
 
-  await writeFile(join(right, "source.py"), "");
+  await writeFile(join(run.targetPath, ".gitignore"), "right/\n");
+  await writeFile(join(right, "ignored.py"), "");
+  await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
+  // A registered file remains in scope even when its directory inventory ignores it.
+  await inspect({
+    ...run,
+    includePaths: ["right/ignored.py"],
+    filePaths: ["right/ignored.py"],
+  });
+
+  await rm(join(run.targetPath, ".gitignore"));
   await inspect(run);
   run.includePaths.reverse();
   await inspect(run);
@@ -222,41 +220,40 @@ for (const [stop, blockedOperation] of [
     async (t) => {
       const fixture = await fixtureRun();
       const { run } = fixture;
-      await mkdir(run.targetPath);
       const blockedPath =
         blockedOperation === "nested directory read"
           ? join(run.targetPath, "nested")
           : run.targetPath;
-      if (blockedPath !== run.targetPath) await mkdir(blockedPath);
+      await mkdir(blockedPath, { recursive: true });
       const scripts = join(fixture.pluginRoot, "scripts");
       await mkdir(scripts, { recursive: true });
       const markerDir = join(dirname(run.targetPath), "ready");
       await mkdir(markerDir);
       const scriptName = "check_deep_scan_target.py";
       await writeFile(join(blockedPath, "source.py"), "");
-      // Stop the real helper inside enumeration. The marker arms the interruption
-      // only once the child owns the request, even on slow hosts.
-      await writeFile(
-        join(scripts, scriptName),
-        `
-import os, runpy, subprocess, sys, time
-from pathlib import Path
-marker_dir = ${JSON.stringify(markerDir)}
+      const markAndWait = `Path(${JSON.stringify(markerDir)}, str(os.getpid())).touch(); time.sleep(30)`;
+      const gitChild = `import os, time; from pathlib import Path; ${markAndWait}`;
+      const blockEnumeration =
+        blockedOperation === "Git inventory"
+          ? `
+real_run = subprocess.run
+def slow_git(command, **kwargs):
+    assert "rev-parse" in command
+    return real_run([sys.executable, "-c", ${JSON.stringify(gitChild)}], **kwargs)
+subprocess.run = slow_git`
+          : `
 real_scan = os.scandir
 def blocked(path):
-    if ${JSON.stringify(blockedOperation)} != "Git inventory" and os.fsdecode(path) == ${JSON.stringify(blockedPath)}:
-        Path(marker_dir, str(os.getpid())).touch()
-        time.sleep(30)
+    if os.fsdecode(path) == ${JSON.stringify(blockedPath)}:
+        ${markAndWait}
     return real_scan(path)
-os.scandir = blocked
-if ${JSON.stringify(blockedOperation)} == "Git inventory":
-    real_run = subprocess.run
-    def slow_git(command, **kwargs):
-        assert "rev-parse" in command
-        script = "import os, sys, time; from pathlib import Path; Path(sys.argv[1], str(os.getpid())).touch(); time.sleep(10)"
-        return real_run([sys.executable, "-c", script, marker_dir], **kwargs)
-    subprocess.run = slow_git
-sys.path.insert(0, ${JSON.stringify(join(pluginRoot, "scripts"))})
+os.scandir = blocked`;
+      // Arm the interruption only once the helper or its Git child owns the request.
+      await writeFile(
+        join(scripts, scriptName),
+        `import os, runpy, subprocess, sys, time
+from pathlib import Path
+${blockEnumeration}
 runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_name="__main__")
 `,
       );
@@ -363,22 +360,4 @@ test("prior dispatch history bypasses fresh admission", async () => {
   });
   assert.equal(result?.status, "succeeded", result?.error);
   assert.equal(executor.discoveryCalls, 1);
-});
-
-test("a target holding only a Git-ignored file has no inventory to scan", async () => {
-  const fixture = await fixtureRun();
-  const { run } = fixture;
-  const child = join(run.targetPath, "child");
-  await mkdir(child, { recursive: true });
-  await writeFile(join(run.targetPath, ".gitignore"), "child/\n");
-  await writeFile(join(child, "ignored.py"), "x = 1\n");
-  execFileSync("git", ["-C", run.targetPath, "init", "-q"]);
-  run.scope = "child";
-  run.includePaths = ["child"];
-  await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
-
-  // Registration treats an explicitly selected file as in scope even if Git ignores it.
-  run.includePaths = ["child/ignored.py"];
-  run.filePaths = ["child/ignored.py"];
-  await inspect(run);
 });

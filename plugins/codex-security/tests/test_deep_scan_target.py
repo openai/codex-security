@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import runpy
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,23 @@ import pytest
 def check_targets():
     script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
     return runpy.run_path(str(script))["check_selected_targets"]
+
+
+@pytest.mark.cross_platform
+def test_empty_directories_and_explicit_files_do_not_need_git(tmp_path, monkeypatch, check_targets):
+    (tmp_path / "first" / "nested").mkdir(parents=True)
+    metadata = tmp_path / "second" / ".svn"
+    metadata.mkdir(parents=True)
+    (metadata / "entries").write_text("metadata")
+
+    def unexpected_git(*args, **kwargs):
+        pytest.fail("admission invoked Git without a candidate directory entry")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_git)
+    with pytest.raises(ValueError, match="target is empty"):
+        check_targets(tmp_path, ["first", "second"], [])
+    (tmp_path / "source.py").touch()
+    check_targets(tmp_path, ["first", "source.py"], ["source.py"])
 
 
 @pytest.mark.cross_platform

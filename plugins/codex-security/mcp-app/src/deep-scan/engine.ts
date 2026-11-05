@@ -1,4 +1,3 @@
-import { execFile, spawn } from "node:child_process";
 import { join } from "node:path";
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
@@ -122,51 +121,9 @@ export async function checkFreshTarget(
       }),
       "Deep Scan target check",
       signal,
-      spawnTargetCheck,
     );
   } catch (error) {
     // Cancellation and elapsed discovery budgets are finalized by the coordinator.
     if (!signal.aborted) throw error;
   }
-}
-
-// The inventory probe can be blocked in a Git subprocess when its budget expires.
-function spawnTargetCheck(
-  command: string,
-  args: string[],
-  signal?: AbortSignal,
-) {
-  signal?.throwIfAborted();
-  const windows = process.platform === "win32";
-  const child = spawn(command, args, { detached: !windows, windowsHide: true });
-  const stop = () => {
-    if (child.pid !== undefined) {
-      if (windows) {
-        const taskkill = join(
-          process.env.SystemRoot ?? "C:\\Windows",
-          "System32",
-          "taskkill.exe",
-        );
-        execFile(
-          taskkill,
-          ["/PID", String(child.pid), "/T", "/F"],
-          { windowsHide: true },
-          (error) => {
-            if (error) child.kill("SIGKILL");
-          },
-        );
-      } else {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          child.kill("SIGKILL");
-        }
-      }
-    }
-    // Release the pipes immediately even when a filesystem call is still blocked.
-    child.emit("error", signal?.reason);
-  };
-  signal?.addEventListener("abort", stop, { once: true });
-  child.once("close", () => signal?.removeEventListener("abort", stop));
-  return child;
 }

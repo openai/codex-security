@@ -743,8 +743,9 @@ def worktree_content_digest_for_context(
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def git_worktree_context(target: Path) -> tuple[Path, str]:
-    root = git_output(target, "rev-parse", "--show-toplevel")
+def git_worktree_context(target: Path, root: str | None = None) -> tuple[Path, str]:
+    if root is None:
+        root = git_output(target, "rev-parse", "--show-toplevel")
     if root is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
     repository = Path(root).resolve()
@@ -855,13 +856,12 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
 
 
 def iter_git_directory_snapshot_paths(target: Path) -> Iterator[Path] | None:
-    if git_output(target, "rev-parse", "--show-toplevel") is None:
-        return None
-    return _iter_git_snapshot_paths(target)
+    root = git_output(target, "rev-parse", "--show-toplevel")
+    return _iter_git_snapshot_paths(target, root) if root is not None else None
 
 
-def _iter_git_snapshot_paths(target: Path) -> Iterator[Path]:
-    repository, pathspec = git_worktree_context(target)
+def _iter_git_snapshot_paths(target: Path, root: str) -> Iterator[Path]:
+    repository, pathspec = git_worktree_context(target, root)
     scope = repository / pathspec
     scope_depth = len(Path(pathspec).parts)
     matching_prefixes: dict[str, bool] = {}
@@ -929,15 +929,12 @@ def _iter_git_snapshot_paths(target: Path) -> Iterator[Path]:
                 junctions[identity] = path
             continue
         yield path
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-        ):
+        if not stat.S_ISDIR(metadata.st_mode):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
             nested_worktrees.add((metadata.st_dev, metadata.st_ino))
-            yield from _iter_git_snapshot_paths(path)
+            yield from _iter_git_snapshot_paths(path, nested_repository_root)
             continue
         yield from source_directory_snapshot_paths(path)
 

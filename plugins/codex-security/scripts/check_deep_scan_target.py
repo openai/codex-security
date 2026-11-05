@@ -44,9 +44,22 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
             raise OSError(errno.ENOTDIR, "Expected a regular file or directory", str(target))
         return target, regular
 
-    # Every selection must be valid, even when another file or directory is usable.
-    for selection in selections:
-        check_path(selection)
+    # Validate all siblings before deciding whether any selected file admits the run.
+    targets = [check_path(selection) for selection in selections]
+    if any(regular for _, regular in targets):
+        return
+
+    def has_leaf(directory: Path, pending: list[str]) -> bool:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name in SOURCE_METADATA_DIRECTORIES:
+                    continue
+                if not entry.is_dir(follow_symlinks=False) or (
+                    getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0) & 0x20000000
+                ):
+                    return True
+                pending.append(str(Path(entry.path).relative_to(root)))
+        return False
 
     def has_content(selection: str) -> bool:
         pending = [selection]
@@ -55,51 +68,36 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
             current = pending.pop()
             try:
                 target, regular = check_path(current)
-                if regular:
-                    return True
-                with os.scandir(target) as entries:
-                    for entry in entries:
-                        if entry.name in SOURCE_METADATA_DIRECTORIES:
-                            continue
-                        if not entry.is_dir(follow_symlinks=False):
-                            return True
-                        # Preserve link entries as content without traversing their targets.
-                        if (
-                            getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0)
-                            & 0x20000000
-                        ):
-                            return True
-                        pending.append(str(Path(entry.path).relative_to(root)))
+                if regular or has_leaf(target, pending):
+                    break
             except OSError as exc:
                 if failure is None:
                     failure = exc
-        if failure is not None:
-            raise failure
+        else:
+            if failure is not None:
+                raise failure
+            return False
+
+        # A directory containing only ignored files still has no inventory. Recheck
+        # the selected path before invoking Git after a potentially long directory walk.
+        target, regular = check_path(selection)
+        if regular:
+            return True
+        paths = iter_git_directory_snapshot_paths(target)
+        if paths is None:
+            return True
+        for path in paths:
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_reparse_tag", 0) & 0x20000000:
+                return True
         return False
 
     failure = None
     for selection in selections:
         try:
-            if not has_content(selection):
-                continue
-            target, regular = check_path(selection)
-            if regular:
+            if has_content(selection):
                 return
-            # Use Git's current ignore rules for directory selections. An explicit
-            # file or a link entry in the inventory is itself in scope.
-            paths = iter_git_directory_snapshot_paths(target)
-            if paths is None:
-                return
-            for path in paths:
-                metadata = path.lstat()
-                if (
-                    not stat.S_ISDIR(metadata.st_mode)
-                    or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-                ):
-                    return
         except OSError as exc:
-            if selection in files:
-                raise
             if failure is None:
                 failure = exc
     if failure is not None:
