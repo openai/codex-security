@@ -1200,7 +1200,7 @@ describe("multiscan", () => {
         ...configured,
         recoverScan: async (scanDir, prompts) => {
           expect(prompts.scanPrompt).toBe("Shared scan instructions.");
-          expect(prompts.telemetryContext?.operationId).toBe(operationId);
+          expect(operationId).toBe(prompts.telemetryContext?.operationId);
           prompts.onMeasurement?.(measurement);
           await completedScan(scanDir);
           const findingsPath = join(scanDir, "findings.json");
