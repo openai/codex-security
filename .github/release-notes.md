@@ -109,6 +109,7 @@
 - bump node from 26.12.1-bookworm-slim to 26.13-bookworm-slim ([#2351](https://github.com/openai/codex-security/pull/2351))
 - import Tenable One code repository findings locally ([#2343](https://github.com/openai/codex-security/pull/2343))
 - restore usage accounting on preview databases ([#2352](https://github.com/openai/codex-security/pull/2352))
+- count historical files for unreviewable local renames ([#2101](https://github.com/openai/codex-security/pull/2101))
 
 </details>
 
