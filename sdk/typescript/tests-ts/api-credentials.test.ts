@@ -793,6 +793,81 @@ console.log("Logged in using ChatGPT");
     },
   );
 
+  test.each(["api-key login", "logout"] as const)(
+    "%s leaves a shared ambient ChatGPT sign-in unchanged",
+    async (operation) => {
+      const root = await temporaryDirectory();
+      const ambientHome = join(root, "ambient-home");
+      const state = join(root, "state");
+      const script = join(root, "synthetic-codex.mjs");
+      const observed = join(root, "native-calls.jsonl");
+      const ambientAuth = join(ambientHome, "auth.json");
+      const session = JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: { refresh_token: "synthetic-ambient-session" },
+      });
+      await mkdir(ambientHome, { mode: 0o700 });
+      await mkdir(state, { mode: 0o700 });
+      await writeFile(ambientAuth, session, { mode: 0o600 });
+      // Codex writes a new sign-in in place and revokes tokens on logout.
+      await writeFile(
+        script,
+        `
+import { appendFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const args = process.argv.slice(2);
+const auth = join(process.env.CODEX_HOME, "auth.json");
+appendFileSync(${JSON.stringify(observed)}, JSON.stringify({ args, authExists: existsSync(auth) }) + "\\n");
+if (args.includes("--with-api-key")) {
+  for await (const _chunk of process.stdin) {}
+  writeFileSync(auth, '{"auth_mode":"apikey"}');
+} else if (args.includes("logout")) {
+  rmSync(auth, { force: true });
+}
+console.log("Logged in using ChatGPT");
+`,
+      );
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            PATH: process.env["PATH"],
+            CODEX_HOME: ambientHome,
+            CODEX_SECURITY_STATE_DIR: state,
+          },
+          resolveCodexCommand: () => ({ ...nodeCommand(), args: [script] }),
+        },
+      );
+      try {
+        expect((await client.account()).authenticated).toBe(true);
+        expect((await stat(join(state, "codex-home", "auth.json"))).nlink).toBe(
+          2,
+        );
+        if (operation === "logout") {
+          await client.logout();
+        } else {
+          await client.loginApiKey("synthetic-login-token");
+        }
+        const call = (await readFile(observed, "utf8"))
+          .trim()
+          .split("\n")
+          .map(
+            (line) =>
+              JSON.parse(line) as { args: string[]; authExists: boolean },
+          )
+          .find(({ args }) =>
+            operation === "logout"
+              ? args.includes("logout")
+              : args.includes("--with-api-key"),
+          );
+        expect(call?.authExists).toBe(false);
+        expect(await readFile(ambientAuth, "utf8")).toBe(session);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("respects another client's logout when switching from API-key to ChatGPT scans", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

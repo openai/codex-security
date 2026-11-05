@@ -2384,15 +2384,30 @@ export async function importAmbientAuth(
   const temporary = join(isolatedHome, `.auth-${randomUUID()}.tmp`);
   try {
     await copyFile(source, temporary, constants.COPYFILE_EXCL);
+    // A ChatGPT refresh token is single-use, and Codex renews it by rewriting
+    // auth.json in place. Share the ambient file through a hard link so a
+    // renewal by either client reaches the other. A copy would sign out
+    // whichever client renews second.
+    const shared = holdsRefreshToken(await readFile(temporary, "utf8"));
+    if (shared) {
+      await rm(temporary);
+      try {
+        await link(await realpath(source), temporary);
+      } catch (error) {
+        if (HARD_LINK_UNSUPPORTED.includes(nodeErrorCode(error) ?? "")) {
+          return false;
+        }
+        throw error;
+      }
+    }
     await chmod(temporary, 0o600);
     try {
       try {
         await link(temporary, destination);
       } catch (error) {
         if (
-          !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
-            nodeErrorCode(error) ?? "",
-          )
+          shared ||
+          !HARD_LINK_UNSUPPORTED.includes(nodeErrorCode(error) ?? "")
         ) {
           throw error;
         }
@@ -2419,6 +2434,47 @@ export async function importAmbientAuth(
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
   }
+}
+
+const HARD_LINK_UNSUPPORTED = [
+  "EPERM",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "EXDEV",
+  "EMLINK",
+];
+
+function holdsRefreshToken(contents: string): boolean {
+  let auth: unknown;
+  try {
+    auth = JSON.parse(contents);
+  } catch {
+    return false;
+  }
+  const tokens = isRecord(auth) ? auth["tokens"] : undefined;
+  return isRecord(tokens) && isNonEmptyString(tokens["refresh_token"]);
+}
+
+/**
+ * Codex login writes through $CODEX_HOME/auth.json, and logout revokes its
+ * tokens. Unlink a sign-in shared with another Codex home first, so these
+ * commands neither replace nor revoke the regular Codex sign-in. Returns
+ * whether a shared sign-in was removed.
+ */
+export async function detachSharedCredentials(
+  codexHome: string,
+): Promise<boolean> {
+  const path = join(codexHome, "auth.json");
+  let metadata: Stats;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.nlink < 2) return false;
+  await rm(path, { force: true });
+  return true;
 }
 
 export async function extractPluginZip(

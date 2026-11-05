@@ -264,6 +264,7 @@ import {
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
   createIsolatedHome,
+  detachSharedCredentials,
   executablePathForSpawn,
   expandHome,
   importAmbientAuth,
@@ -4143,6 +4144,7 @@ export class CodexSecurity {
     await this.#trackOperation(async () => {
       const authentication = await this.#authentication();
       this.#requireOpen();
+      await this.#detachSharedCredentials(authentication.codexHome);
       const result = await persistApiKey(
         await this.#providerPreflightCommand(),
         authentication.environment,
@@ -4172,6 +4174,7 @@ export class CodexSecurity {
     this.#requireOpen();
     const command = await this.#providerPreflightCommand();
     this.#requireOpen();
+    await this.#detachSharedCredentials(authentication.codexHome);
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
         command,
@@ -4222,6 +4225,7 @@ export class CodexSecurity {
       await withCredentialHomeLock(
         authentication.codexHome,
         async () => {
+          await detachSharedCredentials(authentication.codexHome);
           await codexLogout(
             await this.#providerPreflightCommand(),
             authentication.environment,
@@ -4310,6 +4314,13 @@ export class CodexSecurity {
         CODEX_HOME: codexHome,
       },
     };
+  }
+
+  // If the login that follows fails, this client no longer has a stored sign-in.
+  async #detachSharedCredentials(codexHome: string): Promise<void> {
+    if (!(await detachSharedCredentials(codexHome))) return;
+    if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
+    this.#runtimeCredentialSource = null;
   }
 
   async #recordLogin(

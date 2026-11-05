@@ -1329,6 +1329,49 @@ describe("CLI authentication", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  test("login and logout leave a shared ambient ChatGPT sign-in unchanged", async () => {
+    const ambientHome = join(stateDirectory, "ambient");
+    const ambientAuth = join(ambientHome, "auth.json");
+    const credentialAuth = join(stateDirectory, "codex-home", "auth.json");
+    const ambientSession = JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { refresh_token: "synthetic-ambient-session" },
+    });
+    await mkdir(ambientHome, { mode: 0o700 });
+    await writeFile(ambientAuth, ambientSession, { mode: 0o600 });
+    const run = async (argv: readonly string[]) => {
+      const { runCli } = createCliTest(main);
+      const deps = dependencies();
+      const childSaw: { authExists?: boolean } = {};
+      deps.runCodex = async (args, _output, environment) => {
+        const auth = join(environment!["CODEX_HOME"]!, "auth.json");
+        childSaw.authExists = existsSync(auth);
+        // Codex writes a new sign-in in place and revokes tokens on logout.
+        if (args.join(" ") === "login") {
+          await writeFile(auth, '{"tokens":{"refresh_token":"new"}}');
+        } else if (args[0] === "logout") {
+          await rm(auth, { force: true });
+        }
+        return 0;
+      };
+      expect(await runCli(argv, deps)).toBe(0);
+      return childSaw;
+    };
+
+    await run(["login", "status"]);
+    expect(await readFile(credentialAuth, "utf8")).toBe(ambientSession);
+    expect((await run(["login"])).authExists).toBe(false);
+    expect(await readFile(ambientAuth, "utf8")).toBe(ambientSession);
+    expect(await readFile(credentialAuth, "utf8")).toBe(
+      '{"tokens":{"refresh_token":"new"}}',
+    );
+
+    await rm(credentialAuth);
+    await run(["login", "status"]);
+    expect((await run(["logout"])).authExists).toBe(false);
+    expect(await readFile(ambientAuth, "utf8")).toBe(ambientSession);
+  });
 });
 
 describe("skill authentication", () => {

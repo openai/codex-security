@@ -297,6 +297,7 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  detachSharedCredentials,
   executablePathForSpawn,
   environmentWithGit,
   expandHome,
@@ -7162,6 +7163,9 @@ export async function main(
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
         };
+        if (args.action === undefined) {
+          await detachSharedCredentials(credentialHome);
+        }
         exitCode = await dependencies.runCodex(
           [
             "login",
@@ -7229,6 +7233,7 @@ export async function main(
           CODEX_HOME: credentialHome,
         };
         await withCredentialHomeLock(credentialHome, async () => {
+          await detachSharedCredentials(credentialHome);
           exitCode = await dependencies.runCodex(
             ["logout"],
             undefined,

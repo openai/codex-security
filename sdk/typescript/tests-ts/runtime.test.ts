@@ -78,6 +78,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  detachSharedCredentials,
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
@@ -97,6 +98,7 @@ import {
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
   runWorkbench,
+  sameFile,
   workbenchEnvironment,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
@@ -1850,6 +1852,102 @@ for await (const line of createInterface({ input: process.stdin })) {
       );
     },
   );
+
+  test("shares renewals of an ambient ChatGPT sign-in with the regular Codex home", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient");
+    const isolated = join(root, "isolated");
+    const ambientAuth = join(ambient, "auth.json");
+    const isolatedAuth = join(isolated, "auth.json");
+    const session = (refreshToken: string) =>
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: {
+          access_token: "synthetic-access",
+          refresh_token: refreshToken,
+        },
+      });
+    await mkdir(ambient);
+    await writeFile(ambientAuth, session("synthetic-rt-1"), { mode: 0o600 });
+
+    expect(await importAmbientAuth(ambient, isolated)).toBe(true);
+    expect(await sameFile(isolatedAuth, ambientAuth)).toBe(true);
+    if (process.platform !== "win32") {
+      expect((await stat(isolatedAuth)).mode & 0o777).toBe(0o600);
+    }
+
+    // Codex rewrites auth.json in place after each single-use renewal.
+    await writeFile(isolatedAuth, session("synthetic-rt-2"));
+    expect(await readFile(ambientAuth, "utf8")).toBe(session("synthetic-rt-2"));
+    await writeFile(ambientAuth, session("synthetic-rt-3"));
+    expect(await readFile(isolatedAuth, "utf8")).toBe(
+      session("synthetic-rt-3"),
+    );
+    expect(await importAmbientAuth(ambient, isolated)).toBe(true);
+    expect(
+      (await readdir(isolated)).filter((path) => path.startsWith(".auth-")),
+    ).toEqual([]);
+  });
+
+  test("does not copy an ambient ChatGPT sign-in that cannot be hard-linked", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "does not copy an ambient ChatGPT sign-in that cannot be hard-linked",
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient");
+    const isolated = join(root, "isolated");
+    const stored = JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { refresh_token: "synthetic-single-use" },
+    });
+    await mkdir(ambient);
+    await writeFile(join(ambient, "auth.json"), stored);
+    const originalLink = fsPromises.link;
+    mockFs(() => ({
+      link: async () => {
+        const error = new Error(
+          "cross-device link not permitted",
+        ) as NodeJS.ErrnoException;
+        error.code = "EXDEV";
+        throw error;
+      },
+    }));
+    try {
+      expect(await importAmbientAuth(ambient, isolated)).toBe(false);
+      expect(await readdir(isolated)).toEqual([]);
+      expect(await readFile(join(ambient, "auth.json"), "utf8")).toBe(stored);
+    } finally {
+      restoreFs({ link: originalLink });
+    }
+  });
+
+  test("detaches only a shared sign-in before login or logout", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient");
+    const isolated = join(root, "isolated");
+    const stored = JSON.stringify({ tokens: { refresh_token: "synthetic" } });
+    await mkdir(ambient);
+    await writeFile(join(ambient, "auth.json"), stored, { mode: 0o600 });
+    expect(await importAmbientAuth(ambient, isolated)).toBe(true);
+
+    expect(await detachSharedCredentials(isolated)).toBe(true);
+    expect(existsSync(join(isolated, "auth.json"))).toBe(false);
+    expect(await readFile(join(ambient, "auth.json"), "utf8")).toBe(stored);
+    expect(await detachSharedCredentials(isolated)).toBe(false);
+
+    await writeFile(join(isolated, "auth.json"), '{"token":"own"}\n', {
+      mode: 0o600,
+    });
+    expect(await detachSharedCredentials(isolated)).toBe(false);
+    expect(await readFile(join(isolated, "auth.json"), "utf8")).toBe(
+      '{"token":"own"}\n',
+    );
+  });
 
   test("uses the installed plugin path returned by Codex", async () => {
     const root = await temporaryDirectory();
