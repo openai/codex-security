@@ -1,5 +1,13 @@
 [
   [
+    "-- Move saved log boundary previews before checking other history at those versions.",
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 64 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (48, 50, 63) AND name = 'persist scan log completion boundaries';"
+  ],
+  [
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",
     "    'UPDATE schema_migrations SET version = 60 WHERE version = ' || version AS value",
