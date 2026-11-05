@@ -17,7 +17,7 @@ Use its security workflows in Codex, or automate them with the
 - Browse saved scans and findings, identify duplicates, assess severity against
   your own rubric, and suggest owners from source and Git history.
 - Preview third-party scanner findings, save them locally, or publish supported reports to Codex Security Cloud. [Scanner import guides](docs/scanner-imports/README.md).
-- Export SARIF, JSON, or CSV, and publish findings to Linear or a findings service.
+- Track findings in Linear, Jira, or GitHub, publish completed scans, or export SARIF, JSON, and CSV. [Integration workflows](docs/plugin-connectors.md).
 - Automate scans across repositories or project components, including in CI and
   containers.
 

@@ -657,11 +657,12 @@ and does not describe failed or unfinished scans as clean.
 
 ### Publish findings to Cloud
 
-`publish scan --to cloud` uploads selected findings to Codex Security Cloud.
-It requires ChatGPT credentials; inference API keys and AWS credentials do not
-grant Cloud access. See [Cloud publication](docs/cli.md#publish-completed-scans)
-for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
-for issue creation.
+Use `publish scan --to cloud` for completed Codex Security scans or a Codex
+Security findings CSV. Preview either input offline with `--dry-run`. Uploads
+require a file-backed ChatGPT login. [Cloud publication](docs/cli.md#publish-completed-scans)
+
+For a report exported by a scanner, see [Import external findings](#import-external-findings).
+For issue tracking, see [Linear publication](docs/cli.md#publish-completed-scans-to-linear).
 
 ### Import external findings
 

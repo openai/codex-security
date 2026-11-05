@@ -133,8 +133,9 @@ cs scan --schema --format json
 cs scan --help
 ```
 
-Use [the CLI reference](../sdk/typescript/docs/cli.md#command-discovery-and-integrations)
-for integrations and output formats.
+Choose a [connected app or CLI integration](plugin-connectors.md) for your
+destination. See the [CLI reference](../sdk/typescript/docs/cli.md#command-discovery-and-integrations)
+for command discovery and output formats.
 
 ## Troubleshoot setup
 

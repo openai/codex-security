@@ -88,6 +88,10 @@ For a Cloud import, check the receipt for the destination shown in the preview.
 | Private inbox (`privateImport`)                   | Check that `privateJob.status` is `completed` and its counts account for the selected findings, with zero errors or unprocessed rows. Review exclusions. |
 | Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                                                    |
 
+To inspect published findings in Codex, [connect the Cloud app](../../sdk/typescript/README.md#read-existing-cloud-findings)
+and ask for imported findings in the destination repository. For a private import,
+ask for your private import history.
+
 If the repository publisher requires a reported severity, the preview excludes
 findings whose severity the scanner left unknown. You can keep those findings
 in a local import or a private inbox when available.
