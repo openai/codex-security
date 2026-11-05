@@ -256,7 +256,7 @@ def list_repositories(
             )
         ]
         if args.limit is not None or args.offset:
-            limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+            limit = args.limit or FINDINGS_PAGE_MAX
             end = args.offset + limit
             pagination = {
                 "limit": limit,
