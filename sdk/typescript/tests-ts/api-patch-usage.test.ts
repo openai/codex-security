@@ -29,6 +29,7 @@ const receipt = {
 };
 const noChange = {
   status: "no_change",
+  credentialRevocationPending: false,
   changedFiles: [],
   verificationReport: "The synthetic finding is already safe.",
   reason: null,

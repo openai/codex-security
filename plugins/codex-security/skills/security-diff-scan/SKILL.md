@@ -23,7 +23,7 @@ Persist requested context changes with `update_codex_security_scan_context`. At 
 
 The inventory includes changed text files regardless of filename, extension, or directory. Tracked changes remain in scope even when ignored; local patches also include non-ignored untracked files. Inspect deleted files at the baseline revision. Assess security relevance from behavior and reachability, including build, deployment, and CI use.
 
-When assembling each checked-in credential finding, put “Validity unchecked” in the saved `summary`. Include at least one complete, verbatim source line in `codeEvidence` that proves the exposure, such as the embedded assignment or a comparison with a literal password. Refer to the credential by type in the summary.
+For checked-in credential findings, follow [Secrets Exposed In Source](../../references/core-scan.md#secrets-exposed-in-source) for the status in `summary` and exact source lines in `codeEvidence`.
 
 Use `cancel_codex_security_scan` only when the user explicitly cancels. Reserve `fail_codex_security_scan` for a confirmed unrecoverable blocker; preserve durable scans while recovery is possible.
 

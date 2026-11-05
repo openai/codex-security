@@ -159,7 +159,12 @@ function matchesConsumer(location: SourceLocation, expected: Expected) {
   );
 }
 
-function evidenceIssues(finding: Finding, fixture: Fixture, index: number) {
+function evidenceIssues(
+  finding: Finding,
+  fixture: Fixture,
+  matchedCases: Expected[],
+  index: number,
+) {
   const evidence = (finding.codeEvidence ?? []).map((entry) => {
     const code = entry.code?.replaceAll("\r\n", "\n").replace(/\n$/u, "");
     return {
@@ -181,10 +186,9 @@ function evidenceIssues(finding: Finding, fixture: Fixture, index: number) {
             .join("\n"),
     )
     .map(({ path, startLine }) => ({ path, startLine }));
-  const missingCaseEvidence = fixture.positives
+  const missingCaseEvidence = matchedCases
     .filter(
       (expected) =>
-        matches(finding, expected) &&
         !evidence.some(
           (entry) =>
             matchesLocation(entry, expected) ||
@@ -204,18 +208,31 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
   const errors = [];
   const findings = Array.isArray(result?.findings) ? result.findings : [];
   if (!Array.isArray(result?.findings)) errors.push("missing findings array");
+  const evaluated = findings.map((finding) => {
+    const matchesForFinding = fixture.positives.filter((expected) =>
+      matches(finding, expected),
+    );
+    const sourceCases = matchesForFinding.filter(
+      (expected) => expected.category !== "sensitive-data-exposure",
+    );
+    // Source exposures can share a finding. The endpoint needs its own code fix.
+    return {
+      finding,
+      matchedCases: sourceCases.length ? sourceCases : matchesForFinding,
+      sourceCredential: sourceCases.length > 0,
+    };
+  });
   const cases = fixture.positives.map((expected) => ({
     id: expected.id,
-    found: findings.some((finding) => matches(finding, expected)),
+    found: evaluated.some(({ matchedCases }) =>
+      matchedCases.includes(expected),
+    ),
   }));
-  const falsePositives = findings.flatMap<{
+  const falsePositives = evaluated.flatMap<{
     index: number;
     unexpectedLocations?: string[];
     reason?: string;
-  }>((finding, index) => {
-    const matchedCases = fixture.positives.filter((expected) =>
-      matches(finding, expected),
-    );
+  }>(({ finding, matchedCases }, index) => {
     const unexpectedLocations = (finding.locations ?? [])
       .filter(
         (location) =>
@@ -252,19 +269,14 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
   if (found !== cases.length) errors.push("missing retained secret findings");
   if (falsePositives.length)
     errors.push("false positives or incorrect taxonomy/locations");
-  const evidenceFailures = findings.flatMap((finding, index) =>
-    evidenceIssues(finding, fixture, index),
+  const evidenceFailures = evaluated.flatMap(
+    ({ finding, matchedCases }, index) =>
+      evidenceIssues(finding, fixture, matchedCases, index),
   );
   if (evidenceFailures.length) errors.push("missing or invalid code evidence");
   const discoveryPassed = errors.length === 0;
-  const retained = findings.filter((finding) =>
-    fixture.positives.some(
-      (expected) =>
-        expected.category !== "sensitive-data-exposure" &&
-        matches(finding, expected),
-    ),
-  );
-  const withStatus = retained.filter((finding) =>
+  const retained = evaluated.filter(({ sourceCredential }) => sourceCredential);
+  const withStatus = retained.filter(({ finding }) =>
     [
       finding.title,
       finding.summary,
