@@ -32,12 +32,17 @@ function inspect(run: DeepScanRunState) {
 
 after(() => temporaryDirectories.cleanup());
 
-test("nested empty directories dispatch no workers", async () => {
+test("a directory tree emptied after registration dispatches no workers", async () => {
   const fixture = await fixtureRun();
   await mkdir(join(fixture.run.targetPath, "first", "nested"), {
     recursive: true,
   });
   await mkdir(join(fixture.run.targetPath, "second"));
+  const source = join(fixture.run.targetPath, "first", "nested", "source.py");
+  await writeFile(source, "");
+  // A registration-time inventory count remains positive after its file is removed.
+  Object.assign(fixture.run, { scopeFileCount: 1 });
+  await rm(source);
   const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
   const coordinator = createCoordinator(
     fixture,
@@ -58,10 +63,7 @@ test("nested empty directories dispatch no workers", async () => {
     assert.equal(outcome.status, "failed", outcome.error);
     assert.match(outcome.error ?? "", /target is empty.*no security audit/iu);
     assert.equal(executor.discoveryCalls, 0);
-    await writeFile(
-      join(fixture.run.targetPath, "first", "nested", "source.py"),
-      "",
-    );
+    await writeFile(source, "");
     await inspect(fixture.run);
   } finally {
     coordinator.cancel("fixture cleanup");
