@@ -99,17 +99,21 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 
 @pytest.mark.cross_platform
-def test_target_admission_reads_one_entry_without_looking_up_its_type(
+def test_target_admission_stops_at_the_first_non_directory_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
     check_selected_targets = runpy.run_path(str(script))["check_selected_targets"]
     events = []
 
+    class FileEntry:
+        def is_dir(self, *, follow_symlinks):
+            assert not follow_symlinks
+            return False
+
     def entries():
         events.append("read")
-        # A filesystem can report DT_UNKNOWN. Any entry-type lookup here fails.
-        yield object()
+        yield FileEntry()
         pytest.fail("admission read a second directory entry")
 
     @contextmanager
