@@ -138,7 +138,7 @@ import {
   canonicalNumber,
   cloudRepositoryUrlKey,
   CloudEvidenceDepthError,
-  hasSizeLimitedEnrichment,
+  usedEnrichmentFallback,
   validateImportRequest,
   validateExternalEvidence,
   validatePreviousCloudEvidence,
@@ -755,8 +755,8 @@ export async function prepareExternalPublication(
       normalizedPublicationInput(parsed.findings, provider);
     input.readPreviousFindings = parsed.previousFindings;
     if (provider === "endor")
-      input.preferStructuredReport = parsed.findings.findings.some(
-        ({ evidence }) => hasSizeLimitedEnrichment(evidence),
+      input.requiresStructuredReport = parsed.findings.findings.some(
+        ({ evidence }) => usedEnrichmentFallback(evidence),
       );
   }
   return preparePublicationInput(
@@ -980,7 +980,7 @@ function hostedRepositoryMatcher(
 }
 
 interface PublicationSelection extends ExternalPublicationInput {
-  preferStructuredReport?: boolean;
+  requiresStructuredReport?: boolean;
   sourcePositions?: ReadonlyMap<string, readonly number[]>;
   readPreviousFindings?: () => ExternalFindings;
   original?: {
@@ -3220,7 +3220,7 @@ async function preparePublicationInput(
       nativePath,
       context,
       privateSaved,
-      resolved.preferStructuredReport,
+      resolved.requiresStructuredReport,
     );
     const binding = {
       format: report.format,

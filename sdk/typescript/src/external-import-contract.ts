@@ -375,13 +375,11 @@ export function previousAdmission(value: object) {
   return previousAdmissions.get(value);
 }
 
-class CloudEvidenceSizeError extends Error {}
+const enrichmentFallbacks = new WeakSet<ExternalFindingEvidence>();
 
-const sizeLimitedEnrichments = new WeakSet<ExternalFindingEvidence>();
-
-/** Whether adding optional typed fields to this record exceeded the Cloud evidence size limit. */
-export function hasSizeLimitedEnrichment(evidence: ExternalFindingEvidence) {
-  return sizeLimitedEnrichments.has(evidence);
+/** Whether validation selected a reduced projection of the optional typed fields. */
+export function usedEnrichmentFallback(evidence: ExternalFindingEvidence) {
+  return enrichmentFallbacks.has(evidence);
 }
 
 /** Keep a valid native record when its optional structured fields exceed the target's bounds. */
@@ -390,18 +388,18 @@ export function validateEnrichedExternalEvidence(
   target: ExternalImportTarget,
   ...projections: (Record<string, unknown> | undefined)[]
 ): ExternalFindingEvidence {
-  let sizeLimited = false;
+  let usedFallback = false;
   function validate(projection: Record<string, unknown>) {
     const result = validateExternalEvidence(projection, target);
-    if (sizeLimited) sizeLimitedEnrichments.add(result);
+    if (usedFallback) enrichmentFallbacks.add(result);
     return result;
   }
   for (const extra of projections) {
     if (!extra) continue;
     try {
       return validate({ ...evidence, ...extra });
-    } catch (error) {
-      if (error instanceof CloudEvidenceSizeError) sizeLimited = true;
+    } catch {
+      usedFallback = true;
       // Try the next projection. The native record must pass the same validation.
     }
   }
@@ -599,9 +597,7 @@ function rawJsonNumbers(
 const CLOUD_EVIDENCE_BYTES = 256 * 1024;
 function checkEvidenceSize(bytes: number): number {
   if (bytes > CLOUD_EVIDENCE_BYTES)
-    throw new CloudEvidenceSizeError(
-      "Evidence exceeds the Cloud limit of 256 KiB.",
-    );
+    throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
   return bytes;
 }
 

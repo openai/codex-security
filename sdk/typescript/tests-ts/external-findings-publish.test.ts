@@ -11735,7 +11735,8 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
 
 const sonarReport = sonarCapture(exampleRepository);
 const trivy = trivyReport();
-const endorWithManyManifests = endorFinding();
+const endorSource = endorFinding();
+const endorVulnerability = endorSource.spec.finding_metadata.vulnerability;
 const structuredPrivateProviders = [
   {
     provider: "blackduck",
@@ -11827,10 +11828,10 @@ test.each([
     provider: "endor",
     format: "security.findings.v1",
     raw: {
-      ...endorWithManyManifests,
+      ...endorSource,
       extra: "x".repeat(190 * 1024),
       spec: {
-        ...endorWithManyManifests.spec,
+        ...endorSource.spec,
         target_dependency_name: null,
         target_dependency_package_name: "x".repeat(495),
         dependency_file_paths: Array.from(
@@ -11848,6 +11849,39 @@ test.each([
       jobRequestId: "9bceaf8a-8ef4-4bbc-99a7-78fc0d6dcbcf",
     },
   },
+  ...[
+    {
+      packageName: "alternate-package",
+      malwareAliases: Array.from({ length: 99 }, (_, i) => `MAL-${i}`),
+      reviewedPackage: "alternate-package",
+      reviewedMalware: [],
+    },
+    {
+      packageName: "x".repeat(513),
+      malwareAliases: ["MAL-example"],
+      reviewedPackage: null,
+      reviewedMalware: ["MAL-example"],
+    },
+  ].map(
+    ({ packageName, malwareAliases, reviewedPackage, reviewedMalware }) => ({
+      provider: "endor" as const,
+      format: "security.findings.v1" as const,
+      raw: {
+        ...endorSource,
+        spec: {
+          ...endorSource.spec,
+          target_dependency_name: null,
+          target_dependency_package_name: packageName,
+          finding_metadata: {
+            vulnerability: endorVulnerability,
+            malware: { spec: { aliases: malwareAliases } },
+          },
+        },
+      },
+      reviewedPackage,
+      reviewedMalware,
+    }),
+  ),
   {
     provider: "wiz",
     format: "wiz.vulnerability_json.v1",
@@ -11999,6 +12033,28 @@ test.each([
               expect(doc.findings[0].evidence.packages ?? []).toEqual([]);
               expect(doc.findings[0].evidence.source_data).toEqual(raw);
             }
+            if ("reviewedPackage" in scenario) {
+              expect(doc.findings).toHaveLength(1);
+              const { evidence } = doc.findings[0];
+              expect(evidence.source_data).toEqual(raw);
+              expect(evidence.advisory_ids).toEqual([
+                endorVulnerability.meta.name,
+                ...endorVulnerability.spec.aliases,
+                ...scenario.reviewedMalware,
+              ]);
+              expect(evidence.packages ?? []).toEqual(
+                scenario.reviewedPackage
+                  ? endorSource.spec.dependency_file_paths.map((path) => ({
+                      name: scenario.reviewedPackage,
+                      ecosystem: "npm",
+                      installed_version:
+                        endorSource.spec.target_dependency_version,
+                      manifest_path: path,
+                      fixed_versions: [],
+                    }))
+                  : [],
+              );
+            }
             if ("retained" in scenario) {
               expect(doc.findings).toHaveLength(1);
               expect(doc.findings[0].evidence.source_data).toMatchObject(
@@ -12105,6 +12161,18 @@ test.each([
     expect(cli.stderr.text()).toContain(
       `Report: ${format} (${original.preview.privateImport?.bytes} bytes)`,
     );
+    if (
+      format === "endor.findings_json.v1" ||
+      releasedNative ||
+      "reviewedPackage" in scenario
+    ) {
+      const supported = formats;
+      formats = ["endor.findings_json.v1"];
+      if (format === "endor.findings_json.v1")
+        expect((await prepare()).preview.privateImport?.format).toBe(format);
+      else await expect(prepare()).rejects.toThrow("security.findings.v1");
+      formats = supported;
+    }
     expect(calls.filter((call) => call.startsWith("POST"))).toEqual([]);
     contextVersion = "generation-b";
     await expect(original.publish()).rejects.toThrow("private inbox changed");
@@ -12116,6 +12184,7 @@ test.each([
     if (releasedNative) {
       const { key, ...saved } = releasedNative;
       expectedFormat = "endor.findings_json.v1";
+      formats = [expectedFormat];
       contextVersion = "generation-a";
       const directory = join(f.root, "state", "external-finding-publications");
       await mkdir(directory, { recursive: true, mode: 0o700 });

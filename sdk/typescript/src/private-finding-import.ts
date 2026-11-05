@@ -186,7 +186,7 @@ export async function selectPrivateReport(
   path: string | undefined,
   context: PrivateImportContext,
   saved: string | undefined,
-  preferStructuredReport = false,
+  requiresStructuredReport = false,
 ): Promise<ReturnType<typeof privateReport>> {
   const checkpoint =
     saved === undefined ? undefined : checkpointSchema.parse(JSON.parse(saved));
@@ -194,6 +194,13 @@ export async function selectPrivateReport(
     checkpoint?.contextVersion === context.context_version
       ? checkpoint.format
       : undefined;
+  if (requiresStructuredReport && !originalFormat) {
+    if (!context.formats.includes(structuredFormat))
+      throw new CodexSecurityError(
+        `This Cloud service must support ${structuredFormat} to publish the reviewed Endor fields.`,
+      );
+    return privateReport(selection.findings, context.limits);
+  }
   const format =
     provider === "endor"
       ? "endor.findings_json.v1"
@@ -208,7 +215,7 @@ export async function selectPrivateReport(
     selection.findings.length === selection.read &&
     (originalFormat
       ? originalFormat === format
-      : !preferStructuredReport && context.formats.includes(format))
+      : context.formats.includes(format))
   ) {
     const handle = await open(
       path,
