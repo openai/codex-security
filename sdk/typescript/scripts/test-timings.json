@@ -291,7 +291,7 @@
     "win32": 5.8
   },
   "cli-patch.test.ts": {
-    "linux": 3.5,
+    "linux": 585.2,
     "darwin": 6.9,
     "win32": 23.8
   },
