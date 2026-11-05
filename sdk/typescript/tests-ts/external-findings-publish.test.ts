@@ -1319,9 +1319,8 @@ function selectedSemgrepReport(
   });
 }
 
-test("a projected Snyk issue resumes its approved private repository after a rename", async () => {
+function privateSnykProject() {
   const url = "https://git.example.test/Team/OldProject";
-  const renamed = "https://git.example.test/Team/NewProject";
   const capture = snykRestFixture("open-source", { sourceRepositoryUrl: url });
   const project = JSON.parse(capture.projectJson);
   project.attributes.origin = "cli";
@@ -1331,6 +1330,12 @@ test("a projected Snyk issue resumes its approved private repository after a ren
   const report = normalizeSnykIssues(capture, "cloud", [
     { url, platform: "github" },
   ]);
+  return { url, capture, report };
+}
+
+test("a projected Snyk issue resumes its approved private repository after a rename", async () => {
+  const { url, capture, report } = privateSnykProject();
+  const renamed = "https://git.example.test/Team/NewProject";
   const row = report.findings[0]!;
   row.evidence.source_data = {
     issueJson: row.evidence.source_data!["issueJson"],
@@ -1347,6 +1352,61 @@ test("a projected Snyk issue resumes its approved private repository after a ren
     "Snyk target URL",
   );
   expect(fresh.posts).toHaveLength(0);
+});
+
+test("a Snyk private upload resumes after a rename and still checks supplemental SDK repository claims", async () => {
+  const { url, capture, report } = privateSnykProject();
+  const f = await fixture(capture, url);
+  const settings = { ...options, provider: "snyk" as const };
+  f.state.catalogHeaders["Codex-Security-Private-Import-Providers"] = "snyk";
+  const uploads: { id: FormDataEntryValue | null; bytes: string }[] = [];
+  let context = "original-inbox";
+  const deps = {
+    ...f.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const { pathname } = new URL(url);
+      if (pathname.endsWith("/finding-imports/context"))
+        return privateInboxContext(context);
+      if (pathname.includes("/finding-imports/file-requests/"))
+        return new Response(null, { status: 404 });
+      if (pathname.endsWith("/finding-imports/files")) {
+        const form = init.body as FormData;
+        uploads.push({
+          id: form.get("request_id"),
+          bytes: await (form.get("file") as Blob).text(),
+        });
+        throw new Error("Interrupted private upload");
+      }
+      return f.deps.fetch(url, init);
+    },
+  };
+  const prepareFile = () => prepareExternalPublication(f.file, settings, deps);
+  const original = await prepareFile();
+  await expect(original.publish()).rejects.toThrow(
+    "Interrupted private upload",
+  );
+  f.state.repositoryUrl = "https://git.example.test/Team/NewProject";
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...report, sourceRepositoryUrl: f.state.repositoryUrl },
+      settings,
+      deps,
+    ),
+  ).rejects.toThrow(/repository|project/iu);
+  expect((await prepareFile()).preview.resumed).toBe(true);
+  const retry = await prepareNormalizedExternalPublication(
+    report,
+    settings,
+    deps,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.privateImport).toEqual(original.preview.privateImport);
+  await expect(retry.publish()).rejects.toThrow("Interrupted private upload");
+  expect(uploads).toHaveLength(2);
+  expect(uploads[1]).toEqual(uploads[0]);
+
+  context = "new-inbox";
+  await expect(prepareFile()).rejects.toThrow(/repository|project/iu);
 });
 
 test("a self-contained Snyk issue keeps its Cloud identity with or without a report header", async () => {
