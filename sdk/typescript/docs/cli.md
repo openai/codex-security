@@ -1003,8 +1003,10 @@ publication uses the same request attribution; embedding requests identify
 the package and version in their `User-Agent`.
 
 These fields provide request attribution for supported inference providers, including
-Bedrock. They do not create a separate telemetry collector, record command
-starts or outcomes, or make another provider's traffic visible to OpenAI.
+Bedrock. They do not create a separate telemetry collector or make another
+provider's traffic visible to OpenAI. Local operation receipts separately record
+starts, outcomes, duration, and usage coverage; see
+[telemetry and measurement](telemetry.md).
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
@@ -1428,6 +1430,10 @@ For completed scans exported in the Codex Security JSON or CSV format, use
 
 For Checkmarx One CLI JSON or CxSAST XML, use `--provider checkmarx` and pass the
 verified Git URL with `--source-repository-url`. See the [Checkmarx SAST guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md).
+
+## Import Trivy dependency findings
+
+Use `--provider trivy` to read a schema-v2 repository or filesystem report (JSON or gzip). Pass `--trivy-scan-root .` for a whole checkout or a checkout-relative path for a subtree. A corroborated remote repository scan can infer the root. See the [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md) for a preview command, repository matching, and how to save or publish the results.
 
 ## Import Endor Labs findings
 
@@ -2161,11 +2167,10 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
-Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
-Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
-compressed sessions are unavailable to `scans logs`, feedback attachments, and
-`scans resume`. Upgrade Node.js to read or resume these sessions. Plain `.jsonl`
-logs work on all supported runtimes.
+Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
+work on all supported Node.js versions, including logs, feedback attachments,
+usage accounting, and saved-session discovery for resume. A bundled decoder
+reads concatenated frames and reports truncated streams as collection errors.
 
 ### Resuming an interrupted Deep Scan
 
@@ -2811,10 +2816,11 @@ truncating any selected finding. The CLI prints verdicts in selection order
 after every request returns valid results. For these selections the CLI omits
 per-event progress and update notices so stderr cannot delay the verdicts.
 
-If one finding exceeds the input limit on its own, verification stops before
-the first request. The error reports its occurrence ID and required request
-size. To verify another open occurrence from that scan, run
-`codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID`.
+If a finding would exceed the input limit, `validate`, `patch`, and `verify-fix`
+automatically put the complete finding data in a temporary file and ask Codex
+to read it in bounded chunks. No manual splitting or truncation is needed.
+The file remains available until the task finishes and is then removed. The
+SDK's local `validate()` and `patch()` methods use the same fallback.
 
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
