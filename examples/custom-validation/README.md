@@ -1,45 +1,53 @@
 # Custom validation demo
 
-This deliberately vulnerable invoice API contains only synthetic data. Do not
-deploy it. The validation script starts a real loopback HTTP server, tests
-cross-account access, saves the evidence, and stops the server. It uses the
-SDK's supported Node.js version (including 22.13) and TypeScript compiler, with no
-extra packages or Docker.
+Run a local HTTP test against a synthetic invoice API, then use the same test to
+validate a finding in a scan. The app contains a deliberate authorization flaw.
+Use it on loopback with the supplied test data only.
 
-The local SDK bundle requires the source-matched native payloads for all supported platforms under `plugins/codex-security/native/prebuilt`; obtain those build artifacts before running this setup. See the [native build guide](../../plugins/codex-security/native/README.md). From the repository root, build the plugin and CLI, then run the demo:
+## Run the HTTP test
+
+This path uses Node.js and the SDK's TypeScript compiler. From the repository
+root, install the SDK dependencies, compile the fixture, and run its test:
 
 ```bash
 pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir sdk/typescript run build:examples
+node examples/custom-validation/validate.mjs --output reports/http-proof.json
+```
+
+The script starts a loopback server and writes the observed responses to
+`reports/http-proof.json`. Look for an anonymous request returning 401, Alice's
+own invoice returning 200, Alice reading Bob's invoice with 200, and
+`server_stopped: true`. This test runs without model access or sign-in.
+
+## Run the scan with custom validation
+
+Use a [supported Node.js version](../../sdk/typescript/package.json) and your
+configured Codex Security sign-in or API key. Building the local CLI bundle
+requires the source-matched native payloads for all supported platforms under
+`plugins/codex-security/native/prebuilt`. Obtain them as described in the
+[native build guide](../../plugins/codex-security/native/README.md).
+
+From the repository root, with the SDK dependencies installed, run:
+
+```bash
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm --dir sdk/typescript run build:plugin
 pnpm --dir sdk/typescript run build
 node examples/custom-validation/run.mjs
 ```
 
-The runner uses your existing Codex Security sign-in or API key. It copies the
-TypeScript fixture to a temporary directory, compiles it to JavaScript, and
-prints the scan output path. Extra CLI options can be appended, for example
-`--model gpt-5.6-terra --effort high`.
+The runner copies the API into a temporary directory, compiles it, then starts a
+model-backed scan. Open `report.md` in the scan output directory it prints. In
+`artifacts/custom-validation/`, `candidates.json` lists the findings passed to
+validation, `http-proof.json` contains the HTTP observations, and `results.json`
+records each decision. A confirmed cross-account read is reportable. If custom
+validation cannot complete, the scan fails.
 
-To run just the HTTP proof without a scan:
+## Adapt it to another app
 
-```bash
-pnpm --dir sdk/typescript run build:examples
-node examples/custom-validation/validate.mjs --output reports/http-proof.json
-```
-
-Look for these files in the printed scan directory:
-
-- `report.md`: the completed security report.
-- `artifacts/custom-validation/candidates.json`: the fixed candidate set.
-- `artifacts/custom-validation/http-proof.json`: observed HTTP responses.
-- `artifacts/custom-validation/results.json`: the structured dispositions.
-
-The expected result is a reportable cross-account invoice read. The proof should
-show an anonymous 401, Alice's own invoice returning 200, Alice reading Bob's
-invoice with 200, and `server_stopped: true`. The scan fails if custom validation
-cannot complete; it does not fall back to the default validation workflow.
-
-Adapt [validation.md](validation.md) for your own setup, tests, and cleanup.
-For a Docker-based project, the same prompt can run your existing compose or
-test script instead of `validate.mjs`.
+The runner passes [scan.md](scan.md) to discovery and [validation.md](validation.md)
+to validation. Set the scan path and discovery instructions to the code you want
+reviewed. Replace the validation command, the authorized test target, and the
+expected responses with those for your app. Keep the per-candidate decisions,
+scan-local evidence path, and cleanup checks so readers can verify the result.
