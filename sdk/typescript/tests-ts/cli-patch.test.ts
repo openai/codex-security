@@ -437,7 +437,7 @@ describe("scan and patch workflow", () => {
                 )
                   postPatchGitWrites.push([...args]);
                 if (args[0] === "push" && askpassEnvironment.GIT_ASKPASS)
-                  expect(options?.environment?.GIT_ASKPASS).toBe(
+                  expect(options?.environment?.["GIT_ASKPASS"]).toBe(
                     kind === "removed component with external askpass"
                       ? await realpath(askpass)
                       : "",
