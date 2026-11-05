@@ -2386,12 +2386,6 @@ export async function prepareAmbientAuth(
   isolatedHome: string,
   purpose: "scan" | "status",
 ): Promise<boolean | string> {
-  if (
-    purpose === "status" &&
-    (!(await codexSecurityCredentialAllowsAmbientImport(isolatedHome)) ||
-      (await codexSecurityHasStoredFileCredentials(isolatedHome)))
-  )
-    return false;
   const source = join(expandHome(ambientHome), "auth.json");
   const metadata = await stat(source).catch((cause: unknown) => {
     if (nodeErrorCode(cause) === "ENOENT") return null;
@@ -2428,25 +2422,21 @@ export async function prepareAmbientAuth(
     }
     await chmod(temporary, 0o600);
     try {
-      try {
-        await link(temporary, destination);
-      } catch (error) {
+      await link(temporary, destination).catch((error: unknown) => {
         if (
           !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
             nodeErrorCode(error) ?? "",
           )
-        ) {
+        )
           throw error;
-        }
-        await copyFile(temporary, destination, constants.COPYFILE_EXCL);
-      }
+        return copyFile(temporary, destination, constants.COPYFILE_EXCL);
+      });
     } catch (error) {
       if (
         nodeErrorCode(error) === "EEXIST" &&
         (await codexSecurityHasStoredFileCredentials(isolatedHome))
-      ) {
+      )
         return true;
-      }
       throw error;
     }
     await chmod(destination, 0o600);

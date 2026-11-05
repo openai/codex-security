@@ -18,10 +18,7 @@ import { parse as parseToml, stringify } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { restoreProviderProfile } from "../src/provider-profile.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
-import {
-  resolveCodexCommand,
-  setCodexSecurityCredentialLogout,
-} from "../src/runtime.js";
+import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import {
   copyCompletedScan,
   copyCredentialTestPlugin,
@@ -890,34 +887,24 @@ console.log("Logged in using ChatGPT");
       const ambientHome = join(root, "ambient-home");
       const stateDir = join(root, "state");
       await mkdir(ambientHome);
-      await mkdir(stateDir, { mode: 0o700 });
       await writeJson(join(ambientHome, "auth.json"), {
         auth_mode: "chatgpt",
         tokens: chatGptTokens,
       });
-      const client = new TestClient(
-        { pluginPath: PLUGIN_ROOT },
-        {
-          environment: {
-            PATH: process.env["PATH"],
-            HOME: root,
-            USERPROFILE: root,
-            CODEX_HOME: homeRelative ? "~/ambient-home" : ambientHome,
-            CODEX_SECURITY_STATE_DIR: stateDir,
-          },
-          resolveCodexCommand: () => resolveCodexCommand({}),
+      await using client = TestClient.withDependencies({
+        environment: {
+          PATH: process.env["PATH"],
+          HOME: root,
+          USERPROFILE: root,
+          CODEX_HOME: homeRelative ? "~/ambient-home" : ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDir,
         },
-      );
-      try {
-        const status = await client.account();
-        expect(status.authenticated).toBe(true);
-        expect(status.details).toContain("Logged in using ChatGPT");
-        expect(existsSync(join(stateDir, "codex-home", "auth.json"))).toBe(
-          false,
-        );
-      } finally {
-        await client.close();
-      }
+      });
+      expect(await client.account()).toMatchObject({
+        authenticated: true,
+        details: expect.stringContaining("Logged in using ChatGPT"),
+      });
+      expect(existsSync(join(stateDir, "codex-home", "auth.json"))).toBe(false);
     },
   );
   test.each([

@@ -5638,7 +5638,9 @@ export async function withStatusCredentialHome<T>(
 ): Promise<T> {
   const probe = await withCredentialHomeLock(
     credentialHome,
-    () => prepareAmbientAuth(ambientHome, credentialHome, "status"),
+    async () =>
+      (await storedCredentialAvailability(credentialHome)) ??
+      prepareAmbientAuth(ambientHome, credentialHome, "status"),
     signal,
   );
   if (typeof probe !== "string") return await status(credentialHome);
@@ -5658,6 +5660,14 @@ export async function withStatusCredentialHome<T>(
   }
 }
 
+// A missing sign-in can import ambient credentials unless a previous logout disabled it.
+async function storedCredentialAvailability(
+  home: string,
+): Promise<boolean | undefined> {
+  if (!(await codexSecurityCredentialAllowsAmbientImport(home))) return false;
+  if (await codexSecurityHasStoredFileCredentials(home)) return true;
+}
+
 export async function initialCredentialsAvailable(
   environment: ProcessEnvironment,
   ambientHome: string,
@@ -5665,11 +5675,10 @@ export async function initialCredentialsAvailable(
   importer: typeof importAmbientAuth = importAmbientAuth,
 ): Promise<boolean> {
   if (environmentApiKey(environment) !== null) return false;
-  if (!(await codexSecurityCredentialAllowsAmbientImport(isolatedHome))) {
-    return false;
-  }
-  if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
-  return await importer(ambientHome, isolatedHome);
+  return (
+    (await storedCredentialAvailability(isolatedHome)) ??
+    importer(ambientHome, isolatedHome)
+  );
 }
 
 // Reports a cleanup failure without letting it decide the result of the scan. Only the
