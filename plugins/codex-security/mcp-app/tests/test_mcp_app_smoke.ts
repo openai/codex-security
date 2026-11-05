@@ -490,7 +490,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       CODEX_SECURITY_STATE_DIR: headlessStateDir,
     },
   });
-  const ownerThread = "fixture-headless-standard-thread";
+  // Option-like metadata must reach the workbench as the literal owner ID.
+  const ownerThread = "--help";
   const headlessContext =
     `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`.trim();
   assert.ok(headlessContext.length > 1_000_000);
@@ -1394,6 +1395,13 @@ try {
   await assert.rejects(readFile(path.join(stateDir, "workbench.sqlite3")), {
     code: "ENOENT",
   });
+
+  const dashQuery = await request(8999, "tools/call", {
+    name: "list_codex_security_scans",
+    arguments: { query: "--synthetic-query", limit: 50 },
+  });
+  assertNoError(dashQuery);
+  assert.deepEqual(dashQuery.result.structuredContent.scans, []);
 
   const findTool = (name: string) => {
     const tool = toolList.result.tools.find(
@@ -2516,9 +2524,13 @@ try {
       occurrenceId,
       status: "closed",
       closeReason: "false_positive",
-      note: "The archive path is normalized before the write.",
+      note: "--synthetic triage note",
     },
   });
+  assert.equal(
+    closedFinding.structuredContent.scan.findings[0].triage.note,
+    "--synthetic triage note",
+  );
   assert.equal(
     closedFinding.structuredContent.scan.findings[0].triage.status,
     "closed",
