@@ -187,7 +187,7 @@ test("local preview and declined confirmation do not create database state or us
       externalPublicationPrompt: {
         isInteractive: () => true,
         confirm: async (question, defaultValue) => {
-          expect(question).toContain("Store these 1 findings locally");
+          expect(question).toBe("Store this finding locally?");
           expect(defaultValue).toBe(false);
           expect(declined.stderr.text()).toContain(f.repository);
           expect(declined.stderr.text()).toContain(f.record.id);
@@ -415,7 +415,9 @@ test("local import confirms exclusions and returns partial status after storing 
       externalPublicationPrompt: {
         isInteractive: () => true,
         confirm: async (question) => {
-          expect(question).toContain("skip 1 excluded records");
+          expect(question).toBe(
+            "Store this finding locally and skip 1 excluded record?",
+          );
           expect(cli.stderr.text()).toContain("Excluded: 1");
           return true;
         },

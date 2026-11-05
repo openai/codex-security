@@ -89,6 +89,8 @@ console.log(prepared.preview);
 ```
 
 After reviewing the Cloud preview, call `await prepared.publish()` to confirm.
+If you supply normalized evidence that keeps the collector record in
+`source_data`, imports check its original repository against the destination.
 
 For local storage, call `normalizeGitHubCodeScanningAlerts(alerts, "local")` on
 the original alerts to retain evidence that exceeds Cloud limits. Pass the result

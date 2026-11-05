@@ -64,6 +64,11 @@ collection. JSONL can hold one package record per line. Preserve `id`, `name`,
 available package, image and repository metadata. Use the Wiz finding ID for
 identity. Many package occurrences can share a CVE.
 
+For GitHub Enterprise branch assets, keep `vulnerableAsset.cloudProviderURL`
+and either `nativeType: "github#repositoryBranch"` or both
+`type: "REPOSITORY_BRANCH"` and `cloudPlatform: "GitHub"`. The reader uses
+the repository in that URL to check the import destination.
+
 Detailed package CSV requires `ID`, `Name`, `DetailedName`, `AssetID`, `WizURL`,
 `CloudPlatform` and `CloudProviderURL`. The platform must be GitHub and the
 provider URL must identify a repository branch. That repository must match a

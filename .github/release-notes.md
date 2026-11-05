@@ -110,6 +110,11 @@
 - import Tenable One code repository findings locally ([#2343](https://github.com/openai/codex-security/pull/2343))
 - restore usage accounting on preview databases ([#2352](https://github.com/openai/codex-security/pull/2352))
 - count historical files for unreviewable local renames ([#2101](https://github.com/openai/codex-security/pull/2101))
+- privately create Windows multiscan campaign output ([#2344](https://github.com/openai/codex-security/pull/2344))
+- pass validation record efforts through to the host ([#2355](https://github.com/openai/codex-security/pull/2355))
+- batch Windows credential ACL inspection ([#2349](https://github.com/openai/codex-security/pull/2349))
+- use the singular for one finding in import prompts ([#2345](https://github.com/openai/codex-security/pull/2345))
+- verify scanner evidence and route workspace findings ([#2353](https://github.com/openai/codex-security/pull/2353))
 
 </details>
 
