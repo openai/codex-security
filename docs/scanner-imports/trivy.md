@@ -4,15 +4,19 @@ Use a saved Trivy schema-v2 JSON or gzip report from a repository or filesystem 
 
 ## Preview the report
 
-Enable external imports and select the checkout that Trivy scanned. Set `--trivy-scan-root` to the scanned directory relative to the checkout, for example `.` for the whole checkout or `apps/web` for a subtree.
+[Enable external imports](README.md#preview-a-report). If you need a report,
+run `trivy fs --scanners vuln --format json --output /private/path/trivy.json .`
+from the checkout root. Use a private output directory outside the checkout.
+
+Set `--trivy-scan-root` to the directory Trivy scanned, relative to the checkout.
+Use `.` for the whole checkout or, for example, `apps/web` for a subtree.
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
-codex-security publish findings trivy.json.gz --to local --repository /path/to/checkout \
+codex-security publish findings /private/path/trivy.json --to local --repository /path/to/checkout \
   --provider trivy --trivy-scan-root . --source-key example/project/main --dry-run --format json
 ```
 
-Check the repository, manifest paths, versions and exclusions in the preview. Keep the same source key across scans of the same project and branch. [Save locally, publish to Cloud and verify the import](README.md#save-or-publish-and-verify). Cloud requires a deployment that accepts the `trivy` provider.
+Check the repository, manifest paths, versions and exclusions in the preview. Keep the same source key across scans of the same project and branch. Cloud requires a deployment that accepts the `trivy` provider. [Save or publish and verify](README.md#save-or-publish-and-verify).
 
 ## Match the report to its checkout
 
@@ -29,4 +33,4 @@ Use credential-free repository URLs. If the importer reports ambiguous or confli
 
 If a private-inbox upload is interrupted and the connected repository is renamed, check the existing job before retrying. The new catalog URL can fail the original report’s source check.
 
-If an earlier development build left a pending Cloud upload, verify the destination and finish it with that build. A change to finding IDs or evidence can prevent the newer build from recognizing the pending request.
+When changing CLI versions with a Cloud upload pending, finish the upload with the version that created it. A change to finding IDs or evidence can prevent another version from recognizing the request.
