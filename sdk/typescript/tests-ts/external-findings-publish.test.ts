@@ -919,6 +919,16 @@ async function fixture(
     deps,
     cliDeps,
     command,
+    async writeCheckpoint(filename: string, checkpoint: unknown) {
+      const directory = join(
+        environment.CODEX_SECURITY_STATE_DIR,
+        "external-finding-publications",
+      );
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const path = join(directory, filename);
+      await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
+      return path;
+    },
     async loseResponse(prepared: PreparedExternalPublication) {
       state.loseResponse = true;
       const failure: unknown = await prepared
@@ -1031,31 +1041,15 @@ test.each([
   },
 );
 
-test("private inbox preview retains unreported severity when direct publishing requires it", async () => {
-  const f = await fixture([normalized("unscored", "unknown")]);
+test("repository severity restrictions exclude unsupported rows before lookups; private imports retain them", async () => {
+  const { f, prepareFile } = await privateUploadFixture(
+    [normalized("unreported", "unknown")],
+    "wiz",
+  );
   f.state.catalogHeaders = {
-    "Codex-Security-Private-Import-Providers": "wiz",
-    "Codex-Security-Repository-Import-Severities": "high,medium,low",
+    "Codex-Security-Repository-Import-Severities": "high",
   };
-  const { preview } = await prepareExternalPublication(f.file, options, {
-    ...f.deps,
-    fetch: (url, init) =>
-      new URL(url).pathname.endsWith("/finding-imports/context")
-        ? Promise.resolve(privateInboxContext())
-        : f.deps.fetch(url, init),
-  });
-  expect(preview.privateImport).toBeDefined();
-  expect(preview.findings).toHaveLength(1);
-  expect(preview.findings[0]?.evidence.severity).toBe("unknown");
-  expect(preview.excluded).toEqual([]);
-});
-
-test("repository preview excludes all unreported severities before source lookups", async () => {
-  const f = await fixture([normalized("unreported", "unknown")]);
-  f.state.catalogHeaders["Codex-Security-Repository-Import-Severities"] =
-    "high";
-  const prepare = prepareExternalPublication(f.file, options, f.deps);
-  await expect(prepare).rejects.toMatchObject({
+  await expect(prepareFile()).rejects.toMatchObject({
     selection: {
       read: 1,
       findings: [],
@@ -1064,6 +1058,13 @@ test("repository preview excludes all unreported severities before source lookup
   });
   expect(f.state.catalogReads).toBe(1);
   expect(f.state.sourceLookups).toEqual([]);
+  f.state.catalogHeaders["Codex-Security-Private-Import-Providers"] = "wiz";
+  const { preview } = await prepareFile();
+  expect(preview.privateImport).toBeDefined();
+  expect(preview.findings.map(({ evidence }) => evidence.severity)).toEqual([
+    "unknown",
+  ]);
+  expect(preview.excluded).toEqual([]);
   expect(f.posts).toHaveLength(0);
 });
 
@@ -1354,25 +1355,48 @@ test("a projected Snyk issue resumes its approved private repository after a ren
   expect(fresh.posts).toHaveLength(0);
 });
 
-test("a Snyk private upload resumes after a rename and still checks supplemental SDK repository claims", async () => {
-  const { url, capture, report } = privateSnykProject();
-  const f = await fixture(capture, url);
-  const settings = { ...options, provider: "snyk" as const };
-  f.state.catalogHeaders["Codex-Security-Private-Import-Providers"] = "snyk";
-  const uploads: { id: FormDataEntryValue | null; bytes: string }[] = [];
-  let context = "original-inbox";
+async function privateUploadFixture(
+  raw: unknown,
+  provider: "endor" | "snyk" | "wiz",
+  repositoryUrl?: string,
+) {
+  const f = await fixture(raw, repositoryUrl);
+  const settings = { ...options, provider };
+  f.state.catalogHeaders["Codex-Security-Private-Import-Providers"] = provider;
+  const inbox = {
+    version: "original-inbox",
+    formats: ["security.findings.v1"],
+    recoverUpload: false,
+  };
+  const uploads: { id: string; bytes: string }[] = [];
+  const jobs: unknown[] = [];
+  const fileId = "aifile_" + "a".repeat(32);
   const deps = {
     ...f.deps,
     fetch: async (url: string, init: RequestInit) => {
       const { pathname } = new URL(url);
       if (pathname.endsWith("/finding-imports/context"))
-        return privateInboxContext(context);
-      if (pathname.includes("/finding-imports/file-requests/"))
-        return new Response(null, { status: 404 });
+        return privateInboxContext(inbox.version, inbox.formats);
+      if (pathname.includes("/finding-imports/file-requests/")) {
+        const prior = uploads.find((upload) =>
+          pathname.endsWith("/" + upload.id),
+        );
+        return inbox.recoverUpload && prior
+          ? Response.json(privateFileMetadata(fileId, prior.bytes))
+          : new Response(null, { status: 404 });
+      }
+      if (pathname.endsWith("/finding-imports/jobs")) {
+        expect(init.method).toBe("POST");
+        const job = JSON.parse(String(init.body));
+        jobs.push(job);
+        return Response.json(
+          privateJobReceipt(job, "import_" + "b".repeat(32)),
+        );
+      }
       if (pathname.endsWith("/finding-imports/files")) {
         const form = init.body as FormData;
         uploads.push({
-          id: form.get("request_id"),
+          id: String(form.get("request_id")),
           bytes: await (form.get("file") as Blob).text(),
         });
         throw new Error("Interrupted private upload");
@@ -1381,6 +1405,13 @@ test("a Snyk private upload resumes after a rename and still checks supplemental
     },
   };
   const prepareFile = () => prepareExternalPublication(f.file, settings, deps);
+  return { f, settings, deps, inbox, uploads, jobs, fileId, prepareFile };
+}
+
+test("a Snyk private upload resumes after a rename and still checks supplemental SDK repository claims", async () => {
+  const { url, capture, report } = privateSnykProject();
+  const { f, settings, deps, inbox, uploads, prepareFile } =
+    await privateUploadFixture(capture, "snyk", url);
   const original = await prepareFile();
   await expect(original.publish()).rejects.toThrow(
     "Interrupted private upload",
@@ -1402,7 +1433,7 @@ test("a Snyk private upload resumes after a rename and still checks supplemental
   expect(uploads).toHaveLength(2);
   expect(uploads[1]).toEqual(uploads[0]);
 
-  context = "new-inbox";
+  inbox.version = "new-inbox";
   await expect(prepareFile()).rejects.toThrow(/repository|project/iu);
 });
 
@@ -2808,14 +2839,7 @@ test.each(["open-source", "code"] as const)(
 
     // The released SDK approved these findings without retaining a native issue.
     const { file, checkpoint } = releasedSnykCheckpoints[product];
-    const directory = join(
-      f.environment.CODEX_SECURITY_STATE_DIR,
-      "external-finding-publications",
-    );
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await writeFile(join(directory, file), JSON.stringify(checkpoint), {
-      mode: 0o600,
-    });
+    await f.writeCheckpoint(file, checkpoint);
     const first = await f.prepareNormalized(bare);
     expect(first.preview.resumed).toBe(true);
     await f.loseResponse(first);
@@ -4790,7 +4814,7 @@ const githubOrigin = {
 };
 const nativeSemgrep = semgrepJson();
 
-test.each([
+const awsReaderUpgrades = [
   {
     provider: "inspector",
     raw: inspectorReportWithRelatedCves(),
@@ -4799,6 +4823,8 @@ test.each([
     previousDigest:
       "4e90748318e5952a1fa90ff9c25153396340a097db6112f27bdf89a3a092dade",
     expectedCount: 2,
+    previousSha256:
+      "91b5a4d309daee520029a3d54e809ad84d8b47ee97df5fd54d56323fc246f640",
   },
   {
     provider: "continuum",
@@ -4808,7 +4834,13 @@ test.each([
     previousDigest:
       "22307dedb51cefecf56d11fd68f45324dceb5226bfddfbd48c635a462bb68fb5",
     expectedCount: 1,
+    previousSha256:
+      "98f888f8b748bb54a209b19de53af40867f5f129049a99da0387e697895aa320",
   },
+] as const;
+
+test.each([
+  ...awsReaderUpgrades,
   {
     provider: "blackduck",
     raw: blackDuckBomReport([githubOrigin]),
@@ -11770,41 +11802,165 @@ Object.assign(boundEndorSarif.runs[0]!, {
   versionControlProvenance: [{ repositoryUri: exampleRepository }],
 });
 const endorVulnerability = endorSource.spec.finding_metadata.vulnerability;
-const structuredPrivateProviders = [
-  {
-    provider: "blackduck",
-    raw: blackDuckBomReport(),
-    retained: { row: blackDuckBomRow() },
-    sourceRepositoryUrl: exampleRepository,
+test.each(["package", "malware aliases"] as const)(
+  "the Endor private upload retains the reviewed %s when its other enrichment exceeds Cloud limits",
+  async (retained) => {
+    const keepPackage = retained === "package";
+    const packageName = keepPackage ? "alternate-package" : "x".repeat(513);
+    const aliases = keepPackage
+      ? Array.from({ length: 99 }, (_, i) => `MAL-${i}`)
+      : ["MAL-example"];
+    const raw = {
+      ...endorSource,
+      spec: {
+        ...endorSource.spec,
+        target_dependency_name: null,
+        target_dependency_package_name: packageName,
+        finding_metadata: {
+          vulnerability: endorVulnerability,
+          malware: { spec: { aliases } },
+        },
+      },
+    };
+    const { inbox, uploads, prepareFile } = await privateUploadFixture(
+      raw,
+      "endor",
+    );
+    inbox.formats = ["endor.findings_json.v1"];
+    await expect(prepareFile()).rejects.toThrow("security.findings.v1");
+    inbox.formats.push("security.findings.v1");
+    const prepared = await prepareFile();
+    expect(prepared.preview.privateImport?.format).toBe("security.findings.v1");
+    await expect(prepared.publish()).rejects.toThrow(
+      "Interrupted private upload",
+    );
+    const { findings, format } = JSON.parse(uploads[0]!.bytes);
+    expect(format).toBe("security.findings.v1");
+    expect(findings).toHaveLength(1);
+    const { evidence } = findings[0];
+    expect(evidence.source_data).toEqual(raw);
+    expect(evidence.advisory_ids).toEqual([
+      endorVulnerability.meta.name,
+      ...endorVulnerability.spec.aliases,
+      ...(keepPackage ? [] : aliases),
+    ]);
+    expect(evidence.packages ?? []).toEqual(
+      keepPackage
+        ? endorSource.spec.dependency_file_paths.map((path) => ({
+            name: packageName,
+            ecosystem: "npm",
+            installed_version: endorSource.spec.target_dependency_version,
+            manifest_path: path,
+            fixed_versions: [],
+          }))
+        : [],
+    );
   },
-  {
-    provider: "checkmarx",
-    raw: { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
-    retained: { row: checkmarxSastRow() },
-    sourceRepositoryUrl: exampleRepository,
-  },
-  {
-    provider: "sonar",
-    raw: sonarReport,
-    retained: { issue: sonarReport.pages[0]!.issues[0]! },
-    sourceRepositoryUrl: exampleRepository,
-  },
-  {
-    provider: "trivy",
-    raw: trivy,
-    retained: { vulnerability: trivy.Results[0]!.Vulnerabilities[0]! },
-  },
-  {
-    provider: "veracode",
-    raw: veracodePolicyPage(),
-    retained: { row: veracodePolicyRow() },
-    sourceRepositoryUrl: exampleRepository,
-  },
+);
+
+test("an interrupted native Endor checkpoint retains its original bytes and IDs until its inbox changes", async () => {
+  const raw = {
+    ...endorSource,
+    extra: "x".repeat(190 * 1024),
+    spec: {
+      ...endorSource.spec,
+      target_dependency_name: null,
+      target_dependency_package_name: "x".repeat(495),
+      dependency_file_paths: Array.from(
+        { length: 100 },
+        (_, i) => `modules/${i}/yarn.lock`,
+      ),
+    },
+  };
+  const { f, inbox, uploads, prepareFile, jobs, fileId, settings } =
+    await privateUploadFixture(raw, "endor");
+  f.state.catalogHeaders = {};
+  const repositoryPreview = await prepareFile();
+  f.state.catalogHeaders["Codex-Security-Private-Import-Providers"] = "endor";
+  const fresh = await prepareFile();
+  expect(fresh.preview.privateImport?.format).toBe("security.findings.v1");
+  expect(fresh.preview.findings[0]!.evidence).toMatchObject({
+    packages: [],
+    source_data: raw,
+  });
+  inbox.formats = ["endor.findings_json.v1"];
+  await expect(prepareFile()).rejects.toThrow("security.findings.v1");
+  // This released checkpoint predates structured-only uploads for reduced Endor fields.
+  const key =
+    "52629feec0c5f197e2bce1779b908306b6b01d232112b359451da0da111c6ccd";
+  const checkpoint = {
+    format: "endor.findings_json.v1",
+    apiBaseUrl: "https://chatgpt.com/backend-api/aardvark",
+    accountId: "synthetic-account",
+    contextVersion: inbox.version,
+    source: { provider: "endor", source_key: settings.sourceKey },
+    repository: { id: options.repository, repo_connector_id: "github" },
+    sha256: "2aba52fd27bf9b6b2fdf6cb84b701a61690266a29924fb6d6a25e9a4c1574341",
+    uploadRequestId: "200ce23c-1576-4525-8b58-50c43812bce8",
+    jobRequestId: "9bceaf8a-8ef4-4bbc-99a7-78fc0d6dcbcf",
+  };
+  await f.writeCheckpoint(key + ".private-import.json", checkpoint);
+  const retry = await prepareFile();
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.privateImport).toMatchObject({
+    format: checkpoint.format,
+    sha256: checkpoint.sha256,
+  });
+  expect(checkpoint.sha256).not.toBe(fresh.preview.privateImport?.sha256);
+  await expect(retry.publish()).rejects.toThrow("Interrupted private upload");
+  expect(uploads).toEqual([
+    { id: checkpoint.uploadRequestId, bytes: JSON.stringify(raw) },
+  ]);
+  await expect(repositoryPreview.publish()).rejects.toThrow(
+    "A private import already owns this selection",
+  );
+  inbox.recoverUpload = true;
+  expect((await (await prepareFile()).publish()).privateJob?.status).toBe(
+    "completed",
+  );
+  expect(jobs).toEqual([
+    {
+      request_id: checkpoint.jobRequestId,
+      context_version: inbox.version,
+      ...privateJobFields("endor", fileId, checkpoint.format),
+    },
+  ]);
+  inbox.version = "new-inbox";
+  inbox.formats.push("security.findings.v1");
+  const next = await prepareFile();
+  expect(next.preview.resumed).toBe(false);
+  expect(next.preview.privateImport?.sha256).toBe(
+    fresh.preview.privateImport?.sha256,
+  );
+  inbox.recoverUpload = false;
+  await expect(next.publish()).rejects.toThrow("Interrupted private upload");
+  const uploaded = JSON.parse(uploads.at(-1)!.bytes);
+  expect(uploaded.format).toBe("security.findings.v1");
+  expect(uploaded.findings).toHaveLength(1);
+  expect(uploaded.findings[0].evidence).toMatchObject({
+    packages: [],
+    source_data: raw,
+  });
+});
+
+const versionThreeReports = [
+  ["blackduck", blackDuckBomReport(), { row: blackDuckBomRow() }],
+  [
+    "checkmarx",
+    { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
+    { row: checkmarxSastRow() },
+  ],
+  ["sonar", sonarReport, { issue: sonarReport.pages[0]!.issues[0]! }],
+  ["trivy", trivy, { vulnerability: trivy.Results[0]!.Vulnerabilities[0]! }],
+  ["veracode", veracodePolicyPage(), { row: veracodePolicyRow() }],
 ] as const;
 
 test.each([
-  ...structuredPrivateProviders.map((scenario) => ({
-    ...scenario,
+  ...versionThreeReports.map(([provider, raw, retained]) => ({
+    provider,
+    raw,
+    retained,
+    sourceRepositoryUrl: provider === "trivy" ? undefined : exampleRepository,
     format: "security.findings.v1" as const,
     jobVersion: 3 as const,
   })),
@@ -11813,26 +11969,11 @@ test.each([
     format: "security.findings.v1",
     raw: [importedAlert()],
   },
-  {
-    provider: "inspector",
-    format: "security.findings.v1",
-    raw: inspectorReportWithRelatedCves(),
-    jobVersion: 2,
-    sourceRepositoryUrl: inspectorRepositoryUrl,
-    previousReader: normalizePreviousInspectorFindings,
-    previousSha256:
-      "91b5a4d309daee520029a3d54e809ad84d8b47ee97df5fd54d56323fc246f640",
-  },
-  {
-    provider: "continuum",
-    format: "security.findings.v1",
-    raw: continuumDetail(),
-    jobVersion: 2,
-    sourceRepositoryUrl: continuumRepository,
-    previousReader: normalizePreviousContinuumFindings,
-    previousSha256:
-      "98f888f8b748bb54a209b19de53af40867f5f129049a99da0387e697895aa320",
-  },
+  ...awsReaderUpgrades.map((upgrade) => ({
+    ...upgrade,
+    format: "security.findings.v1" as const,
+    jobVersion: 2 as const,
+  })),
   { provider: "snyk", format: "security.findings.v1", raw: snykSarif() },
   {
     provider: "endor",
@@ -11848,7 +11989,8 @@ test.each([
         },
       },
     ],
-    previousReader: (report: unknown) => normalizePreviousEndorFindings(report),
+    normalizePrevious: (report: unknown) =>
+      normalizePreviousEndorFindings(report),
     previousSha256:
       "a6a869d6ac1ac02acf44849bbd55d571e350ff9ef3c8ca8562891eb8cdd64708",
   },
@@ -11863,64 +12005,6 @@ test.each([
     format: "endor.findings_json.v1",
     raw: { list: { objects: [endorFinding()] } },
   },
-  {
-    provider: "endor",
-    format: "security.findings.v1",
-    raw: {
-      ...endorSource,
-      extra: "x".repeat(190 * 1024),
-      spec: {
-        ...endorSource.spec,
-        target_dependency_name: null,
-        target_dependency_package_name: "x".repeat(495),
-        dependency_file_paths: Array.from(
-          { length: 100 },
-          (_, i) => `modules/${i}/yarn.lock`,
-        ),
-      },
-    },
-    // Captured after the native upload was interrupted on 18a74438b.
-    releasedNative: {
-      key: "52629feec0c5f197e2bce1779b908306b6b01d232112b359451da0da111c6ccd",
-      sha256:
-        "2aba52fd27bf9b6b2fdf6cb84b701a61690266a29924fb6d6a25e9a4c1574341",
-      uploadRequestId: "200ce23c-1576-4525-8b58-50c43812bce8",
-      jobRequestId: "9bceaf8a-8ef4-4bbc-99a7-78fc0d6dcbcf",
-    },
-  },
-  ...[
-    {
-      packageName: "alternate-package",
-      malwareAliases: Array.from({ length: 99 }, (_, i) => `MAL-${i}`),
-      reviewedPackage: "alternate-package",
-      reviewedMalware: [],
-    },
-    {
-      packageName: "x".repeat(513),
-      malwareAliases: ["MAL-example"],
-      reviewedPackage: null,
-      reviewedMalware: ["MAL-example"],
-    },
-  ].map(
-    ({ packageName, malwareAliases, reviewedPackage, reviewedMalware }) => ({
-      provider: "endor" as const,
-      format: "security.findings.v1" as const,
-      raw: {
-        ...endorSource,
-        spec: {
-          ...endorSource.spec,
-          target_dependency_name: null,
-          target_dependency_package_name: packageName,
-          finding_metadata: {
-            vulnerability: endorVulnerability,
-            malware: { spec: { aliases: malwareAliases } },
-          },
-        },
-      },
-      reviewedPackage,
-      reviewedMalware,
-    }),
-  ),
   {
     provider: "wiz",
     format: "wiz.vulnerability_json.v1",
@@ -11938,8 +12022,6 @@ test.each([
   "a signed-in $provider private import resumes lost upload and job responses",
   async (scenario) => {
     const { provider, format, raw } = scenario;
-    const releasedNative =
-      "releasedNative" in scenario ? scenario.releasedNative : undefined;
     const sourceRepositoryUrl =
       "sourceRepositoryUrl" in scenario
         ? scenario.sourceRepositoryUrl
@@ -11974,9 +12056,6 @@ test.each([
     if (provider === "checkmarx") acknowledgedVersion = "2";
     let expectedJobsPath = upgrade ? v1Jobs : versionedJobs;
     let canCreate = true;
-    let fileRequest: string | undefined;
-    let fileHash: string | undefined;
-    let fileBytes = 0;
     let reportCount = 1;
     let unorderedUpdates = 0;
     const uploadedReports: { id: string; bytes: string }[] = [];
@@ -11986,39 +12065,17 @@ test.each([
     const fileId = "aifile_" + "a".repeat(32);
     let jobId = "import_" + "b".repeat(32);
     const calls: string[] = [];
-    const fileMetadata = () => ({
-      object: "security.finding_import_file",
-      id: fileId,
-      purpose: "report",
-      sha256: fileHash,
-      bytes: fileBytes,
-    });
-    const job = (status: string) => ({
-      object: "security.finding_import_job",
-      id: jobId,
-      request_id: jobRequest,
-      source: { provider, source_key: settings.sourceKey },
-      input: { type: "file", file_id: fileId, format: expectedFormat },
-      default_targets: [
-        {
-          type: "repository",
-          repo_id: options.repository,
-          repo_connector_id: "github",
-        },
-      ],
-      status,
-      counts: {
-        total: reportCount,
-        discovered: reportCount,
-        created: status === "completed" ? reportCount - unorderedUpdates : 0,
-        updated: 0,
-        unchanged: 0,
-        error: status === "completed" ? unorderedUpdates : 0,
-        unprocessed: status === "completed" ? 0 : reportCount,
-      },
-      poll_after_seconds: null,
-      error: null,
-    });
+    const fileMetadata = () =>
+      privateFileMetadata(fileId, uploadedReports.at(-1)!.bytes);
+    const jobFields = () => privateJobFields(provider, fileId, expectedFormat);
+    const job = (status: string) =>
+      privateJobReceipt(
+        { ...jobFields(), request_id: jobRequest },
+        jobId,
+        status,
+        reportCount,
+        unorderedUpdates,
+      );
     const deps = {
       ...f.deps,
       fetch: async (url: string, init: RequestInit) => {
@@ -12043,23 +12100,12 @@ test.each([
         }
         if (path.startsWith("/external/")) return f.deps.fetch(url, init);
         if (path === "/finding-imports/context")
-          return Response.json({
-            object: "security.finding_import_context",
-            context_version: contextVersion,
-            can_upload: canCreate,
-            can_create_import_jobs: canCreate,
-            can_read: true,
-            formats,
-            limits: {
-              max_direct_file_bytes: 32 * 1024 * 1024,
-              max_record_bytes: 1024 * 1024,
-            },
-          });
+          return privateInboxContext(contextVersion, formats, canCreate);
         if (path === "/finding-imports/files") {
           const form = init.body as FormData;
           expect(form.get("context_version")).toBe(contextVersion);
           expect(form.get("purpose")).toBe("report");
-          fileRequest = String(form.get("request_id"));
+          const id = String(form.get("request_id"));
           const bytes = await (form.get("file") as Blob).text();
           if (expectedFormat === "security.findings.v1") {
             const doc = JSON.parse(bytes);
@@ -12067,33 +12113,6 @@ test.each([
             expect(doc.findings[0].source_finding_id).toBeTruthy();
             expect(doc.findings[0].evidence.source_data).toBeTruthy();
             reportCount = doc.findings.length;
-            if (releasedNative) {
-              expect(doc.findings).toHaveLength(1);
-              expect(doc.findings[0].evidence.packages ?? []).toEqual([]);
-              expect(doc.findings[0].evidence.source_data).toEqual(raw);
-            }
-            if ("reviewedPackage" in scenario) {
-              expect(doc.findings).toHaveLength(1);
-              const { evidence } = doc.findings[0];
-              expect(evidence.source_data).toEqual(raw);
-              expect(evidence.advisory_ids).toEqual([
-                endorVulnerability.meta.name,
-                ...endorVulnerability.spec.aliases,
-                ...scenario.reviewedMalware,
-              ]);
-              expect(evidence.packages ?? []).toEqual(
-                scenario.reviewedPackage
-                  ? endorSource.spec.dependency_file_paths.map((path) => ({
-                      name: scenario.reviewedPackage,
-                      ecosystem: "npm",
-                      installed_version:
-                        endorSource.spec.target_dependency_version,
-                      manifest_path: path,
-                      fixed_versions: [],
-                    }))
-                  : [],
-              );
-            }
             if ("retained" in scenario) {
               expect(doc.findings).toHaveLength(1);
               expect(doc.findings[0].evidence.source_data).toMatchObject(
@@ -12115,20 +12134,12 @@ test.each([
           } else {
             expect(bytes).toBe(originalBytes);
           }
-          uploadedReports.push({ id: fileRequest, bytes });
-          fileHash = hash("sha256", bytes);
-          fileBytes = Buffer.byteLength(bytes);
+          uploadedReports.push({ id, bytes });
           if (loseResponses && uploadedReports.length === 1)
             throw new Error("lost upload response");
           return Response.json(fileMetadata());
         }
-        if (
-          releasedNative &&
-          !fileRequest &&
-          path ===
-            `/finding-imports/file-requests/${releasedNative.uploadRequestId}`
-        )
-          return new Response(null, { status: 404 });
+        const fileRequest = uploadedReports.at(-1)?.id;
         if (path === `/finding-imports/file-requests/${fileRequest}`) {
           if ("previousSha256" in scenario && uploadedReports.length === 1)
             return new Response(null, { status: 404 });
@@ -12138,22 +12149,11 @@ test.each([
           jobBodies.push(String(init.body));
           const body = JSON.parse(String(init.body));
           expect(body.request_id).not.toBe(fileRequest);
-          expect(body.source).toEqual({
-            provider,
-            source_key: settings.sourceKey,
+          expect(body).toEqual({
+            request_id: body.request_id,
+            context_version: contextVersion,
+            ...jobFields(),
           });
-          expect(body.input).toEqual({
-            type: "file",
-            file_id: fileId,
-            format: expectedFormat,
-          });
-          expect(body.default_targets).toEqual([
-            {
-              type: "repository",
-              repo_id: options.repository,
-              repo_connector_id: "github",
-            },
-          ]);
           if (!loseResponses) {
             expect(body.request_id).not.toBe(jobRequest);
             jobRequest = body.request_id;
@@ -12200,16 +12200,10 @@ test.each([
     expect(cli.stderr.text()).toContain(
       `Report: ${format} (${original.preview.privateImport?.bytes} bytes)`,
     );
-    if (
-      format === "endor.findings_json.v1" ||
-      releasedNative ||
-      "reviewedPackage" in scenario
-    ) {
+    if (format === "endor.findings_json.v1") {
       const supported = formats;
-      formats = ["endor.findings_json.v1"];
-      if (format === "endor.findings_json.v1")
-        expect((await prepare()).preview.privateImport?.format).toBe(format);
-      else await expect(prepare()).rejects.toThrow("security.findings.v1");
+      formats = [format];
+      expect((await prepare()).preview.privateImport?.format).toBe(format);
       formats = supported;
     }
     expect(calls.filter((call) => call.startsWith("POST"))).toEqual([]);
@@ -12218,35 +12212,12 @@ test.each([
     canCreate = false;
     await expect(prepare()).rejects.toThrow("unavailable");
     canCreate = true;
-    // Stage the older reader's serialized evidence to reproduce an upgrade
-    // after upload. A fresh context below must use the current reader again.
-    if (releasedNative) {
-      const { key, ...saved } = releasedNative;
-      expectedFormat = "endor.findings_json.v1";
-      formats = [expectedFormat];
-      contextVersion = "generation-a";
-      const directory = join(f.root, "state", "external-finding-publications");
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      await writeFile(
-        join(directory, key + ".private-import.json"),
-        JSON.stringify({
-          ...saved,
-          format: expectedFormat,
-          apiBaseUrl: "https://chatgpt.com/backend-api/aardvark",
-          accountId: "synthetic-account",
-          contextVersion,
-          source: { provider, source_key: settings.sourceKey },
-          repository: { id: options.repository, repo_connector_id: "github" },
-        }),
-        { mode: 0o600 },
-      );
-    }
     const staged =
-      "previousReader" in scenario && scenario.previousReader
+      "normalizePrevious" in scenario && scenario.normalizePrevious
         ? await prepareNormalizedExternalPublication(
             JSON.parse(
               JSON.stringify(
-                scenario.previousReader(raw, sourceRepositoryUrl ?? ""),
+                scenario.normalizePrevious(raw, sourceRepositoryUrl ?? ""),
               ),
             ),
             settings,
@@ -12262,21 +12233,14 @@ test.each([
     const saved = JSON.parse(
       await readFile(interrupted.result.savedSubmission!, "utf8"),
     );
+    expect(saved).toMatchObject({
+      sha256: fileMetadata().sha256,
+      uploadRequestId: uploadedReports.at(-1)!.id,
+    });
     expect(saved.jobApiVersion).toBe(upgrade ? undefined : jobVersion);
-    expect(fileHash).toBe(saved.sha256);
-    expect(fileRequest).toBe(saved.uploadRequestId);
-    if (releasedNative) {
-      expect(saved).toMatchObject({
-        format: "endor.findings_json.v1",
-        sha256: releasedNative.sha256,
-        uploadRequestId: releasedNative.uploadRequestId,
-        jobRequestId: releasedNative.jobRequestId,
-      });
-      expect(fileHash).not.toBe(original.preview.privateImport?.sha256);
-    }
     if ("previousSha256" in scenario) {
-      expect(fileHash).toBe(scenario.previousSha256);
-      expect(fileHash).not.toBe(original.preview.privateImport?.sha256);
+      expect(saved.sha256).toBe(scenario.previousSha256);
+      expect(saved.sha256).not.toBe(original.preview.privateImport?.sha256);
     }
     await expect(repositoryPreview.publish()).rejects.toThrow(
       "previousSha256" in scenario
@@ -12386,7 +12350,6 @@ test.each([
       expectedFormat,
     );
     contextVersion = "generation-c";
-    if (releasedNative) formats.push("endor.findings_json.v1");
     expectedJobsPath = versionedJobs;
     unorderedUpdates = 0;
     advertised = true;
@@ -12407,7 +12370,7 @@ test.each([
         original.preview.privateImport?.sha256,
       );
     expect((await fresh.publish()).privateJob?.status).toBe(terminal);
-    expect(fileHash).toBe(fresh.preview.privateImport?.sha256);
+    expect(fresh.preview.privateImport?.sha256).toBe(fileMetadata().sha256);
     const failedJob = jobId;
     // The saved receipt remains readable after this provider drops out of discovery.
     advertised = false;
@@ -12437,8 +12400,10 @@ test.each([
     }
     const retry = await prepare();
     const secondPreview = await prepare();
-    expect(retry.preview.resumed).toBe(false);
-    expect(retry.preview.privateImport?.retryOfJobId).toBe(failedJob);
+    expect(retry.preview).toMatchObject({
+      resumed: false,
+      privateImport: { retryOfJobId: failedJob },
+    });
 
     // A terminal response still acknowledges the report if saving its receipt fails.
     terminal = "completed";
@@ -12465,25 +12430,80 @@ test.each([
     }
     // A second preview of the failed job replays the already-started replacement.
     loseResponses = true;
-    const uploads = calls.filter(
-      (call) => call === "POST /finding-imports/files",
-    ).length;
+    const priorUploads = uploadedReports.length;
     expect((await secondPreview.publish()).privateJob?.id).not.toBe(failedJob);
-    expect(
-      calls.filter((call) => call === "POST /finding-imports/files"),
-    ).toHaveLength(uploads);
+    expect(uploadedReports).toHaveLength(priorUploads);
   },
 );
 
-function privateInboxContext(context_version = "generation-a") {
+function privateJobFields(provider: string, fileId: string, format: string) {
+  return {
+    source: { provider, source_key: options.sourceKey },
+    input: { type: "file", file_id: fileId, format },
+    default_targets: [
+      {
+        type: "repository",
+        repo_id: options.repository,
+        repo_connector_id: "github",
+      },
+    ],
+  };
+}
+
+function privateFileMetadata(id: string, bytes: string) {
+  return {
+    object: "security.finding_import_file",
+    id,
+    purpose: "report",
+    sha256: hash("sha256", bytes),
+    bytes: Buffer.byteLength(bytes),
+  };
+}
+
+function privateJobReceipt(
+  request: object,
+  id: string,
+  status = "completed",
+  total = 1,
+  errors = 0,
+) {
+  const processed = status === "completed" ? total : 0;
+  const error = status === "completed" ? errors : 0;
+  return {
+    ...request,
+    object: "security.finding_import_job",
+    id,
+    status,
+    counts: {
+      total,
+      discovered: total,
+      created: processed - error,
+      updated: 0,
+      unchanged: 0,
+      error,
+      unprocessed: total - processed,
+    },
+    poll_after_seconds: null,
+    error: null,
+  };
+}
+
+function privateInboxContext(
+  context_version = "generation-a",
+  formats = ["security.findings.v1"],
+  canCreate = true,
+) {
   return Response.json({
     object: "security.finding_import_context",
     context_version,
     can_read: true,
-    can_upload: true,
-    can_create_import_jobs: true,
-    formats: ["security.findings.v1"],
-    limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
+    can_upload: canCreate,
+    can_create_import_jobs: canCreate,
+    formats,
+    limits: {
+      max_direct_file_bytes: 32 * 1024 * 1024,
+      max_record_bytes: 1024 * 1024,
+    },
   });
 }
 
@@ -12509,7 +12529,8 @@ test.each([
 ])(
   "only a verified private Wiz checkpoint replays pre-Checkmarx evidence ($data)",
   async ({ data, report, key, sha256 }) => {
-    const f = await fixture();
+    const { f, deps, inbox, jobs } = await privateUploadFixture([], "wiz");
+    f.state.catalogHeaders = {}; // Recovery must also work after discovery stops advertising Wiz.
     const selection = sdkSelection(
       [sdkRow(normalized().source_finding_id, data)],
       report,
@@ -12531,51 +12552,22 @@ test.each([
       jobRequestId: "a942a3d4-ad70-4b4d-aaca-4e1e2b70cb20",
       fileId: "aifile_" + "a".repeat(32),
     };
-    const directory = join(f.root, "state", "external-finding-publications");
-    const path = join(directory, key + ".private-import.json");
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
-    let contextVersion = checkpoint.contextVersion;
-    const requests: unknown[] = [];
+    const path = await f.writeCheckpoint(
+      key + ".private-import.json",
+      checkpoint,
+    );
     const prepare = () =>
       prepareNormalizedExternalPublication(selection, options, {
+        ...deps,
         environment: {
           ...f.environment,
           CODEX_SECURITY_CLOUD_BASE_URL: undefined,
           CODEX_SECURITY_CLOUD_WEB_URL: undefined,
         },
-        fetch: async (url, init) => {
-          const pathname = new URL(url).pathname;
-          if (pathname.endsWith("/repositories"))
-            return f.deps.fetch(url, init);
-          if (pathname.endsWith("/finding-imports/context"))
-            return privateInboxContext(contextVersion);
-          expect(pathname).toEndWith("/finding-imports/jobs");
-          expect(init.method).toBe("POST");
-          const job = JSON.parse(String(init.body));
-          requests.push(job);
-          return Response.json({
-            ...job,
-            object: "security.finding_import_job",
-            id: "import_" + "b".repeat(32),
-            status: "completed",
-            counts: {
-              total: 1,
-              discovered: 1,
-              created: 1,
-              updated: 0,
-              unchanged: 0,
-              error: 0,
-              unprocessed: 0,
-            },
-            poll_after_seconds: null,
-            error: null,
-          });
-        },
       });
-    contextVersion = "different-inbox";
+    inbox.version = "different-inbox";
     await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
-    contextVersion = checkpoint.contextVersion;
+    inbox.version = checkpoint.contextVersion;
     f.state.repositoryUrl = otherRepository;
     await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
     f.state.repositoryUrl = exampleRepository;
@@ -12583,23 +12575,11 @@ test.each([
     expect(resumed.preview.resumed).toBe(true);
     expect(resumed.preview.privateImport?.sha256).toBe(checkpoint.sha256);
     expect((await resumed.publish()).counts.created).toBe(1);
-    expect(requests).toEqual([
+    expect(jobs).toEqual([
       {
         request_id: checkpoint.jobRequestId,
-        context_version: checkpoint.contextVersion,
-        source,
-        input: {
-          type: "file",
-          file_id: checkpoint.fileId,
-          format: checkpoint.format,
-        },
-        default_targets: [
-          {
-            type: "repository",
-            repo_id: repository.id,
-            repo_connector_id: repository.repo_connector_id,
-          },
-        ],
+        context_version: inbox.version,
+        ...privateJobFields("wiz", checkpoint.fileId, checkpoint.format),
       },
     ]);
     await rm(path);
@@ -12607,30 +12587,18 @@ test.each([
       "requires the checkmarx provider",
     );
     await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
-    expect(requests).toHaveLength(1);
+    expect(jobs).toHaveLength(1);
   },
 );
 
 test("a private preview recognizes a later repository checkpoint under its historical filename", async () => {
-  const f = await fixture();
+  const { f, deps, uploads, jobs } = await privateUploadFixture([], "wiz");
   const privatePreview = await prepareNormalizedExternalPublication(
     scoredFindings(2.5),
     options,
-    {
-      ...f.deps,
-      fetch: async (url, init) => {
-        expect(init.method).toBe("GET");
-        if (new URL(url).pathname.endsWith("/repositories")) {
-          const response = await f.deps.fetch(url, init);
-          return new Response(response.body, {
-            headers: { "Codex-Security-Private-Import-Providers": "wiz" },
-          });
-        }
-        expect(new URL(url).pathname).toEndWith("/finding-imports/context");
-        return privateInboxContext();
-      },
-    },
+    deps,
   );
+  f.state.catalogHeaders = {};
   const repository = await prepareNormalizedExternalPublication(
     scoredFindings(new Number(2.5)),
     options,
@@ -12641,6 +12609,8 @@ test("a private preview recognizes a later repository checkpoint under its histo
   await expect(privatePreview.publish()).rejects.toThrow(
     "A repository submission is pending",
   );
+  expect(uploads).toHaveLength(0);
+  expect(jobs).toHaveLength(0);
   expect(f.posts).toHaveLength(1);
 });
 
