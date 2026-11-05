@@ -104,6 +104,8 @@
 - preserve saved-scan errors and recovery advice ([#1266](https://github.com/openai/codex-security/pull/1266))
 - preserve AWS code scanning evidence and retries ([#2347](https://github.com/openai/codex-security/pull/2347))
 - make scan and integration guides evergreen ([#2350](https://github.com/openai/codex-security/pull/2350))
+- share workbench arguments and simplify SDK and eval workflows ([#2325](https://github.com/openai/codex-security/pull/2325))
+- reject directory trees emptied before dispatch ([#2181](https://github.com/openai/codex-security/pull/2181))
 
 </details>
 
