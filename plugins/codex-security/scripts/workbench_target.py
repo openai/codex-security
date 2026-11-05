@@ -848,10 +848,16 @@ def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str
 
 
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
-    repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None:
+    paths = iter_git_directory_snapshot_paths(target)
+    if paths is None:
         return None
-    return sorted({str(path): path for path in _iter_git_snapshot_paths(target)}.values(), key=str)
+    return sorted({str(path): path for path in paths}.values(), key=str)
+
+
+def iter_git_directory_snapshot_paths(target: Path) -> Iterator[Path] | None:
+    if git_output(target, "rev-parse", "--show-toplevel") is None:
+        return None
+    return _iter_git_snapshot_paths(target)
 
 
 def _iter_git_snapshot_paths(target: Path) -> Iterator[Path]:
@@ -933,7 +939,7 @@ def _iter_git_snapshot_paths(target: Path) -> Iterator[Path]:
             nested_worktrees.add((metadata.st_dev, metadata.st_ino))
             yield from _iter_git_snapshot_paths(path)
             continue
-        yield from _iter_source_snapshot_paths(path)
+        yield from source_directory_snapshot_paths(path)
 
     if _WINDOWS:
         # Git omits empty untracked directories from its file listing. Inventory
@@ -1024,20 +1030,7 @@ def source_directory_snapshot_paths(
     include_git_metadata: bool = False,
     onerror: Callable[[OSError], None] | None = None,
 ) -> list[Path]:
-    return sorted(
-        _iter_source_snapshot_paths(
-            target, excluded, include_git_metadata=include_git_metadata, onerror=onerror
-        )
-    )
-
-
-def _iter_source_snapshot_paths(
-    target: Path,
-    excluded: tuple[Path, ...] = (),
-    *,
-    include_git_metadata: bool = False,
-    onerror: Callable[[OSError], None] | None = None,
-) -> Iterator[Path]:
+    paths: list[Path] = []
     for directory, directories, files in os.walk(
         target, topdown=True, followlinks=False, onerror=onerror
     ):
@@ -1049,16 +1042,17 @@ def _iter_source_snapshot_paths(
             ) or path in excluded:
                 directories.remove(name)
                 continue
-            yield path
+            paths.append(path)
             # Name-surrogate reparse points include Windows directory junctions.
             if getattr(path.lstat(), "st_reparse_tag", 0) & 0x20000000:
                 directories.remove(name)
-        yield from (
+        paths.extend(
             parent / name
             for name in files
             if (name not in SOURCE_METADATA_DIRECTORIES or include_git_metadata)
             and parent / name not in excluded
         )
+    return sorted(paths)
 
 
 def directory_content_digest(
@@ -1115,31 +1109,6 @@ def directory_content_digest(
         else:
             raise UnsupportedLocalFileType(f"Unsupported local file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
-
-
-def directory_has_regular_file(target: Path) -> bool:
-    """Use registration's inventory rules but stop inspecting paths at the first regular file."""
-    failure = None
-
-    def remember_error(error: OSError) -> None:
-        nonlocal failure
-        if failure is None:
-            failure = error
-
-    paths = (
-        _iter_source_snapshot_paths(target, onerror=remember_error)
-        if git_output(target, "rev-parse", "--show-toplevel") is None
-        else _iter_git_snapshot_paths(target)
-    )
-    for path in paths:
-        try:
-            if stat.S_ISREG(path.lstat().st_mode):
-                return True
-        except OSError as exc:
-            remember_error(exc)
-    if failure is not None:
-        raise failure
-    return False
 
 
 def directory_snapshot_regular_file_count(target: Path) -> int:

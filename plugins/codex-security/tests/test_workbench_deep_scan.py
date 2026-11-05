@@ -9,6 +9,7 @@ import runpy
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -98,21 +99,36 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 
 @pytest.mark.cross_platform
-def test_target_admission_stops_the_plain_inventory_at_the_first_file(
+def test_target_admission_stops_at_the_first_non_directory_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
     check_selected_targets = runpy.run_path(str(script))["check_selected_targets"]
-    (tmp_path / "source.py").touch()
+    events = []
 
-    def walk(path, **kwargs):
-        assert path == tmp_path
-        yield str(path), [], ["source.py"]
-        pytest.fail("admission continued walking after finding a regular file")
+    class FileEntry:
+        name = "file.py"
 
-    monkeypatch.setenv("CODEX_SECURITY_GIT", "")
-    monkeypatch.setattr(os, "walk", walk)
+        def is_dir(self, *, follow_symlinks):
+            assert not follow_symlinks
+            return False
+
+    def entries():
+        events.append("read")
+        yield FileEntry()
+        pytest.fail("admission read a second directory entry")
+
+    @contextmanager
+    def scandir(path):
+        assert Path(path) == tmp_path
+        try:
+            yield entries()
+        finally:
+            events.append("closed")
+
+    monkeypatch.setattr(os, "scandir", scandir)
     check_selected_targets(tmp_path, ["."], [])
+    assert events == ["read", "closed"]
 
 
 def restore_v53_schema(state_dir: Path) -> None:
@@ -284,15 +300,14 @@ class DeepScan:
         prompt_path: Path,
         artifact_dir: Path,
         input_worker_ids: list[str],
-    ) -> dict[str, object]:
-        return seed_legacy_reducer(
+    ) -> None:
+        seed_legacy_reducer(
             self.state_dir,
             self.id,
             worker_id,
             str(prompt_path),
             str(artifact_dir),
-            *(item for worker in input_worker_ids for item in ("--input-worker-id", worker)),
-            environment=deep_environment(self.codex_home),
+            *input_worker_ids,
         )
 
     def finish(
@@ -791,7 +806,7 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
             deep.id,
             reducer_id,
             str(result),
-            "1",
+            1,
             environment=deep_environment(deep.codex_home),
         )
 

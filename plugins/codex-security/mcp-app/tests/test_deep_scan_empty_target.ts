@@ -33,6 +33,45 @@ function inspect(run: DeepScanRunState) {
 
 after(() => temporaryDirectories.cleanup());
 
+test("a directory tree emptied after registration dispatches no workers", async () => {
+  const fixture = await fixtureRun();
+  await mkdir(join(fixture.run.targetPath, "first", "nested"), {
+    recursive: true,
+  });
+  await mkdir(join(fixture.run.targetPath, "second"));
+  const source = join(fixture.run.targetPath, "first", "nested", "source.py");
+  await writeFile(source, "");
+  // A registration-time inventory count remains positive after its file is removed.
+  Object.assign(fixture.run, { scopeFileCount: 1 });
+  await rm(source);
+  const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+  const coordinator = createCoordinator(
+    fixture,
+    new FakeStore(fixture.run),
+    executor,
+    {
+      checkFreshTarget: inspect,
+    },
+  );
+  coordinator.start();
+  try {
+    const outcome = await Promise.race([
+      coordinator.settled(),
+      executor.discoveryStarted.promise.then(() =>
+        assert.fail("Empty directory tree dispatched a worker"),
+      ),
+    ]);
+    assert.equal(outcome.status, "failed", outcome.error);
+    assert.match(outcome.error ?? "", /target is empty.*no security audit/iu);
+    assert.equal(executor.discoveryCalls, 0);
+    await writeFile(source, "");
+    await inspect(fixture.run);
+  } finally {
+    coordinator.cancel("fixture cleanup");
+    await coordinator.settled();
+  }
+});
+
 test("only registered paths determine whether the target is empty", async () => {
   const { run } = await fixtureRun();
   run.includePaths = ["left", "right"];
@@ -173,6 +212,8 @@ test(
 for (const [stop, blockedOperation] of [
   ["cancellation", "directory read"],
   ["deadline", "directory read"],
+  ["cancellation", "nested directory read"],
+  ["deadline", "nested directory read"],
   ["cancellation", "Git inventory"],
 ]) {
   test(
@@ -182,12 +223,17 @@ for (const [stop, blockedOperation] of [
       const fixture = await fixtureRun();
       const { run } = fixture;
       await mkdir(run.targetPath);
+      const blockedPath =
+        blockedOperation === "nested directory read"
+          ? join(run.targetPath, "nested")
+          : run.targetPath;
+      if (blockedPath !== run.targetPath) await mkdir(blockedPath);
       const scripts = join(fixture.pluginRoot, "scripts");
       await mkdir(scripts, { recursive: true });
       const markerDir = join(dirname(run.targetPath), "ready");
       await mkdir(markerDir);
       const scriptName = "check_deep_scan_target.py";
-      await writeFile(join(run.targetPath, "source.py"), "");
+      await writeFile(join(blockedPath, "source.py"), "");
       // Stop the real helper inside enumeration. The marker arms the interruption
       // only once the child owns the request, even on slow hosts.
       await writeFile(
@@ -198,7 +244,7 @@ from pathlib import Path
 marker_dir = ${JSON.stringify(markerDir)}
 real_scan = os.scandir
 def blocked(path):
-    if ${JSON.stringify(blockedOperation)} == "directory read" and os.fsdecode(path) == ${JSON.stringify(run.targetPath)}:
+    if ${JSON.stringify(blockedOperation)} != "Git inventory" and os.fsdecode(path) == ${JSON.stringify(blockedPath)}:
         Path(marker_dir, str(os.getpid())).touch()
         time.sleep(30)
     return real_scan(path)

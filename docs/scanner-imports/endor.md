@@ -3,7 +3,10 @@
 Prefer Endor's native Finding JSON. It keeps the scanned commit,
 severity, package and advisory details, and primary SAST or AI SAST locations
 that Endor reports. You can also import self-contained `endorctl` SARIF 2.1.0
-with finding UUIDs.
+with finding UUIDs. A later SARIF import for the same UUID, destination
+and source key can replace the stored commit, package and
+advisory details, and leave severity `unknown`. Use native JSON for updates
+when you need those fields.
 
 ## Quick start
 
@@ -66,10 +69,8 @@ and dismissals come from Endor.
 
 ## SARIF and repeat imports
 
-Both formats identify findings by UUID. Importing SARIF after native JSON
-with the same destination and source key replaces the earlier evidence. You
-can lose the scanned commit, package and advisory details, and severity can
-become `unknown`. The local workbench keeps findings omitted from later exports.
+The local workbench keeps findings omitted from later exports. Use a separate
+source key if you want to retain both formats' evidence for a finding.
 [Imported finding identity and evidence](schema-guide.md)
 
 SARIF keeps finding links, direct repository paths and reported SAST or
