@@ -30,6 +30,8 @@ import {
   type PrivateImportJob,
 } from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
+import type { LocalExternalImportOptions } from "./external-findings-import.js";
+import { tenableReportFormat } from "./tenable-findings.js";
 import {
   guardianFindingId,
   guardianSelectionFormat,
@@ -49,9 +51,10 @@ import {
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
+  requireCloudReader,
   semgrepSarifRepositories,
   snykFileRepositories,
-  type ExternalFindingsReaderOptions,
+  type CloudFindingsReader,
 } from "./external-findings-read.js";
 import {
   canSnapshotWithoutGetters,
@@ -170,11 +173,10 @@ export interface NormalizedExternalPublicationOptions {
   inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
-/** File readers accept the vendor formats installed in this SDK. */
-export interface ExternalPublicationOptions
-  extends
-    Omit<NormalizedExternalPublicationOptions, "provider">,
-    ExternalFindingsReaderOptions {}
+/** File readers accepted by the Cloud publisher. */
+export interface ExternalPublicationOptions extends LocalExternalImportOptions {
+  provider: CloudFindingsReader;
+}
 
 /** Optional transport, account, cancellation, and progress hooks. */
 export interface ExternalPublicationDependencies {
@@ -691,19 +693,23 @@ function storedFindingId(finding: ExternalFinding): string {
   return "";
 }
 
-function rejectGuardianSelection(input: ExternalFindings): void {
-  const isGuardian = (row: ExternalFinding) =>
-    row &&
-    (guardianFindingId.test(storedFindingId(row)) ||
-      ownData(ownData(row.evidence, "source_data"), "format") ===
-        guardianSelectionFormat);
-  if (
-    ownData(ownData(input, "report"), "format") === guardianSelectionFormat ||
-    (Array.isArray(input?.findings) && input.findings.some(isGuardian))
-  )
-    throw new CodexSecurityError(
-      "Semgrep Guardian findings require a local import.",
-    );
+function rejectLocalOnlyFindings(input: ExternalFindings): void {
+  function checkFormat(format: unknown) {
+    if (format === tenableReportFormat)
+      requireCloudReader({ provider: "tenable" });
+    if (format === guardianSelectionFormat)
+      throw new CodexSecurityError(
+        "Semgrep Guardian findings require a local import.",
+      );
+  }
+  checkFormat(ownData(ownData(input, "report"), "format"));
+  if (!Array.isArray(input?.findings)) return;
+  for (const row of input.findings) {
+    if (!row) continue;
+    if (guardianFindingId.test(storedFindingId(row)))
+      checkFormat(guardianSelectionFormat);
+    checkFormat(ownData(ownData(row.evidence, "source_data"), "format"));
+  }
 }
 
 export async function prepareExternalPublication(
@@ -713,6 +719,7 @@ export async function prepareExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
+  requireCloudReader(settings);
   const readerSources = snapshotSourceRepositories(
     dependencies.sourceRepositories,
   );
@@ -787,7 +794,7 @@ export async function prepareExternalPublication(
       : await normalize();
   } else {
     const parsed = await readExternalFindings(path, settings);
-    rejectGuardianSelection(parsed.findings);
+    rejectLocalOnlyFindings(parsed.findings);
     input =
       parsed.publication ??
       normalizedPublicationInput(parsed.findings, provider);
@@ -818,6 +825,7 @@ export async function prepareNormalizedExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
+  requireCloudReader(settings);
   return preparePublicationInput(
     normalizedPublicationInput(input, settings.provider),
     settings,
@@ -1321,7 +1329,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
-  if (original) rejectGuardianSelection(original.parsed);
+  if (original) rejectLocalOnlyFindings(original.parsed);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -1334,7 +1342,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
-  rejectGuardianSelection(current);
+  rejectLocalOnlyFindings(current);
   const identity = publicationIdentity(current, provider);
   return {
     current,
@@ -2225,7 +2233,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
-    rejectGuardianSelection({ ...parsed, findings: saved });
+    rejectLocalOnlyFindings({ ...parsed, findings: saved });
     const approvedScope = content.inputProjection?.semgrepPartialScopeDigest;
     if (
       approvedScope !== undefined &&
@@ -2269,7 +2277,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
-    rejectGuardianSelection({ ...parsed, findings: saved });
+    rejectLocalOnlyFindings({ ...parsed, findings: saved });
     content.legacyApproval = true;
     content.inputProjection = {
       ...content.inputProjection,

@@ -1,16 +1,17 @@
-import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
 } from "./external-import-contract.js";
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
+  type ExternalFindingsReaderOptions,
   readExternalFindings,
 } from "./external-findings-read.js";
 import {
   distinctSourceRepositories,
   prepareLocalImport,
   type LocalExternalImportDependencies,
+  type NormalizedLocalImportOptions,
 } from "./external-findings-local.js";
 import {
   snapshotImportOptions,
@@ -19,10 +20,15 @@ import {
 import { abortable } from "./targets.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 
+export interface LocalExternalImportOptions
+  extends
+    Omit<NormalizedLocalImportOptions, "provider">,
+    ExternalFindingsReaderOptions {}
+
 /** Read an installed vendor format and prepare it for the local workbench. */
 export async function prepareLocalExternalImport(
   path: string,
-  options: ExternalPublicationOptions,
+  options: LocalExternalImportOptions,
   dependencies: LocalExternalImportDependencies = {},
 ) {
   dependencies.signal?.throwIfAborted();

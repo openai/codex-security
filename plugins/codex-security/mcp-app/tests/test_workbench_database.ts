@@ -400,6 +400,32 @@ test("legacy retries can reuse a recorded thread and still verify usage", (t) =>
   }
 });
 
+test("the allowance preview keeps its data and receives canonical usage accounting", (t) => {
+  const database = memory(t, 62);
+  insertRunningWorker(database);
+  database.exec(`
+    ALTER TABLE scans ADD COLUMN investigation_policy TEXT;
+    UPDATE scans SET investigation_policy = 'saved policy';
+    INSERT INTO schema_migrations (version, name, applied_at)
+      VALUES (63, 'retain native investigation time allowances', 'preview');
+    UPDATE deep_scan_workers SET attempt = 2, started_at = 'started', sdk_thread_id = NULL;
+    DELETE FROM deep_scan_worker_threads;
+  `);
+  applyMigrations(database);
+  assertMigrationNames(database, 63);
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
+  database.exec("UPDATE deep_scan_runs SET worker_usage_gap = 0");
+  database.exec("UPDATE deep_scan_workers SET attempt = 3");
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
+  const history = migrationHistory(database);
+  applyMigrations(database);
+  assert.deepEqual(migrationHistory(database), history);
+  assert.equal(
+    storedValue(database, "scans", "investigation_policy"),
+    "saved policy",
+  );
+});
+
 test("worker thread history survives retry, replay, and worker retirement", (t) => {
   const database = memory(t, 49);
   insertRunningWorker(database);
