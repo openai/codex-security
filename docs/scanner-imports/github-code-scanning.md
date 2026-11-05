@@ -5,7 +5,7 @@ alert and the instance GitHub returned for the selected ref.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the matching
+From the matching
 checkout, set the repository and source key. For GitHub Enterprise, export
 `GH_HOST` with your hostname first. For a repeat import, use the exact source
 key from your previous preview, including case.

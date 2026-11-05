@@ -1,4 +1,3 @@
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
@@ -3219,14 +3218,12 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  const child = {
+  return {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
     CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
 
 export function environmentWithGit(

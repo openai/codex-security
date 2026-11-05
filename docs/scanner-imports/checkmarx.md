@@ -7,7 +7,7 @@ self-managed CxSAST scan (XML). Both formats support gzip. If you need the repor
 
 ## Preview, import and verify
 
-[Enable external imports](README.md#preview-a-report). From the matching checkout, preview the report with its verified Git URL.
+From the matching checkout, preview the report with its verified Git URL.
 Choose a source key for the product, tenant or instance, project and ref.
 Reuse it for later exports from that stream.
 

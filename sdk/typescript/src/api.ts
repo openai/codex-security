@@ -182,7 +182,6 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import {
   knowledgeBaseProtectedRoots,
   prepareKnowledgeBase,
@@ -6498,7 +6497,6 @@ function withoutProviderKey(
   for (const name of Object.keys(child)) {
     if (name.toUpperCase() === key.toUpperCase()) delete child[name];
   }
-  forwardExternalImportSetting(environment, child);
   return child;
 }
 
@@ -6556,7 +6554,6 @@ export function selectedScanEnvironment(
       ),
     );
   }
-  forwardExternalImportSetting(environment, selected);
   return selected;
 }
 
@@ -7316,13 +7313,11 @@ function standaloneFindingForPrompt(finding: string | object): string {
 export function definedEnvironment(
   environment: ProcessEnvironment,
 ): Record<string, string> {
-  const child = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(environment).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
 
 function withoutCodexHome(

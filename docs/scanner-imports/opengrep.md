@@ -5,7 +5,7 @@ parse errors or timeouts. The preview shows both.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the scanned checkout
+From the scanned checkout
 root, choose a saved report or run OpenGrep in the same shell.
 
 **Saved report.** Set the path to your OpenGrep JSON file.

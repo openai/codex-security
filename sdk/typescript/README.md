@@ -665,17 +665,11 @@ for issue creation.
 
 ### Import external findings
 
-External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
-to enable `publish findings`, `findings imported`, `import sonar`, `import github-advisories`, and
-the SDK's external publication, local import/readback, Sonar issue collection, and advisory acquisition
-APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
-SDK callers can supply the flag through the existing per-call
-`dependencies.environment`, or in `options.environment` for `collectSonarIssues(options)`.
+Scanner imports are available by default in the CLI and SDK.
 For an SDK import of selected Sonar issues, pass their keys in `options.issueKeys`.
 Omit `issueKeys` to collect the project's open security issues. An empty list is rejected.
 If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
 to check the Sonar binding before fetching issues.
-Pure normalizers and file readers remain available.
 For AWS Continuum code findings, use `readContinuumFindings(path, sourceRepositoryUrl)`
 with a saved list or detail response, or `normalizeContinuumFindings(input, sourceRepositoryUrl)`
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.

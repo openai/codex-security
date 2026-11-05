@@ -1,6 +1,6 @@
 # Import Semgrep findings
 
-[Enable external imports](README.md#preview-a-report), then choose the report or
+Choose the report or
 account you have. Each route has a different source of finding IDs.
 
 | Starting point                                                   | What to collect                                                                                                                                                                                | Destination    |
@@ -233,7 +233,7 @@ repository fields on each selected finding.
   without a URL also needs the matching ID and a `repository.name` equal to
   the decoded, namespace-qualified URL path, such as `example/project`.
 
-**Preview the selection.** [Enable external imports](README.md#preview-a-report).
+**Preview the selection.**
 In a Node.js project you control outside the scanned checkout, install
 `@openai/codex-security` and save this script as `preview-semgrep.mjs`.
 Set the deployment, ref, repository URL, source key and finding IDs. Use
@@ -309,7 +309,6 @@ checkout. Each collection gets a new owner-only file. A failed collection
 leaves earlier exports available for replay.
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 report=$(mktemp ./semgrep-backlog.XXXXXX) &&
   codex-security import semgrep example/project --semgrep-deployment example \
     --semgrep-ref refs/heads/topic --semgrep-product sast --format json > "$report" &&

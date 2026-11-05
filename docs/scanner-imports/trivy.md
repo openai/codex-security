@@ -4,7 +4,7 @@ Use a saved Trivy schema-v2 JSON or gzip report from a repository or filesystem 
 
 ## Preview the report
 
-[Enable external imports](README.md#preview-a-report). If you need a report,
+If you need a report,
 run `trivy fs --scanners vuln --format json --output /private/path/trivy.json .`
 from the checkout root. Use a private output directory outside the checkout.
 

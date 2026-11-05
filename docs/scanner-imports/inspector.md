@@ -6,7 +6,7 @@ findings are excluded.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report) and open the matching
+Open the matching
 checkout. Verify the repository's Git URL in your SCM integration. If
 the report identifies the repository only by an Inspector project ARN, verify
 that full ARN against the same URL in the SCM integration before importing.

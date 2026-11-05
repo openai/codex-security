@@ -7,7 +7,7 @@ Use a supplied One CLI JSON or CxSAST XML report directly. For collection, confi
 - Use a trusted session and a private working and temporary directory outside the source tree, for both local and Cloud imports. Set the working directory **before** starting a process. Use a noninteractive, non-login system shell such as `/bin/sh` with `login: false`.
 - If an IDE or build supplies checkout-controlled startup settings, use a known-clean session or a saved export. A trusted host can exclude `LD_*`, `DYLD_*`, `BASH_ENV` and `ENV` before launching a shell or interpreter. Keep existing exclusions and account for restored shell snapshots. Never start a suspect shell to unset variables or source project files. [Codex shell environment policy](https://developers.openai.com/codex/config-advanced/)
 - Resolve the installed [collector](../scripts/collect_checkmarx.py) and vendor tools to trusted absolute paths outside the source tree. For `python_path`, use trusted system tools to inspect the executable and resolve symlinks without running it. Use the native Python 3.10+ interpreter with `-I -S`. Ask for native installation paths if given a shim or shell launcher.
-- Enable external imports. Pass the absolute checkout or unpacked source as `--source-root` before the product. Omit it only when there is no local source tree.
+- Pass the absolute checkout or unpacked source as `--source-root` before the product. Omit it only when there is no local source tree.
 
 ## Checkmarx One
 

@@ -37,7 +37,6 @@ Pass additional finding chunks after `--findings`. To retain file locations, add
 Use the CLI built from this checkout. Choose a stable tenant alias so the same finding can be matched on later imports. [Source build setup](../../sdk/typescript/TESTING.md)
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 cli="$PWD/sdk/typescript/bin/codex-security.mjs"
 node "$cli" publish findings "$reports/selection.json" --provider tenable \
   --to local --repository "$checkout" --source-repository-url "$repository_url" \

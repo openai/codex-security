@@ -6,7 +6,7 @@ summaries from an environment dedicated to one repository.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report) and open the matching
+Open the matching
 checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which
 repository supplied the scanned code, including the archive for an S3 source.
 For a finding from another scanner, you can also check its repository in that

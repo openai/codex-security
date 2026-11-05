@@ -5,7 +5,7 @@ dependency occurrence. Its advisory describes the vulnerability.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the matching
+From the matching
 checkout, set a private report path outside the checkout. Choose a source key
 for this host, repository and alert family, or reuse your existing Dependabot key.
 

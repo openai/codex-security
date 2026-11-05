@@ -40,8 +40,7 @@ Codex plugin session.
 | Track a validated finding                               | Give [`$track-findings`](../plugins/codex-security/skills/track-findings/SKILL.md) the finding and destination. See [plugin connectors](plugin-connectors.md).                                                                             | For completed scans, see [publishing to Linear](../sdk/typescript/docs/cli.md#publish-completed-scans-to-linear).     |
 | Inspect a downloaded skill                              | [Review the skill before installation](#review-a-skill-before-installation) in a trusted Codex chat.                                                                                                                                       | Use the interactive Codex CLI with the plugin enabled.                                                                |
 
-**Read a saved dependency alert.** With `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`,
-run `cs findings imported ./project --format json` to list the repository's
+**Read a saved dependency alert.** Run `cs findings imported ./project --format json` to list the repository's
 imported records. Give the relevant record to `$resolve-dependency-alert` when
 you want Codex to check the installed versions and upgrade options.
 

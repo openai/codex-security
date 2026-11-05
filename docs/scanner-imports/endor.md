@@ -21,7 +21,7 @@ format for these findings. Retrying a saved import reuses its original upload.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). In Endor, verify that
+In Endor, verify that
 the project and scan context match your checkout. A project UUID alone doesn't
 establish that link. From the checkout root, set the namespace and project
 UUID for this default-branch example.

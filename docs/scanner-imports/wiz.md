@@ -7,7 +7,7 @@ support gzip.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). This example imports
+This example imports
 repository package vulnerabilities.
 
 **Saved report.** Choose the file for your repository and branch or build.

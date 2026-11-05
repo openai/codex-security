@@ -5,15 +5,7 @@ to Codex Security Cloud.
 
 ## Preview a report
 
-[Install the CLI](../../README.md#quick-start), then enable imports in the shell
-where you run it or start Codex.
-
-```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
-```
-
-In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
-Keep reports and preview output in a private directory outside the checkout.
+[Install the CLI](../../README.md#quick-start). Keep reports and preview output in a private directory outside the checkout.
 For commands that use `mktemp`, set `TMPDIR` there if needed. In CI, redirect
 both stdout and stderr to private files.
 
@@ -32,7 +24,7 @@ Ask it to preview the report with your configured model.
 
 ## Choose your scanner
 
-With imports enabled, run `codex-security publish findings --help` to check the
+Run `codex-security publish findings --help` to check the
 providers in your installed CLI. The guides cover local and Cloud imports
 unless an input is marked local only.
 
