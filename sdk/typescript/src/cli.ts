@@ -491,7 +491,7 @@ const SKILL_AUTH_OPTION = z
   .enum(SCAN_AUTH_MODES)
   .default("auto")
   .describe(
-    "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+    "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication. ChatGPT requires a separate codex-security login.",
   );
 const VERIFICATION_MODE_OPTION = VerificationModeSchema.optional().describe(
   "Use static source review or standard verification (default: standard).",
@@ -5051,7 +5051,7 @@ export async function main(
             ),
           cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto). ChatGPT requires a separate codex-security login.",
           ),
           verbose: z
             .boolean()
@@ -5774,7 +5774,7 @@ export async function main(
           config: PROJECT_CONFIG_OPTION,
           cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto). ChatGPT requires a separate codex-security login.",
           ),
           component: z
             .array(optionValue("--component"))
