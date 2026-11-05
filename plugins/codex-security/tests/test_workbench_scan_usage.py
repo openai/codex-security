@@ -923,6 +923,193 @@ def test_completion_includes_cached_and_cache_write_tokens(
     )
 
 
+@pytest.mark.parametrize(
+    "cache_field", ["cached_input_tokens", "cache_write_input_tokens", "cache_write_tokens"]
+)
+@pytest.mark.parametrize(
+    ("snapshots", "expected_input", "expected_cache"),
+    [
+        ([(100, 50), (100, None), (100, 50)], 100, 50),
+        ([(100, 100), (200, None), (200, 100)], 200, 100),
+        ([(100, 40), (200, None), (300, 60)], 300, 60),
+        ([(100, 40), (20, None), (100, 20)], 200, 60),
+        ([(100, 40), (200, 20), (300, 30)], 300, 70),
+        ([(100, None), (100, 50)], 100, 50),
+    ],
+    ids=[
+        "same-total",
+        "increasing",
+        "new-writes",
+        "epoch-reset",
+        "explicit-decrease",
+        "initial-omission",
+    ],
+)
+def test_completion_retains_cache_baseline_across_omissions(
+    tmp_path: Path,
+    cache_field: str,
+    snapshots: list[tuple[int, int | None]],
+    expected_input: int,
+    expected_cache: int,
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    events = []
+    is_cache_read = cache_field == "cached_input_tokens"
+    for input_tokens, cache_tokens in snapshots:
+        event = _token_event(counted, input_tokens, 0)
+        reported = event["payload"]["info"]["total_token_usage"]
+        reported.pop("cached_input_tokens" if is_cache_read else "cache_write_input_tokens")
+        if cache_tokens is not None:
+            reported[cache_field] = cache_tokens
+        events.append(event)
+    parent = _rollout(tmp_path, "scan-parent", events)
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(
+                expected_input,
+                expected_cache if is_cache_read else 0,
+                0,
+                cache_write_input_tokens=0 if is_cache_read else expected_cache,
+            ),
+            "threadCount": 1,
+        }.items()
+    )
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_inconsistent_partial_cache_snapshot_cannot_establish_a_baseline(
+    scan_usage, tmp_path: Path, recovered: bool
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    initial = _token_event(started, 100, 0, cached_input_tokens=80)
+    partial = _token_event(started, 100, 0)
+    partial_usage = partial["payload"]["info"]["total_token_usage"]
+    del partial_usage["cached_input_tokens"]
+    partial_usage["cache_write_input_tokens"] = 50
+    events = [initial, partial]
+    if recovered:
+        latest = _token_event(started, 140, 0, cached_input_tokens=80)
+        latest["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 60
+        events.append(latest)
+    result = _measure_rollout(
+        scan_usage, _rollout(tmp_path, "scan-parent", events), started, started
+    )
+    assert result.warnings == {"token_breakdown_unavailable"}
+    assert result.tokens == _counts(
+        140 if recovered else 100, 80, 0, cache_write_input_tokens=60 if recovered else 0
+    )
+
+
+@pytest.mark.parametrize("category", ["cached_input_tokens", "cache_write_input_tokens"])
+@pytest.mark.parametrize("missing", [None, "refined", "other"])
+@pytest.mark.parametrize("new_input", [0, 1000])
+def test_late_cache_classification_only_excludes_ambiguous_categories(
+    tmp_path: Path, category: str, missing: str | None, new_input: int
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    prefix = _token_event(fixture.started_at - timedelta(seconds=1), 1000, 0)
+    owned = _token_event(counted, 2000, 0)
+    refined = _token_event(counted, 2000 + new_input, 0)
+    if missing is not None:
+        other = (
+            "cache_write_input_tokens"
+            if category == "cached_input_tokens"
+            else "cached_input_tokens"
+        )
+        absent = category if missing == "refined" else other
+        for event in (prefix, owned, refined):
+            del event["payload"]["info"]["total_token_usage"][absent]
+    refined["payload"]["info"]["total_token_usage"][category] = 1000
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [prefix, owned, refined]),
+            "child": _rollout(
+                tmp_path, "child", [_token_event(counted, 30, 5)], parent_thread_id="scan-parent"
+            ),
+        },
+        [("scan-parent", "child")],
+    )
+    usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
+    ambiguous = missing == "refined"
+    assert usage["coverage"] == ("partial" if ambiguous else "complete")
+    assert usage["totalTokens"] == (35 if ambiguous else 1035 + new_input)
+    assert usage["byRole"]["parent"]["threadCount"] == (0 if ambiguous else 1)
+    assert usage.get("warnings", []) == (["token_breakdown_unavailable"] if ambiguous else [])
+
+
+@pytest.mark.parametrize("previous_native", [False, True])
+@pytest.mark.parametrize("current_native", [False, True])
+def test_legacy_cache_refinement_survives_turn_boundaries(
+    scan_usage, tmp_path: Path, previous_native: bool, current_native: bool
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    initial = _token_event(started, 100, 10)
+    initial["payload"]["info"]["total_token_usage"].pop("cache_write_input_tokens")
+    refined = _token_event(started, 100, 10, cached_input_tokens=20)
+    refined["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 30
+    later = _token_event(started, 150, 20, cached_input_tokens=20)
+    later["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 30
+    events = [
+        _event(started, "event_msg", {"type": "task_started", "turn_id": "previous"}),
+        initial,
+    ]
+    if previous_native:
+        events.append(
+            _response_event(
+                started,
+                "scan-parent",
+                "previous",
+                100,
+                10,
+                turn_id="previous",
+                cached_input_tokens=7,
+            )
+        )
+    events.extend(
+        [
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "current"}),
+            refined,
+        ]
+    )
+    if current_native:
+        events.append(
+            _response_event(
+                started,
+                "scan-parent",
+                "current",
+                50,
+                10,
+                turn_id="current",
+                cached_input_tokens=5,
+            )
+        )
+    events.append(later)
+    events.extend(
+        _event(started, "event_msg", {"type": "task_complete", "turn_id": turn})
+        for turn in ("previous", "current")
+    )
+    parent = _rollout(tmp_path, "scan-parent", events)
+    result = _measure_rollout(scan_usage, parent, started, started)
+
+    assert result.tokens == _counts(
+        150,
+        (7 if previous_native else 20) + (5 if current_native else 0),
+        20,
+        cache_write_input_tokens=0 if previous_native else 30,
+    )
+    assert result.warnings == set()
+
+
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -1231,6 +1418,7 @@ def test_completion_counts_deep_worker_retries_and_descendants(tmp_path: Path) -
         fixture.environment,
         {
             "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
+            "comparison": _rollout(tmp_path, "comparison", [_token_event(counted, 50, 5)]),
             "sdk-worker": _rollout(tmp_path, "sdk-worker", [_token_event(counted, 20, 5)]),
             "sdk-child": _rollout(
                 tmp_path,
@@ -1242,14 +1430,19 @@ def test_completion_counts_deep_worker_retries_and_descendants(tmp_path: Path) -
         },
         [("sdk-worker", "sdk-child")],
     )
+    with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
+        db.execute(
+            "UPDATE threads SET cwd = ?, created_at = ? WHERE id = 'comparison'",
+            (str(fixture.scan_dir / "artifacts" / "deep_discovery"), int(counted.timestamp())),
+        )
     usage = _complete_scan(fixture)["scan"]["usage"]
     assert (
         usage.items()
         >= {
             "coverage": "complete",
             "source": "codex_rollout",
-            **_counts(67, 0, 13),
-            "threadCount": 4,
+            **_counts(117, 0, 18),
+            "threadCount": 5,
         }.items()
     )
 
@@ -1498,12 +1691,149 @@ def test_metadata_only_deep_owner_requires_direct_control_originator(
     }
 
 
-def test_usage_has_no_separate_workbench_command(workbench_api, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(sys, "argv", ["workbench_db.py", "get-scan-usage"])
-    with pytest.raises(SystemExit) as rejected:
-        workbench_api["parse_args"]("workbench")
-    assert rejected.value.code == 2
-    assert "invalid choice: 'get-scan-usage'" in capsys.readouterr().err
+def test_budget_keeps_measured_totals_when_a_started_worker_has_no_thread(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    fixture.write_parent_rollout([_token_event(counted, 100, 10)])
+    artifact = fixture.scan_dir / "artifacts" / "worker"
+    artifact.mkdir(parents=True)
+    prompt = artifact / "prompt.md"
+    prompt.write_text("Review the fixture.\n", encoding="utf-8")
+    upsert_deep_worker(
+        fixture.state_dir,
+        fixture.scan_id,
+        str(uuid.uuid4()),
+        "discovery",
+        "running",
+        str(prompt),
+        str(artifact),
+        "--attempt",
+        "1",
+        environment=fixture.environment,
+    )
+    usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
+    assert usage["coverage"] == "partial"
+    assert usage["totalTokens"] == 110
+    assert "worker_thread_unavailable" in usage["warnings"]
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_budget_distinguishes_fresh_retry_from_resumed_worker(tmp_path: Path, resume: bool) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    worker = str(uuid.uuid4())
+    artifact = fixture.scan_dir / "artifacts" / "worker"
+    artifact.mkdir(parents=True)
+    prompt = artifact / "prompt.md"
+    prompt.write_text("Review the fixture.", encoding="utf-8")
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 0)])
+    earlier = _rollout(tmp_path, "earlier", [_token_event(counted, 100, 0)])
+    later = _rollout(tmp_path, "later", [_token_event(counted, 5, 0)])
+    _state_graph(
+        fixture.environment, {"scan-parent": parent, "earlier": earlier, "later": later}, []
+    )
+    with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
+        db.execute(
+            "UPDATE threads SET cwd = ?, created_at = ? WHERE id = 'earlier'",
+            (str(artifact), int(counted.timestamp())),
+        )
+
+    def running(attempt: str, *thread: str) -> None:
+        upsert_deep_worker(
+            fixture.state_dir,
+            fixture.scan_id,
+            worker,
+            "discovery",
+            "running",
+            str(prompt),
+            str(artifact),
+            "--attempt",
+            attempt,
+            *thread,
+            environment=fixture.environment,
+        )
+
+    running("1", "--sdk-thread-id", "earlier")
+    running("2", *(["--sdk-thread-id", "earlier"] if resume else []))
+    # Repeat an update without the optional ID, as the worker runner does after an error.
+    running("2")
+
+    def assert_usage(total: int) -> None:
+        usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
+        assert usage["coverage"] == ("complete" if resume else "partial")
+        assert usage["totalTokens"] == total
+        assert ("worker_thread_unavailable" in usage.get("warnings", [])) == (not resume)
+
+    assert_usage(110)
+    running("3", "--sdk-thread-id", "later")
+    assert_usage(115)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("truncated", [False, True])
+@pytest.mark.parametrize("indexed_archive", [False, True])
+def test_budget_counts_compressed_comparison_or_reports_partial_usage(
+    tmp_path: Path, truncated: bool, indexed_archive: bool
+) -> None:
+    try:
+        from compression import zstd
+    except ImportError:
+        zstd = pytest.importorskip("backports.zstd")
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 100, 10)])
+    comparison = _rollout(tmp_path, "comparison", [_token_event(counted, 10, 5)])
+    archive = comparison.with_suffix(".jsonl.zst")
+    frames = zstd.compress(comparison.read_bytes()) + zstd.compress(b"")
+    archive.write_bytes(frames[:-1] if truncated else frames)
+    comparison.unlink()
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": parent, "comparison": archive if indexed_archive else comparison},
+        [],
+    )
+    with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
+        db.execute(
+            "UPDATE threads SET cwd = ?, created_at = ? WHERE id = 'comparison'",
+            (str(fixture.scan_dir / "artifacts" / "deep_discovery"), int(counted.timestamp())),
+        )
+    usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
+    assert usage["coverage"] == ("partial" if truncated else "complete")
+    assert usage["totalTokens"] == (110 if truncated else 125)
+
+
+@pytest.mark.parametrize("missing_child", [False, True])
+def test_budget_usage_includes_final_receipts_and_validation_after_completion(
+    tmp_path: Path, missing_child: bool
+) -> None:
+    fixture = _start_scan(tmp_path)
+    stored = _complete_scan(fixture)["scan"]["usage"]
+    after = datetime.now(fixture.started_at.tzinfo)
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(after, 8, 2)]),
+            "validation": _rollout(tmp_path, "validation", [_token_event(after, 40, 10)]),
+            "validation-child": (
+                tmp_path / "missing.jsonl"
+                if missing_child
+                else _rollout(
+                    tmp_path,
+                    "validation-child",
+                    [_token_event(after, 20, 5)],
+                    parent_thread_id="validation",
+                )
+            ),
+        },
+        [("validation", "validation-child")],
+    )
+    usage = fixture.command(
+        "read-scan-usage", "--thread-id", "scan-parent", "--validation-thread-id", "validation"
+    )
+    assert usage["coverage"] == ("partial" if missing_child else "complete")
+    assert usage["totalTokens"] == (60 if missing_child else 85)
+    assert usage["byRole"]["parent"]["threadCount"] == 2
+    assert fixture.command("get-scan")["scan"]["usage"] == stored
 
 
 @pytest.mark.parametrize("native", [False, True])
@@ -1995,7 +2325,7 @@ def test_worker_discovery_matches_platform_path_spelling(
         state_database,
         ["current-worker"],
         warnings,
-        worker_directories={directory},
+        worker_directories={directory: False},
         started_at=started,
         completed_at=started + timedelta(seconds=1),
     )

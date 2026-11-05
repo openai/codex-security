@@ -108,11 +108,12 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "persist repository identities"),
-    (64, "stabilize Linux repository generations"),
-    (65, "distinguish unvalidated workspace targets"),
-    (66, "retain checkout roots for Git discovery"),
-    (67, "retain rejected workspace checkout boundaries"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "persist repository identities"),
+    (65, "stabilize Linux repository generations"),
+    (66, "distinguish unvalidated workspace targets"),
+    (67, "retain checkout roots for Git discovery"),
+    (68, "retain rejected workspace checkout boundaries"),
 ]
 
 
@@ -193,6 +194,34 @@ def create_historical_database(
     with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
         apply_migrations(connection)
     return connection, apply_migrations
+
+
+def test_repository_preview_history_keeps_original_application_times_after_budget_upgrade():
+    connection, migrate = create_historical_database(69)
+    connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
+    connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
+    connection.execute("DELETE FROM schema_migrations WHERE version = 63")
+    for version in range(64, 69):
+        connection.execute(
+            "UPDATE schema_migrations SET version = ?, applied_at = ? WHERE version = ?",
+            (version - 1, f"preview-{version - 1}", version),
+        )
+
+    migrate(connection)
+    migrate(connection)
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, applied_at FROM schema_migrations WHERE version >= 64 ORDER BY version"
+        )
+    ] == [(version, f"preview-{version - 1}") for version in range(64, 69)]
+    assert (
+        connection.execute("SELECT name FROM schema_migrations WHERE version = 63").fetchone()[0]
+        == "retain unverified Deep Scan worker attempts"
+    )
+    assert "worker_usage_gap" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
 
 
 def insert_historical_row(
@@ -1115,7 +1144,7 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
 
 @pytest.mark.cross_platform
 def test_registration_retains_the_widest_observed_checkout(tmp_path: Path) -> None:
-    connection, migrate = create_historical_database(66)
+    connection, migrate = create_historical_database(67)
     with closing(connection):
         migrate(connection)
         target = tmp_path / "checkout" / "nested" / "target"
@@ -1146,7 +1175,7 @@ def test_checkout_root_is_not_inferred_from_legacy_paths(
     target = tmp_path / "nested" / "target"
     initialize_git_repository(target.parent)
     target.mkdir()
-    connection, migrate = create_historical_database(66)
+    connection, migrate = create_historical_database(67)
     with closing(connection):
         if legacy_registration == "target":
             connection.execute(
@@ -1174,7 +1203,7 @@ def test_checkout_root_is_not_inferred_from_legacy_paths(
 def test_unvalidated_target_migration_preserves_legacy_workspace_paths(
     tmp_path: Path, binding: str
 ) -> None:
-    connection, apply_migrations = create_historical_database(65)
+    connection, apply_migrations = create_historical_database(66)
     with closing(connection):
         target_path = str(tmp_path / "unavailable")
         target_id = None if binding == "unbound" else "legacy-target"
@@ -1273,7 +1302,7 @@ def test_scan_lifecycle_migration_recognizes_saved_recipes(
     registered_version: str | None,
     write_after_upgrade: bool,
 ) -> None:
-    connection, apply_migrations = create_historical_database(64 if registered_version else 63)
+    connection, apply_migrations = create_historical_database(65 if registered_version else 64)
     if write_after_upgrade:
         apply_migrations(connection)
 
@@ -2940,7 +2969,7 @@ def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) ->
                 for row in connection.execute("SELECT * FROM schema_migrations")
             }
             assert migrations["editable scan names"][0] == 42
-            assert migrations["persist repository identities"][0] == 63
+            assert migrations["persist repository identities"][0] == 64
             for name, timestamp in timestamps.items():
                 assert migrations[name][1] == timestamp
 
@@ -2976,7 +3005,7 @@ def test_correcting_aliased_workspace_setup_retains_target(tmp_path: Path, spell
         )
 
 
-@pytest.mark.parametrize("before_version", [63, 64])
+@pytest.mark.parametrize("before_version", [64, 65])
 @pytest.mark.parametrize("with_scan", [False, True])
 def test_identity_migrations_skip_unavailable_historical_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before_version: int, with_scan: bool
@@ -2997,7 +3026,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
         "VALUES (?, ?, ?, ?, ?)",
         (workspace_id, target_id, historical, timestamp, timestamp),
     )
-    old_identity = "repository_sha256_" + "1" * 64 if before_version == 64 else None
+    old_identity = "repository_sha256_" + "1" * 64 if before_version == 65 else None
     if old_identity is not None:
         connection.execute("UPDATE security_targets SET repository_identity = ?", (old_identity,))
     if with_scan:
@@ -3009,7 +3038,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
             (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
         )
     apply_migrations(connection)
-    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 67
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 68
     assert tuple(
         connection.execute(
             "SELECT id, current_path, repository_identity FROM security_targets"
@@ -3044,7 +3073,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
 def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
-    connection, apply_migrations = create_historical_database(64)
+    connection, apply_migrations = create_historical_database(65)
     connection.executescript("""
         CREATE TRIGGER competing_target BEFORE INSERT ON security_targets
         WHEN NEW.id <> 'existing-target'
@@ -3083,7 +3112,7 @@ def test_identity_migration_excludes_all_history_and_caller_git(
         initialize_git_repository(repository)
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
-    connection, _ = create_historical_database(63)
+    connection, _ = create_historical_database(64)
     timestamp = "2026-08-01T00:00:00Z"
     destination = tmp_path / "destination"
     if executable_source.startswith("redirected-"):
@@ -3146,7 +3175,7 @@ def test_identity_migration_excludes_all_history_and_caller_git(
 def test_identity_migration_merges_partially_sequenced_completion_history(
     clock_reversed: bool,
 ) -> None:
-    connection, apply_migrations = create_historical_database(64)
+    connection, apply_migrations = create_historical_database(65)
     connection.execute(
         "INSERT INTO workspaces(id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
     )
@@ -3198,7 +3227,7 @@ def test_identity_migrations_respect_git_availability_for_unavailable_history(
     repository = tmp_path / "healthy"
     initialize_git_repository(repository)
     connection, apply_migrations = create_historical_database(
-        63 if migration == "pre-release" else 64
+        64 if migration == "pre-release" else 65
     )
     import workbench_target as target
     import workbench_target_state as state
@@ -3212,7 +3241,7 @@ def test_identity_migrations_respect_git_availability_for_unavailable_history(
     if migration == "pre-release":
         connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (63, 'persist repository identities', ?)",
+            "INSERT INTO schema_migrations VALUES (64, 'persist repository identities', ?)",
             (timestamp,),
         )
     missing = tmp_path / "unavailable" / "old-checkout"
@@ -3290,7 +3319,7 @@ def test_identity_migrations_respect_git_availability_for_unavailable_history(
 def test_current_database_does_not_inspect_historical_git_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connection, apply_migrations = create_historical_database(64)
+    connection, apply_migrations = create_historical_database(65)
     connection.executemany(
         "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
         "VALUES (?, ?, 'Saved checkout', 'created', 'updated')",

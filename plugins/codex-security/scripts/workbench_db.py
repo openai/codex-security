@@ -1080,6 +1080,17 @@ def complete_scan(
         )
 
 
+def read_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    # Validation can finish after the scan's recorded completion timestamp.
+    return scan_usage.collect_scan_usage(
+        connection,
+        require_scan(connection, args.scan_id),
+        thread_id=args.thread_id,
+        validation_thread_id=args.validation_thread_id,
+        completed_at=now(),
+    )
+
+
 def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     with scan_completion_lock(scan_id):
@@ -3229,7 +3240,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     with (
         closing(
             connect(
-                deferred=args.command in {"get-scan", "list-scans", "database-info"},
+                deferred=args.command
+                in {"get-scan", "read-scan-usage", "list-scans", "database-info"},
                 discovery_roots=command_targets,
             )
         ) as connection,
@@ -3259,6 +3271,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             ),
             "set-scan-thread": set_scan_thread,
             "set-scan-cost-limit": set_scan_cost_limit,
+            "read-scan-usage": read_scan_usage,
             "finalize-scan-usage": finalize_scan_usage,
             "list-global-findings": native_indexes.list_global_findings,
             "list-repositories": native_indexes.list_repositories,

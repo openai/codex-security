@@ -127,6 +127,8 @@ def test_target_admission_reads_one_entry_without_looking_up_its_type(
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
+        connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
         connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
         connection.execute("DROP VIEW scan_lifecycles")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_kind")
@@ -484,7 +486,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         schema_version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-        assert schema_version == (67,)
+        assert schema_version == (68,)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)

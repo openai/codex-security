@@ -16,7 +16,7 @@ export interface Migration {
 
 // Repository-dependent migrations run in Python before semantic workbench operations.
 export const migrations: readonly Migration[] = history.filter(
-  (item) => item.version <= 62,
+  (item) => item.version <= 63,
 );
 const migration = (version: number) =>
   migrations.find((item) => item.version === version)!;

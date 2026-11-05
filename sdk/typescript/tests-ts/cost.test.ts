@@ -61,6 +61,34 @@ async function waitFor(check: () => boolean): Promise<void> {
 
 afterEach(cleanup);
 
+test("a partial owned subtotal includes spending absent from local session logs", async () => {
+  const home = await codexHome();
+  const observed: Array<[number, boolean]> = [];
+  let complete = false;
+  const tracker = new ScanCostTracker({
+    codexHome: home,
+    model: "gpt-5.6-sol",
+    maxCostUsd: 1,
+    readBudgetUsage: async () => ({
+      usage: { ...ownedSdkUsage, cache_write_input_tokens_reported: false },
+      complete,
+    }),
+    onCost: (cost, coverage) => observed.push([cost.inputTokens, coverage]),
+  });
+  tracker.start("primary");
+  try {
+    await tracker.refresh();
+    expect(observed).toEqual([[ownedSdkUsage.input_tokens, false]]);
+    complete = true;
+    // The SDK's parent receipt omits the detached worker's usage.
+    const final = await tracker.stop({ input_tokens: 1, output_tokens: 1 });
+    expect(final.cost?.inputTokens).toBe(ownedSdkUsage.input_tokens);
+    expect(observed.at(-1)).toEqual([ownedSdkUsage.input_tokens, true]);
+  } finally {
+    await tracker.stop();
+  }
+});
+
 let costModuleBundle: Promise<string> | undefined;
 function bundledCostModule(): Promise<string> {
   costModuleBundle ??= Bun.build({
