@@ -1,3 +1,5 @@
+"""Exercise history updates and reruns against the original checkout, scope, and revisions."""
+
 from __future__ import annotations
 
 import hashlib

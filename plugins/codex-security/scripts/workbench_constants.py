@@ -63,6 +63,7 @@ EMPTY_GIT_TREES = {
 
 
 def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
+    """Strip surrounding whitespace, return None for blank text, and enforce the character limit."""
     if value is None:
         return None
     normalized = value.strip()
@@ -72,6 +73,7 @@ def optional_text(value: str | None, *, maximum: int | None = None) -> str | Non
 
 
 def positive_int(value: str) -> int:
+    """Parse a CLI count and reject values below one with an argparse validation error."""
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("expected a positive integer")

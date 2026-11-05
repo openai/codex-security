@@ -23,6 +23,7 @@ def list_global_findings(
     *,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
+    """Return a page of indexed findings after applying the requested filters, with nextOffset for continuation."""
     limit = args.limit
     query = args.query.strip().casefold() if args.query else ""
     selected_ids = args.target_id
@@ -856,6 +857,7 @@ def list_repositories(
     *,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
+    """Return tracked targets with scan summaries, finding counts, and current checkout availability."""
     current_owner_only, owner_values = _current_owner_scan_scope(connection)
     by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(

@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -105,9 +107,10 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "preserve finding decision append chronology"),
-    (64, "bind new finding decisions to admitted scans"),
-    (65, "record first scan result admission order"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "preserve finding decision append chronology"),
+    (65, "bind new finding decisions to admitted scans"),
+    (66, "record first scan result admission order"),
 ]
 
 
@@ -2788,8 +2791,8 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
 
 @pytest.mark.parametrize(
     ("installed_version", "migration_count"),
-    [(version, count) for version in [42, 43, 48, 50, 53, 54, 61] for count in (1, 2)]
-    + [(54, 3), (61, 3)],
+    [(version, count) for version in [42, 43, 48, 50, 53, 54, 61, 63] for count in (1, 2)]
+    + [(54, 3), (61, 3), (63, 3)],
 )
 def test_decision_history_upgrade_preserves_published_sequences(
     installed_version: int, migration_count: int
@@ -2802,9 +2805,9 @@ def test_decision_history_upgrade_preserves_published_sequences(
         if version < installed_version
     ]
     historical.extend(
-        (version - (63 - installed_version), name, sql)
+        (version - (64 - installed_version), name, sql)
         for version, name, sql in namespace["MIGRATIONS"]
-        if 63 <= version < 63 + migration_count
+        if 64 <= version < 64 + migration_count
     )
     with sqlite3.connect(":memory:") as connection:
         connection.row_factory = sqlite3.Row

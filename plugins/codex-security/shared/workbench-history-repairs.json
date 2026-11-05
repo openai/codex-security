@@ -8,9 +8,9 @@
     "SELECT 'sql' AS operation,",
     "    'UPDATE schema_migrations SET version = ' || destination || ' WHERE version = ' || version AS value",
     "FROM schema_migrations JOIN history USING (name)",
-    "WHERE (destination = 63 AND version IN (42, 43, 48, 50, 53, 54, 61))",
-    "    OR (destination = 64 AND version IN (43, 44, 49, 51, 54, 55, 62))",
-    "    OR (destination = 65 AND version IN (56, 63)) ORDER BY version DESC;"
+    "WHERE (destination = 64 AND version IN (42, 43, 48, 50, 53, 54, 61, 63))",
+    "    OR (destination = 65 AND version IN (43, 44, 49, 51, 54, 55, 62, 64))",
+    "    OR (destination = 66 AND version IN (56, 63, 65)) ORDER BY version DESC;"
   ],
   [
     "-- A released reader can add its columns while a finding history preview still owns the version.",
@@ -292,5 +292,13 @@
     "        quote((SELECT name FROM history WHERE version = 2)) || ', ?)'",
     "    FROM legacy WHERE present",
     "ORDER BY position;"
+  ],
+  [
+    "-- Refuse unknown receipts for either version of the finding-history preview.",
+    "WITH history AS (SELECT json_extract(value, '$.version') AS version,",
+    "    json_extract(value, '$.name') AS name FROM json_each(:history))",
+    "SELECT 'error' AS operation, 'Unsupported finding history migration receipt.' AS value",
+    "FROM schema_migrations AS receipt JOIN history USING (version)",
+    "WHERE receipt.version BETWEEN 63 AND 66 AND receipt.name != history.name LIMIT 1;"
   ]
 ]

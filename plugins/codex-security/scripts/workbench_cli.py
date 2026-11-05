@@ -37,6 +37,11 @@ def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False)
 
 
 def parse_args(description: str, *, inspection_only: bool = False) -> argparse.Namespace:
+    """Parse the workbench command line into the namespace consumed by its dispatcher.
+
+    For a full command, read UTF-8 user context from stdin when requested. In
+    inspection mode, recognized inspection arguments return before that read.
+    """
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -197,6 +202,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     rename_scan = subparsers.add_parser("rename-scan")
     rename_scan.add_argument("--scan-id", required=True)
     rename_scan.add_argument("--name", required=True)
+
+    read_scan_usage = add_command("read-scan-usage", "--scan-id", "--thread-id")
+    read_scan_usage.add_argument("--validation-thread-id")
 
     add_command("get-scan-feedback", "--scan-id")
 

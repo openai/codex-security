@@ -1,3 +1,5 @@
+"""Check that scan context counts concurrent deep scans while excluding the current run."""
+
 from __future__ import annotations
 
 import uuid

@@ -32,6 +32,7 @@ from validate_scan_contract import validate_contract
 
 
 def destination_key(destination: Any) -> str:
+    """Encode exact provider-specific destination IDs into a stable key for matching issue receipts."""
     if not isinstance(destination, dict):
         raise SystemExit("Finding issues require an exact tracker destination.")
     kind = destination.get("type")
@@ -60,6 +61,12 @@ def verify_publication_history(
     scan_directory: str,
     findings: list[dict[str, Any]],
 ) -> None:
+    """Require publication input to match the completed scan in local history.
+
+    Check the exact scan ID, directory, pinned manifest digest when present,
+    and the complete set of occurrence-to-finding associations. Raise
+    SystemExit if any of these disagree.
+    """
     try:
         scan = db.require_scan(connection, scan_id)
     except SystemExit as exc:
@@ -110,6 +117,7 @@ def inspect_issue_receipts(
     key: str,
     finding_ids: list[str],
 ) -> list[dict[str, Any]]:
+    """Return receipts for the selected findings and destination, including receipts from older Linear tables."""
     tables = {
         row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
@@ -133,6 +141,7 @@ def inspect_issue_receipts(
 
 
 def validate_issue_receipts(receipts: Any, selected: dict[str, str]) -> list[dict[str, Any]]:
+    """Return receipts bound to the selected finding occurrences or raise SystemExit on invalid receipt data."""
     if not isinstance(receipts, list):
         raise SystemExit("Finding issue receipts must be an array.")
     for receipt in receipts:
@@ -368,6 +377,7 @@ def write_csv_export(
     scan: sqlite3.Row,
     findings_document: dict[str, Any],
 ) -> Path:
+    """Write indexed findings to exports/findings.csv, adding candidate IDs for Deep Scans, and return its path."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     output = io.StringIO(newline="")
     writer = csv.writer(output)

@@ -88,6 +88,7 @@ import {
 } from "./plugin-root.js";
 import {
   EXTERNAL_PROVIDER_CASES,
+  measuredScanUsage,
   mockScanRegistration,
   mockWorkbench,
   shellEnvironmentReference,
@@ -3861,13 +3862,12 @@ if __name__ == "__main__":
     ["without", false],
     ["with", true],
   ] as const)(
-    "handles a session-tracking failure %s an explicit cost limit",
+    "warns about unreadable activity logs %s an explicit cost limit",
     async (_description, enforceCostLimit) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       await writeFile(join(codexHome, "sessions"), "not a directory");
       const commands: string[] = [];
       const warnings: string[] = [];
-      let savedFailure: string | undefined;
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -3876,7 +3876,6 @@ if __name__ == "__main__":
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args[0]!);
-          if (args[0] === "fail-scan") savedFailure = args[3];
           return mockWorkbench(args, input);
         },
         createCodex: completedCodex(root),
@@ -3887,18 +3886,13 @@ if __name__ == "__main__":
         onActivity: () => {},
         onWarning: (warning) => warnings.push(warning),
       });
-      if (enforceCostLimit) {
-        await expect(scan).rejects.toThrow("interrupted");
-        expect(commands).toContain("fail-scan");
-        expect(savedFailure).toContain("sessions");
-        expect(commands).not.toContain("cancel-scan");
-      } else {
-        await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
-        expect(warnings).toContainEqual(
-          expect.stringContaining("Could not track scan activity:"),
-        );
-        expect(commands).toContain("complete-scan");
-      }
+      await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
+      expect(warnings).toContainEqual(
+        expect.stringContaining("Could not track scan activity:"),
+      );
+      expect(commands.includes("read-scan-usage")).toBe(enforceCostLimit);
+      expect(commands).toContain("complete-scan");
+      expect(commands).not.toContain("cancel-scan");
       await client.close();
     },
   );
@@ -14379,7 +14373,7 @@ if __name__ == "__main__":
     }
   });
   const prices = [
-    { model: "gpt-6-astra", min: 0.000232, max: 0.000389 },
+    { model: "gpt-6-astra", min: 0.000232, max: 0.000429 },
     { model: "gpt-5.6-cyber", min: 0.0003275, max: null },
   ];
   test.each(prices)("tracks live and saved $model costs", async (price) => {
@@ -14425,7 +14419,7 @@ if __name__ == "__main__":
       estimatedUsdRange: { min, max, context: "unknown" },
       pricing: { serviceTier: "standard", context: "short" },
     });
-    expect([result.cost]).toEqual(costs);
+    expect(result.cost).toEqual(costs.at(-1)!);
 
     const completion = commands.find((args) => args[0] === "complete-scan");
     expect(completion).toBeDefined();
@@ -14565,6 +14559,8 @@ if __name__ == "__main__":
         resumeThread: () => thread,
       }),
       runWorkbench: async (_options, args, input): Promise<JsonObject> => {
+        if (args[0] === "read-scan-usage")
+          return measuredScanUsage(2_000, 0, 0);
         if (args[0] === "get-cli-scan-resume")
           return {
             scanId,
@@ -14800,6 +14796,7 @@ if __name__ == "__main__":
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
           prepareRuntime: async () => prepared,
+          runWorkbench: recordingWorkbench([], measuredScanUsage(900, 0, 0)),
           createCodex: codexFactory(
             async (_input: string, { signal }: { signal: AbortSignal }) => {
               scanSignal = signal;
@@ -14910,6 +14907,7 @@ if __name__ == "__main__":
     const secondApproval = new Promise<void>((resolve) =>
       approvals.set(0.016, resolve),
     );
+    let measured = 0;
     const requests: number[] = [];
     const commands: Array<readonly string[]> = [];
     const startThread = mock(() => {
@@ -14928,9 +14926,12 @@ if __name__ == "__main__":
               { input_tokens: 100, output_tokens: 0 },
               { parent: "scan-thread", parentField: "parent_thread_id" },
             );
+            measured = 900;
             await firstApproval;
             await appendUsage(path, 1_700);
+            measured = 1_800;
             await secondApproval;
+            measured = 2_600;
             await copyCompletedScan(root);
             yield {
               type: "turn.completed",
@@ -14950,16 +14951,19 @@ if __name__ == "__main__":
     let budgetSignal: AbortSignal | undefined;
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: recordingWorkbench(commands),
+      runWorkbench: recordingWorkbench(commands, () =>
+        measuredScanUsage(measured, 0, 0),
+      ),
       createCodex: () => ({
         startThread,
       }),
     });
-    const keepAlive = setTimeout(() => {}, 10_000);
+    const guard = new AbortController();
+    const guardTimer = setTimeout(() => guard.abort(), 15_000);
     try {
       const result = await client.run(repository, {
         maxCostUsd: 0.004,
-        signal: AbortSignal.timeout(5_000),
+        signal: guard.signal,
         onBudgetApproaching: ({ maxCostUsd, signal }) => {
           requests.push(maxCostUsd);
           budgetSignal = signal;
@@ -14983,7 +14987,7 @@ if __name__ == "__main__":
       expect(commands.some(([command]) => command === "fail-scan")).toBe(false);
       expect(budgetSignal?.aborted).toBe(true);
     } finally {
-      clearTimeout(keepAlive);
+      clearTimeout(guardTimer);
       await client.close();
     }
   });
@@ -15008,6 +15012,7 @@ if __name__ == "__main__":
       const controller = new AbortController();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
+      let measured = 900;
       let requestCount = 0;
       const onCost = mock((cost: ScanCost, _limit: number | undefined) => {
         if (cost.inputTokens === 950) nextCost.resolve();
@@ -15017,6 +15022,8 @@ if __name__ == "__main__":
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input) => {
           commands.push(args);
+          if (args[0] === "read-scan-usage")
+            return measuredScanUsage(measured, 0, 0);
           if (scenario === "save-failed" && args[0] === "set-scan-cost-limit")
             throw new Error("Synthetic save failure");
           if (scenario === "saving" && args[0] === "set-scan-cost-limit")
@@ -15047,10 +15054,15 @@ if __name__ == "__main__":
                 return;
               }
               await appendUsage(path, 950);
+              measured = 950;
               await nextCost.promise;
               if (scenario === "canceled") controller.abort();
-              else await appendUsage(path, 1_200);
+              else {
+                measured = 1_200;
+                await appendUsage(path, 1_200);
+              }
               await (signal.aborted ? undefined : once(signal, "abort"));
+              measured = 2_000;
               await appendUsage(path, 2_000);
               throw new DOMException("aborted", "AbortError");
             }
@@ -15156,7 +15168,10 @@ if __name__ == "__main__":
     })!;
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: recordingWorkbench(commands),
+      runWorkbench: recordingWorkbench(
+        commands,
+        measuredScanUsage(1_250, 200, 30),
+      ),
       createCodex: codexFactory(runStreamed),
     });
 
@@ -15194,8 +15209,12 @@ if __name__ == "__main__":
       "--thread-id",
       "scan-thread",
     ]);
-    expect(commands[3]).toEqual(["get-scan", "--scan-id", "scan_example_001"]);
-    expect(commands[4]).toEqual([
+    expect(commands.at(-2)).toEqual([
+      "get-scan",
+      "--scan-id",
+      "scan_example_001",
+    ]);
+    expect(commands.at(-1)).toEqual([
       "fail-scan",
       "--scan-id",
       "scan_example_001",
@@ -15266,6 +15285,8 @@ if __name__ == "__main__":
             return { ...mockWorkbench(args, input), lifecycle: registration };
           }
           if (args[0] === "fail-scan") return { scan: { lifecycle: terminal } };
+          if (args[0] === "read-scan-usage")
+            return measuredScanUsage(1_250, 200, 30);
           if (args[0] !== "complete-budget-exhausted-scan") {
             return mockWorkbench(args, input);
           }
@@ -15381,14 +15402,13 @@ if __name__ == "__main__":
     },
   );
 
-  test("saves a budgeted scan with a warning when token usage is unavailable", async () => {
+  test("fails a budgeted scan before sealing when token usage is unavailable", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const warnings = mock((_warning: string) => {});
     const commands: Array<readonly string[]> = [];
     let threads = 0;
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: recordingWorkbench(commands),
+      runWorkbench: recordingWorkbench(commands, { coverage: "unavailable" }),
       createCodex: (options: CodexOptions) => ({
         startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
           threads++;
@@ -15412,26 +15432,22 @@ if __name__ == "__main__":
       }),
     });
 
-    const result = await client.run(repository, {
-      maxCostUsd: 1,
-      ownerSuggestions: true,
-      onWarning: warnings,
-    });
-    expect(result.threadId).toBe("scan-thread");
-    expect(result.cost).toBeNull();
+    await expect(
+      client.run(repository, { maxCostUsd: 1, ownerSuggestions: true }),
+    ).rejects.toThrow(/could not verify.*cost limit/i);
     expect(threads).toBe(1);
-    expect(warnings.mock.calls.map(([value]) => value)).toContain(
-      "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
-    );
-    expect(commands.map(([command]) => command)).toEqual([
+    expect(commands.some(([name]) => name === "read-scan-usage")).toBe(true);
+    expect(
+      commands
+        .map(([name]) => name)
+        .filter((name) => name !== "read-scan-usage"),
+    ).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
       "set-scan-thread",
-      "prepare-scan-completion",
-      "complete-scan",
-      "list-global-findings",
+      "get-scan",
+      "fail-scan",
     ]);
-    expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
     await client.close();
   });
 
@@ -18252,13 +18268,18 @@ setInterval(() => {}, 1000);
   }, 30_000);
 });
 
-function recordingWorkbench(commands: Array<readonly string[]>) {
+function recordingWorkbench(
+  commands: Array<readonly string[]>,
+  usage?: JsonObject | (() => JsonObject),
+) {
   return async (
     _options: unknown,
     args: readonly string[],
     input?: string,
   ): Promise<JsonObject> => {
     commands.push(args);
+    if (usage && args[0] === "read-scan-usage")
+      return typeof usage === "function" ? usage() : usage;
     return mockWorkbench(args, input);
   };
 }
