@@ -71,7 +71,7 @@ describe("trusted executable resolution", () => {
       "askpass.sh",
       { PATH: [".", relative(repository, trusted)].join(delimiter) },
       repository,
-      { askpassDirectory: repository },
+      { gitTransportDirectory: repository },
     );
     expect(resolved.executable).toBe(
       await realpath(join(trusted, "askpass.sh")),
@@ -96,7 +96,7 @@ describe("trusted executable resolution", () => {
           { PATH: root },
           repository,
           {
-            askpassDirectory: repository,
+            gitTransportDirectory: repository,
           },
         );
         expect(resolved.executable).toBe(await realpath(helper));

@@ -42,7 +42,7 @@ export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
-  options?: { askpassDirectory: string },
+  options?: { gitTransportDirectory: string },
 ): Promise<InspectedExecutable> {
   const roots = await Promise.all(
     (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
@@ -55,8 +55,8 @@ export async function inspectTrustedExecutable(
     if (!options || isAbsolute(value)) return value;
     // Keep parent traversal through symlinks until realpath inspects it.
     return parse(value).root
-      ? resolve(options.askpassDirectory, value)
-      : `${options.askpassDirectory}${sep}${value}`;
+      ? resolve(options.gitTransportDirectory, value)
+      : `${options.gitTransportDirectory}${sep}${value}`;
   };
   const path =
     environment["PATH"] ??
@@ -88,7 +88,7 @@ export async function inspectTrustedExecutable(
   // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
   // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
   // will actually run instead of rejecting an otherwise valid Windows configuration.
-  // Git for Windows can launch a trusted askpass script via its interpreter.
+  // Git for Windows can launch a trusted transport or askpass script via its interpreter.
   // Direct Node subprocesses still require a native executable.
   const allowScript = options !== undefined;
   const extensions =

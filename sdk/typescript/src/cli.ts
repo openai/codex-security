@@ -1347,6 +1347,7 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
+  patchCallerDirectory?: string;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
@@ -9642,6 +9643,112 @@ async function patchTransportEnvironment(
   return pinned;
 }
 
+// Git treats GIT_SSH as one executable path, but GIT_SSH_COMMAND and
+// core.sshCommand as shell commands. Bind a small literal subset without
+// evaluating the operator's command in a checkout the patch can change.
+async function pinPublicationSshCommand(
+  command: string | [string],
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string> {
+  const unsupported = () =>
+    new CodexSecurityError(
+      "Cannot bind the SSH transport for patch publication. Use an executable wrapper outside the repository on a trusted PATH, with absolute external paths for SSH configuration and identity files.",
+    );
+  let words: string[];
+  if (Array.isArray(command)) {
+    words = command;
+  } else {
+    const literal =
+      /(?:[a-zA-Z0-9_./:@%+,=~-]+|'[^'\r\n]*'|"[^"$\x60\\\r\n]*")(?=[ \t]|$)/gy;
+    words = [];
+    const text = command.trim();
+    for (let offset = 0; offset < text.length;) {
+      literal.lastIndex = offset;
+      const word = literal.exec(text)?.[0];
+      if (!word) throw unsupported();
+      words.push(/^['"]/u.test(word) ? word.slice(1, -1) : word);
+      offset = literal.lastIndex;
+      while (text[offset] === " " || text[offset] === "\t") offset++;
+    }
+  }
+  const [program, ...args] = words;
+  if (!program) throw unsupported();
+  const root = await realpath(
+    await patchRepositoryRoot(repository, dependencies),
+  );
+  const caller = await realpath(
+    dependencies.patchCallerDirectory ?? repository,
+  );
+  const directory = isOutsidePath(relative(root, caller)) ? caller : root;
+  const environment = dependencies.environment;
+  const path = [
+    environmentEntry(environment, "GIT_EXEC_PATH"),
+    environmentEntry(environment, "PATH") ?? process.env["PATH"],
+  ]
+    .filter(Boolean)
+    .join(delimiter);
+  const { executable } = await inspectTrustedExecutable(
+    program,
+    { PATH: path },
+    [root, caller],
+    {
+      gitTransportDirectory: directory,
+    },
+  );
+  if (!executable) throw unsupported();
+  const bindFile = async (file: string | undefined) => {
+    if (!file || !isAbsolute(file)) throw unsupported();
+    const physical = await realpath(file).catch(() => undefined);
+    if (
+      !physical ||
+      [root, caller].some(
+        (protectedRoot) => !isOutsidePath(relative(protectedRoot, physical)),
+      )
+    )
+      throw unsupported();
+    return physical;
+  };
+  if (/^ssh(?:\.exe)?$/iu.test(basename(program))) {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      if (/^-[46AaCqTtv]+$/u.test(arg)) continue;
+      const option = arg.slice(0, 2);
+      if (!["-F", "-i", "-o", "-p", "-l"].includes(option)) throw unsupported();
+      const value = arg.length > 2 ? arg.slice(2) : args[++i];
+      if (!value) throw unsupported();
+      let bound = value;
+      if (option === "-F" || option === "-i") {
+        bound = await bindFile(value);
+      } else if (option === "-o") {
+        const pathSetting = /^(IdentityFile|UserKnownHostsFile)=(.+)$/iu.exec(
+          value,
+        );
+        if (pathSetting) {
+          bound = pathSetting[1] + "=" + (await bindFile(pathSetting[2]));
+        } else if (
+          !/^(?:BatchMode|IdentitiesOnly|StrictHostKeyChecking|HostKeyAlias|ConnectTimeout|LogLevel|AddressFamily)=[a-zA-Z0-9._-]+$/iu.test(
+            value,
+          )
+        ) {
+          throw unsupported();
+        }
+      } else if (!/^[a-zA-Z0-9._-]+$/u.test(value)) throw unsupported();
+      args[i] = arg.length > 2 ? option + bound : bound;
+    }
+  } else if (args.length) {
+    // Support an external interpreter with an explicit external script. Other
+    // command forms can put their options in an operator-owned wrapper.
+    args[0] = await bindFile(args[0]);
+    if (args.slice(1).some((arg) => !/^[a-zA-Z0-9_-]+$/u.test(arg)))
+      throw unsupported();
+  }
+  // Git for Windows interprets shell-command values with its POSIX shell too.
+  return [executable, ...args]
+    .map((word) => "'" + word.replaceAll("'", "'\\''") + "'")
+    .join(" ");
+}
+
 async function publicationSshCommand(
   repository: string,
   dependencies: CliDependencies,
@@ -9650,7 +9757,12 @@ async function publicationSshCommand(
     dependencies.environment,
     "GIT_SSH_COMMAND",
   );
-  if (environmentCommand !== undefined) return environmentCommand;
+  if (environmentCommand !== undefined)
+    return pinPublicationSshCommand(
+      environmentCommand,
+      repository,
+      dependencies,
+    );
   const fallback =
     environmentEntry(dependencies.environment, "GIT_SSH") === undefined
       ? "ssh"
@@ -9680,7 +9792,12 @@ async function publicationSshCommand(
     throw new CodexSecurityError(
       "Patch publication cannot run checkout-selected core.sshCommand. Select the SSH command through your user Git configuration or GIT_SSH_COMMAND.",
     );
-  return command!;
+  const legacy = environmentEntry(dependencies.environment, "GIT_SSH");
+  return pinPublicationSshCommand(
+    command === '"$GIT_SSH"' && legacy !== undefined ? [legacy] : command!,
+    repository,
+    dependencies,
+  );
 }
 
 async function githubPatchRepository(
@@ -9813,6 +9930,7 @@ function patchCommandDirectoryDependencies(
 ): CliDependencies {
   return {
     ...dependencies,
+    patchCallerDirectory: directory,
     runRepositoryCommand: (command, args, repository, options) =>
       dependencies.runRepositoryCommand(command, args, repository, {
         ...options,
@@ -9879,7 +9997,7 @@ async function patchCommandContext(
       askpass,
       dependencies.environment,
       [physicalRoot, physicalDirectory],
-      { askpassDirectory: transportDirectory },
+      { gitTransportDirectory: transportDirectory },
     );
     // An empty value disables a missing or checkout-controlled helper.
     environment[name] = helper.executable ?? "";
@@ -10121,6 +10239,7 @@ async function bindPatchCommandContext(
     directory,
     dependencies: {
       ...dependencies,
+      patchCallerDirectory: context.directory,
       runRepositoryCommand: (command, args, root, options) =>
         dependencies.runRepositoryCommand(command, args, root, {
           ...options,
