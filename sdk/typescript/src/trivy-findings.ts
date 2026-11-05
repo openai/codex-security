@@ -67,36 +67,67 @@ function networkRepository(value: unknown): string | null {
   return source;
 }
 
-function comparableGitHubRemote(remote: string): string | undefined {
-  const parsed = parseGitRemote(remote);
+function comparableGitHubRemote(
+  remote: string,
+  cloudRepositoryUrl?: string,
+): string | undefined {
+  if (/[?#\t\r\n]/u.test(remote)) return undefined;
+  let parsed;
+  try {
+    parsed = parseGitRemote(remote);
+  } catch {
+    // A checkout can have unrelated remotes with no comparable URL.
+    return undefined;
+  }
   if (!parsed) return undefined;
   const prefix = `${parsed.url.protocol}//`;
   // Git dispatches mixed-case schemes to distinct remote helpers.
   if (!parsed.scpStyle && !remote.startsWith(prefix)) return undefined;
   const host = parsed.url.hostname.toLowerCase();
-  if (!isGitHubCloudHost(host)) return undefined;
+  const githubUrl =
+    cloudRepositoryUrl ??
+    (isGitHubCloudHost(host) ? `https://${host}` : undefined);
   const normalized = normalizeHostedGitRepositoryUrl(
     remote,
-    `https://${host}`,
-    true,
+    githubUrl,
+    githubUrl !== undefined,
   );
-  return /^https?:\/\//iu.test(normalized) ? normalized : undefined;
+  if (!/^https?:\/\//iu.test(normalized)) return undefined;
+  if (
+    !isGitHubCloudHost(new URL(normalized).hostname) &&
+    (!cloudRepositoryUrl || new URL(cloudRepositoryUrl).hostname !== host)
+  )
+    return undefined;
+  return normalized;
 }
 
-function trivyRemoteKey(remote: string): string {
-  const normalized = comparableGitHubRemote(remote);
-  return normalized
-    ? hostedRepositoryUrlKey(normalized, true, false, "local")
-    : remote;
+export function trivyRemoteKey(
+  remote: string,
+  cloudRepositoryUrl?: string,
+  checkout = false,
+): string {
+  const normalized = comparableGitHubRemote(remote, cloudRepositoryUrl);
+  if (!normalized) return remote;
+  // GitHub identifies an HTTPS repository by host and path. Other Git servers
+  // may use the HTTP username to select the repository.
+  const url = checkout
+    ? normalized.replace(/^(https?:\/\/)[^/\\?#]*@/iu, "$1")
+    : normalized;
+  return hostedRepositoryUrlKey(
+    url,
+    true,
+    false,
+    cloudRepositoryUrl ? "cloud" : "local",
+  );
 }
 
 const sshScheme = /^(?:ssh|git\+ssh|ssh\+git):\/\//u;
 
-function userlessSsh(url: string): boolean {
+export function trivyRemoteOmitsSshUser(url: string): boolean {
   return sshScheme.test(url) && !new URL(url).username;
 }
 
-const headerFields = [
+export const trivyHeaderFields = [
   "SchemaVersion",
   "ArtifactType",
   "ArtifactID",
@@ -114,7 +145,8 @@ function escapedHttpTarget(target: string): string {
   );
 }
 
-function trivyReportRemotes(report: NativeRecord): string[] {
+export function trivyReportRemotes(report: unknown) {
+  if (!isRecord(report)) return { urls: [] };
   const metadata = report["Metadata"];
   const repoUrl = text(isRecord(metadata) && metadata["RepoURL"]);
   const name = text(report["ArtifactName"]);
@@ -125,9 +157,10 @@ function trivyReportRemotes(report: NativeRecord): string[] {
     throw new Error(unsafeRepositoryUrl);
   const repository = networkRepository(repoUrl);
   let artifact = name && urlScheme.test(name) ? networkRepository(name) : null;
+  if (report["SchemaVersion"] !== 2) return { urls: [] };
   // A filesystem display label is validated but never identifies the repository.
   if (report["ArtifactType"] === "filesystem")
-    return repository ? [repository] : [];
+    return { urls: repository ? [repository] : [] };
   // Trivy accepts scheme-less HTTPS targets and relative checkout paths.
   // A scheme-less name identifies a remote only when Git metadata corroborates it.
   const target =
@@ -144,22 +177,40 @@ function trivyReportRemotes(report: NativeRecord): string[] {
   // other difference visible when validating the report's repository claims.
   if (
     repository &&
-    userlessSsh(repository) &&
+    trivyRemoteOmitsSshUser(repository) &&
     artifact?.replace(/^([^:]+:\/\/)[^/@]+@/u, "$1") === repository
   )
-    return [repository];
-  return [repository, artifact].filter((url) => url !== null);
+    return { urls: [repository] };
+  return {
+    urls: [repository, artifact].filter((url) => url !== null),
+    uncorroboratedTarget: repository ? null : artifact,
+  };
 }
 
-function matchingTrivyRemotes([
-  repository,
-  artifact,
-]: readonly string[]): boolean {
+function matchingTrivyRemotes(
+  [repository, artifact]: readonly string[],
+  githubUrl?: string,
+): boolean {
   return (
     !!repository &&
     !!artifact &&
-    trivyRemoteKey(repository) === trivyRemoteKey(artifact)
+    trivyRemoteKey(repository, githubUrl) ===
+      trivyRemoteKey(artifact, githubUrl)
   );
+}
+
+/** Compare the report's claims using the authenticated host when available. */
+export function trivyRepositoryUrl(
+  report: unknown,
+  cloudRepositoryUrl?: string,
+): string | null {
+  const { urls } = trivyReportRemotes(report);
+  if (urls.length > 1 && !matchingTrivyRemotes(urls, cloudRepositoryUrl))
+    throw new Error("Trivy source URLs identify different repositories.");
+  const remote = urls[0];
+  return remote && cloudRepositoryUrl
+    ? (comparableGitHubRemote(remote, cloudRepositoryUrl) ?? remote)
+    : (remote ?? null);
 }
 
 function repositoryPath(value: unknown, directory = false): string | null {
@@ -201,7 +252,7 @@ function resolveScanRoot(
   if (scanRoot === undefined) {
     if (remoteRepository) return ".";
     throw new Error(
-      "Specify scanRoot relative to the repository; use . for a whole-checkout scan.",
+      "Specify --trivy-scan-root relative to the repository; use . for a whole-checkout scan.",
     );
   }
   const root = repositoryPath(scanRoot.split(sep).join("/"), true)?.replace(
@@ -210,11 +261,11 @@ function resolveScanRoot(
   );
   if (!root)
     throw new Error(
-      "scanRoot must be a repository-relative directory without traversal.",
+      "--trivy-scan-root must be a repository-relative directory without traversal.",
     );
   if (remoteRepository && root !== ".")
     throw new Error(
-      "A remote Trivy repository scan starts at the checkout root; scanRoot must be .",
+      "A remote Trivy repository scan starts at the checkout root; --trivy-scan-root must be .",
     );
   return root;
 }
@@ -341,9 +392,9 @@ export function normalizeTrivyFindings(
       "Only Trivy repository and filesystem reports are supported.",
     );
   const metadata = record(document["Metadata"] ?? {}, "Trivy Metadata");
-  const urls = trivyReportRemotes(document);
+  const { urls } = trivyReportRemotes(document);
   const report = {
-    ...pick(document, headerFields),
+    ...pick(document, trivyHeaderFields),
     ...(isRecord(document["Trivy"])
       ? { Trivy: pick(document["Trivy"], ["Version"]) }
       : {}),

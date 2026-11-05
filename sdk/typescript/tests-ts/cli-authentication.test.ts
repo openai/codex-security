@@ -59,11 +59,14 @@ const GATEWAY_CONFIGURATION = [
 ].join("\n");
 
 let stateDirectory: string;
+let skillDirectory: string;
 
 beforeEach(async () => {
   stateDirectory = await realpath(
     await temporaryDirectory("codex-security-cli-authentication-"),
   );
+  skillDirectory = join(stateDirectory, "selected-directory");
+  await mkdir(skillDirectory, { mode: 0o700 });
 });
 
 afterEach(async () => {
@@ -1898,6 +1901,7 @@ describe("skill authentication", () => {
         {
           command: "validate",
           auth: "auto",
+          directory: skillDirectory,
           stdout: stdout.stream,
           stderr: stderr.stream,
         },
@@ -2140,6 +2144,7 @@ describe("skill authentication", () => {
         {
           command: "validate",
           auth: "auto",
+          directory: skillDirectory,
           stdout: capture().stream,
           stderr: capture().stream,
         },
@@ -2201,6 +2206,7 @@ describe("skill authentication", () => {
             {
               command: "validate",
               auth,
+              directory: skillDirectory,
               stdout: stdout.stream,
               stderr: capture().stream,
             },
@@ -2232,7 +2238,17 @@ describe("skill authentication", () => {
         join(environment.CODEX_HOME, "config.toml"),
         'model = "unrelated-model"',
       );
-      expect((await run()).args).toEqual([process.execPath]);
+      expect((await run()).args).toEqual([
+        process.execPath,
+        "--config",
+        expect.stringMatching(
+          /^responses_api_metadata\.codex_security_operation_id="[^"]+"$/u,
+        ),
+        "--config",
+        expect.stringMatching(
+          /^responses_api_metadata\.codex_security_attempt_id="[^"]+"$/u,
+        ),
+      ]);
       expect(
         parseToml(await readFile(join(runtimeHome, "config.toml"), "utf8")),
       ).toEqual({
@@ -2342,10 +2358,12 @@ if (basename(process.argv[1] ?? "") === "login" && process.argv[2] === "status")
             unauthorized
               ? 'console.error("401 Unauthorized"); process.exit(1)'
               : 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}))',
+            "--",
           ],
           {
             command: "validate",
             auth: "chatgpt",
+            directory: skillDirectory,
             stdout: capture().stream,
             stderr: stderr.stream,
           },
