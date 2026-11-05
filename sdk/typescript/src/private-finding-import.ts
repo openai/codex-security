@@ -301,6 +301,8 @@ const checkpointSchema = z.object({
   jobRequestId: z.uuid(),
   // Earlier checkpoints used the unversioned job route.
   jobApiVersion: jobVersion.optional(),
+  approvedRepositoryUrl: z.string().optional(),
+  approvedRepositoryPlatform: z.literal("other").optional(),
   fileId: fileId.optional(),
   jobId: jobSchema.shape.id.optional(),
   receipt: jobSchema
@@ -318,7 +320,7 @@ export function parsePrivateCheckpoint(serialized: string) {
 }
 
 export function readPrivateCheckpoint(
-  serialized: string,
+  serialized: string | undefined,
   expected: {
     format: PrivateImportFormat;
     apiBaseUrl: string;
@@ -329,11 +331,14 @@ export function readPrivateCheckpoint(
     repository: { id: string; repo_connector_id: string };
   },
 ) {
+  if (serialized === undefined) return;
   const checkpoint = parsePrivateCheckpoint(serialized);
   const {
     uploadRequestId,
     jobRequestId,
     jobApiVersion,
+    approvedRepositoryUrl,
+    approvedRepositoryPlatform,
     fileId,
     jobId,
     receipt,

@@ -1386,12 +1386,9 @@ test("a Snyk private upload resumes after a rename and still checks supplemental
     "Interrupted private upload",
   );
   f.state.repositoryUrl = "https://git.example.test/Team/NewProject";
+  const conflicting = { ...report, sourceRepositoryUrl: f.state.repositoryUrl };
   await expect(
-    prepareNormalizedExternalPublication(
-      { ...report, sourceRepositoryUrl: f.state.repositoryUrl },
-      settings,
-      deps,
-    ),
+    prepareNormalizedExternalPublication(conflicting, settings, deps),
   ).rejects.toThrow(/repository|project/iu);
   expect((await prepareFile()).preview.resumed).toBe(true);
   const retry = await prepareNormalizedExternalPublication(
@@ -11768,6 +11765,10 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
 const sonarReport = sonarCapture(exampleRepository);
 const trivy = trivyReport();
 const endorSource = endorFinding();
+const boundEndorSarif = endorSarif();
+Object.assign(boundEndorSarif.runs[0]!, {
+  versionControlProvenance: [{ repositoryUri: exampleRepository }],
+});
 const endorVulnerability = endorSource.spec.finding_metadata.vulnerability;
 const structuredPrivateProviders = [
   {
@@ -11850,6 +11851,12 @@ test.each([
     previousReader: (report: unknown) => normalizePreviousEndorFindings(report),
     previousSha256:
       "a6a869d6ac1ac02acf44849bbd55d571e350ff9ef3c8ca8562891eb8cdd64708",
+  },
+  {
+    provider: "endor",
+    format: "security.findings.v1",
+    raw: boundEndorSarif,
+    rename: true,
   },
   {
     provider: "endor",
@@ -12277,6 +12284,21 @@ test.each([
         : "A private import already owns this selection",
     );
     expect(f.posts).toHaveLength(0);
+    if ("rename" in scenario) {
+      f.state.repositoryUrl = "https://github.com/example/renamed";
+      expect(saved.approvedRepositoryUrl).toBe(exampleRepository);
+      // Earlier checkpoints bound the immutable report and connector ID only.
+      const { approvedRepositoryUrl, ...legacy } = saved;
+      const path = interrupted.result.savedSubmission!;
+      const pending = await prepare();
+      await rm(path);
+      await expect(pending.publish()).rejects.toThrow(
+        "saved private import changed",
+      );
+      await writeFile(path, JSON.stringify(legacy), { mode: 0o600 });
+      expect((await prepare()).preview.resumed).toBe(true);
+      await writeFile(path, JSON.stringify(saved));
+    }
     advertised = false;
     const resumed = await prepare();
     expect(resumed.preview.resumed).toBe(true);
@@ -12373,6 +12395,10 @@ test.each([
     expectedFormat = "security.findings.v1";
     terminal =
       provider === "wiz" || provider === "continuum" ? "cancelled" : "failed";
+    if ("rename" in scenario) {
+      await expect(prepare()).rejects.toThrow("does not match");
+      f.state.repositoryUrl = exampleRepository;
+    }
     const fresh = await prepare();
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.privateImport?.format).toBe(expectedFormat);
@@ -12404,6 +12430,11 @@ test.each([
     contextVersion = "generation-c";
     advertised = true;
     acknowledgedVersion = undefined; // The saved version also applies to its replacement attempt.
+    if ("rename" in scenario) {
+      f.state.repositoryUrl = "https://github.com/example/renamed";
+      await expect(prepare()).rejects.toThrow("does not match");
+      f.state.repositoryUrl = exampleRepository;
+    }
     const retry = await prepare();
     const secondPreview = await prepare();
     expect(retry.preview.resumed).toBe(false);

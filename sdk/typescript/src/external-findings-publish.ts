@@ -2901,6 +2901,72 @@ async function preparePublicationInput(
       "Supply the verified Inspector project binding again to resume.",
     );
 
+  // Existing repository submissions keep their original request bodies and receipts.
+  const privatePath = join(state, `${key}.private-import.json`);
+  const privateSaved = await readOptionalFile(privatePath);
+  if (resumingPreviousReader && !saved && privateSaved === undefined)
+    throw new CodexSecurityError(
+      "The saved publication changed. Run the command again to preview this report.",
+    );
+  const usePrivateImport =
+    !saved && (canStartJob || privateSaved !== undefined);
+  async function preparePrivateAttempt() {
+    const context = previewContext ?? (await privateClient.context());
+    if (source.source_key.trim() !== source.source_key)
+      throw new CodexSecurityError(
+        "A private source key cannot have leading or trailing whitespace.",
+      );
+    const report = await selectPrivateReport(
+      parsed,
+      source.provider,
+      nativePath,
+      context,
+      privateSaved,
+      resolved.requiresStructuredReport,
+    );
+    const binding = {
+      format: report.format,
+      apiBaseUrl,
+      accountId: credentials.account_id,
+      source,
+      repository: {
+        id: destination.id,
+        repo_connector_id: destination.repo_connector_id,
+      },
+      sha256: report.digest,
+      contextVersion: context.context_version,
+    };
+    return { context, report, binding };
+  }
+  function acceptsJob(
+    context: PrivateImportContext,
+    format: PrivateImportFormat,
+  ) {
+    return context.can_create_import_jobs && context.formats.includes(format);
+  }
+  // Use an earlier catalog URL only after the account, connector, repository,
+  // inbox context and exact upload digest all match the immutable checkpoint.
+  const existingPrivate =
+    usePrivateImport && privateSaved !== undefined
+      ? await preparePrivateAttempt()
+      : undefined;
+  const previous =
+    existingPrivate &&
+    readPrivateCheckpoint(privateSaved, existingPrivate.binding);
+  const retryOfJobId =
+    unsuccessfulJob(previous?.receipt) &&
+    canStartJob &&
+    existingPrivate?.context.can_upload &&
+    acceptsJob(existingPrivate.context, existingPrivate.report.format)
+      ? previous?.jobId
+      : undefined;
+  const resumed = previous !== undefined && retryOfJobId === undefined;
+  const privateApproval = resumed ? previous : undefined;
+  const privateUrl = privateApproval?.approvedRepositoryUrl;
+  const approvedPlatform =
+    saved?.approvedRepositoryPlatform ??
+    privateApproval?.approvedRepositoryPlatform;
+
   // The findings-only checkpoint key lets projected and native callers resume one immutable
   // request. Supplemental report claims are outside that digest and must still match its source.
   const recheckOriginal =
@@ -2967,7 +3033,8 @@ async function preparePublicationInput(
   }
   // The released request retained its typed finding URL, but only the authenticated
   // catalog or a previously recorded approval can bind a new source declaration.
-  const approvedUrl = saved?.approvedRepositoryUrl ?? destination.url;
+  const approvedUrl =
+    saved?.approvedRepositoryUrl ?? privateUrl ?? destination.url;
   if (
     hosted &&
     readerSources.some(({ platform, url }) => {
@@ -2985,10 +3052,10 @@ async function preparePublicationInput(
     throw new CodexSecurityError(
       "The reader's source repository does not match the selected Cloud repository.",
     );
-  await recheckFileRepository?.(approvedUrl, saved?.approvedRepositoryPlatform);
+  await recheckFileRepository?.(approvedUrl, approvedPlatform);
   const hostedSource =
     hosted && (!saved || declaredSource)
-      ? sourceFor(approvedUrl, saved?.approvedRepositoryPlatform)
+      ? sourceFor(approvedUrl, approvedPlatform)
       : undefined;
   const matchesHostedRepository = hostedSource?.matches;
   function requireApprovedSource(url: string, platform?: "other") {
@@ -3004,7 +3071,8 @@ async function preparePublicationInput(
   requireApprovedSource(approvedUrl);
   if (legacyTypedUrl) requireApprovedSource(legacyTypedUrl);
 
-  const trivyTarget = saved?.trivyRepositoryUrl ?? destination.url;
+  const trivyTarget =
+    saved?.trivyRepositoryUrl ?? privateUrl ?? destination.url;
   function requireTrivyRemote(url: string, id?: string) {
     if (trivyRemoteKey(url, trivyTarget) !== catalogKey(trivyTarget)) {
       const label =
@@ -3036,7 +3104,7 @@ async function preparePublicationInput(
       ? trivyTarget
       : sameCatalog
         ? approved
-        : destination.url;
+        : (privateUrl ?? destination.url);
     const key = sameCatalog
       ? (url: string) =>
           cloudSourceKey(
@@ -3071,8 +3139,8 @@ async function preparePublicationInput(
     // Historical checkpoints already fixed the provider and request bytes.
     // Recheck any projected source against the destination discovered for this retry.
     const replay =
-      saved && options.provider !== "blackduck" && !trivyReportUrls;
-    if (!saved || options.provider === "sonar" || trivyReportUrls) {
+      historical && options.provider !== "blackduck" && !trivyReportUrls;
+    if (!historical || options.provider === "sonar" || trivyReportUrls) {
       for (const url of sonarRepositoryUrls(
         options.provider,
         findings,
@@ -3097,7 +3165,8 @@ async function preparePublicationInput(
       ["veracode", veracodeReportRepositories],
       ["continuum", continuumReportRepositories],
     ] as const) {
-      if (saved && options.provider !== provider && !trivyReportUrls) continue;
+      if (historical && options.provider !== provider && !trivyReportUrls)
+        continue;
       for (const [id, source] of repositories(
         options.provider,
         findings,
@@ -3185,15 +3254,6 @@ async function preparePublicationInput(
         );
     }
   }
-  // Existing repository submissions keep their original request bodies and receipts.
-  const privatePath = join(state, `${key}.private-import.json`);
-  const privateSaved = await readOptionalFile(privatePath);
-  if (resumingPreviousReader && !saved && privateSaved === undefined)
-    throw new CodexSecurityError(
-      "The saved publication changed. Run the command again to preview this report.",
-    );
-  const usePrivateImport =
-    !saved && (canStartJob || privateSaved !== undefined);
   if (!usePrivateImport) checkRepositories(parsed);
   // A retry sends its saved projection, which may differ from today's reader.
   if (saved) {
@@ -3240,58 +3300,20 @@ async function preparePublicationInput(
 
   if (usePrivateImport) {
     const client = privateClient;
-    const context = previewContext ?? (await client.context());
-    if (source.source_key.trim() !== source.source_key)
-      throw new CodexSecurityError(
-        "A private source key cannot have leading or trailing whitespace.",
-      );
-    const report = await selectPrivateReport(
-      parsed,
-      source.provider,
-      nativePath,
-      context,
-      privateSaved,
-      resolved.requiresStructuredReport,
-    );
-    const binding = {
-      format: report.format,
-      apiBaseUrl,
-      accountId: credentials.account_id,
-      source,
-      repository: {
-        id: destination.id,
-        repo_connector_id: destination.repo_connector_id,
-      },
-      sha256: report.digest,
-      contextVersion: context.context_version,
-    };
-    function checkpointForContext(data: string | undefined) {
-      return data === undefined
-        ? undefined
-        : readPrivateCheckpoint(data, binding);
-    }
-    const previous = checkpointForContext(privateSaved);
-    const acceptsJob = (value: typeof context) =>
-      value.can_create_import_jobs && value.formats.includes(report.format);
+    const { context, report, binding } =
+      existingPrivate ?? (await preparePrivateAttempt());
     function requireAccess(value: typeof context, saved: typeof previous) {
       if (
         !value.can_read ||
         (!saved && !canStartJob) ||
         (!saved?.jobId &&
-          ((!saved?.fileId && !value.can_upload) || !acceptsJob(value)))
+          ((!saved?.fileId && !value.can_upload) ||
+            !acceptsJob(value, report.format)))
       )
         throw new CodexSecurityError(
           "Private findings import is unavailable for this account or report format.",
         );
     }
-    const retryOfJobId =
-      unsuccessfulJob(previous?.receipt) &&
-      canStartJob &&
-      context.can_upload &&
-      acceptsJob(context)
-        ? previous?.jobId
-        : undefined;
-    const resumed = previous !== undefined && retryOfJobId === undefined;
     checkRepositories(parsed, resumed);
     requireAccess(context, previous);
     const privateImport = {
@@ -3321,10 +3343,15 @@ async function preparePublicationInput(
               "The private inbox changed. Run the command again to review the new destination.",
             );
           await assertNoAlternateCheckpoint(async () => current);
-          const stored = checkpointForContext(
+          const stored = readPrivateCheckpoint(
             await readOptionalFile(privatePath),
+            binding,
           );
-          if (resumingPreviousReader && !stored)
+          if (
+            !stored &&
+            (resumingPreviousReader ||
+              (privateUrl && privateUrl !== destination.url))
+          )
             throw new CodexSecurityError(
               "The saved private import changed. Run the command again to preview this report.",
             );
@@ -3343,6 +3370,9 @@ async function preparePublicationInput(
           const checkpoint = {
             ...(active ?? {
               ...binding,
+              approvedRepositoryUrl: destination.url,
+              approvedRepositoryPlatform:
+                hostedSource?.github === false ? ("other" as const) : undefined,
               uploadRequestId: randomUUID(),
               jobRequestId: randomUUID(),
               fileId: undefined,
