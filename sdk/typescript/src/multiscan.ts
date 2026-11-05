@@ -503,6 +503,7 @@ async function runCampaign(
           artifactOutput,
           checkout,
           knowledgeByMode[task.mode]?.snapshot,
+          receipt.operationId,
         ),
         restoreReport,
         (warning) => {
@@ -676,6 +677,7 @@ async function runCampaign(
                 scanDir,
                 authority?.target_path ?? normalCheckout,
                 knowledge?.snapshot,
+                recorded?.operationId,
               );
               if (
                 authority !== undefined &&
@@ -865,7 +867,7 @@ async function runCampaign(
           }
           if (error instanceof OutputDirectoryNotEmptyError) {
             requiresRecovery = true;
-            failure = `Bulk attempt directory is not empty: ${scanDir}. Inspect the preserved artifacts and checkout before running the same bulk-scan command with --recover.`;
+            failure = `Bulk attempt directory is not empty: ${scanDir}. Inspect the preserved artifacts before running the same bulk-scan command with --recover.`;
           } else {
             failure = errorMessage(error);
           }
@@ -1527,6 +1529,7 @@ function campaignRequestDigests(
   scanDir: string,
   checkout: string,
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot,
+  operationId?: string,
 ): string[] {
   const scanOptions = campaignScanOptions(
     options,
@@ -1535,10 +1538,16 @@ function campaignRequestDigests(
     knowledgeBaseSnapshot,
   );
   // Retain prior request identities while accepting literal absolute CSV scopes.
-  return [
+  const digests = [
     scanRequestDigest(options.config, scanOptions),
     scanRequestDigest(options.config, scanOptions, checkout),
   ];
+  // Older registrations included the operation ID of this specific attempt.
+  if (operationId !== undefined)
+    digests.push(
+      scanRequestDigest(options.config, scanOptions, checkout, { operationId }),
+    );
+  return digests;
 }
 
 function registeredTaskMatches(
@@ -2020,7 +2029,7 @@ function parseInventory(
   if (errors.length > 0) {
     throw new Error(`Multiscan CSV could not be parsed: ${errors[0]!.message}`);
   }
-  const headers = rows.shift();
+  const headers = rows.shift()?.map((header) => header.trim());
   if (
     headers === undefined ||
     !["id", "repository", "revision"].every((name) => headers.includes(name)) ||
