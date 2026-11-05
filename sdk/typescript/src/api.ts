@@ -120,6 +120,7 @@ import {
 } from "./config.js";
 import {
   estimateScanCost,
+  readScanBudgetUsage,
   ScanCostTracker,
   type ScanCost,
   type ParentProgressSource,
@@ -2447,6 +2448,7 @@ export class CodexSecurity {
       status: "pending" as "pending" | "running" | "complete",
     };
     let completionCost: ScanCost | null = null;
+    let validationThreadId: string | undefined;
     let nativeTurnFailure: string | undefined;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
@@ -2685,9 +2687,7 @@ export class CodexSecurity {
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
-        mode === "deep" && typeof sqliteHome === "string"
-          ? { CODEX_SQLITE_HOME: sqliteHome }
-          : {};
+        typeof sqliteHome === "string" ? { CODEX_SQLITE_HOME: sqliteHome } : {};
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
         responses_api_metadata: codexSecurityRequestContext(effectiveConfig, {
@@ -2861,11 +2861,7 @@ export class CodexSecurity {
         notifyObserver(options, "onWorkerStatus")(status);
       };
       const reportedInaccessibleSessionLogs = new Set<string>();
-      const reportTrackingError = (error: unknown): void => {
-        if (options.maxCostUsd !== undefined) {
-          costAbortController.abort(error);
-          return;
-        }
+      const warnTrackingError = (error: unknown): void => {
         if (
           isRecord(error) &&
           (error["code"] === "EACCES" || error["code"] === "EPERM") &&
@@ -2881,12 +2877,35 @@ export class CodexSecurity {
           "onWarning",
         )(`Could not track scan activity: ${errorMessage(error)}`);
       };
+      const reportTrackingError = (error: unknown): void => {
+        if (options.maxCostUsd !== undefined) costAbortController.abort(error);
+        else warnTrackingError(error);
+      };
       const tracker = new ScanCostTracker({
+        onObservationError: warnTrackingError,
         codexHome: runtime.codexHome,
         model,
         repository: repo,
         scanDirectory: scanDir,
         maxCostUsd: options.maxCostUsd,
+        readBudgetUsage:
+          options.maxCostUsd === undefined
+            ? undefined
+            : (threadId) =>
+                readScanBudgetUsage(
+                  (args) =>
+                    workbench(
+                      {
+                        ...workbenchOptions,
+                        signal: signal.aborted ? undefined : signal,
+                      },
+                      args,
+                    ),
+                  scanId,
+                  threadId,
+                  validationThreadId,
+                  directDeepScan,
+                ),
         onUsage:
           options.onUsage === undefined
             ? undefined
@@ -3137,6 +3156,7 @@ export class CodexSecurity {
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
           ...environmentWithGit(git.environment, git),
+          CODEX_HOME: runtime.codexHome,
           ...sqliteEnvironment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
@@ -3212,7 +3232,7 @@ export class CodexSecurity {
             });
       // The registered recipe now owns the private snapshot, including after completion.
       savedProviderProfile = undefined;
-      const scanId = registration["scanId"];
+      const registeredScanId = registration["scanId"];
       const resumeThreadId =
         options.resumeScanId === undefined
           ? undefined
@@ -3220,7 +3240,7 @@ export class CodexSecurity {
       if (options.resumeScanId !== undefined) {
         const savedRecipe = registration["recipe"];
         if (
-          scanId !== options.resumeScanId ||
+          registeredScanId !== options.resumeScanId ||
           !isRecord(savedRecipe) ||
           savedRecipe["repository"] !== repo ||
           typeof resumeThreadId !== "string" ||
@@ -3241,7 +3261,7 @@ export class CodexSecurity {
           savedSession.workingDirectory !== scanDir
         ) {
           throw new CodexSecurityError(
-            `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+            `The original Codex session for scan ${registeredScanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
           );
         }
         if (typeof registration["sealedProducerVersion"] === "string") {
@@ -3286,7 +3306,7 @@ export class CodexSecurity {
             : undefined;
       const registeredRevision = registration["targetRevision"];
       if (
-        typeof scanId !== "string" ||
+        typeof registeredScanId !== "string" ||
         typeof targetId !== "string" ||
         registration["scanDir"] !== scanDir ||
         typeof targetKind !== "string" ||
@@ -3306,6 +3326,7 @@ export class CodexSecurity {
           "The Codex Security workbench returned an invalid scan registration.",
         );
       }
+      const scanId = registeredScanId;
       const targetRevision =
         registeredRevision === "unversioned" ? null : registeredRevision;
       const registeredFileCount = registration["scopeFileCount"];
@@ -3779,6 +3800,13 @@ export class CodexSecurity {
                       outputSchema,
                     })
                   ).events,
+                  onEvent: (event) => {
+                    if (
+                      event.type === "thread.started" &&
+                      typeof event["thread_id"] === "string"
+                    )
+                      validationThreadId = event["thread_id"];
+                  },
                   onReconnect: (message, attempts) =>
                     notifyObserver(options, "onReconnect")(
                       ...attempts,
@@ -3792,6 +3820,13 @@ export class CodexSecurity {
                       "The custom validation turn did not complete.",
                   );
                 budgetAbortController.abort();
+                if (turn.threadId === null && maxCostUsd !== undefined) {
+                  runPostScan = null;
+                  throw new CodexSecurityError(
+                    "Could not verify the cost of the custom validation turn.",
+                  );
+                }
+                validationThreadId = turn.threadId ?? undefined;
                 tracker.recordUsage(turn.usage, turn.threadId);
                 await tracker.refresh().catch(reportTrackingError);
                 checkOpen();
@@ -3802,17 +3837,18 @@ export class CodexSecurity {
           }
           budgetAbortController.abort();
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
-            if (options.maxCostUsd !== undefined) throw error;
+            if (options.maxCostUsd !== undefined) {
+              runPostScan = null;
+              throw error;
+            }
             reportTrackingError(error);
             return { usage, cost: estimateScanCost(model, usage) };
           });
           throwIfAborted(signal, scanDir);
-          if (options.maxCostUsd !== undefined && snapshot.cost === null) {
-            notifyObserver(
-              options,
-              "onWarning",
-            )(
-              "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
+          if (maxCostUsd !== undefined && snapshot.cost === null) {
+            runPostScan = null;
+            throw new IncompleteScanError(
+              "Could not verify the requested scan cost limit because scan-owned token usage is incomplete.",
             );
           }
           completionCost = snapshot.cost;
@@ -4128,6 +4164,10 @@ export class CodexSecurity {
       }
       if (
         failure instanceof ScanCostLimitExceededError &&
+        snapshot?.cost &&
+        snapshot.cost.estimatedUsd > failure.maxCostUsd &&
+        (customValidation.status !== "running" ||
+          validationThreadId !== undefined) &&
         budgetRecovery !== null &&
         budgetRecovery.threadId !== null &&
         activeScan !== null &&
@@ -4141,7 +4181,7 @@ export class CodexSecurity {
               "--scan-id",
               activeScan.id,
               "--cost-json",
-              JSON.stringify(snapshot?.cost ?? failure.cost),
+              JSON.stringify(snapshot.cost),
               `--message=${failure.message}`,
             ],
           );
@@ -4159,7 +4199,7 @@ export class CodexSecurity {
             {
               status: "completed",
               model: budgetRecovery.model,
-              usage: snapshot?.usage ?? null,
+              usage: snapshot.usage,
             },
             budgetRecovery.threadId,
             scanDir,
@@ -4253,7 +4293,9 @@ export class CodexSecurity {
               : priorTurnFailure === undefined &&
                   explicitlyCanceled(callerCancellation),
             priorTurnFailure ?? failure,
-            snapshot?.cost,
+            failure instanceof ScanCostLimitExceededError
+              ? failure.cost
+              : snapshot?.cost,
           );
           activeScan = null;
         } catch {}

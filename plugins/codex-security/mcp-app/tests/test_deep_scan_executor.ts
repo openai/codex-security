@@ -65,6 +65,7 @@ import type {
   CodexWorkerDiagnostic,
   CodexWorkerRequest,
 } from "../src/deep-scan/types.js";
+import { testExecutorExecutablePinning } from "./deep_scan_executable_cases.ts";
 import { testWorkerSelectedProfileFiles } from "./deep_scan_profile_file_cases.ts";
 import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_alias_cases.ts";
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
@@ -154,6 +155,17 @@ try {
 
   await test("Deep worker executable selection", async (t) => {
     await check(t, testConfiguredExecutablePaths);
+    await check(
+      t,
+      () =>
+        testExecutorExecutablePinning({
+          CodexSdkWorkerExecutor,
+          fakeCodexFixture,
+          parentSandbox: trustedParentSandbox,
+          resolveCodexPath,
+        }),
+      "worker executable pinning",
+    );
     if (process.platform !== "win32") {
       await check(t, testWorkerLaunchesWithoutGlobalCodex);
       await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);

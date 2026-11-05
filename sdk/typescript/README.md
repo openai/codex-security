@@ -478,7 +478,8 @@ coordinator has finished.
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription
 allowance. Use `cost.estimatedUsdRange` for reporting. `maxCostUsd` uses the
 short-context estimate; in-flight requests can exceed it. Post-scan prompts run
-outside that limit. Matching earlier findings can also make model calls.
+outside that limit. With a cost limit, completing the scan requires verifiable
+usage for the scan and its workers. Matching earlier findings can also make model calls.
 See [progress and cost](docs/cli.md#progress-and-cost) for accounting and budget callbacks.
 
 ### Validate an existing finding
