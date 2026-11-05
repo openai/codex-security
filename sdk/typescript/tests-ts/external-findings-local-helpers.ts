@@ -1,13 +1,15 @@
 import { expect } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
 import { EXTERNAL_FINDINGS_PROVIDERS } from "../src/external-findings-read.js";
-import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import {
+  prepareLocalExternalImport,
+  type LocalExternalImportOptions,
+} from "../src/external-findings-import.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
   type StoredExternalFinding,
 } from "../src/external-findings-local.js";
-import type { ExternalPublicationOptions } from "../src/external-findings-publish.js";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -66,7 +68,7 @@ export async function localFindingsFixture(options: Checkout = {}) {
 
 export async function localReportFixture(
   filename: string,
-  source: Omit<ExternalPublicationOptions, "repository">,
+  source: Omit<LocalExternalImportOptions, "repository">,
   checkout: Checkout = {},
 ) {
   const fixture = await localFindingsFixture(checkout);
@@ -96,7 +98,7 @@ export async function localReportFixture(
 
 export function isolatedGitReportFixture(
   filename: string,
-  source: Omit<ExternalPublicationOptions, "repository">,
+  source: Omit<LocalExternalImportOptions, "repository">,
   checkout: Checkout = {},
 ) {
   return localReportFixture(filename, source, {
@@ -107,8 +109,13 @@ export function isolatedGitReportFixture(
 
 type LocalReportFixture = Awaited<ReturnType<typeof localReportFixture>>;
 
-export async function createAndReplayFinding(fixture: LocalReportFixture) {
-  const prepared = await fixture.prepare();
+export async function createAndReplayFinding(
+  fixture: LocalReportFixture,
+  normalized?: ExternalFindings,
+) {
+  const prepared = normalized
+    ? await fixture.prepareNormalized(normalized)
+    : await fixture.prepare();
   expect(prepared.preview.excluded).toEqual([]);
   expect(prepared.preview.findings).toHaveLength(1);
   expect(await fixture.read()).toEqual([]);

@@ -1414,6 +1414,8 @@ codex-security publish findings /private/path/endor-findings.json --provider end
 After reviewing the findings and exclusions, rerun the command without
 `--dry-run` and confirm. [Save or publish and verify](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#save-or-publish-and-verify).
 
+For Tenable One Code Repository findings, use `--provider tenable --to local` and set `--source-repository-url` to the checkout’s verified HTTPS remote. [Tenable export and import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md)
+
 Local readback uses `findings imported [PATH]`. The path defaults to the current
 directory. Each imported record starts as `not_assessed`. Unknown revisions and
 locations stay unknown. Repository-scoped sources are checked against comparable
