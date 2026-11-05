@@ -1,45 +1,58 @@
 # Plugin connectors
 
-Codex Security uses optional connected apps for Cloud reads, finding intake
-and tracking. The [app manifest](../plugins/codex-security/.app.json)
-declares each connection with `required: false` so users can run local scans
-without connecting an app.
+Connect an app when you want Codex Security to read findings from a service
+or track them in an issue. Local repository scans work without these apps.
 
-| App                  | Workflows                                                 |
-| -------------------- | --------------------------------------------------------- |
-| Codex Security Cloud | Read existing findings, evidence, reports and scan status |
-| Linear               | Ticket intake and finding tracking                        |
-| GitHub               | Finding intake, source lookup and issue tracking          |
-| Atlassian            | Jira Cloud ticket intake and finding tracking             |
+| App                  | Use it to                                                                      | Setup                                                                              |
+| -------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| Codex Security Cloud | Read findings, evidence, reports, and scan status in your workspace.           | [Connect Cloud in Codex](../sdk/typescript/README.md#read-existing-cloud-findings) |
+| Linear               | Read tickets and track findings in a team or project.                          | [Connect Linear](#linear-setup)                                                    |
+| GitHub               | Read alerts and repository source, track issues, or draft a security advisory. | [Connect GitHub](#github-setup)                                                    |
+| Atlassian            | Read Jira Cloud tickets and track findings in a project.                       | [Connect Jira](#jira-setup)                                                        |
 
-For scanner imports, use a connected tool or signed-in CLI to obtain the
-requested records. Follow the [scanner import guide](scanner-imports/README.md)
-to select and preview the evidence for your destination.
+## Linear setup
 
-Finding tracking and CLI publication share issue associations when they use the same local state directory, including reuse across scan occurrences. The tracking skill reads them with `get_codex_security_finding_issues` and records accepted writes or verified reuse with `record_codex_security_finding_issues`. Provider reads still confirm saved candidates and search for unrecorded duplicates. Accepted writes remain recorded even when follow-up reads fail. The tools accept sealed scan bundles without requiring their original local scan history and keep receipts outside those bundles.
+Connect **Linear** in the Codex app directory with the account that can access
+your team. Give Codex a ticket URL to triage, or name the team and optional
+project where you want to track a finding. To use an existing Linear MCP
+connection for reads, specify the account and workspace.
+See [ticket intake](../plugins/codex-security/skills/triage-finding/references/ticket-intake.md#retrieval).
 
-To replace `scripts/validate_tracking_source.py`, run the plugin launcher with `--helper validate-tracking-source <scan-directory> [--finding-id <id> | --fingerprint <fingerprint>]`. The Node helper validates the sealed scan before printing the selected finding IDs in scan order.
+## GitHub setup
 
-For GitHub triage, use a connected tool that can read the requested records and
-evidence. The [GitHub intake reference](../plugins/codex-security/skills/triage-finding/references/github-rest-intake.md)
-covers scoped reads using an existing GitHub CLI login and how to handle an
-explicit choice of account or transport.
+Connect **GitHub** in the app directory with access to the repository and the
+type of alert you want to read. Give Codex the repository and an issue or alert
+URL. To use an existing GitHub CLI login for triage, specify the host and
+account. See [GitHub intake](../plugins/codex-security/skills/triage-finding/references/github-rest-intake.md).
+When tracking a finding, specify whether it belongs in an issue or a
+[draft security advisory](../plugins/codex-security/skills/track-findings/references/github-security-advisories.md).
 
 ## Jira setup
 
-Connect the **Atlassian** app in the app directory. Existing Atlassian Rovo (Legacy) connections do not connect the new app; authorize it separately with the intended account and site.
+Connect **Atlassian** in the Codex app directory and authorize the account and
+site that contain your Jira project. If you already use Atlassian Rovo (Legacy), authorize
+the Atlassian app separately. Give Codex an issue key and site, or a Jira Query
+Language (JQL) query to select the tickets to read.
+See [Jira ticket intake](../plugins/codex-security/skills/triage-finding/references/ticket-intake.md#retrieval)
+for using an already signed-in Jira CLI.
 
-For user-selected Jira CLI or Linear MCP reads, see the [ticket intake guide](../plugins/codex-security/skills/triage-finding/references/ticket-intake.md#retrieval). Intake and duplicate checks need read and search access. Creating or updating issues also needs write access. Before creating an issue, the tracking skill resolves the project, issue type, and required fields.
+## Track a finding
 
-Use the app's live schemas and discover deferred operations when needed. See Atlassian's [supported tools](https://developer.atlassian.com/cloud/rovo-mcp/guides/supported-tools/) and the skill's [Jira workflow](../plugins/codex-security/skills/track-findings/references/jira.md).
+Give Codex the saved scan directory, the finding ID, and the destination. Ask
+it to check for an existing issue. The account needs read and search access to
+check for duplicates. To create or update an issue, it also needs write access.
+Review the destination, audience, and proposed changes before approving a write.
+If Codex cannot find a ticket you can see, check the signed-in account and the
+selected site, workspace, or repository.
 
-## QA
+When the plugin and CLI use the same local state directory, both can find issue
+links saved by earlier tracking or publication runs. Codex checks a saved link
+against the tracker before reusing it and searches the destination for other
+matches. You can also track findings from a sealed scan bundle copied from
+another machine. Codex saves new issue associations outside the bundle, even
+if an issue was created but its follow-up read failed. On retry, check that
+issue before approving another write.
+See the [tracking workflow](../plugins/codex-security/skills/track-findings/SKILL.md).
 
-Test the plugin build with synthetic findings in a selected QA project:
-
-- Verify that Jira tracking uses the Atlassian app and that intake reads use the selected connection and account on the intended site or workspace.
-- Read a synthetic issue directly and through project-scoped JQL, including pagination.
-- Create one issue, reuse it without creating a duplicate, and update approved fields. Verify each write by reading the issue back.
-- Verify that missing connections and insufficient access produce recovery guidance without duplicate creates.
-
-Record live results separately from static checks. Keep account and project details, issue keys, and raw tool responses out of public PRs.
+To import a scanner report instead, use the [scanner import guides](scanner-imports/README.md)
+to choose the input format, preview the records, and select a destination.

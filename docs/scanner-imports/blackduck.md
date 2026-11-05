@@ -1,9 +1,9 @@
 # Import Black Duck SCA findings
 
-Use a BOM-6 export of vulnerable components from one Black Duck SCA project
-version. In the scan configuration, verify which Git repository that version
-represents. A project name or component download URL alone can't establish
-that link.
+Export the vulnerable components from the bill of materials for one Black Duck
+SCA project version. Request the BOM-6 JSON format. In the scan configuration,
+verify which Git repository the version represents. A project name or component
+download URL alone can't establish that link. [Export the collection](#export-the-bom-6-collection).
 
 ## Quick start
 

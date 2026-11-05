@@ -8,8 +8,8 @@ findings are excluded.
 
 [Enable external imports](README.md#preview-a-report) and open the matching
 checkout. Verify the repository's Git URL in your SCM integration. If
-Inspector identifies the repository by project ARN, set `VERIFIED_PROJECT_ARN`
-to the full ARN you verified there.
+the report identifies the repository only by an Inspector project ARN, verify
+that full ARN against the same URL in the SCM integration before importing.
 
 **Saved report.** Use a complete repository export or select full native rows
 by ARN within its `findings` array. Set `report` and skip to the preview.
@@ -55,13 +55,14 @@ Combine every batch's fully paginated `findings` array in one
 
 ### Import and verify
 
-Preview the report with your verified Git URL and source key. If the native
-findings already include the matching Git URL, omit `--inspector-project-arn`.
+Preview the report with the verified Git URL and a source key for the repository.
+This example assumes the native findings identify the repository by URL. For
+ARN-only findings, add `--inspector-project-arn FULL_PROJECT_ARN` using the ARN
+you independently matched to that URL.
 
 ```sh
 codex-security publish findings "$report" --to local --repository . \
   --provider inspector --source-repository-url https://github.com/example/project \
-  --inspector-project-arn "$VERIFIED_PROJECT_ARN" \
   --source-key inspector/account-alias/us-east-1/example/project \
   --dry-run --format json
 ```
@@ -75,14 +76,13 @@ To save the selected findings in your local workbench, remove `--dry-run` and co
 
 Sign in to a workspace with the GitHub repository connected and private
 Inspector imports enabled. Preview the same file and source key, using your
-connected repository URL. Include the verified project ARN if the local
-preview required it.
+connected repository URL. If the local preview required a project ARN, add
+`--inspector-project-arn` with the same verified ARN to the command below.
 
 ```sh
 repo=https://github.com/example/project
 codex-security publish findings "$report" --to cloud --repository "$repo" \
   --provider inspector --source-repository-url "$repo" \
-  --inspector-project-arn "$VERIFIED_PROJECT_ARN" \
   --source-key inspector/account-alias/us-east-1/example/project \
   --dry-run --format json
 ```

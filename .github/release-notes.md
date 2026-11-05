@@ -4,6 +4,9 @@
 
 ## Highlights
 
+<details>
+<summary>Changes to review for highlights</summary>
+
 - identify invalid committed receipt lines ([#2180](https://github.com/openai/codex-security/pull/2180))
 - use the singular for one additional finding in the job summary ([#2252](https://github.com/openai/codex-security/pull/2252))
 - keep scrolled history in place at the history cap ([#2266](https://github.com/openai/codex-security/pull/2266))
@@ -16,7 +19,6 @@
 - publish hosted scanner findings to Cloud ([#2085](https://github.com/openai/codex-security/pull/2085))
 - honor bounded Retry-After on hosted scanner reads ([#2086](https://github.com/openai/codex-security/pull/2086))
 - handle disconnected child stdin on macOS ([#2275](https://github.com/openai/codex-security/pull/2275))
-- deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
 - simplify scanner imports and clarify Cloud receipts ([#2271](https://github.com/openai/codex-security/pull/2271))
 - avoid repeated repository and Snyk project checks ([#2187](https://github.com/openai/codex-security/pull/2187))
 - bump taiki-e/install-action from 2.87.32 to 2.88.0 ([#2283](https://github.com/openai/codex-security/pull/2283))
@@ -45,7 +47,6 @@
 - preserve worker activity when a session log is unreadable ([#970](https://github.com/openai/codex-security/pull/970))
 - preserve shell-escaped whitespace in repository paths ([#2163](https://github.com/openai/codex-security/pull/2163))
 - protect HF\_TOKEN and defer the Hugging Face scan preset ([#277](https://github.com/openai/codex-security/pull/277))
-- restrict sockets and process tracing in Compose ([#160](https://github.com/openai/codex-security/pull/160))
 - simplify lifecycle and protocol test fixtures ([#2186](https://github.com/openai/codex-security/pull/2186))
 - align severity badges in finding tables ([#122](https://github.com/openai/codex-security/pull/122))
 - use trusted Git when installing hooks ([#92](https://github.com/openai/codex-security/pull/92))
@@ -102,6 +103,9 @@
 - preserve usage coverage and operation outcomes ([#1841](https://github.com/openai/codex-security/pull/1841))
 - preserve saved-scan errors and recovery advice ([#1266](https://github.com/openai/codex-security/pull/1266))
 - preserve AWS code scanning evidence and retries ([#2347](https://github.com/openai/codex-security/pull/2347))
+- make scan and integration guides evergreen ([#2350](https://github.com/openai/codex-security/pull/2350))
+
+</details>
 
 <!-- release-section: highlights:end -->
 
@@ -109,7 +113,7 @@
 
 ## Upgrade notes
 
-Review migration steps for these breaking changes:
+<!-- Replace each candidate with the affected users and the action they need to take. -->
 
 - deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
 - restrict sockets and process tracing in Compose ([#160](https://github.com/openai/codex-security/pull/160))

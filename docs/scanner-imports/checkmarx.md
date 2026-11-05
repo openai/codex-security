@@ -1,11 +1,13 @@
 # Import Checkmarx SAST findings
 
 Use `--provider checkmarx` for a completed Checkmarx One scan (CLI JSON) or
-self-managed CxSAST scan (XML). Both formats support gzip. [Enable external imports](README.md#preview-a-report).
+self-managed CxSAST scan (XML). Both formats support gzip. If you need the report,
+[collect an existing scan with Codex](#collect-an-existing-scan-with-codex) or
+[export one scan manually](#export-one-scan-manually).
 
 ## Preview, import and verify
 
-From the matching checkout, preview a saved report with its verified Git URL.
+[Enable external imports](README.md#preview-a-report). From the matching checkout, preview the report with its verified Git URL.
 Choose a source key for the product, tenant or instance, project and ref.
 Reuse it for later exports from that stream.
 
@@ -62,7 +64,7 @@ Review the result filters before generating the file. [Generate a CxSAST report]
 
 ## Identity and evidence
 
-One combines `similarityId` and `data.resultHash` to identify each occurrence.
+Checkmarx One combines `similarityId` and `data.resultHash` to identify each occurrence.
 CxSAST uses the project, query, path similarity ID and ordered path nodes,
 or the reported result location for a path without nodes. Moving a node can
 create a new occurrence. [Checkmarx similarity IDs](https://docs.checkmarx.com/en/34965-205026-similarity-id.html)
