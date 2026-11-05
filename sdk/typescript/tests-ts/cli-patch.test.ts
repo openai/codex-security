@@ -135,6 +135,8 @@ describe("scan and patch workflow", () => {
     "removed component with relative object directory",
     "removed component with relative symlink Git environment",
     "removed component with relative provider configuration",
+    "removed component with external askpass",
+    "removed component with checkout askpass",
     "removed component with relative GitLab configuration",
     "removed component with removed provider configuration",
     ...(process.platform === "win32"
@@ -201,6 +203,13 @@ describe("scan and patch workflow", () => {
                     : kind.includes("relative object directory")
                       ? { GIT_OBJECT_DIRECTORY: "../metadata/objects" }
                       : {};
+      const askpass = join(directory, "fixture-askpass.exe");
+      const askpassEnvironment =
+        kind === "removed component with external askpass"
+          ? { GIT_ASKPASS: relative(subdirectory, askpass) }
+          : kind === "removed component with checkout askpass"
+            ? { GIT_ASKPASS: `.${sep}app.ts` }
+            : {};
       const providerConfiguration = kind.includes(
         "removed provider configuration",
       )
@@ -221,6 +230,8 @@ describe("scan and patch workflow", () => {
             alias,
             process.platform === "win32" ? "junction" : "dir",
           );
+        if (kind === "removed component with external askpass")
+          await writeFile(askpass, "", { mode: 0o700 });
         if (Object.keys(providerEnvironment).length > 0) {
           await mkdir(providerConfiguration);
           await writeFile(
@@ -307,6 +318,7 @@ describe("scan and patch workflow", () => {
               ...process.env,
               ...gitEnvironment,
               ...providerEnvironment,
+              ...askpassEnvironment,
             },
             onCodex: async (_args, output, environment) => {
               const assessing = output?.appServer?.prompt.includes(
@@ -424,6 +436,12 @@ describe("scan and patch workflow", () => {
                   )
                 )
                   postPatchGitWrites.push([...args]);
+                if (args[0] === "push" && askpassEnvironment.GIT_ASKPASS)
+                  expect(options?.environment?.GIT_ASKPASS).toBe(
+                    kind === "removed component with external askpass"
+                      ? await realpath(askpass)
+                      : "",
+                  );
                 if (kind === "long checkout root")
                   expect(args.join(" ").length).toBeLessThan(32767);
                 if (

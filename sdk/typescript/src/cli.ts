@@ -9865,6 +9865,23 @@ async function patchCommandContext(
       ? {}
       : { GIT_WORK_TREE: repository }),
   };
+  // A patch can remove the caller's directory before Git asks for credentials.
+  const askpass = environmentEntry(dependencies.environment, "GIT_ASKPASS");
+  if (askpass) {
+    let candidate = askpass;
+    if (!isAbsolute(askpass)) {
+      if (parse(askpass).root) candidate = resolve(physicalDirectory, askpass);
+      else if (askpass.includes("/") || askpass.includes(sep))
+        candidate = `${physicalDirectory}${sep}${askpass}`;
+    }
+    const helper = await resolveTrustedExecutable(
+      candidate,
+      dependencies.environment,
+      [repository, physicalDirectory],
+    );
+    // An empty value disables a missing or checkout-controlled helper.
+    environment["GIT_ASKPASS"] = helper?.executable ?? "";
+  }
   const commonReference =
     dependencies.environment["GIT_COMMON_DIR"] === undefined
       ? undefined
