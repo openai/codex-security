@@ -95,6 +95,7 @@
 - guide recovery when a refresh token was already used ([#2289](https://github.com/openai/codex-security/pull/2289))
 - enforce scan budgets from verified usage ([#465](https://github.com/openai/codex-security/pull/465))
 - preserve differing threat models and use primary repair sites ([#2306](https://github.com/openai/codex-security/pull/2306))
+- preserve independently fixable findings across batches and resumes ([#2311](https://github.com/openai/codex-security/pull/2311))
 
 <!-- release-section: highlights:end -->
 
