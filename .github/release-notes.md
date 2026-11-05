@@ -115,6 +115,7 @@
 - batch Windows credential ACL inspection ([#2349](https://github.com/openai/codex-security/pull/2349))
 - use the singular for one finding in import prompts ([#2345](https://github.com/openai/codex-security/pull/2345))
 - verify scanner evidence and route workspace findings ([#2353](https://github.com/openai/codex-security/pull/2353))
+- recheck empty targets before a resumed scan's first dispatch ([#2346](https://github.com/openai/codex-security/pull/2346))
 
 </details>
 
