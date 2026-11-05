@@ -972,13 +972,17 @@ describe("CLI", () => {
         ).toBe(2);
         expect(stdout.text()).toBe("");
         expect(stderr.text()).not.toContain(control);
+        const escapedScan = scan.replace(
+          control,
+          `\\x${control.charCodeAt(0).toString(16)}`,
+        );
         expect(stderr.text()).toContain(
-          `scan directory ${scan.replace(control, " ")}: expected an existing non-symlink directory`,
+          `scan directory ${escapedScan}: expected an existing non-symlink directory`,
         );
         expect(stderr.text()).toContain("No such file or directory");
         await expect(
           exportArtifact({ source: { directory: scan }, output }),
-        ).rejects.toThrow(scan);
+        ).rejects.toThrow(escapedScan);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }

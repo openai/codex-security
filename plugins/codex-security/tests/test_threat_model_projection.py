@@ -1,3 +1,5 @@
+"""Check how authored Markdown and older threat models are sealed, recovered, and exported."""
+
 from __future__ import annotations
 
 import io

@@ -72,6 +72,47 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
+  test("reports empty and excluded selections without storage and preserves failed scanner diagnostics", async () => {
+    const { repository, stateDirectory, environment } = await fixture();
+    const options = { repository, ...source };
+    const empty = { read: 0, findings: [], excluded: [] };
+    const failed = {
+      ...empty,
+      report: { errors: [{ message: "Scanner timed out" }] },
+    };
+    const excluded = {
+      ...empty,
+      read: 1,
+      excluded: [
+        {
+          position: 1,
+          source_finding_id: null,
+          reason: "Unsupported severity",
+        },
+      ],
+    };
+    for (const [selection, shouldFail] of [
+      [empty, false],
+      [excluded, false],
+      [failed, true],
+      [{ ...excluded, report: failed.report }, true],
+      [{ ...empty, read: 1 }, true],
+    ] as const) {
+      const prepared = await prepareNormalizedLocalImport(selection, options, {
+        environment,
+      });
+      expect(prepared.preview).toMatchObject(selection);
+      if (shouldFail)
+        await expect(prepared.import()).rejects.toMatchObject({ selection });
+      else
+        expect(await prepared.import()).toMatchObject({
+          ...selection,
+          counts: { created: 0, updated: 0, unchanged: 0 },
+        });
+      expect(existsSync(stateDirectory)).toBe(false);
+    }
+  });
+
   test("requires opt-in before resolving repositories or accessing the workbench", async () => {
     const { root, stateDirectory, environment } = await fixture();
     const disabledEnvironment: NodeJS.ProcessEnv = { ...environment };
@@ -801,7 +842,7 @@ describe("local normalized scanner findings", () => {
           },
         }),
       };
-      const input = { read: 0, findings: [], excluded: [] };
+      const input = ${JSON.stringify(input())};
       const options = { repository, provider: "snyk", sourceKey: "synthetic-project" };
       const prepared = operation === "import"
         ? await prepareNormalizedLocalImport(input, options, dependencies)
