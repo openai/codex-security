@@ -61,9 +61,7 @@ export interface InventoryOptions {
   mode?: string;
 }
 
-export class ScopePathNotFoundError extends Error {}
-
-export function scopePath(
+function scopePath(
   repo: string,
   scope: string,
   home: string | undefined,
@@ -110,7 +108,7 @@ export function scopePath(
   const resolved = canonical(path);
   inside(repo, resolved);
   if (!directory(resolved) && !regular(resolved))
-    throw new ScopePathNotFoundError(`Scope path not found: ${resolved}`);
+    throw new Error(`Scope path not found: ${resolved}`);
   return resolved;
 }
 

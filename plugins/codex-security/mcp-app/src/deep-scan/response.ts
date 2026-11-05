@@ -75,11 +75,11 @@ export const runSchema = z
       config: configSchema,
       includePaths: z.array(z.string()).optional(),
       filePaths: z.array(z.string()).optional(),
-      discoveryStarted: z.boolean().optional(),
       scanId: requiredString,
       sdkOwnsCompletion: z.boolean().optional(),
       serviceTier: optionalString,
       coordinatorGeneration: optionalValue(positiveInteger),
+      discoveryStarted: z.boolean().optional(),
       createdAt: optionalString,
       updatedAt: optionalString,
       targetPath: requiredString,
@@ -93,7 +93,9 @@ export const runSchema = z
         })
         .optional(),
       scanDir: requiredString,
+      workerUsageDirectory: optionalString,
       dispatchedCount: nonNegativeInteger,
+      completionSequence: nonNegativeInteger.optional(),
       noNewStreak: nonNegativeInteger,
       consecutiveErrors: nonNegativeInteger
         .nullish()
