@@ -3326,3 +3326,16 @@ def test_repository_generation_returns_after_offline_migration(
             change_repository_metadata(monkeypatch, repository, "device")
         updated = connection.execute("SELECT * FROM scans WHERE id=?", (scan["scanId"],)).fetchone()
         target_state.require_scan_checkout_owner(connection, updated)
+
+
+def test_scan_list_honors_advertised_page_size(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    for index in range(21):
+        output = tmp_path / f"scan-{index}"
+        output.mkdir(mode=0o700)
+        create_cli_scan(state_dir, output, repository, complete=False)
+    page = run_workbench(state_dir, "list-scans", "--limit", "50")
+    assert len(page["scans"]) == 21
+    assert page["nextOffset"] is None

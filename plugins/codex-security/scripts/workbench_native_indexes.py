@@ -451,7 +451,7 @@ def list_repositories(
             and (args.status != "open_findings" or open_findings_count(repository["targetId"]) > 0)
         ]
         if args.limit is not None or args.offset:
-            limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+            limit = args.limit or FINDINGS_PAGE_MAX
             end = args.offset + limit
             pagination = {
                 "limit": limit,

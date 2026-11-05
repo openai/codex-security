@@ -3434,6 +3434,11 @@ export async function probeCodexSandbox(
       `Codex exited with status ${result.exitCode}.`;
   } catch (error) {
     signal?.throwIfAborted();
+    if (timeout.aborted)
+      throw new SandboxUnavailableError(
+        `Codex sandbox probe timed out after ${SANDBOX_PROBE_TIMEOUT_MILLISECONDS / 1000} seconds.`,
+        { cause: error },
+      );
     detail = processErrorDetail(error);
   }
   const guidance =
