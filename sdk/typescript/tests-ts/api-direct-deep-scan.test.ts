@@ -146,7 +146,17 @@ test.each([undefined, "Summarize the completed scan."])(
       expect(result.turnResult.finalResponse).toBe(finalReport);
       expect(result.cost?.inputTokens).toBe(100);
       expect(JSON.parse(completionReceipt!)).toMatchObject({
-        inputTokens: 100,
+        cost: { inputTokens: 100, outputTokens: 10 },
+        usage: {
+          source: "codex_runtime",
+          coverage: "complete",
+          inputTokens: 100,
+          outputTokens: 10,
+          totalTokens: 110,
+          threadCount: 2,
+          missingThreadCount: 0,
+          coverageScope: ["thread:discovery-session", "thread:engine-session"],
+        },
       });
       expect(result.toJSON()["turn"]).toMatchObject({
         finalResponse: finalReport,
