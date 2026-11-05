@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { classificationRunsSchema } from "./severity-review.js";
 import { severityRubricSchema } from "./severity-rubric.js";
+import { explicitlyCanceled } from "./scan-executor.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
@@ -1629,9 +1630,15 @@ export async function runCodexSkillCommand(
     );
     return status;
   } catch (error) {
-    await journal?.finish("failed", {
-      failureCategory:
-        error instanceof AuthenticationRequiredError
+    const signal = output?.signal;
+    const canceled =
+      explicitlyCanceled(signal) &&
+      (Object.is(error, signal?.reason) ||
+        (error instanceof Error && error.name === "AbortError"));
+    await journal?.finish(canceled ? "canceled" : "failed", {
+      failureCategory: canceled
+        ? "canceled"
+        : error instanceof AuthenticationRequiredError
           ? "authentication"
           : error instanceof ConfigurationError
             ? "configuration"

@@ -824,3 +824,37 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
     );
   },
 );
+
+test.each([
+  ["AbortError", "canceled", "canceled"],
+  ["TimeoutError", "failed", "execution"],
+] as const)(
+  "records a prelaunch %s in the skill receipt",
+  async (name, outcome, failureCategory) => {
+    const state = await mkdtemp(join(tmpdir(), "skill-startup-journal-"));
+    try {
+      const reason = new DOMException("fixture stop", name);
+      await expect(
+        runCodexSkillCommand(
+          [],
+          {
+            command: "patch",
+            stdout: capture().stream,
+            stderr: capture().stream,
+            signal: AbortSignal.abort(reason),
+          },
+          { command: process.execPath },
+          { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+        ),
+      ).rejects.toBe(reason);
+      const record = await readOperationTelemetry(state);
+      expect(record.events.map((event) => event.type)).toEqual([
+        "attempt_started",
+        "attempt_finished",
+      ]);
+      expect(record.events[1]).toMatchObject({ outcome, failureCategory });
+    } finally {
+      await rm(state, { recursive: true, force: true });
+    }
+  },
+);
