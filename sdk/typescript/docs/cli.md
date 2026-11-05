@@ -1138,6 +1138,10 @@ and show a short/long-context range. They estimate model usage, excluding other
 tiers, fees, surcharges, and account-specific pricing. They do not measure ChatGPT
 subscription allowance. Models without known prices have no estimate.
 
+GPT-6-Cyber uses its published standard short-context prices and the 30-minute
+cache-write rate. Its upper estimate remains unavailable because no long-context
+rate is published.
+
 JSON, history, and bulk receipts include `cost.estimatedUsdRange` (`min`, `max`,
 and `context: "unknown"`). A null maximum means no upper estimate is available.
 `cost.pricing` records source, verification date, tier, and rates. Older results

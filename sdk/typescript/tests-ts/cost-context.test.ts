@@ -83,32 +83,43 @@ test("prices the exact Bedrock Daybreak Blue ID with AWS short and long context 
   expect(estimateScanCost("gpt-daybreak-blue-5.6-sol", usage)).toBeNull();
 });
 
-test("prices the exact OpenAI Cyber ID without inventing long-context rates", () => {
-  const cost = estimateScanCost("gpt-5.6-cyber", {
-    input_tokens: 1_000_000,
-    cached_input_tokens: 200_000,
-    cache_write_input_tokens: 300_000,
-    output_tokens: 100_000,
-  })!;
-  expect(cost).toMatchObject({
+test.each([
+  {
     model: "gpt-5.6-cyber",
     estimatedUsd: 18.6875,
-    estimatedUsdRange: { min: 18.6875, max: null, context: "unknown" },
-    pricing: {
-      source: "https://developers.openai.com/api/docs/pricing",
-      asOf: "2026-10-06",
-      serviceTier: "standard",
-      context: "short",
-      usdPerMillionTokens: {
-        input: 12.5,
-        cacheRead: 1.25,
-        cacheWrite: 15.625,
-        output: 75,
+    asOf: "2026-10-06",
+    rates: { input: 12.5, cacheRead: 1.25, cacheWrite: 15.625, output: 75 },
+  },
+  {
+    model: "gpt-6-cyber",
+    estimatedUsd: 27.9,
+    asOf: "2026-11-05",
+    rates: { input: 20, cacheRead: 2, cacheWrite: 25, output: 100 },
+  },
+])(
+  "prices $model without inventing long-context rates",
+  ({ model, estimatedUsd, asOf, rates }) => {
+    const cost = estimateScanCost(model, {
+      input_tokens: 1_000_000,
+      cached_input_tokens: 200_000,
+      cache_write_input_tokens: 300_000,
+      output_tokens: 100_000,
+    })!;
+    expect(cost).toMatchObject({
+      model,
+      estimatedUsd,
+      estimatedUsdRange: { min: estimatedUsd, max: null, context: "unknown" },
+      pricing: {
+        source: "https://developers.openai.com/api/docs/pricing",
+        asOf,
+        serviceTier: "standard",
+        context: "short",
+        usdPerMillionTokens: rates,
       },
-    },
-  });
-  expect(cost.pricing).not.toHaveProperty("longContextUsdPerMillionTokens");
-});
+    });
+    expect(cost.pricing).not.toHaveProperty("longContextUsdPerMillionTokens");
+  },
+);
 
 test("prices the exact Bedrock Daybreak Red ID without inventing long-context rates", () => {
   const usage = {
