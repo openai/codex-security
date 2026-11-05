@@ -1,3 +1,11 @@
+export function trivyRepositoryHeader(RepoURL: string) {
+  return {
+    SchemaVersion: 2,
+    ArtifactType: "repository",
+    Metadata: { RepoURL },
+  };
+}
+
 export function trivyReport() {
   const name = "@example/package";
   const version = "1.0.0";
