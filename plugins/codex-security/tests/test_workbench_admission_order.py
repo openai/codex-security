@@ -154,12 +154,17 @@ def test_replayed_completion_does_not_advance_admission(tmp_path: Path, failed: 
 
 def test_admission_migration_preserves_legacy_boundaries_and_first_admissions():
     schema = load_script("workbench_schema")
+    admission_version = next(
+        version
+        for version, name, _ in schema.MIGRATIONS
+        if name == "record first scan result admission order"
+    )
     with sqlite3.connect(":memory:") as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         schema.apply_migrations(
             connection,
-            tuple(item for item in schema.MIGRATIONS if item[0] <= 64),
+            tuple(item for item in schema.MIGRATIONS if item[0] < admission_version),
             lambda: "2026-01-01T00:00:00Z",
             lambda _connection: None,
         )
