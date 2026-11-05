@@ -1,3 +1,5 @@
+"""Check when project limits are captured and how simultaneous deep scans keep their settings separate."""
+
 from __future__ import annotations
 
 import json

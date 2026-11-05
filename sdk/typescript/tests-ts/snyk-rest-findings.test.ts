@@ -69,7 +69,14 @@ test.each(["open-source", "code"] as const)(
     if (code) {
       const { representations } = record.attributes.coordinates[0]!;
       const location = representations[0]!.sourceLocation!;
-      for (const file of [".", "src/", "src/.", "src\\app.ts"])
+      for (const file of [
+        ".",
+        "src/",
+        "src/.",
+        "src\\app.ts",
+        "file:/tmp/app.ts",
+        "git@example.invalid:app.ts",
+      ])
         representations.push({ sourceLocation: { ...location, file } });
     }
     const path = `/rest/orgs/${options.organizationId}/issues`;

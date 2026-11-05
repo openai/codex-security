@@ -32,6 +32,11 @@ const distModules = [
   "scanner-import",
   "inspector-findings",
   "continuum-findings",
+  "checkmarx-evidence",
+  "checkmarx-findings",
+  "checkmarx-one",
+  "checkmarx-repository",
+  "checkmarx-xml",
   "snyk-findings",
   "snyk-rest-findings",
   "snyk-rest-v1",
@@ -51,6 +56,8 @@ const distModules = [
   "sonar-import",
   "native-json-findings",
   "opengrep-findings",
+  "trivy-findings",
+  "trivy-import",
   "external-findings-publish",
   "private-finding-import",
   "external-import-contract",
@@ -89,6 +96,7 @@ const distModules = [
   "errors",
   "feedback",
   "finding-catalogue",
+  "finding-prompt",
   "findings-import",
   "git-remote",
   "local-git-metadata",
@@ -105,12 +113,14 @@ const distModules = [
   "models",
   "multiscan",
   "mock-scan",
+  "operation-telemetry",
   "owner-evidence",
   "patch-publication",
   "patch-tui",
   "publication",
   "publication-events",
   "publication-store",
+  "publication-telemetry",
   "publish",
   "result",
   "record",
@@ -123,10 +133,12 @@ const distModules = [
   "scan-history-renderer",
   "scan-inputs",
   "scan-logs",
+  "scan-measurement",
   "scan-usage-display",
   "security-policy",
   "security-policy-cli",
   "security-policy-diff",
+  "session-lines",
   "skill-authentication",
   "standalone-validation-prompt",
   "validation-records",
@@ -139,7 +151,6 @@ const distModules = [
   "deduplication/retry",
   "deduplication/deduplication",
   "finding-retrieval",
-  "finding-normalization",
   "contract-values",
   "workbench-arguments",
   "executable-path",
@@ -158,6 +169,7 @@ const distModules = [
   "saved-scan",
   "saved-scan-bootstrap",
   "scan-skill-paths",
+  "server/embedding-tokenizer",
   "server/embeddings",
   "server/errors",
   "server/sqlite-store",
@@ -173,8 +185,11 @@ const distModules = [
   "worker-progress",
 ];
 
-export const packageDistFiles = distModules.flatMap((module) =>
-  ["js", "js.map", "d.ts", "d.ts.map"].map(
-    (extension) => `package/dist/${module}.${extension}`,
+export const packageDistFiles = [
+  "package/dist/server/embedding-tokenizer.cdx.json",
+  ...distModules.flatMap((module) =>
+    ["js", "js.map", "d.ts", "d.ts.map"].map(
+      (extension) => `package/dist/${module}.${extension}`,
+    ),
   ),
-);
+];

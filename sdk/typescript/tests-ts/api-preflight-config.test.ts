@@ -8,42 +8,16 @@ import {
 } from "../src/api.js";
 import {
   mergedCodexConfig,
-  CHEAPERINFERENCE_CODEX_PROVIDER,
-  FIREWORKS_CODEX_PROVIDER,
-  OPENROUTER_CODEX_PROVIDER,
   scanModelProvider,
   writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
-import { TestClient } from "./support/api-client.js";
+import { EXTERNAL_PROVIDER_CASES, TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-preflight-",
 );
-const EXTERNAL_PROVIDER_CASES = [
-  [
-    "OpenRouter",
-    "openrouter",
-    "OPENROUTER_API_KEY",
-    "anthropic/claude-sonnet-4.5",
-    OPENROUTER_CODEX_PROVIDER,
-  ],
-  [
-    "Fireworks AI",
-    "fireworks",
-    "FIREWORKS_API_KEY",
-    "accounts/fireworks/models/qwen3-235b-a22b",
-    FIREWORKS_CODEX_PROVIDER,
-  ],
-  [
-    "Cheaper Inference",
-    "cheaperinference",
-    "CHEAPER_INFERENCE_API_KEY",
-    "gpt-5.4",
-    CHEAPERINFERENCE_CODEX_PROVIDER,
-  ],
-] as const;
 
 afterEach(cleanup);
 
@@ -440,6 +414,14 @@ describe("CodexSecurity preflight configuration", () => {
       model_reasoning_effort: "high",
       openai_base_url:
         "https://synthetic-user:synthetic-password@gateway.example.test/v1?token=synthetic-root-token",
+      otel: {
+        exporter: {
+          "otlp-http": {
+            endpoint: "https://otel.example.test/v1/logs",
+            headers: { Authorization: "Bearer SYNTHETIC_ROOT_OTEL_AUTH" },
+          },
+        },
+      },
       features: {
         plugins: true,
         goals: true,
@@ -453,6 +435,16 @@ describe("CodexSecurity preflight configuration", () => {
           model: "profile-model",
           openai_base_url:
             "https://synthetic-user:synthetic-password@profile.example.test/v1?token=synthetic-profile-token",
+          otel: {
+            exporter: {
+              "otlp-http": {
+                endpoint: "https://otel.example.test/v1/logs",
+                headers: {
+                  Authorization: "Bearer SYNTHETIC_PROFILE_OTEL_AUTH",
+                },
+              },
+            },
+          },
           features: { goals: true, secret: "PROFILE_SECRET" },
           agents: { max_threads: 4, token: "PROFILE_AGENT_TOKEN" },
           shell_environment_policy: { set: { SECRET: "PROFILE_ENV_SECRET" } },
@@ -533,6 +525,8 @@ describe("CodexSecurity preflight configuration", () => {
       "PROJECT_TOKEN",
       "MCP_TOKEN",
       "SHELL_SECRET",
+      "SYNTHETIC_ROOT_OTEL_AUTH",
+      "SYNTHETIC_PROFILE_OTEL_AUTH",
     ]) {
       expect(serialized).not.toContain(secret);
     }

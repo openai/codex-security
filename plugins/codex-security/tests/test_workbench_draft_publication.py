@@ -1,3 +1,5 @@
+"""Exercise deep scan drafts before orchestration and after the run has reached a terminal state."""
+
 from __future__ import annotations
 
 import hashlib

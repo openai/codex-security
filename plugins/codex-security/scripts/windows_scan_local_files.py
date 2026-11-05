@@ -587,7 +587,11 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
 
 
 def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> tuple[int, str]:
-    """Return the descriptor and its filename while the verified parents are held."""
+    """Return an owned read descriptor and the scan-relative path with the file's actual leaf name.
+
+    Verify the regular file while holding its parent directories. The caller must
+    close the returned descriptor.
+    """
 
     try:
         with _locked_parent(scan_dir, relative_path, create=False, missing_is_path_error=False) as (
@@ -636,6 +640,7 @@ def file_change_time(descriptor: int) -> int:
 
 
 def stream_matches_payload(stream: BinaryIO, payload: bytes) -> bool:
+    """Compare bytes from the current stream position to payload, requiring EOF after the final byte."""
     offset = 0
     while offset < len(payload):
         chunk = stream.read(min(_MAX_COMPARE_CHUNK, len(payload) - offset))

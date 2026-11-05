@@ -12,27 +12,16 @@ continuation, or minimum runtime. Finalization is outside the allowance.
 
 ## Run
 
-Use the repository's dependency and
-[native-artifact setup](../../plugins/codex-security/native/README.md), then run
-from the repository root:
+The checked-in [experiment](experiment.json) runs two pairs of Standard scans, including delegated work. Each pair compares a baseline with a five-minute advisory allowance. Both arms use `xhigh` reasoning and alternate which runs first. There is no enforced time or spend cap. Two pairs can expose differences worth investigating, but cannot establish a general effect on quality or cost.
+
+Set `OPENAI_API_KEY` or `CODEX_API_KEY` for this model-backed experiment. It uses the bundled Codex SDK without loading saved logins. [Build the evaluation tools](../README.md#build-the-evaluation-tools) and [download the native package inputs](../../plugins/codex-security/native/README.md#package-inputs), then run from the repository root:
 
 ```sh
 pnpm --dir sdk/typescript run build:plugin
-pnpm --dir sdk/typescript run build:evals
 node --experimental-strip-types evals/standard-time-budget/run.mts
 ```
 
-Rebuild the bundle after plugin changes. This developer eval requires an existing
-`OPENAI_API_KEY` or `CODEX_API_KEY` environment variable; saved Codex or
-`codex-security login` credentials are intentionally unsupported. It uses the
-bundled Codex SDK without reading saved logins, provisioning credentials, or
-changing persistent configuration. Production SDK and CLI login support is
-unchanged. **Model runs consume usage and have no enforced time or spend cap.**
-
-[experiment.json](experiment.json) selects an explicit model, two pairs
-(four scans including delegated work), and five advisory minutes. Both arms
-use `xhigh` reasoning and production worker settings. Pairs alternate
-baseline-first and treatment-first order. Override settings with a JSON file:
+Rebuild the bundle after a plugin change. For a harness-only check, run the [deterministic tests](#interpretation-and-checks) after the builds and omit the model command. To choose the model, pair count, or allowance, pass a configuration file:
 
 ```sh
 node --experimental-strip-types evals/standard-time-budget/run.mts /path/to/experiment.json
@@ -97,7 +86,7 @@ incomplete attempts separately.
 
 ## Results
 
-Artifacts are saved under ignored `reports/`, updated after every attempt:
+Open `evals/standard-time-budget/reports/run-*/summary.json` for the paired comparison. Each delta is treatment minus baseline for completed pairs. The summary lists excluded pairs separately. The run directory also contains:
 
 - `experiment.json`: settings, evaluator/shared-helper, source, full-plugin,
   and built-SDK file hashes, plus SDK/Codex package versions and the selected
@@ -136,9 +125,7 @@ false-positive labels. Free-text location roles can flag benign context
 citations. Preserve raw scores and record adjudication separately: source
 matching is a heuristic, not independent exploit validation.
 
-The summary separates execution success from completed-run quality. Paired
-deltas are treatment minus baseline and include only complete pairs; excluded
-pairs remain explicit. Each attempt's top-level `usage` includes delegated
+Each attempt's top-level `usage` includes delegated
 workers, even when completion or grading fails. Missing usage stays unknown,
 cached input is a subset of input tokens, and no dollar cost is inferred.
 
@@ -147,7 +134,7 @@ cached input is a subset of input tokens, and no dollar cost is inferred.
 Use the `fixtures.mts` hash in `experiment.json` to identify the corpus revision.
 If two runs have different revisions, compare their results on the shared case IDs.
 
-Two pairs are a smoke comparison, not statistical evidence. Review findings
+Review findings
 without variant labels and compare grounded recall, adjudicated false
 positives, completion, tokens, and elapsed time together. More findings or a
 longer run alone is not an improvement, and these arms do not have matched

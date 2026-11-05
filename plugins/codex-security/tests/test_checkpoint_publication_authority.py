@@ -1,3 +1,5 @@
+"""Test which saved parent and worker checkpoints may supply findings after publication or a stop."""
+
 from __future__ import annotations
 
 import copy
@@ -12,7 +14,6 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_standard_deep_results import deep_scan_fixture, worker_paths
 from workbench_test_support import (
     interrupt_publication,
@@ -48,16 +49,7 @@ def test_flat_retained_source_name_replays(workbench_db, publication_scan, sourc
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     scan.add_worker(status="canceled")
     source = scan.scan_dir / source_name
-    source.write_text(
-        json.dumps(
-            {
-                "scanId": scan.scan_id,
-                "complete": True,
-                "findings": scan.findings,
-                "coverage": scan.coverage,
-            }
-        )
-    )
+    source.write_text(json.dumps(scan.worker_draft(scan.findings)))
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE scan_id = ?",
@@ -207,12 +199,7 @@ def test_recovery_honors_rejection_committed_before_result_replacement(
     if archived:
         result_path = result_path.parent / "attempts" / "attempt-1" / "result.json"
         result_path.parent.mkdir(parents=True)
-    previous = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [provisional, retained],
-        "coverage": scan.coverage,
-    }
+    previous = scan.worker_draft([provisional, retained])
     result_path.write_text(json.dumps(previous))
     old_checkpoint = write_checkpoint(result_path.parent / "checkpoints", previous)
     rejected = {
@@ -259,22 +246,17 @@ def save_disposition(scan, directory, disposition):
     directory.mkdir(parents=True, exist_ok=True)
     finding = copy.deepcopy(scan.findings[0])
     finding["extensions"] = {"candidateId": "candidate-disposition"}
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [finding] if disposition == "reported" else [],
-        "coverage": {
-            **scan.coverage,
-            "surfaces": [
-                {
-                    "candidateId": "candidate-disposition",
-                    "label": "Validated candidate disposition",
-                    "disposition": disposition,
-                    "receiptRefs": [],
-                }
-            ],
-        },
-    }
+    draft = scan.worker_draft(
+        [finding] if disposition == "reported" else [],
+        surfaces=[
+            {
+                "candidateId": "candidate-disposition",
+                "label": "Validated candidate disposition",
+                "disposition": disposition,
+                "receiptRefs": [],
+            }
+        ],
+    )
     checkpoint = write_checkpoint(directory / "checkpoints", draft)
     head = select_checkpoint(directory, checkpoint)
     result = directory / "result.json"
