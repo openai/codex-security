@@ -9849,6 +9849,7 @@ async function patchCommandContext(
     await gitPath(["--absolute-git-dir"]),
   );
   const physicalDirectory = await realpath(directory);
+  const physicalRoot = await realpath(repository);
   const gitDirectoryBase =
     dependencies.environment["GIT_DIR"] === undefined
       ? physicalDirectory
@@ -9865,22 +9866,23 @@ async function patchCommandContext(
       ? {}
       : { GIT_WORK_TREE: repository }),
   };
-  // A patch can remove the caller's directory before Git asks for credentials.
-  const askpass = environmentEntry(dependencies.environment, "GIT_ASKPASS");
-  if (askpass) {
-    let candidate = askpass;
-    if (!isAbsolute(askpass)) {
-      if (parse(askpass).root) candidate = resolve(physicalDirectory, askpass);
-      else if (askpass.includes("/") || askpass.includes(sep))
-        candidate = `${physicalDirectory}${sep}${askpass}`;
-    }
-    const helper = await resolveTrustedExecutable(
-      candidate,
+  // Git enters the worktree from a component, but keeps an external caller's cwd.
+  const transportDirectory = isOutsidePath(
+    relative(physicalRoot, physicalDirectory),
+  )
+    ? physicalDirectory
+    : physicalRoot;
+  for (const name of ["GIT_ASKPASS", "SSH_ASKPASS"] as const) {
+    const askpass = environmentEntry(dependencies.environment, name);
+    if (!askpass) continue;
+    const helper = await inspectTrustedExecutable(
+      askpass,
       dependencies.environment,
-      [repository, physicalDirectory],
+      [physicalRoot, physicalDirectory],
+      { askpassDirectory: transportDirectory },
     );
     // An empty value disables a missing or checkout-controlled helper.
-    environment["GIT_ASKPASS"] = helper?.executable ?? "";
+    environment[name] = helper.executable ?? "";
   }
   const commonReference =
     dependencies.environment["GIT_COMMON_DIR"] === undefined
@@ -10038,7 +10040,7 @@ async function patchCommandContext(
       );
   }
   return {
-    root: await realpath(repository),
+    root: physicalRoot,
     callerDirectory: directory,
     directory: physicalDirectory,
     gitDirectory: canonicalGitDirectory,

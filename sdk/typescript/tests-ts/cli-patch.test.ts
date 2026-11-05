@@ -203,12 +203,19 @@ describe("scan and patch workflow", () => {
                     : kind.includes("relative object directory")
                       ? { GIT_OBJECT_DIRECTORY: "../metadata/objects" }
                       : {};
-      const askpass = join(directory, "fixture-askpass.exe");
+      const askpass = join(directory, "fixture-askpass.sh");
+      const sshAskpass = join(directory, "fixture-ssh-askpass.exe");
       const askpassEnvironment =
         kind === "removed component with external askpass"
-          ? { GIT_ASKPASS: relative(subdirectory, askpass) }
+          ? {
+              GIT_ASKPASS: relative(repository, askpass),
+              SSH_ASKPASS: relative(repository, sshAskpass),
+            }
           : kind === "removed component with checkout askpass"
-            ? { GIT_ASKPASS: `.${sep}app.ts` }
+            ? {
+                GIT_ASKPASS: `sub${sep}app.ts`,
+                SSH_ASKPASS: `sub${sep}app.ts`,
+              }
             : {};
       const providerConfiguration = kind.includes(
         "removed provider configuration",
@@ -230,8 +237,10 @@ describe("scan and patch workflow", () => {
             alias,
             process.platform === "win32" ? "junction" : "dir",
           );
-        if (kind === "removed component with external askpass")
-          await writeFile(askpass, "", { mode: 0o700 });
+        if (kind === "removed component with external askpass") {
+          await writeFile(askpass, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+          await writeFile(sshAskpass, "", { mode: 0o700 });
+        }
         if (Object.keys(providerEnvironment).length > 0) {
           await mkdir(providerConfiguration);
           await writeFile(
@@ -436,12 +445,18 @@ describe("scan and patch workflow", () => {
                   )
                 )
                   postPatchGitWrites.push([...args]);
-                if (args[0] === "push" && askpassEnvironment.GIT_ASKPASS)
+                if (args[0] === "push" && askpassEnvironment.GIT_ASKPASS) {
                   expect(options?.environment?.["GIT_ASKPASS"]).toBe(
                     kind === "removed component with external askpass"
                       ? await realpath(askpass)
                       : "",
                   );
+                  expect(options?.environment?.["SSH_ASKPASS"]).toBe(
+                    kind === "removed component with external askpass"
+                      ? await realpath(sshAskpass)
+                      : "",
+                  );
+                }
                 if (kind === "long checkout root")
                   expect(args.join(" ").length).toBeLessThan(32767);
                 if (
@@ -609,7 +624,11 @@ describe("scan and patch workflow", () => {
         "codex-security-separate-worktree-",
       );
       const repository = join(root, "repository");
-      const worktree = join(root, "worktree");
+      const worktree =
+        kind === "relative environment"
+          ? join(root, "separate", "worktree")
+          : join(root, "worktree");
+      const helper = join(root, "prompt-helper.sh");
       const remote = join(root, "remote.git");
       const gitEnvironment =
         kind === "configuration"
@@ -637,7 +656,9 @@ describe("scan and patch workflow", () => {
         }).trim();
       try {
         await mkdir(repository);
-        await mkdir(worktree);
+        await mkdir(worktree, { recursive: true });
+        if (kind === "relative environment")
+          await writeFile(helper, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
         repositoryGit(repository)("init", "--initial-branch=main");
         git("config", "user.name", "Synthetic User");
         git("config", "user.email", "synthetic@example.test");
@@ -652,7 +673,13 @@ describe("scan and patch workflow", () => {
           ["patch", "Synthetic issue", "--assess-patch-risk", "--create-pr"],
           {
             currentDirectory: repository,
-            environment: { ...process.env, ...gitEnvironment },
+            environment: {
+              ...process.env,
+              ...gitEnvironment,
+              ...(kind === "relative environment"
+                ? { GIT_ASKPASS: relative(repository, helper) }
+                : {}),
+            },
             onCodex: async (_args, output) => {
               expect(output?.appServer?.directory).toBe(repository);
               if (
@@ -673,15 +700,24 @@ describe("scan and patch workflow", () => {
               }
               return 0;
             },
-            onRepositoryCommand: (command, args, directory, options) =>
-              command === "git"
+            onRepositoryCommand: async (command, args, directory, options) => {
+              if (
+                kind === "relative environment" &&
+                command === "git" &&
+                args[0] === "push"
+              )
+                expect(options?.environment?.["GIT_ASKPASS"]).toBe(
+                  await realpath(helper),
+                );
+              return command === "git"
                 ? runGitRepositoryCommand(command, args, directory, {
                     ...options,
                     environment: { ...gitEnvironment, ...options?.environment },
                   })
                 : args[1] === "create"
                   ? "https://github.example.test/example/repository/pull/17"
-                  : "",
+                  : "";
+            },
           },
         );
         expect(outcome.exitCode, outcome.stderr).toBe(0);
