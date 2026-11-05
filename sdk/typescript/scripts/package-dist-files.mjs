@@ -57,6 +57,7 @@ const distModules = [
   "native-json-findings",
   "opengrep-findings",
   "trivy-findings",
+  "trivy-import",
   "external-findings-publish",
   "private-finding-import",
   "external-import-contract",
