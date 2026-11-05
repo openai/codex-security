@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
+import { watch } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -826,27 +827,43 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
 );
 
 test.each([
-  ["AbortError", "canceled", "canceled"],
-  ["TimeoutError", "failed", "execution"],
+  ["AbortError", "canceled", "canceled", false],
+  ["TimeoutError", "failed", "execution", false],
+  ["AbortError", "canceled", "canceled", true],
+  ["TimeoutError", "failed", "execution", true],
 ] as const)(
-  "records a prelaunch %s in the skill receipt",
-  async (name, outcome, failureCategory) => {
+  "records %s as %s/%s in the skill receipt (after launch: %p)",
+  async (name, outcome, failureCategory, afterLaunch) => {
     const state = await mkdtemp(join(tmpdir(), "skill-startup-journal-"));
     try {
       const reason = new DOMException("fixture stop", name);
-      await expect(
-        runCodexSkillCommand(
-          [],
+      const controller = new AbortController();
+      const readyDir = join(state, "child");
+      await mkdir(readyDir);
+      const script = join(state, "child.mjs");
+      await writeFile(
+        script,
+        `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(join(readyDir, "ready"))}, ""); setTimeout(() => {}, 10000);`,
+      );
+      const watcher = watch(readyDir, () => controller.abort(reason));
+      try {
+        if (!afterLaunch) controller.abort(reason);
+        const result = runCodexSkillCommand(
+          [script],
           {
             command: "patch",
             stdout: capture().stream,
             stderr: capture().stream,
-            signal: AbortSignal.abort(reason),
+            signal: controller.signal,
           },
           { command: process.execPath },
           { ...process.env, CODEX_SECURITY_STATE_DIR: state },
-        ),
-      ).rejects.toBe(reason);
+        );
+        if (afterLaunch) expect(await result).toBe(143);
+        else await expect(result).rejects.toBe(reason);
+      } finally {
+        watcher.close();
+      }
       const record = await readOperationTelemetry(state);
       expect(record.events.map((event) => event.type)).toEqual([
         "attempt_started",

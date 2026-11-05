@@ -1615,18 +1615,14 @@ export async function runCodexSkillCommand(
       processEnvironment,
       input,
     );
+    const canceled =
+      (status === 130 || status === 143) &&
+      (!output?.signal?.aborted || explicitlyCanceled(output.signal));
     await journal?.finish(
-      status === 0
-        ? "completed"
-        : status === 130 || status === 143
-          ? "canceled"
-          : "failed",
+      status === 0 ? "completed" : canceled ? "canceled" : "failed",
       status === 0
         ? {}
-        : {
-            failureCategory:
-              status === 130 || status === 143 ? "canceled" : "execution",
-          },
+        : { failureCategory: canceled ? "canceled" : "execution" },
     );
     return status;
   } catch (error) {
