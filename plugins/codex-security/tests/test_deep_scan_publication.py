@@ -1,3 +1,5 @@
+"""Compare an archived deep scan publication with the snapshot used to produce it."""
+
 from __future__ import annotations
 
 import importlib
