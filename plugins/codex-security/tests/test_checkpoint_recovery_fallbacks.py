@@ -1,3 +1,5 @@
+"""Recover selected checkpoint records when sibling captures fail or a previous recovery was interrupted."""
+
 from __future__ import annotations
 
 import copy
@@ -7,7 +9,6 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import (
     interrupt_publication,
     read_review_state,

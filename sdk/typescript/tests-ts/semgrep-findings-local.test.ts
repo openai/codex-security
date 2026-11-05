@@ -8,6 +8,7 @@ import {
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
 import {
+  normalizeSemgrepFindings,
   normalizeSemgrepSarif,
   readSemgrepFindings,
 } from "../src/semgrep-findings.js";
@@ -19,6 +20,11 @@ import {
   semgrepJson,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
+import { normalizeOpenGrepFindings } from "../src/opengrep-findings.js";
+import {
+  opengrepJson,
+  opengrepTraceJson,
+} from "./support/opengrep-import-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const repositoryUrl = "https://github.com/example/project";
@@ -62,6 +68,40 @@ function report(
   }
   return input;
 }
+
+test("a marked Platform report accepts the Semgrep and OpenGrep readers' ordinary findings", async () => {
+  await using fixture = await localReportFixture(
+    "report.json",
+    {
+      provider: "semgrep",
+      sourceKey: "example/topic",
+    },
+    { remote: repositoryUrl, isolatedGit: true },
+  );
+  const options = { sourceRepositoryUrl: repositoryUrl };
+  for (const ordinary of [
+    normalizeSemgrepFindings(semgrepJson(), options, "local"),
+    normalizeSemgrepFindings(semgrepSarif(), options, "local"),
+    normalizeOpenGrepFindings(opengrepJson(), options, "local"),
+    normalizeOpenGrepFindings(opengrepTraceJson(), options, "local"),
+  ]) {
+    expect(ordinary.findings.length).toBeGreaterThan(0);
+    const input = {
+      ...ordinary,
+      ...options,
+      sourceFormat: "semgrep-platform-findings/v1",
+      semgrepPlatformScope: {
+        deployment: "example",
+        projectId: "14",
+        ref: "refs/heads/topic",
+        product: "sast",
+      },
+    };
+    expect((await fixture.prepareNormalized(input)).preview.findings).toEqual(
+      ordinary.findings,
+    );
+  }
+});
 
 test("Semgrep file reader rejects malformed SARIF repository provenance", async () => {
   const directory = await temporaryDirectory("semgrep-reader-");
@@ -242,8 +282,20 @@ test.each(formats)(
       },
       { remote: repositoryUrl },
     );
-    await fixture.writeJson(report(format));
+    const input = report(format);
+    await fixture.writeJson(input);
     await expect(fixture.prepare()).rejects.toThrow("does not match");
+    if ("runs" in input) input.runs[0]!.results.length = 0;
+    else input.results.length = 0;
+    await fixture.writeJson(input);
+    await expect(fixture.prepare()).rejects.toThrow("does not match");
+    const empty = await fixture.prepare({ sourceRepositoryUrl: repositoryUrl });
+    expect((await empty.import()).counts).toEqual({
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+    });
+    await expect(access(fixture.stateDirectory)).rejects.toThrow();
     expect(await fixture.read()).toEqual([]);
   },
 );
@@ -255,8 +307,9 @@ function sarifWithRepositories(urls: string[]) {
     runs: [
       {
         ...input.runs[0]!,
-        versionControlProvenance: urls.map((repositoryUri) => ({
+        versionControlProvenance: urls.map((repositoryUri, index) => ({
           repositoryUri,
+          branch: index === 0 ? "main" : "release",
         })),
       },
     ],
@@ -314,6 +367,12 @@ test.each([
       await expect(
         prepareLocalExternalImport(file, options, dependencies),
       ).rejects.toThrow("does not match");
+      const empty = sarifWithRepositories([sourceRepositoryUrl, originalUrl]);
+      empty.runs[0]!.results.length = 0;
+      await writeFile(file, JSON.stringify(empty));
+      await expect(
+        prepareLocalExternalImport(file, options, dependencies),
+      ).rejects.toThrow("does not match");
       await expect(access(database)).rejects.toThrow();
       await writeReport(sourceRepositoryUrl);
     }
@@ -336,8 +395,9 @@ test.each([
     );
     expect(stored[0]!.evidence.source_data?.["runContext"]).toMatchObject({
       versionControlProvenance: [
-        { repositoryUri: sourceRepositoryUrl },
+        { repositoryUri: sourceRepositoryUrl, branch: "main" },
         {
+          branch: "release",
           repositoryUri:
             platform === "unknown host" ? sourceRepositoryUrl : originalUrl,
         },

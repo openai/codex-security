@@ -12,7 +12,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join, normalize, relative, resolve } from "node:path";
+import {
+  delimiter,
+  dirname,
+  join,
+  normalize,
+  relative,
+  resolve,
+} from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -55,6 +62,7 @@ import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelConfiguration,
+  mergedCodexConfig,
 } from "../src/config.js";
 import {
   warningResult,
@@ -230,6 +238,47 @@ describe("CLI", () => {
       }
     }
   });
+
+  test.each([
+    ["--auth", "chatgpt"],
+    ["--auth", "api-key"],
+    ["--codex", 'model_provider="amazon-bedrock"'],
+  ])(
+    "reports plugin installation permission errors with %s %s",
+    async (flag, value) => {
+      const message =
+        "Codex plugin bootstrap failed: failed to create plugin cache directory: Permission denied (os error 13)";
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-key" },
+        onRun: () => {
+          throw new PluginBootstrapError(message);
+        },
+      });
+      for (const json of [false, true]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "scan",
+              ".",
+              flag,
+              value,
+              "--verbose",
+              ...(json ? ["--json"] : []),
+            ],
+            deps,
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain(message);
+        expect(stderr.text()).toContain(
+          'scan.failed classification="plugin_bootstrap"',
+        );
+        expect(stderr.text()).not.toContain("cannot access the configured");
+        if (json) expect(JSON.parse(stdout.text()).message).toBe(message);
+        else expect(stdout.text()).toBe("");
+      }
+    },
+  );
 
   test("passes the safety identifier as a per-scan option", async () => {
     const onTurn = mock<(repository: string, options: unknown) => void>();
@@ -1085,6 +1134,67 @@ describe("CLI", () => {
     expect(onRun).not.toHaveBeenCalled();
   });
 
+  test("installs hooks with trusted Git in the selected checkout using the caller's configuration", async () => {
+    await using temp = await scopedTemporaryDirectory("trusted-hook-git-");
+    const root = await realpath(temp.path);
+    const caller = join(root, "caller");
+    const target = join(root, "target");
+    const component = join(target, "component");
+    const alias = join(caller, "target-link");
+    const hooks = join(root, "owned hooks");
+    const otherHooks = join(root, "other hooks");
+    const config = join(root, "gitconfig");
+    const git = Bun.which("git")!;
+    for (const args of [
+      ["init", "-q", caller],
+      ["init", "-q", target],
+      ["-C", caller, "config", "core.hooksPath", otherHooks],
+      ["config", "--file", config, "core.hooksPath", hooks],
+    ]) {
+      const result = await runCommand(git, args);
+      expect(result.status, result.stderr).toBe(0);
+    }
+    await mkdir(component);
+    await symlink(
+      target,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const directory of [caller, target]) {
+      await writeFile(
+        join(directory, process.platform === "win32" ? "git.exe" : "git"),
+        "",
+        { mode: 0o700 },
+      );
+    }
+    for (const selected of [component, join(alias, "component")]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const status = await runCli(
+        ["install-hook", selected, "--json"],
+        dependencies({
+          currentDirectory: caller,
+          environment: {
+            PATH: [caller, target, dirname(git)].join(delimiter),
+            SystemRoot: process.env["SystemRoot"],
+            GIT_CONFIG_GLOBAL: config,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_DIR: join(caller, ".git"),
+          },
+        }),
+      );
+      expect(status, stderr.text()).toBe(0);
+      expect(normalize(JSON.parse(stdout.text()).hook)).toBe(
+        join(hooks, "pre-commit"),
+      );
+    }
+    expect(await readFile(join(hooks, "pre-commit"), "utf8")).toContain(
+      "--working-tree",
+    );
+    await expect(stat(join(otherHooks, "pre-commit"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
     const root = await realpath(
       await temporaryDirectory("codex-security-cli-pre-commit-"),
@@ -1101,6 +1211,7 @@ describe("CLI", () => {
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
         currentDirectory: root,
+        environment: { ...process.env },
         onRun: () => (started = true),
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1297,7 +1408,10 @@ describe("CLI", () => {
           expect(
             await captureCli(main, "stdout").run(
               ["install-hook", "."],
-              dependencies({ currentDirectory: repository }),
+              dependencies({
+                currentDirectory: repository,
+                environment: { PATH: dirname(Bun.which("git")!) },
+              }),
             ),
           ).toBe(0);
         } finally {
@@ -2078,7 +2192,7 @@ describe("CLI", () => {
 
     expect(
       await runCli(
-        ["info", "--json", "--filter-output", "model,reasoningEffort,nextStep"],
+        ["info", "--json", "--filter-output=model,reasoningEffort,nextStep"],
         deps,
       ),
     ).toBe(0);
@@ -3087,6 +3201,7 @@ describe("CLI", () => {
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
       ],
       [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [["--codex", 'model = "gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
       [
         ["--codex", 'model_reasoning_effort="high"'],
         { model_reasoning_effort: "high" },
@@ -3716,6 +3831,18 @@ describe("CLI", () => {
           verified: false,
         });
         options?.onOutputDirReady?.("/tmp/scan");
+        options?.onLifecycle?.({
+          scanId: result.manifest.scan.id,
+          mode: "standard",
+          status: "running",
+          startedAt: result.manifest.scan.startedAt,
+          finishedAt: null,
+          hasReportableFindings: null,
+          surface: "cli",
+          packageVersion: VERSION,
+          pluginVersion: BUNDLED_PLUGIN_VERSION,
+          mock: false,
+        });
         options?.onScanStarted?.();
         options?.onWorkerStatus?.({
           kind: "dispatch",
@@ -3746,6 +3873,20 @@ describe("CLI", () => {
       'codex-security: debug: scan.output_ready scan_dir="/tmp/scan"',
     );
     expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    const lifecycleLine = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.lifecycle "),
+      );
+    expect(lifecycleLine).toContain(
+      `scan_id=${JSON.stringify(result.manifest.scan.id)}`,
+    );
+    expect(lifecycleLine).toContain('status="running"');
+    expect(lifecycleLine).toContain('surface="cli"');
+    expect(lifecycleLine).toContain(
+      `package_version=${JSON.stringify(VERSION)}`,
+    );
     expect(stderr.text()).toContain(
       'codex-security: debug: worker.phase phase="validation" planned=6 started=3',
     );
@@ -3766,6 +3907,44 @@ describe("CLI", () => {
     );
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_SECRET");
   });
+
+  test.each([true, false])(
+    "routes direct Deep Scan coordinator diagnostics in verbose mode (%p)",
+    async (verbose) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies();
+      deps.createSecurity = (_config, observe) =>
+        fakeSecurity(async () => {
+          expect(typeof observe).toBe(verbose ? "function" : "undefined");
+          observe?.({
+            event: "finding_comparison_failed",
+            reason: "first\nsecond",
+          });
+          return fakeResult();
+        });
+      expect(
+        await runCli(
+          [
+            "scan",
+            ".",
+            "--mode",
+            "deep",
+            "--json",
+            ...(verbose ? ["--verbose"] : []),
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const diagnostics = stderr
+        .text()
+        .split("\n")
+        .filter((line) => line.includes("deep_scan.coordinator"));
+      expect(diagnostics).toHaveLength(verbose ? 1 : 0);
+      if (verbose)
+        expect(diagnostics[0]).toContain('event="finding_comparison_failed"');
+    },
+  );
 
   test("reports the effective default model and reasoning effort in verbose scan diagnostics", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -3858,6 +4037,227 @@ describe("CLI", () => {
       );
     }
   });
+
+  test("reports settings from a selected Codex file profile", async () => {
+    const home = await temporaryDirectory("codex-security-profile-");
+    try {
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model = "native-model"\nmodel_reasoning_effort = "high"\n',
+      );
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan", ".", "--codex", 'profile="review"', "--verbose", "--json"],
+          capture().stream,
+          stderr.stream,
+          dependencies({ environment: { CODEX_HOME: home } }),
+        ),
+      ).toBe(0);
+      const configuration = stderr
+        .text()
+        .split("\n")
+        .find((line) =>
+          line.startsWith("codex-security: debug: scan.configuration"),
+        );
+      expect(configuration).toContain('model="native-model"');
+      expect(configuration).toContain('reasoning_effort="high"');
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["amazon-bedrock", "openrouter", "fireworks"])(
+    "uses the selected file-profile model before validating --provider %s",
+    async (provider) => {
+      const home = await temporaryDirectory("codex-security-provider-profile-");
+      const stderr = capture();
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model = "file-profile-model"\nmodel_reasoning_effort = "high"\n',
+      );
+      for (const model of [undefined, "explicit-model"]) {
+        const selected = model ?? "file-profile-model";
+        const args = [
+          "scan",
+          ".",
+          "--provider",
+          provider,
+          "--codex",
+          'profile="review"',
+          "--verbose",
+          "--json",
+          ...(model === undefined ? [] : ["--model", model]),
+        ];
+        expect(
+          await main(
+            args,
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(stderr.text()).toContain(`model=${JSON.stringify(selected)}`);
+      }
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_reasoning_effort = "high"\n',
+      );
+      for (const profile of ["review", "missing"]) {
+        const missingModel = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--provider",
+              provider,
+              "--codex",
+              `profile="${profile}"`,
+              "--json",
+            ],
+            capture().stream,
+            missingModel.stream,
+            dependencies({
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(missingModel.text()).toContain(
+          `--model is required when using --provider ${provider}`,
+        );
+      }
+    },
+  );
+
+  test.each(["openrouter", "fireworks"])(
+    "keeps file-profile command authentication with --provider %s",
+    async (provider) => {
+      const home = await temporaryDirectory("codex-security-auth-profile-");
+      await writeFile(
+        join(home, "review.config.toml"),
+        `model="synthetic-model"\n[model_providers.${provider}]\nname="Synthetic"\nwire_api="responses"\nbase_url="http://127.0.0.1:1/v1"\n[model_providers.${provider}.auth]\ncommand="synthetic-auth"\n`,
+      );
+      for (const explicit of [undefined, 4321]) {
+        let selected: CodexSecurityConfig | undefined;
+        const stderr = capture();
+        const args = [
+          "scan",
+          ".",
+          "--provider",
+          provider,
+          "--codex",
+          'profile="review"',
+          "--json",
+          ...(explicit === undefined
+            ? []
+            : [
+                "--codex",
+                `model_providers.${provider}.auth.refresh_interval_ms=${explicit}`,
+              ]),
+        ];
+        expect(
+          await main(
+            args,
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment: { CODEX_HOME: home },
+              onConfig: (config) => {
+                selected = config;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        const effective = await mergedCodexConfig(selected!, home);
+        expect(effective["model_providers"]).toEqual({
+          [provider]: {
+            name: "Synthetic",
+            wire_api: "responses",
+            base_url: "http://127.0.0.1:1/v1",
+            auth: {
+              command: "synthetic-auth",
+              ...(explicit === undefined
+                ? {}
+                : { refresh_interval_ms: explicit }),
+            },
+          },
+        });
+        expect(selected!.codexOverrides?.["model_provider"]).toBe(provider);
+      }
+    },
+  );
+
+  test.each([
+    ["openrouter", OPENROUTER_CODEX_PROVIDER],
+    ["fireworks", FIREWORKS_CODEX_PROVIDER],
+  ] as const)(
+    "fills missing file-profile %s defaults without replacing refinements",
+    async (provider, defaults) => {
+      const home = await temporaryDirectory("codex-security-partial-provider-");
+      for (const refinement of [
+        { request_max_retries: 4 },
+        {
+          request_max_retries: 4,
+          base_url: "http://127.0.0.1:1/v1",
+          env_key: "SYNTHETIC_FILE_PROVIDER_KEY",
+        },
+      ]) {
+        await writeFile(
+          join(home, "review.config.toml"),
+          `model="synthetic-model"\n[model_providers.${provider}]\n` +
+            Object.entries(refinement)
+              .map(([key, value]) => `${key}=${JSON.stringify(value)}\n`)
+              .join(""),
+        );
+        let selected: CodexSecurityConfig | undefined;
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--provider",
+              provider,
+              "--codex",
+              'profile="review"',
+              "--json",
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+                SYNTHETIC_FILE_PROVIDER_KEY: "synthetic-file-provider-key",
+              },
+              onConfig: (config) => {
+                selected = config;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(
+          (await mergedCodexConfig(selected!, home))["model_providers"],
+        ).toEqual({
+          [provider]: { ...defaults, ...refinement },
+        });
+      }
+    },
+  );
 
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -4762,6 +5162,7 @@ describe("CLI", () => {
       ["--token-limit", "4"],
       ["--token-offset", "1"],
       ["--token-offset", "1", "--token-limit", "4"],
+      ["--token-offset=1", "--token-limit=4"],
     ] as const) {
       const stdout = captureCli(main, "stdout");
       expect(await stdout.run(["scan", ...arguments_], dependencies())).toBe(0);
@@ -5367,6 +5768,22 @@ describe("CLI", () => {
       ...fakePreflight("repo"),
     });
     expect(stderr.text()).not.toContain("Running scan");
+  });
+
+  test("explains the resolved cost limit in a dry-run plan", async () => {
+    const { stdout, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["scan", "repo", "--max-cost", "5", "--dry-run", "--json"],
+        dependencies(),
+      ),
+    ).toBe(0);
+    const plan = JSON.parse(stdout.text());
+    expect(plan.maxCostUsd).toBe(5);
+    expect(plan.costLimitNote).toContain("short-context API prices");
+    expect(plan.costLimitNote).toContain("In-flight requests");
+    expect(plan.costLimitNote).toContain("ChatGPT allowance");
   });
 
   test("renders dry-run output with Incur structured formats", async () => {

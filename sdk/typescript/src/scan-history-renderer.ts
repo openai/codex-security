@@ -124,7 +124,8 @@ export function renderScanHistory(
   const finding = (entry: JsonObject, includeReason = true): void => {
     const severity = findingSeverity(entry);
     const title = clean(entry["title"]);
-    const badge = paint(severity.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
+    const label = severity === "INFORMATIONAL" ? "INFO" : severity;
+    const badge = paint(label.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
     wrap(title, 14, `    ${badge}  `);
     const before = entry["beforeOccurrenceIds"] as string[] | undefined;
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
@@ -219,7 +220,7 @@ export function renderScanHistory(
       new Set(scans.map((scan) => scan["targetPath"])).size > 1;
     const wide = width >= (multipleRepositories ? 97 : 80);
     lines.push(
-      `  ${strong(clean(repository))}  ${accent("·")}  ${scans.length} ${scans.length === 1 ? "scan" : "scans"}${latest === undefined ? "" : `  ${accent("·")}  latest: ${clean(latest)} findings`}`,
+      `  ${strong(clean(repository))}  ${accent("·")}  ${scans.length} ${scans.length === 1 ? "scan" : "scans"}${latest === undefined ? "" : `  ${accent("·")}  latest: ${clean(latest)} finding${latest === 1 ? "" : "s"}`}`,
       "",
     );
     if (wide) {
@@ -245,7 +246,7 @@ export function renderScanHistory(
       } else {
         lines.push(`  ${clean(scan["scanId"])}`);
         const separator = `  ${accent("·")}  `;
-        const summary = `${findings} findings${separator}${statusLabel}`;
+        const summary = `${findings} finding${scan["findingCount"] === 1 ? "" : "s"}${separator}${statusLabel}`;
         const location = multipleRepositories
           ? `${scanRepository}${separator}`
           : "";
@@ -361,7 +362,9 @@ export function renderScanHistory(
             ]),
         ...(coverage["filesTotal"] == null
           ? []
-          : [`${clean(coverage["filesTotal"])} files`]),
+          : [
+              `${clean(coverage["filesTotal"])} file${coverage["filesTotal"] === 1 ? "" : "s"}`,
+            ]),
       ];
       if (parts.length > 0) {
         lines.push(

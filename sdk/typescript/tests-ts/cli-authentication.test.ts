@@ -1,5 +1,6 @@
 import { readJsonLines } from "./support/json.js";
 import { runProviderSkill } from "./support/cli-provider-authentication.js";
+import { TestClient } from "./support/api-client.js";
 import { resolving } from "./support/promises.js";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -58,11 +59,14 @@ const GATEWAY_CONFIGURATION = [
 ].join("\n");
 
 let stateDirectory: string;
+let skillDirectory: string;
 
 beforeEach(async () => {
   stateDirectory = await realpath(
     await temporaryDirectory("codex-security-cli-authentication-"),
   );
+  skillDirectory = join(stateDirectory, "selected-directory");
+  await mkdir(skillDirectory, { mode: 0o700 });
 });
 
 afterEach(async () => {
@@ -1041,9 +1045,14 @@ describe("CLI authentication", () => {
         expect(stderr.text()).toContain(
           "API key is selected for model authentication",
         );
-        expect(stderr.text()).toContain(
-          "npx @openai/codex-security login status",
-        );
+        if (detail.includes("was already used")) {
+          expect(stderr.text()).toContain("refresh token was already used");
+          expect(stderr.text()).not.toContain("login status");
+        } else {
+          expect(stderr.text()).toContain(
+            "npx @openai/codex-security login status",
+          );
+        }
         expect(stderr.text()).toContain(
           "npx @openai/codex-security logout', then 'npx @openai/codex-security login",
         );
@@ -1150,6 +1159,45 @@ describe("CLI authentication", () => {
       expect(stderr.text()).not.toContain("env -u");
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     }
+  });
+
+  test("scan rejects an explicit ChatGPT login with a required native provider key", async () => {
+    const home = await createCredentialHome();
+    await writeFile(join(home, "review.config.toml"), GATEWAY_CONFIGURATION);
+    const environment = {
+      CODEX_HOME: home,
+      GATEWAY_API_KEY: "synthetic-provider-secret",
+      OPENAI_API_KEY: "synthetic-unrelated-secret",
+    };
+    const { runCli, stdout, stderr } = createCliTest(main);
+    const deps = dependencies({
+      environment,
+      currentDirectory: stateDirectory,
+    });
+    deps.createSecurity = (config) => new TestClient(config, { environment });
+    expect(
+      await runCli(
+        [
+          "scan",
+          ".",
+          "--dry-run",
+          "--auth",
+          "chatgpt",
+          "--codex",
+          'profile="review"',
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "ChatGPT authentication cannot use the gateway provider's required GATEWAY_API_KEY",
+    );
+    expect(stdout.text() + stderr.text()).not.toContain(
+      "synthetic-provider-secret",
+    );
+    expect(stdout.text() + stderr.text()).not.toContain(
+      "synthetic-unrelated-secret",
+    );
   });
 
   test("keeps selected dry-run authentication metadata safe and machine readable", async () => {
@@ -1853,6 +1901,7 @@ describe("skill authentication", () => {
         {
           command: "validate",
           auth: "auto",
+          directory: skillDirectory,
           stdout: stdout.stream,
           stderr: stderr.stream,
         },
@@ -2095,6 +2144,7 @@ describe("skill authentication", () => {
         {
           command: "validate",
           auth: "auto",
+          directory: skillDirectory,
           stdout: capture().stream,
           stderr: capture().stream,
         },
@@ -2156,6 +2206,7 @@ describe("skill authentication", () => {
             {
               command: "validate",
               auth,
+              directory: skillDirectory,
               stdout: stdout.stream,
               stderr: capture().stream,
             },
@@ -2187,7 +2238,17 @@ describe("skill authentication", () => {
         join(environment.CODEX_HOME, "config.toml"),
         'model = "unrelated-model"',
       );
-      expect((await run()).args).toEqual([process.execPath]);
+      expect((await run()).args).toEqual([
+        process.execPath,
+        "--config",
+        expect.stringMatching(
+          /^responses_api_metadata\.codex_security_operation_id="[^"]+"$/u,
+        ),
+        "--config",
+        expect.stringMatching(
+          /^responses_api_metadata\.codex_security_attempt_id="[^"]+"$/u,
+        ),
+      ]);
       expect(
         parseToml(await readFile(join(runtimeHome, "config.toml"), "utf8")),
       ).toEqual({
@@ -2297,10 +2358,12 @@ if (basename(process.argv[1] ?? "") === "login" && process.argv[2] === "status")
             unauthorized
               ? 'console.error("401 Unauthorized"); process.exit(1)'
               : 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}))',
+            "--",
           ],
           {
             command: "validate",
             auth: "chatgpt",
+            directory: skillDirectory,
             stdout: capture().stream,
             stderr: stderr.stream,
           },

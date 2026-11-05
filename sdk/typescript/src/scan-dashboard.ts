@@ -17,6 +17,7 @@ import {
   formatUsd,
   type ScanCost,
   type ScanSessionEvent,
+  type ScanUsageMeasurement,
   type ScanUsageObservation,
 } from "./cost.js";
 import {
@@ -27,6 +28,7 @@ import {
   formatTokenUsage,
   type ScanTokenUsage,
 } from "./cost-model.js";
+import { formatDeepScanReviews } from "./scan-progress.js";
 import type { ScanActivity } from "./scan-activity.js";
 import {
   ACCOUNT_LIMITS_UNAVAILABLE,
@@ -52,8 +54,14 @@ const CURSOR_HOME = "\u001B[H";
 const ERASE_LINE = "\u001B[2K";
 const MAX_HISTORY_ENTRIES = 2_000;
 const FIXED_SCREEN_ROWS = 4; // Title, two dividers and elapsed time.
+const COMPONENT_STATUS = {
+  pending: "Queued",
+  completed: "Complete",
+  failed: "Failed",
+} as const;
 
 interface DashboardStream {
+  readonly writableNeedDrain?: boolean;
   write(chunk: string, callback?: (error?: Error | null) => void): unknown;
   on?(event: "error", listener: (error: Error) => void): unknown;
   off?(event: "error", listener: (error: Error) => void): unknown;
@@ -162,9 +170,11 @@ export class ScanDashboard {
   } | null = null;
   #stage = "Preparing scan";
   #files: ScanProgress | null = null;
+  #componentReviews: string | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
   #tokens: string | null = null;
+  #usageCoverage: ScanUsageMeasurement["coverage"] | null = null;
   #usageFreshness: string | null = null;
   #accountLimits: string | null = null;
   #chatGptAuth = false;
@@ -473,10 +483,9 @@ export class ScanDashboard {
       const dashboard = new ScanDashboard(this.#stream, {
         ...this.#options,
         presentation: "scan",
-        mode: "standard",
         componentName: receipt.name,
       });
-      dashboard.setStage("Queued");
+      dashboard.setStage(COMPONENT_STATUS.pending);
       dashboard.note(`Scope: ${receipt.paths.join(", ")}`);
       return { receipt: { ...receipt }, dashboard };
     });
@@ -494,15 +503,19 @@ export class ScanDashboard {
         dashboard.#startedAt = this.#options.clock.now();
         dashboard.setStage("Preparing scan");
       } else if (receipt.status !== "pending") {
+        const status = COMPONENT_STATUS[receipt.status];
+        dashboard.#componentReviews = null;
         dashboard.#finishedAt = this.#options.clock.now();
-        dashboard.setStage(componentStatus(receipt));
+        dashboard.setStage(status);
         dashboard.note(
           receipt.error ??
-            `${componentStatus(receipt)} · ${receipt.findingCount ?? 0} findings before deduplication`,
+            `${status} · ${receipt.findingCount ?? 0} findings before deduplication`,
         );
       }
     }
-    if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
+    if (receipt.measurement !== undefined)
+      dashboard.setMeasurement(receipt.measurement);
+    else if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
     component.receipt = { ...receipt };
     this.#refresh();
   }
@@ -519,6 +532,13 @@ export class ScanDashboard {
       case "progress":
         dashboard.setFiles(event.value);
         dashboard.setStage(scanPhaseLabel(event.value.phase));
+        break;
+      case "deep-progress":
+        dashboard.#componentReviews = `${event.value.completed} done, ${event.value.active} active`;
+        dashboard.setStage(
+          event.value.consolidating ? "consolidating results" : "discovery",
+        );
+        dashboard.note(formatDeepScanReviews(event.value));
         break;
       case "activity":
         dashboard.record(event.value);
@@ -537,12 +557,14 @@ export class ScanDashboard {
       case "usage":
         dashboard.setUsage(event.value);
         break;
+      case "measurement":
+        dashboard.setMeasurement(event.value);
+        break;
       case "usage-observation":
         dashboard.setUsageObservation(event.value);
         break;
       case "workers":
-        if (event.value.kind === "dispatch")
-          dashboard.setStage(scanPhaseLabel(event.value.phase));
+        dashboard.setStage(scanPhaseLabel(event.value.phase));
         break;
       case "warning":
         dashboard.note(event.value);
@@ -579,13 +601,23 @@ export class ScanDashboard {
     cost: Readonly<ScanCost>,
     maxCostUsd = this.#options.maxCostUsd,
   ): void {
+    this.#usageCoverage = "complete";
     this.#cost = cost;
     this.#tokens = formatScanCostTokens(cost);
     this.#options.maxCostUsd = maxCostUsd;
     this.#refresh();
   }
 
+  public setMeasurement(measurement: Readonly<ScanUsageMeasurement>): void {
+    this.#usageCoverage = measurement.coverage;
+    this.#cost = measurement.cost;
+    this.#tokens =
+      measurement.usage === null ? null : formatTokenUsage(measurement.usage);
+    this.#refresh();
+  }
+
   public setUsage(usage: Readonly<ScanTokenUsage>): void {
+    this.#usageCoverage = "complete";
     this.#tokens = formatTokenUsage(usage);
     this.#refresh();
   }
@@ -649,13 +681,40 @@ export class ScanDashboard {
           isFileInventory(entry) &&
           isFileInventory(activity)),
     );
-    const previousRows =
-      this.#scrollOffset === 0 ? 0 : this.#activityLines(this.#width()).length;
     const recordedAt =
       existing < 0
         ? this.#options.clock.now()
         : this.#activities[existing]!.recordedAt;
     const entry = { ...activity, recordedAt };
+    if (this.#view === "activity" && this.#scrollOffset !== 0) {
+      const width = this.#width();
+      const newRows = this.#summaryLines(width, [entry]).length;
+      if (existing < 0) {
+        // Count the append before evicting the oldest entry.
+        this.#scrollOffset += newRows;
+      } else {
+        const oldRows = this.#summaryLines(width, [
+          this.#activities[existing]!,
+        ]).length;
+        if (newRows !== oldRows) {
+          const rowsAfter = this.#summaryLines(
+            width,
+            this.#activities.slice(existing + 1),
+          ).length;
+          const topFromEnd =
+            this.#scrollOffset +
+            this.#activityRows(this.#usageLayout().footer.length);
+          if (rowsAfter < topFromEnd) {
+            // Changes above the viewport move its index but not its distance from the end.
+            this.#scrollOffset = Math.max(
+              0,
+              this.#scrollOffset +
+                Math.max(newRows - oldRows, rowsAfter - topFromEnd),
+            );
+          }
+        }
+      }
+    }
     if (existing < 0) {
       this.#activities.push(entry);
     } else {
@@ -663,12 +722,6 @@ export class ScanDashboard {
     }
     if (this.#activities.length > MAX_HISTORY_ENTRIES) {
       this.#activities.splice(0, this.#activities.length - MAX_HISTORY_ENTRIES);
-    }
-    if (this.#scrollOffset !== 0) {
-      this.#scrollOffset += Math.max(
-        0,
-        this.#activityLines(this.#width()).length - previousRows,
-      );
     }
     this.#scheduleRefresh();
   }
@@ -721,7 +774,7 @@ export class ScanDashboard {
   }
 
   #refresh(): void {
-    if (this.#timer === null) return;
+    if (this.#timer === null || this.#stream.writableNeedDrain) return;
     try {
       this.#stream.write(this.#frame());
     } catch {}
@@ -931,13 +984,14 @@ export class ScanDashboard {
             ? null
             : scanProgressCount(dashboard.#files);
         const progress =
-          count === null
+          dashboard.#componentReviews ??
+          (count === null
             ? "—"
-            : `${formatCount(count.completed)}/${formatCount(count.total)} ${count.label}`;
+            : `${formatCount(count.completed)}/${formatCount(count.total)} ${count.label}`);
         const status =
           receipt.status === "started"
             ? dashboard.#stage
-            : componentStatus(receipt);
+            : COMPONENT_STATUS[receipt.status];
         return { receipt, dashboard, status, progress };
       });
     const progressWidth = Math.max(
@@ -946,8 +1000,8 @@ export class ScanDashboard {
     );
     const costWidth = Math.max(
       8,
-      ...this.#components.map(({ dashboard }) =>
-        dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
+      ...this.#components.map(
+        ({ dashboard }) => dashboard.#componentCostLabel().length,
       ),
     );
     const nameAndStatusWidth =
@@ -970,7 +1024,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
+      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost}` : ""}`;
     const table = visible.map(
       ({ receipt, dashboard, status, progress }, index) =>
         row(
@@ -981,7 +1035,7 @@ export class ScanDashboard {
           receipt.findingCount === undefined
             ? "—"
             : formatCount(receipt.findingCount),
-          dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost),
+          dashboard.#componentCostLabel(),
         ),
     );
     if (table.length === 0) table.push(`  ${this.#stage}…`);
@@ -1021,6 +1075,12 @@ export class ScanDashboard {
     );
   }
 
+  #componentCostLabel(): string {
+    return this.#cost === null
+      ? "—"
+      : `${formatScanCost(this.#cost)}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
+  }
+
   #componentCostLines(): string[] {
     if (!this.#showCost) return [];
     const costs = this.#components.flatMap(({ dashboard }) =>
@@ -1028,7 +1088,7 @@ export class ScanDashboard {
     );
     return wrapActivity(
       "  COST     ",
-      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)} · component scans only`,
+      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)}${this.#components.some(({ dashboard }) => dashboard.#usageCoverage !== "complete") ? " (partial)" : ""} · component scans only`,
       this.#width(),
     );
   }
@@ -1063,15 +1123,15 @@ export class ScanDashboard {
       return { footer: [], details: [] };
     }
     const width = this.#width();
+    const tokens =
+      this.#usageCoverage === "unavailable"
+        ? "usage unavailable"
+        : `${this.#tokens ?? "waiting for usage"}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
     const limits =
       this.#accountLimits ??
       (this.#chatGptAuth ? ACCOUNT_LIMITS_UNAVAILABLE : null);
     const lines = [
-      ...wrapActivity(
-        "  TOKENS   ",
-        this.#tokens ?? "waiting for usage",
-        width,
-      ),
+      ...wrapActivity("  TOKENS   ", tokens, width),
       ...this.#costLines(),
       ...(this.#tokens === null
         ? []
@@ -1118,7 +1178,11 @@ export class ScanDashboard {
           ? "waiting for usage"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
-    return wrapActivity("  COST     ", cost, this.#width());
+    return wrapActivity(
+      "  COST     ",
+      `${cost}${this.#usageCoverage === "partial" ? " (partial)" : this.#usageCoverage === "unavailable" ? " (usage unavailable)" : ""}`,
+      this.#width(),
+    );
   }
 
   #activityLines(width: number): DashboardActivityLine[] {
@@ -1221,6 +1285,13 @@ export class ScanDashboard {
       }
       return cache.lines;
     }
+    return this.#summaryLines(width, this.#activities);
+  }
+
+  #summaryLines(
+    width: number,
+    activities: readonly TimedScanActivity[],
+  ): DashboardActivityLine[] {
     const elapsed = Math.max(
       0,
       Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000),
@@ -1287,7 +1358,7 @@ export class ScanDashboard {
         }
       }
     };
-    for (const entry of this.#activities) {
+    for (const entry of activities) {
       const kind: DashboardActivityKind = entry.id.startsWith("scan-note-")
         ? /\b(?:warning|unavailable|interrupted|retrying)\b|could not be confirmed|capacity changed/iu.test(
             entry.description,
@@ -1474,15 +1545,6 @@ function isFileInventory(activity: ScanActivity): boolean {
 
 function formatElapsed(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-function componentStatus(receipt: ComponentReceipt): string {
-  return {
-    pending: "Queued",
-    started: "Running",
-    completed: "Complete",
-    failed: "Failed",
-  }[receipt.status];
 }
 
 function formatLocalTime(timestamp: number): string {

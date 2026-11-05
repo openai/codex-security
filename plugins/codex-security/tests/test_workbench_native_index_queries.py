@@ -1,3 +1,5 @@
+"""Exercise filtering, pagination, and latest-scan selection in finding and repository indexes."""
+
 from __future__ import annotations
 
 import ntpath
@@ -364,11 +366,12 @@ def test_scan_list_probes_requested_repository_once(
     connection, targets = indexed_collections
     history = workbench_api["scan_history"]
     probes = []
-    git_output = history.git_output
 
     def record_git_output(target, *arguments):
         probes.append((target, arguments))
-        return git_output(target, *arguments)
+        if arguments[0] == "rev-parse":
+            return str(target / ".git")
+        return f"https://example.test/{target.name}.git"
 
     monkeypatch.setattr(history, "git_output", record_git_output)
     result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))
@@ -378,6 +381,22 @@ def test_scan_list_probes_requested_repository_once(
         ("rev-parse", "--path-format=absolute", "--git-common-dir"),
         ("remote", "get-url", "origin"),
     ]
+
+
+@pytest.mark.parametrize("collection", ["scans", "repositories", "findings"])
+def test_collection_pages_honor_the_advertised_limit(
+    workbench_api, indexed_collections, collection
+):
+    connection, _targets = indexed_collections
+    arguments = query_args(limit=50, scan_id=SCAN_IDS[0])
+    if collection == "scans":
+        page = workbench_api["scan_history"].list_scans(connection, arguments)
+    elif collection == "repositories":
+        page = workbench_api["native_indexes"].list_repositories(connection, arguments)
+    else:
+        page = workbench_api["list_findings"](connection, arguments)["findingsPage"]
+    assert page["limit"] == 50
+    assert page["nextOffset"] is None
 
 
 def test_unscanned_repositories_follow_scanned_rows_and_paginate(

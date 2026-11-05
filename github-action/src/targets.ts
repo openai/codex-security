@@ -121,7 +121,7 @@ export async function resolveTarget(inputs: Inputs, event: EventContext): Promis
     else if (pr) diffBase = (await git(repository, ['merge-base', pr.base.sha, diffHead])).trim();
     else throw new Error('diff-base is required for diff scans outside pull_request events.');
     if (!SHA.test(diffBase)) throw new Error('Could not resolve the diff base. Fetch full history.');
-    emptyDiff = (await gitResult(repository, ['diff', '--no-ext-diff', '--no-textconv', '--quiet', diffBase, diffHead, '--'], [0, 1])).exitCode === 0;
+    emptyDiff = (await gitResult(repository, ['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', '--quiet', diffBase, diffHead, '--'], [0, 1])).exitCode === 0;
   }
   const analysisRef = pr ? `refs/pull/${pr.number ?? event.payload.number}/head` : event.ref;
   const publishable = /^refs\/(heads|tags|pull)\//.test(analysisRef);

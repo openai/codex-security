@@ -59,6 +59,126 @@ function commandActivityCase(
 }
 
 describe("scan activity", () => {
+  test.each([
+    [
+      "cat $CODEX_SECURITY_REPOSITORY/src/my\\ file.ts",
+      "/repo",
+      ["src/my file.ts"],
+    ],
+    [
+      "cat /code/project\\ files/\\ leading\\ file.ts\\ ",
+      "/code/project files",
+      [" leading file.ts "],
+    ],
+    [
+      "cat \"/repo/two words\\ with.txt\" '/repo/quoted path.ts' /repo/my\\\tfile.ts",
+      "/repo",
+      ["two words/ with.txt", "quoted path.ts", "my\tfile.ts"],
+    ],
+    ["cat /repo/my\\ file.ts\\\\sibling /repo/safe.ts", "/repo", ["safe.ts"]],
+  ] as const)(
+    "decodes unquoted blanks in recorded POSIX commands: %s",
+    (cmd, repository, paths) => {
+      for (const activity of [
+        scanActivityFromEvent(
+          {
+            type: "item.started",
+            item: {
+              id: "live",
+              type: "command_execution",
+              command: cmd,
+              shell: "/bin/bash",
+            },
+          },
+          repository,
+        ),
+        scanActivityFromEvent(
+          toolEvent("exec", { cmd, shell: "sh" }),
+          repository,
+        ),
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "function_call",
+            name: "exec_command",
+            call_id: "saved",
+            arguments: JSON.stringify({ cmd, shell: "/bin/zsh" }),
+          }),
+          repository,
+        ),
+      ])
+        expect(activity?.paths).toEqual([...paths]);
+    },
+  );
+
+  test.each([undefined, "/usr/bin/pwsh", "unknown"])(
+    "preserves ordinary token boundaries for shell %p",
+    (shell) => {
+      expect(
+        scanActivityFromEvent(
+          toolEvent("exec", {
+            cmd: "Get-ChildItem /repo/src\\ -File /repo/one.ts",
+            shell,
+          }),
+          "/repo",
+        )?.paths,
+      ).toEqual(["src", "one.ts"]);
+    },
+  );
+
+  test.each([
+    [
+      [
+        "grep",
+        "-F",
+        "foo\\",
+        "/repo/my file.ts",
+        "/repo/one\\two.ts",
+        "$CODEX_SECURITY_REPOSITORY/other.ts",
+      ],
+      "/repo",
+      ["my file.ts", "one\\two.ts"],
+    ],
+    [
+      ["sh", "-e", "-c", "/repo/inside.ts /repo/fake.ts", "/repo/direct.ts"],
+      "/repo",
+      ["direct.ts"],
+    ],
+    [
+      ["sh", "/repo/run.sh", "-c", "/repo/options.conf"],
+      "/repo",
+      ["run.sh", "options.conf"],
+    ],
+    [
+      ["pwsh", "-Command", "/repo/script.ps1", "/repo/script text"],
+      "/repo",
+      [],
+    ],
+    [
+      ["pwsh", "-File", "C:\\repo\\run.ps1", "-Command", "c:\\repo\\settings"],
+      "C:\\repo",
+      ["run.ps1", "settings"],
+    ],
+    [
+      ["cat", "//server/Share/Repo/my file.ts"],
+      "//Server/Share/Repo",
+      ["my file.ts"],
+    ],
+  ] as const)(
+    "uses the recorded argv boundaries for %p",
+    (command, repository, paths) => {
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "local_shell_call",
+            call_id: "argv",
+            action: { type: "exec", command },
+          }),
+          repository,
+        ),
+      ).toMatchObject({ description: command.join(" "), paths: [...paths] });
+    },
+  );
+
   test("reports repository files as soon as a read command starts", () => {
     expect(
       scanActivityFromEvent(
@@ -387,6 +507,76 @@ describe("scan activity", () => {
       { paths: [] },
     ],
   ] as const)("%s", commandActivityCase);
+
+  test.each([
+    ["C:\\Work\\Repo", "C:\\Work\\Repo\\Src\\A.ts", true],
+    ["C:\\Work\\Repo", "c:\\Work\\Repo\\Src\\A.ts", true],
+    ["C:/", "c:/Src/A.ts", true],
+    ["//Server/Share/Repo", "//server/Share/Repo/Src/A.ts", true],
+    ["\\\\Server\\Share", "\\\\server\\Share\\Src\\A.ts", true],
+    ["//?/UNC/Server/Share/Repo", "//?/UNC/server/Share/Repo/Src/A.ts", true],
+    ["//?/C:/Repo", "//?/c:/Repo/Src/A.ts", true],
+    ["//Server/Docs/Repo", "//server/docs/Repo/Src/A.ts", false],
+    ["//?/UNC/Srv/Docs", "//?/UNC/srv/docs/Src/A.ts", false],
+    ["/\\Foo/Repo", "/\\Foo/Repo/Src/A.ts", true],
+    ["/\\Foo/Repo", "/\\foo/Repo/Src/A.ts", false],
+    ["//Foo/Repo", "/\\foo/Repo/Src/A.ts", false],
+    ["/work/Repo", "/work/Repo/Src/A.ts", true],
+    ["C:/Work/Repo", "c:/Work/repo/Src/A.ts", false],
+    ["C:/Work/Repo", "c:/work/Repo/Src/A.ts", false],
+    ["//Server/Share/Repo", "//server/Share/repo/Src/A.ts", false],
+    ["//?/UNC/Srv/Share/Repo", "//?/UNC/srv/Share/repo/Src/A.ts", false],
+    ["//Server/Share", "//server/share-other/Src/A.ts", false],
+    ["//host/K/Repo", "//host/K/Repo/Src/A.ts", false],
+    ["//HOST/K/Repo", "//host/K/Repo/Src/A.ts", true],
+    ["//Host@SSL/Docs", "//HOST@ssl/Docs/Src/A.ts", true],
+    ["//Host@SSL/Docs", "//host@SSL/docs/Src/A.ts", false],
+    ["//Host@8080/Docs", "//host@8080/docs/Src/A.ts", false],
+    ["//?/UNC/Host@SSL@443/Docs", "//?/UNC/host@SSL@443/docs/Src/A.ts", false],
+    ["C:/Work/Repo", "c:/Work/Repo-other/Src/A.ts", false],
+    ["C:/", "D:/Src/A.ts", false],
+    ["C:Repo", "c:Repo/Src/A.ts", false],
+    ["/work/Repo", "/work/repo/Src/A.ts", false],
+    ["/work/Repo", "/work/Repo/../Src/A.ts", false],
+    ["C:/Work/Repo", "c:\\Work\\Repo\\..\\Src\\A.ts", false],
+  ] as const)(
+    "%s extracts live and saved activity paths from %s",
+    (repository, path, inside) => {
+      const paths = inside ? ["Src/A.ts"] : [];
+      const cmd = `type "${path}"`;
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "local_shell_call",
+            call_id: "worker-argv",
+            action: { type: "exec", command: ["cat", path] },
+          }),
+          repository,
+        ),
+      ).toMatchObject({ paths });
+      expect(
+        scanActivityFromEvent(toolEvent("read_file", { path }), repository),
+      ).toMatchObject({ paths });
+      expect(
+        scanActivityFromEvent(commandEvent("item.started", cmd), repository),
+      ).toMatchObject({ paths, description: cmd });
+
+      for (const [name, args] of [
+        ["read_file", { path }],
+        ["exec_command", { cmd }],
+      ] as const) {
+        const event = sessionEvent({
+          type: "function_call",
+          call_id: "worker-call",
+          name,
+          arguments: JSON.stringify(args),
+        });
+        expect(scanActivityFromSessionEvent(event, repository)).toMatchObject({
+          paths,
+        });
+      }
+    },
+  );
 
   test("reports tool reads and completed reasoning", () => {
     expect(
@@ -991,205 +1181,4 @@ describe("scan activity", () => {
       ),
     ).toBeNull();
   });
-});
-
-describe("concrete repository path prefixes", () => {
-  test.each([
-    [
-      "POSIX backslash directory",
-      "/\\Foo/Repo",
-      "/\\Foo/Repo/Src/Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "distinct POSIX backslash directory",
-      "/\\Foo/Repo",
-      "/\\foo/Repo/Src/Login.ts",
-      [],
-    ],
-    [
-      "mixed separators are not a UNC host",
-      "//Foo/Repo",
-      "/\\foo/Repo/Src/Login.ts",
-      [],
-    ],
-    [
-      "extended Windows drive",
-      "\\\\?\\C:\\Repo",
-      "\\\\?\\c:\\Repo\\Src\\Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "extended Windows UNC host",
-      "\\\\?\\UNC\\Server\\Share\\Repo",
-      "\\\\?\\UNC\\server\\Share\\Repo\\Src\\Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "extended UNC collection remains exact",
-      "//?/UNC/Server/Docs/Repo",
-      "//?/UNC/server/docs/Repo/Src/Login.ts",
-      [],
-    ],
-    [
-      "matching drive casing",
-      "C:\\code\\project",
-      "C:\\code\\project\\Src\\Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "drive casing",
-      "C:\\code\\project",
-      "c:\\code\\project\\Src\\Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "drive forward slashes",
-      "C:/code/project",
-      "c:/code/project/Src/Login.ts",
-      ["Src/Login.ts"],
-    ],
-    ["drive root", "C:\\", "c:\\Src\\Login.ts", ["Src/Login.ts"]],
-    ["drive root forward slashes", "C:/", "c:/Src/Login.ts", ["Src/Login.ts"]],
-    [
-      "UNC casing",
-      "\\\\Server\\Share\\project",
-      "\\\\server\\Share\\project\\Src\\Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "UNC share root",
-      "\\\\Server\\Share\\",
-      "\\\\server\\Share\\Src\\Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "UNC forward slashes",
-      "//Server/Share/project",
-      "//server/Share/project/Src/Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "UNC share root without separator",
-      "//Server/Share",
-      "//server/Share/Src/Login.ts",
-      ["Src/Login.ts"],
-    ],
-    [
-      "case-sensitive UNC collection",
-      "//Server/Docs/Repo",
-      "//server/docs/Repo/Src/Login.ts",
-      [],
-    ],
-    [
-      "case-sensitive WebDAV collection",
-      "//Server/DavWWWRoot/Docs/Repo",
-      "//server/DavWWWRoot/docs/Repo/Src/Login.ts",
-      [],
-    ],
-    [
-      "case-sensitive Windows checkout sibling",
-      "C:\\work\\Repo",
-      "c:\\work\\repo\\Src\\Login.ts",
-      [],
-    ],
-    [
-      "case-sensitive Windows ancestor",
-      "C:\\Work\\Repo",
-      "c:\\work\\Repo\\Src\\Login.ts",
-      [],
-    ],
-    [
-      "case-sensitive UNC checkout sibling",
-      "\\\\Server\\Share\\Repo",
-      "\\\\server\\SHARE\\repo\\Src\\Login.ts",
-      [],
-    ],
-    [
-      "matching POSIX casing",
-      "/code/project",
-      "/code/project/Src/Login.ts",
-      ["Src/Login.ts"],
-    ],
-    ["POSIX root", "/", "/Src/Login.ts", ["Src/Login.ts"]],
-    [
-      "POSIX parent traversal",
-      "/code/project",
-      "/code/project/../outside.ts",
-      [],
-    ],
-    [
-      "matching drive parent traversal",
-      "C:\\code\\project",
-      "C:\\code\\project\\..\\outside.ts",
-      [],
-    ],
-    [
-      "different POSIX casing",
-      "/code/project",
-      "/code/PROJECT/Src/Login.ts",
-      [],
-    ],
-    [
-      "sibling directory",
-      "C:\\code\\project",
-      "c:\\code\\project-other\\Src\\Login.ts",
-      [],
-    ],
-    [
-      "drive-relative repository cannot be case-folded",
-      "C:work\\project",
-      "c:work\\project\\Src\\Login.ts",
-      [],
-    ],
-    ["different drive", "C:\\", "D:\\Src\\Login.ts", []],
-    [
-      "different UNC share",
-      "\\\\Server\\Share",
-      "\\\\server\\Share-other\\Src\\Login.ts",
-      [],
-    ],
-    [
-      "parent traversal",
-      "C:\\code\\project",
-      "c:\\code\\project\\..\\outside.ts",
-      [],
-    ],
-  ] as const)(
-    "preserves relative activity paths for %s",
-    (_name, repository, path, paths) => {
-      expect(
-        scanActivityFromEvent(toolEvent("read_file", { path }), repository),
-      ).toMatchObject({ paths });
-      expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            type: "function_call",
-            name: "read_file",
-            call_id: "worker-tool",
-            arguments: JSON.stringify({ path }),
-          }),
-          repository,
-        ),
-      ).toMatchObject({ paths });
-      const command = `type "${path}"`;
-      expect(
-        scanActivityFromEvent(
-          commandEvent("item.started", command),
-          repository,
-        ),
-      ).toMatchObject({ paths, description: command });
-      expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            type: "function_call",
-            name: "exec_command",
-            call_id: "worker-command",
-            arguments: JSON.stringify({ cmd: command }),
-          }),
-          repository,
-        ),
-      ).toMatchObject({ paths, description: command });
-    },
-  );
 });

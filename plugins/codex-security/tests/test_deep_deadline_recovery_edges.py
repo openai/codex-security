@@ -1,3 +1,5 @@
+"""Preserve usable worker checkpoints and earlier recovery files when deadline publication fails."""
+
 from __future__ import annotations
 
 import copy
@@ -148,7 +150,7 @@ def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, c
     if canonical:
         canonical_parent(scan, saved_draft(scan.scan_id))
 
-    defects = {"severity": None, "codeEvidence": [None], "rootCause": {"summary": 7}}
+    defects = {"severity": None, "confidence": {"level": "high"}, "rootCause": {"summary": 7}}
     partials = []
     for same_identity in (False, True):
         for field, value in defects.items():
@@ -193,6 +195,41 @@ def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, c
     assert manifest["scan"]["status"] == "completed"
     assert "sealedAt" in manifest["scan"]
     assert_retained_finding(scan)
+
+
+def test_deadline_preserves_worker_evidence_when_one_excerpt_is_malformed(tmp_path):
+    scan = deadline_fixture(tmp_path, "valid")
+    revised = copy.deepcopy(scan.finding)
+    revised["severity"]["level"] = "critical"
+    excerpt = {**revised["codeEvidence"][0], "id": "worker-excerpt"}
+    revised["codeEvidence"] = [excerpt, None]
+    revised["rootCause"]["evidenceRefs"] = [excerpt["id"], "missing-excerpt"]
+    revised["attackPath"]["evidenceRefs"] = [excerpt["id"]]
+    distinct = copy.deepcopy(revised)
+    distinct["identity"]["anchor"] = "partial-code-evidence"
+    distinct["provenance"]["candidateId"] = "partial-code-evidence"
+    sources = {
+        path: path.read_bytes() for path in append_worker_findings(scan, [revised, distinct])
+    }
+
+    assert finish(scan)["deepScan"]["terminalReason"] == "capped"
+    run_workbench(
+        scan.state, "complete-scan", "--scan-id", scan.scan_id, environment=scan.environment
+    )
+
+    retained = json.loads((scan.directory / "findings.json").read_text())["findings"]
+    by_anchor = {row["identity"]["anchor"]: row for row in retained}
+    assert set(by_anchor) == {scan.finding["identity"]["anchor"], distinct["identity"]["anchor"]}
+    for row in retained:
+        assert row["severity"] == revised["severity"]
+        assert row["codeEvidence"] == [excerpt]
+        assert row["rootCause"] == {**revised["rootCause"], "evidenceRefs": [excerpt["id"]]}
+    (previous,) = by_anchor[scan.finding["identity"]["anchor"]]["provenance"]["previousFindings"]
+    assert previous["severity"] == scan.finding["severity"]
+    assert previous["codeEvidence"] == scan.finding["codeEvidence"]
+    warnings = get_scan(scan.state, scan.scan_id)["scan"]["warnings"]
+    assert sum("Skipped malformed codeEvidence" in warning for warning in warnings) == 2
+    assert all(path.read_bytes() == contents for path, contents in sources.items())
 
 
 @pytest.mark.parametrize("checkpoint_kind", ["empty", "valid", "invalid"])

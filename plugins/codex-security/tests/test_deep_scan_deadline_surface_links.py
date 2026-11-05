@@ -1,14 +1,11 @@
+"""Track source-to-surface links through deadline recovery, reused IDs, and repeated crashes."""
+
 from __future__ import annotations
 
 import json
 import os
 
 import pytest
-from test_deep_scan_deadline_recovery import finish_after_crashes as finish_after_crashes
-from test_deep_scan_stop_conditions import canceled_discovery_output, finish
-from test_deep_scan_stop_conditions import deadline_scan as deadline_scan
-from test_deep_scan_stop_conditions import publication_scan as publication_scan
-from test_deep_scan_stop_conditions import saturated_scan as saturated_scan
 from workbench_test_support import (
     read_review_state,
     replay_saved_results,
@@ -32,10 +29,10 @@ def pending(identity, reason, surface_id="entry"):
     "parent_collision", [pytest.param(False, marks=pytest.mark.cross_platform), True]
 )
 def test_deadline_surface_links_follow_sources_across_repeated_crashes(
-    workbench_db, deadline_scan, finish_after_crashes, parent_collision
+    deadline_scan, finish_after_crashes, parent_collision
 ):
     scan = deadline_scan
-    worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2)
+    worker_id, output = scan.canceled_discovery_output(attempt=2)
     archived = output.parent / "attempts" / "attempt-01"
     shared = pending("shared-review", "Review all retained observations.")
     checkpoints = []
@@ -77,7 +74,7 @@ def test_deadline_surface_links_follow_sources_across_repeated_crashes(
 
 @pytest.mark.parametrize("with_reduction", [False, True], ids=["zero-accepted", "reduced"])
 def test_deadline_retains_all_targets_of_one_legacy_surface_id(
-    workbench_api, workbench_db, publication_scan, request, with_reduction
+    workbench_db, publication_scan, request, with_reduction
 ):
     scan = request.getfixturevalue("deadline_scan") if with_reduction else publication_scan()
     if not with_reduction:
@@ -88,7 +85,7 @@ def test_deadline_retains_all_targets_of_one_legacy_surface_id(
                 "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
                 (scan.scan_id,),
             )
-    _, output = canceled_discovery_output(workbench_db, scan)
+    _, output = scan.canceled_discovery_output()
     checkpoint = write_checkpoint(
         output / "checkpoints",
         saved_draft(
@@ -99,7 +96,7 @@ def test_deadline_retains_all_targets_of_one_legacy_surface_id(
     )
     original = checkpoint.read_bytes()
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     scan.complete()
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
@@ -112,11 +109,9 @@ def test_deadline_retains_all_targets_of_one_legacy_surface_id(
     assert checkpoint.read_bytes() == original
 
 
-def test_deadline_deferred_only_checkpoint_keeps_prior_surface_link(
-    workbench_api, workbench_db, deadline_scan
-):
+def test_deadline_deferred_only_checkpoint_keeps_prior_surface_link(workbench_db, deadline_scan):
     scan = deadline_scan
-    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    worker_id, output = scan.canceled_discovery_output()
     earlier = write_checkpoint(
         output / "checkpoints",
         saved_draft(scan.scan_id, surfaces=[surface("Earlier review", "prior")]),
@@ -129,7 +124,7 @@ def test_deadline_deferred_only_checkpoint_keeps_prior_surface_link(
     os.utime(current, ns=(200, 200))
     originals = {path: path.read_bytes() for path in (earlier, current)}
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     scan.complete()
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
@@ -139,11 +134,9 @@ def test_deadline_deferred_only_checkpoint_keeps_prior_surface_link(
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-def test_deadline_reopened_generic_surface_copy_retains_its_link(
-    workbench_api, workbench_db, deadline_scan
-):
+def test_deadline_reopened_generic_surface_copy_retains_its_link(workbench_db, deadline_scan):
     scan = deadline_scan
-    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    worker_id, output = scan.canceled_discovery_output()
     canonical = surface("Canonical parent", f"{worker_id}/entry")
     scan.coverage["surfaces"] = [canonical]
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
@@ -172,7 +165,7 @@ def test_deadline_reopened_generic_surface_copy_retains_its_link(
     head = select_checkpoint(output, checkpoint)
     originals[head] = head.read_bytes()
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     scan.complete()
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
@@ -217,10 +210,10 @@ def test_stopped_recovery_preserves_source_link_union(workbench_api, tmp_path):
 
 @pytest.mark.parametrize("changed_task", [False, True], ids=["copied-task", "updated-task"])
 def test_deadline_retains_equal_task_origins_from_selected_worker_result(
-    workbench_db, deadline_scan, finish_after_crashes, changed_task
+    deadline_scan, finish_after_crashes, changed_task
 ):
     scan = deadline_scan
-    worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2)
+    worker_id, output = scan.canceled_discovery_output(attempt=2)
     archived = output.parent / "attempts" / "attempt-01"
     previous_task = pending("download-review", "Download review pending.")
     archived_draft = saved_draft(
@@ -270,10 +263,10 @@ def test_deadline_retains_equal_task_origins_from_selected_worker_result(
     "selected_result", [False, True], ids=["raw-checkpoint", "selected-result"]
 )
 def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
-    workbench_db, deadline_scan, finish_after_crashes, selected_result
+    deadline_scan, finish_after_crashes, selected_result
 ):
     scan = deadline_scan
-    worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2)
+    worker_id, output = scan.canceled_discovery_output(attempt=2)
     archived = output.parent / "attempts" / "attempt-01"
     download_task = pending("download-review", "Download review pending.")
     archived_checkpoint = write_checkpoint(
@@ -328,11 +321,11 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
     ["parent-collision", "current-checkpoints", "retry-checkpoints", "coalesced-history"],
 )
 def test_deadline_inherited_surface_links_follow_historical_observations(
-    workbench_db, deadline_scan, finish_after_crashes, history
+    deadline_scan, finish_after_crashes, history
 ):
     scan = deadline_scan
-    worker_id, output = canceled_discovery_output(
-        workbench_db, scan, attempt=2 if history == "retry-checkpoints" else 1
+    worker_id, output = scan.canceled_discovery_output(
+        attempt=2 if history == "retry-checkpoints" else 1
     )
     archived = output.parent / "attempts" / "attempt-01"
     first_output = archived if history == "retry-checkpoints" else output
@@ -404,10 +397,10 @@ def test_deadline_inherited_surface_links_follow_historical_observations(
     ids=["same-id", "changed-id", "legacy-duplicate-id"],
 )
 def test_deadline_candidate_supersession_preserves_independent_surface_links(
-    workbench_db, deadline_scan, finish_after_crashes, changed_surface_id, legacy_duplicate_id
+    deadline_scan, finish_after_crashes, changed_surface_id, legacy_duplicate_id
 ):
     scan = deadline_scan
-    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    worker_id, output = scan.canceled_discovery_output()
     canonical_id = f"{worker_id}/entry"
     canonical_surface = surface("Canonical parent", canonical_id)
     canonical_task = pending("parent-review", "Parent review remains.", canonical_id)

@@ -37,6 +37,7 @@ jobs:
       container-required: ${{ steps.scope.outputs.container-required }}
       plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
+      audit-lockfiles: ${{ steps.scope.outputs.audit-lockfiles }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
       eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
       workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
@@ -122,6 +123,11 @@ jobs:
         run: pnpm --dir sdk/typescript run format
       - name: Check MCP formatting
         run: pnpm --dir plugins/codex-security/mcp-app exec prettier --check "**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}"
+      - name: Audit changed dependency inventories
+        if: needs.classify-changes.outputs.audit-lockfiles != ''
+        uses: ./.github/actions/audit-pnpm-lockfiles
+        with:
+          targets: ${{ needs.classify-changes.outputs.audit-lockfiles }}
       - name: Audit production dependencies
         run: pnpm --dir sdk/typescript run audit:prod
 

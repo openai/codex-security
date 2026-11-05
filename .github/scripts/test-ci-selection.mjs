@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { selectChecks } from "./select-ci-checks.mjs";
+import { selectChecks, selectLockfileAudits } from "./select-ci-checks.mjs";
 import { failedChecks } from "./check-ci-results.mjs";
 
 const select = (paths, options = {}) =>
@@ -153,10 +153,10 @@ test("only edits to existing direct pytest modules skip independent jobs", (t) =
     fs.writeFileSync(output, "");
     execFileSync(process.execPath, [script], { cwd, env });
     const lines = fs.readFileSync(output, "utf8").trim().split("\n");
-    assert.deepEqual(
-      Object.fromEntries(lines.map((line) => line.split("="))),
-      expected,
-    );
+    assert.deepEqual(Object.fromEntries(lines.map((line) => line.split("="))), {
+      ...expected,
+      "audit-lockfiles": "",
+    });
   }
 });
 
@@ -556,4 +556,33 @@ test("only an authenticated, successful classifier can propagate a source result
       ["classify-changes"],
     );
   }
+});
+
+test("audits changed dependency inputs and checks every inventory on full event runs", () => {
+  const pr = { event: "pull_request" };
+  const mcp = "plugins/codex-security/mcp-app/pnpm-lock.yaml";
+  const evals = "evals/triage-finding/pnpm-lock.yaml";
+  assert.equal(selectLockfileAudits([mcp], pr), "mcp");
+  assert.equal(selectLockfileAudits([evals], pr), "evals");
+  assert.equal(selectLockfileAudits([mcp, evals], pr), "mcp evals");
+  for (const input of [
+    "sdk/typescript/pnpm-lock.yaml",
+    "sdk/typescript/scripts/build-embedding-tokenizer.mjs",
+    "sdk/typescript/src/server/embedding-tokenizer.ts",
+  ])
+    assert.equal(selectLockfileAudits([input], pr), "tokenizer");
+  assert.equal(selectLockfileAudits(["README.md"], pr), "");
+  for (const event of ["schedule", "workflow_dispatch", "push"])
+    assert.equal(selectLockfileAudits([], { event }), "mcp evals tokenizer");
+  assert.equal(
+    selectLockfileAudits([], { ...pr, baseChanged: true }),
+    "mcp evals tokenizer",
+  );
+  assert.equal(
+    selectLockfileAudits(
+      [".github/actions/audit-pnpm-lockfiles/action.yml"],
+      pr,
+    ),
+    "mcp evals tokenizer",
+  );
 });

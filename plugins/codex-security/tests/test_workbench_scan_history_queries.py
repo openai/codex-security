@@ -1,3 +1,5 @@
+"""Check repository matching and finding relationships across legacy, linked, and unlinked scan records."""
+
 from __future__ import annotations
 
 import json
@@ -358,6 +360,39 @@ def test_cached_group_status_follows_coverage_uncertainty_and_confirmed_links(
 
     db.execute("DELETE FROM scan_comparison_matches WHERE after_scan_id='scan-latest'")
     assert compare() == unlinked
+
+
+def test_matching_reuses_repository_membership_for_repeated_scans(
+    workbench_api, workbench_db, tmp_path, monkeypatch
+):
+    history = workbench_api["scan_history"]
+    repository = tmp_path / "current"
+    previous_path = tmp_path / "previous"
+    add_scan(workbench_db, "current", repository, target_id="selected")
+    add_scan(workbench_db, "moved", previous_path, target_id="selected")
+    add_scan(workbench_db, "legacy-current", repository)
+    add_scan(workbench_db, "legacy-previous", previous_path)
+    add_scan(workbench_db, "another-legacy-previous", previous_path)
+    add_scan(workbench_db, "clone", tmp_path / "clone")
+    probes = []
+
+    def probe(path, *arguments):
+        probes.append((path, *arguments))
+        if arguments[0] == "remote":
+            remote = "other" if path == previous_path else "current"
+            return f"https://example.test/{remote}.git"
+        return None
+
+    monkeypatch.setattr(history, "git_output", probe)
+    selected = []
+    history.list_unmatched_scan_pairs(
+        workbench_db,
+        Namespace(repository=str(repository), force=False),
+        backfill_finding_details=lambda _, scan: selected.append(scan["id"]),
+        read_coverage=lambda _: {},
+    )
+    assert sorted(selected) == ["clone", "current", "legacy-current", "moved"]
+    assert len(probes) == len(set(probes))
 
 
 def test_matching_reads_each_scan_once_and_skips_cached_links(

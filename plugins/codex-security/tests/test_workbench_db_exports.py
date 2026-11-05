@@ -1,3 +1,5 @@
+"""Export saved findings from stopped scans while retaining newer drafts across recovery."""
+
 from __future__ import annotations
 
 import copy
@@ -858,9 +860,9 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
         state_dir, "list-findings", scan_id, "--offset", "20", "--limit", "50"
     )["findingsPage"]
     assert second_page["offset"] == 20
-    assert second_page["nextOffset"] == 40
+    assert second_page["nextOffset"] == 70
     assert second_page["total"] == 75
-    assert len(second_page["findings"]) == 20
+    assert len(second_page["findings"]) == 50
     assert embedded_occurrence_ids.isdisjoint(
         finding["occurrenceId"] for finding in second_page["findings"]
     )
@@ -869,6 +871,26 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
     assert any(
         finding["occurrenceId"] == off_prefix_occurrence_id for finding in selected["findings"]
     )
+
+    request = RemediationRequest(state_dir, off_prefix_occurrence_id)
+    action_token = str(uuid.uuid4())
+    request.start(action_token)
+    patch = "--- /dev/null\n+++ b/contained.txt\n@@ -0,0 +1 @@\n+safe\n"
+    generated = request.update(
+        action_token,
+        "1",
+        "generated",
+        "--patch-stdin",
+        input_text=patch,
+    )
+    findings = {finding["occurrenceId"]: finding for finding in generated["scan"]["findings"]}
+    remediation = findings[off_prefix_occurrence_id]["remediationState"]
+    assert remediation["state"] == "generated"
+    patch_path = scan_dir / remediation["patchPath"]
+    assert patch_path.read_text(encoding="utf-8") == patch
+    digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    assert remediation["patchDigest"] == f"sha256:{digest}"
+    assert generated["workspace"]["results"]["findings"] == completed["findings"]
 
 
 def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -> None:

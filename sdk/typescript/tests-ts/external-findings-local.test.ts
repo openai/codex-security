@@ -12,6 +12,8 @@ import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
+import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
+import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
@@ -70,6 +72,47 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
+  test("reports empty and excluded selections without storage and preserves failed scanner diagnostics", async () => {
+    const { repository, stateDirectory, environment } = await fixture();
+    const options = { repository, ...source };
+    const empty = { read: 0, findings: [], excluded: [] };
+    const failed = {
+      ...empty,
+      report: { errors: [{ message: "Scanner timed out" }] },
+    };
+    const excluded = {
+      ...empty,
+      read: 1,
+      excluded: [
+        {
+          position: 1,
+          source_finding_id: null,
+          reason: "Unsupported severity",
+        },
+      ],
+    };
+    for (const [selection, shouldFail] of [
+      [empty, false],
+      [excluded, false],
+      [failed, true],
+      [{ ...excluded, report: failed.report }, true],
+      [{ ...empty, read: 1 }, true],
+    ] as const) {
+      const prepared = await prepareNormalizedLocalImport(selection, options, {
+        environment,
+      });
+      expect(prepared.preview).toMatchObject(selection);
+      if (shouldFail)
+        await expect(prepared.import()).rejects.toMatchObject({ selection });
+      else
+        expect(await prepared.import()).toMatchObject({
+          ...selection,
+          counts: { created: 0, updated: 0, unchanged: 0 },
+        });
+      expect(existsSync(stateDirectory)).toBe(false);
+    }
+  });
+
   test("requires opt-in before resolving repositories or accessing the workbench", async () => {
     const { root, stateDirectory, environment } = await fixture();
     const disabledEnvironment: NodeJS.ProcessEnv = { ...environment };
@@ -629,10 +672,19 @@ describe("local normalized scanner findings", () => {
     },
   );
 
-  test.each(["repository", "prepare-state", "read-state", "prepare-metadata"])(
+  const pendingPaths = [
+    "repository",
+    "prepare-state",
+    "read-state",
+    "prepare-metadata",
+    "prepare-snyk-remotes",
+  ];
+  test.each(pendingPaths)(
     "cancels %s resolution while its filesystem lookup is pending",
     async (operation) => {
-      const { repository, stateDirectory, environment } = await fixture();
+      const { repository, stateDirectory, environment } = await fixture({
+        isolatedGit: operation === "prepare-snyk-remotes",
+      });
       if (operation === "prepare-metadata")
         await rm(join(repository, ".git"), { recursive: true });
       const module = new URL(
@@ -649,7 +701,9 @@ describe("local normalized scanner findings", () => {
       const operation = ${JSON.stringify(operation)};
       const heldPath = operation === "repository" ? repository
         : operation === "prepare-metadata" ? ${JSON.stringify(join(repository, "HEAD"))}
+        : operation === "prepare-snyk-remotes" ? ${JSON.stringify(join(repository, ".git", "remotes"))}
         : ${JSON.stringify(stateDirectory)};
+      const holdLstat = operation === "prepare-metadata" || operation === "prepare-snyk-remotes";
       const originalRealpath = fs.realpath;
       const originalLstat = fs.lstat;
       let enteredLookup, releaseLookup;
@@ -657,13 +711,13 @@ describe("local normalized scanner findings", () => {
       const lookup = new Promise((_, reject) => { releaseLookup = reject; });
       mockFs(() => ({
         realpath: (path, ...args) => {
-          if (operation === "prepare-metadata" || path !== heldPath)
+          if (holdLstat || path !== heldPath)
             return originalRealpath(path, ...args);
           enteredLookup();
           return lookup;
         },
         lstat: (path, ...args) => {
-          if (operation !== "prepare-metadata" || path !== heldPath)
+          if (!holdLstat || path !== heldPath)
             return originalLstat(path, ...args);
           enteredLookup();
           return lookup;
@@ -676,7 +730,15 @@ describe("local normalized scanner findings", () => {
       let outcome;
       const pending = operation.startsWith("prepare-")
         ? prepareNormalizedLocalImport(
-            { read: 0, findings: [], excluded: [] },
+            ${JSON.stringify(
+              operation === "prepare-snyk-remotes"
+                ? normalizeSnykIssues(
+                    snykRestFixture("open-source", {
+                      sourceRepositoryUrl: "https://github.com/example/project",
+                    }),
+                  )
+                : { read: 0, findings: [], excluded: [] },
+            )},
             { repository, provider: "snyk", sourceKey: "synthetic-project" },
             { signal: controller.signal,
               sourceRepositories: [{ url: "https://github.com/example/project" }] },
@@ -745,7 +807,8 @@ describe("local normalized scanner findings", () => {
       const original = { lstat: fs.lstat, realpath: fs.realpath, stat: fs.stat };
       const held = new Map();
       function lookup(method, path, args) {
-        const gate = held.get(method + ":" + path);
+        // Repository normalization checks a byte path before the protected-root lookups.
+        const gate = typeof path === "string" && held.get(method + ":" + path);
         if (gate) { gate.entered(); return gate.wait; }
         return original[method](path, ...args);
       }
@@ -779,7 +842,7 @@ describe("local normalized scanner findings", () => {
           },
         }),
       };
-      const input = { read: 0, findings: [], excluded: [] };
+      const input = ${JSON.stringify(input())};
       const options = { repository, provider: "snyk", sourceKey: "synthetic-project" };
       const prepared = operation === "import"
         ? await prepareNormalizedLocalImport(input, options, dependencies)
@@ -874,6 +937,110 @@ describe("local normalized scanner findings", () => {
     ).rejects.toThrow("non-finite numbers");
     expect(existsSync(stateDirectory)).toBe(false);
   });
+
+  test("local previews and storage capture the same numeric source data", async () => {
+    const { repository, environment } = await fixture();
+    const data = input();
+    let reads = 0;
+    const sourceData = {
+      scores: Object.assign([3], {
+        note: Object.assign(new Number(4), {
+          toJSON() {
+            throw new Error("JSON ignores named array properties");
+          },
+        }),
+      }),
+      get section() {
+        const n = ++reads;
+        return [new Number(n), new Number(n)];
+      },
+      value: Object.assign(new Number(9), {
+        toJSON: (key: string) => (key === "value" ? 0 : 9),
+      }),
+    };
+    data.findings[0]!.evidence.source_data = sourceData;
+    data.report = { value: sourceData.value, alias: sourceData.value };
+    const prepared = await prepareNormalizedLocalImport(
+      data,
+      { repository, ...source },
+      { environment },
+    );
+    const expected = { scores: [3], section: [1, 1], value: 0 };
+    expect(reads).toBe(1);
+    const preview = prepared.preview.findings[0]!.evidence.source_data!;
+    expect(JSON.parse(JSON.stringify(preview))).toEqual(expected);
+    expect(prepared.preview.report).toEqual({ value: 0, alias: 9 });
+    expect((await prepared.import()).report).toEqual(prepared.preview.report);
+    const rows = await listLocalExternalFindings(
+      { repository },
+      { environment },
+    );
+    expect(
+      rows.find((item) => item.sourceFindingId === "scanner-finding-1")
+        ?.evidence.source_data,
+    ).toEqual(expected);
+  });
+
+  test("captures numeric fields before later getters mutate the source", async () => {
+    const { repository, environment } = await fixture();
+    const data = input();
+    class Scores {
+      score = new Number(3);
+    }
+    const scores = new Scores();
+    let reads = 0;
+    Object.defineProperty(scores, "getterScore", {
+      enumerable: true,
+      get() {
+        reads++;
+        scores.score = new Number(7);
+        return Object.assign(new Number(1), { toJSON: () => 5 });
+      },
+    });
+    data.findings[0]!.evidence.source_data = { scores };
+    Object.assign(data.findings[0]!, {
+      vendorCursor: 2 ** 53,
+      previousCursor: new Number(2 ** 53),
+    });
+    const prepared = await prepareNormalizedLocalImport(
+      data,
+      { repository, ...source },
+      { environment },
+    );
+    expect(reads).toBe(1);
+    const expected = { scores: { score: 3, getterScore: 5 } };
+    expect(
+      JSON.parse(
+        JSON.stringify(prepared.preview.findings[0]!.evidence.source_data),
+      ),
+    ).toEqual(expected);
+    await prepared.import();
+    const rows = await listLocalExternalFindings(
+      { repository },
+      { environment },
+    );
+    expect(
+      rows.find((item) => item.sourceFindingId === "scanner-finding-1")
+        ?.evidence.source_data,
+    ).toEqual(expected);
+  });
+
+  test.each([2 ** 53, new Number(2 ** 53)])(
+    "rejects unsafe normalized evidence before writing any local state",
+    async (score) => {
+      const { repository, stateDirectory, environment } = await fixture();
+      const data = input();
+      data.findings[0]!.evidence.source_data = { score };
+      await expect(
+        prepareNormalizedLocalImport(
+          data,
+          { repository, ...source },
+          { environment },
+        ),
+      ).rejects.toThrow("safe integer");
+      expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
 
   test("uses the canonical selected checkout and rejects state inside it", async () => {
     const { root, repository, environment } = await fixture();

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { DeepScanLogEvent } from "../src/deep-scan/types.js";
 import {
   coordinatorFixture,
-  createCoordinator,
+  startCoordinator,
   FakeExecutor,
   runCoordinator,
   temporaryDirectories,
@@ -18,7 +18,7 @@ try {
       return Promise.reject(error);
     };
 
-    await test(`a ${failure} logger does not stop discovery or reduction`, async () => {
+    await test(`a ${failure} logger does not stop the scan loop`, async () => {
       const { fixture, store } = await coordinatorFixture();
       const executor = new FakeExecutor({
         discoveryCandidateId: "candidate-1",
@@ -33,11 +33,25 @@ try {
       await setImmediate();
       assert.equal(terminal?.status, "succeeded", terminal?.error);
       assert.equal(executor.discoveryCalls, 1);
-      assert.equal(executor.dedupCalls, 1);
+      assert.equal(store.iterations.length, 1);
+      assert.deepEqual(
+        events.filter(({ event }) => event === "dedup_committed"),
+        [
+          {
+            event: "dedup_committed",
+            scanId: fixture.run.scanId,
+            workerId: store.iterations[0]!.id,
+            pass: 1,
+            count: 1,
+            newFindings: 1,
+            retainedFindings: 1,
+          },
+        ],
+      );
       for (const event of [
         "coordinator_started",
         "discovery_accepted",
-        "dedup_committed",
+        "progress_updated",
         "coordinator_terminal",
       ]) {
         assert.ok(events.some((entry) => entry.event === event));
@@ -52,7 +66,7 @@ try {
       });
       let workerSignal: AbortSignal | undefined;
       const events: DeepScanLogEvent[] = [];
-      const coordinator = createCoordinator(
+      const coordinator = startCoordinator(
         fixture,
         store,
         {
@@ -72,7 +86,6 @@ try {
           },
         },
       );
-      coordinator.start();
       await executor.discoveryStarted.promise;
       const reason = "fixture cancellation\nwith diagnostic detail";
       try {
@@ -86,7 +99,6 @@ try {
       await setImmediate();
       assert.equal(coordinator.snapshot().status, "canceled");
       assert.equal(executor.runningDiscovery, 0);
-      assert.equal(executor.runningDedup, 0);
       assert.equal(
         events.find((entry) => entry.event === "coordinator_cancel_requested")
           ?.reason,

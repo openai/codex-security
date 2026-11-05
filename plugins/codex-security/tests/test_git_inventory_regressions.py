@@ -1,3 +1,5 @@
+"""Exercise local Git inventories for root commits, worktree changes, submodules, and optional snapshots."""
+
 from __future__ import annotations
 
 import hashlib
@@ -5,7 +7,7 @@ import json
 import os
 import sqlite3
 import subprocess
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 import pytest
@@ -41,6 +43,95 @@ def test_sha256_root_commit_uses_the_sha256_empty_tree(tmp_path: Path, workbench
     diff = workbench_api["require_diff_target"](target, "commit", None, "HEAD", None)
     revisions = (diff["baseRevision"], diff["headRevision"])
     assert git(target, "diff", "--name-only", *revisions) == b"README.md"
+
+
+def test_blob_batch_preserves_following_blobs_after_tree_and_commit(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    source = target / ("fixture.py" if os.name == "nt" else "line\nbreak.py")
+    source.write_bytes(b"print('fixture')\npayload\n")
+    git(target, "add", "--", source.name)
+    git(target, "commit", "-qm", "Add unusual fixture")
+    reader = load_script("workbench_target").git_blob_binary_flags
+    assert reader(
+        target,
+        ["HEAD^{tree}", "HEAD", f"HEAD:{source.name}", "HEAD:missing\nfile", "HEAD:README.md"],
+    ) == [
+        None,
+        None,
+        False,
+        None,
+        False,
+    ]
+
+
+@pytest.mark.cross_platform
+def test_working_tree_count_stops_reading_a_local_binary(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "target"
+    head = initialize_git_repository(target)
+    binary = target / "binary.dat"
+    binary.write_bytes(b"\0" + b"x" * (1024 * 1024))
+    open_file = Path.open
+    diff = {"kind": "working_tree", "baseRevision": head, "headRevision": head}
+    with binary.open("rb") as stream:
+
+        def open_counted(path, *args, **kwargs):
+            return nullcontext(stream) if path == binary else open_file(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", open_counted)
+        assert load_script("workbench_target").diff_scope_file_count(target, diff) == 0
+        assert 0 < stream.tell() < binary.stat().st_size
+
+
+@pytest.mark.cross_platform
+def test_registration_counts_the_selected_git_replacement_view(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "added.py").write_text("text\n")
+    git(target, "add", ".")
+    git(target, "commit", "-qm", "Add text file")
+    original = git(target, "rev-parse", "HEAD:added.py").decode()
+    replacement = git(target, "hash-object", "-w", "--stdin", input=b"\0binary").decode()
+    git(target, "replace", original, replacement)
+    diff = {"kind": "range", "baseRevision": base, "headRevision": "HEAD"}
+    reader = load_script("workbench_target")
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    assert reader.diff_scope_file_count(target, diff) == 0
+    monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "1")
+    assert reader.diff_scope_file_count(target, diff) == 1
+
+
+@pytest.mark.cross_platform
+def test_working_tree_uses_base_source_below_a_replaced_directory(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    parent = target / "nested"
+    parent.mkdir()
+    name = "nested/source.py"
+    (target / name).write_text("base line one\nbase line two\n")
+    git(target, "add", ".")
+    git(target, "commit", "-qm", "Add base file")
+    base = git(target, "rev-parse", "HEAD").decode()
+    (target / name).write_text("changed\n")
+    git(target, "commit", "-qam", "Modify file")
+    head = git(target, "rev-parse", "HEAD").decode()
+    git(target, "update-index", "--skip-worktree", name)
+    (target / name).unlink()
+    parent.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "source.py").write_bytes(b"\0binary")
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(parent), str(outside)], check=True)
+    else:
+        parent.symlink_to(outside, target_is_directory=True)
+
+    reader = load_script("workbench_target")
+    diff = {"kind": "working_tree", "baseRevision": base, "headRevision": head}
+    assert reader.diff_scope_file_count(target, diff) == 1
+    assert reader.candidate_source_lines(target, diff, [], [name]) == {
+        name: {"path": name, "lineCount": 2}
+    }
 
 
 def test_plain_directory_inventory_ignores_nested_git_metadata(tmp_path: Path) -> None:

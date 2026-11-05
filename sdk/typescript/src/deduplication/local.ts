@@ -8,7 +8,7 @@ import type {
 import { CodexSecurityError } from "../errors.js";
 import { workflowDigest } from "../finding-workflow.js";
 import {
-  resolveWorkbenchRuntime,
+  bundledPluginRoot,
   workbenchEnvironment,
   runWorkbench,
   type WorkbenchCommandOptions,
@@ -19,6 +19,7 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDINGS_URL,
   type FindingEmbedder,
+  type EmbeddingUsageObserver,
 } from "../server/embeddings.js";
 import { retryDelay, waitForRetry } from "./retry.js";
 
@@ -36,7 +37,7 @@ export interface FindingEmbeddingBinding {
 
 /** Direct workbench adapter. Importing it starts no HTTP or MCP server. */
 export class LocalDeduplication {
-  private options?: Promise<WorkbenchCommandOptions>;
+  private options?: Promise<Omit<WorkbenchCommandOptions, "python">>;
   private cacheKeys: Record<string, string> = {};
   private readonly space: string;
   private readonly embedding: FindingEmbeddingBinding;
@@ -48,6 +49,7 @@ export class LocalDeduplication {
     private readonly signal?: AbortSignal,
     private readonly workbench: typeof runWorkbench = runWorkbench,
     embedding?: FindingEmbeddingBinding,
+    onEmbeddingUsage?: EmbeddingUsageObserver,
   ) {
     const endpoint =
       environmentEntry(environment, "CODEX_SECURITY_EMBEDDINGS_URL") ||
@@ -64,6 +66,7 @@ export class LocalDeduplication {
         embeddingRequest,
         endpoint,
         signal,
+        onEmbeddingUsage,
       ),
     };
     // The digest keeps endpoint/namespace details out of persisted cache keys.
@@ -137,14 +140,9 @@ export class LocalDeduplication {
     this.signal?.throwIfAborted();
     this.options ??= (async () => {
       const environment = workbenchEnvironment(this.environment);
-      const [python, pluginRoot] = await resolveWorkbenchRuntime({
-        environment,
-        protectedRoot: this.repositoryPath,
-        signal: this.signal,
-      });
       return {
-        python,
-        pluginRoot,
+        pluginRoot: await bundledPluginRoot(),
+        stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
         environment,
         signal: this.signal,
         protectedRoot: [

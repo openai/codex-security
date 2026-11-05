@@ -44,6 +44,29 @@ function scopeFor(paths, { event, baseChanged, modifiedOnly }) {
   return "full";
 }
 
+export function selectLockfileAudits(paths, { event, baseChanged }) {
+  // Full runs have no reliable pull-request diff. Exercise changes to the audit itself, too.
+  if (
+    event !== "pull_request" ||
+    baseChanged ||
+    paths.includes(".github/actions/audit-pnpm-lockfiles/action.yml")
+  )
+    return "mcp evals tokenizer";
+  return [
+    ["mcp", "plugins/codex-security/mcp-app/pnpm-lock.yaml"],
+    ["evals", "evals/triage-finding/pnpm-lock.yaml"],
+    [
+      "tokenizer",
+      "sdk/typescript/pnpm-lock.yaml",
+      "sdk/typescript/src/server/embedding-tokenizer.ts",
+      "sdk/typescript/scripts/build-embedding-tokenizer.mjs",
+    ],
+  ]
+    .filter(([, ...inputs]) => inputs.some((input) => paths.includes(input)))
+    .map(([target]) => target)
+    .join(" ");
+}
+
 export function selectChecks(paths, options) {
   const scope = scopeFor(paths, options);
   const full = scope === "full" || scope === "python-tests";
@@ -144,7 +167,10 @@ if (
       : [];
   const paths = changes.filter((_, i) => i % 2);
   const modifiedOnly = changes.every((field, i) => i % 2 || field === "M");
-  const selected = selectChecks(paths, { event, baseChanged, modifiedOnly });
+  const selected = {
+    ...selectChecks(paths, { event, baseChanged, modifiedOnly }),
+    "audit-lockfiles": selectLockfileAudits(paths, { event, baseChanged }),
+  };
   appendFileSync(
     process.env.GITHUB_OUTPUT,
     Object.entries(selected)
