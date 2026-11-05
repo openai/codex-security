@@ -106,6 +106,7 @@
 - make scan and integration guides evergreen ([#2350](https://github.com/openai/codex-security/pull/2350))
 - share workbench arguments and simplify SDK and eval workflows ([#2325](https://github.com/openai/codex-security/pull/2325))
 - reject directory trees emptied before dispatch ([#2181](https://github.com/openai/codex-security/pull/2181))
+- bump node from 26.12.1-bookworm-slim to 26.13-bookworm-slim ([#2351](https://github.com/openai/codex-security/pull/2351))
 
 </details>
 
