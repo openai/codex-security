@@ -48,6 +48,8 @@ jobs:
         with:
           python-version: "3.14.7"
 
+      # The direct CLI needs working Bubblewrap before AWS authentication.
+      # Runner setup: https://github.com/openai/codex-security/blob/main/docs/bedrock.md#check-the-sandbox-on-an-ubuntu-ci-runner
       # Install outside the checkout, before any repository content is present.
       - name: Install Codex Security
         working-directory: ${{ runner.temp }}

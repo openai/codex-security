@@ -13,20 +13,27 @@ particular, testing a fix does not automatically request the standalone
 
 ## Run
 
-Use the repository's normal SDK and MCP dependency setup, then:
+[Build the evaluation tools](../README.md#build-the-evaluation-tools), then run the commands below from the repository root.
+
+## Deterministic checks
+
+Run the CI checks for staging, expected routes, false-positive trace rejection, cancellation, and SDK thread setup without making model calls:
 
 ```sh
-pnpm --dir sdk/typescript run build:evals
+node --experimental-strip-types --test evals/workflow-routing/test_*.mts
+```
+
+## Run a model evaluation
+
+To measure model routing accuracy, run the following command from the same directory. It consumes model usage. Pass a model name as a positional argument to select one explicitly. If omitted, Codex selects a default and the SDK does not report its name.
+
+```sh
 node --experimental-strip-types evals/workflow-routing/run.mts
 ```
 
-An optional positional argument selects a model. Without one, Codex selects its
-default; the SDK does not expose that resolved model. Model runs consume usage
-and are not part of CI.
-
 The runner reuses the secret-discovery eval's private-home authentication,
 restricted permission profile, native preflight, cancellation draining, and
-cleanup. See its [runtime notes](../secret-discovery/README.md#run), including
+cleanup. See its [runtime notes](../secret-discovery/README.md#runtime-and-isolation), including
 saved-login refresh behavior and the Windows elevated-sandbox requirement. It
 also isolates `HOME` so ambient user skills do not enter discovery. Each case
 starts a fresh thread with the fixture as its authoritative working directory.
@@ -62,13 +69,3 @@ stops at the routing boundary; a passing case must not be presented as a complet
 security task. It does not parse arbitrary shell programs to prove what they
 read. Unsupported command-output formats can fail the content-based grader and
 should be reviewed in the retained transcript before changing the assertion.
-
-## Deterministic checks
-
-```sh
-node --experimental-strip-types --test evals/workflow-routing/test_*.mts
-```
-
-Normal CI checks unchanged production staging, each expected route, negative
-controls, false-positive trace rejection, failures, cancellation, and SDK thread
-setup. These checks validate the harness; they do not establish model accuracy.
