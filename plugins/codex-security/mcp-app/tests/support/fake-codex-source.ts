@@ -11,7 +11,11 @@ export function fakeCodexSource(
 import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
+const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${
+    preflightProfile === null
+      ? `(await import(${JSON.stringify(import.meta.resolve("smol-toml"))})).parse(process.argv.find(arg => arg.startsWith('permissions.codex_security_deep_scan_worker=')) ?? '').permissions?.codex_security_deep_scan_worker`
+      : JSON.stringify(preflightProfile)
+  };
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
@@ -117,7 +121,8 @@ const schemaIndex = process.argv.indexOf('--output-schema');
 const schema = schemaIndex < 0 ? undefined : JSON.parse(readFileSync(process.argv[schemaIndex + 1], 'utf8'));
 const text = schema?.properties?.reviews ? '{"reviews":[]}' : schema?.properties?.defects ? JSON.stringify({defects: [{operation: 'Check ownership', failure: 'foreign object', path: 'fixture.py', reports: [{id: 0, evidence: 0}]}], uncertain: []}) : 'fixture final response';
 console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text } }));
-console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
+const completedTurns = stdin.includes('COMPLETE_THEN_HANG') && process.argv.includes('resume') ? 2 : 1;
+console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: completedTurns, cached_input_tokens: 0, output_tokens: completedTurns } }));
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }
 `;
