@@ -18,7 +18,12 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { main, runCodexSkillCommand } from "../src/cli.js";
+import { initialCredentialsAvailable } from "../src/api.js";
+import {
+  hasStoredChatGPTSignIn,
+  main,
+  runCodexSkillCommand,
+} from "../src/cli.js";
 import {
   CodexSecurityError,
   type JsonObject,
@@ -39,8 +44,6 @@ import {
   failingSecurity,
 } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
-import { chatGptTokens } from "./support/chatgpt-credentials.js";
-import { readJson, writeJson } from "./support/json.js";
 import { throwing } from "./support/errors.js";
 
 import {
@@ -59,6 +62,15 @@ const GATEWAY_CONFIGURATION = [
   'env_key="GATEWAY_API_KEY"',
   "requires_openai_auth=true",
 ].join("\n");
+
+const STORED_CHATGPT_LOGIN = JSON.stringify({
+  auth_mode: "chatgpt",
+  tokens: {
+    id_token: "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.c2ln",
+    access_token: "synthetic-access",
+    refresh_token: "synthetic-refresh",
+  },
+});
 
 let stateDirectory: string;
 let skillDirectory: string;
@@ -628,6 +640,48 @@ describe("CLI authentication", () => {
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
+
+  test.each([
+    ["ambient ChatGPT", true],
+    ["dedicated API key", false],
+    ["truncated dedicated credential file", false],
+    ["explicit logout", false],
+    ["invalid logout marker", false],
+  ] as const)(
+    "offers an interactive ChatGPT choice with %s: %p",
+    async (source, offered) => {
+      const ambientHome = join(stateDirectory, "ambient");
+      const dedicatedHome = await createCredentialHome();
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(join(ambientHome, "auth.json"), STORED_CHATGPT_LOGIN, {
+        mode: 0o600,
+      });
+      if (source === "explicit logout") {
+        await setCodexSecurityCredentialLogout(dedicatedHome, true);
+      } else if (source === "invalid logout marker") {
+        await mkdir(join(dedicatedHome, ".codex-security-logged-out"));
+      } else if (source !== "ambient ChatGPT") {
+        await writeFile(
+          join(dedicatedHome, "auth.json"),
+          source === "dedicated API key"
+            ? '{"OPENAI_API_KEY":"synthetic-stored-key"}'
+            : "{",
+          { mode: 0o600 },
+        );
+      }
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-environment-key" },
+      });
+      deps.hasStoredChatGPTSignIn = (signal) =>
+        hasStoredChatGPTSignIn(deps.environment, signal);
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (_message, options) => options[0]!.value,
+      );
+      const stderr = captureCli(main, "stderr", true);
+      expect(await stderr.run(["scan"], deps), stderr.text()).toBe(0);
+      expect(stderr.text().includes("Both a ChatGPT sign-in")).toBe(offered);
+    },
+  );
 
   test("cancels sign-in discovery and authentication prompts before starting a scan", async () => {
     for (const stage of ["status", "prompt"] as const) {
@@ -1257,98 +1311,81 @@ describe("CLI authentication", () => {
     },
   );
 
-  test.each(["success", "failure"])(
-    "uses and removes the temporary ambient status home on %s",
-    async (outcome) => {
-      const ambientHome = join(stateDirectory, "ambient");
-      await mkdir(ambientHome);
-      const source = join(ambientHome, "auth.json");
-      const auth =
-        outcome === "success"
-          ? { auth_mode: "chatgpt", tokens: chatGptTokens }
-          : { tokens: chatGptTokens };
-      await writeJson(source, auth);
-      await writeFile(join(ambientHome, "config.toml"), "not valid TOML");
+  test.each([false, true])(
+    "keeps fresh ambient authentication usable after login status and removal of the source (home-relative: %p)",
+    async (homeRelative) => {
+      const root = await realpath(
+        await temporaryDirectory("codex-security-cli-ambient-auth-"),
+      );
+      try {
+        const ambientHome = join(root, "ambient-codex");
+        await mkdir(ambientHome, { mode: 0o700 });
+        await writeFile(join(ambientHome, "auth.json"), STORED_CHATGPT_LOGIN);
 
-      let probeHome: string | undefined;
-      const { runCli, stderr } = createCliTest(main);
-      const deps = dependencies({
-        environment: {
-          HOME: stateDirectory,
-          USERPROFILE: stateDirectory,
-          CODEX_HOME: outcome === "success" ? "~/ambient" : ambientHome,
-        },
-        onCodex: async (_args, _output, env) => {
-          probeHome = env!["CODEX_HOME"]!;
-          expect(await readJson(join(probeHome, "auth.json"))).toEqual({
-            ...auth,
-            tokens: { ...chatGptTokens, access_token: "", refresh_token: "" },
-          });
-          expect(existsSync(join(probeHome, "config.toml"))).toBe(false);
-          if (outcome === "failure") throw new Error("synthetic status error");
+        const stdout = capture();
+        const stderr = capture();
+        let forwardedHome: string | undefined;
+        const deps = dependencies({
+          environment: {
+            HOME: root,
+            USERPROFILE: root,
+            CODEX_HOME: homeRelative ? "~/ambient-codex" : ambientHome,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        });
+        deps.runCodex = async (_args, _output, authEnvironment) => {
+          forwardedHome = authEnvironment?.["CODEX_HOME"];
           return 0;
-        },
-      });
-      expect(await runCli(["login", "status"], deps)).toBe(
-        outcome === "success" ? 0 : 2,
-      );
-      if (outcome === "failure")
-        expect(stderr.text()).toContain("synthetic status error");
-      expect(existsSync(probeHome!)).toBe(false);
-      expect(existsSync(join(stateDirectory, "codex-home", "auth.json"))).toBe(
-        false,
-      );
-      expect(await readJson(source)).toEqual(auth);
-    },
-  );
+        };
 
-  test.each(["static API key", "configured ChatGPT"] as const)(
-    "keeps a %s available after the ambient credential file is removed",
-    async (kind) => {
-      const ambientHome = join(stateDirectory, "ambient");
-      const credentialHome = await createCredentialHome();
-      await mkdir(ambientHome, { mode: 0o700 });
-      const auth =
-        kind === "static API key"
-          ? { OPENAI_API_KEY: "synthetic-key" }
-          : { auth_mode: "chatgpt", tokens: chatGptTokens };
-      if (kind === "configured ChatGPT") {
-        await writeFile(
-          join(credentialHome, "config.toml"),
-          'cli_auth_credentials_store="file"',
+        expect(
+          await main(["login", "status"], stdout.stream, stderr.stream, deps),
+        ).toBe(0);
+        const privateHome = join(stateDirectory, "codex-home");
+        expect(forwardedHome).toBe(privateHome);
+        await rm(join(ambientHome, "auth.json"));
+        expect(
+          await initialCredentialsAvailable({}, ambientHome, privateHome),
+        ).toBe(true);
+        expect(await readFile(join(privateHome, "auth.json"), "utf8")).toBe(
+          STORED_CHATGPT_LOGIN,
         );
+      } finally {
+        await rm(root, { recursive: true, force: true });
       }
-      const source = join(ambientHome, "auth.json");
-      await writeJson(source, auth);
-      const deps = dependencies({
-        onCodex: async (_args, _output, env) => {
-          expect(env?.["CODEX_HOME"]).toBe(credentialHome);
-          expect(await readJson(join(credentialHome, "auth.json"))).toEqual(
-            auth,
-          );
-          return 0;
-        },
-      });
-      const { runCli } = createCliTest(main);
-      expect(await runCli(["login", "status"], deps)).toBe(0);
-      await rm(source);
-      expect(await runCli(["login", "status"], deps)).toBe(0);
     },
   );
 
   test("does not import ambient Codex authentication during login status after explicit logout", async () => {
-    const ambientHome = join(stateDirectory, "ambient");
-    await mkdir(ambientHome);
-    await writeJson(join(ambientHome, "auth.json"), { tokens: chatGptTokens });
-    const credentialHome = await createCredentialHome();
-    await setCodexSecurityCredentialLogout(credentialHome, true);
-    const deps = dependencies({
-      onCodex: async (_args, _output, env) => {
-        expect(env?.["CODEX_HOME"]).toBe(credentialHome);
-        return existsSync(join(credentialHome, "auth.json")) ? 0 : 1;
-      },
-    });
-    expect(await runCapturedCli(main, ["login", "status"], deps)).toBe(1);
+    const root = await realpath(
+      await temporaryDirectory("codex-security-cli-ambient-logout-"),
+    );
+    try {
+      const ambientHome = join(root, "ambient-codex");
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        '{"auth_mode":"chatgpt"}\n',
+      );
+
+      const credentialHome = await createCredentialHome();
+      await setCodexSecurityCredentialLogout(credentialHome, true);
+
+      const { runCli } = createCliTest(main);
+
+      const deps = dependencies({
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+      });
+      deps.runCodex = async () => 0;
+
+      expect(await runCli(["login", "status"], deps)).toBe(0);
+      expect(existsSync(join(credentialHome, "auth.json"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

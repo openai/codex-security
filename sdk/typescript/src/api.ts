@@ -254,7 +254,6 @@ import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
-  prepareAmbientAuth,
   withCredentialHomeLock,
   bootstrapPlugin,
   bundledPluginRoot,
@@ -279,7 +278,6 @@ import {
   prepareScanRegistrationOutput,
   preparePersistentOutputRoot,
   probeCodexSandbox,
-  requireSecureCredentialHome,
   requireModelSafeOutputDir,
   requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
@@ -4198,17 +4196,20 @@ export class CodexSecurity {
       }
       const authentication = await this.#authentication();
       this.#requireOpen();
-      const status = async (home: string) =>
-        await accountStatus(
-          await this.#providerPreflightCommand(),
-          { ...authentication.environment, CODEX_HOME: home },
-          this.#abortController.signal,
-        );
-      return await withStatusCredentialHome(
-        scanCodexHome(this.#dependencies.environment),
+      const ambientHome = scanCodexHome(this.#dependencies.environment);
+      await withCredentialHomeLock(
         authentication.codexHome,
-        status,
-        (home, known) => known ?? status(home),
+        () =>
+          initialCredentialsAvailable(
+            this.#dependencies.environment,
+            ambientHome,
+            authentication.codexHome,
+          ),
+        this.#abortController.signal,
+      );
+      return await accountStatus(
+        await this.#providerPreflightCommand(),
+        authentication.environment,
         this.#abortController.signal,
       );
     });
@@ -5628,46 +5629,6 @@ export function scanCodexHome(environment: ProcessEnvironment): string {
   });
 }
 
-/** @internal Choose credentials for native login status without seeding a fresh scan home. */
-export async function withStatusCredentialHome<T>(
-  ambientHome: string,
-  credentialHome: string,
-  nativeLoginStatus: (home: string) => Promise<AccountStatus>,
-  status: (home: string, known?: AccountStatus) => T | Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  const probe = await withCredentialHomeLock(
-    credentialHome,
-    async () =>
-      (await storedCredentialAvailability(credentialHome)) ??
-      prepareAmbientAuth(ambientHome, credentialHome, "status"),
-    signal,
-  );
-  if (typeof probe !== "string") return await status(credentialHome);
-  // Device policy can select a keyring even without a local config file.
-  const current = await nativeLoginStatus(credentialHome);
-  if (current.authenticated) return await status(credentialHome, current);
-  const temporary = await createIsolatedHome(credentialHome);
-  try {
-    await requireSecureCredentialHome(temporary);
-    await writeFile(join(temporary, "auth.json"), probe, {
-      mode: 0o600,
-      flag: "wx",
-    });
-    return await status(temporary);
-  } finally {
-    await cleanupSdkDirectory(temporary);
-  }
-}
-
-// A missing sign-in can import ambient credentials unless a previous logout disabled it.
-async function storedCredentialAvailability(
-  home: string,
-): Promise<boolean | undefined> {
-  if (!(await codexSecurityCredentialAllowsAmbientImport(home))) return false;
-  if (await codexSecurityHasStoredFileCredentials(home)) return true;
-}
-
 export async function initialCredentialsAvailable(
   environment: ProcessEnvironment,
   ambientHome: string,
@@ -5675,10 +5636,11 @@ export async function initialCredentialsAvailable(
   importer: typeof importAmbientAuth = importAmbientAuth,
 ): Promise<boolean> {
   if (environmentApiKey(environment) !== null) return false;
-  return (
-    (await storedCredentialAvailability(isolatedHome)) ??
-    importer(ambientHome, isolatedHome)
-  );
+  if (!(await codexSecurityCredentialAllowsAmbientImport(isolatedHome))) {
+    return false;
+  }
+  if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
+  return await importer(ambientHome, isolatedHome);
 }
 
 // Reports a cleanup failure without letting it decide the result of the scan. Only the
@@ -7363,8 +7325,7 @@ export function definedEnvironment(
   return child;
 }
 
-/** @internal */
-export function withoutCodexHome(
+function withoutCodexHome(
   environment: ProcessEnvironment,
 ): Record<string, string> {
   return Object.fromEntries(

@@ -88,8 +88,6 @@ import {
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
-  withStatusCredentialHome,
-  withoutCodexHome,
   scanCodexHome,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
@@ -109,6 +107,7 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
+  withoutOpenAiApiKeys,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
 import type { DeepScanDiagnostic } from "./deep-scan.js";
@@ -298,7 +297,9 @@ import {
   withCredentialHomeLock,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
+  codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
+  codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   executablePathForSpawn,
   environmentWithGit,
@@ -1399,6 +1400,38 @@ export const runRepositoryCommand: CliDependencies["runRepositoryCommand"] =
     return options?.trim === false ? stdout : stdout.trim();
   };
 
+/** @internal Inspect the sign-in that an interactive scan could actually select. */
+export async function hasStoredChatGPTSignIn(
+  environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  signal?.throwIfAborted();
+  const storedEnvironment = withoutOpenAiApiKeys(environment);
+  const command = resolveCodexCommand(storedEnvironment);
+  if (existsSync(codexSecurityCredentialHome(environment))) {
+    const home = await prepareCodexSecurityCredentialHome(environment);
+    const dedicated = await accountStatus(
+      command,
+      { ...storedEnvironment, CODEX_HOME: home },
+      signal,
+    );
+    if (dedicated.authenticated) return /\bchatgpt\b/iu.test(dedicated.details);
+    try {
+      if (
+        !(await codexSecurityCredentialAllowsAmbientImport(home)) ||
+        (await codexSecurityHasStoredFileCredentials(home))
+      ) {
+        return false;
+      }
+    } catch {
+      // An unusable credential file or logout marker does not prevent API-key scans.
+      return false;
+    }
+  }
+  const ambient = await accountStatus(command, storedEnvironment, signal);
+  return ambient.authenticated && /\bchatgpt\b/iu.test(ambient.details);
+}
+
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config, onDeepScanDiagnostic) =>
     new CodexSecurity(config, undefined, {
@@ -1408,37 +1441,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   environment: process.env,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
-  hasStoredChatGPTSignIn: async (signal) => {
-    signal?.throwIfAborted();
-    const environment = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([name]) =>
-          name.toUpperCase() !== "OPENAI_API_KEY" &&
-          name.toUpperCase() !== "CODEX_API_KEY",
-      ),
-    );
-    const command = resolveCodexCommand(environment);
-    if (existsSync(codexSecurityCredentialHome(process.env))) {
-      const dedicatedStatus = await accountStatus(
-        command,
-        {
-          ...environment,
-          CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
-        },
-        signal,
-      );
-      if (
-        dedicatedStatus.authenticated &&
-        /\bchatgpt\b/iu.test(dedicatedStatus.details)
-      ) {
-        return true;
-      }
-    }
-    const ambientStatus = await accountStatus(command, environment, signal);
-    return (
-      ambientStatus.authenticated && /\bchatgpt\b/iu.test(ambientStatus.details)
-    );
-  },
+  hasStoredChatGPTSignIn: (signal) =>
+    hasStoredChatGPTSignIn(process.env, signal),
   currentDirectory: cwd,
   now: Date.now,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -7152,37 +7156,31 @@ export async function main(
           dependencies.environment,
         );
         const authentication = scanAuthentication(dependencies.environment);
-        const loginEnvironment = (home: string) => ({
-          ...withoutCodexHome(dependencies.environment),
-          CODEX_HOME: home,
-        });
-        const runLogin = (home: string) =>
-          dependencies.runCodex(
-            [
-              "login",
-              ...(args.action === undefined ? [] : [args.action]),
-              ...(options.deviceAuth ? ["--device-auth"] : []),
-              ...(options.withApiKey ? ["--with-api-key"] : []),
-              ...(options.withAccessToken ? ["--with-access-token"] : []),
-            ],
-            undefined,
-            loginEnvironment(home),
+        if (args.action === "status" && authentication.method !== "api_key") {
+          const ambientHome = scanCodexHome(dependencies.environment);
+          await withCredentialHomeLock(credentialHome, () =>
+            initialCredentialsAvailable(
+              dependencies.environment,
+              ambientHome,
+              credentialHome,
+            ),
           );
-        exitCode =
-          args.action === "status" && authentication.method !== "api_key"
-            ? await withStatusCredentialHome(
-                scanCodexHome(dependencies.environment),
-                credentialHome,
-                (home) =>
-                  accountStatus(
-                    resolveCodexCommand(dependencies.environment),
-                    loginEnvironment(home),
-                    undefined,
-                    parse(process.execPath).root,
-                  ),
-                runLogin,
-              )
-            : await runLogin(credentialHome);
+        }
+        const authenticationEnvironment = {
+          ...dependencies.environment,
+          CODEX_HOME: credentialHome,
+        };
+        exitCode = await dependencies.runCodex(
+          [
+            "login",
+            ...(args.action === undefined ? [] : [args.action]),
+            ...(options.deviceAuth ? ["--device-auth"] : []),
+            ...(options.withApiKey ? ["--with-api-key"] : []),
+            ...(options.withAccessToken ? ["--with-access-token"] : []),
+          ],
+          undefined,
+          authenticationEnvironment,
+        );
         if (args.action === undefined && exitCode === 0) {
           await setCodexSecurityCredentialLogout(credentialHome, false);
         }

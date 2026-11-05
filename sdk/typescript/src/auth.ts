@@ -282,7 +282,6 @@ export async function accountStatus(
   command: CodexCommand,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
-  cwd?: string,
 ): Promise<AccountStatus> {
   const result = await runCodexCommand(
     command,
@@ -290,9 +289,6 @@ export async function accountStatus(
     environment,
     undefined,
     signal,
-    false,
-    undefined,
-    cwd,
   );
   const details = [result.stdout.trim(), result.stderr.trim()]
     .filter(Boolean)

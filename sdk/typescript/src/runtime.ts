@@ -3,7 +3,7 @@ import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
-import { isNonEmptyString, notify, parseJson } from "./value.js";
+import { isNonEmptyString, notify } from "./value.js";
 import {
   execFile as execFileCallback,
   spawn,
@@ -2359,84 +2359,52 @@ export async function importAmbientAuth(
   ambientHome: string,
   isolatedHome: string,
 ): Promise<boolean> {
-  return (await prepareAmbientAuth(ambientHome, isolatedHome, "scan")) === true;
-}
-
-// Native login status validates the ID token without refreshing or calling the model.
-function renewableStatusProbe(contents: Buffer): string | undefined {
-  const record = parseJson(() => contents.toString("utf8"));
-  if (!isRecord(record)) return undefined;
-  const { auth_mode: mode, OPENAI_API_KEY: apiKey, tokens } = record;
-  const chatGpt = mode === "chatgpt" || (mode == null && apiKey == null);
-  if (
-    !chatGpt ||
-    !isRecord(tokens) ||
-    !isNonEmptyString(tokens["refresh_token"])
-  )
-    return undefined;
-
-  tokens["refresh_token"] = "";
-  if (typeof tokens["access_token"] === "string") tokens["access_token"] = "";
-  return JSON.stringify(record);
-}
-
-/** Return a token-stripped native status probe, or whether credentials were installed. */
-export async function prepareAmbientAuth(
-  ambientHome: string,
-  isolatedHome: string,
-  purpose: "scan" | "status",
-): Promise<boolean | string> {
   const source = join(expandHome(ambientHome), "auth.json");
-  const metadata = await stat(source).catch((cause: unknown) => {
-    if (nodeErrorCode(cause) === "ENOENT") return null;
+  let metadata;
+  try {
+    metadata = await stat(source);
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
     throw new PluginBootstrapError(
       `Unable to inspect ambient Codex authentication: ${source}`,
-      { cause },
+      {
+        cause: error,
+      },
     );
-  });
-  if (!metadata?.isFile()) return false;
-  if (purpose === "scan") {
-    await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
-    if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
-      await chmod(isolatedHome, 0o700);
-    }
-    if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   }
+  if (!metadata.isFile()) {
+    return false;
+  }
+  await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
+    await chmod(isolatedHome, 0o700);
+  }
+  if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   const destination = join(isolatedHome, "auth.json");
   const temporary = join(isolatedHome, `.auth-${randomUUID()}.tmp`);
   try {
-    // Configured stores can be bound to this home. For a fresh status check,
-    // classify and install the same bytes even if the ambient login changes.
-    if (
-      purpose === "status" &&
-      !(await lstat(join(isolatedHome, "config.toml")).catch(
-        nullIfMissingFileError,
-      ))
-    ) {
-      const contents = await readFile(source);
-      const probe = renewableStatusProbe(contents);
-      if (probe !== undefined) return probe;
-      await writeFile(temporary, contents, { mode: 0o600, flag: "wx" });
-    } else {
-      await copyFile(source, temporary, constants.COPYFILE_EXCL);
-    }
+    await copyFile(source, temporary, constants.COPYFILE_EXCL);
     await chmod(temporary, 0o600);
     try {
-      await link(temporary, destination).catch((error: unknown) => {
+      try {
+        await link(temporary, destination);
+      } catch (error) {
         if (
           !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
             nodeErrorCode(error) ?? "",
           )
-        )
+        ) {
           throw error;
-        return copyFile(temporary, destination, constants.COPYFILE_EXCL);
-      });
+        }
+        await copyFile(temporary, destination, constants.COPYFILE_EXCL);
+      }
     } catch (error) {
       if (
         nodeErrorCode(error) === "EEXIST" &&
         (await codexSecurityHasStoredFileCredentials(isolatedHome))
-      )
+      ) {
         return true;
+      }
       throw error;
     }
     await chmod(destination, 0o600);
@@ -3337,7 +3305,6 @@ export async function runCodexCommand(
   signal?: AbortSignal,
   archiveHandshake = false,
   stdinPrefix?: string,
-  cwd?: string,
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
@@ -3348,7 +3315,6 @@ export async function runCodexCommand(
     [...(command.args ?? []), ...args],
     {
       env: environment,
-      cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
