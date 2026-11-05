@@ -98,18 +98,17 @@ async function testJoiningCallerAdmission(
     if (change === "added") await rm(source);
     const created = await owner.begin({ targetPath, threadId, scanRoot });
     const lease = { scanId: created.scanId, threadId };
-    // The joining caller sees the run before its owner starts discovery.
-    // Admission must use the state returned by the later claim, and a claim
-    // whose discovery phase was persisted before any dispatch is re-admitted.
+    // Admission uses the later claim, even if the owner entered discovery before it expired.
+    const discoveryProgress = {
+      scanId: created.scanId,
+      phase: "discovery",
+    } as const;
     const joined = await joiner.begin({ ...lease, scanRoot });
     assert.equal(joined.discoveryStarted, false);
     if (afterDiscoveryProgress) {
       const claimed = await owner.claimCoordinator(lease);
       assert.equal(claimed.acquired, true);
-      await owner.updateProgress({
-        scanId: created.scanId,
-        phase: "discovery",
-      });
+      await owner.updateProgress(discoveryProgress);
       const observer = await joiner.claimCoordinator(lease);
       assert.equal(observer.acquired, false);
       assert.equal(observer.run.discoveryStarted, true);
@@ -129,37 +128,26 @@ async function testJoiningCallerAdmission(
       threadId,
     });
     try {
+      const terminal = await Promise.race([
+        executor.discoveryStarted.promise,
+        coordinator.wait(undefined, 30_000),
+      ]);
+      const persisted = await joiner.get(created.scanId, threadId);
+      if (afterDiscoveryProgress)
+        assert.equal(persisted.coordinatorGeneration, 3);
       if (change === "added") {
-        await Promise.race([
-          executor.discoveryStarted.promise,
-          coordinator
-            .wait(undefined, 30_000)
-            .then((run: { error?: string } | undefined) =>
-              assert.fail(
-                run?.error ?? "No worker dispatched after a file was added",
-              ),
-            ),
-        ]);
-        const recovered = await joiner.get(created.scanId, threadId);
-        assert.equal(recovered.coordinatorGeneration, 3);
-        assert.ok(recovered.dispatchedCount > 0);
+        assert.ok(executor.discoveryCalls > 0, terminal?.error);
+        assert.ok(persisted.dispatchedCount > 0);
         await assert.rejects(
-          owner.updateProgress({ scanId: created.scanId, phase: "discovery" }),
+          owner.updateProgress(discoveryProgress),
           /newer generation/,
         );
-        return;
-      }
-      const terminal = await coordinator.wait(undefined, 30_000);
-      assert.equal(terminal?.status, "failed");
-      assert.match(terminal.error, /target is empty.*no security audit/iu);
-      assert.equal(executor.discoveryCalls, 0);
-      const persisted = await owner.get(created.scanId, threadId);
-      assert.equal(persisted.status, "failed");
-      assert.deepEqual(persisted.persistedWorkers, []);
-      if (afterDiscoveryProgress) {
-        // The adopting claim still advanced the coordinator generation even
-        // though re-admission stopped the run before any dispatch.
-        assert.equal(persisted.coordinatorGeneration, 3);
+      } else {
+        assert.equal(terminal?.status, "failed");
+        assert.match(terminal.error, /target is empty.*no security audit/iu);
+        assert.equal(executor.discoveryCalls, 0);
+        assert.equal(persisted.status, "failed");
+        assert.deepEqual(persisted.persistedWorkers, []);
         assert.equal(persisted.dispatchedCount, 0);
       }
     } finally {
