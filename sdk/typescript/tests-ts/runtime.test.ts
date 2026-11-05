@@ -3766,6 +3766,65 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  for (const language of ["FullLanguage", "ConstrainedLanguage"] as const) {
+    const name = `batches Windows credential ACL queries without dropping files in ${language}`;
+    test.skipIf(process.platform !== "win32")(name, async () => {
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const { root, home } = await credentialHome(false);
+      await requireSecureCredentialHome(home);
+      const cache = join(home, "cache");
+      await mkdir(cache);
+      for (let index = 0; index < 8; index++)
+        await writeFile(join(cache, `entry-${index}.txt`), "fixture\n");
+      const trace = join(root, "acl-queries.txt").replaceAll("'", "''");
+      const marker = "function Write-CredentialAcl($path) {";
+      const originalSpawn = childProcess.spawn;
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+          const [command, args, options] = spawnArgs;
+          if (
+            options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+            !Array.isArray(args)
+          )
+            return originalSpawn(...spawnArgs);
+          const scriptIndex = args.indexOf("-Command") + 1;
+          const script = args[scriptIndex];
+          if (typeof script !== "string" || !script.includes(marker))
+            return originalSpawn(...spawnArgs);
+          const instrumented = [...args];
+          instrumented[scriptIndex] =
+            `${language === "ConstrainedLanguage" ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" : ""}` +
+            script.replace(
+              marker,
+              `${marker} Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${trace}' -Value ('input:' + @($path).Count);`,
+            ) +
+            `\nMicrosoft.PowerShell.Management\\Add-Content -LiteralPath '${trace}' -Value ('complete:' + $script:descriptorCount)`;
+          return originalSpawn(command, instrumented, options);
+        },
+      }));
+      try {
+        await requireSecureCredentialHome(home);
+        const rows = (await readFile(join(root, "acl-queries.txt"), "utf8"))
+          .trim()
+          .split(/\r?\n/u);
+        const queries = rows
+          .filter((row) => row.startsWith("input:"))
+          .map((row) => Number(row.slice(6)));
+        const expected = credentialAncestors(home, "").length + 10;
+        expect(queries.some((count) => count === 8)).toBe(true);
+        expect(queries.reduce((total, count) => total + count, 0)).toBe(
+          expected,
+        );
+        expect(rows.filter((row) => row.startsWith("complete:"))).toEqual([
+          `complete:${expected}`,
+        ]);
+      } finally {
+        restoreSpawn(originalSpawn);
+      }
+    });
+  }
+
   test("retries interrupted Windows credential ACL enumeration", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
