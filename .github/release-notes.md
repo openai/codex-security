@@ -96,6 +96,7 @@
 - enforce scan budgets from verified usage ([#465](https://github.com/openai/codex-security/pull/465))
 - preserve differing threat models and use primary repair sites ([#2306](https://github.com/openai/codex-security/pull/2306))
 - preserve independently fixable findings across batches and resumes ([#2311](https://github.com/openai/codex-security/pull/2311))
+- read oversized findings from temporary files ([#2342](https://github.com/openai/codex-security/pull/2342))
 
 <!-- release-section: highlights:end -->
 
