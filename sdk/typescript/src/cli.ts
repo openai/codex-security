@@ -1348,6 +1348,7 @@ interface CliDependencies {
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
   patchCallerDirectory?: string;
+  patchTransportContext?: { root: string; caller: string; directory: string };
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
@@ -9520,6 +9521,8 @@ async function patchTransportDirectories(
   repository: string,
   dependencies: CliDependencies,
 ) {
+  if (dependencies.patchTransportContext)
+    return dependencies.patchTransportContext;
   const root = await realpath(
     await patchRepositoryRoot(repository, dependencies),
   );
@@ -9968,6 +9971,7 @@ function patchCommandDirectoryDependencies(
   return {
     ...dependencies,
     patchCallerDirectory: directory,
+    patchTransportContext: undefined,
     runRepositoryCommand: (command, args, repository, options) =>
       dependencies.runRepositoryCommand(command, args, repository, {
         ...options,
@@ -10276,7 +10280,17 @@ async function bindPatchCommandContext(
     directory,
     dependencies: {
       ...dependencies,
-      patchCallerDirectory: context.directory,
+      // A patch may remove the original component. Keep its captured physical
+      // protection root while resolving later config from Git's validated cwd.
+      patchTransportContext: {
+        root: context.root,
+        caller: context.directory,
+        directory:
+          currentDirectory === context.directory &&
+          isOutsidePath(relative(context.root, context.directory))
+            ? context.directory
+            : context.root,
+      },
       runRepositoryCommand: (command, args, root, options) =>
         dependencies.runRepositoryCommand(command, args, root, {
           ...options,

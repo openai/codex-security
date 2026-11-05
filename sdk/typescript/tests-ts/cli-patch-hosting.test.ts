@@ -1,7 +1,7 @@
 import { gitText } from "./support/shell.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rmdir, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -121,11 +121,14 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each(["preflight", "push"] as const)(
+  test.each(["preflight", "push", "push from removed component"] as const)(
     "HTTP %s uses the operator credential helper without executing checkout helpers",
     async (stage) => {
       const { directory, git } = await publicationRepository();
       const external = await fixtures.create("patch-credentials-");
+      const component = join(directory, "component");
+      const removesComponent = stage === "push from removed component";
+      if (removesComponent) await mkdir(component);
       let challenged = false;
       const server = Bun.serve({
         hostname: "127.0.0.1",
@@ -176,7 +179,7 @@ describe("patch change tracking", () => {
           "config",
           "--file",
           global,
-          stage === "push"
+          stage !== "preflight"
             ? "includeIf.onbranch:codex-security/**.path"
             : "include.path",
           checkout,
@@ -192,20 +195,25 @@ describe("patch change tracking", () => {
           NO_PROXY: "127.0.0.1",
         };
         const outcome = await runWorkflow(
-          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          removesComponent
+            ? ["patch", "Synthetic issue", "--create-pr", "--json"]
+            : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
           {
-            currentDirectory: directory,
+            currentDirectory: removesComponent ? component : directory,
             environment,
             onWorkbench: () =>
               savedScan(resultWithFindings(["high"]), "scan-1", directory),
             onCodex: async (args, output) => {
+              if (removesComponent) await rmdir(component);
               await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-              completePatches(args, output);
+              if (removesComponent) output?.stdout.write("Patch complete.\n");
+              else completePatches(args, output);
               return 0;
             },
             onRepositoryCommand: (tool, args, cwd, options) => {
               if (tool !== "git") return "";
-              if (stage === "push" && args.includes("ls-remote")) return "";
+              if (stage !== "preflight" && args.includes("ls-remote"))
+                return "";
               return runRepositoryCommand(tool, args, cwd, {
                 ...options,
                 environment: { ...environment, ...options?.environment },
