@@ -18,7 +18,11 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { main, runCodexSkillCommand } from "../src/cli.js";
+import {
+  hasStoredChatGPTSignIn,
+  main,
+  runCodexSkillCommand,
+} from "../src/cli.js";
 import {
   CodexSecurityError,
   type JsonObject,
@@ -38,6 +42,7 @@ import {
   fakeSecurity,
   failingSecurity,
 } from "./cli-fixtures.js";
+import { chatGptTokens } from "./support/chatgpt-credentials.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
@@ -626,6 +631,50 @@ describe("CLI authentication", () => {
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
+
+  test.each([
+    ["ambient ChatGPT", true],
+    ["dedicated API key", false],
+    ["truncated dedicated credential file", false],
+    ["explicit logout", false],
+    ["invalid logout marker", false],
+  ] as const)(
+    "offers an interactive ChatGPT choice with %s: %p",
+    async (source, offered) => {
+      const ambientHome = join(stateDirectory, "ambient");
+      const dedicatedHome = await createCredentialHome();
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        JSON.stringify({ auth_mode: "chatgpt", tokens: chatGptTokens }),
+        { mode: 0o600 },
+      );
+      if (source === "explicit logout") {
+        await setCodexSecurityCredentialLogout(dedicatedHome, true);
+      } else if (source === "invalid logout marker") {
+        await mkdir(join(dedicatedHome, ".codex-security-logged-out"));
+      } else if (source !== "ambient ChatGPT") {
+        await writeFile(
+          join(dedicatedHome, "auth.json"),
+          source === "dedicated API key"
+            ? '{"OPENAI_API_KEY":"synthetic-stored-key"}'
+            : "{",
+          { mode: 0o600 },
+        );
+      }
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-environment-key" },
+      });
+      deps.hasStoredChatGPTSignIn = (signal) =>
+        hasStoredChatGPTSignIn(deps.environment, signal);
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (_message, options) => options[0]!.value,
+      );
+      const stderr = captureCli(main, "stderr", true);
+      expect(await stderr.run(["scan"], deps), stderr.text()).toBe(0);
+      expect(stderr.text().includes("Both a ChatGPT sign-in")).toBe(offered);
+    },
+  );
 
   test("cancels sign-in discovery and authentication prompts before starting a scan", async () => {
     for (const stage of ["status", "prompt"] as const) {

@@ -78,7 +78,9 @@ your local browser. Keep SSH connected until login finishes.
 ### OpenAI credentials
 
 Interactive scans ask which credentials to use when both ChatGPT and an
-environment API key are available. Noninteractive commands prefer
+environment API key are available. A dedicated sign-in takes precedence. After
+`codex-security logout`, the prompt skips the ambient sign-in until you log in
+again. Noninteractive commands prefer
 `OPENAI_API_KEY`, then `CODEX_API_KEY`, then stored credentials. Choose explicitly
 with `--auth`:
 
