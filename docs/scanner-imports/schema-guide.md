@@ -7,21 +7,20 @@ mean and how to interpret the result.
 
 ## Choose the record and source key
 
-Private Cloud imports identify a record by its importing owner, provider, source
-key and vendor occurrence ID. Use a stable key for the vendor project or
-repository where those occurrence IDs are unique. Changing the assessment
-target preserves the record’s identity. The preview shows the format, size and
-digest of the report the CLI will upload. The receipt identifies a private job.
-Explicit assessment and publication produce a shared finding.
+Keep the same provider and source key for later exports of the same vendor
+project and finding family. For example, use
+`github.com/OWNER/REPO/dependabot` for Dependabot alerts. An updated local import
+under that key replaces evidence for its existing record. A key containing
+today's date would create another record for the same alert.
 
-The repository publisher identifies a record by destination repository,
-provider, source key and source finding ID. Use the same source key for each
-export of the same stream, such as an organization, project and branch. A
-date or run ID in the key creates a new set of records on each run.
+| Destination                | What identifies the record                                                                                                                                                                             |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Local workbench            | The checkout path, stored provider, source key and source finding ID. For a repeat import, reuse the exact repository path and source key in the preview.                                              |
+| Private Cloud inbox        | The importing owner, provider, source key and vendor occurrence ID. The suggested repository for assessment can change without creating another record. The receipt identifies the private import job. |
+| Cloud repository publisher | The destination repository, provider, source key and source finding ID.                                                                                                                                |
 
-The reader derives the source finding ID from the export. The differences matter
-when a finding moves, an advisory affects several packages, or the export format
-changes.
+Each reader derives the source finding ID from the export. The table shows
+which changes can give an occurrence a different ID.
 
 | Report                                                                                | What identifies one record                                                                                                                                                               |
 | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -34,6 +33,7 @@ changes.
 | [GitHub advisories](github-security-advisories.md)                                    | Host, repository or global scope, and GHSA ID. This identifies a disclosure. Check installed packages separately.                                                                        |
 | [Trivy](trivy.md)                                                                     | Analyzer, advisory, package name, target and package path when available. Use the same source key for a repository, project and branch.                                                  |
 | [Snyk Open Source](snyk.md)                                                           | Native CLI JSON distinguishes manifest, package manager, advisory, package name and version, and dependency path. Plugin and SARIF reports use different identities.                     |
+| [Snyk monitored project](snyk.md#existing-issues-from-snyk)                           | API origin, organization, project, product and issue key.                                                                                                                                |
 | [Black Duck SCA](blackduck.md), [Veracode Static Analysis](veracode.md)               | Black Duck combines project version, component version, origin and advisory identity. Veracode scopes a native issue ID to its API origin, application and context.                      |
 | [Semgrep CLI or CI reports](semgrep.md), [OpenGrep](opengrep.md)                      | Semgrep prefers a fingerprint and falls back to rule, path and range. OpenGrep groups traces by rule, path and range. Both store provider `semgrep`. Use a separate OpenGrep source key. |
 | [Semgrep Guardian selections](semgrep.md#import-selected-guardian-findings)           | Deployment, repository name, Guardian tool, full ref and exact string ID. Guardian records stay separate from Web API occurrences.                                                       |
@@ -76,7 +76,12 @@ readers also apply the Cloud size limit to the evidence they return.
 repository path from the preview. Each record includes
 `sourceKey`, `sourceFindingId`, `version`, `evidence` and `assessment`.
 
-**Repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
+**Private Cloud inbox.** Check the format, size and digest under
+`privateImport` in the preview, then inspect the job receipt for errors and
+unprocessed findings. Open a finding in the inbox to assess it and publish
+the assessment when you're ready to share it.
+
+**Cloud repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
 Check the per-item result for conflicts. The receipt's source-report,
 observation and canonical-finding IDs identify Cloud records. Read the source
 report for the imported evidence.

@@ -12,9 +12,7 @@ repository supplied the scanned code, including the archive for an S3 source.
 For a finding from another scanner, you can also check its repository in that
 scanner. [AWS Continuum code sources](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html)
 
-**Saved report.** Set `report` to a native detail response, an array of detail
-responses, or a complete list response with its `items` array. Then skip to
-the preview.
+**Saved report.** Set `report` to a native detail response, an array of detail responses, or a complete list response with its `items` array. Then [preview the report](#preview-and-import).
 
 ```sh
 report=/private/path/continuum.json
@@ -76,8 +74,7 @@ codex-security publish findings "$report" --to local --repository . \
 
 Check the repository, finding ARNs, paths, and exclusions. In a
 multi-repository environment, a customer-supplied path can begin with a
-repository name. The reader keeps that prefix. To save the findings in your
-local workbench, remove `--dry-run` and confirm.
+repository name. The reader keeps that prefix. For local repeat imports, a summary replaces richer evidence already saved for the same ARN and source key. Use the detail export to keep locations, mitigation and validation evidence. To save locally, remove `--dry-run` and confirm.
 
 ### Publish to your Cloud inbox
 
@@ -102,8 +99,7 @@ receipt, then open a finding in your inbox and compare its source ID with the AW
 ## Detail, summaries, and repeat imports
 
 Both formats use the finding ARN. In the local workbench, importing a detail
-response under the same source key updates the existing summary. A later
-summary replaces the richer local evidence. In a private Cloud inbox,
+response under the same source key updates the existing summary. In a private Cloud inbox,
 retrying identical evidence under the same source key preserves the finding.
 
 The importer uses `statusUpdatedAt` for the source update time when available.
