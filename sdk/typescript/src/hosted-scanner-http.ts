@@ -1,6 +1,6 @@
 import { waitForRetry } from "./deduplication/retry.js";
 import { canonicalNumber } from "./external-import-contract.js";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import { normalizeHostedGitRepositoryUrl } from "./hosted-git-repository.js";
 import { importEnvironmentSetting } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
@@ -143,6 +143,51 @@ function retryAfterMs(response: Response): number | undefined {
   return delay <= 10_000 ? delay : undefined;
 }
 
+// A proxy's failure page can be arbitrarily large, including when chunked or compressed.
+// Bound only the remote diagnostic; successful vendor findings use the normal parser.
+const HTTP_ERROR_DETAIL_BYTES = 64 * 1024;
+
+async function scannerHttpError(
+  url: URL,
+  response: Response,
+  signal?: AbortSignal,
+) {
+  const retry = response.headers.get("retry-after");
+  const status = `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry ? `; Retry-After: ${retry}` : ""}`;
+  const reader = response.body?.getReader();
+  if (!reader) return new CodexSecurityError(`${status}.`);
+  const decoder = new TextDecoder();
+  let remaining = HTTP_ERROR_DETAIL_BYTES;
+  let detail = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        detail += decoder.decode();
+        break;
+      }
+      const prefix = value.subarray(0, remaining);
+      detail += decoder.decode(prefix, { stream: true });
+      remaining -= prefix.byteLength;
+      if (prefix.byteLength < value.byteLength) {
+        void reader.cancel().catch(() => undefined);
+        detail += `\nShowing the first ${HTTP_ERROR_DETAIL_BYTES} bytes of the error response.`;
+        break;
+      }
+    }
+  } catch (cause) {
+    signal?.throwIfAborted();
+    const received = detail ? `: ${detail}` : "";
+    return new CodexSecurityError(
+      `${status}${received}\nReading the error response failed: ${errorMessage(cause)}`,
+      { cause },
+    );
+  } finally {
+    reader.releaseLock();
+  }
+  return new CodexSecurityError(`${status}${detail ? `: ${detail}` : "."}`);
+}
+
 export function hostedScannerHttp(
   dependencies: HostedScannerHttpOptions,
   callerSignal?: AbortSignal,
@@ -176,13 +221,7 @@ export function hostedScannerHttp(
       signal?.throwIfAborted();
       response = await get();
     }
-    if (!response.ok) {
-      const retry = response.headers.get("retry-after");
-      const detail = await response.text();
-      throw new CodexSecurityError(
-        `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry ? `; Retry-After: ${retry}` : ""}${detail ? `: ${detail}` : "."}`,
-      );
-    }
+    if (!response.ok) throw await scannerHttpError(url, response, signal);
     return parseHostedScannerJson(
       new TextDecoder("utf-8", { fatal: true }).decode(
         await response.arrayBuffer(),

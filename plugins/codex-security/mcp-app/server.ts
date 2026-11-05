@@ -853,8 +853,7 @@ export function createCodexSecurityServer(): McpServer {
       );
       const setup = await runWorkbench([
         "inspect-setup",
-        "--target-path",
-        selected.targetPath,
+        `--target-path=${selected.targetPath}`,
         `--scope=${scope}`,
         "--mode",
         mode,
@@ -899,8 +898,7 @@ export function createCodexSecurityServer(): McpServer {
             "save-workspace",
             "--workspace-id",
             sessionId,
-            "--target-path",
-            selected.targetPath,
+            `--target-path=${selected.targetPath}`,
             `--scope=${scope}`,
             "--mode",
             mode,
@@ -1027,12 +1025,24 @@ export function createCodexSecurityServer(): McpServer {
             ),
           ]);
           // Full findings and workspace history can exceed the host's tool-result limit.
-          const { progress, reportAvailable } = completion.scan as {
-            progress: { status: string };
-            reportAvailable: boolean;
-          };
+          const { progress, reportAvailable, usage, cost } =
+            completion.scan as {
+              progress: { status: string };
+              reportAvailable: boolean;
+              usage?: JsonObject;
+              cost?: { model: string; estimatedUsd: number };
+            };
+          // Rate-limit snapshots can grow independently of the measured scan totals.
+          const { accountRateLimits: _limits, ...scanUsage } = usage ?? {};
           return deepScanTerminalResult(run, {
-            scan: { progress: { status: progress.status }, reportAvailable },
+            scan: {
+              progress: { status: progress.status },
+              reportAvailable,
+              ...(usage && { usage: scanUsage }),
+              ...(cost && {
+                cost: { model: cost.model, estimatedUsd: cost.estimatedUsd },
+              }),
+            },
           });
         } catch (error) {
           logDeepScanEvent({
@@ -2028,8 +2038,7 @@ async function startPromptOnlyScan(
       "start-prompt-only-scan",
       "--thread-id",
       threadId,
-      "--target-path",
-      targetPath,
+      `--target-path=${targetPath}`,
       `--scope=${scope}`,
       "--mode",
       mode,
@@ -2060,8 +2069,7 @@ async function startHeadlessStandardScan(
       "start-headless-standard-scan",
       "--thread-id",
       threadId,
-      "--target-path",
-      input.targetPath,
+      `--target-path=${input.targetPath}`,
       `--scope=${input.scope ?? "."}`,
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
@@ -2332,14 +2340,20 @@ function deepScanTerminalResult(
 ) {
   if (run.status === "succeeded") {
     if (!run.manifestPath) return undefined;
+    const outcome =
+      run.terminalReason === "capped" && run.completionSequence === 0
+        ? "The discovery deadline expired before any Standard scan completed. Report the coverage limitation."
+        : "Report the retained findings from completed Standard scans.";
     const instructions = run.sdkOwnsCompletion
-      ? `Deep Scan ${run.scanId} aggregated its validated findings under ${run.scanDir}. End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
-      : `Deep Scan ${run.scanId} completed. The coordinator validated and sealed scan-manifest.json and findings.json and generated report.md under ${run.scanDir}. Independent Standard scans have already performed validation and attack-path analysis. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Report the completed results and link the generated report.`;
+      ? `Deep Scan ${run.scanId} stopped. ${outcome} End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
+      : `Deep Scan ${run.scanId} completed. ${outcome} The coordinator sealed scan-manifest.json and findings.json and generated report.md under ${run.scanDir}. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Link the generated report.`;
     return scanActionResult(
       {
         scanId: run.scanId,
         scanDir: run.scanDir,
         manifestPath: run.manifestPath,
+        completedAudits: run.completionSequence,
+        terminalReason: run.terminalReason,
         ...(completion === undefined
           ? {}
           : { completion, reportPath: resolve(run.scanDir, "report.md") }),

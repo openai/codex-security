@@ -1,3 +1,9 @@
+"""Run verify-fix fixture processes with broken or congested stderr and emit JSON results.
+
+A separate pipe carries synchronization events so tests can observe worker completion,
+cancellation, and cleanup even when the simulated terminal stops accepting output.
+"""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -21,6 +27,8 @@ NODE, FIXTURE, CWD, STATE_ROOT, SCENARIO_TIMEOUT = sys.argv[1:]
 
 
 class HarnessTermination(Exception):
+    """Unwind a scenario on SIGTERM so the harness can clean up its process group."""
+
     pass
 
 
@@ -33,6 +41,7 @@ signal.signal(signal.SIGTERM, terminate_harness)
 
 
 def wait(process: subprocess.Popen, timeout: float = 10):
+    """Return True if the child is still running after the timeout, in seconds."""
     try:
         process.wait(timeout=timeout)
         return False
@@ -41,6 +50,14 @@ def wait(process: subprocess.Popen, timeout: float = 10):
 
 
 class RunningProcess:
+    """Own a fixture subprocess, its process group, and the read end of its synchronization pipe.
+
+    The process attribute is the Node child. The state path is where its worker
+    publishes a PID. Use event_until to synchronize with that worker and finish
+    to collect the exit status and output. The running context manager releases
+    the process group and descriptors on exit.
+    """
+
     def __init__(self, scenario: str, stderr, label: str):
         self.label = label
         sync_read, sync_write = os.pipe()
@@ -75,12 +92,14 @@ class RunningProcess:
         self.sync_buffer = b""
 
     def send(self, command: str = "continue"):
+        """Write one newline-terminated command to the child and flush it immediately."""
         if self.process.stdin is None or self.process.stdin.closed:
             raise AssertionError("fixture stdin is closed")
         self.process.stdin.write(f"{command}\n".encode())
         self.process.stdin.flush()
 
     def _next_event(self, timeout: float = 10):
+        """Decode one newline-delimited JSON event, retaining later events in the read buffer."""
         deadline = time.monotonic() + timeout
         while b"\n" not in self.sync_buffer:
             remaining = deadline - time.monotonic()
@@ -97,6 +116,18 @@ class RunningProcess:
         return json.loads(line)
 
     def event_until(self, name: str, worker: int | None = None):
+        """Read synchronization events through the first matching milestone.
+
+        Args:
+            name (str): Event name emitted by the child.
+            worker (int | None): Require a matching worker ID when supplied.
+
+        Returns:
+            list: All events read by this call, including the matching event.
+
+        Raises:
+            AssertionError: The synchronization pipe closes or times out before the milestone.
+        """
         events = []
         while True:
             try:
@@ -127,6 +158,7 @@ class RunningProcess:
             pass
 
     def stop(self):
+        """Stop the fixture, escalating to SIGKILL and cleaning up any descendants still in its group."""
         if self.process.poll() is None:
             self.signal_group(signal.SIGTERM)
             if wait(self.process, 1):
@@ -154,6 +186,7 @@ class RunningProcess:
         return stream.read().decode(errors="replace")
 
     def collect(self, events, blocked: bool = False):
+        """Drain events into the supplied list and return exit status, captured output, and the blocked flag."""
         if self.process.poll() is None:
             self.process.wait()
         events.extend(self._remaining_events())
@@ -171,6 +204,15 @@ class RunningProcess:
         }
 
     def finish(self, events, timeout: float = 10):
+        """Close stdin, then wait for the child before collecting its final state.
+
+        Args:
+            events (list): Previously observed synchronization events, extended in place.
+            timeout (float): Seconds to wait for normal exit before stopping the group.
+
+        Returns:
+            dict: Exit code, timeout flag (blocked), stdout, stderr, and all observed events.
+        """
         self.close_stdin()
         blocked = wait(self.process, timeout)
         if blocked:
@@ -192,6 +234,8 @@ class RunningProcess:
 
 @contextmanager
 def running(scenario: str, stderr=subprocess.PIPE, *, label: str | None = None):
+    """Yield an isolated fixture process and clean it up on completion, interruption, or timeout."""
+
     def timeout(_signal_number, _frame):
         raise TimeoutError(f"Verification fixture timed out: {scenario}")
 
@@ -206,6 +250,7 @@ def running(scenario: str, stderr=subprocess.PIPE, *, label: str | None = None):
 
 
 def read_pty(master: int):
+    """Read the master end through EOF or terminal hangup and decode the captured output."""
     chunks = []
     while True:
         try:
@@ -235,12 +280,14 @@ def drain_pty(master: int, stopped: threading.Event):
 
 
 def open_pty():
+    """Return master and slave descriptors for a terminal with 24 rows and 100 columns."""
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
     return master, slave
 
 
 def wait_for_worker(state: Path):
+    """Return the PID written by a worker, raising AssertionError if its state file fails to appear."""
     deadline = time.monotonic() + 10
     while not state.exists():
         if time.monotonic() >= deadline:
@@ -274,6 +321,7 @@ def connected_output(scenario: str, name: str, stderr=subprocess.PIPE):
 
 
 def fill_output(fd: int):
+    """Fill the descriptor until a single byte would block, then restore blocking mode."""
     os.set_blocking(fd, False)
     try:
         chunk = b"x" * 4096
@@ -324,6 +372,7 @@ def disconnected_pty(scenario: str):
 
 
 def release_with_full_terminal(fixture: RunningProcess, slave: int):
+    """Fill terminal output before releasing the second worker and return its startup events."""
     events = fixture.event_until("worker-started", 2)
     # Use a separate file description so the fixture's stderr stays blocking.
     with open(os.ttyname(slave), "wb", buffering=0) as filler:
@@ -333,6 +382,7 @@ def release_with_full_terminal(fixture: RunningProcess, slave: int):
 
 
 def paused_pty(scenario: str, sent_signal: signal.Signals | None):
+    """Return completion and worker-liveness observations while leaving terminal output undrained."""
     master, slave = open_pty()
     try:
         with running(scenario, slave) as fixture:
@@ -395,6 +445,7 @@ def full_terminal(scenario: str):
 
 
 def mixed_signals(first: signal.Signals, second: signal.Signals):
+    """Send the second signal after the worker observes the first and collect the final worker state."""
     scenario = f"pty-backpressure-mixed-{first.name.lower()}-{second.name.lower()}"
     master, slave = open_pty()
     try:
@@ -431,6 +482,7 @@ def mixed_signals(first: signal.Signals, second: signal.Signals):
 
 
 def cleanup_sigwinch():
+    """Deliver a resize signal after terminal cleanup and capture the fixture's response."""
     master, slave = open_pty()
     stop_reader = threading.Event()
     reader = threading.Thread(target=drain_pty, args=(master, stop_reader))

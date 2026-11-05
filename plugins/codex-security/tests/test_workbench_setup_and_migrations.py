@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -105,6 +107,7 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
+    (63, "retain unverified Deep Scan worker attempts"),
 ]
 
 

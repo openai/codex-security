@@ -29,8 +29,8 @@ maintained in the SDK.
 `pnpm --dir sdk/typescript run types` checks freshness.
 
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
-source. Deterministic triage checks and the MCP reducer IPC regression remain
-part of normal CI.
+source. CI runs deterministic triage checks and the Deep Scan iteration and
+publication tests in the MCP suite.
 
 See the [CI guide](docs/ci.md) for check selection, platform/version coverage,
 required status checks, and test-runner qualification.

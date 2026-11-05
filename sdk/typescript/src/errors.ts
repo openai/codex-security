@@ -74,7 +74,12 @@ export class OutputInsideProtectedRootError extends OutputDirectoryError {
   ) {
     super(
       pathKind === "state"
-        ? `State directory ${outputDirectory} overlaps the protected root ${protectedRoot}. Choose a private, non-overlapping directory for CODEX_SECURITY_STATE_DIR (local scans) or stateDirectory (hosted scans).`
+        ? [
+            "Codex Security state directory must be outside the protected scan root and cannot contain it.",
+            `  Resolved path:  ${outputDirectory}`,
+            `  Protected root: ${protectedRoot}`,
+            "Set CODEX_SECURITY_STATE_DIR to a private directory that does not overlap the protected root. For hosted scans, set stateDirectory on the request.",
+          ].join("\n")
         : `Scan ${pathKind} directory must be outside the protected scan root: ${outputDirectory}`,
     );
   }
