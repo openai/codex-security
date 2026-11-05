@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { dirname, join, posix, relative, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
@@ -498,10 +498,29 @@ export function addScanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
 ): void {
-  const coverage = worker.coverage ?? scanCoverage(worker, scanDir);
+  const model = worker.result.threatModel;
+  aggregate.threatModel ??= model;
+  const additionalModel =
+    model && !isDeepStrictEqual(model, aggregate.threatModel)
+      ? model
+      : undefined;
+  const projected = worker.coverage ?? scanCoverage(worker, scanDir);
+  const coverage =
+    additionalModel && Array.isArray(projected.reviews)
+      ? {
+          ...projected,
+          reviews: projected.reviews.map((review, index) =>
+            index === 0
+              ? { ...asRecord(review), threatModel: additionalModel }
+              : review,
+          ),
+        }
+      : projected;
   const previous = aggregate.sourceCoverage;
   if (!previous) {
-    aggregate.sourceCoverage = coverage;
+    aggregate.sourceCoverage = worker.coverage
+      ? structuredClone(coverage)
+      : coverage;
     return;
   }
   for (const field of [

@@ -30,6 +30,18 @@ def finding_source_excerpt(
     locations: list[dict[str, Any]],
     scopes: list[str],
 ) -> str | None:
+    """Return numbered context from a finding location at the scanned Git revision.
+
+    Args:
+        scan: Saved scan row with its revision, snapshot digest, and scope metadata.
+        target: Local target directory in which to resolve the recorded Git objects.
+        locations: Displayed finding locations, using one-based line numbers.
+        scopes: Selected paths used to interpret saved source scopes.
+
+    Returns:
+        A bounded excerpt, or None when a location, scope, or local blob cannot
+        supply it. Root-control locations have priority.
+    """
     if target is None or not locations or scan["target_revision"] == "unversioned":
         return None
     snapshot = scan["target_snapshot_digest"]
@@ -116,6 +128,7 @@ def finding_source_excerpt(
 
 
 def scanned_source_text(repository: Path, object_id: str) -> str | None:
+    """Decode the locally available Git blob as UTF-8 with replacement, or return None on lookup failure."""
     try:
         content = offline_git_bytes(repository, "cat-file", "blob", object_id)
     except (OSError, RuntimeError, SystemExit):
