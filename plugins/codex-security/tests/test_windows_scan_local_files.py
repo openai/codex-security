@@ -1,3 +1,5 @@
+"""Exercise Windows scan-local path handling across aliases, junctions, and replacement races."""
+
 from __future__ import annotations
 
 import argparse

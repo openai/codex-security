@@ -1,3 +1,5 @@
+"""Project false-positive decisions into later scans and preserve the reasons behind triage changes."""
+
 from __future__ import annotations
 
 import json
