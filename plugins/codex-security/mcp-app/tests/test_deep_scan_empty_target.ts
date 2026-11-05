@@ -281,6 +281,30 @@ test("legacy setup workers still require admission before the first discovery", 
   assert.equal(executor.discoveryCalls, 0);
 });
 
+test("a zero-dispatch resume is re-admitted after its only file is removed", async () => {
+  const fixture = await fixtureRun();
+  const { run } = fixture;
+  await mkdir(run.targetPath, { recursive: true });
+  const only = join(run.targetPath, "source.py");
+  await writeFile(only, "x = 1\n");
+  // The run persisted its discovery phase but never dispatched a worker, and
+  // its only source file was removed before the lease expired.
+  run.discoveryStarted = true;
+  await rm(only);
+  let admissionCalls = 0;
+  const executor = new FakeExecutor();
+  const result = await runCoordinator(fixture, new FakeStore(run), executor, {
+    checkFreshTarget: async (state) => {
+      admissionCalls += 1;
+      await inspect(state);
+    },
+  });
+  assert.equal(admissionCalls, 1);
+  assert.equal(result?.status, "failed");
+  assert.match(result.error, /target is empty.*no security audit/iu);
+  assert.equal(executor.discoveryCalls, 0);
+});
+
 test("prior dispatch history bypasses fresh admission", async () => {
   const fixture = await fixtureRun({ maxDiscoveryRuns: 2 });
   fixture.run.dispatchedCount = 1;
