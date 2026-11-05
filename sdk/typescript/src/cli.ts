@@ -9856,11 +9856,12 @@ export function skillCommandFailure(
     /\b(?:syntax\s*error|pars(?:e|er|ing)|unexpected token|at (?:line|column) \d+)\b/iu.test(
       detail,
     );
+  // Keep a neutral token so a quoted provider/model remains a named model in the message.
   const withoutPaths = detail
     .replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "")
     .replace(/[^\s"'()<>,]+/gu, (token) =>
       /[/\\]/u.test(token) && !/^HTTP\/\d+(?:\.\d+)?$/iu.test(token)
-        ? ""
+        ? "[path]"
         : token,
     );
   const diagnosticDetail = containsParserError
