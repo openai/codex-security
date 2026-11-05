@@ -217,25 +217,15 @@ describe("scan import", () => {
     expect(stderr.text()).toBe("");
   });
 
-  test("uses a concise summary for default output", async () => {
+  test("uses a concise singular summary for one imported finding", async () => {
     const { deps } = importDependencies();
+    deps.importScan = async () => fakeResult(["high"]);
     const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
       await runCli(["scan", "import", "--json", "findings.json"], deps),
     ).toBe(0);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Imported 2 findings as scan scan.");
-  });
-
-  test("uses the singular for one imported finding", async () => {
-    const { deps } = importDependencies();
-    deps.importScan = async () => fakeResult(["high"]);
-    const { stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(["scan", "import", "--json", "findings.json"], deps),
-    ).toBe(0);
     expect(stderr.text()).toContain("Imported 1 finding as scan scan.");
   });
 

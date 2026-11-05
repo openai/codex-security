@@ -3933,14 +3933,13 @@ export async function main(
             const count = preview.findings.length;
             const findings =
               count === 1 ? "this finding" : `these ${count} findings`;
-            const action = local
+            let action = local
               ? `Store ${findings} locally`
               : `Publish ${findings}`;
             const excluded = preview.excluded.length;
-            const question = excluded
-              ? `${action} and skip ${excluded} excluded record${excluded === 1 ? "" : "s"}?`
-              : `${action}?`;
-            return prompt.confirm(question, false, controller.signal);
+            if (excluded)
+              action += ` and skip ${excluded} excluded record${excluded === 1 ? "" : "s"}`;
+            return prompt.confirm(`${action}?`, false, controller.signal);
           };
           const showScannerReport = (preview: ExternalFindings) => {
             if (options.provider !== "opengrep") return;
