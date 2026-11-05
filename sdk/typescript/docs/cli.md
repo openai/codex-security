@@ -108,6 +108,11 @@ Stored OpenAI credentials live in
 outside the target and every enclosing Git worktree. It also serves providers
 with `requires_openai_auth = true`.
 
+If you manually hard-linked the two homes’ `auth.json` files, run
+`codex-security logout` before switching accounts. Logout removes the private
+home’s link before Codex can revoke the shared file-based session. Then use
+`codex-security login` to establish an independent sign-in.
+
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
@@ -121,19 +126,15 @@ after logout completes.
 Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
 `HOME` or `USERPROFILE` environment setting.
 
-A file-based ChatGPT sign-in has a single-use refresh token, so Codex Security
-shares it instead of copying it. The credential home hard-links the Codex
-`auth.json`, and a renewal by either client reaches the other. If the file
-cannot be hard-linked, for example because `CODEX_SECURITY_STATE_DIR` is on
-another volume, Codex Security does not import the sign-in. Run
-`codex-security login` to give it its own session. `codex-security login` and
-`codex-security logout` remove a shared link first, so they do not replace or
-revoke your Codex sign-in.
+If you use file-based ChatGPT credentials with both Codex and Codex Security,
+run `codex-security login` before your first scan or status check to give Codex
+Security its own session. An imported sign-in shares a single-use refresh token.
+When either client renews it, the other client's next refresh can fail even
+while its login status reports that it is signed in.
 
-Earlier versions copied the sign-in, so both clients could hold the same
-refresh token. If Codex Security reports that the refresh token was already
-used, run `codex-security logout`, then `codex-security login`. If your Codex
-CLI or app reports that error, sign out and sign back in there.
+If Codex Security reports that the refresh token was already used, run
+`codex-security logout`, then `codex-security login`. If your Codex CLI or app
+reports that error, sign out and sign back in there.
 
 For other refresh errors, check `codex-security login status`. Retry if the
 sign-in recently changed. Otherwise run `codex-security logout`, then

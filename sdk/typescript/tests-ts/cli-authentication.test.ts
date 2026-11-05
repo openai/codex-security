@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   realpath,
   readFile,
@@ -142,6 +143,37 @@ describe("CLI authentication", () => {
       ).toBe(argv[0] !== "logout");
     }
   });
+
+  test.each(["shared", "unrelated"] as const)(
+    "preserves logout intent after native failure with a %s hard link",
+    async (kind) => {
+      const credentialHome = await createCredentialHome();
+      const localAuth = join(credentialHome, "auth.json");
+      const ambientHome = join(stateDirectory, "ambient");
+      const ambientAuth = join(ambientHome, "auth.json");
+      await mkdir(ambientHome);
+      await writeFile(ambientAuth, "ambient", { mode: 0o600 });
+      if (kind === "shared") {
+        await link(ambientAuth, localAuth);
+      } else {
+        await writeFile(localAuth, "private", { mode: 0o600 });
+        await link(localAuth, join(credentialHome, "backup"));
+      }
+
+      const deps = dependencies();
+      deps.runCodex = async (args, _output, environment) => {
+        expect(args).toEqual(["logout"]);
+        expect(environment?.["CODEX_HOME"]).toBe(credentialHome);
+        expect(existsSync(localAuth)).toBe(kind === "unrelated");
+        return 19;
+      };
+      expect(await createCliTest(main).runCli(["logout"], deps)).toBe(19);
+      expect(
+        await codexSecurityCredentialAllowsAmbientImport(credentialHome),
+      ).toBe(kind === "unrelated");
+      expect(await readFile(ambientAuth, "utf8")).toBe("ambient");
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "validates and canonicalizes the credential home for status and logout",
@@ -1328,49 +1360,6 @@ describe("CLI authentication", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
-
-  test("login and logout leave a shared ambient ChatGPT sign-in unchanged", async () => {
-    const ambientHome = join(stateDirectory, "ambient");
-    const ambientAuth = join(ambientHome, "auth.json");
-    const credentialAuth = join(stateDirectory, "codex-home", "auth.json");
-    const ambientSession = JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: { refresh_token: "synthetic-ambient-session" },
-    });
-    await mkdir(ambientHome, { mode: 0o700 });
-    await writeFile(ambientAuth, ambientSession, { mode: 0o600 });
-    const run = async (argv: readonly string[]) => {
-      const { runCli } = createCliTest(main);
-      const deps = dependencies();
-      const childSaw: { authExists?: boolean } = {};
-      deps.runCodex = async (args, _output, environment) => {
-        const auth = join(environment!["CODEX_HOME"]!, "auth.json");
-        childSaw.authExists = existsSync(auth);
-        // Codex writes a new sign-in in place and revokes tokens on logout.
-        if (args.join(" ") === "login") {
-          await writeFile(auth, '{"tokens":{"refresh_token":"new"}}');
-        } else if (args[0] === "logout") {
-          await rm(auth, { force: true });
-        }
-        return 0;
-      };
-      expect(await runCli(argv, deps)).toBe(0);
-      return childSaw;
-    };
-
-    await run(["login", "status"]);
-    expect(await readFile(credentialAuth, "utf8")).toBe(ambientSession);
-    expect((await run(["login"])).authExists).toBe(false);
-    expect(await readFile(ambientAuth, "utf8")).toBe(ambientSession);
-    expect(await readFile(credentialAuth, "utf8")).toBe(
-      '{"tokens":{"refresh_token":"new"}}',
-    );
-
-    await rm(credentialAuth);
-    await run(["login", "status"]);
-    expect((await run(["logout"])).authExists).toBe(false);
-    expect(await readFile(ambientAuth, "utf8")).toBe(ambientSession);
   });
 });
 

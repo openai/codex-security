@@ -1462,6 +1462,52 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   return true;
 }
 
+/** Called under the credential-home lock, before native logout can revoke a shared session. */
+export async function detachAmbientAuthForLogout(
+  codexHome: string,
+  ambientHome: string,
+): Promise<boolean> {
+  const localPath = join(codexHome, "auth.json");
+  const local = await lstat(localPath, { bigint: true }).catch(
+    nullIfMissingFileError,
+  );
+  if (!local?.isFile() || local.nlink < 2n) return false;
+
+  // An ambient symlink can lead to another hard link or back to the local entry.
+  const ambientPath = await realpath(join(ambientHome, "auth.json")).catch(
+    nullIfMissingFileError,
+  );
+  if (ambientPath === null) return false;
+  const ambient = await stat(ambientPath, { bigint: true }).catch(
+    nullIfMissingFileError,
+  );
+  if (
+    ambient === null ||
+    local.dev !== ambient.dev ||
+    local.ino !== ambient.ino
+  )
+    return false;
+  const sourceName = basename(ambientPath);
+  if (sourceName.toLowerCase() === "auth.json") {
+    const [localHome, sourceHome] = await Promise.all([
+      stat(codexHome, { bigint: true }),
+      stat(dirname(ambientPath), { bigint: true }),
+    ]);
+    if (localHome.dev === sourceHome.dev && localHome.ino === sourceHome.ino) {
+      if (sourceName === "auth.json") return false;
+      // A case-insensitive volume may accept both spellings for one entry.
+      const names = await readdir(codexHome);
+      if (!names.includes("auth.json") || !names.includes(sourceName))
+        return false;
+    }
+  }
+
+  // A failed native logout or interrupted process must not let a scan reimport the token.
+  await setCodexSecurityCredentialLogout(codexHome, true);
+  await rm(localPath);
+  return true;
+}
+
 export async function setCodexSecurityCredentialLogout(
   codexHome: string,
   loggedOut: boolean,
@@ -2384,30 +2430,15 @@ export async function importAmbientAuth(
   const temporary = join(isolatedHome, `.auth-${randomUUID()}.tmp`);
   try {
     await copyFile(source, temporary, constants.COPYFILE_EXCL);
-    // A ChatGPT refresh token is single-use, and Codex renews it by rewriting
-    // auth.json in place. Share the ambient file through a hard link so a
-    // renewal by either client reaches the other. A copy would sign out
-    // whichever client renews second.
-    const shared = holdsRefreshToken(await readFile(temporary, "utf8"));
-    if (shared) {
-      await rm(temporary);
-      try {
-        await link(await realpath(source), temporary);
-      } catch (error) {
-        if (HARD_LINK_UNSUPPORTED.includes(nodeErrorCode(error) ?? "")) {
-          return false;
-        }
-        throw error;
-      }
-    }
     await chmod(temporary, 0o600);
     try {
       try {
         await link(temporary, destination);
       } catch (error) {
         if (
-          shared ||
-          !HARD_LINK_UNSUPPORTED.includes(nodeErrorCode(error) ?? "")
+          !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
+            nodeErrorCode(error) ?? "",
+          )
         ) {
           throw error;
         }
@@ -2434,47 +2465,6 @@ export async function importAmbientAuth(
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
   }
-}
-
-const HARD_LINK_UNSUPPORTED = [
-  "EPERM",
-  "ENOTSUP",
-  "EOPNOTSUPP",
-  "EXDEV",
-  "EMLINK",
-];
-
-function holdsRefreshToken(contents: string): boolean {
-  let auth: unknown;
-  try {
-    auth = JSON.parse(contents);
-  } catch {
-    return false;
-  }
-  const tokens = isRecord(auth) ? auth["tokens"] : undefined;
-  return isRecord(tokens) && isNonEmptyString(tokens["refresh_token"]);
-}
-
-/**
- * Codex login writes through $CODEX_HOME/auth.json, and logout revokes its
- * tokens. Unlink a sign-in shared with another Codex home first, so these
- * commands neither replace nor revoke the regular Codex sign-in. Returns
- * whether a shared sign-in was removed.
- */
-export async function detachSharedCredentials(
-  codexHome: string,
-): Promise<boolean> {
-  const path = join(codexHome, "auth.json");
-  let metadata: Stats;
-  try {
-    metadata = await lstat(path);
-  } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") return false;
-    throw error;
-  }
-  if (!metadata.isFile() || metadata.nlink < 2) return false;
-  await rm(path, { force: true });
-  return true;
 }
 
 export async function extractPluginZip(

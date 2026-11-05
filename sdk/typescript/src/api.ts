@@ -264,7 +264,7 @@ import {
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
   createIsolatedHome,
-  detachSharedCredentials,
+  detachAmbientAuthForLogout,
   executablePathForSpawn,
   expandHome,
   importAmbientAuth,
@@ -4144,7 +4144,6 @@ export class CodexSecurity {
     await this.#trackOperation(async () => {
       const authentication = await this.#authentication();
       this.#requireOpen();
-      await this.#detachSharedCredentials(authentication.codexHome);
       const result = await persistApiKey(
         await this.#providerPreflightCommand(),
         authentication.environment,
@@ -4174,7 +4173,6 @@ export class CodexSecurity {
     this.#requireOpen();
     const command = await this.#providerPreflightCommand();
     this.#requireOpen();
-    await this.#detachSharedCredentials(authentication.codexHome);
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
         command,
@@ -4222,24 +4220,34 @@ export class CodexSecurity {
     await this.#trackOperation(async () => {
       const authentication = await this.#authentication();
       this.#requireOpen();
+      const clearStoredCredentials = () => {
+        if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
+        this.#runtimeCredentialSource = null;
+      };
       await withCredentialHomeLock(
         authentication.codexHome,
         async () => {
-          await detachSharedCredentials(authentication.codexHome);
+          const command = await this.#providerPreflightCommand();
+          const detached = await detachAmbientAuthForLogout(
+            authentication.codexHome,
+            scanCodexHome(this.#dependencies.environment),
+          );
+          if (detached) clearStoredCredentials();
           await codexLogout(
-            await this.#providerPreflightCommand(),
+            command,
             authentication.environment,
             this.#abortController.signal,
           );
-          await setCodexSecurityCredentialLogout(
-            authentication.codexHome,
-            true,
-          );
+          if (!detached) {
+            await setCodexSecurityCredentialLogout(
+              authentication.codexHome,
+              true,
+            );
+            clearStoredCredentials();
+          }
         },
         this.#abortController.signal,
       );
-      if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
-      this.#runtimeCredentialSource = null;
       this.#requireOpen();
     });
   }
@@ -4314,13 +4322,6 @@ export class CodexSecurity {
         CODEX_HOME: codexHome,
       },
     };
-  }
-
-  // If the login that follows fails, this client no longer has a stored sign-in.
-  async #detachSharedCredentials(codexHome: string): Promise<void> {
-    if (!(await detachSharedCredentials(codexHome))) return;
-    if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
-    this.#runtimeCredentialSource = null;
   }
 
   async #recordLogin(
