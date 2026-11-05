@@ -290,6 +290,10 @@ export function unsuccessfulJob(job: PrivateImportJob | undefined) {
   return job?.status === "failed" || job?.status === "cancelled";
 }
 
+export function parsePrivateCheckpoint(serialized: string) {
+  return checkpointSchema.parse(JSON.parse(serialized));
+}
+
 export function readPrivateCheckpoint(
   serialized: string,
   expected: {
@@ -302,7 +306,7 @@ export function readPrivateCheckpoint(
     repository: { id: string; repo_connector_id: string };
   },
 ) {
-  const checkpoint = checkpointSchema.parse(JSON.parse(serialized));
+  const checkpoint = parsePrivateCheckpoint(serialized);
   const {
     uploadRequestId,
     jobRequestId,

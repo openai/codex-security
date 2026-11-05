@@ -102,7 +102,11 @@ import {
 } from "./support/github-import-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { normalizeTrivyFindings } from "../src/trivy-findings.js";
-import { normalizeInspectorFindings } from "../src/inspector-findings.js";
+import {
+  normalizeInspectorFindings,
+  normalizePreviousInspectorFindings,
+} from "../src/inspector-findings.js";
+import { normalizePreviousContinuumFindings } from "../src/continuum-findings.js";
 import {
   trivyReport,
   trivyRepositoryHeader,
@@ -110,6 +114,7 @@ import {
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
+  inspectorCodeFinding,
   inspectorReport,
   inspectorPackageFinding,
   inspectorRepositoryUrl,
@@ -4534,6 +4539,121 @@ test.each(["inspector", "sonar"] as const)(
     expect(f.posts).toHaveLength(1);
   },
 );
+
+function inspectorReportWithRelatedCves() {
+  const pkg = inspectorPackageFinding();
+  // The previous reader excluded this row because it projected 101 advisory IDs.
+  pkg.packageVulnerabilityDetails.relatedVulnerabilities = Array.from(
+    { length: 100 },
+    (_, i) => `CVE-2099-${3000 + i}`,
+  );
+  return { findings: [inspectorCodeFinding(), pkg] };
+}
+
+test.each([
+  {
+    provider: "inspector",
+    raw: inspectorReportWithRelatedCves(),
+    normalizePrevious: normalizePreviousInspectorFindings,
+    sourceRepositoryUrl: inspectorRepositoryUrl,
+    previousDigest:
+      "4e90748318e5952a1fa90ff9c25153396340a097db6112f27bdf89a3a092dade",
+    expectedCount: 2,
+  },
+  {
+    provider: "continuum",
+    raw: continuumDetail(),
+    normalizePrevious: normalizePreviousContinuumFindings,
+    sourceRepositoryUrl: continuumRepository,
+    previousDigest:
+      "22307dedb51cefecf56d11fd68f45324dceb5226bfddfbd48c635a462bb68fb5",
+    expectedCount: 1,
+  },
+] as const)(
+  "a raw $provider retry preserves the repository request from the previous reader",
+  async ({
+    provider,
+    raw,
+    normalizePrevious,
+    sourceRepositoryUrl,
+    previousDigest,
+    expectedCount,
+  }) => {
+    const f = await fixture(raw, sourceRepositoryUrl);
+    const settings = { ...options, provider, sourceRepositoryUrl };
+    const prepare = () => prepareExternalPublication(f.file, settings, f.deps);
+
+    // Round-trip the previous SDK's output through JSON as a saved caller artifact.
+    const previous = JSON.parse(
+      JSON.stringify(normalizePrevious(raw, sourceRepositoryUrl)),
+    );
+    expect(hash("sha256", canonicalJson(previous.findings))).toBe(
+      previousDigest,
+    );
+    const original = await prepareNormalizedExternalPublication(
+      previous,
+      settings,
+      f.deps,
+    );
+    const pending = await f.loseResponse(original);
+    const request = f.posts[0]!;
+
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(original.preview.requests);
+    expect(await f.loseResponse(retry)).toBe(pending);
+    expect((await (await prepare()).publish()).verified).toBe(1);
+    expect(f.posts).toEqual([request, request, request]);
+
+    const fresh = await prepare();
+    expect(fresh.preview.resumed).toBe(false);
+    expect(fresh.preview.findings).toHaveLength(expectedCount);
+    expect(fresh.preview.findings).not.toEqual(original.preview.findings);
+  },
+);
+
+test("a fresh AWS publication waits for the previous reader to save its request", async () => {
+  const raw = continuumDetail();
+  const f = await fixture(raw, continuumRepository);
+  const settings = {
+    ...options,
+    provider: "continuum" as const,
+    sourceRepositoryUrl: continuumRepository,
+  };
+  const previous = await prepareNormalizedExternalPublication(
+    normalizePreviousContinuumFindings(raw, continuumRepository),
+    settings,
+    f.deps,
+  );
+  const fresh = await prepareExternalPublication(f.file, settings, f.deps);
+  const observer = observeLockContention();
+  const rename = fs.rename;
+  let competitor: Promise<unknown> | undefined;
+  let outcome: string | undefined;
+  const install = spyOn(fs, "rename").mockImplementationOnce(
+    async (...args) => {
+      // The earlier publisher holds its lock but has not installed its checkpoint yet.
+      competitor = fresh.publish().catch((error: unknown) => error);
+      outcome = await Promise.race([
+        observer.contended.then(() => "locked"),
+        competitor.then(() => "finished"),
+      ]);
+      return rename(...args);
+    },
+  );
+  try {
+    f.state.throttle = true;
+    await expect(previous.publish()).rejects.toThrow("Slow down");
+    expect(outcome).toBe("locked");
+    expect(String(await competitor)).toContain(
+      "Another publication prepared this input",
+    );
+    expect(f.posts).toHaveLength(1);
+  } finally {
+    install.mockRestore();
+    observer.restore();
+  }
+});
 
 const savedBlackDuckEvidence = {
   data: { format: "blackduck-bom-6" },
@@ -11147,6 +11267,29 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
 });
 
 test.each([
+  {
+    provider: "github",
+    format: "security.findings.v1",
+    raw: [importedAlert()],
+  },
+  {
+    provider: "inspector",
+    format: "security.findings.v1",
+    raw: inspectorReportWithRelatedCves(),
+    sourceRepositoryUrl: inspectorRepositoryUrl,
+    previousReader: normalizePreviousInspectorFindings,
+    previousSha256:
+      "91b5a4d309daee520029a3d54e809ad84d8b47ee97df5fd54d56323fc246f640",
+  },
+  {
+    provider: "continuum",
+    format: "security.findings.v1",
+    raw: continuumDetail(),
+    sourceRepositoryUrl: continuumRepository,
+    previousReader: normalizePreviousContinuumFindings,
+    previousSha256:
+      "98f888f8b748bb54a209b19de53af40867f5f129049a99da0387e697895aa320",
+  },
   { provider: "snyk", format: "security.findings.v1", raw: snykSarif() },
   {
     provider: "endor",
@@ -11168,16 +11311,15 @@ test.each([
   },
 ] as const)(
   "a signed-in $provider private import resumes lost upload and job responses",
-  async ({ provider, format, raw }) => {
+  async (scenario) => {
+    const { provider, format, raw } = scenario;
+    const sourceRepositoryUrl =
+      "sourceRepositoryUrl" in scenario
+        ? scenario.sourceRepositoryUrl
+        : undefined;
     const f = await fixture(raw);
     const originalBytes = await readFile(f.file, "utf8");
-    const settings = { ...options, provider };
-    const repositoryPreview = await prepareExternalPublication(
-      f.file,
-      settings,
-      f.deps,
-    );
-    f.state.environmentId = null;
+    const settings = { ...options, provider, sourceRepositoryUrl };
     let contextVersion = "generation-a";
     let formats = [
       "security.findings.v1",
@@ -11188,11 +11330,14 @@ test.each([
     let loseResponses = true;
     let unavailable = false;
     let terminal: "completed" | "failed" | "cancelled" = "completed";
-    let advertised = true;
+    let advertised = false;
     let canCreate = true;
     let fileRequest: string | undefined;
     let fileHash: string | undefined;
     let fileBytes = 0;
+    let reportCount = 1;
+    let unorderedUpdates = 0;
+    const uploadedReports: { id: string; bytes: string }[] = [];
     let jobRequest: string | undefined;
     const fileId = "aifile_" + "a".repeat(32);
     let jobId = "import_" + "b".repeat(32);
@@ -11219,13 +11364,13 @@ test.each([
       ],
       status,
       counts: {
-        total: 1,
-        discovered: 1,
-        created: status === "completed" ? 1 : 0,
+        total: reportCount,
+        discovered: reportCount,
+        created: status === "completed" ? reportCount - unorderedUpdates : 0,
         updated: 0,
         unchanged: 0,
-        error: 0,
-        unprocessed: status === "completed" ? 0 : 1,
+        error: status === "completed" ? unorderedUpdates : 0,
+        unprocessed: status === "completed" ? 0 : reportCount,
       },
       poll_after_seconds: null,
       error: null,
@@ -11248,11 +11393,12 @@ test.each([
             headers: advertised
               ? {
                   "Codex-Security-Private-Import-Providers":
-                    "snyk,github,endor,wiz",
+                    "snyk,github,endor,wiz,inspector,continuum",
                 }
               : {},
           });
         }
+        if (path.startsWith("/external/")) return f.deps.fetch(url, init);
         if (path === "/finding-imports/context")
           return Response.json({
             object: "security.finding_import_context",
@@ -11277,19 +11423,41 @@ test.each([
             expect(doc.format).toBe(expectedFormat);
             expect(doc.findings[0].source_finding_id).toBeTruthy();
             expect(doc.findings[0].evidence.source_data).toBeTruthy();
+            reportCount = doc.findings.length;
+            if (provider === "inspector" || provider === "continuum") {
+              const native = provider === "inspector" ? raw.findings : [raw];
+              const expected = loseResponses ? native.slice(0, 1) : native;
+              expect(doc.findings).toHaveLength(expected.length);
+              for (const row of expected) {
+                const finding = doc.findings.find(
+                  (item: { source_finding_id: string }) =>
+                    item.source_finding_id === row.findingArn,
+                );
+                expect(finding?.evidence.source_data.finding).toEqual(row);
+              }
+            }
           } else {
             expect(bytes).toBe(originalBytes);
           }
+          uploadedReports.push({ id: fileRequest, bytes });
           fileHash = hash("sha256", bytes);
           fileBytes = Buffer.byteLength(bytes);
-          if (loseResponses) throw new Error("lost upload response");
+          if (loseResponses && uploadedReports.length === 1)
+            throw new Error("lost upload response");
           return Response.json(fileMetadata());
         }
-        if (path === `/finding-imports/file-requests/${fileRequest}`)
+        if (path === `/finding-imports/file-requests/${fileRequest}`) {
+          if ("previousSha256" in scenario && uploadedReports.length === 1)
+            return new Response(null, { status: 404 });
           return Response.json(fileMetadata());
+        }
         if (path === "/finding-imports/jobs") {
           const body = JSON.parse(String(init.body));
           expect(body.request_id).not.toBe(fileRequest);
+          expect(body.source).toEqual({
+            provider,
+            source_key: settings.sourceKey,
+          });
           expect(body.input).toEqual({
             type: "file",
             file_id: fileId,
@@ -11328,11 +11496,16 @@ test.each([
       },
     };
     const prepare = () => prepareExternalPublication(f.file, settings, deps);
+    const repositoryPreview = await prepare();
+    f.state.environmentId = null;
+    advertised = true;
     const original = await prepare();
     expect(original.preview.privateImport?.sha256).toBeTruthy();
     expect(original.preview.privateImport?.format).toBe(format);
     const cli = createCliTest(main);
     const dryRun = [...f.command, "--dry-run"];
+    if (sourceRepositoryUrl)
+      dryRun.push("--source-repository-url", sourceRepositoryUrl);
     dryRun[dryRun.indexOf("--provider") + 1] = provider;
     dryRun[dryRun.indexOf("--format") + 1] = "toon";
     expect(
@@ -11347,24 +11520,76 @@ test.each([
     canCreate = false;
     await expect(prepare()).rejects.toThrow("unavailable");
     canCreate = true;
-    await expect((await prepare()).publish()).rejects.toThrow(
-      "lost upload response",
+    // Stage the older AWS reader's serialized evidence to reproduce an upgrade
+    // after upload. A fresh context below must use the current reader again.
+    const staged =
+      scenario.previousReader && scenario.sourceRepositoryUrl
+        ? await prepareNormalizedExternalPublication(
+            JSON.parse(
+              JSON.stringify(
+                scenario.previousReader(raw, scenario.sourceRepositoryUrl),
+              ),
+            ),
+            settings,
+            deps,
+          )
+        : await prepare();
+    const interrupted = await staged.publish().catch((error: unknown) => error);
+    if (!(interrupted instanceof ExternalPublicationError))
+      throw new Error("Expected an interrupted private upload", {
+        cause: interrupted,
+      });
+    expect(interrupted.message).toContain("lost upload response");
+    const saved = JSON.parse(
+      await readFile(interrupted.result.savedSubmission!, "utf8"),
     );
+    expect(fileHash).toBe(saved.sha256);
+    expect(fileRequest).toBe(saved.uploadRequestId);
+    if ("previousSha256" in scenario) {
+      expect(fileHash).toBe(scenario.previousSha256);
+      expect(fileHash).not.toBe(original.preview.privateImport?.sha256);
+    }
     await expect(repositoryPreview.publish()).rejects.toThrow(
-      "A private import already owns this selection",
+      "previousSha256" in scenario
+        ? "Another publication prepared this input"
+        : "A private import already owns this selection",
     );
     expect(f.posts).toHaveLength(0);
     advertised = false;
-    await expect((await prepare()).publish()).rejects.toThrow(
-      "lost job response",
-    );
+    const resumed = await prepare();
+    expect(resumed.preview.resumed).toBe(true);
+    expect(resumed.preview.privateImport?.sha256).toBe(saved.sha256);
+    await expect(resumed.publish()).rejects.toThrow("lost job response");
+    expect(jobRequest).toBe(saved.jobRequestId);
     const completed = await (await prepare()).publish();
     expect(completed.privateJob?.counts.created).toBe(1);
     expect(completed.receipts).toEqual([]);
     expect(completed.verified).toBe(0);
-    expect(
-      calls.filter((call) => call === "POST /finding-imports/files"),
-    ).toHaveLength(1);
+    if ("previousSha256" in scenario) {
+      expect(uploadedReports).toHaveLength(2);
+      expect(uploadedReports[1]).toEqual(uploadedReports[0]);
+    } else {
+      expect(uploadedReports).toHaveLength(1);
+    }
+    if (provider === "inspector") {
+      // A completed old job cannot account for the newly admitted package finding.
+      advertised = true;
+      loseResponses = false;
+      const next = await prepare();
+      expect(next.preview.resumed).toBe(false);
+      expect(next.preview.privateImport?.sha256).toBe(
+        original.preview.privateImport?.sha256,
+      );
+      // The code finding's changed evidence has no baseline. Only the new ARN
+      // can be created in this workspace.
+      unorderedUpdates = 1;
+      const nextResult = await next.publish();
+      expect(nextResult.privateJob?.id).not.toBe(completed.privateJob?.id);
+      expect(nextResult.privateJob?.counts).toMatchObject({
+        created: 1,
+        error: 1,
+      });
+    }
     canCreate = false;
     expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
     expect(calls.at(-1)).toBe(`GET /finding-imports/jobs/${jobId}`);
@@ -11372,7 +11597,7 @@ test.each([
     const acknowledged = {
       result: {
         status: "interrupted",
-        counts: { created: 1 },
+        counts: { created: reportCount - unorderedUpdates },
         unacknowledged: 0,
         privateJob: { id: jobId },
       },
@@ -11386,6 +11611,8 @@ test.each([
     formats = ["security.findings.v1"];
     expect((await prepare()).preview.privateImport?.format).toBe(format);
     contextVersion = "generation-c";
+    unorderedUpdates = 0;
+    advertised = true;
     canCreate = true;
     loseResponses = false;
     expectedFormat = "security.findings.v1";
@@ -11393,7 +11620,12 @@ test.each([
     const fresh = await prepare();
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.privateImport?.format).toBe(expectedFormat);
+    if ("previousSha256" in scenario)
+      expect(fresh.preview.privateImport?.sha256).toBe(
+        original.preview.privateImport?.sha256,
+      );
     expect((await fresh.publish()).privateJob?.status).toBe(terminal);
+    expect(fileHash).toBe(fresh.preview.privateImport?.sha256);
     const failedJob = jobId;
     const retry = await prepare();
     const secondPreview = await prepare();
@@ -11415,7 +11647,7 @@ test.each([
       await expect(retry.publish()).rejects.toMatchObject({
         result: {
           status: "interrupted",
-          counts: { created: 1 },
+          counts: { created: reportCount },
           unacknowledged: 0,
           privateJob: { status: "completed" },
         },

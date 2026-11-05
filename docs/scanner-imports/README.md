@@ -39,7 +39,7 @@ Cloud private inbox imports came after [version 0.8.2](https://github.com/openai
 | Guide                                                       | Supported input                                                                 |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md)                            | Inspector2 `ListFindings` JSON for one Code Security repository                 |
-| [AWS Continuum](continuum.md)                               | Code finding summaries or a detailed finding verified for one repository        |
+| [AWS Continuum](continuum.md)                               | Summaries or selected code finding details for one verified repository          |
 | [Black Duck SCA](blackduck.md)                              | BOM component vulnerabilities for one project version                           |
 | [Checkmarx SAST](checkmarx.md)                              | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |
 | [Endor Labs](endor.md)                                      | Finding JSON from `endorctl`, or SARIF with finding UUIDs                       |
@@ -81,10 +81,10 @@ codex-security findings imported /path/to/project --format json
 
 For a Cloud import, check the receipt for the destination shown in the preview.
 
-| What the Cloud preview shows                      | How to verify the import                                                                                                   |
-| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Private inbox (`privateImport`)                   | Check the job status, errors, exclusions, and unprocessed count. Open a finding in your inbox to assess it before sharing. |
-| Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                      |
+| What the Cloud preview shows                      | How to verify the import                                                                                                                                 |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private inbox (`privateImport`)                   | Check that `privateJob.status` is `completed` and its counts account for the selected findings, with zero errors or unprocessed rows. Review exclusions. |
+| Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                                                    |
 
 If `publish findings` stops and returns `savedSubmission`, [resume from that checkpoint](schema-guide.md#retry-a-cloud-submission).
 
