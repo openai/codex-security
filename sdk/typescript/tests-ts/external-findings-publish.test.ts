@@ -10708,6 +10708,26 @@ test("repository severity exclusions identify every original OpenGrep trace", as
     ]);
     expect(selection.excluded[2]).toEqual(parsed.excluded[0]);
   }
+  for (const saved of [
+    structuredClone(parsed),
+    JSON.parse(JSON.stringify(parsed)),
+  ]) {
+    const failure = await prepareNormalizedExternalPublication(
+      saved,
+      { ...settings, provider: "semgrep" },
+      deps,
+    ).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(NoPublishableFindingsError);
+    const { selection, summary } = failure as NoPublishableFindingsError;
+    expect(summary).toContain("4 read, 4 excluded");
+    expect(selection.excluded.map(({ position }) => position)).toEqual([
+      1, 2, 3, 4,
+    ]);
+    expect(
+      selection.excluded.map(({ source_finding_id }) => source_finding_id),
+    ).toEqual([null, null, null, null]);
+    expect(selection.excluded[2]).toEqual(parsed.excluded[0]);
+  }
   expect(f.posts).toHaveLength(0);
 });
 

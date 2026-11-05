@@ -327,6 +327,21 @@ function matchesRepositoryEvidence(
   return wireJson({ ...expected, locations, packages }) === storedWire;
 }
 
+function isCompleteUnscoredOpenGrepReport(report: ExternalFindings) {
+  let rows = report.excluded.length;
+  for (const { evidence } of report.findings) {
+    const traces = evidence.source_data?.["results"];
+    if (
+      evidence.details?.scanner_origin !== "OpenGrep" ||
+      evidence.severity !== "unknown" ||
+      !Array.isArray(traces)
+    )
+      return false;
+    rows += traces.length;
+  }
+  return rows === report.read;
+}
+
 function repositorySelection(
   report: ExternalFindings,
   severities: readonly string[] | undefined,
@@ -341,19 +356,37 @@ function repositorySelection(
     return report;
   const excluded = [...report.excluded];
   const skipped = new Set(excluded.map(({ position }) => position));
+  function exclude(position: number, id: string | null, severity: string) {
+    excluded.push({
+      position,
+      source_finding_id: id,
+      reason: `The repository publisher does not accept severity ${JSON.stringify(severity)}. A local import or an available private inbox can retain this finding.`,
+    });
+  }
+  // Serialized OpenGrep selections retain every trace but lose the reader's
+  // position map. All these traces have unknown severity, so the remaining
+  // source rows are provably excluded even when their individual IDs are lost.
+  if (!sourcePositions && isCompleteUnscoredOpenGrepReport(report)) {
+    const id =
+      report.findings.length === 1
+        ? report.findings[0]!.source_finding_id
+        : null;
+    for (let row = 1; row <= report.read; row++)
+      if (!skipped.has(row)) exclude(row, id, "unknown");
+    return {
+      ...report,
+      findings: [],
+      excluded: excluded.sort((a, b) => a.position - b.position),
+    };
+  }
   let position = 0;
   const findings = report.findings.filter(({ source_finding_id, evidence }) => {
     do {
       position++;
     } while (skipped.has(position));
     if (severities.includes(evidence.severity)) return true;
-    // OpenGrep can combine several nonconsecutive traces into one occurrence.
     for (const row of sourcePositions?.get(source_finding_id) ?? [position])
-      excluded.push({
-        position: row,
-        source_finding_id,
-        reason: `The repository publisher does not accept severity ${JSON.stringify(evidence.severity)}. A local import or an available private inbox can retain this finding.`,
-      });
+      exclude(row, source_finding_id, evidence.severity);
     return false;
   });
   return {
