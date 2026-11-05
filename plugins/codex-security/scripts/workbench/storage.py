@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
+# SDK hosts also load this file directly with runpy, outside the workbench package.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from windows_paths import filesystem_path, portable_path
 
 
