@@ -13,7 +13,10 @@ imports and the private inbox can retain findings with an unreported severity.
 Native JSON keeps vulnerability and malware advisory IDs and aliases. When
 Endor supplies only the fully qualified dependency name, the import preserves
 that name, including its ecosystem and version. A branch scan uses its REF
-context ID. The source version's ref can also identify a tag or commit.
+context ID. The source version's ref can also identify a tag or commit. If
+optional package or advisory details would exceed Cloud's 256 KiB limit for
+a finding, a new private import uploads the reviewed fields and their original
+Endor record together. Retrying a saved import reuses its original upload.
 
 ## Quick start
 

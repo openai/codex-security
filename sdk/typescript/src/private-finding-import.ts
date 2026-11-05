@@ -186,6 +186,7 @@ export async function selectPrivateReport(
   path: string | undefined,
   context: PrivateImportContext,
   saved: string | undefined,
+  preferStructuredReport = false,
 ): Promise<ReturnType<typeof privateReport>> {
   const checkpoint =
     saved === undefined ? undefined : checkpointSchema.parse(JSON.parse(saved));
@@ -207,7 +208,7 @@ export async function selectPrivateReport(
     selection.findings.length === selection.read &&
     (originalFormat
       ? originalFormat === format
-      : context.formats.includes(format))
+      : !preferStructuredReport && context.formats.includes(format))
   ) {
     const handle = await open(
       path,

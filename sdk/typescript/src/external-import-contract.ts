@@ -375,21 +375,37 @@ export function previousAdmission(value: object) {
   return previousAdmissions.get(value);
 }
 
+class CloudEvidenceSizeError extends Error {}
+
+const sizeLimitedEnrichments = new WeakSet<ExternalFindingEvidence>();
+
+/** Whether adding optional typed fields to this record exceeded the Cloud evidence size limit. */
+export function hasSizeLimitedEnrichment(evidence: ExternalFindingEvidence) {
+  return sizeLimitedEnrichments.has(evidence);
+}
+
 /** Keep a valid native record when its optional structured fields exceed the target's bounds. */
 export function validateEnrichedExternalEvidence(
   evidence: Record<string, unknown>,
   target: ExternalImportTarget,
   ...projections: (Record<string, unknown> | undefined)[]
 ): ExternalFindingEvidence {
+  let sizeLimited = false;
+  function validate(projection: Record<string, unknown>) {
+    const result = validateExternalEvidence(projection, target);
+    if (sizeLimited) sizeLimitedEnrichments.add(result);
+    return result;
+  }
   for (const extra of projections) {
     if (!extra) continue;
     try {
-      return validateExternalEvidence({ ...evidence, ...extra }, target);
-    } catch {
+      return validate({ ...evidence, ...extra });
+    } catch (error) {
+      if (error instanceof CloudEvidenceSizeError) sizeLimited = true;
       // Try the next projection. The native record must pass the same validation.
     }
   }
-  return validateExternalEvidence(evidence, target);
+  return validate(evidence);
 }
 
 export function validateExternalEvidence(
@@ -583,7 +599,9 @@ function rawJsonNumbers(
 const CLOUD_EVIDENCE_BYTES = 256 * 1024;
 function checkEvidenceSize(bytes: number): number {
   if (bytes > CLOUD_EVIDENCE_BYTES)
-    throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
+    throw new CloudEvidenceSizeError(
+      "Evidence exceeds the Cloud limit of 256 KiB.",
+    );
   return bytes;
 }
 

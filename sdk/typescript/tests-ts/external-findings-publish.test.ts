@@ -11735,6 +11735,7 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
 
 const sonarReport = sonarCapture(exampleRepository);
 const trivy = trivyReport();
+const endorWithManyManifests = endorFinding();
 const structuredPrivateProviders = [
   {
     provider: "blackduck",
@@ -11823,6 +11824,31 @@ test.each([
     raw: { list: { objects: [endorFinding()] } },
   },
   {
+    provider: "endor",
+    format: "security.findings.v1",
+    raw: {
+      ...endorWithManyManifests,
+      extra: "x".repeat(190 * 1024),
+      spec: {
+        ...endorWithManyManifests.spec,
+        target_dependency_name: null,
+        target_dependency_package_name: "x".repeat(495),
+        dependency_file_paths: Array.from(
+          { length: 100 },
+          (_, i) => `modules/${i}/yarn.lock`,
+        ),
+      },
+    },
+    // Captured after the native upload was interrupted on 18a74438b.
+    releasedNative: {
+      key: "52629feec0c5f197e2bce1779b908306b6b01d232112b359451da0da111c6ccd",
+      sha256:
+        "2aba52fd27bf9b6b2fdf6cb84b701a61690266a29924fb6d6a25e9a4c1574341",
+      uploadRequestId: "200ce23c-1576-4525-8b58-50c43812bce8",
+      jobRequestId: "9bceaf8a-8ef4-4bbc-99a7-78fc0d6dcbcf",
+    },
+  },
+  {
     provider: "wiz",
     format: "wiz.vulnerability_json.v1",
     raw: [
@@ -11839,6 +11865,8 @@ test.each([
   "a signed-in $provider private import resumes lost upload and job responses",
   async (scenario) => {
     const { provider, format, raw } = scenario;
+    const releasedNative =
+      "releasedNative" in scenario ? scenario.releasedNative : undefined;
     const sourceRepositoryUrl =
       "sourceRepositoryUrl" in scenario
         ? scenario.sourceRepositoryUrl
@@ -11966,6 +11994,11 @@ test.each([
             expect(doc.findings[0].source_finding_id).toBeTruthy();
             expect(doc.findings[0].evidence.source_data).toBeTruthy();
             reportCount = doc.findings.length;
+            if (releasedNative) {
+              expect(doc.findings).toHaveLength(1);
+              expect(doc.findings[0].evidence.packages ?? []).toEqual([]);
+              expect(doc.findings[0].evidence.source_data).toEqual(raw);
+            }
             if ("retained" in scenario) {
               expect(doc.findings).toHaveLength(1);
               expect(doc.findings[0].evidence.source_data).toMatchObject(
@@ -11994,6 +12027,13 @@ test.each([
             throw new Error("lost upload response");
           return Response.json(fileMetadata());
         }
+        if (
+          releasedNative &&
+          !fileRequest &&
+          path ===
+            `/finding-imports/file-requests/${releasedNative.uploadRequestId}`
+        )
+          return new Response(null, { status: 404 });
         if (path === `/finding-imports/file-requests/${fileRequest}`) {
           if ("previousSha256" in scenario && uploadedReports.length === 1)
             return new Response(null, { status: 404 });
@@ -12073,6 +12113,26 @@ test.each([
     canCreate = true;
     // Stage the older reader's serialized evidence to reproduce an upgrade
     // after upload. A fresh context below must use the current reader again.
+    if (releasedNative) {
+      const { key, ...saved } = releasedNative;
+      expectedFormat = "endor.findings_json.v1";
+      contextVersion = "generation-a";
+      const directory = join(f.root, "state", "external-finding-publications");
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeFile(
+        join(directory, key + ".private-import.json"),
+        JSON.stringify({
+          ...saved,
+          format: expectedFormat,
+          apiBaseUrl: "https://chatgpt.com/backend-api/aardvark",
+          accountId: "synthetic-account",
+          contextVersion,
+          source: { provider, source_key: settings.sourceKey },
+          repository: { id: options.repository, repo_connector_id: "github" },
+        }),
+        { mode: 0o600 },
+      );
+    }
     const staged =
       "previousReader" in scenario && scenario.previousReader
         ? await prepareNormalizedExternalPublication(
@@ -12097,6 +12157,15 @@ test.each([
     expect(saved.jobApiVersion).toBe(upgrade ? undefined : jobVersion);
     expect(fileHash).toBe(saved.sha256);
     expect(fileRequest).toBe(saved.uploadRequestId);
+    if (releasedNative) {
+      expect(saved).toMatchObject({
+        format: "endor.findings_json.v1",
+        sha256: releasedNative.sha256,
+        uploadRequestId: releasedNative.uploadRequestId,
+        jobRequestId: releasedNative.jobRequestId,
+      });
+      expect(fileHash).not.toBe(original.preview.privateImport?.sha256);
+    }
     if ("previousSha256" in scenario) {
       expect(fileHash).toBe(scenario.previousSha256);
       expect(fileHash).not.toBe(original.preview.privateImport?.sha256);
@@ -12190,8 +12259,11 @@ test.each([
 
     // The same context retains its native wire representation even if discovery changes.
     formats = ["security.findings.v1"];
-    expect((await prepare()).preview.privateImport?.format).toBe(format);
+    expect((await prepare()).preview.privateImport?.format).toBe(
+      expectedFormat,
+    );
     contextVersion = "generation-c";
+    if (releasedNative) formats.push("endor.findings_json.v1");
     expectedJobsPath = versionedJobs;
     unorderedUpdates = 0;
     advertised = true;
