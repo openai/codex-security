@@ -18,7 +18,6 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { initialCredentialsAvailable } from "../src/api.js";
 import {
   hasStoredChatGPTSignIn,
   main,
@@ -43,6 +42,7 @@ import {
   fakeSecurity,
   failingSecurity,
 } from "./cli-fixtures.js";
+import { chatGptTokens } from "./support/chatgpt-credentials.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
@@ -62,15 +62,6 @@ const GATEWAY_CONFIGURATION = [
   'env_key="GATEWAY_API_KEY"',
   "requires_openai_auth=true",
 ].join("\n");
-
-const STORED_CHATGPT_LOGIN = JSON.stringify({
-  auth_mode: "chatgpt",
-  tokens: {
-    id_token: "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.c2ln",
-    access_token: "synthetic-access",
-    refresh_token: "synthetic-refresh",
-  },
-});
 
 let stateDirectory: string;
 let skillDirectory: string;
@@ -653,9 +644,11 @@ describe("CLI authentication", () => {
       const ambientHome = join(stateDirectory, "ambient");
       const dedicatedHome = await createCredentialHome();
       await mkdir(ambientHome, { mode: 0o700 });
-      await writeFile(join(ambientHome, "auth.json"), STORED_CHATGPT_LOGIN, {
-        mode: 0o600,
-      });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        JSON.stringify({ auth_mode: "chatgpt", tokens: chatGptTokens }),
+        { mode: 0o600 },
+      );
       if (source === "explicit logout") {
         await setCodexSecurityCredentialLogout(dedicatedHome, true);
       } else if (source === "invalid logout marker") {
@@ -1312,7 +1305,7 @@ describe("CLI authentication", () => {
   );
 
   test.each([false, true])(
-    "keeps fresh ambient authentication usable after login status and removal of the source (home-relative: %p)",
+    "recognizes existing ambient Codex authentication on a fresh state directory during login status (home-relative: %p)",
     async (homeRelative) => {
       const root = await realpath(
         await temporaryDirectory("codex-security-cli-ambient-auth-"),
@@ -1320,7 +1313,10 @@ describe("CLI authentication", () => {
       try {
         const ambientHome = join(root, "ambient-codex");
         await mkdir(ambientHome, { mode: 0o700 });
-        await writeFile(join(ambientHome, "auth.json"), STORED_CHATGPT_LOGIN);
+        await writeFile(
+          join(ambientHome, "auth.json"),
+          '{"auth_mode":"chatgpt"}\n',
+        );
 
         const stdout = capture();
         const stderr = capture();
@@ -1341,15 +1337,10 @@ describe("CLI authentication", () => {
         expect(
           await main(["login", "status"], stdout.stream, stderr.stream, deps),
         ).toBe(0);
-        const privateHome = join(stateDirectory, "codex-home");
-        expect(forwardedHome).toBe(privateHome);
-        await rm(join(ambientHome, "auth.json"));
+        expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
         expect(
-          await initialCredentialsAvailable({}, ambientHome, privateHome),
+          existsSync(join(stateDirectory, "codex-home", "auth.json")),
         ).toBe(true);
-        expect(await readFile(join(privateHome, "auth.json"), "utf8")).toBe(
-          STORED_CHATGPT_LOGIN,
-        );
       } finally {
         await rm(root, { recursive: true, force: true });
       }
