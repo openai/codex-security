@@ -162,6 +162,7 @@ export function createMultiscanFixtures() {
     const id = basename(dirname(outputDir)).toLowerCase();
     return Papa.parse<Record<string, string>>(inventory, {
       header: true,
+      transformHeader: (header) => header.trim(),
       skipEmptyLines: true,
     }).data.find((entry) => entry["id"]?.trim().toLowerCase() === id);
   }
