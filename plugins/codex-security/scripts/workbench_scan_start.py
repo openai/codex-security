@@ -19,7 +19,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
-from windows_paths import extended_path, portable_path, portable_relative_path
+from windows_paths import (
+    extended_path,
+    portable_is_relative_to,
+    portable_path,
+    portable_relative_path,
+)
 from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
@@ -176,8 +181,7 @@ def archive_scan(
                 ),
             ]
             if any(
-                portable_path(path).is_relative_to(portable_scan_dir)
-                for path in protected_directories
+                portable_is_relative_to(path, portable_scan_dir) for path in protected_directories
             ):
                 raise SystemExit(
                     "Cannot archive output containing the workbench state or active database."
@@ -226,9 +230,7 @@ def archive_scan(
             )
 
             def archive_path(value: str | None) -> str | None:
-                if value is None or not portable_path(Path(value)).is_relative_to(
-                    portable_scan_dir
-                ):
+                if value is None or not portable_is_relative_to(Path(value), portable_scan_dir):
                     return value
                 return str(archive_dir / portable_relative_path(Path(value), scan_dir))
 

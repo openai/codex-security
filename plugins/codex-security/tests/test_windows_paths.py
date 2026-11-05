@@ -67,6 +67,8 @@ def test_windows_path_conversion_keeps_relative_spelling_and_literal_leaf(window
     checkout = PureWindowsPath("C:/checkout")
     literal = PureWindowsPath("//?/C:/checkout/reports.")
     assert windows_paths.portable_relative_path(literal, checkout) == PureWindowsPath("reports.")
+    assert windows_paths.portable_is_relative_to(literal / "tool.exe", checkout)
+    assert not windows_paths.portable_is_relative_to(literal, checkout / "reports")
     assert windows_paths.extended_path(checkout / "reports.") == checkout / "reports."
     assert not windows_paths.uses_windows_namespace(windows_paths.extended_path(checkout))
 
@@ -189,3 +191,21 @@ def test_git_snapshot_digest_is_independent_of_root_spelling(tmp_path: Path):
     assert target.directory_content_digest(tmp_path) == target.directory_content_digest(
         paths.extended_path(tmp_path)
     )
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows path spelling")
+def test_git_discovery_rejects_a_tool_under_a_verbatim_only_directory(tmp_path, monkeypatch):
+    paths = load_script("windows_paths")
+    target = load_script("workbench_target")
+    literal = paths.extended_path(tmp_path) / "tools."
+    literal.mkdir()
+    candidate = literal / "git.exe"
+    try:
+        candidate.touch()
+        monkeypatch.setenv("CODEX_SECURITY_GIT", str(candidate))
+        with pytest.raises(SystemExit, match="outside the protected repository"):
+            target.trusted_git_executable(tmp_path)
+    finally:
+        candidate.unlink(missing_ok=True)
+        literal.rmdir()

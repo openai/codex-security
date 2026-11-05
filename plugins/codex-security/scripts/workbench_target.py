@@ -21,7 +21,13 @@ from typing import Any, BinaryIO, Callable
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from windows_paths import extended_path, filesystem_path, portable_path, portable_relative_path
+from windows_paths import (
+    extended_path,
+    filesystem_path,
+    portable_is_relative_to,
+    portable_path,
+    portable_relative_path,
+)
 from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
@@ -261,8 +267,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         ):
             continue
         if any(
-            portable_path(path).is_relative_to(repository)
-            for path in (lexical, invocation, canonical)
+            portable_is_relative_to(path, repository) for path in (lexical, invocation, canonical)
         ):
             if configured is not None:
                 raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
@@ -432,7 +437,7 @@ def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int | No
         else:
             try:
                 resolved = path.resolve(strict=True)
-                if not portable_path(resolved).is_relative_to(portable_path(target)):
+                if not portable_is_relative_to(resolved, target):
                     continue
                 with resolved.open("rb") as stream:
                     binary = _stream_is_binary(stream, os.fstat(stream.fileno()).st_size)
@@ -756,9 +761,7 @@ def git_worktree_context(target: Path) -> tuple[Path, str]:
     pathspec = os.fsdecode(prefix.removesuffix(b"\n")).removesuffix("/") or "."
     scoped = filesystem_path(repository / pathspec).resolve()
     try:
-        if not portable_path(scoped).is_relative_to(
-            portable_path(repository)
-        ) or not scoped.samefile(target):
+        if not portable_is_relative_to(scoped, repository) or not scoped.samefile(target):
             raise ValueError("Git working tree does not contain the selected target")
     except (OSError, ValueError) as exc:
         raise SystemExit("Scan target must stay inside its Git working tree.") from exc
@@ -1074,7 +1077,7 @@ def directory_content_digest(
     excluded_relative = [
         portable_relative_path(path, target)
         for path in excluded
-        if portable_path(path).is_relative_to(portable_path(target))
+        if portable_is_relative_to(path, target)
     ]
     paths = (
         source_directory_snapshot_paths(
@@ -1142,7 +1145,7 @@ def copy_directory_excluding(
     excluded_relative = [
         portable_relative_path(path, source)
         for path in excluded
-        if portable_path(path).is_relative_to(portable_path(source))
+        if portable_is_relative_to(path, source)
     ]
 
     junctions: list[Path] = []

@@ -65,10 +65,20 @@ def uses_windows_namespace(path: Path) -> bool:
     return os.name == "nt" and str(portable_path(path)).startswith(_NAMESPACE_PREFIXES)
 
 
-def portable_relative_path(path: Path, root: Path) -> Path:
+def _comparable_paths(path: Path, root: Path) -> tuple[Path, Path]:
     if os.name == "nt" and path.anchor != root.anchor and path.is_absolute() and root.is_absolute():
         # An extended child can contain a verbatim-only name below an ordinary root.
-        return extended_path(path).relative_to(extended_path(root))
+        return extended_path(path), extended_path(root)
+    return path, root
+
+
+def portable_is_relative_to(path: Path, root: Path) -> bool:
+    path, root = _comparable_paths(path, root)
+    return path.is_relative_to(root)
+
+
+def portable_relative_path(path: Path, root: Path) -> Path:
+    path, root = _comparable_paths(path, root)
     return path.relative_to(root)
 
 

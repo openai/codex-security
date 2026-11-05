@@ -54,7 +54,13 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
-from windows_paths import extended_path, filesystem_path, portable_path, portable_relative_path
+from windows_paths import (
+    extended_path,
+    filesystem_path,
+    portable_is_relative_to,
+    portable_path,
+    portable_relative_path,
+)
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -642,7 +648,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
     root = resolve_scan_root(scan_root)
     target_root = filesystem_path(root / safe_segment(target.name)).resolve()
-    if portable_path(target_root).is_relative_to(portable_path(target)):
+    if portable_is_relative_to(target_root, target):
         raise SystemExit("The scan artifact directory must be outside the selected target.")
     return target_root
 
@@ -1465,9 +1471,9 @@ def complete_scan_locked(
 
 def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Path:
     scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
-    if portable_path(scan_dir).is_relative_to(portable_path(repository)) or portable_path(
-        repository
-    ).is_relative_to(portable_path(scan_dir)):
+    if portable_is_relative_to(scan_dir, repository) or portable_is_relative_to(
+        repository, scan_dir
+    ):
         raise SystemExit(
             "The scan artifact directory must be outside and not contain the selected target."
         )
