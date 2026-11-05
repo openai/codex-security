@@ -380,7 +380,8 @@ export function normalizeTrivyFindings(
   target: ExternalImportTarget = "cloud",
   scanRoot?: string,
 ): ExternalFindings {
-  return normalizeReport(input, target, scanRoot, false);
+  const locationLimit = target === "cloud" ? cloudLocationLimit : Infinity;
+  return normalizeReport(input, target, scanRoot, locationLimit);
 }
 
 /** @internal Only a finding at the Cloud location limit can have a different prior selection. */
@@ -396,14 +397,14 @@ export function normalizePreviousTrivyFindings(
   target: ExternalImportTarget = "cloud",
   scanRoot?: string,
 ): ExternalFindings {
-  return normalizeReport(input, target, scanRoot, true);
+  return normalizeReport(input, target, scanRoot, Infinity);
 }
 
 function normalizeReport(
   input: unknown,
   target: ExternalImportTarget,
   scanRoot: string | undefined,
-  previous: boolean,
+  locationLimit: number,
 ): ExternalFindings {
   const document = record(input, "Trivy report");
   if (document["SchemaVersion"] !== 2)
@@ -497,6 +498,8 @@ function normalizeReport(
       if (targetPath && targetPath !== declaration)
         locations.push({ path: targetPath, line: null });
       if (declaration) {
+        // The scan target already consumes a slot when it differs from this declaration.
+        const lineLimit = locationLimit - locations.length;
         const lines = new Set<number>();
         for (const range of array(
           pkg?.["Locations"] ?? [],
@@ -506,7 +509,8 @@ function normalizeReport(
           if (
             typeof start === "number" &&
             Number.isSafeInteger(start) &&
-            start > 0
+            start > 0 &&
+            lines.size < lineLimit
           )
             lines.add(start);
         }
@@ -538,10 +542,7 @@ function normalizeReport(
                   .filter(Boolean) ?? [],
             },
           ],
-          locations:
-            target === "cloud" && !previous
-              ? locations.slice(0, cloudLocationLimit)
-              : locations,
+          locations,
           branch: text(metadata["Branch"]),
           source_scan_id: text(document["ReportID"]),
           source_data: structuredClone({
