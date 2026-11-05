@@ -127,12 +127,18 @@ export function scanProviderEnvKey(
   config: Readonly<JsonObject>,
 ): string | undefined {
   const selected = scanModelProvider(config);
-  if (!isExternalModelProvider(selected)) return undefined;
+  if (
+    typeof selected !== "string" ||
+    ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
+  )
+    return undefined;
   const providers = resolveCodexProfile(config)["model_providers"];
   const provider = isObject(providers) ? providers[selected] : undefined;
   return isObject(provider) && typeof provider["env_key"] === "string"
     ? provider["env_key"]
-    : EXTERNAL_CODEX_PROVIDERS[selected].env_key;
+    : isExternalModelProvider(selected)
+      ? EXTERNAL_CODEX_PROVIDERS[selected].env_key
+      : undefined;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
@@ -246,14 +252,12 @@ export function scanCyberAccessConfig(
   program: CyberAccessProgram | undefined,
 ): JsonObject {
   if (program === undefined) return config;
-  const resolved = resolveCodexProfile(config);
-  const features = isObject(resolved["features"]) ? resolved["features"] : {};
+  const features = isObject(config["features"]) ? config["features"] : {};
   return {
     ...config,
     features: {
-      ...(isObject(config["features"]) ? config["features"] : {}),
-      // Explicit selections opt in to upstream API-key support. Keep a user's
-      // explicit disable so Codex can report it instead of silently dropping it.
+      ...features,
+      // Set a root default. Normal profile resolution preserves explicit overrides.
       api_key_cyber_access_programs:
         features["api_key_cyber_access_programs"] ?? true,
     },

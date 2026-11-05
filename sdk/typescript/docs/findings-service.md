@@ -1,23 +1,33 @@
 # Findings storage and deduplication
 
-Saved scans and findings persist in the local workbench SQLite database.
-Deduplication reads that database directly; no local HTTP service is needed.
-The CLI can also publish to and deduplicate against independently operated
-compatible endpoints through explicit `--findings-url` settings.
+Choose where the duplicate candidates and groups should live.
 
-For an older service deployment or helper integration, see [compatibility](#compatibility).
+- **Local workbench.** The CLI stores saved scans and findings in SQLite.
+  Use this default to search the current checkout's stored findings. New
+  embeddings and fresh reviews still need provider access.
+- **Independently operated endpoint.** To search a shared corpus, use a
+  [compatible findings endpoint](#compatible-endpoint-contract) that already
+  holds your candidates. [Publish the scan](#publish-a-scan) or import its
+  findings into the service with the matching `repositoryId` first.
 
 ## Deduplicate a scan
 
-Saved-scan deduplication uses local SQLite by default. No findings service or
-publication step is required:
+For the local workbench, run:
 
 ```bash
 codex-security dedupe --scan SCAN_ID --json
 ```
 
-See [local embedding requirements](#local-embeddings-and-backups) for endpoint,
-credential, and vector compatibility.
+For a shared corpus, supply the base URL of your endpoint:
+
+```bash
+codex-security dedupe --scan SCAN_ID --findings-url https://findings.example.com --json
+```
+
+Replace `SCAN_ID` with the ID of a completed scan, or use `latest` for the
+current repository. For local setup or migration, see
+[embedding credentials and backups](#local-embeddings-and-backups) or
+[moving from the bundled service](#local-service-removal).
 
 The CLI prepares missing or stale embeddings for the local repository's stored
 findings, searches them, and saves reviewed duplicate groups in the workbench
@@ -36,24 +46,15 @@ select logical findings using their current stored bodies; dedupe does not
 replace newer bodies with old scan artifacts. A local database does not include
 findings stored only in a separate Docker volume or remote service.
 
-To retain a centralized findings corpus, publish the scan first, or import its
-findings with `repositoryId`, and explicitly select the service:
-
-```bash
-codex-security dedupe --scan SCAN_ID --findings-url https://findings.example.com --json
-```
-
-A scan or workflow selector is required. `--scan`
-accepts a full ID, unique prefix, or `latest` for the current repository. The
-scan must be complete, with sealed artifacts and a local checkout available.
+A scan or workflow selector is required. `--scan` also accepts a unique ID
+prefix. The scan must have sealed artifacts and a local checkout available.
 Local `latest` lookup matches the exact checkout path without Git. Matching
 across worktrees or clones additionally requires a Git executable outside all
 saved scan targets. If an unrelated historical target includes the available
 Git installation, use `codex-security dedupe --scan SCAN_ID` with an explicit
 saved scan ID instead.
 By default, candidates come from its manifest's `scan.target.targetId`. Use
-`--all-repositories` to search the whole selected database or service. Explicit
-`--findings-url` retains the existing remote lookup and publication behavior.
+`--all-repositories` to search the whole selected database or service.
 
 ```typescript
 import { deduplicateScan } from "@openai/codex-security";
@@ -66,6 +67,21 @@ const result = await deduplicateScan("scan_example_001", {
 });
 console.log(result.duplicateGroups);
 ```
+
+Both saved-scan APIs accept `onEmbeddingUsage` for the built-in local adapter.
+It receives one observation per processed batch: model, tokenized input count
+(including chunks of long findings), provider-reported input tokens, outcome,
+and duration in milliseconds. `inputTokens: null` means usage was unavailable,
+including responses that omit usage; it does not mean zero tokens. Cached
+embeddings generate no new observations. Observers are best effort: throws,
+rejections, and pending promises do not fail or block embedding work. No finding
+text, vectors, credentials, or endpoint is included.
+
+Embedding tokens remain separate from scan model-token and cost totals. A batch
+can contain several HTTP attempts when the local adapter retries, and its
+observation only includes usage from the final response. Remote services and
+custom embedding bindings own their usage reporting; set an observer directly on
+`OpenAiFindingEmbedder` when using it in a custom binding.
 
 For a different embedding provider or model, both saved-scan SDK methods accept
 an `embedding` binding. Reuse the `FindingEmbedder` interface: return one
@@ -326,6 +342,20 @@ const receipt = await publishScanToCustom("/path/to/completed-scan", {
 console.log(receipt.repositoryId, receipt.findingIds);
 ```
 
+The Linear and custom publication SDKs return a content-free `telemetry`
+summary and accept `onTelemetry` for outcomes, including preparation failure and
+cancellation. Existing Linear receipts and custom workflow results retain this
+summary. It includes an attempt ID, destination family, duration, outcome, and
+counts of selected, submitted, created, reused, acknowledged, and failed findings.
+Submitted counts describe findings handed to publication, not HTTP attempts.
+`null` denotes unknown counts; in particular, the custom bulk API acknowledges
+IDs without distinguishing creation from upsert. Unknown mutation outcomes are
+`indeterminate`, and dry runs have `outcome: "preview"` and `attempted: false`.
+Reusing a saved custom workflow receipt produces a new attempt summary with no
+submitted findings. Hosts should group repeated receipt snapshots by attempt ID
+and use the latest observation. Callback failures do not change publication
+results, and these callbacks add no network destination or separate files.
+
 ## Compatible endpoint contract
 
 The retained HTTP clients use these endpoints on the supplied base URL,
@@ -373,6 +403,8 @@ the callback before each HTTP batch; the caller handles token acquisition.
 Cancellation prevents a new callback or HTTP request. Direct embedder callers
 still await a key callback that has already started.
 Pass `fetch` as the second argument and the full endpoint URL as the third.
+The fourth argument accepts an `AbortSignal`; the fifth accepts an
+`EmbeddingUsageObserver`.
 By default, the saved-scan deduplication APIs use environment credentials. A
 custom SDK `embedding` binding can supply an adapter with its own credentials,
 including an `OpenAiFindingEmbedder` with a renewable key callback.

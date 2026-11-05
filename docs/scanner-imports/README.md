@@ -32,29 +32,31 @@ Ask it to preview the report with your configured model.
 
 ## Choose your scanner
 
-Check your version with `codex-security --version`. Support for AWS Continuum,
-Black Duck, SonarQube Cloud, Veracode, the Semgrep Platform SDK example, and
-Cloud private inbox imports came after [version 0.8.2](https://github.com/openai/codex-security/blob/npm-v0.8.2/sdk/typescript/docs/cli.md#import-vendor-findings-locally).
+With imports enabled, run `codex-security publish findings --help` to check the
+providers in your installed CLI. The guides cover local and Cloud imports
+unless an input is marked local only. Cloud must support the selected provider. For AWS inbox imports, use a CLI and workspace that support v2 finding import jobs. Check for `privateImport` in the dry-run preview.
 
-| Guide                                                       | Supported input                                                                 |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| [Amazon Inspector](inspector.md)                            | Inspector2 `ListFindings` JSON for one Code Security repository                 |
-| [AWS Continuum](continuum.md)                               | Code finding summaries or a detailed finding verified for one repository        |
-| [Black Duck SCA](blackduck.md)                              | BOM component vulnerabilities for one project version                           |
-| [Endor Labs](endor.md)                                      | Finding JSON from `endorctl`, or SARIF with finding UUIDs                       |
-| [GitHub code scanning](github-code-scanning.md)             | Alerts selected for one repository and Git ref                                  |
-| [GitHub Dependabot](github-dependabot.md)                   | Dependency alerts exported from one repository                                  |
-| [GitHub Security Advisories](github-security-advisories.md) | Selected repository or global advisories                                        |
-| [OpenGrep](opengrep.md)                                     | Native scan JSON, optionally gzip-compressed                                    |
-| [Semgrep](semgrep.md)                                       | CLI/CI JSON, SARIF, selected Guardian findings, or Platform Web API reports     |
-| [Snyk](snyk.md)                                             | CLI JSON, plugin exports, SARIF, or monitored Code and Open Source issues       |
-| [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
-| [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |
-| [Wiz](wiz.md)                                               | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV |
+| Guide                                                       | Supported input                                                                          |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| [Amazon Inspector](inspector.md)                            | Inspector2 `ListFindings` JSON for one Code Security repository                          |
+| [AWS Continuum](continuum.md)                               | Summaries or selected code finding details for one verified repository                   |
+| [Black Duck SCA](blackduck.md)                              | BOM component vulnerabilities for one project version                                    |
+| [Checkmarx SAST](checkmarx.md)                              | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                           |
+| [Endor Labs](endor.md)                                      | Finding JSON from `endorctl`, or SARIF with finding UUIDs                                |
+| [GitHub code scanning](github-code-scanning.md)             | Alerts selected for one repository and Git ref                                           |
+| [GitHub Dependabot](github-dependabot.md)                   | Dependency alerts exported from one repository                                           |
+| [GitHub Security Advisories](github-security-advisories.md) | Selected repository or global advisories                                                 |
+| [OpenGrep](opengrep.md)                                     | Native scan JSON, optionally gzip-compressed                                             |
+| [Semgrep](semgrep.md)                                       | CLI/CI JSON, SARIF, Platform Web API reports, or selected Guardian findings (local only) |
+| [Snyk](snyk.md)                                             | CLI JSON, plugin exports, SARIF, or monitored Code and Open Source issues                |
+| [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages                |
+| [Trivy](trivy.md)                                           | Native schema-v2 repository or filesystem JSON, optionally gzip-compressed               |
+| [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                                    |
+| [Wiz](wiz.md)                                               | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV          |
 
 If you selected specific findings, compare the preview with your selection.
-Check for missing, duplicate, or unexpected occurrences and resolve any
-exclusions before importing.
+Check for missing, duplicate or unexpected occurrences. For OpenGrep, check
+`report.errors` as well as exclusions, even when the findings list is empty.
 
 ## Save or publish and verify
 
@@ -64,7 +66,9 @@ from the preview for your destination](sonar.md#import-and-verify).
 **Save locally.** Remove `--dry-run` and confirm. In automation, use `--yes`
 after reviewing the preview.
 
-**Send to Cloud.** Keep your file, provider, source key, and scanner options.
+**Send to Cloud.** Semgrep Guardian captures support local import only. For other
+supported files, keep the file, provider, source key and scanner options from
+your preview.
 Set `--to cloud` and pass the connected repository URL or Cloud ID to
 `--repository`. Preview again with `--dry-run`. Check the account, endpoint,
 destination, findings, and exclusions. Remove `--dry-run` and confirm. [Cloud setup](../../sdk/typescript/docs/cli.md#preview-and-publish)
@@ -79,12 +83,21 @@ codex-security findings imported /path/to/project --format json
 
 For a Cloud import, check the receipt for the destination shown in the preview.
 
-| What the Cloud preview shows                      | How to verify the import                                                                                                   |
-| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Private inbox (`privateImport`)                   | Check the job status, errors, exclusions, and unprocessed count. Open a finding in your inbox to assess it before sharing. |
-| Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                      |
+| What the Cloud preview shows                      | How to verify the import                                                                                                                                 |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private inbox (`privateImport`)                   | Check that `privateJob.status` is `completed` and its counts account for the selected findings, with zero errors or unprocessed rows. Review exclusions. |
+| Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                                                    |
 
 If `publish findings` stops and returns `savedSubmission`, [resume from that checkpoint](schema-guide.md#retry-a-cloud-submission).
+
+## Troubleshoot Semgrep and Snyk collection
+
+If `import semgrep` or `import snyk` returns HTTP 429, check `Retry-After`.
+Both collectors retry the same GET once when the requested wait is at most
+10 seconds. They accept whole seconds or an HTTP date and retry immediately
+for zero or a past date. Cancellation stops the wait. A failed request reports
+its HTTP status and up to 64 KiB of the vendor response. After the indicated
+wait, rerun collection and preview the complete successful output.
 
 ## Work with imported findings
 

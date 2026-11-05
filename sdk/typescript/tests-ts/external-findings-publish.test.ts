@@ -17,6 +17,7 @@ import {
 } from "../src/snyk-findings.js";
 import {
   semgrepJson,
+  semgrepPercentPathReports,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
@@ -41,6 +42,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import { Database } from "bun:sqlite";
+import { NoPublishableFindingsError } from "../src/index.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   ExternalPublicationError,
@@ -99,7 +101,21 @@ import {
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import { normalizeTrivyFindings } from "../src/trivy-findings.js";
 import {
+  normalizeInspectorFindings,
+  normalizePreviousInspectorFindings,
+} from "../src/inspector-findings.js";
+import { normalizePreviousContinuumFindings } from "../src/continuum-findings.js";
+import {
+  trivyReport,
+  trivyRepositoryHeader,
+} from "./support/trivy-import-fixtures.js";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import {
+  inspectorCodeFinding,
+  inspectorReport,
   inspectorPackageFinding,
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
@@ -885,6 +901,156 @@ async function fixture(
   };
 }
 
+test("a zero-record report needs no Cloud account, destination lookup, confirmation, or submission", async () => {
+  const f = await fixture([]);
+  await rm(f.environment.CODEX_HOME, { recursive: true });
+  const fetch = spyOn(f.cliDeps, "cloudFetch");
+  const cli = createCliTest(main);
+  const code = await cli.runCli(
+    [...f.command, "--full-output", "--dry-run"],
+    f.cliDeps,
+  );
+  expect(code, cli.stderr.text()).toBe(0);
+  expect(fetch).not.toHaveBeenCalled();
+  const { ok, data } = JSON.parse(cli.stdout.text());
+  expect(ok).toBe(true);
+  expect(data).toMatchObject({
+    status: "empty",
+    published: false,
+    dryRun: true,
+    read: 0,
+    ready: 0,
+    findings: [],
+    excluded: [],
+  });
+  expect(data).not.toHaveProperty("destination");
+  expect(data).not.toHaveProperty("accountId");
+  await expect(readdir(f.environment.CODEX_SECURITY_STATE_DIR)).rejects.toThrow(
+    "ENOENT",
+  );
+});
+
+test("an empty monitored Snyk capture finishes without an upload after catalog lookup", async () => {
+  const report = snykRestFixture("open-source");
+  report.pages = [{ startingAfter: null, responseJson: '{"data":[]}' }];
+  const f = await fixture(report, report.sourceRepositoryUrl);
+  const cli = createCliTest(main);
+  const args = f.command.map((arg) => (arg === "wiz" ? "snyk" : arg));
+  expect(await cli.runCli(args, f.cliDeps)).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "empty",
+    published: false,
+  });
+  expect(f.posts).toHaveLength(0);
+});
+
+test("an entirely excluded report fails with all positions intact and a short diagnostic", async () => {
+  const f = await fixture(
+    Array.from({ length: 500 }, (_, index) =>
+      normalized(`id-\x1b[2J${index}`, "unsupported"),
+    ),
+  );
+  await rm(f.environment.CODEX_HOME, { recursive: true });
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli([...f.command, "--dry-run", "--full-output"], f.cliDeps),
+  ).toBe(2);
+  const output = JSON.parse(cli.stdout.text());
+  expect(output).toMatchObject({
+    ok: false,
+    error: { code: "IMPORT_FAILED" },
+    data: { status: "failed", read: 500, ready: 0 },
+  });
+  expect(
+    output.data.excluded.map((row: { position: number }) => row.position),
+  ).toEqual(Array.from({ length: 500 }, (_, index) => index + 1));
+  expect(output.data.excluded.at(-1)).toMatchObject({
+    source_finding_id: "id-\x1b[2J499",
+    reason: expect.any(String),
+  });
+  expect(cli.stderr.text()).not.toContain("Item 500");
+  expect(output.error.message).not.toContain("Item 500");
+  const terminal = createCliTest(main);
+  expect(
+    await terminal.runCli([...f.command.slice(0, -2), "--yes"], f.cliDeps),
+  ).toBe(2);
+  expect(terminal.stderr.text()).toContain("Excluded item 1:");
+  expect(terminal.stderr.text()).toContain("Showing 5 of 500 exclusions");
+  expect(terminal.stderr.text()).not.toContain("Excluded item 6:");
+  expect(terminal.stderr.text()).not.toContain("\x1b");
+  const flags = [
+    ...f.command.slice(0, -1),
+    "jsonl",
+    "--full-output",
+    "--filter-output=findings",
+  ];
+  const filtered = createCliTest(main);
+  expect(await filtered.runCli(flags, f.cliDeps)).toBe(2);
+  const failure = JSON.parse(filtered.stdout.text());
+  expect(failure.data.excluded).toEqual(output.data.excluded);
+  expect(failure.meta.command).toBe("publish findings");
+  const limited = createCliTest(main);
+  expect(await limited.runCli([...flags, "--token-limit=5"], f.cliDeps)).toBe(
+    2,
+  );
+  expect(JSON.parse(limited.stdout.text())).toMatchObject({
+    ok: false,
+    data: expect.any(String),
+    meta: { nextOffset: 5 },
+  });
+  expect(f.posts).toHaveLength(0);
+});
+
+test("normalized SDK callers can distinguish an empty report from exclusions without authenticating", async () => {
+  for (const selection of [
+    { read: 0, findings: [], excluded: [] },
+    {
+      read: 1,
+      findings: [],
+      excluded: [
+        { position: 1, source_finding_id: null, reason: "Not an occurrence" },
+      ],
+    },
+  ]) {
+    const prepared = prepareNormalizedExternalPublication(selection, options, {
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+      credentials: async () => {
+        throw new Error("Unexpected credential read");
+      },
+    });
+    await expect(prepared).rejects.toBeInstanceOf(NoPublishableFindingsError);
+    await expect(prepared).rejects.toMatchObject({ selection });
+  }
+});
+
+test("a failed scanner run is not an empty successful import", async () => {
+  const f = await fixture({
+    version: "1.100.0",
+    results: [],
+    errors: [{ message: "example scan error" }],
+  });
+  const command = f.command.map((argument) =>
+    argument === "wiz" ? "semgrep" : argument,
+  );
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      [
+        ...command,
+        "--source-repository-url",
+        "https://github.com/example/project",
+        "--yes",
+      ],
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "failed",
+    error: expect.stringContaining("scan errors"),
+  });
+  expect(f.posts).toHaveLength(0);
+});
+
 async function hostedFixture(
   provider: "semgrep" | "snyk",
   records: unknown,
@@ -1444,6 +1610,41 @@ test("a saved selection with Guardian evidence cannot resume a Cloud upload", as
   );
   expect(f.posts).toHaveLength(1);
   expect(await readFile(path, "utf8")).toBe(bytes);
+});
+
+test("Trivy Cloud preparation reads the serialized batch and rows", async () => {
+  const report = normalizeTrivyFindings(trivyReport(), "cloud", ".");
+  const row = report.findings[0]!;
+  for (const input of [
+    {
+      ...report,
+      get findings(): never {
+        throw new Error("Unused batch getter");
+      },
+      toJSON: () => report,
+    },
+    {
+      ...report,
+      findings: [
+        {
+          ...row,
+          get evidence(): never {
+            throw new Error("Unused row getter");
+          },
+          toJSON: () => row,
+        },
+      ],
+    },
+  ]) {
+    await expect(
+      prepareNormalizedExternalPublication(input, trivyOptions, {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        credentials: async () => {
+          throw new Error("Reached credential lookup");
+        },
+      }),
+    ).rejects.toThrow("Reached credential lookup");
+  }
 });
 
 test("a normalized Semgrep report checks the provider before Cloud credentials", async () => {
@@ -4034,6 +4235,63 @@ async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
   return { f, input, project, map, prepare, loseResponse };
 }
 
+test("Checkmarx publishes a native SAST finding only to its declared Cloud repository", async () => {
+  const row = {
+    type: "sast",
+    similarityId: "17",
+    severity: "MEDIUM",
+    data: { resultHash: "c97c", queryName: "Example_Query" },
+  };
+  const f = await fixture({ scanID: "scan-a", totalCount: 1, results: [row] });
+  const selected = {
+    ...options,
+    provider: "checkmarx" as const,
+    sourceRepositoryUrl: f.state.repositoryUrl,
+  };
+  const prepare = () => prepareExternalPublication(f.file, selected, f.deps);
+  const first = await prepare();
+  expect(first.preview.requests[0]).toMatchObject({
+    source: { provider: "checkmarx", source_key: selected.sourceKey },
+    items: [{ evidence: { source_scan_id: "scan-a", source_data: { row } } }],
+  });
+  const sibling = sdkRow("sdk-id");
+  sibling.evidence.source_scan_id = "scan-b";
+  await expect(
+    prepareNormalizedExternalPublication(
+      sdkSelection([...first.preview.findings, sibling]),
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow(/same product, project and scan/i);
+  const replayWithReport = (change: Record<string, unknown>) =>
+    prepareNormalizedExternalPublication(
+      { ...first.preview, report: { ...first.preview.report, ...change } },
+      selected,
+      f.deps,
+    );
+  await expect(
+    replayWithReport({
+      sourceRepositoryUrl: "https://github.com/example/other",
+    }),
+  ).rejects.toThrow(/does not match the selected Cloud repository/i);
+  f.state.repositoryUrl = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  expect(f.posts).toHaveLength(0);
+  f.state.repositoryUrl = selected.sourceRepositoryUrl;
+  await f.loseResponse(first);
+  await expect(replayWithReport({ scanId: "different-scan" })).rejects.toThrow(
+    /does not match the retained report/i,
+  );
+  f.state.repositoryUrl = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = selected.sourceRepositoryUrl;
+  const replay = await prepare();
+  expect(replay.preview.resumed).toBe(true);
+  expect((await replay.publish()).verified).toBe(1);
+  expect(f.posts[1]).toBe(f.posts[0]!);
+});
+
 test("Continuum Cloud publication checks repository and provider and replays an interrupted request", async () => {
   const detail = continuumDetail();
   const f = await fixture(detail, continuumRepository);
@@ -4113,43 +4371,60 @@ test("Inspector publication checks its source and reuses the finding ARN", async
   expect(f.posts).toHaveLength(2);
 });
 
-test("Wiz can import, resume and update its own occurrence with upstream Inspector evidence", async () => {
-  const record = {
-    id: "wiz-vulnerability-1",
-    name: "CVE-2099-1234",
-    detailedName: "example-package",
-    vendorSeverity: "HIGH",
-    vulnerableAsset: { id: "example-asset" },
-    finding: inspectorPackageFinding(),
-  };
-  const f = await fixture([record]);
-  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
-  const first = await prepare();
-  f.state.loseResponse = true;
-  const error = await first.publish().catch((error: unknown) => error);
-  if (!(error instanceof ExternalPublicationError)) throw error;
-  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+test.each(["Inspector", "Trivy"] as const)(
+  "Wiz can import, resume and update its own occurrence with upstream %s evidence",
+  async (upstream) => {
+    const trivy = selectedTrivyRows().findings[0]!;
+    const record = {
+      id:
+        upstream === "Trivy" ? trivy.source_finding_id : "wiz-vulnerability-1",
+      name: "CVE-2099-1234",
+      detailedName: "example-package",
+      vendorSeverity: "HIGH",
+      vulnerableAsset: { id: "example-asset" },
+      ...(upstream === "Trivy"
+        ? trivy.evidence.source_data
+        : { finding: inspectorPackageFinding() }),
+    };
+    const f = await fixture([record]);
+    await using local = await localFindingsFixture({
+      remote: foreignArtifactUrl,
+    });
+    const prepared = await prepareNormalizedLocalImport(
+      await readVendorFindings(f.file),
+      { ...options, repository: local.repository },
+      { environment: local.environment },
+    );
+    expect((await prepared.import()).counts.created).toBe(1);
 
-  // A pre-Inspector checkpoint can contain the original requests without their input projection.
-  const path = error.result.savedSubmission!;
-  const saved = JSON.parse(await readFile(path, "utf8"));
-  delete saved.inputProjection;
-  await writeFile(path, JSON.stringify(saved));
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).verified).toBe(1);
-  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+    const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+    const first = await prepare();
+    f.state.loseResponse = true;
+    const error = await first.publish().catch((error: unknown) => error);
+    if (!(error instanceof ExternalPublicationError)) throw error;
+    expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
 
-  record.vendorSeverity = "MEDIUM";
-  await writeFile(f.file, JSON.stringify([record]));
-  const updated = await prepareNormalizedExternalPublication(
-    await readVendorFindings(f.file),
-    options,
-    f.deps,
-  );
-  expect((await updated.publish()).counts.updated).toBe(1);
-  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
-});
+    // Older checkpoints can contain the original requests without their input projection.
+    const path = error.result.savedSubmission!;
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    delete saved.inputProjection;
+    await writeFile(path, JSON.stringify(saved));
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+
+    record.vendorSeverity = "MEDIUM";
+    await writeFile(f.file, JSON.stringify([record]));
+    const updated = await prepareNormalizedExternalPublication(
+      await readVendorFindings(f.file),
+      options,
+      f.deps,
+    );
+    expect((await updated.publish()).counts.updated).toBe(1);
+    expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+  },
+);
 
 test.each(["example/project", inspectorRepositoryUrl])(
   "pending Inspector requests for %s recheck their project mapping and destination host",
@@ -4265,6 +4540,121 @@ test.each(["inspector", "sonar"] as const)(
   },
 );
 
+function inspectorReportWithRelatedCves() {
+  const pkg = inspectorPackageFinding();
+  // The previous reader excluded this row because it projected 101 advisory IDs.
+  pkg.packageVulnerabilityDetails.relatedVulnerabilities = Array.from(
+    { length: 100 },
+    (_, i) => `CVE-2099-${3000 + i}`,
+  );
+  return { findings: [inspectorCodeFinding(), pkg] };
+}
+
+test.each([
+  {
+    provider: "inspector",
+    raw: inspectorReportWithRelatedCves(),
+    normalizePrevious: normalizePreviousInspectorFindings,
+    sourceRepositoryUrl: inspectorRepositoryUrl,
+    previousDigest:
+      "4e90748318e5952a1fa90ff9c25153396340a097db6112f27bdf89a3a092dade",
+    expectedCount: 2,
+  },
+  {
+    provider: "continuum",
+    raw: continuumDetail(),
+    normalizePrevious: normalizePreviousContinuumFindings,
+    sourceRepositoryUrl: continuumRepository,
+    previousDigest:
+      "22307dedb51cefecf56d11fd68f45324dceb5226bfddfbd48c635a462bb68fb5",
+    expectedCount: 1,
+  },
+] as const)(
+  "a raw $provider retry preserves the repository request from the previous reader",
+  async ({
+    provider,
+    raw,
+    normalizePrevious,
+    sourceRepositoryUrl,
+    previousDigest,
+    expectedCount,
+  }) => {
+    const f = await fixture(raw, sourceRepositoryUrl);
+    const settings = { ...options, provider, sourceRepositoryUrl };
+    const prepare = () => prepareExternalPublication(f.file, settings, f.deps);
+
+    // Round-trip the previous SDK's output through JSON as a saved caller artifact.
+    const previous = JSON.parse(
+      JSON.stringify(normalizePrevious(raw, sourceRepositoryUrl)),
+    );
+    expect(hash("sha256", canonicalJson(previous.findings))).toBe(
+      previousDigest,
+    );
+    const original = await prepareNormalizedExternalPublication(
+      previous,
+      settings,
+      f.deps,
+    );
+    const pending = await f.loseResponse(original);
+    const request = f.posts[0]!;
+
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(original.preview.requests);
+    expect(await f.loseResponse(retry)).toBe(pending);
+    expect((await (await prepare()).publish()).verified).toBe(1);
+    expect(f.posts).toEqual([request, request, request]);
+
+    const fresh = await prepare();
+    expect(fresh.preview.resumed).toBe(false);
+    expect(fresh.preview.findings).toHaveLength(expectedCount);
+    expect(fresh.preview.findings).not.toEqual(original.preview.findings);
+  },
+);
+
+test("a fresh AWS publication waits for the previous reader to save its request", async () => {
+  const raw = continuumDetail();
+  const f = await fixture(raw, continuumRepository);
+  const settings = {
+    ...options,
+    provider: "continuum" as const,
+    sourceRepositoryUrl: continuumRepository,
+  };
+  const previous = await prepareNormalizedExternalPublication(
+    normalizePreviousContinuumFindings(raw, continuumRepository),
+    settings,
+    f.deps,
+  );
+  const fresh = await prepareExternalPublication(f.file, settings, f.deps);
+  const observer = observeLockContention();
+  const rename = fs.rename;
+  let competitor: Promise<unknown> | undefined;
+  let outcome: string | undefined;
+  const install = spyOn(fs, "rename").mockImplementationOnce(
+    async (...args) => {
+      // The earlier publisher holds its lock but has not installed its checkpoint yet.
+      competitor = fresh.publish().catch((error: unknown) => error);
+      outcome = await Promise.race([
+        observer.contended.then(() => "locked"),
+        competitor.then(() => "finished"),
+      ]);
+      return rename(...args);
+    },
+  );
+  try {
+    f.state.throttle = true;
+    await expect(previous.publish()).rejects.toThrow("Slow down");
+    expect(outcome).toBe("locked");
+    expect(String(await competitor)).toContain(
+      "Another publication prepared this input",
+    );
+    expect(f.posts).toHaveLength(1);
+  } finally {
+    install.mockRestore();
+    observer.restore();
+  }
+});
+
 const savedBlackDuckEvidence = {
   data: { format: "blackduck-bom-6" },
   requiredProvider: "blackduck",
@@ -4276,7 +4666,60 @@ const savedDependabotData = {
   sourceRepositoryUrl: "https://github.com/example/different",
 };
 
+const checkmarxFormat = { format: "cxsast-xml" };
+const exampleRepository = "https://github.com/example/project";
+const otherRepository = "https://github.com/example/other";
+const savedEndorData = (repositoryUri: string) => ({
+  ...checkmarxFormat,
+  runContext: { versionControlProvenance: ["opaque", { repositoryUri }] },
+});
+const endorCheckpoint = {
+  requiredProvider: "checkmarx",
+  selected: { ...options, provider: "endor" as const },
+};
+
+const wizBranchAsset = {
+  nativeType: "github#repositoryBranch",
+  cloudProviderURL: exampleRepository + "/tree/main",
+};
+
 test.each([
+  {
+    data: { ...checkmarxFormat, vulnerableAsset: wizBranchAsset },
+    selected: options,
+    requiredProvider: "checkmarx",
+    filename:
+      "44c97129ef37ba88ccf7d6a1c43c3ef4c051080c0e746145b1f37dc6216f0181.pending.json",
+    digest: "7c90e7bf4a7d9c64c7cbbc15fdcdf6a3ff0e14f50cda77c9b523d834cf337dd7",
+  },
+  {
+    ...endorCheckpoint,
+    data: savedEndorData(exampleRepository),
+    filename:
+      "4d59df5533b5d0acbbcc2e28884e597a52d8b55e354eb15539d6cfba37c79011.pending.json",
+    digest: "d19b090ff4cd18329b37e74e674394deb2670c1d0dfc7bc088c02edcbb088cad",
+  },
+  {
+    ...endorCheckpoint,
+    data: {
+      ...savedEndorData(exampleRepository),
+      sourceRepositoryUrl: exampleRepository,
+    },
+    filename:
+      "624c404a8fcf0e8241c30d9b1a434d78aaa2c1e87d211465e0698821ab1c509f.pending.json",
+    digest: "f77bce9f03733812b5fda88ae988193b54462baf78be95ba6b4de49658b103d9",
+  },
+  {
+    ...endorCheckpoint,
+    data: {
+      ...savedEndorData(otherRepository),
+      sourceRepositoryUrl: exampleRepository,
+    },
+    conflictingUrl: otherRepository,
+    filename:
+      "70e7f4be8d0d9eb0306f18ea1a2b256641bee797b3626a8dfc2920d0a15abcd2.pending.json",
+    digest: "8fedf62999d4c5f510706db4647ad3d847e8e5f6f5f3d75eb365da193c16ea1a",
+  },
   {
     data: { format: "snyk-rest-issues/v2", issueJson: "{}" },
     requiredProvider: "snyk",
@@ -4327,7 +4770,8 @@ test.each([
   },
 ])(
   "checks a saved $selected.provider request from before $requiredProvider checks",
-  async ({ selected, data, requiredProvider, filename, digest }) => {
+  async (saved) => {
+    const { selected, data, requiredProvider, filename, digest } = saved;
     const f = await fixture();
     const environment: NodeJS.ProcessEnv = { ...f.environment };
     // These persisted keys came from the default deployment.
@@ -4390,6 +4834,13 @@ test.each([
       { mode: 0o600 },
     );
 
+    if ("conflictingUrl" in saved && saved.conflictingUrl) {
+      await expect(prepare()).rejects.toThrow(
+        `belongs to "${saved.conflictingUrl}"`,
+      );
+      expect(f.posts).toHaveLength(0);
+      return;
+    }
     if (alert) {
       // The original publisher selected the alert's repository. Changing the
       // catalog to match the projection must not permit replay to another repo.
@@ -4400,6 +4851,13 @@ test.each([
       );
       expect(f.posts).toHaveLength(0);
       return;
+    }
+    if (requiredProvider === "checkmarx") {
+      const original = f.state.repositoryUrl;
+      f.state.repositoryUrl += "-other";
+      await expect(prepare()).rejects.toThrow(`belongs to "${original}"`);
+      expect(f.posts).toHaveLength(0);
+      f.state.repositoryUrl = original;
     }
     if (selected.provider === "snyk") {
       const other = "https://github.com/example/other";
@@ -4452,6 +4910,94 @@ test.each(["wiz", "inspector"] as const)(
     expect(f.posts[1]).toBe(f.posts[0]);
   },
 );
+
+const projectedId = "checkmarx-one:" + "a".repeat(64);
+
+function sdkRow(id: string, source_data?: Record<string, unknown>) {
+  const row = normalized(id);
+  return {
+    ...row,
+    evidence: validateExternalEvidence({ ...row.evidence, source_data }),
+  };
+}
+
+function sdkSelection(
+  findings: ExternalFindings["findings"],
+  report?: ExternalFindings["report"],
+): ExternalFindings {
+  return { read: findings.length, excluded: [], findings, report };
+}
+
+test.each(["row", "report", "Snyk SARIF"] as const)(
+  "keeps the projected Checkmarx repository from the %s across retries",
+  async (scope) => {
+    const f = await fixture();
+    const sourceRepositoryUrl = f.state.repositoryUrl;
+    const snyk = scope === "Snyk SARIF";
+    const selected = snyk ? { ...options, provider: "snyk" as const } : options;
+    const report = scope === "report" ? { sourceRepositoryUrl } : undefined;
+    const input = snyk
+      ? (await snykRepositoryEvidence("SARIF", sourceRepositoryUrl)).normalized
+      : sdkSelection(
+          [
+            sdkRow(
+              projectedId,
+              scope === "row" ? { sourceRepositoryUrl } : undefined,
+            ),
+          ],
+          report,
+        );
+    input.findings[0]!.source_finding_id = projectedId;
+    const prepare = (selection: ExternalFindings = input) =>
+      prepareNormalizedExternalPublication(selection, selected, f.deps);
+    f.state.repositoryUrl = otherRepository;
+    if (report)
+      expect(
+        (await prepare(sdkSelection([sdkRow("opaque-sdk-id")], report))).preview
+          .requests,
+      ).toHaveLength(1);
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    f.state.repositoryUrl = sourceRepositoryUrl;
+    await f.loseResponse(await prepare());
+    f.state.repositoryUrl = otherRepository;
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    expect(f.posts).toHaveLength(1);
+    f.state.repositoryUrl = sourceRepositoryUrl;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts[1]).toBe(f.posts[0]);
+  },
+);
+
+test("Checkmarx projections under Wiz bind retained row URLs and native repository branch assets", async () => {
+  const f = await fixture();
+  const sourceRepositoryUrl = f.state.repositoryUrl;
+  f.state.repositoryUrl = otherRepository;
+  const report = { sourceRepositoryUrl: otherRepository };
+  const prepare = (
+    findings: ExternalFindings["findings"],
+    metadata?: typeof report,
+  ) =>
+    prepareNormalizedExternalPublication(
+      sdkSelection(findings, metadata),
+      options,
+      f.deps,
+    );
+  const branch = { vulnerableAsset: wizBranchAsset };
+  const mismatch = `belongs to "${sourceRepositoryUrl}"`;
+  const projected = sdkRow(projectedId, branch);
+  await expect(prepare([projected], report)).rejects.toThrow(mismatch);
+  await expect(prepare([projected])).rejects.toThrow(mismatch);
+  for (const data of [branch, { sourceRepositoryUrl }]) {
+    const sibling = sdkRow("wiz-finding", data);
+    expect((await prepare([sibling], report)).preview.requests).toHaveLength(1);
+    await expect(
+      prepare([sdkRow(projectedId), sibling], report),
+    ).rejects.toThrow(mismatch);
+  }
+  expect(f.posts).toHaveLength(0);
+});
 
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
   const row = {
@@ -8846,6 +9392,462 @@ async function snykRepositoryEvidence(
 
 const gitHubProject = "https://github.com/example/project";
 const connectedProject = "https://git.example.test/example/project";
+const foreignArtifactUrl = "https://github.com/example/other";
+
+const trivyOptions = {
+  ...options,
+  provider: "trivy" as const,
+  trivyScanRoot: ".",
+};
+
+async function trivyCloud(
+  report: unknown = trivyReport(),
+  destination = gitHubProject,
+) {
+  const f = await fixture(report, destination);
+  return {
+    ...f,
+    fileImport: () => prepareExternalPublication(f.file, trivyOptions, f.deps),
+    selected: (rows: ExternalFindings, settings = trivyOptions) =>
+      prepareNormalizedExternalPublication(rows, settings, f.deps),
+  };
+}
+
+test.each([
+  [
+    "http://git.example.test/Example/Project",
+    "http://git.example.test/example/project.git",
+    true,
+  ],
+  [connectedProject, "git@git.example.test:example/project.git", true],
+  [
+    "ssh://tenant-a@git.example.test/example/project",
+    "ssh://git.example.test/example/project",
+    false,
+  ],
+] as const)(
+  "Trivy CLI binds artifact %s and origin %s before publication",
+  async (ArtifactName, RepoURL, matches) => {
+    const cloud = await trivyCloud(
+      { ...trivyReport(), ArtifactName, Metadata: { RepoURL } },
+      RepoURL.startsWith("http:")
+        ? connectedProject.replace("https:", "http:")
+        : connectedProject,
+    );
+    const args = [...cloud.command, "--trivy-scan-root", "."];
+    args[args.indexOf("--provider") + 1] = "trivy";
+    const cli = createCliTest(main);
+    for (const mode of ["--dry-run", "--yes"]) {
+      expect(await cli.runCli([...args, mode], cloud.cliDeps)).toBe(
+        matches ? 0 : 2,
+      );
+      if (!matches)
+        expect(cli.stderr.text()).toContain("Trivy omitted the SSH user");
+      expect(cloud.posts).toHaveLength(matches && mode === "--yes" ? 1 : 0);
+    }
+    if (matches)
+      expect([...cloud.reports.values()]).toMatchObject([
+        {
+          source: { provider: "trivy" },
+          assessment: { state: "not_assessed" },
+          evidence: { source_data: { report: { Metadata: { RepoURL } } } },
+        },
+      ]);
+  },
+);
+
+test.each([
+  ["HTTPS://github.com/example/project", gitHubProject],
+  ["Git+SSH://git@github.com/example/project", gitHubProject],
+  ["http://git.example.test/example/project.git", connectedProject],
+  [gitHubProject, foreignArtifactUrl],
+  ["git@github.com:example/project.git.git", gitHubProject],
+  ["ssh://git@git.example.test/other/../example/project.git", connectedProject],
+  ["https://0177.1./org/project", "https://127.0.0.1/org/project"],
+])(
+  "Trivy file and selected row preserve origin %s at destination %s",
+  async (RepoURL, destination) => {
+    const report = { ...trivyReport(), Metadata: { RepoURL } };
+    const cloud = await trivyCloud(report, destination);
+    await expect(cloud.fileImport()).rejects.toThrow("does not match");
+    await expect(cloud.selected(selectedTrivyRows(report))).rejects.toThrow(
+      "does not match",
+    );
+    expect(cloud.posts).toHaveLength(0);
+  },
+);
+
+// A selected row can be imported without the original batch header.
+function selectedTrivyRows(report: unknown = trivyReport()) {
+  const { findings, read, excluded } = normalizeTrivyFindings(
+    report,
+    "cloud",
+    ".",
+  );
+  return { findings, read, excluded };
+}
+
+test.each(["complete", "projected", "header only", "URL only"] as const)(
+  "selected Trivy %s evidence keeps its provider and repository",
+  async (shape) => {
+    const rows = selectedTrivyRows();
+    const row = rows.findings[0]!;
+    const header = row.evidence.source_data!["report"] as Record<
+      string,
+      unknown
+    >;
+    if (shape === "projected") delete header["ArtifactType"];
+    if (shape === "header only") row.evidence.source_data = { report: header };
+    if (shape === "URL only")
+      row.evidence.source_data = {
+        report: { Metadata: { RepoURL: gitHubProject } },
+      };
+    else row.source_finding_id = "selected-occurrence";
+    await expectTrivyReplay(rows);
+    await expectTrivyReplay(rows, /does not match/, foreignArtifactUrl);
+    await expectTrivyReplay(
+      rows,
+      /requires the trivy provider/,
+      foreignArtifactUrl,
+      "wiz",
+    );
+  },
+);
+
+test.each(["batch header", "SAST fields", "package fields"])(
+  "Trivy ownership survives projection as Wiz %s",
+  async (shape) => {
+    const rows: ExternalFindings = selectedTrivyRows();
+    const row = rows.findings[0]!;
+    const data = row.evidence.source_data!;
+    const id = "selected-occurrence";
+    row.source_finding_id = id;
+    if (shape === "batch header") {
+      rows.report = data["report"] as Record<string, unknown>;
+      delete row.evidence.source_data;
+    } else if (shape === "SAST fields") {
+      data["id"] = id;
+      row.source_finding_id = `sast:${id}`;
+      row.evidence.details = {
+        kind: "sast",
+        repository: { id: "wiz-repository", url: foreignArtifactUrl },
+      };
+    } else
+      Object.assign(data, {
+        id,
+        name: "CVE-2099-0001",
+        detailedName: "example-package",
+        vendorSeverity: "HIGH",
+        vulnerableAsset: { id: "example-asset" },
+      });
+    await expectTrivyReplay(
+      rows,
+      /requires the trivy provider/,
+      foreignArtifactUrl,
+      "wiz",
+    );
+  },
+);
+
+test("Wiz SAST can carry upstream Trivy evidence while binding its own repository through inventory", async () => {
+  const record = {
+    ...selectedTrivyRows().findings[0]!.evidence.source_data,
+    id: "example-occurrence",
+    name: "Synthetic finding",
+    severity: "HIGH",
+    repository: { id: "wiz-repository" },
+  };
+  const cloud = await fixture(
+    {
+      data: {
+        sastFindings: { nodes: [record] },
+        versionControlResources: {
+          nodes: [
+            {
+              platform: "GITHUB",
+              repository: { ...record.repository, url: foreignArtifactUrl },
+            },
+          ],
+        },
+      },
+    },
+    foreignArtifactUrl,
+  );
+  const rows = await readVendorFindings(cloud.file);
+  expect(rows.findings[0]).toMatchObject({
+    source_finding_id: `sast:${record.id}`,
+    evidence: {
+      details: { repository: { url: foreignArtifactUrl } },
+      source_data: record,
+    },
+  });
+  await using local = await localFindingsFixture({
+    remote: foreignArtifactUrl,
+  });
+  const prepared = await prepareNormalizedLocalImport(
+    rows,
+    { ...options, repository: local.repository },
+    { environment: local.environment },
+  );
+  expect((await prepared.import()).counts.created).toBe(1);
+  const publication = await prepareExternalPublication(
+    cloud.file,
+    options,
+    cloud.deps,
+  );
+  expect((await publication.publish()).counts.created).toBe(1);
+});
+
+async function expectTrivyReplay(
+  rows: ExternalFindings,
+  error?: string | RegExp,
+  remote = gitHubProject,
+  provider: "trivy" | "wiz" = "trivy",
+) {
+  await using local = await localFindingsFixture({ remote });
+  const cloud = await fixture(undefined, remote);
+  const settings = { ...options, provider };
+  for (const prepare of [
+    () =>
+      prepareNormalizedLocalImport(
+        rows,
+        { ...settings, repository: local.repository },
+        { environment: local.environment },
+      ),
+    () => prepareNormalizedExternalPublication(rows, settings, cloud.deps),
+  ]) {
+    if (error) await expect(prepare()).rejects.toThrow(error);
+    else expect((await prepare()).preview.findings).toHaveLength(1);
+  }
+}
+
+const uppercaseWebUrl = "HTTPS://github.com/Example/Project";
+const userlessSsh = "ssh://github.com/example/project";
+const explicitSsh = "ssh://git@github.com/example/project";
+test.each([
+  [gitHubProject, uppercaseWebUrl, undefined],
+  [gitHubProject, foreignArtifactUrl, /does not match|different repositories/],
+  [uppercaseWebUrl, gitHubProject, /does not match|different repositories/],
+  [userlessSsh, gitHubProject, /omitted the SSH user/],
+  [explicitSsh, gitHubProject, undefined],
+] as const)(
+  "Trivy compares the raw origin %s independently of the typed repository %s",
+  async (raw, typed, error) => {
+    const rows = selectedTrivyRows();
+    const evidence = rows.findings[0]!.evidence;
+    evidence.source_data!["report"] = trivyRepositoryHeader(raw);
+    evidence.details = { kind: "sast", repository: { url: typed } };
+    await expectTrivyReplay(
+      { ...rows, report: trivyRepositoryHeader(gitHubProject) },
+      error,
+    );
+  },
+);
+
+test("each normalized Trivy finding must retain its report's repository", async () => {
+  const report = trivyReport();
+  report.Results.push({
+    ...report.Results[0]!,
+    Target: "nested/package-lock.json",
+  });
+  const input = normalizeTrivyFindings(report, "cloud", ".");
+  delete input.findings[1]!.evidence.source_data;
+  input.report = trivyRepositoryHeader(report.Metadata.RepoURL);
+  await expectTrivyReplay(input, /retain/i);
+});
+
+test.each([
+  [`${gitHubProject}/Kit`, `${gitHubProject}/Kit`, false],
+  [`${gitHubProject}/Kit`, `${gitHubProject}/%E2%84%AAit`, true],
+  ["https://0177.1./org/project", "https://127.0.0.1/org/project", false],
+] as const)(
+  "Trivy compares typed and catalog URLs %s and %s",
+  async (source, target, matches) => {
+    const cloud = await trivyCloud(undefined, target);
+    const rows = selectedTrivyRows({ ...trivyReport(), Metadata: {} });
+    const catalog = cloud.selected(rows, {
+      ...trivyOptions,
+      repository: source,
+    });
+    if (matches) expect((await catalog).preview.destination.url).toBe(target);
+    else
+      await expect(catalog).rejects.toThrow(
+        "destination repository is not available",
+      );
+
+    for (const kind of ["typed", "native"]) {
+      const report = {
+        ...trivyReport(),
+        Metadata: { RepoURL: kind === "native" ? source : target },
+      };
+      const rows = selectedTrivyRows(report);
+      if (kind === "typed")
+        rows.findings[0]!.evidence.details = {
+          kind: "sast",
+          repository: { url: source },
+        };
+      const prepared = cloud.selected(rows);
+      if (matches) expect((await prepared).preview.findings).toHaveLength(1);
+      else await expect(prepared).rejects.toThrow("does not match");
+    }
+  },
+);
+
+test("Trivy preparation rejects retained Inspector findings", async () => {
+  const input = normalizeInspectorFindings(inspectorReport(), gitHubProject);
+  const cloud = await fixture();
+  await expect(
+    prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
+  ).rejects.toThrow(
+    "Retained Inspector evidence requires the inspector provider.",
+  );
+});
+
+test("Trivy typed repository links and catalog URLs must identify the same HTTP and Git path", async () => {
+  const ambiguous = "https://github.com/example/%2e%2e/../project";
+  const error = /HTTP path that does not match its Git path/u;
+  const input = selectedTrivyRows({ ...trivyReport(), Metadata: {} });
+  input.findings[0]!.evidence.details = {
+    kind: "sast",
+    repository: { url: ambiguous },
+  };
+  await expectTrivyReplay(input, error);
+
+  const rows = selectedTrivyRows();
+  const cloud = await trivyCloud();
+  await expect(
+    cloud.selected(rows, { ...trivyOptions, repository: ambiguous }),
+  ).rejects.toThrow(error);
+  cloud.state.repositoryUrl = ambiguous;
+  await expect(cloud.selected(rows)).rejects.toThrow(error);
+});
+
+const credentialUrl = "https://scanner:fixture@github.com/example/project";
+
+test.each([
+  ["filesystem", credentialUrl, "without credentials"],
+  [undefined, credentialUrl, "without credentials"],
+  ["unknown", credentialUrl, "without credentials"],
+  [undefined, foreignArtifactUrl, "does not match"],
+  ["filesystem", foreignArtifactUrl, undefined],
+] as const)(
+  "checks retained Trivy artifact type %s with URL %s",
+  async (ArtifactType, ArtifactName, error) => {
+    const input = normalizeTrivyFindings(
+      { ...trivyReport(), Metadata: {} },
+      "cloud",
+      ".",
+    );
+    input.findings[0]!.evidence.source_data!["report"] = {
+      SchemaVersion: 2,
+      ...(ArtifactType && { ArtifactType }),
+      ArtifactName,
+    };
+    await expectTrivyReplay(input, error);
+  },
+);
+
+test.each([
+  ["repository", "other", false],
+  ["repository", "project", true],
+  ["filesystem", "other", true],
+])(
+  "Trivy %s artifact URL ending in %s binds individual findings when it identifies a repository",
+  async (ArtifactType, project, accepts) => {
+    const ArtifactName = `ssh://git@github.com/example/${project}.git`;
+    const report = {
+      ...trivyReport(),
+      ArtifactType,
+      ArtifactName,
+      Metadata: {},
+    };
+    const cloud = await trivyCloud(report);
+    for (const prepare of [
+      cloud.fileImport,
+      () => cloud.selected(selectedTrivyRows(report)),
+    ]) {
+      if (!accepts) {
+        await expect(prepare()).rejects.toThrow("does not match");
+        continue;
+      }
+      const prepared = await prepare();
+      if (ArtifactType === "repository") {
+        const other = await trivyCloud(report, foreignArtifactUrl);
+        await expect(
+          other.selected(JSON.parse(JSON.stringify(prepared.preview))),
+        ).rejects.toThrow("does not match");
+      }
+      await prepared.publish();
+      expect(
+        JSON.parse(cloud.posts.at(-1)!).items[0].evidence.source_data.report
+          .ArtifactName,
+      ).toBe(ArtifactName);
+    }
+  },
+);
+
+test.each([
+  ["empty", [], "No supported findings are ready to publish"],
+  [
+    "excluded-only",
+    [{ Class: "os-pkgs" }],
+    "Unsupported Trivy result class: os-pkgs",
+  ],
+] as const)(
+  "an %s Trivy report stops before Cloud authentication or repository discovery",
+  async (_name, Results, error) => {
+    const report = {
+      ...trivyReport(),
+      Metadata: { RepoURL: "ssh://git.example.test/example/project" },
+      Results,
+    };
+    const cloud = await fixture(report);
+    const unexpected = async () => {
+      throw new Error("Unexpected Cloud access");
+    };
+    const deps = {
+      environment: cloud.environment,
+      credentials: unexpected,
+      fetch: unexpected,
+    };
+    await expect(
+      prepareExternalPublication(cloud.file, trivyOptions, deps),
+    ).rejects.toThrow(error);
+    const input = normalizeTrivyFindings(report, "cloud", ".");
+    await expect(
+      prepareNormalizedExternalPublication(input, trivyOptions, deps),
+    ).rejects.toThrow(error);
+    input.report = trivyRepositoryHeader(credentialUrl);
+    await expect(
+      prepareNormalizedExternalPublication(input, trivyOptions, deps),
+    ).rejects.toThrow("without credentials");
+  },
+);
+
+test.each([
+  [
+    {
+      provider: "trivy",
+      trivyScanRoot: ".",
+      sourceRepositoryUrl: "https://github.com/example/other",
+    },
+    "--source-repository-url",
+  ],
+  [{ provider: "trivy" }, "--trivy-scan-root"],
+  [{ provider: "wiz", trivyScanRoot: "." }, "only to --provider trivy"],
+  [{ provider: "snyk", trivyScanRoot: "." }, "only to --provider trivy"],
+  [{ provider: "semgrep", trivyScanRoot: "." }, "only to --provider trivy"],
+] as const)(
+  "rejects invalid file import options %p",
+  async (settings, message) => {
+    const f = await fixture(trivyReport());
+    await expect(
+      prepareExternalPublication(f.file, { ...options, ...settings }, f.deps),
+    ).rejects.toThrow(message);
+    expect(f.posts).toHaveLength(0);
+  },
+);
+
 const tenantProject = "https://tenant.ghe.com/example/project";
 
 const snykRepositoryAliases: [string, string][] = [
@@ -9293,23 +10295,7 @@ test("OpenGrep CLI Cloud preview forwards source provenance without uploading", 
 });
 
 test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
-  const paths = [
-    "src/my file.ts",
-    "src/my%20file.ts",
-    "src/100%.ts",
-    "src/100%25.ts",
-  ];
-  const json: any = semgrepJson();
-  const sarif: any = semgrepSarif();
-  delete json.results[0].extra.fingerprint;
-  delete sarif.runs[0].results[0].fingerprints;
-  json.results = paths.map((path) => ({ ...json.results[0], path }));
-  const run = sarif.runs[0];
-  run.results = paths.map((path) => {
-    const result = structuredClone(run.results[0]);
-    result.locations[0].physicalLocation.artifactLocation.uri = path;
-    return result;
-  });
+  const { paths, json, sarif } = semgrepPercentPathReports();
   const f = await fixture(json);
   const settings = {
     ...options,
@@ -9470,6 +10456,76 @@ test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async
     result: sarif.runs[0]!.results[0],
   });
 });
+test.each(["file", "selected rows"] as const)(
+  "a Trivy %s publication resumes its original request across entrypoints and a repository rename",
+  async (initialKind) => {
+    const report = {
+      ...trivyReport(),
+      Metadata: {},
+      ArtifactName: "ssh://git@github.com/example/project.git",
+    };
+    const cloud = await trivyCloud(report);
+    const file = cloud.fileImport;
+    const selected = (header?: Record<string, unknown>) =>
+      cloud.selected({ ...selectedTrivyRows(report), report: header });
+    const first = initialKind === "file" ? await file() : await selected();
+    await cloud.loseResponse(first);
+    const body = cloud.posts[0]!;
+    expect(JSON.parse(body)).toEqual(first.preview.requests[0]);
+    await writeFile(
+      cloud.file,
+      JSON.stringify({ ...report, ArtifactName: foreignArtifactUrl }),
+    );
+    await expect(file()).rejects.toThrow("does not match");
+    await writeFile(cloud.file, JSON.stringify(report));
+
+    cloud.state.repositoryUrl = "https://github.com/example/renamed";
+    await expect(
+      selected(trivyRepositoryHeader(cloud.state.repositoryUrl)),
+    ).rejects.toThrow("does not match");
+    expect(cloud.posts).toEqual([body]);
+    expect(
+      (await selected(trivyRepositoryHeader(gitHubProject))).preview.resumed,
+    ).toBe(true);
+    const retry = initialKind === "file" ? await selected() : await file();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(first.preview.requests);
+    expect((await retry.publish()).status).toBe("complete");
+    expect(cloud.posts).toEqual([body, body]);
+    await expect(file()).rejects.toThrow("does not match");
+  },
+);
+
+test("unverified Trivy checkpoints retain their requests and receipts for the original importer", async () => {
+  const cloud = await trivyCloud();
+  const prepare = cloud.fileImport;
+  cloud.state.brokenReadback = true;
+  const failure = await (
+    await prepare()
+  )
+    .publish()
+    .catch((error: unknown) => error);
+  if (!(failure instanceof ExternalPublicationError)) throw failure;
+  const filename = failure.result.savedSubmission!;
+  cloud.state.brokenReadback = false;
+  const retry = await prepare();
+  const { accountId, requests, receipts, inputProjection } = JSON.parse(
+    await readFile(filename, "utf8"),
+  );
+  expect(receipts).toHaveLength(1);
+  const original = JSON.stringify({
+    accountId,
+    requests,
+    receipts,
+    inputProjection,
+  });
+  await writeFile(filename, original);
+  await expect(prepare()).rejects.toThrow("the build that created it");
+  await expect(retry.publish()).rejects.toThrow();
+  expect(await readFile(filename, "utf8")).toBe(original);
+  expect(cloud.posts).toHaveLength(1);
+});
+
 test("Endor source repository binding preserves immutable requests across a repository rename", async () => {
   const input: any = endorSarif();
   input.runs[0].versionControlProvenance = [
@@ -10211,6 +11267,29 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
 });
 
 test.each([
+  {
+    provider: "github",
+    format: "security.findings.v1",
+    raw: [importedAlert()],
+  },
+  {
+    provider: "inspector",
+    format: "security.findings.v1",
+    raw: inspectorReportWithRelatedCves(),
+    sourceRepositoryUrl: inspectorRepositoryUrl,
+    previousReader: normalizePreviousInspectorFindings,
+    previousSha256:
+      "91b5a4d309daee520029a3d54e809ad84d8b47ee97df5fd54d56323fc246f640",
+  },
+  {
+    provider: "continuum",
+    format: "security.findings.v1",
+    raw: continuumDetail(),
+    sourceRepositoryUrl: continuumRepository,
+    previousReader: normalizePreviousContinuumFindings,
+    previousSha256:
+      "98f888f8b748bb54a209b19de53af40867f5f129049a99da0387e697895aa320",
+  },
   { provider: "snyk", format: "security.findings.v1", raw: snykSarif() },
   {
     provider: "endor",
@@ -10232,16 +11311,15 @@ test.each([
   },
 ] as const)(
   "a signed-in $provider private import resumes lost upload and job responses",
-  async ({ provider, format, raw }) => {
+  async (scenario) => {
+    const { provider, format, raw } = scenario;
+    const sourceRepositoryUrl =
+      "sourceRepositoryUrl" in scenario
+        ? scenario.sourceRepositoryUrl
+        : undefined;
     const f = await fixture(raw);
     const originalBytes = await readFile(f.file, "utf8");
-    const settings = { ...options, provider };
-    const repositoryPreview = await prepareExternalPublication(
-      f.file,
-      settings,
-      f.deps,
-    );
-    f.state.environmentId = null;
+    const settings = { ...options, provider, sourceRepositoryUrl };
     let contextVersion = "generation-a";
     let formats = [
       "security.findings.v1",
@@ -10252,12 +11330,21 @@ test.each([
     let loseResponses = true;
     let unavailable = false;
     let terminal: "completed" | "failed" | "cancelled" = "completed";
-    let advertised = true;
+    let advertised = false;
+    const v1Jobs = "/finding-imports/jobs";
+    const v2Jobs = "/v2" + v1Jobs;
+    let supportsJobV2 = provider !== "inspector";
+    let expectedJobsPath = provider === "continuum" ? v2Jobs : v1Jobs;
     let canCreate = true;
     let fileRequest: string | undefined;
     let fileHash: string | undefined;
     let fileBytes = 0;
+    let reportCount = 1;
+    let unorderedUpdates = 0;
+    const uploadedReports: { id: string; bytes: string }[] = [];
     let jobRequest: string | undefined;
+    let loseNextJobResponse = true;
+    const jobBodies: string[] = [];
     const fileId = "aifile_" + "a".repeat(32);
     let jobId = "import_" + "b".repeat(32);
     const calls: string[] = [];
@@ -10283,13 +11370,13 @@ test.each([
       ],
       status,
       counts: {
-        total: 1,
-        discovered: 1,
-        created: status === "completed" ? 1 : 0,
+        total: reportCount,
+        discovered: reportCount,
+        created: status === "completed" ? reportCount - unorderedUpdates : 0,
         updated: 0,
         unchanged: 0,
-        error: 0,
-        unprocessed: status === "completed" ? 0 : 1,
+        error: status === "completed" ? unorderedUpdates : 0,
+        unprocessed: status === "completed" ? 0 : reportCount,
       },
       poll_after_seconds: null,
       error: null,
@@ -10308,15 +11395,18 @@ test.each([
         calls.push(`${init.method} ${path}`);
         if (path === "/external/repositories") {
           const response = await f.deps.fetch(url, init);
-          return new Response(response.body, {
-            headers: advertised
-              ? {
-                  "Codex-Security-Private-Import-Providers":
-                    "snyk,github,endor,wiz",
-                }
-              : {},
-          });
+          const headers = new Headers();
+          if (advertised)
+            headers.set(
+              "Codex-Security-Private-Import-Providers",
+              "snyk,github,endor,wiz,inspector,continuum",
+            );
+          const version = "Codex-Security-Private-Import-Job-Version";
+          expect(new Headers(init.headers).get(version)).toBe("2");
+          if (supportsJobV2) headers.set(version, "2");
+          return new Response(response.body, { headers });
         }
+        if (path.startsWith("/external/")) return f.deps.fetch(url, init);
         if (path === "/finding-imports/context")
           return Response.json({
             object: "security.finding_import_context",
@@ -10341,19 +11431,42 @@ test.each([
             expect(doc.format).toBe(expectedFormat);
             expect(doc.findings[0].source_finding_id).toBeTruthy();
             expect(doc.findings[0].evidence.source_data).toBeTruthy();
+            reportCount = doc.findings.length;
+            if (provider === "inspector" || provider === "continuum") {
+              const native = provider === "inspector" ? raw.findings : [raw];
+              const expected = loseResponses ? native.slice(0, 1) : native;
+              expect(doc.findings).toHaveLength(expected.length);
+              for (const row of expected) {
+                const finding = doc.findings.find(
+                  (item: { source_finding_id: string }) =>
+                    item.source_finding_id === row.findingArn,
+                );
+                expect(finding?.evidence.source_data.finding).toEqual(row);
+              }
+            }
           } else {
             expect(bytes).toBe(originalBytes);
           }
+          uploadedReports.push({ id: fileRequest, bytes });
           fileHash = hash("sha256", bytes);
           fileBytes = Buffer.byteLength(bytes);
-          if (loseResponses) throw new Error("lost upload response");
+          if (loseResponses && uploadedReports.length === 1)
+            throw new Error("lost upload response");
           return Response.json(fileMetadata());
         }
-        if (path === `/finding-imports/file-requests/${fileRequest}`)
+        if (path === `/finding-imports/file-requests/${fileRequest}`) {
+          if ("previousSha256" in scenario && uploadedReports.length === 1)
+            return new Response(null, { status: 404 });
           return Response.json(fileMetadata());
-        if (path === "/finding-imports/jobs") {
+        }
+        if (path === expectedJobsPath) {
+          jobBodies.push(String(init.body));
           const body = JSON.parse(String(init.body));
           expect(body.request_id).not.toBe(fileRequest);
+          expect(body.source).toEqual({
+            provider,
+            source_key: settings.sourceKey,
+          });
           expect(body.input).toEqual({
             type: "file",
             file_id: fileId,
@@ -10375,16 +11488,17 @@ test.each([
                 : "import_" + "c".repeat(32);
             return Response.json(job(terminal));
           }
-          if (!jobRequest) {
-            jobRequest = body.request_id;
+          if (jobRequest) expect(body.request_id).toBe(jobRequest);
+          jobRequest = body.request_id;
+          if (loseNextJobResponse) {
+            loseNextJobResponse = false;
             throw new Error("lost job response");
           }
-          expect(body.request_id).toBe(jobRequest);
           return Response.json(job("queued"), {
             headers: { "Retry-After": "0" },
           });
         }
-        if (path === `/finding-imports/jobs/${jobId}`)
+        if (path === `${expectedJobsPath}/${jobId}`)
           return unavailable
             ? new Response(null, { status: 503 })
             : Response.json(job(terminal));
@@ -10392,11 +11506,16 @@ test.each([
       },
     };
     const prepare = () => prepareExternalPublication(f.file, settings, deps);
+    const repositoryPreview = await prepare();
+    f.state.environmentId = null;
+    advertised = true;
     const original = await prepare();
     expect(original.preview.privateImport?.sha256).toBeTruthy();
     expect(original.preview.privateImport?.format).toBe(format);
     const cli = createCliTest(main);
     const dryRun = [...f.command, "--dry-run"];
+    if (sourceRepositoryUrl)
+      dryRun.push("--source-repository-url", sourceRepositoryUrl);
     dryRun[dryRun.indexOf("--provider") + 1] = provider;
     dryRun[dryRun.indexOf("--format") + 1] = "toon";
     expect(
@@ -10411,32 +11530,114 @@ test.each([
     canCreate = false;
     await expect(prepare()).rejects.toThrow("unavailable");
     canCreate = true;
-    await expect((await prepare()).publish()).rejects.toThrow(
-      "lost upload response",
+    // Stage the older AWS reader's serialized evidence to reproduce an upgrade
+    // after upload. A fresh context below must use the current reader again.
+    const staged =
+      scenario.previousReader && scenario.sourceRepositoryUrl
+        ? await prepareNormalizedExternalPublication(
+            JSON.parse(
+              JSON.stringify(
+                scenario.previousReader(raw, scenario.sourceRepositoryUrl),
+              ),
+            ),
+            settings,
+            deps,
+          )
+        : await prepare();
+    const interrupted = await staged.publish().catch((error: unknown) => error);
+    if (!(interrupted instanceof ExternalPublicationError))
+      throw new Error("Expected an interrupted private upload", {
+        cause: interrupted,
+      });
+    expect(interrupted.message).toContain("lost upload response");
+    const saved = JSON.parse(
+      await readFile(interrupted.result.savedSubmission!, "utf8"),
     );
+    expect(saved.jobApiVersion).toBe(provider === "continuum" ? 2 : undefined);
+    expect(fileHash).toBe(saved.sha256);
+    expect(fileRequest).toBe(saved.uploadRequestId);
+    if ("previousSha256" in scenario) {
+      expect(fileHash).toBe(scenario.previousSha256);
+      expect(fileHash).not.toBe(original.preview.privateImport?.sha256);
+    }
     await expect(repositoryPreview.publish()).rejects.toThrow(
-      "A private import already owns this selection",
+      "previousSha256" in scenario
+        ? "Another publication prepared this input"
+        : "A private import already owns this selection",
     );
     expect(f.posts).toHaveLength(0);
     advertised = false;
-    await expect((await prepare()).publish()).rejects.toThrow(
-      "lost job response",
-    );
+    const resumed = await prepare();
+    expect(resumed.preview.resumed).toBe(true);
+    expect(resumed.preview.privateImport?.sha256).toBe(saved.sha256);
+    await expect(resumed.publish()).rejects.toThrow("lost job response");
+    expect(jobRequest).toBe(saved.jobRequestId);
+    expect(calls.at(-1)).toBe(`POST ${expectedJobsPath}`);
+    if (provider === "inspector") {
+      // The upgraded server accepts the same job request only on v2.
+      supportsJobV2 = true;
+      expectedJobsPath = v2Jobs;
+      loseNextJobResponse = true;
+      await expect((await prepare()).publish()).rejects.toThrow(
+        "lost job response",
+      );
+      expect(calls.at(-1)).toBe(`POST ${v2Jobs}`);
+      expect(jobBodies).toHaveLength(2);
+      expect(jobBodies[1]).toBe(jobBodies[0]);
+      const promoted = JSON.parse(
+        await readFile(interrupted.result.savedSubmission!, "utf8"),
+      );
+      expect(promoted).toMatchObject({
+        jobApiVersion: 2,
+        jobRequestId: saved.jobRequestId,
+        uploadRequestId: saved.uploadRequestId,
+        sha256: saved.sha256,
+        fileId,
+      });
+    }
+    // A saved v2 job can still be retrieved if the catalogue acknowledgement disappears.
+    supportsJobV2 = false;
     const completed = await (await prepare()).publish();
     expect(completed.privateJob?.counts.created).toBe(1);
+    expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${jobId}`);
     expect(completed.receipts).toEqual([]);
     expect(completed.verified).toBe(0);
-    expect(
-      calls.filter((call) => call === "POST /finding-imports/files"),
-    ).toHaveLength(1);
+    if ("previousSha256" in scenario) {
+      expect(uploadedReports).toHaveLength(2);
+      expect(uploadedReports[1]).toEqual(uploadedReports[0]);
+    } else {
+      expect(uploadedReports).toHaveLength(1);
+    }
+    if (provider === "inspector") {
+      // A completed old job cannot account for the newly admitted package finding.
+      advertised = true;
+      supportsJobV2 = true;
+      loseResponses = false;
+      const next = await prepare();
+      expect(next.preview.resumed).toBe(false);
+      expect(next.preview.privateImport?.sha256).toBe(
+        original.preview.privateImport?.sha256,
+      );
+      // The code finding's changed evidence has no baseline. Only the new ARN
+      // can be created in this workspace.
+      unorderedUpdates = 1;
+      const nextResult = await next.publish();
+      expect(nextResult.privateJob?.id).not.toBe(completed.privateJob?.id);
+      expect(nextResult.privateJob?.counts).toMatchObject({
+        created: 1,
+        error: 1,
+      });
+    }
     canCreate = false;
+    advertised = false;
+    supportsJobV2 = true;
     expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
-    expect(calls.at(-1)).toBe(`GET /finding-imports/jobs/${jobId}`);
+    expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${jobId}`);
     unavailable = true;
     const acknowledged = {
       result: {
         status: "interrupted",
-        counts: { created: 1 },
+        counts: { created: reportCount - unorderedUpdates },
         unacknowledged: 0,
         privateJob: { id: jobId },
       },
@@ -10450,15 +11651,42 @@ test.each([
     formats = ["security.findings.v1"];
     expect((await prepare()).preview.privateImport?.format).toBe(format);
     contextVersion = "generation-c";
+    expectedJobsPath =
+      provider === "inspector" || provider === "continuum" ? v2Jobs : v1Jobs;
+    unorderedUpdates = 0;
+    advertised = true;
     canCreate = true;
     loseResponses = false;
     expectedFormat = "security.findings.v1";
-    terminal = provider === "wiz" ? "cancelled" : "failed";
+    terminal =
+      provider === "wiz" || provider === "continuum" ? "cancelled" : "failed";
     const fresh = await prepare();
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.privateImport?.format).toBe(expectedFormat);
+    if ("previousSha256" in scenario)
+      expect(fresh.preview.privateImport?.sha256).toBe(
+        original.preview.privateImport?.sha256,
+      );
     expect((await fresh.publish()).privateJob?.status).toBe(terminal);
+    expect(fileHash).toBe(fresh.preview.privateImport?.sha256);
     const failedJob = jobId;
+    if (expectedJobsPath === v2Jobs) {
+      // Losing AWS write access still allows the failed or cancelled job to be read.
+      advertised = false;
+      const before = calls.length;
+      const readOnly = await prepare();
+      expect(readOnly.preview.privateImport?.retryOfJobId).toBeUndefined();
+      expect((await readOnly.publish()).privateJob).toMatchObject({
+        id: failedJob,
+        status: terminal,
+      });
+      expect(calls.at(-1)).toBe(`GET ${v2Jobs}/${failedJob}`);
+      expect(
+        calls.slice(before).filter((call) => call.startsWith("POST")),
+      ).toEqual([]);
+      advertised = true;
+      supportsJobV2 = false; // The saved version also applies to its replacement attempt.
+    }
     const retry = await prepare();
     const secondPreview = await prepare();
     expect(retry.preview.resumed).toBe(false);
@@ -10479,7 +11707,7 @@ test.each([
       await expect(retry.publish()).rejects.toMatchObject({
         result: {
           status: "interrupted",
-          counts: { created: 1 },
+          counts: { created: reportCount },
           unacknowledged: 0,
           privateJob: { status: "completed" },
         },
@@ -10499,6 +11727,142 @@ test.each([
   },
 );
 
+function privateInboxContext(context_version = "generation-a") {
+  return Response.json({
+    object: "security.finding_import_context",
+    context_version,
+    can_read: true,
+    can_upload: true,
+    can_create_import_jobs: true,
+    formats: ["security.findings.v1"],
+    limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
+  });
+}
+
+test.each([
+  {
+    data: checkmarxFormat,
+    report: { sourceRepositoryUrl: exampleRepository, scanId: "123" },
+    key: "0b6db48e67edf53d39403c9fd1897c34a179edf5b6cce9bffabc9f52f8757f33",
+    sha256: "8b0e177506af75c363184d3627fed74325acfcada7e3ee8e9d81041c5db5b2d1",
+  },
+  {
+    data: { vulnerableAsset: wizBranchAsset },
+    report: checkmarxFormat,
+    key: "7400c077334e75f2b1ca49f05eb5cc4f431b62a9f2063734f42a03d60500ea5e",
+    sha256: "bf944f1fec0d2f97675f35dc8db1bee753807879fa6077e2bd8c5169889ce7ae",
+  },
+  {
+    data: { sourceRepositoryUrl: exampleRepository },
+    report: checkmarxFormat,
+    key: "0c9c5eef708bb27f19dcaebb67832cc6dcd43bfbf9dee0f0d4c4d2da9145ffa8",
+    sha256: "2ae1422cd86875a7be2d73f2dc8f6833e494668f6e4be9982c403d336557ef9f",
+  },
+])(
+  "only a verified private Wiz checkpoint replays pre-Checkmarx evidence ($data)",
+  async ({ data, report, key, sha256 }) => {
+    const f = await fixture();
+    const selection = sdkSelection(
+      [sdkRow(normalized().source_finding_id, data)],
+      report,
+    );
+    const source = {
+      provider: options.provider,
+      source_key: options.sourceKey,
+    };
+    const repository = { id: options.repository, repo_connector_id: "github" };
+    const checkpoint = {
+      format: "security.findings.v1",
+      apiBaseUrl: "https://chatgpt.com/backend-api/aardvark",
+      accountId: "synthetic-account",
+      contextVersion: "generation-a",
+      source,
+      repository,
+      sha256,
+      uploadRequestId: "ff52f1ac-ee15-4126-a3f4-bc9984fa0c51",
+      jobRequestId: "a942a3d4-ad70-4b4d-aaca-4e1e2b70cb20",
+      fileId: "aifile_" + "a".repeat(32),
+    };
+    const directory = join(f.root, "state", "external-finding-publications");
+    const path = join(directory, key + ".private-import.json");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
+    let contextVersion = checkpoint.contextVersion;
+    const requests: unknown[] = [];
+    const prepare = () =>
+      prepareNormalizedExternalPublication(selection, options, {
+        environment: {
+          ...f.environment,
+          CODEX_SECURITY_CLOUD_BASE_URL: undefined,
+          CODEX_SECURITY_CLOUD_WEB_URL: undefined,
+        },
+        fetch: async (url, init) => {
+          const pathname = new URL(url).pathname;
+          if (pathname.endsWith("/repositories"))
+            return f.deps.fetch(url, init);
+          if (pathname.endsWith("/finding-imports/context"))
+            return privateInboxContext(contextVersion);
+          expect(pathname).toEndWith("/finding-imports/jobs");
+          expect(init.method).toBe("POST");
+          const job = JSON.parse(String(init.body));
+          requests.push(job);
+          return Response.json({
+            ...job,
+            object: "security.finding_import_job",
+            id: "import_" + "b".repeat(32),
+            status: "completed",
+            counts: {
+              total: 1,
+              discovered: 1,
+              created: 1,
+              updated: 0,
+              unchanged: 0,
+              error: 0,
+              unprocessed: 0,
+            },
+            poll_after_seconds: null,
+            error: null,
+          });
+        },
+      });
+    contextVersion = "different-inbox";
+    await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
+    contextVersion = checkpoint.contextVersion;
+    f.state.repositoryUrl = otherRepository;
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    f.state.repositoryUrl = exampleRepository;
+    const resumed = await prepare();
+    expect(resumed.preview.resumed).toBe(true);
+    expect(resumed.preview.privateImport?.sha256).toBe(checkpoint.sha256);
+    expect((await resumed.publish()).counts.created).toBe(1);
+    expect(requests).toEqual([
+      {
+        request_id: checkpoint.jobRequestId,
+        context_version: checkpoint.contextVersion,
+        source,
+        input: {
+          type: "file",
+          file_id: checkpoint.fileId,
+          format: checkpoint.format,
+        },
+        default_targets: [
+          {
+            type: "repository",
+            repo_id: repository.id,
+            repo_connector_id: repository.repo_connector_id,
+          },
+        ],
+      },
+    ]);
+    await rm(path);
+    await expect(resumed.publish()).rejects.toThrow(
+      "requires the checkmarx provider",
+    );
+    await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
+    expect(requests).toHaveLength(1);
+  },
+);
+
 test("a private preview recognizes a later repository checkpoint under its historical filename", async () => {
   const f = await fixture();
   const privatePreview = await prepareNormalizedExternalPublication(
@@ -10515,15 +11879,7 @@ test("a private preview recognizes a later repository checkpoint under its histo
           });
         }
         expect(new URL(url).pathname).toEndWith("/finding-imports/context");
-        return Response.json({
-          object: "security.finding_import_context",
-          context_version: "generation-a",
-          can_read: true,
-          can_upload: true,
-          can_create_import_jobs: true,
-          formats: ["security.findings.v1"],
-          limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
-        });
+        return privateInboxContext();
       },
     },
   );

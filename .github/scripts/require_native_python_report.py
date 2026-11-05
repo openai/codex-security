@@ -1,3 +1,5 @@
+"""Require at least one test case and zero skipped cases in reports/python.xml."""
+
 from xml.etree import ElementTree
 
 report = ElementTree.parse("reports/python.xml")
