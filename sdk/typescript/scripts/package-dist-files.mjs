@@ -79,6 +79,7 @@ const distModules = [
   "cost-model",
   "bedrock-pricing",
   "bedrock-oss-pricing",
+  "vertex-pricing",
   "coverage-presentation",
   "custom-validation",
   "custom-validation-prompt",
