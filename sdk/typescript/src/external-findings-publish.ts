@@ -346,19 +346,24 @@ function isCompleteUnscoredOpenGrepReport(report: ExternalFindings) {
   return rows === report.read;
 }
 
+function repositoryFindings(
+  report: ExternalFindings,
+  severities: readonly string[] | undefined,
+) {
+  return severities
+    ? report.findings.filter(({ evidence }) =>
+        severities.includes(evidence.severity),
+      )
+    : report.findings;
+}
+
 function repositorySelection(
   report: ExternalFindings,
   severities: readonly string[] | undefined,
   sourcePositions: PublicationSelection["sourcePositions"],
 ): ExternalFindings {
-  if (
-    !severities ||
-    report.findings.every(({ evidence }) =>
-      severities.includes(evidence.severity),
-    )
-  )
-    return report;
-  const findings: ExternalFindings["findings"] = [];
+  const findings = repositoryFindings(report, severities);
+  if (findings.length === report.findings.length) return report;
   const excluded = [...report.excluded];
   const skipped = new Set(excluded.map(({ position }) => position));
   function exclude(position: number, id: string | null, severity: string) {
@@ -379,16 +384,16 @@ function repositorySelection(
     for (let row = 1; row <= report.read; row++)
       if (!skipped.has(row)) exclude(row, id, "unknown");
   } else {
+    const retained = new Set(findings);
     let position = 0;
     for (const finding of report.findings) {
       do {
         position++;
       } while (skipped.has(position));
+      if (retained.has(finding)) continue;
       const { source_finding_id, evidence } = finding;
-      if (severities.includes(evidence.severity)) findings.push(finding);
-      else
-        for (const row of sourcePositions?.get(source_finding_id) ?? [position])
-          exclude(row, source_finding_id, evidence.severity);
+      for (const row of sourcePositions?.get(source_finding_id) ?? [position])
+        exclude(row, source_finding_id, evidence.severity);
     }
   }
   return {
@@ -1773,33 +1778,32 @@ async function preparePublicationInput(
   const currentReaderKey = resolved.readPreviousFindings
     ? scopeKey(resolved.currentIdentity)
     : undefined;
-  let previousReaderKey: string | undefined;
   let alternateKey: string | undefined;
   let resumingPreviousReader = false;
   function previousCandidateKey(previous: ExternalFindings | undefined) {
     if (!previous?.findings.length) return;
     // The file reader already validated plain JSON evidence for Cloud. Only a
     // matching checkpoint needs the full normalized publication snapshot.
-    previousReaderKey ??= scopeKey(
+    const previousKey = scopeKey(
       publicationIdentity(previous, options.provider),
     );
-    return previousReaderKey !== currentReaderKey
-      ? previousReaderKey
-      : undefined;
+    return previousKey !== currentReaderKey ? previousKey : undefined;
   }
-  async function hasPrivateCheckpoint(
+  async function alternateCheckpoint(
     key: string,
     context: () => Promise<PrivateImportContext>,
-  ) {
+  ): Promise<{ pending: string | undefined } | undefined> {
+    const pending = await readOptionalFile(join(state, key + ".pending.json"));
+    if (pending !== undefined) return { pending };
     const saved = await readOptionalFile(
       join(state, key + ".private-import.json"),
     );
-    if (saved === undefined) return false;
+    if (saved === undefined) return;
     const checkpoint = parsePrivateCheckpoint(saved);
     // A completed import cannot acknowledge findings newly admitted by the
     // current reader. Pending uploads and jobs always retain their original bytes.
     if (
-      key === previousReaderKey &&
+      !resumingPreviousReader &&
       previousFindings &&
       checkpoint.receipt?.status === "completed" &&
       !sameFindingSelection(
@@ -1807,19 +1811,14 @@ async function preparePublicationInput(
         resolved.current.findings,
       )
     )
-      return false;
-    return checkpoint.contextVersion === (await context()).context_version;
+      return;
+    if (checkpoint.contextVersion === (await context()).context_version)
+      return { pending };
   }
   async function assertNoAlternateCheckpoint(
     context = () => privateClient.context(),
   ) {
-    const otherKey = alternateKey;
-    if (!otherKey) return;
-    if (
-      (await readOptionalFile(join(state, otherKey + ".pending.json"))) !==
-        undefined ||
-      (await hasPrivateCheckpoint(otherKey, context))
-    )
+    if (alternateKey && (await alternateCheckpoint(alternateKey, context)))
       throw new CodexSecurityError(
         resumingPreviousReader
           ? "Both reader versions have saved publications for this report. Resume either one using its original normalized findings."
@@ -1831,15 +1830,11 @@ async function preparePublicationInput(
       await previousFindingsIfSaved(resolved, currentReaderKey),
     );
   if (alternateKey && previousFindings) {
-    capturedPending = await readOptionalFile(
-      join(state, alternateKey + ".pending.json"),
-    );
     const context = async () =>
       (previewContext ??= await privateClient.context());
-    if (
-      capturedPending !== undefined ||
-      (await hasPrivateCheckpoint(alternateKey, context))
-    ) {
+    const checkpoint = await alternateCheckpoint(alternateKey, context);
+    capturedPending = checkpoint?.pending;
+    if (checkpoint) {
       projection = normalizedPublicationInput(
         previousFindings,
         options.provider,
@@ -2191,11 +2186,10 @@ async function preparePublicationInput(
     const saved = submissionFindings(content.requests);
     const wire = wireJson(saved);
     const projection = content.inputProjection;
-    const expected = repositorySelection(
+    const expected = repositoryFindings(
       legacy ? legacyParsed : parsed,
       projection?.repositorySeverities,
-      input.sourcePositions,
-    ).findings;
+    );
     if (
       projection &&
       (!sameFindingSelection(saved, expected) ||
@@ -3093,7 +3087,8 @@ async function preparePublicationInput(
     { findings, report }: Pick<ExternalFindings, "findings" | "report">,
     historical = Boolean(saved),
   ) {
-    checkTrivyReportProvider(options.provider, report);
+    const { provider } = options;
+    checkTrivyReportProvider(provider, report);
     // A catalog casing or spelling change keeps the original source comparison target.
     const approved = hosted ? saved?.approvedRepositoryUrl : undefined;
     const sameCatalog =
@@ -3132,17 +3127,19 @@ async function preparePublicationInput(
       for (const { url } of fileRepositories?.() ?? [])
         requireDestination(
           "Source report",
-          options.provider === "snyk"
+          provider === "snyk"
             ? normalizeHostedGitRepositoryUrl(url, destination.url, true)
             : url,
         );
     // Historical checkpoints already fixed the provider and request bytes.
     // Recheck any projected source against the destination discovered for this retry.
-    const replay =
-      historical && options.provider !== "blackduck" && !trivyReportUrls;
-    if (!historical || options.provider === "sonar" || trivyReportUrls) {
+    const checkNative = (...providers: (typeof provider)[]) =>
+      !historical ||
+      trivyReportUrls !== undefined ||
+      providers.includes(provider);
+    if (checkNative("sonar")) {
       for (const url of sonarRepositoryUrls(
-        options.provider,
+        provider,
         findings,
         report,
         "cloud",
@@ -3150,51 +3147,45 @@ async function preparePublicationInput(
         requireDestination("Sonar source", url);
     }
     const checkmarx = checkmarxSelection(
-      options.provider,
+      provider,
       findings,
       report,
       "cloud",
       historical,
     );
     requireDestination("Checkmarx source", checkmarx.reportUrl);
-    const repositories = replay
-      ? undefined
-      : blackDuckReportRepositories(options.provider, findings, "cloud");
+    const blackDuck = checkNative("blackduck")
+      ? blackDuckReportRepositories(provider, findings, "cloud")
+      : undefined;
     const checkmarxRepository = checkmarx.repositories();
-    for (const [provider, repositories] of [
+    for (const [scanner, repositories] of [
       ["veracode", veracodeReportRepositories],
       ["continuum", continuumReportRepositories],
     ] as const) {
-      if (historical && options.provider !== provider && !trivyReportUrls)
-        continue;
-      for (const [id, source] of repositories(
-        options.provider,
-        findings,
-        "cloud",
-      ))
+      if (!checkNative(scanner)) continue;
+      for (const [id, source] of repositories(provider, findings, "cloud"))
         requireDestination(id, source.url);
     }
-    if (
-      !replay ||
-      options.provider === "inspector" ||
-      options.provider === "veracode"
-    ) {
+    if (checkNative("blackduck", "inspector", "veracode")) {
       const binding = inspectorReportRepository(
-        options.provider,
+        provider,
         findings,
         "cloud",
         inspectorProjectMap,
       );
       if (binding) requireDestination(binding.findingId, binding.url);
     }
-    const checkOnlyProjected =
-      replay &&
-      !["inspector", "veracode", "checkmarx", "continuum", "sonar"].includes(
-        options.provider,
-      );
+    const checkOnlyProjected = !checkNative(
+      "blackduck",
+      "inspector",
+      "veracode",
+      "checkmarx",
+      "continuum",
+      "sonar",
+    );
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
-      checkRetainedTrivyProvider(options.provider, finding);
+      checkRetainedTrivyProvider(provider, finding);
       if (trivyReportUrls) {
         const remote = trivyRepositoryUrl(
           retainedTrivyReport(finding),
@@ -3202,40 +3193,43 @@ async function preparePublicationInput(
         );
         if (remote) requireTrivyRemote(remote, id);
       }
-      const blackDuckUrl = repositories
-        ? repositories.get(id)?.url
+      const blackDuckUrl = blackDuck
+        ? blackDuck.get(id)?.url
         : projectedBlackDuckRepositoryUrl(finding, "cloud");
       const hasProjection =
         !!blackDuckUrl || checkmarx.projections.has(finding);
       if (checkOnlyProjected && !hasProjection) continue;
-      const urls = [
+      let urls = [
         blackDuckUrl,
         checkmarxRepository(finding)?.url,
         evidence.details?.repository?.url,
-        options.provider === "wiz"
-          ? hasProjection ||
-            (!historical && isWizPackageFinding(evidence.source_data))
-            ? wizFindingRepository(evidence, "cloud")?.url
-            : wizCsvRepositoryUrl(evidence)
-          : undefined,
-        ...(options.provider === "snyk"
-          ? snykRepositoryUrls(evidence.source_data, {
-              cloudRepositoryUrl: destination.url,
-            })
-          : []),
-        ...(options.provider === "endor"
-          ? endorRepositoryUrls(
-              evidence.source_data,
-              Boolean(replay && !blackDuckUrl),
-            )
-          : []),
-        options.provider === "github" && !historical
-          ? retainedGitHubRepository(finding)
-          : undefined,
-        options.provider === "github"
-          ? dependabotRepository(finding)
-          : undefined,
       ];
+      if (provider === "wiz") {
+        const native =
+          hasProjection ||
+          (!historical && isWizPackageFinding(evidence.source_data));
+        urls.push(
+          native
+            ? wizFindingRepository(evidence, "cloud")?.url
+            : wizCsvRepositoryUrl(evidence),
+        );
+      } else if (provider === "snyk") {
+        urls = urls.concat(
+          snykRepositoryUrls(evidence.source_data, {
+            cloudRepositoryUrl: destination.url,
+          }),
+        );
+      } else if (provider === "endor") {
+        urls = urls.concat(
+          endorRepositoryUrls(
+            evidence.source_data,
+            !blackDuck && !blackDuckUrl,
+          ),
+        );
+      } else if (provider === "github") {
+        if (!historical) urls.push(retainedGitHubRepository(finding));
+        urls.push(dependabotRepository(finding));
+      }
       for (const url of urls) requireDestination(id, url);
     }
   }
