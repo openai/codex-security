@@ -74,6 +74,7 @@ async function run() {
                 },
               },
             })}\n`,
+            { mode: 0o600 },
           );
           result = {};
           break;
