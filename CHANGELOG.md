@@ -1,14 +1,12 @@
 # Changelog
 
-[GitHub Releases](https://github.com/openai/codex-security/releases) is the
-canonical changelog for Codex Security. Each release page combines a reviewed
-summary with the categorized pull requests included in that version.
+Find highlights and upgrade instructions on [GitHub Releases](https://github.com/openai/codex-security/releases). Open the [latest release](https://github.com/openai/codex-security/releases/latest) for the current version, or select the `npm-vX.Y.Z` tag for the version you use. Some older entries contain only the generated change list.
 
-Use the [latest release](https://github.com/openai/codex-security/releases/latest)
-for current upgrade notes. The [complete release history](https://github.com/openai/codex-security/releases)
-links every version to its tag, package asset, contributors, and full Git
-comparison.
+For a GitHub Action pin, open the companion `action-vX.Y.Z` release. It lists the distribution commit SHA and links to the matching CLI changelog.
 
-Maintainers should follow [RELEASING.md](RELEASING.md) when preparing or
-repairing a release. Keeping the detailed history on GitHub avoids maintaining
-two changelogs that can drift apart.
+## Upgrading to 0.8.3
+
+- **Daybreak budgets.** If you set `--max-cost` or the SDK’s `maxCostUsd` with `gpt-daybreak-blue-latest` or `gpt-daybreak-red-latest`, select an available model with built-in pricing. The CLI and SDK no longer have rates for those aliases. Select Blue or Red separately through `--cyber-access-program`. [Pricing change](https://github.com/openai/codex-security/pull/2165)
+- **Required GitHub Action checks.** When adopting the new PR workflow, let the target-specific check run, then replace the old required **Codex Security** check with `Codex Security / <target-branch>` on that branch. Protect against base changes at merge time as described in the [PR workflow guide](https://github.com/openai/codex-security/blob/npm-v0.8.3/github-action/README.md#scan-pull-requests). Put configuration-only runs in a separate job with `dry-run: 'true'` and `fail-on-severity: none`.
+- **Scripts that validate a tracking source.** Replace direct calls to `scripts/validate_tracking_source.py` with `scripts/launch_codex_security_mcp --helper validate-tracking-source SCAN_DIRECTORY` from the installed plugin directory. Use the `.cmd` launcher on Windows. Pass the same optional `--finding-id` or `--fingerprint` selector. The helper verifies the sealed scan and prints one matching finding ID per line. [Tracking change](https://github.com/openai/codex-security/pull/1846)
+- **Scripts that prepare local deduplication.** Replace direct calls to the bundled `workbench_db.py local-dedupe` with `scripts/launch_codex_security_mcp --helper local-dedupe` from the installed plugin directory. Supply the state directory and action payload as JSON on stdin. Keep Python available for saved-scan lookup and export. The [storage helper reference](https://github.com/openai/codex-security/blob/npm-v0.8.3/sdk/typescript/docs/findings-service.md#direct-storage-helpers) shows the request shape and Windows launcher.
