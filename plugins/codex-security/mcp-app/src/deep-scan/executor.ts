@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   accessSync,
+  type BigIntStats,
   constants as fsConstants,
   existsSync,
   promises as fs,
@@ -33,6 +34,7 @@ import {
 } from "../../../scripts/codex_profile.mjs";
 import { executablePathForSpawn } from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
+import { workerTokenUsage } from "./usage-receipt.js";
 import {
   classifyCodexWorkerError,
   codexWorkerTurnError,
@@ -51,6 +53,7 @@ import type {
   CodexWorkerExecutor,
   CodexWorkerRequest,
   CodexWorkerResult,
+  WorkerTelemetryOptions,
   DeepScanConfig,
 } from "./types.js";
 
@@ -75,25 +78,36 @@ export interface CodexSdkWorkerArtifactContext {
   pythonCommand?: string;
 }
 
+interface BoundCodexExecutable {
+  readonly path: string;
+  readonly identity: BigIntStats;
+}
+
 interface CodexSdkWorkerRuntimeSettings {
+  hasProviderEnvKey?: boolean;
   environment?: Record<string, string>;
   config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
   nativeProfile?: string;
+  profileMcpServerNames?: string[];
   cyberAccessProgram?: CyberAccessProgram;
 }
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
+  // Each live coordinator keeps the executable selected for its first worker.
+  private codexExecutable?: Promise<BoundCodexExecutable>;
   private parentCyberAccessProgram?: Promise<CyberAccessProgram | undefined>;
+  private pluginVersion?: Promise<string | undefined>;
 
   constructor(
     private readonly modelSettings: CodexSdkWorkerModelSettings = {},
   ) {}
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
-    const { threadId, diagnostics } = await this.runTurn(request);
-    return { threadId, ...(diagnostics && { diagnostics }) };
+    const { threadId, turnId, usage, diagnostics } =
+      await this.runTurn(request);
+    return { threadId, turnId, usage, ...(diagnostics && { diagnostics }) };
   }
 
   async compareFindings(
@@ -101,8 +115,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     workingDirectory: string,
     signal: AbortSignal,
     schema: Record<string, unknown>,
+    telemetry?: WorkerTelemetryOptions,
   ): Promise<string> {
     const turn = await this.runTurn({
+      ...telemetry,
       kind: "compare",
       prompt,
       workingDirectory,
@@ -115,20 +131,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private async runTurn(
     request:
       | CodexWorkerRequest
-      | {
+      | (WorkerTelemetryOptions & {
           kind: "compare";
           prompt: string;
           workingDirectory: string;
           signal: AbortSignal;
           schema: Record<string, unknown>;
-        },
+        }),
   ) {
     const discovery = request.kind === "discovery" ? request : undefined;
     const includePaths = this.modelSettings.artifactContext?.includePaths;
-    const scopeInput = JSON.stringify({
-      paths: includePaths,
-      filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
-    });
     const includePathsFile =
       !discovery || includePaths === undefined
         ? undefined
@@ -144,12 +156,26 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           "Deep Scan cannot start a read-only worker without verified parent sandbox metadata.",
         );
       }
-      const workerProfile = workerPermissionProfile(parentSandbox);
+      const workerProfile = workerPermissionProfile(
+        request.workerUsageDirectory
+          ? {
+              ...parentSandbox,
+              literalFilesystemDenies: [
+                ...(parentSandbox.literalFilesystemDenies ?? []),
+                request.workerUsageDirectory,
+              ],
+            }
+          : parentSandbox,
+      );
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv));
+        workerRuntimeSettings(childEnv).catch((error: unknown) => {
+          // A failed read produced no snapshot. Let the next worker retry it.
+          this.runtimeSettings = undefined;
+          throw error;
+        }));
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -187,22 +213,77 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
       if (includePathsFile !== undefined) {
         // Keep host-bound inputs beside the prompt, outside the worker's output root.
-        await writePrivateFile(includePathsFile, scopeInput);
+        await writePrivateFile(
+          includePathsFile,
+          JSON.stringify({
+            paths: includePaths,
+            filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+          }),
+        );
       }
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
+      const inheritedMetadata = isRecord(
+        runtimeSettings.config.responses_api_metadata,
+      )
+        ? runtimeSettings.config.responses_api_metadata
+        : {};
+      const attemptId = request.attemptId ?? randomUUID();
+      const operationId =
+        typeof inheritedMetadata.codex_security_operation_id === "string"
+          ? inheritedMetadata.codex_security_operation_id
+          : this.modelSettings.artifactContext?.scanId;
+      const parentAttemptId =
+        typeof inheritedMetadata.codex_security_attempt_id === "string"
+          ? inheritedMetadata.codex_security_attempt_id
+          : undefined;
+      const pluginRootForVersion =
+        this.modelSettings.artifactContext?.pluginRoot;
+      const pluginVersion =
+        pluginRootForVersion === undefined
+          ? undefined
+          : await (this.pluginVersion ??= fs
+              .readFile(
+                join(pluginRootForVersion, ".codex-plugin", "plugin.json"),
+                "utf8",
+              )
+              .then((text) => {
+                const manifest: unknown = JSON.parse(text);
+                return isRecord(manifest) &&
+                  typeof manifest.version === "string"
+                  ? manifest.version
+                  : undefined;
+              })
+              .catch(() => undefined));
+      try {
+        request.onAttribution?.({ operationId, attemptId, parentAttemptId });
+      } catch {
+        // Optional observability cannot interrupt a worker.
+      }
       const configOverrides = profileConfigOverrides({
         ...runtimeSettings.config,
         responses_api_metadata: {
           codex_security_surface: "plugin",
           codex_security_command: "scan",
           codex_security_scan_mode: "deep",
+          ...(pluginVersion === undefined
+            ? {}
+            : {
+                codex_security_plugin_version: pluginVersion,
+              }),
           // Keep the host's integration/provider context as this coordinator
           // launches or resumes workers with a different role.
-          ...(isRecord(runtimeSettings.config.responses_api_metadata)
-            ? runtimeSettings.config.responses_api_metadata
-            : {}),
+          ...inheritedMetadata,
           codex_security_worker_role: request.kind,
+          ...(operationId === undefined
+            ? {}
+            : { codex_security_operation_id: operationId }),
+          codex_security_attempt_id: attemptId,
+          ...(parentAttemptId === undefined
+            ? {}
+            : {
+                codex_security_parent_attempt_id: parentAttemptId,
+              }),
         },
         ...(this.modelSettings.reasoningEffort
           ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -210,12 +291,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ...(this.modelSettings.serviceTier === undefined
           ? {}
           : { service_tier: this.modelSettings.serviceTier }),
-        mcp_servers: {
-          // A disabled server still needs a valid transport during native resolution.
-          "codex-security": { command: "node", enabled: false },
-          ...(discovery &&
-            this.compactArtifactServer(discovery, includePathsFile)),
-        },
         ...(discovery
           ? workerSubagentConfig(
               discovery.subagents,
@@ -224,12 +299,21 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           : {
               web_search: "disabled",
               project_doc_max_bytes: 0,
+              tools: {
+                experimental_request_user_input: { enabled: false },
+                update_plan: { enabled: false },
+              },
               features: {
                 ...(isRecord(runtimeSettings.config.features) &&
                   runtimeSettings.config.features),
                 apps: false,
                 plugins: false,
                 shell_tool: false,
+                view_image: false,
+                image_generation: false,
+                goals: false,
+                request_permissions_tool: false,
+                computer_use: false,
                 unified_exec: false,
                 code_mode: false,
                 code_mode_only: false,
@@ -254,14 +338,17 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         "CODEX_API_KEY",
         process.platform,
       )?.trim();
-      const codexPath = resolveCodexPath(
+      const executable = await (this.codexExecutable ??= bindCodexExecutable(
         childEnv,
-        process.platform,
-        process.arch,
         originalCwd,
-      );
+      ).catch((error) => {
+        // A failed first lookup has not pinned an executable yet; allow startup retries.
+        this.codexExecutable = undefined;
+        throw error;
+      }));
+      await verifyBoundCodexExecutable(executable);
       const preflightOptions = {
-        codexPath,
+        codexPath: executable.path,
         cwd: request.workingDirectory,
         configOverrides,
         providerConfigOverrides: runtimeSettings.preflightProviderOverrides,
@@ -292,22 +379,33 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await preflightDeepScanWorkerPermissionProfile({
           ...preflightOptions,
           expectedProfile: workerProfile,
-          allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
+          allowOpenAiApiKeyFallback: Boolean(
+            openAiApiKey && !codexApiKey && !runtimeSettings.hasProviderEnvKey,
+          ),
         });
-      if (!discovery) {
-        for (const name of mcpServerNames) {
-          if (name !== "codex-security")
-            configOverrides.push(
-              `mcp_servers.${JSON.stringify(name)}.enabled=false`,
-            );
-        }
-      }
+      const inheritedServers = new Set([
+        ...mcpServerNames,
+        ...(runtimeSettings.profileMcpServerNames ?? []),
+      ]);
+      // Merge flags into the existing transports. Native -c splits dotted keys
+      // even when the server name is quoted; a single TOML table preserves it.
+      const servers = discovery
+        ? {
+            "codex-security": inheritedServers.has("codex-security")
+              ? { enabled: false }
+              : { command: "node", enabled: false },
+            ...this.compactArtifactServer(discovery, includePathsFile),
+          }
+        : Object.fromEntries(
+            [...inheritedServers].map((name) => [name, { enabled: false }]),
+          );
+      configOverrides.push(...profileConfigOverrides({ mcp_servers: servers }));
       const prompt =
         request.kind === "compare"
           ? request.prompt
           : await fs.readFile(request.promptPath, "utf8");
       const codexOptions = {
-        codexPathOverride: executablePathForSpawn(codexPath),
+        codexPathOverride: executablePathForSpawn(executable.path),
         env: childEnv,
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
         // Keep native credentials unless the worker has no configured account.
@@ -322,6 +420,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               ...codexOptions,
               profileName: runtimeSettings.nativeProfile,
             });
+      // The pinned SDK defaults missing cache writes to zero; native profiles
+      // preserve field presence before defaulting in our profile adapter.
+      const readUsage = (value: unknown) =>
+        workerTokenUsage(value, runtimeSettings.nativeProfile === undefined);
       const threadOptions = {
         ...(this.modelSettings.model
           ? { model: this.modelSettings.model }
@@ -350,6 +452,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
 
       try {
+        // Detect updates during preflight before starting a fresh or resumed worker.
+        await verifyBoundCodexExecutable(executable);
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
           ...(request.kind === "compare" && { outputSchema: request.schema }),
@@ -357,11 +461,26 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             parentProgram ?? runtimeSettings.cyberAccessProgram,
         });
         const diagnostics: CodexWorkerDiagnostic[] = [];
+        let turnId: string | undefined;
         const turn = await readCodexSessionTurn({
           thread,
           events,
           stopOnCompletion: true,
           onEvent: async (event) => {
+            if (
+              (event.type === "turn.started" ||
+                event.type === "turn.completed") &&
+              "turn_id" in event &&
+              typeof event.turn_id === "string"
+            )
+              turnId = event.turn_id;
+            if (event.type === "turn.completed") {
+              try {
+                await request.onUsage?.(readUsage(event.usage), turnId);
+              } catch {
+                // Retaining optional usage must not change turn acceptance.
+              }
+            }
             const item = event.type === "item.completed" ? event.item : event;
             if (item.type === "error") {
               const fallbackError = deepScanPermissionProfileFallbackError(
@@ -373,7 +492,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               }
             }
             if (event.type === "thread.started") {
-              await discovery?.onThreadStarted?.(event.thread_id);
+              await request.onThreadStarted?.(event.thread_id);
             } else if (event.type === "item.completed") {
               appendItemDiagnostic(diagnostics, event.item);
             } else if (event.type === "turn.completed") {
@@ -400,6 +519,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         return {
           finalResponse: turn.finalResponse,
           threadId: turn.threadId ?? thread.id ?? undefined,
+          ...(turnId === undefined ? {} : { turnId }),
+          usage: readUsage(turn.usage),
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         };
       } finally {
@@ -443,6 +564,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           CODEX_SECURITY_ARTIFACT_LAYOUT: assigned.layout,
           CODEX_SECURITY_SCAN_ID: scan.scanId,
           CODEX_SECURITY_PLUGIN_ROOT: scan.pluginRoot,
+          ...(assigned.discoveryBoard && {
+            CODEX_SECURITY_DISCOVERY_BOARD_ROOT: assigned.discoveryBoard.root,
+            CODEX_SECURITY_DISCOVERY_WORKER: assigned.discoveryBoard.author,
+          }),
           ...(scan.scope !== undefined
             ? { CODEX_SECURITY_SCOPE: scan.scope }
             : {}),
@@ -636,6 +761,57 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+async function bindCodexExecutable(
+  env: NodeJS.ProcessEnv,
+  originalCwd: string,
+): Promise<BoundCodexExecutable> {
+  const path = resolveCodexPath(
+    env,
+    process.platform,
+    process.arch,
+    originalCwd,
+  );
+  return { path, identity: await codexExecutableIdentity(path) };
+}
+
+async function verifyBoundCodexExecutable(
+  executable: BoundCodexExecutable,
+): Promise<void> {
+  let identity: BigIntStats;
+  try {
+    identity = await codexExecutableIdentity(executable.path);
+  } catch (error) {
+    throw codexExecutableChangedError(executable.path, error);
+  }
+  if (
+    identity.dev !== executable.identity.dev ||
+    identity.ino !== executable.identity.ino ||
+    identity.size !== executable.identity.size ||
+    identity.mtimeNs !== executable.identity.mtimeNs ||
+    identity.ctimeNs !== executable.identity.ctimeNs
+  ) {
+    throw codexExecutableChangedError(executable.path);
+  }
+}
+
+async function codexExecutableIdentity(path: string): Promise<BigIntStats> {
+  const metadata = await fs.stat(path, { bigint: true });
+  if (!metadata.isFile() || metadata.size === 0n) {
+    throw new Error("Codex executable is not a non-empty file.");
+  }
+  return metadata;
+}
+
+function codexExecutableChangedError(path: string, cause?: unknown): Error {
+  return new DeepScanNonRetryableError(
+    "Deep Scan cannot start this worker because the Codex executable " +
+      `"${path}" changed after this Deep Scan started or is no longer available. ` +
+      "This usually means Codex updated while the scan was running. Retry after the update " +
+      "finishes; completed work remains in the retained partial scan.",
+    { cause },
+  );
+}
+
 function mergeConfigTables(
   base: Record<string, unknown>,
   override: Record<string, unknown>,
@@ -721,7 +897,29 @@ export async function workerRuntimeSettings(
         "utf8",
       ),
     );
+    if (isRecord(nativeProfileConfig.mcp_servers)) {
+      settings.profileMcpServerNames = Object.keys(
+        nativeProfileConfig.mcp_servers,
+      );
+    }
     if (isRecord(nativeProfileConfig.model_providers)) {
+      const providerId = workerConfig.model_provider ?? selected.model_provider;
+      const provider =
+        typeof providerId === "string"
+          ? nativeProfileConfig.model_providers[providerId]
+          : undefined;
+      if (
+        isRecord(provider) &&
+        typeof provider.env_key === "string" &&
+        provider.auth == null
+      ) {
+        settings.hasProviderEnvKey =
+          environmentVariable(
+            settings.environment ?? {},
+            provider.env_key,
+            process.platform,
+          ) !== undefined;
+      }
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,
       );
@@ -869,7 +1067,21 @@ export function resolveCodexPath(
           : resolveFromSearchPath(searchPath, executableName, originalCwd);
       if (fromSearchPath) return fromSearchPath;
     }
-    return absoluteCodexPath(configured, platform, originalCwd);
+    const configuredPath = absoluteCodexPath(configured, platform, originalCwd);
+    if (platform === "win32") {
+      // Match Node's spawn lookup before binding the actual file's identity.
+      const suffixBase = configuredPath.endsWith(".")
+        ? configuredPath
+        : `${configuredPath}.`;
+      const hasExtension = /\.[^.]+$/u.test(win32.basename(configuredPath));
+      const candidates = [
+        ...(hasExtension ? [configuredPath] : []),
+        `${suffixBase}com`,
+        `${suffixBase}exe`,
+      ];
+      return candidates.find(isExecutableFile) ?? configuredPath;
+    }
+    return configuredPath;
   }
 
   if (platform !== "win32") {

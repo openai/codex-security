@@ -1,4 +1,5 @@
 import { jsonLineInputSource } from "./support/json-line-input-source.ts";
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import type { PersistedDeepScanWorker } from "../src/deep-scan/types.js";
 import { readJson, readJsonLines } from "./support/json.ts";
 import {
@@ -10,7 +11,9 @@ import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { parse as parseToml } from "smol-toml";
-import { execFile } from "node:child_process";
+import { execFile, fork } from "node:child_process";
+import { once } from "node:events";
+import { text } from "node:stream/consumers";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
@@ -33,7 +36,9 @@ import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
 
-const pluginRoot = path.resolve(mcpAppRoot, "..");
+const pluginRoot = await realpath(
+  path.resolve(mcpAppRoot, "../../../sdk/typescript/_bundled_plugin"),
+);
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
 
@@ -49,11 +54,13 @@ async function testDeepScanStdioLifecycle() {
   const fixtureRoot = await temporaryDirectory("codex-security-deep-stdio-");
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
+  const expiredTargetPath = path.join(fixtureRoot, "expired-target");
   const stateDir = path.join(fixtureRoot, "state");
   const codexHome = path.join(fixtureRoot, "codex [home]");
   const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
   const projectConfigPath = path.join(fixtureRoot, "selected.yaml");
+  const expiredProjectConfigPath = path.join(fixtureRoot, "expired.yaml");
   const startLogPath = path.join(fixtureRoot, "fake-codex-started.jsonl");
   const exitLogPath = path.join(fixtureRoot, "fake-codex-exited.jsonl");
   const restartControlPath = path.join(
@@ -88,11 +95,14 @@ async function testDeepScanStdioLifecycle() {
 
   await mkdir(targetPath, { recursive: true });
   await mkdir(failedTargetPath, { recursive: true });
+  await mkdir(expiredTargetPath, { recursive: true });
   await mkdir(path.join(codexHome, "codex-security"), { recursive: true });
   for (const directory of [
     "scripts",
     "references",
     "schemas",
+    "shared",
+    "mcp/native",
     ".codex-plugin",
   ]) {
     await cp(
@@ -154,6 +164,10 @@ max_discovery_runs = 2
   await writeFakeCodex(fakeCodexPath);
   await writeFile(projectConfigPath, "scan: {max_time_minutes: 30}\n");
   await writeFile(
+    expiredProjectConfigPath,
+    "scan: {mode: deep, max_time_minutes: 0.000001}\n",
+  );
+  await writeFile(
     runtimeConfigPath,
     `model_reasoning_summary = "detailed"
 profile = "selected"
@@ -187,7 +201,6 @@ service_tier = "ultrafast"
     FAKE_CODEX_RESTART_CONTROL: restartControlPath,
     FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL: signalCheckpointControlPath,
     FAKE_CODEX_START_LOG: startLogPath,
-    FAKE_CODEX_DENIED_HOME: codexHome,
   };
   const server = startServer(serverBundlePath, environment);
 
@@ -256,6 +269,35 @@ service_tier = "ultrafast"
       [],
     );
 
+    const expired = await server.request(
+      5,
+      "tools/call",
+      toolCall(
+        "start_codex_security_deep_scan",
+        {
+          targetPath: expiredTargetPath,
+          projectConfigPath: expiredProjectConfigPath,
+        },
+        threadId,
+      ),
+    );
+    assertNoError(expired);
+    const expiredScanId = expired.result.structuredContent.scanId;
+    const expiredState = await getDeepScan({
+      environment,
+      scanId: expiredScanId,
+      threadId,
+    });
+    assert.equal(expiredState.terminalReason, "capped");
+    assert.equal(expiredState.dispatchedCount, 0);
+    assert.equal(
+      expired.result.structuredContent.completion.scan.reportAvailable,
+      true,
+    );
+    const coverage = await readFixtureCoverage(expiredState.scanDir, stateDir);
+    assert.match(coverage.deferred[0].reason, /discovery time limit elapsed/);
+    assert.deepEqual(await readLogLines(startLogPath), []);
+
     const targetRequest = {
       targetPath,
       scope: ".",
@@ -276,7 +318,10 @@ service_tier = "ultrafast"
       }),
     );
 
-    const scanId = await waitForScanId({ server });
+    const scanId = await waitForScanId({
+      server,
+      excludedScanIds: [expiredScanId],
+    });
     await waitForDeepScanWorker({ environment, scanId, threadId });
     const [startedWorker] = await waitForJsonLines(startLogPath, 1);
     assert.equal(startedWorker.hasExpectedApiKey, true);
@@ -333,7 +378,12 @@ service_tier = "ultrafast"
       startedWorker.argv.includes('model_reasoning_summary="none"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
+    assertReadOnlyWorkerInvocation(
+      startedWorker.argv,
+      codexHome,
+      stateDir,
+      scanId,
+    );
     assertWorkerArtifactEnvironment(
       startedWorker.argv,
       pluginRoot,
@@ -534,7 +584,7 @@ service_tier = "ultrafast"
     const failedScanId = await waitForScanId({
       server,
       requestId: 20,
-      excludedScanIds: [scanId],
+      excludedScanIds: [expiredScanId, scanId],
     });
     await waitForDeepScanWorker({
       environment,
@@ -577,7 +627,12 @@ service_tier = "ultrafast"
       failedWorker.argv.includes('model_reasoning_effort="high"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
+    assertReadOnlyWorkerInvocation(
+      failedWorker.argv,
+      codexHome,
+      stateDir,
+      failedScanId,
+    );
     assert.equal(activeFailureState.workers.length, 1);
     assert.equal(activeFailureState.workers[0].kind, "discovery");
     assert.equal(activeFailureState.workers[0].status, "running");
@@ -904,12 +959,28 @@ service_tier = "ultrafast"
         /Do not call complete_codex_security_scan again/,
       );
       const completion = resumed.structuredContent.completion;
+      const sealed = await runWorkbench(environment, [
+        "get-scan",
+        "--scan-id",
+        resumedScanId,
+      ]);
+      const { accountRateLimits: _limits, ...usage } = sealed.scan.usage;
+      // The synthetic workers report their tokens; the parent has no usage receipt.
+      assert.equal(usage.coverage, "partial");
+      assert.ok(usage.inputTokens > 0);
+      assert.ok(usage.warnings.length);
       assert.deepEqual(completion, {
-        scan: { progress: { status: "complete" }, reportAvailable: true },
+        scan: {
+          progress: { status: "complete" },
+          reportAvailable: true,
+          usage,
+        },
       });
       assert.deepEqual(resumed.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
+        completedAudits: 2,
+        terminalReason: "saturated",
         manifestPath,
         reportPath: path.join(resumedScan.scanDir, "report.md"),
         instructions,
@@ -993,7 +1064,12 @@ service_tier = "ultrafast"
       for (const [index, execution] of executions.entries()) {
         const afterRestart = index + restartStartIndex >= resumedStartIndex;
         assertConfigOverrides(execution.argv, { service_tier: "default" });
-        assertReadOnlyWorkerInvocation(execution.argv, codexHome);
+        assertReadOnlyWorkerInvocation(
+          execution.argv,
+          codexHome,
+          stateDir,
+          resumedScanId,
+        );
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) {
@@ -1089,6 +1165,26 @@ service_tier = "ultrafast"
       assert.equal(
         retry.structuredContent.reportPath,
         path.join(retry.structuredContent.scanDir, "report.md"),
+      );
+      assert.equal(
+        (await readLogLines(startLogPath)).length,
+        workerCountBeforeRetry,
+      );
+      const deadlineConfig = path.join(fixtureRoot, "deadline.yaml");
+      await writeFile(deadlineConfig, "scan: {max_time_minutes: 0.000001}\n");
+      const expired = await restartedServer.request(
+        6,
+        "tools/call",
+        toolCall(
+          "start_codex_security_deep_scan",
+          { targetPath: retryTarget, projectConfigPath: deadlineConfig },
+          "deadline-thread",
+        ),
+      );
+      assertNoError(expired);
+      assert.match(
+        expired.result.structuredContent.instructions,
+        /deadline expired before any Standard scan completed/,
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,
@@ -1253,31 +1349,29 @@ async function testCliDeepScanEngine({
     ]);
     return { scanId: registration.scanId as string, scanDir };
   };
+  const request = (scanId: string) => ({
+    scanId,
+    threadId,
+    model: "gpt-6.1-sol",
+    reasoningEffort: "max",
+    permissionProfile: (parentSandboxState as { permissionProfile: unknown })
+      .permissionProfile,
+  });
+  const engineEnvironment = {
+    ...environment,
+    CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase,
+  };
   const launch = (scanId: string, overrides: NodeJS.ProcessEnv = {}) => {
     const execution = execFileAsync(
       process.execPath,
       [serverBundlePath, "--deep-scan-engine"],
       {
-        env: {
-          ...environment,
-          CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase,
-          ...overrides,
-        },
+        env: { ...engineEnvironment, ...overrides },
         encoding: "utf8",
         timeout: 30_000,
       },
     );
-    execution.child.stdin!.write(
-      JSON.stringify({
-        scanId,
-        threadId,
-        model: "gpt-6.1-sol",
-        reasoningEffort: "max",
-        permissionProfile: (
-          parentSandboxState as { permissionProfile: unknown }
-        ).permissionProfile,
-      }) + "\n",
-    );
+    execution.child.stdin!.write(JSON.stringify(request(scanId)) + "\n");
     return execution;
   };
   const completed = await register("cli-engine-completed", true);
@@ -1286,7 +1380,35 @@ async function testCliDeepScanEngine({
   const helperStartIndex = (
     await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
   ).length;
-  const result = await launch(completed.scanId);
+  const verbose = fork(serverBundlePath, ["--deep-scan-engine"], {
+    env: engineEnvironment,
+    execArgv: [],
+    timeout: 30_000,
+    silent: true,
+  });
+  const diagnosticEvents: unknown[] = [];
+  verbose.on("message", (event) => diagnosticEvents.push(event));
+  const output = Promise.all([
+    text(verbose.stdout!),
+    text(verbose.stderr!),
+    once(verbose, "close"),
+  ]);
+  verbose.stdin!.write(
+    JSON.stringify({ ...request(completed.scanId), diagnosticsVersion: 1 }) +
+      "\n",
+  );
+  const [stdout, stderr, [code]] = await output;
+  assert.equal(code, 0, stderr);
+  assert.ok(
+    diagnosticEvents.some(
+      (entry) => (entry as { event: string }).event === "discovery_accepted",
+    ),
+  );
+  assert.ok(
+    diagnosticEvents.some(
+      (entry) => (entry as { event: string }).event === "coordinator_terminal",
+    ),
+  );
   const helperLaunches = (
     await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
   ).slice(helperStartIndex);
@@ -1297,7 +1419,7 @@ async function testCliDeepScanEngine({
     assert.equal(launch.args.length, 7);
     assert.equal(launch.cwd, pluginRoot);
   }
-  assert.deepEqual(JSON.parse(result.stdout), {
+  assert.deepEqual(JSON.parse(stdout), {
     scanId: completed.scanId,
     manifestPath: path.join(completed.scanDir, "scan-manifest.json"),
   });
@@ -1309,7 +1431,12 @@ async function testCliDeepScanEngine({
     ["discovery-0001", "discovery-0002"],
   );
   for (const entry of starts) {
-    assertReadOnlyWorkerInvocation(entry.argv, codexHome);
+    assertReadOnlyWorkerInvocation(
+      entry.argv,
+      codexHome,
+      environment.CODEX_SECURITY_STATE_DIR!,
+      completed.scanId,
+    );
     assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
     assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
     assert.equal(entry.hasExpectedApiKey, true);
@@ -1506,7 +1633,12 @@ function assertWorkerArtifactEnvironment(
   assert.equal(env.CODEX_SECURITY_PYTHON_COMMAND, expectedPython);
 }
 
-function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
+function assertReadOnlyWorkerInvocation(
+  args: string[],
+  deniedHome: string,
+  stateDirectory: string,
+  scanId: string,
+) {
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
   assert.equal(
@@ -1534,7 +1666,7 @@ function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
     overrides.map((value) => parseToml(value)),
     [
       parseToml(
-        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"}},network={enabled=false}}`,
+        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"},${JSON.stringify(path.join(stateDirectory, "codex-home", "worker-usage", scanId))}={"."="deny"}},network={enabled=false}}`,
       ),
     ],
   );
@@ -1601,6 +1733,7 @@ async function getDeepScan({
 async function waitForDeepScanWorker(input: Parameters<typeof getDeepScan>[0]) {
   await waitFor(async () => {
     const deepScan = await getDeepScan(input);
+    if (deepScan.status === "failed") throw new Error(deepScan.error);
     const worker = deepScan.workers.find(
       (candidate: PersistedDeepScanWorker) =>
         candidate.kind === "discovery" && candidate.status === "running",
@@ -1642,6 +1775,8 @@ async function writeFakeCodex(executablePath: string) {
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 if (process.argv.includes('app-server')) {
+const profileOverride = process.argv.find(arg => arg.startsWith('permissions.codex_security_deep_scan_worker='));
+const workerProfile = (await import(${JSON.stringify(import.meta.resolve("smol-toml"))})).parse(profileOverride ?? '').permissions?.codex_security_deep_scan_worker;
 ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       let result;
       if (message.method === 'initialize') {
@@ -1649,7 +1784,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       } else if (message.method === 'thread/read') {
         result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: workerProfile } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
       } else if (message.method === 'account/read') {
@@ -1704,8 +1839,10 @@ import { appendFileSync, existsSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
 const input = Buffer.concat(await process.stdin.toArray());
-const workbenchArgs = JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'));
-appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
+const workbenchArgs = args.at(-1).endsWith('workbench_db.py')
+  ? JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'))
+  : [];
+if (workbenchArgs.length) appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
 if (workbenchArgs[0] === 'cancel-scan') {
   appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(workbenchArgs) + '\\n');

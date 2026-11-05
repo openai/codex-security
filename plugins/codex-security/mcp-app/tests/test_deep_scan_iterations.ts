@@ -197,6 +197,24 @@ test("an exact repeat of a merged source saturates without another comparison", 
   );
 });
 
+test("reordered extension fields do not spend a comparison or restart the no-new streak", async () => {
+  const first = {
+    ...base,
+    extensions: { observed: { input: "request", operation: "lookup" } },
+  };
+  const repeat = {
+    ...base,
+    extensions: { observed: { operation: "lookup", input: "request" } },
+  };
+  const { terminal, draft } = await scanLoop([[first], [repeat]], {
+    maxDiscoveryRuns: 2,
+    stopAfterNoNew: 1,
+  });
+  assert.equal(terminal.terminalReason, "saturated");
+  assert.equal(draft.findings.length, 1);
+  assert.equal(draft.findings[0].provenance.sourceFindings?.length, 2);
+});
+
 test("one scan's distinct rule and anchor survive a cross-scan alias", async () => {
   const extract = {
     ...base,
@@ -316,7 +334,13 @@ test("overlapping lists of affected endpoints retain the additional fix", async 
 });
 
 test("a new instance extends the loop and an unfinished final batch respects the cap", async () => {
-  const other = { ...base, locations: [{ path: "fixture.py", startLine: 22 }] };
+  const other = {
+    ...base,
+    locations: [
+      { path: "fixture.py", startLine: 22, role: "entrypoint" },
+      { path: "fixture.py", startLine: 35, role: "root_control" },
+    ],
+  };
   const gate = Promise.withResolvers<void>();
   const { terminal, draft, started, previousByPass } = await scanLoop(
     [[base], [other], [base]],
@@ -335,7 +359,7 @@ test("a new instance extends the loop and an unfinished final batch respects the
   assert.deepEqual(previousByPass, [
     [],
     [],
-    [`fixture.py:1 ${base.title}`, `fixture.py:22 ${other.title}`],
+    [`fixture.py:1 ${base.title}`, `fixture.py:35 ${other.title}`],
   ]);
   assert.equal(terminal.terminalReason, "capped");
   assert.deepEqual(
@@ -760,6 +784,30 @@ test("a later source with a surviving path reopens the merge and counts as new",
   );
 });
 
+test("a context fallback rechecks a prior consolidation before counting it as new", async () => {
+  const [left, alias, clarification] = [
+    "Unchecked lookup",
+    "Another lookup caller",
+    "More detail on the lookup",
+  ].map((title) => ({ ...lookup, title }));
+  const { draft, terminal } = await scanLoop([[left, alias], [clarification]], {
+    workers: 1,
+    maxDiscoveryRuns: 2,
+    stopAfterNoNew: 1,
+    comparisons: [
+      [[0, 1], [1]],
+      () => {
+        throw new Error("Codex ran out of room in the model's context window.");
+      },
+      [[0, 1], [2]],
+    ],
+    sameFix: approvePairs,
+  });
+  assert.equal(draft.findings.length, 1);
+  assert.equal(draft.findings[0]!.provenance.sourceFindings?.length, 3);
+  assert.equal(terminal.terminalReason, "saturated");
+});
+
 test("a failed comparison waits for every started worker batch", async () => {
   const { checkSameFix } = await importSource(
     join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
@@ -876,6 +924,85 @@ test("a saved same-fix merge keeps both original comparison inputs on resume", a
       fail,
     ),
     [1],
+  );
+  // Both workers amend the prior visible group, but the second worker adds
+  // the independently fixable path to its secondary repair group.
+  const split = parseScanUnion(
+    JSON.parse(JSON.stringify(persistedScanUnion(before))),
+  );
+  const splitCounts = await mergeBatch(
+    split,
+    [
+      worker("w3", [{ ...left, title: "Left clarification" }]),
+      worker("w4", [{ ...alias, title: "Alias with a separate repair" }]),
+    ],
+    "/tmp",
+    async (
+      _prompt: string,
+      schema: { properties: Record<string, unknown> },
+    ) => {
+      if ("reviews" in schema.properties)
+        return JSON.stringify({ reviews: [] });
+      return defects([
+        [0, 2],
+        [1, 3],
+      ]);
+    },
+    fail,
+  );
+  assert.deepEqual(splitCounts, [0, 1]);
+  const legacy = {
+    scanId: before.scanId,
+    findings: [
+      {
+        ...left,
+        title: "Accepted combined report",
+        summary: "The previous reducer combined the validated explanations.",
+        locations: [...left.locations, { path: "combined.py", startLine: 3 }],
+        provenance: {
+          ...left.provenance,
+          sourceFindingIds: ["old:0"],
+          sourceFindings: [{ id: "old:0", finding: left }],
+        },
+      },
+    ],
+  };
+  const singleton = legacy.findings[0]!;
+  const representative = { ...singleton, provenance: left.provenance };
+  Object.assign(singleton.provenance, {
+    deepScanRepairGroups: [{ order: 0, sources: ["old:0"], representative }],
+  });
+  await mergeBatch(
+    legacy,
+    [worker("next", [alias])],
+    "/tmp",
+    async (_p: string, schema: { properties: Record<string, unknown> }) => {
+      if ("reviews" in schema.properties)
+        return JSON.stringify({ reviews: [samePair(0)] });
+      if ("sources" in schema.properties)
+        return JSON.stringify({
+          sources: [{ id: 0, same: true, survivingPaths: [] }],
+        });
+      return defects([[0, 1], [1]]);
+    },
+    fail,
+  );
+  const legacyRestored = parseScanUnion(
+    JSON.parse(JSON.stringify(persistedScanUnion(legacy))),
+  );
+  await mergeBatch(
+    legacyRestored,
+    [worker("last", [unrelated])],
+    "/tmp",
+    async () => defects([[0], [1], [2]]),
+    fail,
+  );
+  assert.equal(legacyRestored.findings[0].title, "Accepted combined report");
+  assert.match(legacyRestored.findings[0].summary, /combined the validated/);
+  assert.ok(
+    legacyRestored.findings[0].locations.some(
+      ({ path }: { path: string }) => path === "combined.py",
+    ),
   );
   const draft = scanUnionToDraft(restored);
   assert.deepEqual(draft.scope, {
@@ -1017,6 +1144,120 @@ test("a merged report cannot lend its extra citation to a later comparison", asy
   );
 });
 
+test("a context-sized report does not prevent comparison of later observations", async () => {
+  const tooLarge = () => {
+    throw new Error(
+      "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+    );
+  };
+  const separate = { ...base, title: "Oversized report" };
+  const alias = { ...base, title: "Second description" };
+  const { draft } = await scanLoop([[separate, base, alias]], {
+    maxDiscoveryRuns: 1,
+    stopAfterNoNew: 1,
+    comparisons: [
+      tooLarge,
+      tooLarge,
+      tooLarge,
+      tooLarge,
+      (rows) => {
+        assert.deepEqual(
+          rows.map(({ title }) => title),
+          [alias.title, base.title],
+        );
+        return {
+          uncertain: [],
+          defects: [
+            {
+              operation: "check",
+              failure: "fixture",
+              path: "fixture.py",
+              reports: rows.map(({ id }) => ({ id, evidence: 0 })),
+            },
+          ],
+        };
+      },
+    ],
+  });
+  assert.deepEqual(
+    draft.findings.map((f) => f.provenance.sourceFindings?.length),
+    [1, 2],
+  );
+  assert.match(draft.scope?.limitations?.join(" ") ?? "", /context window/);
+});
+
+test("same-worker identities and independently cited controls survive an identical repair assignment", async () => {
+  const root = {
+    ...lookup,
+    identity: { anchor: "lookup.owner" },
+    taxonomy: { category: "authorization", cwe: ["CWE-862"] },
+  };
+  const second = {
+    ...root,
+    title: "Different instance",
+    identity: { anchor: "lookup.other" },
+  };
+  const authorization = {
+    ...root,
+    title: "Also missing the caller check",
+    taxonomy: { category: "authorization", cwe: ["CWE-862", "CWE-306"] },
+    locations: [
+      ...root.locations,
+      { path: "caller.py", startLine: 4, role: "control" },
+    ],
+  };
+  const { draft } = await scanLoop([[root, second, authorization]], {
+    maxDiscoveryRuns: 1,
+    stopAfterNoNew: 1,
+    comparisons: [[[0, 1, 2]]],
+    sameFix: approvePairs,
+  });
+  assert.deepEqual(
+    draft.findings.map((f) => f.title),
+    [root.title, second.title, authorization.title],
+  );
+});
+
+test("repair assignment includes validated attack paths and a shared range retains its root role", async () => {
+  const first = {
+    ...lookup,
+    locations: [{ path: "fixture.py", startLine: 4, role: "entrypoint" }],
+  };
+  const second = {
+    ...first,
+    title: "Alias",
+    locations: [{ ...first.locations[0], role: "root_control" }],
+    validation: { summary: "Verified dispatch." },
+    attackPath: { steps: ["Dispatch calls the helper."] },
+  };
+  const { draft } = await scanLoop([[first, second]], {
+    maxDiscoveryRuns: 1,
+    stopAfterNoNew: 1,
+    comparisons: [
+      (rows) => {
+        const record = rows[1] as unknown as typeof second;
+        assert.deepEqual(record.validation, second.validation);
+        assert.deepEqual(record.attackPath, second.attackPath);
+        return {
+          uncertain: [],
+          defects: [
+            {
+              operation: "repair",
+              failure: "fixture",
+              path: "fixture.py",
+              reports: rows.map(({ id }) => ({ id, evidence: 0 })),
+            },
+          ],
+        };
+      },
+    ],
+  });
+  assert.deepEqual(
+    draft.findings.map((f) => f.locations.map(({ role }) => role)),
+    [["entrypoint", "root_control"]],
+  );
+});
+
 for (const conflict of ["reviews", "sources"]) {
   test(`conflicting ${conflict} cannot hide an independent finding`, async () => {
     const { checkSameFix } = await importSource(
@@ -1089,10 +1330,13 @@ test("repeated original observations require one source comparison", async () =>
     maxDiscoveryRuns: 1,
     stopAfterNoNew: 1,
     comparisons: [
-      () => ({
-        uncertain: observations.map((_, i) => i).concat(observations.length),
-        defects: [],
-      }),
+      (rows) => {
+        assert.deepEqual(
+          rows.map(({ title }) => title),
+          [lookup.title, alias.title],
+        );
+        return { uncertain: rows.map(({ id }) => id), defects: [] };
+      },
     ],
     sameFix: approvePairs,
     sameSource: () => {
