@@ -120,6 +120,7 @@
 - preserve verified hard-linked credentials during logout ([#2354](https://github.com/openai/codex-security/pull/2354))
 - add GPT-6-Cyber cost estimates ([#2359](https://github.com/openai/codex-security/pull/2359))
 - enable external scanner imports by default ([#2360](https://github.com/openai/codex-security/pull/2360))
+- consolidate preview migration receipt lookups ([#2357](https://github.com/openai/codex-security/pull/2357))
 
 </details>
 
