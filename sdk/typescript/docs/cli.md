@@ -78,7 +78,9 @@ your local browser. Keep SSH connected until login finishes.
 ### OpenAI credentials
 
 Interactive scans ask which credentials to use when both ChatGPT and an
-environment API key are available. Noninteractive commands prefer
+environment API key are available. A dedicated sign-in takes precedence. After
+`codex-security logout`, the prompt skips the ambient sign-in until you log in
+again. Noninteractive commands prefer
 `OPENAI_API_KEY`, then `CODEX_API_KEY`, then stored credentials. Choose explicitly
 with `--auth`:
 
@@ -107,6 +109,12 @@ Stored OpenAI credentials live in
 `$CODEX_HOME/state/plugins/codex-security/codex-home`. Keep this private home
 outside the target and every enclosing Git worktree. It also serves providers
 with `requires_openai_auth = true`.
+
+If you manually hard-linked the two homes’ `auth.json` files, keep both homes
+accessible when running `codex-security logout`. When the CLI verifies the
+two hard links, it removes the private link before invoking native logout.
+If the ambient home is unavailable, the configured credential store handles
+logout normally.
 
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
@@ -1024,27 +1032,26 @@ For filesystem and approval behavior, see the
 
 ### Environment variables
 
-| Variable                                                                    | Effect                                                                                                                        |
-| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                                 |
-| `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS`                                    | Set to `1` to enable vendor finding imports, imported-findings readback, and GitHub advisory acquisition; disabled otherwise. |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                             |
-| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                                     |
-| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                                       |
-| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                                        |
-| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                                    |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                              |
-| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                                     |
-| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                              |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                                      |
-| `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`.          |
-| `CODEX_SECURITY_CLOUD_WEB_URL`                                              | Cloud app URL for repository links when an alternate deployment serves its UI separately.                                     |
-| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                                        |
-| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                                    |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                           |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                                                                                         |
-| `CI`                                                                        | Disable interactive update notices.                                                                                           |
-| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`.                                                            |
+| Variable                                                                    | Effect                                                                                                               |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                        |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                    |
+| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                            |
+| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                              |
+| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                               |
+| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                           |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                     |
+| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                            |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                     |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                             |
+| `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`. |
+| `CODEX_SECURITY_CLOUD_WEB_URL`                                              | Cloud app URL for repository links when an alternate deployment serves its UI separately.                            |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                               |
+| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                           |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                  |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                                                                                |
+| `CI`                                                                        | Disable interactive update notices.                                                                                  |
+| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`.                                                   |
 
 Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
@@ -1392,13 +1399,6 @@ Choose the command by what you want to keep. [Scanner guides](https://github.com
 | Collect live Sonar issues                                    | [`import sonar --dry-run`](#import-sonarqube-cloud-issues)                     | SonarQube Cloud during collection | The `capture` field gives a private file path. Replay it to save locally or save locally and publish to Cloud. |
 | Save Codex Security findings CSV or JSON as a completed scan | [`scan import`](#import-findings-as-a-saved-scan)                              | None                              | `scans list --scan-root DIR --json` shows imports under the artifact root.                                     |
 
-Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` to enable `publish findings`,
-`findings imported`, `import sonar`, `import semgrep`, `import snyk`, and `import github-advisories`. Only `1`
-enables these commands in help and schemas. The SDK's corresponding operations
-require the flag in their effective environment. Pure normalizers, file readers,
-and the existing `import github` alert collector remain available independently.
-Disabling the flag retains saved records.
-
 For `publish findings`, `--to` is required. With `--to local`, `--repository`
 takes a checkout path. Select the reader with `--provider` and give the source a stable `--source-key`.
 The reader detects the file format. `--format json` selects the output format. A local preview checks the file offline without
@@ -1427,7 +1427,7 @@ exits with status 1. Local imports can retain evidence that exceeds Cloud's per-
 Preview the same file and source key again for the intended destination before
 publishing. Semgrep Guardian captures support local import only. Both Web API
 formats, a selected SAST capture and a full project collection, support local
-and Cloud import. The [Semgrep input selector](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) lists the four routes.
+and Cloud import. Choose the [Semgrep import method](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) that matches your source.
 
 ## Import Trivy dependency findings
 
@@ -1703,15 +1703,16 @@ Choose a destination authorized to receive that content. Local history records
 successful issue IDs separately from sealed artifacts. The CLI and the plugin's
 finding-tracking workflow share these records when using the same Codex Security
 state directory. Accepted writes remain recorded even if a later issue read fails.
-The shared-history migration preserves existing Linear receipts and replaces their
-old table. Upgrade CLI and plugin installations together when they share state;
-older publishers cannot write to the migrated database.
 
-Republishing creates duplicates unless `--skip-existing` finds a recorded success
-for that occurrence, team, and project, including issues created or reused through
-the plugin. It does not check remote issues or cover
-unrecorded/concurrent publication. After interruption, inspect the handoff,
-evidence, and destination before retrying.
+By default, publishing the same scan again creates new issues. With
+`--skip-existing`, the CLI skips occurrences with a recorded success for the
+same team and project. This includes issues the plugin created or reused.
+The CLI checks local history only. After an interrupted or concurrent run,
+check Linear for an existing issue before retrying.
+
+If the CLI and plugin share a database from an older installation, upgrade
+both together. The shared history preserves existing Linear receipts, but
+publishers that require the old table can no longer record new ones.
 
 ```ts
 import { publishScan } from "@openai/codex-security";

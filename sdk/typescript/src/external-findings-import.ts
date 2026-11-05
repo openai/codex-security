@@ -18,7 +18,6 @@ import {
   snapshotSourceRepositories,
 } from "./external-findings.js";
 import { abortable } from "./targets.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 
 export interface LocalExternalImportOptions
   extends
@@ -32,7 +31,6 @@ export async function prepareLocalExternalImport(
   dependencies: LocalExternalImportDependencies = {},
 ) {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   const readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),

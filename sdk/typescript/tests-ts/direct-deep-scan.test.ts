@@ -62,7 +62,6 @@ writeFileSync(process.env.SYNTHETIC_RECEIPT, JSON.stringify({
   request, ipc: !!process.send, argv: process.argv.slice(2), key: process.env.CODEX_API_KEY,
   execPath: process.execPath, bun: process.versions.bun,
   awsProfile: process.env.AWS_PROFILE, snapshot: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-  externalImports: process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
 }));
 if (request.diagnosticsVersion === 1 && process.env.SYNTHETIC_OLD_ENGINE !== '1') {
   process.send({ event: 'discovery_worker_replaced', scanId: request.scanId, reason: 'tool error' });
@@ -89,7 +88,7 @@ if (process.env.SYNTHETIC_FAIL === '1') {
 test("isolates direct engine credentials and runtime snapshots across concurrent scans", async () => {
   const { root, pluginRoot } = await fixture();
   const events = await Promise.all(
-    ["first", "second", "unset", "mixed-case"].map(async (name) => {
+    ["first", "second"].map(async (name) => {
       const scanDir = join(root, name);
       const receipt = join(root, `${name}.json`);
       await mkdir(scanDir);
@@ -104,14 +103,6 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
           "private-snapshot.toml",
         ),
         AWS_PROFILE: `profile-${name}`,
-        ...(name === "mixed-case"
-          ? { Codex_Security_Enable_External_Imports: "1" }
-          : name === "unset"
-            ? {}
-            : {
-                CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS:
-                  name === "first" ? "1" : "0",
-              }),
       };
       const before = { ...environment };
       const collected = [];
@@ -137,18 +128,6 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       }))
         collected.push(event);
       const saved = JSON.parse(await readFile(receipt, "utf8"));
-      assert.equal(
-        saved.externalImports,
-        name === "mixed-case"
-          ? process.platform === "win32"
-            ? "1"
-            : undefined
-          : name === "first"
-            ? "1"
-            : name === "second"
-              ? "0"
-              : undefined,
-      );
       assert.partialDeepStrictEqual(saved, {
         key: `synthetic-key-${name}`,
         awsProfile: `profile-${name}`,

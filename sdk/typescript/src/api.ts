@@ -182,7 +182,6 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import {
   knowledgeBaseProtectedRoots,
   prepareKnowledgeBase,
@@ -264,6 +263,7 @@ import {
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
   createIsolatedHome,
+  logoutCredentialHome,
   executablePathForSpawn,
   expandHome,
   importAmbientAuth,
@@ -4217,25 +4217,26 @@ export class CodexSecurity {
 
   public async logout(): Promise<void> {
     await this.#trackOperation(async () => {
-      const authentication = await this.#authentication();
+      const { codexHome, environment } = await this.#authentication();
+      const signal = this.#abortController.signal;
       this.#requireOpen();
       await withCredentialHomeLock(
-        authentication.codexHome,
+        codexHome,
         async () => {
-          await codexLogout(
-            await this.#providerPreflightCommand(),
-            authentication.environment,
-            this.#abortController.signal,
-          );
-          await setCodexSecurityCredentialLogout(
-            authentication.codexHome,
-            true,
+          const command = await this.#providerPreflightCommand();
+          await logoutCredentialHome(
+            codexHome,
+            scanCodexHome(this.#dependencies.environment),
+            () => codexLogout(command, environment, signal),
+            () => {
+              if (this.#runtime !== null)
+                this.#runtime.credentialsAvailable = false;
+              this.#runtimeCredentialSource = null;
+            },
           );
         },
-        this.#abortController.signal,
+        signal,
       );
-      if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
-      this.#runtimeCredentialSource = null;
       this.#requireOpen();
     });
   }
@@ -6498,7 +6499,6 @@ function withoutProviderKey(
   for (const name of Object.keys(child)) {
     if (name.toUpperCase() === key.toUpperCase()) delete child[name];
   }
-  forwardExternalImportSetting(environment, child);
   return child;
 }
 
@@ -6556,7 +6556,6 @@ export function selectedScanEnvironment(
       ),
     );
   }
-  forwardExternalImportSetting(environment, selected);
   return selected;
 }
 
@@ -7316,13 +7315,11 @@ function standaloneFindingForPrompt(finding: string | object): string {
 export function definedEnvironment(
   environment: ProcessEnvironment,
 ): Record<string, string> {
-  const child = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(environment).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
 
 function withoutCodexHome(

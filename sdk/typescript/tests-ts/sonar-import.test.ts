@@ -31,7 +31,6 @@ async function fixture(root: string, name = "checkout") {
   const environment = {
     ...sonarGitTestEnvironment(),
     CODEX_HOME: join(root, "codex"),
-    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
   const git = (...args: string[]) =>

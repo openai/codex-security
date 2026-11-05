@@ -93,14 +93,15 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-luna": [200, 20, 250, 1_200],
   // https://developers.openai.com/api/docs/pricing#cyber-models
   "gpt-5.6-cyber": [12_500, 1_250, 15_625, 75_000],
+  "gpt-6-cyber": [20_000, 2_000, 25_000, 100_000],
 };
 
 // Verified Standard rates: https://developers.openai.com/api/docs/pricing
 // GPT-5.5: https://developers.openai.com/api/docs/models/gpt-5.5
 // GPT-6 Sol: https://developers.openai.com/api/docs/models/gpt-6-sol
 // Do not infer tiers from aggregate scan tokens: the runtime does not report
-// which usage received long-context pricing. GPT-5.6-Cyber has no verified
-// long-context rate in the pricing table, so its upper estimate stays unavailable.
+// which usage received long-context pricing. GPT-5.6-Cyber and GPT-6-Cyber have no
+// verified long-context rates, so their upper estimates stay unavailable.
 const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
   {
     "gpt-5.5": [10_000, 1_000, 10_000, 45_000],
@@ -251,9 +252,11 @@ export function estimateScanCost(
           ? "2026-10-10"
           : pricingModel === "gpt-5.6-cyber"
             ? "2026-10-06"
-            : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
-              ? "2026-09-30"
-              : "2026-09-14",
+            : pricingModel === "gpt-6-cyber"
+              ? "2026-11-05"
+              : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
+                ? "2026-09-30"
+                : "2026-09-14",
       serviceTier: "standard",
       context: "short",
       usdPerMillionTokens: usdPerMillionTokens(pricing, unitsPerUsd),

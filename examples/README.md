@@ -8,12 +8,13 @@
 | Scan Azure Repos from a central pipeline | [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md) runs manual full or committed-diff scans. |
 | Import Tenable One findings locally | [Tenable One export guide](../docs/scanner-imports/tenable.md) shows how to select code repository findings. |
 | Prepare a ServiceNow AVIT export | [AVIT template](servicenow-avit-template.csv). Replace the synthetic application and assignment values before using it as input to [export findings for ServiceNow](../sdk/typescript/docs/cli.md#export-findings-for-servicenow). |
-| Prepare findings for Cloud | [Findings CSV template](findings.csv). Add one row per finding and preview the file as shown below. |
+| Preview a Codex Security findings CSV for Cloud | [Findings CSV template](findings.csv). Add one row per finding and preview the file as shown below. |
 
 ## Preview a findings CSV
 
-Copy the header-only [template](findings.csv). For a local dry run, append this
-synthetic row under its header:
+Use this CSV format with `publish scan --to cloud`. For reports exported by a scanner,
+follow its [provider guide](../docs/scanner-imports/README.md). To try the Cloud CSV
+preview, copy the header-only [template](findings.csv) and append this synthetic row.
 
 ```csv
 occ_e79cb19591e696572a1c22be,csf_852f90d6e1177502ff113d4a,Archive entry can escape the output directory,The archive writer uses the entry path without checking containment.,high,high,open,,,Validate each destination before writing.,src/extract.py,41,44
