@@ -6397,7 +6397,7 @@ function turnFailureMessage(error: unknown): string {
 export function connectionAdviceDetail(error: unknown): string {
   const message = (
     error instanceof Error ? error.message : String(error)
-  ).replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "");
+  ).replace(/\bhttps?:\/\/[^\s"'`<>]+/giu, "");
   return /\.toml:\d+:\d+:/iu.test(message) ? "" : message;
 }
 

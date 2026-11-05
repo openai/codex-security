@@ -1475,6 +1475,7 @@ process.stdout.write(JSON.stringify({
         "model 'gpt-5' not found",
         'model "synthetic/provider-v2" not found',
         "model `synthetic-v2` not found",
+        "model `synthetic/provider-v2` not found",
       ].map(
         (detail) =>
           [
