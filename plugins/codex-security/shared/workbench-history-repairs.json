@@ -4,12 +4,10 @@
     "SELECT 'sql' AS operation,",
     "    'UPDATE schema_migrations SET version = 60 WHERE version = ' || version AS value",
     "FROM schema_migrations",
-    "WHERE version IN (58, 59) AND name = 'record classification rubric provenance';"
-  ],
-  [
-    "-- The allowance preview used 63 for a separate scans column. Keep its data and run canonical 63.",
-    "WITH input AS (SELECT :history AS history)",
-    "SELECT 'sql' AS operation, 'DELETE FROM schema_migrations WHERE version = 63' AS value",
+    "WHERE version IN (58, 59) AND name = 'record classification rubric provenance'",
+    "UNION ALL",
+    "-- Release the allowance preview receipt so canonical 63 runs without touching its policy column.",
+    "SELECT 'sql', 'DELETE FROM schema_migrations WHERE version = 63'",
     "FROM schema_migrations",
     "WHERE version = 63 AND name = 'retain native investigation time allowances';"
   ],
