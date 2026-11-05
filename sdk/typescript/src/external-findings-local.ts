@@ -82,6 +82,7 @@ import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
+import { retainedGitHubRepository } from "./github-findings.js";
 import {
   type SnykIssuesFindings,
   snykRestImportRepository,
@@ -995,6 +996,13 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     }
     const { evidence } = finding;
+    if (options.provider === "github") {
+      const source = retainedGitHubRepository(
+        finding,
+        (url) => identify(url).key,
+      );
+      if (source) sources.set(source, { url: source, platform: "github" });
+    }
     const guardian = guardianFindingSourceData(finding);
     const url = evidence.details?.repository?.url;
     if (guardian) {
