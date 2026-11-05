@@ -3,7 +3,7 @@ import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
-import { isNonEmptyString, notify } from "./value.js";
+import { isNonEmptyString, notify, parseJson } from "./value.js";
 import {
   execFile as execFileCallback,
   spawn,
@@ -2385,6 +2385,16 @@ export async function importAmbientAuth(
   try {
     await copyFile(source, temporary, constants.COPYFILE_EXCL);
     await chmod(temporary, 0o600);
+    const contents = await readFile(temporary, "utf8");
+    const auth = parseJson(() => contents);
+    // Independent homes must not clone a single-use refresh token.
+    if (
+      isRecord(auth) &&
+      isRecord(auth["tokens"]) &&
+      isNonEmptyString(auth["tokens"]["refresh_token"])
+    ) {
+      return false;
+    }
     try {
       try {
         await link(temporary, destination);

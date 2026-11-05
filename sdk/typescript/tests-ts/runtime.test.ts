@@ -1756,6 +1756,39 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
   });
 
+  test("does not duplicate an ambient ChatGPT refresh token", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient"),
+      isolated = join(root, "isolated");
+    await mkdir(ambient);
+    const source = JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: "synthetic-access",
+        refresh_token: "synthetic-refresh",
+        id_token: "synthetic-id",
+      },
+    });
+    await writeFile(join(ambient, "auth.json"), source, { mode: 0o600 });
+    expect(await importAmbientAuth(ambient, isolated)).toBe(false);
+    expect(existsSync(join(isolated, "auth.json"))).toBe(false);
+    expect(await readFile(join(ambient, "auth.json"), "utf8")).toBe(source);
+    expect(
+      (await readdir(isolated)).filter((name) => name.startsWith(".auth-")),
+    ).toEqual([]);
+  });
+
+  test("continues importing ambient API-key credentials", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient"),
+      isolated = join(root, "isolated");
+    await mkdir(ambient);
+    const source = JSON.stringify({ OPENAI_API_KEY: "synthetic-api-key" });
+    await writeFile(join(ambient, "auth.json"), source, { mode: 0o600 });
+    expect(await importAmbientAuth(ambient, isolated)).toBe(true);
+    expect(await readFile(join(isolated, "auth.json"), "utf8")).toBe(source);
+  });
+
   test("imports ambient auth when credential files do not support hard links", async () => {
     if (
       runTestInSubprocess(
@@ -1797,7 +1830,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     await mkdir(ambient);
     await mkdir(isolated, { mode: 0o700 });
     if (process.platform !== "win32") await chmod(isolated, 0o700);
-    await writeFile(join(ambient, "auth.json"), '{"token":"ambient"}\n');
+    await writeFile(
+      join(ambient, "auth.json"),
+      JSON.stringify({ tokens: { refresh_token: "synthetic-refresh" } }),
+    );
     await writeFile(join(isolated, "auth.json"), '{"token":"explicit"}\n', {
       mode: 0o600,
     });

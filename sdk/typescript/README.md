@@ -91,6 +91,9 @@ If you installed only the SDK locally, sign in from your project directory:
 npx @openai/codex-security login
 ```
 
+ChatGPT uses an independent Codex Security sign-in so token renewal does not
+invalidate the session used by your regular Codex CLI or app.
+
 In the following CLI examples, replace `cs` with `npx @openai/codex-security`
 when using a local SDK installation, including the API-key login example below.
 

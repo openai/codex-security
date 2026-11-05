@@ -120,8 +120,9 @@ with `requires_openai_auth = true`.
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
-Without an overriding environment API key, scans and status checks import
-existing file-based Codex credentials when this home is empty. Import errors make
+Without an overriding environment API key, scans and status checks can import
+file-based API-key credentials when this home is empty. ChatGPT credentials
+containing a refresh token require a separate `codex-security login`. Import errors make
 `login status` exit with code 2 and SDK `account()` reject its promise. Logout
 disables imports until you log in again. Status imports and logout share the
 credential-home lock so a concurrent status check cannot restore credentials
@@ -130,11 +131,10 @@ after logout completes.
 Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
 `HOME` or `USERPROFILE` environment setting.
 
-If you use file-based ChatGPT credentials with both Codex and Codex Security,
-run `codex-security login` before your first scan or status check to give Codex
-Security its own session. An imported sign-in shares a single-use refresh token.
-When either client renews it, the other client's next refresh can fail even
-while its login status reports that it is signed in.
+Run `codex-security login` before using ChatGPT credentials with Codex Security.
+This creates an independent session and avoids copying the single-use refresh
+token used by your regular Codex CLI or app. Existing stored Codex Security
+sign-ins are preserved.
 
 If Codex Security reports that the refresh token was already used, run
 `codex-security logout`, then `codex-security login`. If your Codex CLI or app
