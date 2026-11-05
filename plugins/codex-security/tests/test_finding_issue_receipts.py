@@ -1,3 +1,5 @@
+"""Verify that issue receipts stay bound to their finding and that inspection preserves local state."""
+
 from __future__ import annotations
 
 import json

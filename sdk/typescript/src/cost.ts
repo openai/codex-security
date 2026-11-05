@@ -1,4 +1,6 @@
 import { parseJson } from "./value.js";
+import type { JsonObject } from "./config.js";
+import { workbenchArgs } from "./workbench-arguments.js";
 import { createHash } from "node:crypto";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -29,6 +31,47 @@ import {
 } from "./worker-progress.js";
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
+
+export async function readScanBudgetUsage(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  scanId: string,
+  threadId: string,
+  validationThreadId?: string,
+  requireWorkerUsage = false,
+) {
+  const result = await workbench(
+    workbenchArgs("read-scan-usage", { scanId, threadId, validationThreadId }),
+  );
+  const counts = {
+    input_tokens: result["inputTokens"],
+    cached_input_tokens: result["cachedInputTokens"],
+    cache_write_input_tokens: result["cacheWriteInputTokens"],
+    output_tokens: result["outputTokens"],
+    reasoning_output_tokens: result["reasoningOutputTokens"],
+  };
+  const usage = Object.values(counts).every(Number.isSafeInteger)
+    ? tokenUsage(counts)
+    : null;
+  const roles = result["byRole"];
+  const workers = isRecord(roles) ? roles["workers"] : undefined;
+  const coverage = result["coverage"];
+  if (
+    (coverage !== "complete" && coverage !== "partial") ||
+    usage === null ||
+    usage.total_tokens !== result["totalTokens"]
+  )
+    return { usage: null, complete: false };
+
+  const hasWorkers =
+    isRecord(workers) &&
+    typeof workers["threadCount"] === "number" &&
+    workers["threadCount"] > 0;
+  // The workbench sums known cache writes but does not record which receipts omitted them.
+  return {
+    usage: { ...usage, cache_write_input_tokens_reported: false },
+    complete: coverage === "complete" && (!requireWorkerUsage || hasWorkers),
+  };
+}
 
 export interface ScanAccountRateLimitWindow {
   readonly usedPercent: number;
@@ -244,6 +287,9 @@ interface ScanCostTrackerOptions {
   repository?: string;
   scanDirectory?: string;
   maxCostUsd?: number;
+  readBudgetUsage?: (
+    threadId: string,
+  ) => ReturnType<typeof readScanBudgetUsage>;
   expectedFilesTotal?: number;
   /** Incomplete costs are measured subtotals, usable for spending limits only. */
   onCost?: (cost: Readonly<ScanCost>, complete: boolean) => void;
@@ -254,6 +300,7 @@ interface ScanCostTrackerOptions {
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onError?: (error: unknown) => void;
+  onObservationError?: (error: unknown) => void;
 }
 
 interface ScanCostSnapshot {
@@ -316,6 +363,7 @@ function createSessionUsage(observeUsage: boolean) {
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
+  #lastBudgetPoll = -Infinity;
   readonly #sessions = new Map<string, SessionUsage>();
   readonly #receipts = new Map<string, ScanTokenUsage | null>();
   readonly #workers = new Map<string, number>();
@@ -2219,7 +2267,7 @@ export class ScanCostTracker {
         return;
       }
       polling = true;
-      void this.refresh()
+      void this.refresh(true)
         .catch((error: unknown) => {
           this.#options.onError?.(error);
         })
@@ -2236,9 +2284,28 @@ export class ScanCostTracker {
     poll();
   }
 
-  public async refresh(): Promise<ScanCostSnapshot> {
+  public async refresh(polling = false): Promise<ScanCostSnapshot> {
     const update = this.#pending.then(async () => {
-      await this.#readSessions();
+      const { readBudgetUsage } = this.#options;
+      if (readBudgetUsage === undefined) return this.#readSessions();
+      if (this.#threadId === null) return;
+      if (
+        this.#options.onActivity ||
+        this.#options.onProgress ||
+        this.#options.onWorkerEvent ||
+        this.#options.onSessionEvent ||
+        this.#options.onUsageObservation
+      ) {
+        await this.#readSessions().catch((error) =>
+          this.#options.onObservationError?.(error),
+        );
+      }
+      // Reading the indexed graph is more expensive than tailing session activity.
+      // Always get fresh usage when stopping, even after a recent live poll.
+      if (polling && performance.now() - this.#lastBudgetPoll < 1_000) return;
+      const measured = await readBudgetUsage(this.#threadId);
+      this.#lastBudgetPoll = performance.now();
+      this.#updateCost(measured.usage, measured.complete);
     });
     this.#pending = update.catch(() => {});
     await update;
@@ -2254,7 +2321,11 @@ export class ScanCostTracker {
     } finally {
       this.#observingWorkers = false;
     }
-    if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
+    if (
+      this.#options.readBudgetUsage ||
+      this.#receipts.size > 0 ||
+      this.#snapshot.usage !== null
+    )
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
@@ -2486,6 +2557,11 @@ export class ScanCostTracker {
       usage = addTokenUsage(usage, value);
     }
     if (observeUsage) this.#reportUsageObservation(usages, complete);
+    if (this.#options.readBudgetUsage === undefined)
+      this.#updateCost(usage, complete);
+  }
+
+  #updateCost(usage: ScanTokenUsage | null, complete: boolean): void {
     if (!complete) this.#snapshot = { usage: null, cost: null };
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
