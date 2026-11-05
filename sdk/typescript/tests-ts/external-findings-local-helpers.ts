@@ -52,14 +52,8 @@ export async function localFindingsFixture(options: Checkout = {}) {
     stateDirectory,
     git,
     environment: {
-      ...Object.fromEntries(
-        Object.entries(env).filter(
-          ([name]) =>
-            name.toUpperCase() !== "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
-        ),
-      ),
+      ...env,
       CODEX_SECURITY_STATE_DIR: stateDirectory,
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     },
     dispose,
     [Symbol.asyncDispose]: dispose,

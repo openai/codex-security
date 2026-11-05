@@ -119,6 +119,7 @@
 - respect the dedicated sign-in in the authentication prompt ([#2348](https://github.com/openai/codex-security/pull/2348))
 - preserve verified hard-linked credentials during logout ([#2354](https://github.com/openai/codex-security/pull/2354))
 - add GPT-6-Cyber cost estimates ([#2359](https://github.com/openai/codex-security/pull/2359))
+- enable external scanner imports by default ([#2360](https://github.com/openai/codex-security/pull/2360))
 
 </details>
 

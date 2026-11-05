@@ -4,7 +4,7 @@ Select a **Code Repository** in Tenable Exposure Management Inventory. Copy its 
 
 ## Export the selection
 
-Run the examples from the Codex Security source tree. Set `TENABLE_ACCESS_KEY` and `TENABLE_SECRET_KEY` for a tenant with inventory export access on `cloud.tenable.com`. Use a private report directory outside both checkouts.
+The [download and CSV capture helpers](../../examples/tenable-one/) are part of the Codex Security source repository. Run the Python commands from that repository's root. Set `TENABLE_ACCESS_KEY` and `TENABLE_SECRET_KEY` for a tenant with Inventory Export API access on `cloud.tenable.com`, or [use existing CSV exports](#from-existing-csv-exports). Keep the reports outside both the source repository and the checkout whose findings you are importing.
 
 ```sh
 umask 077
@@ -34,14 +34,12 @@ Pass additional finding chunks after `--findings`. To retain file locations, add
 
 ## Preview, save and read back
 
-Use the CLI built from this checkout. Choose a stable tenant alias so the same finding can be matched on later imports. [Source build setup](../../sdk/typescript/TESTING.md)
+Use the [installed CLI](../../README.md#quick-start) to preview the selection for the local checkout. Choose a stable tenant alias and keep it with the asset UUID in `--source-key` on repeat imports.
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
-cli="$PWD/sdk/typescript/bin/codex-security.mjs"
-node "$cli" publish findings "$reports/selection.json" --provider tenable \
+codex-security publish findings "$reports/selection.json" --provider tenable \
   --to local --repository "$checkout" --source-repository-url "$repository_url" \
   --source-key "TENANT_ALIAS/$asset_id" --dry-run --format json
 ```
 
-Check the preview against your selection. Remove `--dry-run` and confirm to save, then run `node "$cli" findings imported "$checkout" --format json`. The saved record retains Tenable's exact finding ID and state. Its Codex assessment starts as `not_assessed`. With the same source key, changed evidence updates that record and identical evidence preserves its version.
+Check the preview against your selection. Remove `--dry-run` and confirm to save, then run `codex-security findings imported "$checkout" --format json`. The saved record retains Tenable's exact finding ID and state. Its Codex assessment starts as `not_assessed`. With the same source key, changed evidence updates that record and identical evidence preserves its version.
