@@ -11,6 +11,11 @@ import {
   gitTransportBytes,
   hostedRepositoryMatches,
 } from "./hosted-git-repository.js";
+import {
+  checkRetainedTrivyProvider,
+  checkTrivyReportProvider,
+  matchTrivyCheckout,
+} from "./trivy-import.js";
 import { readHostedGitRemotes } from "./hosted-git-remotes.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -776,6 +781,7 @@ export async function prepareLocalImport(
     throw new CodexSecurityError(
       "Retained Tenable evidence requires the tenable provider.",
     );
+  checkTrivyReportProvider(settings.provider, current.report);
   // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
   if (!("snykRestContext" in current) && "snykRestContext" in input)
     current.snykRestContext = structuredClone(input.snykRestContext);
@@ -798,6 +804,7 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    checkRetainedTrivyProvider(settings.provider, finding, "local");
     if (
       settings.provider !== "tenable" &&
       finding.evidence.source_data?.["format"] === tenableReportFormat
@@ -1306,23 +1313,32 @@ export async function prepareLocalImport(
     false,
   );
   const selected = manualSource ? new URL(manualSource) : undefined;
-  const matchesRepositoryRemote = await requireMatchingRepository(
-    repository,
-    options.provider,
-    ordinarySources,
-    strictSources,
-    hosted,
-    (source, bound) => (bound ? platformFor(source) : loosePlatformFor(source)),
-    snyk,
-    workbenchOptions.protectedRoot,
-    workbenchOptions.environment,
-    dependencies.signal,
-    selected?.protocol === "https:" ? selected.hostname : undefined,
-    fetchRemotes,
-    checkmarx.projections.size
-      ? (url) => checkmarxKeys.has(identify(url).key)
-      : undefined,
-  );
+  const matchesRepositoryRemote =
+    options.provider === "trivy"
+      ? await matchTrivyCheckout(
+          repository,
+          current,
+          references,
+          workbenchOptions,
+        )
+      : await requireMatchingRepository(
+          repository,
+          options.provider,
+          ordinarySources,
+          strictSources,
+          hosted,
+          (source, bound) =>
+            bound ? platformFor(source) : loosePlatformFor(source),
+          snyk,
+          workbenchOptions.protectedRoot,
+          workbenchOptions.environment,
+          dependencies.signal,
+          selected?.protocol === "https:" ? selected.hostname : undefined,
+          fetchRemotes,
+          checkmarx.projections.size
+            ? (url) => checkmarxKeys.has(identify(url).key)
+            : undefined,
+        );
   return preparedLocalStorage(
     current,
     options,

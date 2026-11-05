@@ -50,6 +50,7 @@ import {
   requireCloudReader,
   semgrepSarifRepositories,
   type CloudFindingsReader,
+  type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import {
   canSnapshotWithoutGetters,
@@ -95,6 +96,7 @@ import {
   hostedRepositoryUrlKey,
   normalizeHostedGitRepositoryUrl,
 } from "./hosted-git-repository.js";
+import { trivyRemoteKey, trivyRepositoryUrl } from "./trivy-findings.js";
 import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import {
@@ -106,6 +108,14 @@ import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
+import {
+  checkRetainedTrivyProvider,
+  checkTrivyReportProvider,
+  isTrivyReportHeader,
+  retainedTrivyReport,
+  trivyBatchSourceUrls,
+  validateTrivyRepositoryUrl,
+} from "./trivy-import.js";
 import {
   NoPublishableFindingsError,
   reportForJson,
@@ -151,12 +161,11 @@ export interface NormalizedExternalPublicationOptions {
 }
 
 /** File readers accepted by the Cloud publisher. */
-export interface ExternalPublicationOptions extends Omit<
-  NormalizedExternalPublicationOptions,
-  "provider"
-> {
+export interface ExternalPublicationOptions
+  extends
+    Omit<NormalizedExternalPublicationOptions, "provider">,
+    ExternalFindingsReaderOptions {
   provider: CloudFindingsReader;
-  sourceRepositoryUrl?: string;
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */
@@ -215,6 +224,7 @@ export class ExternalPublicationError extends CodexSecurityError {
 
 interface SavedSubmission {
   accountId: string;
+  trivyRepositoryUrl?: string;
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: {
@@ -293,6 +303,7 @@ function sameSubmission(
 ): boolean {
   return (
     left.accountId === right.accountId &&
+    left.trivyRepositoryUrl === right.trivyRepositoryUrl &&
     left.inspectorProjectMapRequired === right.inspectorProjectMapRequired &&
     wireJson(left.requests) === wireJson(right.requests)
   );
@@ -694,7 +705,6 @@ export async function prepareNormalizedExternalPublication(
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   requireCloudReader(settings.provider);
-  rejectLocalOnlyFindings(input);
   return preparePublicationInput(
     normalizedPublicationInput(input, settings.provider),
     settings,
@@ -1201,7 +1211,14 @@ function normalizedPublicationInput(
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
   rejectLocalOnlyFindings(current);
-  const identity = publicationIdentity(current);
+  // A Trivy header provides repository provenance for its findings. Either entrypoint
+  // can resume the same immutable request when the independently checked rows agree.
+  const identity =
+    provider === "trivy" &&
+    current.report &&
+    isTrivyReportHeader(current.report)
+      ? current.findings
+      : publicationIdentity(current);
   return {
     current,
     legacy: current,
@@ -1405,8 +1422,22 @@ async function preparePublicationInput(
   dependencies.signal?.throwIfAborted();
   requireExternalImports(environment);
   progress({ phase: "reading", completed: 0 });
+  const trivyReportUrls =
+    options.provider === "trivy" && typeof supplied !== "function"
+      ? trivyBatchSourceUrls(
+          supplied.current,
+          supplied.current.findings.length > 0,
+        )
+      : undefined;
+  if (trivyReportUrls) validateTrivyRepositoryUrl(options.repository);
+  const catalogKey = trivyReportUrls
+    ? (url: string) => cloudSourceKey(url, "github")
+    : cloudRepositoryUrlKey;
   function checkSelection(input: PublicationSelection) {
     const parsed = input.current;
+    checkTrivyReportProvider(options.provider, parsed.report);
+    for (const finding of parsed.findings)
+      checkRetainedTrivyProvider(options.provider, finding);
     if (
       !parsed.findings.length &&
       !input.original?.parsed.findings.length &&
@@ -1487,8 +1518,7 @@ async function preparePublicationInput(
         ...result.data.filter(
           (item) =>
             item.id === options.repository ||
-            cloudRepositoryUrlKey(item.url) ===
-              cloudRepositoryUrlKey(options.repository),
+            catalogKey(item.url) === catalogKey(options.repository),
         ),
       );
       page = result.next;
@@ -1507,7 +1537,9 @@ async function preparePublicationInput(
           ? "The repository matches multiple connectors. Select an unambiguous Cloud repository."
           : "The destination repository is not available to this Cloud account. Copy its repository URL or ID from Codex Security Cloud and check that you are signed into the intended account.",
       );
-    return destinations[0]!;
+    const destination = destinations[0]!;
+    if (trivyReportUrls) validateTrivyRepositoryUrl(destination.url);
+    return destination;
   }
   const destination = await discoverDestination();
   const deferred = typeof supplied === "function";
@@ -1891,8 +1923,14 @@ async function preparePublicationInput(
     )
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
+    for (const finding of submissionFindings(content.requests))
+      checkRetainedTrivyProvider(options.provider, finding);
     if (!matchesSavedDestination(content.requests))
       throw new Error("Saved import destination does not match.");
+    if (source.provider === "trivy" && !content.trivyRepositoryUrl)
+      throw new CodexSecurityError(
+        "This build cannot verify the original repository for this pending Trivy import. Check its destination before resuming with the build that created it.",
+      );
     return content;
   }
 
@@ -2703,17 +2741,39 @@ async function preparePublicationInput(
   requireApprovedSource(approvedUrl);
   if (legacyTypedUrl) requireApprovedSource(legacyTypedUrl);
 
+  const trivyTarget = saved?.trivyRepositoryUrl ?? destination.url;
+  function requireTrivyRemote(url: string, id?: string) {
+    if (trivyRemoteKey(url, trivyTarget) !== catalogKey(trivyTarget)) {
+      const label =
+        id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;
+      throw new CodexSecurityError(
+        `${label} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(trivyTarget)}. Verify the source repository mapping before publishing.`,
+      );
+    }
+  }
+  if (trivyReportUrls) {
+    for (const url of trivyReportUrls) requireTrivyRemote(url);
+    if (parsed !== resolved.current)
+      for (const url of trivyBatchSourceUrls(parsed, true))
+        requireTrivyRemote(url);
+  }
+
   function checkRepositories(
     { findings, report }: Pick<ExternalFindings, "findings" | "report">,
     historicalCheckmarx = Boolean(saved),
   ) {
+    checkTrivyReportProvider(options.provider, report);
     // A catalog casing or spelling change keeps the original source comparison target.
     const approved = hosted ? saved?.approvedRepositoryUrl : undefined;
     const sameCatalog =
       approved !== undefined &&
       cloudSourceKey(approved, "github") ===
         cloudSourceKey(destination.url, "github");
-    const comparisonUrl = sameCatalog ? approved : destination.url;
+    const comparisonUrl = trivyReportUrls
+      ? trivyTarget
+      : sameCatalog
+        ? approved
+        : destination.url;
     const key = sameCatalog
       ? (url: string) =>
           cloudSourceKey(
@@ -2722,7 +2782,7 @@ async function preparePublicationInput(
               ? undefined
               : "github",
           )
-      : cloudRepositoryUrlKey;
+      : catalogKey;
     function requireDestination(id: string, url: string | null | undefined) {
       if (
         url &&
@@ -2737,8 +2797,9 @@ async function preparePublicationInput(
     }
     // Historical checkpoints already fixed the provider and request bytes.
     // Recheck any projected source against the destination discovered for this retry.
-    const replay = saved && options.provider !== "blackduck";
-    if (!saved || options.provider === "sonar") {
+    const replay =
+      saved && options.provider !== "blackduck" && !trivyReportUrls;
+    if (!saved || options.provider === "sonar" || trivyReportUrls) {
       for (const url of sonarRepositoryUrls(
         options.provider,
         findings,
@@ -2763,7 +2824,7 @@ async function preparePublicationInput(
       ["veracode", veracodeReportRepositories],
       ["continuum", continuumReportRepositories],
     ] as const) {
-      if (saved && options.provider !== provider) continue;
+      if (saved && options.provider !== provider && !trivyReportUrls) continue;
       for (const [id, source] of repositories(
         options.provider,
         findings,
@@ -2786,6 +2847,14 @@ async function preparePublicationInput(
     }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
+      checkRetainedTrivyProvider(options.provider, finding);
+      if (trivyReportUrls) {
+        const remote = trivyRepositoryUrl(
+          retainedTrivyReport(finding),
+          trivyTarget,
+        );
+        if (remote) requireTrivyRemote(remote, id);
+      }
       const blackDuckUrl = repositories
         ? repositories.get(id)?.url
         : projectedBlackDuckRepositoryUrl(finding, "cloud");
@@ -3190,6 +3259,7 @@ async function preparePublicationInput(
     );
   const submission: SavedSubmission = {
     accountId: credentials.account_id,
+    ...(trivyReportUrls && { trivyRepositoryUrl: trivyTarget }),
     requests,
     receipts: saved?.receipts,
     legacyApproval: saved?.legacyApproval,

@@ -4,11 +4,11 @@ import {
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import { z } from "zod";
-import { asRecord } from "../record.js";
+import { asRecord, canonicalJson } from "../record.js";
 import { addScanCoverage, type ScanUnion } from "./artifact-validation.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
-import { errorMessage } from "./errors.js";
-import { checkSameFix } from "./same-fix.js";
+import { errorMessage, exceedsContext } from "./errors.js";
+import { checkSameFix, sharesSource } from "./same-fix.js";
 
 type Finding = ScanDraftInput["findings"][number];
 export type ComparisonReport = ReturnType<typeof report>;
@@ -136,12 +136,6 @@ function equalRepairs(a?: number[], b?: number[]) {
   );
 }
 
-function contextWindowExceeded(error: unknown) {
-  return errorMessage(error).startsWith(
-    "Codex ran out of room in the model's context window.",
-  );
-}
-
 async function compareRecords(
   records: ComparisonReport[],
   compare: CompareReports,
@@ -164,6 +158,7 @@ async function compareWithinContext(
   previous: number,
   compare: CompareReports,
   matches: Map<number, Set<number>>,
+  overlaps: Map<number, Set<number>>,
 ) {
   const byFile = new Map<string, number[]>();
   const seen = new Set<string>();
@@ -186,14 +181,21 @@ async function compareWithinContext(
             compare,
           );
           for (const [i, other] of ids.entries()) {
-            if (equalRepairs(keys.get(0), keys.get(i + 1))) {
-              const earlier = matches.get(id) ?? new Set<number>();
+            const current = keys.get(0);
+            const prior = keys.get(i + 1);
+            const table = equalRepairs(current, prior) ? matches : overlaps;
+            if (
+              current && prior
+                ? current.some((key) => prior.includes(key))
+                : sharesSource(record, records[other]!)
+            ) {
+              const earlier = table.get(id) ?? new Set<number>();
               earlier.add(other);
-              matches.set(id, earlier);
+              table.set(id, earlier);
             }
           }
         } catch (error) {
-          if (!contextWindowExceeded(error)) throw error;
+          if (!exceedsContext(error)) throw error;
           if (ids.length === 1) return; // Even this pair cannot fit. Retain both reports.
           const mid = Math.ceil(ids.length / 2);
           await check(ids.slice(0, mid));
@@ -332,6 +334,11 @@ function distinctIdentity(
     (namesInstance(member, otherInstance) &&
       !namesInstance(source, otherInstance))
   );
+}
+
+// JSON object field order has no meaning, including inside extension fields.
+function findingContent({ provenance, ...fields }: Record<string, unknown>) {
+  return canonicalJson(fields);
 }
 
 function addLocations(finding: Finding, source: Pick<Finding, "locations">) {
@@ -521,9 +528,7 @@ export async function mergeBatch(
     ...retained.map(({ finding }) => finding),
     ...workers.flatMap((worker) => worker.result.findings),
   ];
-  const content = (finding: object) =>
-    JSON.stringify({ ...finding, provenance: undefined });
-  const exact = originals.map(content);
+  const exact = originals.map(findingContent);
   const copies = new Map<string, (typeof retained)[number]>();
   const incomplete = new Set<number>();
   for (const group of retained) {
@@ -535,10 +540,12 @@ export async function mergeBatch(
     // A legacy checkpoint can include all originals without the separate ID array.
     group.finding.provenance.sourceFindingIds ??= sourceIds(group.finding);
     for (const source of group.finding.provenance.sourceFindings ?? [])
-      copies.set(content(source.finding), group);
+      copies.set(findingContent(source.finding), group);
   }
   let repairs: Map<number, number[] | undefined> | undefined;
   const fallbackMatches = new Map<number, Set<number>>();
+  const fallbackOverlaps = new Map<number, Set<number>>();
+  const joined = new Map<number, number[]>();
   let records: ComparisonReport[] = [];
   let limitation: string | undefined;
   const unseen = new Set(
@@ -569,7 +576,7 @@ export async function mergeBatch(
     } catch (error) {
       onError(error);
       limitation = `Deep Scan could not compare this batch for duplicates: ${errorMessage(error)}`;
-      if (contextWindowExceeded(error) && records.length > 2) {
+      if (exceedsContext(error) && records.length > 2) {
         limitation +=
           " Retried reports with shared files in smaller comparisons. Pairs that could not fit were kept separate.";
         try {
@@ -579,6 +586,7 @@ export async function mergeBatch(
             previous,
             compare,
             fallbackMatches,
+            fallbackOverlaps,
           );
         } catch (retryError) {
           onError(retryError);
@@ -597,12 +605,15 @@ export async function mergeBatch(
         copy ??
         retained.find((prior) => {
           const other = repairs?.get(prior.id);
-          if (
-            incomplete.has(prior.target) ||
-            (!equalRepairs(key, other) &&
-              !fallbackMatches.get(id)?.has(prior.id))
-          )
-            return false;
+          if (incomplete.has(prior.target)) return false;
+          if (!equalRepairs(key, other)) {
+            const earlier = fallbackMatches.get(id);
+            if (
+              !earlier?.has(prior.id) ||
+              joined.get(prior.id)?.some((member) => !earlier.has(member))
+            )
+              return false;
+          }
           if (
             separateSinks(
               source,
@@ -632,6 +643,12 @@ export async function mergeBatch(
         group = { id, finding, worker: workerIndex, target: id };
         retained.push(group);
       } else {
+        // Pair-local repair IDs can yield non-transitive matches across retries.
+        if (!repairs && !copy) {
+          const members = joined.get(group.id) ?? [];
+          members.push(id);
+          joined.set(group.id, members);
+        }
         addLocations(group.finding, source);
         if (!copy && group.id < previous) changed.set(group.id, workerIndex);
       }
@@ -673,13 +690,10 @@ export async function mergeBatch(
     group.target = group.id;
     group.worker = worker;
   }
-  const reviewable = retained.filter(
-    (group) =>
-      group.target === group.id &&
-      !incomplete.has(group.target) &&
-      (repairs || (fallbackMatches.size > 0 && group.id < previous)),
-  );
-  if (reviewable.some((group) => group.worker >= 0)) {
+  if (
+    (repairs || fallbackOverlaps.size || fallbackMatches.size) &&
+    retained.some((group) => group.worker >= 0)
+  ) {
     const sources = new Map<number, Record<string, unknown>[]>();
     for (const group of retained) {
       if (incomplete.has(group.target)) continue;
@@ -691,7 +705,9 @@ export async function mergeBatch(
     }
     const reviewFailures = new Set<string>();
     const matches = await checkSameFix(
-      reviewable,
+      retained.filter(
+        (group) => group.target === group.id && !incomplete.has(group.target),
+      ),
       priorTargets,
       records,
       repairs ?? new Map(),
@@ -701,6 +717,13 @@ export async function mergeBatch(
         onError(error);
         reviewFailures.add(errorMessage(error));
       },
+      repairs
+        ? undefined
+        : (left, right) =>
+            Boolean(
+              fallbackOverlaps.get(right)?.has(left) ||
+              fallbackMatches.get(right)?.has(left),
+            ),
     );
     if (reviewFailures.size) {
       limitation = [

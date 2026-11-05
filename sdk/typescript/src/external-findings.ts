@@ -222,8 +222,17 @@ export function snapshotImportOptions<P extends ExternalFindingsReader>({
   provider,
   sourceKey,
   sourceRepositoryUrl,
+  trivyScanRoot,
   inspectorProjectMap,
 }: Omit<ExternalPublicationOptions, "provider"> & { provider: P }) {
+  if (provider === "trivy" && sourceRepositoryUrl !== undefined)
+    throw new CodexSecurityError(
+      "Trivy reads repository provenance from the report; do not supply --source-repository-url.",
+    );
+  if (trivyScanRoot !== undefined && provider !== "trivy")
+    throw new CodexSecurityError(
+      "--trivy-scan-root applies only to --provider trivy.",
+    );
   if (inspectorProjectMap !== undefined && provider !== "inspector")
     throw new CodexSecurityError(
       "An Inspector project map requires the inspector provider.",
@@ -233,6 +242,7 @@ export function snapshotImportOptions<P extends ExternalFindingsReader>({
     provider,
     sourceKey,
     sourceRepositoryUrl,
+    trivyScanRoot,
     inspectorProjectMap: inspectorProjectMap && new Map(inspectorProjectMap),
   };
 }
