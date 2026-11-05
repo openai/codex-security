@@ -1,0 +1,91 @@
+# Security Review: example/repo
+
+## Scope
+
+The scan was configured for the include paths and exclusions listed below.
+
+- Scan mode: repository
+- Target kind: git\_worktree
+- Target ID: target\_sha256\_example
+- Revision: deadbeef
+- Snapshot digest: codex-security-snapshot/v1:sha256:ed88f96a4c1a06603a41b3f261f59c3de2555c367ef6ad3bb8b9e483495d34eb
+- Included paths: .
+- Excluded paths: none
+- Scan context: Illustrative scan of a synthetic archive importer.
+
+### Scan Summary
+
+| Field | Value |
+| --- | --- |
+| Scan outcome | completed |
+| Reportable findings | 1 |
+| Severity mix | high: 1 |
+| Confidence mix | high: 1 |
+| Validation mode | Static source review |
+
+Canonical artifacts: `scan-manifest.json` and `findings.json`. This report is a deterministic projection of those files.
+
+## Threat Model
+
+No explicit canonical threat-model summary was recorded.
+
+## Findings
+
+| Finding | Severity | Confidence | Detailed write-up |
+| --- | --- | --- | --- |
+| [Unsafe archive extraction can escape the output directory](#finding-1) | high | high | inline below |
+
+### Confidence Scale
+
+| Label | Meaning |
+| --- | --- |
+| high | Direct evidence supports the finding with no material unresolved blocker. |
+| medium | Evidence supports a plausible issue, but material runtime or reachability proof remains. |
+| low | Evidence is incomplete and the item is retained only for explicit follow-up. |
+
+<a id="finding-1"></a>
+
+### [1] Unsafe archive extraction can escape the output directory
+
+| Field | Value |
+| --- | --- |
+| Severity | high |
+| Confidence | high |
+| Confidence rationale | The destination passed to the file writer is visible in the reviewed code. |
+| Category | path-traversal |
+| CWE | CWE-22 |
+| Affected lines | src/extract.py:41-44 |
+
+#### Summary
+
+Archive extraction can overwrite files outside the directory chosen for the import.
+
+#### Validation
+
+The extractor combines the output directory with the entry name and passes the resulting path to the writer. It never checks that the destination stays inside the output directory.
+
+Validation method: Static source review
+
+#### Dataflow
+
+The archive supplies an entry name. The extractor uses that name to select the file it writes.
+
+#### Reachability
+
+The caller must be able to supply an archive for extraction. The service account must have write access to the destination.
+
+#### Severity
+
+**High** — The caller can alter files outside the import area with the permissions of the extraction service.
+
+A filesystem policy that confines writes to a disposable import directory would limit the impact.
+
+#### Remediation
+
+Normalize destinations and reject entries that escape the extraction root.
+
+Tests:
+- Assert that extracting an archive entry named `../escape.txt` fails without writing outside the extraction root.
+
+Preventive controls:
+- Route all archive extraction through one helper that normalizes and validates destination paths.

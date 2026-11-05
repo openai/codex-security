@@ -1,5 +1,8 @@
-import { readFileSync } from "node:fs";
+import { isNonEmptyString } from "./value.js";
+import { readFileSync, realpathSync } from "node:fs";
+import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import semverGt from "semver/functions/gt.js";
 
 const PACKAGE_VERSIONS = packageVersions(
   new URL("../package.json", import.meta.url),
@@ -8,11 +11,9 @@ const PACKAGE_VERSIONS = packageVersions(
 export const VERSION = PACKAGE_VERSIONS.package;
 export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
-export const BUNDLED_PLUGIN_VERSION = "0.1.22" as const;
+export const BUNDLED_PLUGIN_VERSION = "0.1.95" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
-const VERSION_PATTERN =
-  /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u;
 
 export interface UpdateNotice {
   readonly currentVersion: string;
@@ -31,6 +32,9 @@ export function updateNoticeEnabled(environment: NodeJS.ProcessEnv): boolean {
 export function updateCommand(
   environment: NodeJS.ProcessEnv = process.env,
   entrypoint: string = fileURLToPath(import.meta.url),
+  nodeExecutable: string | undefined = process.platform === "win32"
+    ? realpathSync(process.execPath)
+    : undefined,
 ): string {
   const path = entrypoint.replaceAll("\\", "/").toLowerCase();
   const agent = (environment["npm_config_user_agent"] ?? "").toLowerCase();
@@ -46,14 +50,24 @@ export function updateCommand(
     return "download and extract the latest Codex Security release";
   }
 
+  const nodeModulesDirectory =
+    nodeExecutable === undefined
+      ? undefined
+      : win32
+          .join(win32.dirname(nodeExecutable), "node_modules")
+          .replaceAll("\\", "/")
+          .toLowerCase();
   const global =
     environment["npm_config_global"] === "true" ||
     path.includes("/lib/node_modules/") ||
     path.includes("/appdata/roaming/npm/node_modules/") ||
+    (nodeModulesDirectory !== undefined &&
+      path.startsWith(`${nodeModulesDirectory}/`)) ||
     path.includes("/pnpm/global/") ||
     path.includes("/.bun/install/global/") ||
     path.includes("/.yarn/global/") ||
-    path.includes("/yarn/global/");
+    path.includes("/yarn/global/") ||
+    path.includes("/yarn/data/global/");
 
   if (agent.startsWith("pnpm/") || path.includes("/.pnpm/")) {
     return `pnpm add${global ? " -g" : ""} ${PACKAGE_NAME}@latest`;
@@ -61,7 +75,8 @@ export function updateCommand(
   if (
     agent.startsWith("yarn/") ||
     path.includes("/.yarn/") ||
-    path.includes("/yarn/global/")
+    path.includes("/yarn/global/") ||
+    path.includes("/yarn/data/global/")
   ) {
     return `yarn${global ? " global" : ""} add ${PACKAGE_NAME}@latest`;
   }
@@ -116,7 +131,7 @@ export async function checkForUpdate({
       manifest === null ||
       !("version" in manifest) ||
       typeof manifest.version !== "string" ||
-      !isNewerVersion(manifest.version, currentVersion)
+      !semverGt(manifest.version, currentVersion)
     ) {
       return undefined;
     }
@@ -146,40 +161,14 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
   ].join("\n");
 }
 
-function isNewerVersion(latest: string, current: string): boolean {
-  const candidate = VERSION_PATTERN.exec(latest);
-  const installed = VERSION_PATTERN.exec(current);
-  if (candidate === null || installed === null) return false;
-
-  for (let index = 1; index <= 3; index += 1) {
-    const difference = Number(candidate[index]) - Number(installed[index]);
-    if (difference !== 0) return difference > 0;
-  }
-
-  if (candidate[4] === installed[4]) return false;
-  if (candidate[4] === undefined) return true;
-  if (installed[4] === undefined) return false;
-  return (
-    new Intl.Collator("en", { numeric: true }).compare(
-      candidate[4],
-      installed[4],
-    ) > 0
-  );
-}
-
-function packageVersions(url: URL): {
-  package: string;
-  sdk: string;
-  executable: string;
-} {
+function packageVersions(url: URL) {
   try {
     const manifest: unknown = JSON.parse(readFileSync(url, "utf8"));
     if (
       typeof manifest !== "object" ||
       manifest === null ||
       !("version" in manifest) ||
-      typeof manifest.version !== "string" ||
-      manifest.version.length === 0
+      !isNonEmptyString(manifest.version)
     ) {
       throw new Error("version must be a non-empty string");
     }
@@ -196,12 +185,7 @@ function packageVersions(url: URL): {
       "@openai/codex" in dependencies
         ? dependencies["@openai/codex"]
         : undefined;
-    if (
-      typeof sdk !== "string" ||
-      sdk.length === 0 ||
-      typeof executable !== "string" ||
-      executable.length === 0
-    ) {
+    if (!isNonEmptyString(sdk) || !isNonEmptyString(executable)) {
       throw new Error("Codex dependencies must have non-empty versions");
     }
     return { package: manifest.version, sdk, executable };

@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Render saved structured or Markdown threat models without running analysis."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+# Keep sibling helpers importable when Python starts in isolated mode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import report_projection as report
+
+
+def _is_structured_model(model: dict[str, Any]) -> bool:
+    summary = model.get("summary")
+    return (
+        isinstance(summary, str)
+        and bool(summary)
+        and all(
+            isinstance(values := model.get(key, []), list)
+            and all(isinstance(value, str) and value for value in values)
+            for _, key in report.THREAT_MODEL_SECTIONS
+        )
+    )
+
+
+def threat_model_body(model: dict[str, Any]) -> str:
+    """Return the authored Markdown body verbatim or render a legacy summary and its sections.
+
+    Raises:
+        ValueError: Required content is absent or the saved model has invalid metadata or sections.
+    """
+    content = report.markdown_threat_model_content(model)
+    if content is not None:
+        # The structured schema permits legacy metadata as extension fields.
+        if _is_structured_model(model):
+            return content
+        if "origin" in model and model["origin"] not in (
+            "generated",
+            "provided",
+            "reconciled",
+            "recovered",
+        ):
+            raise ValueError("threatModel.origin: unsupported value")
+        if "scope" in model:
+            scope = model["scope"]
+            if not isinstance(scope, dict) or "includePaths" not in scope:
+                raise ValueError("threatModel.scope: expected an object with includePaths")
+            for key in ("includePaths", "excludePaths"):
+                if key in scope and (
+                    not isinstance(scope[key], list)
+                    or not all(isinstance(path, str) and path for path in scope[key])
+                ):
+                    raise ValueError(
+                        f"threatModel.scope.{key}: expected an array of non-empty strings"
+                    )
+            if "summary" in scope and (
+                not isinstance(scope["summary"], str) or not scope["summary"]
+            ):
+                raise ValueError("threatModel.scope.summary: expected a non-empty string")
+        return content
+    summary = model.get("summary")
+    if not isinstance(summary, str) or not summary:
+        if model.get("format") == "markdown":
+            raise ValueError("threatModel.content: expected non-empty Markdown")
+        raise ValueError("threatModel.summary: expected a non-empty string")
+    sections = [
+        summary if summary.strip() else "No explicit canonical threat-model summary was recorded."
+    ]
+    for heading, key in report.THREAT_MODEL_SECTIONS:
+        values = model.get(key, [])
+        if not isinstance(values, list):
+            raise ValueError(f"threatModel.{key}: expected an array")
+        if not values:
+            continue
+        for index, value in enumerate(values):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"threatModel.{key}[{index}]: expected a non-empty string")
+        sections.append(f"## {heading}")
+        sections.append("\n".join("- " + value.replace("\n", "\n  ") for value in values))
+    return "\n\n".join(sections)
+
+
+def _scope_lines(scope: Any, label: str) -> list[str]:
+    # Older structured models may use these extension names for unrelated data.
+    included = scope.get("includePaths") if isinstance(scope, dict) else None
+    if not isinstance(included, list) or not all(isinstance(path, str) for path in included):
+        return [f"- {label}: not recorded"]
+    included_text = ", ".join(report._path_text(path, ensure_ascii=True) for path in included)
+    lines = [f"- {label}: {included_text or 'none'}"]
+    excluded = scope.get("excludePaths")
+    if isinstance(excluded, list) and excluded and all(isinstance(path, str) for path in excluded):
+        excluded_text = ", ".join(report._path_text(path, ensure_ascii=True) for path in excluded)
+        lines.append(f"- {label} exclusions: {excluded_text or 'none'}")
+    summary = scope.get("summary")
+    if isinstance(summary, str) and summary:
+        lines.append(f"- {label} description: {report._text(summary, 'not recorded')}")
+    return lines
+
+
+def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None = None) -> bytes:
+    """Return the saved threat model as UTF-8 Markdown, including its provenance footer.
+
+    Args:
+        model (dict): Authored Markdown or a legacy structured model from a scan.
+        provenance (dict | None): Optional saved scan identifiers, scope, and provisional status.
+    """
+    body = threat_model_body(model)
+    if report.markdown_threat_model_content(model) is None:
+        body = "# Threat Model\n\n" + body
+    text = report._text
+    provenance = provenance or {}
+    footer = ["---", "", "## Saved Model Context", ""]
+    for key, label in (
+        ("source", "Source"),
+        ("scanId", "Scan"),
+        ("target", "Target"),
+        ("revision", "Revision"),
+        ("snapshotDigest", "Snapshot"),
+        ("status", "Result status"),
+    ):
+        if provenance.get(key):
+            footer.append(f"- {label}: {text(str(provenance[key]), 'not recorded')}")
+    footer.append(f"- Model origin: {text(model.get('origin'), 'not recorded')}")
+    footer.extend(_scope_lines(model.get("scope"), "Model scope"))
+    scan_scope = provenance.get("scanScope")
+    if isinstance(scan_scope, dict):
+        footer.extend(_scope_lines(scan_scope, "Scan scope"))
+    if provenance.get("provisional"):
+        footer.extend(["", "This is a provisional model saved before successful completion."])
+    return (body + ("\n" if body.endswith("\n") else "\n\n") + "\n".join(footer) + "\n").encode(
+        "utf-8"
+    )
+
+
+def main() -> int:
+    """Render a JSON payload from stdin to UTF-8 Markdown on stdout and return zero on success."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input-json-stdin", action="store_true", required=True)
+    parser.parse_args()
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload["threatModel"], dict):
+            raise ValueError("threatModel must be an object")
+        sys.stdout.buffer.write(
+            render_threat_model(payload["threatModel"], payload.get("provenance"))
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        parser.error(str(exc))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

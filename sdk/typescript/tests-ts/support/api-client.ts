@@ -1,12 +1,104 @@
 import { CodexSecurity } from "../../src/api.js";
-import type { JsonObject } from "../../src/config.js";
+import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
+  FIREWORKS_CODEX_PROVIDER,
+  OPENROUTER_CODEX_PROVIDER,
+  type JsonObject,
+} from "../../src/config.js";
+import { throwing } from "./errors.js";
+import { readFile } from "node:fs/promises";
+import { parse } from "smol-toml";
+import type { TurnOptions } from "@openai/codex-sdk";
+
+export const EXTERNAL_PROVIDER_CASES = [
+  [
+    "OpenRouter",
+    "openrouter",
+    "OPENROUTER_API_KEY",
+    "anthropic/claude-sonnet-4.5",
+    OPENROUTER_CODEX_PROVIDER,
+  ],
+  [
+    "Fireworks AI",
+    "fireworks",
+    "FIREWORKS_API_KEY",
+    "accounts/fireworks/models/qwen3-235b-a22b",
+    FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "Cheaper Inference",
+    "cheaperinference",
+    "CHEAPER_INFERENCE_API_KEY",
+    "gpt-5.4",
+    CHEAPERINFERENCE_CODEX_PROVIDER,
+  ],
+] as const;
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
+type Dependencies = NonNullable<ClientArguments[1]>;
+
+/** Reuse a test's synthetic events at both scan execution boundaries. */
+export function withSyntheticScanEvents<T extends Partial<Dependencies>>(
+  dependencies: T,
+): T {
+  const createCodex = dependencies.createCodex;
+  if (createCodex === undefined) return dependencies;
+  type Client = Awaited<ReturnType<Dependencies["createCodex"]>>;
+  let thread: ReturnType<Client["startThread"]> | undefined;
+  const runDeepScan: NonNullable<Dependencies["runDeepScan"]> =
+    async function* (options) {
+      if (!thread) throw new Error("The synthetic scan session is missing.");
+      const configPath =
+        options.codexOptions.env?.["CODEX_SECURITY_CONFIG_PATH"];
+      const config = configPath
+        ? parse(await readFile(configPath, "utf8"))
+        : {};
+      const security = config["codex_security"] as
+        | { cyber_access_program?: TurnOptions["cyberAccessProgram"] }
+        | undefined;
+      yield* (
+        await thread.runStreamed(options.prompt, {
+          signal: options.signal,
+          cyberAccessProgram: security?.cyber_access_program,
+        })
+      ).events;
+    };
+  return {
+    ...dependencies,
+    createCodex: async (
+      options: Parameters<Dependencies["createCodex"]>[0],
+    ) => {
+      const client = await createCodex(options);
+      return {
+        startThread: (options: Parameters<Client["startThread"]>[0]) =>
+          (thread = client.startThread(options)),
+        ...(client.resumeThread === undefined
+          ? {}
+          : {
+              resumeThread: (
+                id: string,
+                options: Parameters<Client["startThread"]>[0],
+              ) => (thread = client.resumeThread!(id, options)),
+            }),
+      };
+    },
+    runDeepScan: dependencies.runDeepScan ?? runDeepScan,
+    readDeepScanParentConfig:
+      dependencies.readDeepScanParentConfig ??
+      (async ({ codexOptions }) => codexOptions.config ?? {}),
+  };
+}
 
 export const TEST_SNAPSHOT_DIGEST = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
 
-export function mockScanRegistration(args: readonly string[]) {
-  const recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!) as {
+export function mockScanRegistration(
+  args: readonly string[],
+  input?: string,
+): JsonObject {
+  if (!args.includes("--registration-json-stdin") || input === undefined) {
+    throw new Error("missing stdin scan registration");
+  }
+  const recipe = JSON.parse(input).recipe as {
     repositoryRevision?: string;
     target: { kind: string };
   };
@@ -33,8 +125,32 @@ export function mockScanRegistration(args: readonly string[]) {
   };
 }
 
-export function mockWorkbench(args: readonly string[]): JsonObject {
-  if (args[0] === "register-cli-scan") return mockScanRegistration(args);
+export function measuredScanUsage(
+  inputTokens: number,
+  cachedInputTokens: number,
+  outputTokens: number,
+  reasoningOutputTokens = 0,
+): JsonObject {
+  return {
+    coverage: "complete",
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens: 0,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens: inputTokens + outputTokens,
+    byRole: { workers: { threadCount: 0 } },
+  };
+}
+
+export function mockWorkbench(
+  args: readonly string[],
+  input?: string,
+): JsonObject {
+  if (args[0] === "register-cli-scan") {
+    return mockScanRegistration(args, input);
+  }
+  if (args[0] === "read-scan-usage") return measuredScanUsage(10, 2, 3, 1);
   if (args[0] === "get-scan-feedback") {
     return {
       scanId: "scan_example_001",
@@ -46,20 +162,30 @@ export function mockWorkbench(args: readonly string[]): JsonObject {
 }
 
 export class TestClient extends CodexSecurity {
+  static withDependencies(
+    dependencies: Partial<NonNullable<ClientArguments[1]>>,
+  ) {
+    return new TestClient({}, dependencies);
+  }
+
   public constructor(
     config: ClientArguments[0],
-    dependencies: Partial<ClientArguments[1]>,
+    dependencies: Partial<NonNullable<ClientArguments[1]>>,
   ) {
     super(
       config,
-      {
-        createCodex: () => {
-          throw new Error("Unexpected Codex invocation in test");
-        },
+      withSyntheticScanEvents({
+        createCodex: throwing("Unexpected Codex invocation in test"),
         environment: {},
-        runWorkbench: async (_options, args) => mockWorkbench(args),
+        createOperationTelemetry: () => null,
+        probeCodexSandbox: async () => {},
+        prepareScanArtifactRestorer: async () => ({
+          restore: async () => {},
+        }),
+        runWorkbench: async (_options, args, input) =>
+          mockWorkbench(args, input),
         ...dependencies,
-      },
+      }),
       { surface: "sdk" },
     );
   }

@@ -1,17 +1,13 @@
-import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
-import { promisify } from "node:util";
-import { confirm, input, search } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
+import { createAuthenticatedGitHub } from "./github.js";
 import { expandHome } from "./runtime.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
 
-const execFile = promisify(execFileCallback);
 const GITHUB_REPOSITORIES_QUERY = `
   query($owner: String!, $cursor: String) {
     repositoryOwner(login: $owner) {
@@ -20,6 +16,7 @@ const GITHUB_REPOSITORIES_QUERY = `
         after: $cursor
         isArchived: false
         isFork: false
+        ownerAffiliations: [OWNER]
         orderBy: { field: PUSHED_AT, direction: DESC }
       ) {
         nodes {
@@ -71,6 +68,12 @@ export interface BulkScanPrompt {
     presentation?: { header?: string },
     signal?: AbortSignal,
   ): Promise<Value>;
+  checkbox<Value extends string>(
+    question: string,
+    options: readonly { label: string; value: Value; short?: string }[],
+    presentation?: { header?: string; required?: boolean },
+    signal?: AbortSignal,
+  ): Promise<Value[]>;
 }
 
 export interface BulkScanDiscoveryDependencies {
@@ -105,43 +108,19 @@ export function createBulkScanDiscoveryDependencies(options: {
     ...(process.env["GH_HOST"]?.trim()
       ? { githubHost: process.env["GH_HOST"].trim() }
       : {}),
-    createGitHub: async (host, signal) => {
-      const trusted = await resolveTrustedExecutable(
-        "gh",
-        process.env,
-        options.currentDirectory(),
-      );
-      if (trusted === null) {
-        throw new Error(
-          "GitHub CLI is required. Install gh and sign in first.",
-        );
-      }
-
-      let token: string;
-      try {
-        const { stdout } = await execFile(
-          trusted.executable,
-          ["auth", "token", "--hostname", host],
-          { env: trusted.environment, signal },
-        );
-        token = stdout.trim();
-      } catch {
-        signal?.throwIfAborted();
-        throw new Error(
-          "GitHub sign-in is required. Run 'gh auth login' first.",
-        );
-      }
-      return new Octokit({
-        auth: token,
-        ...(host === "github.com" ? {} : { baseUrl: `https://${host}/api/v3` }),
-      });
-    },
+    createGitHub: (host, signal) =>
+      createAuthenticatedGitHub(host, {
+        environment: process.env,
+        currentDirectory: options.currentDirectory(),
+        signal,
+      }),
   };
 }
 
 export async function runBulkScanWizard(
   dependencies: BulkScanDiscoveryDependencies,
   signal?: AbortSignal,
+  defaultOutputDir = "./security-scans",
 ): Promise<BulkScanWizardResult | null> {
   const { prompt } = dependencies;
   if (!prompt.isInteractive()) {
@@ -167,25 +146,30 @@ export async function runBulkScanWizard(
     return null;
   }
 
-  prompt.write(`\nFound ${discovered.length} repositories.\n`);
-  const repositories = await selectGitHubRepositories(discovered, prompt);
+  prompt.write(`\nFound ${formatRepositoryCount(discovered.length)}.\n`);
+  const repositories = await selectGitHubRepositories(
+    discovered,
+    prompt,
+    signal,
+  );
 
   const outputDir = resolve(
     dependencies.currentDirectory(),
     expandHome(
       await prompt.input(
         "Where should scan results be saved?",
-        "./security-scans",
+        defaultOutputDir,
+        signal,
       ),
     ),
   );
   const inputPath = join(outputDir, "repositories.csv");
   await validateWizardOutput(outputDir);
   prompt.write(
-    `\nReady to scan ${repositories.length} repositories?\n` +
+    `\nReady to scan ${formatRepositoryCount(repositories.length)}?\n` +
       `Results: ${outputDir}\nRepository list: ${inputPath}\n`,
   );
-  if (!(await prompt.confirm("Start scanning?"))) {
+  if (!(await prompt.confirm("Start scanning?", false, signal))) {
     prompt.write("\nScan canceled.\n");
     return null;
   }
@@ -233,31 +217,42 @@ async function selectGitHubOwner(
     return await prompt.select(
       "Which account or organization should we scan?",
       owners.map((owner) => ({ label: owner, value: owner })),
+      undefined,
+      signal,
     );
   }
   prompt.write(`\nFinding repositories in ${personal}.\n`);
   return personal;
 }
 
+function formatRepositoryCount(count: number): string {
+  return count === 1 ? "1 repository" : `${count} repositories`;
+}
+
 async function selectGitHubRepositories(
   repositories: GitHubRepository[],
   prompt: BulkScanPrompt,
+  signal?: AbortSignal,
 ): Promise<GitHubRepository[]> {
+  const allLabel =
+    repositories.length === 1
+      ? "All repositories"
+      : `All ${formatRepositoryCount(repositories.length)}`;
   const selected = new Set<string>();
   while (selected.size < repositories.length) {
     const choice = await prompt.select(
       "Select repositories to scan (type to filter)",
       [
         {
-          label: selected.size
-            ? `Done (${selected.size} selected)`
-            : `All ${repositories.length} repositories`,
+          label: selected.size ? `Done (${selected.size} selected)` : allLabel,
           value: "",
         },
         ...repositories
           .filter(({ fullName }) => !selected.has(fullName))
           .map(({ fullName }) => ({ label: fullName, value: fullName })),
       ],
+      undefined,
+      signal,
     );
     if (!choice) break;
     selected.add(choice);
@@ -308,8 +303,7 @@ async function discoverGitHubRepositories(
 function repositoryId(fullName: string): string {
   const id = fullName.replace("/", "--");
   if (id.length <= 128) return id;
-  const hash = createHash("sha256").update(fullName).digest("hex").slice(0, 16);
-  return `${id.slice(0, 111)}-${hash}`;
+  return `${id.slice(0, 111)}-${createHash("sha256").update(fullName).digest("hex").slice(0, 16)}`;
 }
 
 async function validateWizardOutput(outputDir: string): Promise<void> {
@@ -337,7 +331,7 @@ async function validateWizardOutput(outputDir: string): Promise<void> {
   }
 }
 
-function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
+export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
   const context = (signal?: AbortSignal) => {
     const stream = new Writable({
       write(chunk: Buffer, _encoding, callback) {
@@ -357,12 +351,37 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
     write: (value) => {
       output.write(value);
     },
-    confirm: (message, defaultValue = false, signal) =>
-      confirm({ message, default: defaultValue }, context(signal)),
-    input: (message, defaultValue, signal) =>
-      input({ message, default: defaultValue }, context(signal)),
-    select: (message, options, presentation, signal) =>
-      search(
+    async confirm(message, defaultValue = false, signal) {
+      const { confirm } = await import("@inquirer/prompts");
+      return confirm({ message, default: defaultValue }, context(signal));
+    },
+    async input(message, defaultValue, signal) {
+      const { input } = await import("@inquirer/prompts");
+      return input({ message, default: defaultValue }, context(signal));
+    },
+    async checkbox(message, options, presentation, signal) {
+      const { checkbox, Separator } = await import("@inquirer/prompts");
+      return checkbox(
+        {
+          message,
+          choices: [
+            ...(presentation?.header === undefined
+              ? []
+              : [new Separator(presentation.header)]),
+            ...options.map(({ label, value, short }) => ({
+              name: label,
+              value,
+              ...(short === undefined ? {} : { short }),
+            })),
+          ],
+          required: presentation?.required,
+        },
+        context(signal),
+      );
+    },
+    async select(message, options, presentation, signal) {
+      const { search } = await import("@inquirer/prompts");
+      return search(
         {
           message,
           ...(presentation?.header === undefined
@@ -387,6 +406,7 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
               })),
         },
         context(signal),
-      ),
+      );
+    },
   };
 }

@@ -1,0 +1,277 @@
+import {
+  previousAdmission,
+  validateExternalEvidenceJson,
+  validateExternalReport,
+  type ExternalImportTarget,
+} from "./external-import-contract.js";
+import { canonicalJson } from "./record.js";
+import { errorMessage } from "./errors.js";
+import type { ExternalFindings } from "./external-findings.js";
+import {
+  messageText,
+  nativeResultPath,
+  parseNativeJsonResult,
+  projectNativeJsonResult,
+  sourceRepositoryUrl,
+} from "./native-json-findings.js";
+import {
+  trackReaderSelection,
+  array,
+  readScannerJson,
+  record,
+  requiredText,
+  stableId,
+} from "./scanner-import.js";
+
+export interface OpenGrepImportOptions {
+  /** Source repository declared by the caller, independent of the destination. */
+  sourceRepositoryUrl: string;
+}
+
+// Occurrences are sorted by ID and can retain traces from nonadjacent input rows.
+const sourcePositions = new WeakMap<
+  ExternalFindings["findings"],
+  ReadonlyMap<string, readonly number[]>
+>();
+
+export function getOpenGrepSourcePositions(findings: unknown) {
+  return Array.isArray(findings) ? sourcePositions.get(findings) : undefined;
+}
+
+/** Import native scanner evidence without assigning a Codex assessment. */
+export function normalizeOpenGrepFindings(
+  input: unknown,
+  options: OpenGrepImportOptions,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  const document = record(input, "OpenGrep report");
+  const repositoryUrl = sourceRepositoryUrl(
+    options?.sourceRepositoryUrl,
+    "OpenGrep",
+  );
+  const version = requiredText(document["version"], "OpenGrep version");
+  const { results, ...report } = document;
+  const values = array(results, "OpenGrep results");
+  const errors = array(report["errors"], "OpenGrep errors");
+  validateExternalReport(report);
+  const projection = {
+    origin: "OpenGrep",
+    repositoryUrl,
+    severity: () => "unknown",
+    reportContext: { version },
+    target,
+    scanErrorCount: errors.length,
+  };
+  const output: ExternalFindings = {
+    read: values.length,
+    findings: [],
+    excluded: [],
+    report: structuredClone(report),
+  };
+  const selection = trackReaderSelection(output);
+  type Observation = {
+    position: number;
+    parsed: ReturnType<typeof parseNativeJsonResult>;
+  };
+  function exclude(position: number, id: string | null, error: unknown) {
+    if (id && error instanceof Error && previousAdmission(error) !== undefined)
+      selection.uncertainIds.add(id);
+    output.excluded.push({
+      position,
+      source_finding_id: id,
+      reason: errorMessage(error),
+    });
+  }
+  function projectGroup(observations: Observation[]) {
+    const results = observations.map(({ parsed }) => parsed.result);
+    if (results.length === 1)
+      return projectNativeJsonResult(observations[0]!.parsed, {
+        ...projection,
+        observations: results,
+      });
+    const sourceData = {
+      report: { version },
+      scan_error_count: errors.length,
+      results,
+    };
+    // Replacing [] with the same raw results adds the same wire bytes to every candidate.
+    const rawBytes =
+      validateExternalEvidenceJson({ source_data: sourceData }, target) -
+      validateExternalEvidenceJson(
+        { source_data: { ...sourceData, results: [] } },
+        target,
+      );
+    let projectionError: unknown;
+    for (const { parsed } of observations) {
+      try {
+        const evidence = projectNativeJsonResult(parsed, {
+          ...projection,
+          observations: [],
+        });
+        validateExternalEvidenceJson(evidence, target, rawBytes);
+        evidence.source_data!["results"] = results;
+        return evidence;
+      } catch (error) {
+        projectionError ??= error;
+      }
+    }
+    throw projectionError;
+  }
+  function retainPublishableTraces(observations: Observation[], id: string) {
+    const emptyWrapperBytes = validateExternalEvidenceJson(
+      { source_data: { results: [] } },
+      target,
+    );
+    function sizeWithTrace(observation: Observation, evidenceBytes: number) {
+      return validateExternalEvidenceJson(
+        { source_data: { results: [observation.parsed.result] } },
+        target,
+        evidenceBytes - emptyWrapperBytes,
+      );
+    }
+    const singletonErrors = new Map<Observation, string>();
+    let smallestProjectionBytes = Infinity;
+    let coreRawBytes = 0;
+    for (const observation of observations) {
+      try {
+        const evidence = projectNativeJsonResult(observation.parsed, {
+          ...projection,
+          observations: [],
+        });
+        const projectedBytes = validateExternalEvidenceJson(evidence, target);
+        const singletonBytes = sizeWithTrace(observation, projectedBytes);
+        coreRawBytes += singletonBytes - projectedBytes;
+        smallestProjectionBytes = Math.min(
+          smallestProjectionBytes,
+          projectedBytes,
+        );
+      } catch (error) {
+        if (error instanceof Error && previousAdmission(error) !== undefined)
+          selection.uncertainIds.add(id);
+        singletonErrors.set(observation, errorMessage(error));
+      }
+    }
+    if (!singletonErrors.size) return observations;
+    // Reserve every independently publishable trace, including the commas in
+    // their results array, before trying raw-only traces in canonical order.
+    const coreCount = observations.length - singletonErrors.size;
+    let groupBytes = smallestProjectionBytes + coreRawBytes + coreCount - 1;
+    return observations.filter((observation) => {
+      let reason = singletonErrors.get(observation);
+      if (reason === undefined) return true;
+      if (coreCount) {
+        try {
+          groupBytes = sizeWithTrace(observation, groupBytes + 1);
+          return true;
+        } catch (error) {
+          const groupReason = errorMessage(error);
+          if (groupReason !== reason)
+            reason = `${groupReason} This trace also fails standalone validation. ${reason}`;
+        }
+      }
+      exclude(observation.position, id, reason);
+      return false;
+    });
+  }
+  const groups = new Map<string, Observation[]>();
+  for (const [index, value] of values.entries()) {
+    let id: string | null = null;
+    try {
+      const parsed = parseNativeJsonResult(value, "OpenGrep", nativeResultPath);
+      // Native fingerprint counters change when another analysis pass adds matches.
+      // A source move creates a new occurrence; this is not cross-revision matching.
+      id = stableId("opengrep-location", [
+        parsed.rule,
+        parsed.path ?? parsed.rawPath,
+        parsed.line,
+        parsed.column,
+        parsed.endLine,
+        parsed.endColumn,
+      ]);
+      messageText(parsed.extra["message"], "OpenGrep");
+      const group = groups.get(id) ?? [];
+      group.push({ position: index + 1, parsed });
+      groups.set(id, group);
+    } catch (error) {
+      exclude(index + 1, id, error);
+    }
+  }
+  const positions = new Map<string, number[]>();
+  for (const [id, observations] of [...groups].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    if (observations.length === 1) {
+      const { position } = observations[0]!;
+      selection.append(position, id, () => {
+        const evidence = projectGroup(observations);
+        positions.set(id, [position]);
+        return evidence;
+      });
+      continue;
+    }
+    const ordered = observations
+      .flatMap((observation) => {
+        try {
+          const result = structuredClone(observation.parsed.result);
+          // The group adds these same raw bytes when choosing a representative
+          // and deciding which traces fit alongside it.
+          validateExternalEvidenceJson(
+            { source_data: { results: [result] } },
+            target,
+            0,
+            (previousBytes, currentBytes) => {
+              if (previousBytes !== currentBytes)
+                selection.uncertainIds.add(id);
+            },
+          );
+          observation.parsed.result = result;
+          return [{ observation, key: canonicalJson(result) }];
+        } catch (error) {
+          exclude(observation.position, id, error);
+          return [];
+        }
+      })
+      .sort((left, right) =>
+        left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+      )
+      .map(({ observation }) => observation);
+    if (!ordered.length) continue;
+    let retained = ordered;
+    try {
+      let evidence;
+      try {
+        evidence = projectGroup(retained);
+      } catch (error) {
+        if (retained.length === 1) throw error;
+        retained = retainPublishableTraces(retained, id);
+        if (!retained.length) continue;
+        if (retained.length === ordered.length) throw error;
+        evidence = projectGroup(retained);
+      }
+      if (previousAdmission(evidence) === null) selection.uncertainIds.add(id);
+      output.findings.push({ source_finding_id: id, evidence });
+      positions.set(
+        id,
+        retained.map(({ position }) => position),
+      );
+    } catch (error) {
+      for (const observation of retained)
+        exclude(observation.position, id, error);
+    }
+  }
+  output.excluded.sort((left, right) => left.position - right.position);
+  sourcePositions.set(output.findings, positions);
+  return selection.finish();
+}
+
+export async function readOpenGrepFindings(
+  path: string,
+  options: OpenGrepImportOptions,
+  target: ExternalImportTarget = "cloud",
+): Promise<ExternalFindings> {
+  return normalizeOpenGrepFindings(
+    await readScannerJson(path),
+    options,
+    target,
+  );
+}
