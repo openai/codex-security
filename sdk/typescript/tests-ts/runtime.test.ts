@@ -3671,6 +3671,7 @@ describe("runtime directories and plugin Python boundary", () => {
       "transient missing descendant",
       "persistent missing descendant",
       "access denied",
+      "batch access denied",
       "unexpected error",
       "missing home",
       "transient path-not-found descendant",
@@ -3689,6 +3690,9 @@ describe("runtime directories and plugin Python boundary", () => {
     await requireSecureCredentialHome(home);
     const descendant = join(home, ".auth-replay.tmp");
     await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
+    const batchOnly = kind === "batch access denied";
+    if (batchOnly) await writeFile(join(home, "sibling.tmp"), "fixture\n");
+    const accessDenied = kind.endsWith("access denied");
     const pathNotFound = kind.includes("path-not-found");
     const missing = pathNotFound || kind.includes("missing");
     const transient = kind.startsWith("transient ");
@@ -3697,27 +3701,26 @@ describe("runtime directories and plugin Python boundary", () => {
       ? "System.Management.Automation.ItemNotFoundException"
       : missing
         ? "System.IO.FileNotFoundException"
-        : kind === "access denied"
+        : accessDenied
           ? "System.UnauthorizedAccessException"
           : "System.InvalidOperationException";
     const errorId = pathNotFound
       ? "GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand"
       : missing
         ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
-        : kind === "access denied"
+        : accessDenied
           ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
           : "SyntheticCredentialAclFailure";
-    const category =
-      kind === "access denied"
-        ? "PermissionDenied"
-        : missing && !pathNotFound
-          ? "NotSpecified"
-          : "ObjectNotFound";
+    const category = accessDenied
+      ? "PermissionDenied"
+      : missing && !pathNotFound
+        ? "NotSpecified"
+        : "ObjectNotFound";
     const failurePath = kind.endsWith("home")
       ? home
       : win32.toNamespacedPath(descendant);
     // Replay the native error without relying on racing a filesystem deletion.
-    const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
+    const injection = `if (@($path) -contains '${failurePath.replaceAll("'", "''")}'${batchOnly ? " -and @($path).Count -gt 1" : ""}) { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
     const marker = "function Write-CredentialAcl($path) {";
     const originalSpawn = childProcess.spawn;
     let attempts = 0;

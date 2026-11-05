@@ -1006,6 +1006,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     throw new Error("Unable to identify the current Windows user SID");
   }
 
+  const retryIncompleteAcl = `if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`;
   // Signed built-in cmdlets remain available under ConstrainedLanguage;
   // arbitrary .NET constructors, static methods, and SID translation do not.
   // Enumerate and count ACLs in the same process: parallel startup can create
@@ -1035,20 +1036,20 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "  })",
     "  if ($children.Count -gt 0) {",
     "    try { Write-CredentialAcl $children } catch {",
-    // Preserve the existing per-path diagnostics when a batch encounters an error.
-    "      foreach ($child in $children) {",
-    "        try { Write-CredentialAcl $child } catch {",
-    // A descendant can disappear inside Get-Acl after it was enumerated.
-    `          if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
-    "          if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }",
+    // Only a vanished path can justify rechecking siblings individually.
+    `      ${retryIncompleteAcl}`,
+    "      if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw }",
+    "      for ($i = 0; $i -lt $children.Count; $i++) {",
+    "        try { Write-CredentialAcl $children[$i] } catch {",
+    `          ${retryIncompleteAcl}`,
+    "          if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { $children[$i] = $null; continue }",
     "          throw",
     "        }",
     "      }",
     "    }",
     "  }",
-    "  foreach ($entry in $entries) {",
-    '    $child = "$path\\$($entry.Name)"',
-    "    if ($entry.PSIsContainer) { Read-CredentialDescendants $child }",
+    "  for ($i = 0; $i -lt $children.Count; $i++) {",
+    "    if ($children[$i] -and $entries[$i].PSIsContainer) { Read-CredentialDescendants $children[$i] }",
     "  }",
     "}",
     ancestorAclScript,
