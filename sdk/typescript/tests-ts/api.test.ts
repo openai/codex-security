@@ -699,6 +699,7 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
     for (const model of [
       "gpt-6-astra",
+      "gpt-6-cyber",
       "gpt-6-sol",
       "gpt-6.1-sol",
       "gpt-6-luna",
@@ -14461,6 +14462,7 @@ if __name__ == "__main__":
   });
   const prices = [
     { model: "gpt-6-astra", min: 0.000232, max: 0.000429 },
+    { model: "gpt-6-cyber", min: 0.000464, max: null },
     { model: "gpt-5.6-cyber", min: 0.0003275, max: null },
   ];
   test.each(prices)("tracks live and saved $model costs", async (price) => {
