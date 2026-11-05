@@ -18,7 +18,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity, ScanOptions } from "./api.js";
@@ -38,6 +46,7 @@ import {
 } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
+  canonicalConfigPath,
   createWindowsOutputDirectory,
   requireSecureOutputAncestry,
   resolvePluginPath,
@@ -755,7 +764,8 @@ async function ensureOutputDirectory(path: string): Promise<string> {
   );
   if (metadata === undefined) {
     if (process.platform === "win32") {
-      path = await canonicalWindowsCreationPath(path);
+      // Resolve parent aliases while leaving the leaf for lstat to verify.
+      path = join(await canonicalConfigPath(dirname(path)), basename(path));
       await createWindowsOutputDirectory(path, true);
     } else {
       await mkdir(path, { recursive: true, mode: 0o700 });
@@ -786,20 +796,6 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     );
   }
   return canonical;
-}
-
-async function canonicalWindowsCreationPath(path: string): Promise<string> {
-  let ancestor = dirname(path);
-  for (;;) {
-    try {
-      return resolve(await realpath(ancestor), relative(ancestor, path));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      const parent = dirname(ancestor);
-      if (parent === ancestor) throw error;
-      ancestor = parent;
-    }
-  }
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {

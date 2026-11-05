@@ -29,33 +29,45 @@ const exec = promisify(execFile);
 const windowsTest = test.skipIf(process.platform !== "win32");
 const example = join(PLUGIN_ROOT, "examples", "completed-scan");
 
+const system = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32");
+const powershell = join(system, "WindowsPowerShell", "v1.0");
+
 async function icacls(path: string, ...args: string[]): Promise<void> {
-  await exec(
-    join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "icacls.exe"),
-    [path, ...args],
-  );
+  await exec(join(system, "icacls.exe"), [path, ...args]);
 }
 
-async function inspectAcl(path: string, expression: string): Promise<string> {
-  const system = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32");
-  const result = await exec(
-    join(system, "WindowsPowerShell", "v1.0", "powershell.exe"),
+async function sharedRoot(): Promise<string> {
+  const root = await temporaryDirectory();
+  await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+  return root;
+}
+
+async function runPowerShell(script: string, environment: NodeJS.ProcessEnv) {
+  const { stdout } = await exec(
+    join(powershell, "powershell.exe"),
     [
       "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
-      "-Command",
-      `$ErrorActionPreference = 'Stop'; $acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH; ${expression}`,
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
     ],
     {
       env: {
         ...process.env,
-        CODEX_SECURITY_TEST_ACL_PATH: path,
-        PSModulePath: join(system, "WindowsPowerShell", "v1.0", "Modules"),
+        ...environment,
+        PSModulePath: join(powershell, "Modules"),
       },
     },
   );
-  return result.stdout.trim();
+  return stdout.trim();
+}
+
+function inspectAcl(path: string, expression: string): Promise<string> {
+  return runPowerShell(
+    `$ErrorActionPreference = 'Stop'; $acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH; ${expression}`,
+    { CODEX_SECURITY_TEST_ACL_PATH: path },
+  );
 }
 
 async function descriptor(path: string): Promise<string> {
@@ -75,6 +87,22 @@ async function createMultiscanCampaign(output: string): Promise<void> {
     options({ ...paths, output }, client(completeRun), { maxAttempts: 1 }),
   );
   expect(result).toMatchObject({ completed: 1, failed: 0 });
+}
+
+async function archiveSdkOutput(output: string, root: string): Promise<string> {
+  let archive: string | undefined;
+  await runtime.prepareOutputDir(
+    output,
+    "fixture",
+    root,
+    undefined,
+    true,
+    (path) => {
+      archive = path;
+    },
+  );
+  expect(archive).toBeDefined();
+  return archive!;
 }
 
 async function archiveWorkbenchOutput(
@@ -116,8 +144,7 @@ async function archiveWorkbenchOutput(
 windowsTest(
   "new Windows scan roots start private beneath a shared parent",
   async () => {
-    const root = await temporaryDirectory();
-    await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+    const root = await sharedRoot();
     const before = await descriptor(root);
     expect(before).toContain(";;;WD)");
     const explicit = join(root, "new parent", "scan");
@@ -150,8 +177,7 @@ windowsTest(
 windowsTest.each([204, 233])(
   "generated Windows output supports a %i-character repository name",
   async (length) => {
-    const root = await temporaryDirectory();
-    await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+    const root = await sharedRoot();
     const output = await runtime.prepareOutputDir(
       undefined,
       "r".repeat(length),
@@ -171,8 +197,7 @@ windowsTest.each([204, 233])(
 windowsTest(
   "fresh SDK output keeps its private identity through workbench registration",
   async () => {
-    const root = await temporaryDirectory();
-    await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+    const root = await sharedRoot();
     const repository = join(root, "repository");
     await mkdir(repository);
     await writeFile(join(repository, "source.txt"), "Synthetic repository");
@@ -225,8 +250,7 @@ windowsTest.each(
 )(
   "generated Windows output remains archivable through %s for a %i-character repository name",
   async (archiver, length) => {
-    const root = await temporaryDirectory();
-    await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+    const root = await sharedRoot();
     const output = await runtime.prepareOutputDir(
       undefined,
       "r".repeat(length),
@@ -237,28 +261,16 @@ windowsTest.each(
       "Synthetic retained scan data",
     );
     const original = await descriptor(output);
-    let archive: string | undefined;
-    if (archiver === "SDK") {
-      await runtime.prepareOutputDir(
-        output,
-        "fixture",
-        root,
-        undefined,
-        true,
-        (path) => {
-          archive = path;
-        },
-      );
-    } else {
-      archive = await archiveWorkbenchOutput(output, root);
-    }
+    const archive =
+      archiver === "SDK"
+        ? await archiveSdkOutput(output, root)
+        : await archiveWorkbenchOutput(output, root);
     expect(await descriptor(output)).toBe(original);
-    expect(archive).toBeDefined();
-    expect(basename(archive!).length).toBeLessThanOrEqual(255);
-    expect(await readFile(join(archive!, "retained.txt"), "utf8")).toBe(
+    expect(basename(archive).length).toBeLessThanOrEqual(255);
+    expect(await readFile(join(archive, "retained.txt"), "utf8")).toBe(
       "Synthetic retained scan data",
     );
-    expect(await descriptor(archive!)).toBe(original);
+    expect(await descriptor(archive)).toBe(original);
   },
 );
 
@@ -317,26 +329,14 @@ windowsTest(
 windowsTest(
   "archiving Windows output preserves old ACLs and privately creates the replacement",
   async () => {
-    const root = await temporaryDirectory();
-    await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+    const root = await sharedRoot();
     const output = join(root, "scan");
     await mkdir(output);
     await writeFile(join(output, "retained.txt"), "Synthetic retained data");
     const original = await descriptor(output);
-    let archive: string | undefined;
-    await runtime.prepareOutputDir(
-      output,
-      "fixture",
-      root,
-      undefined,
-      true,
-      (path) => {
-        archive = path;
-      },
-    );
-    expect(archive).toBeDefined();
-    expect(await descriptor(archive!)).toBe(original);
-    expect(await readFile(join(archive!, "retained.txt"), "utf8")).toBe(
+    const archive = await archiveSdkOutput(output, root);
+    expect(await descriptor(archive)).toBe(original);
+    expect(await readFile(join(archive, "retained.txt"), "utf8")).toBe(
       "Synthetic retained data",
     );
     expect(await descriptor(output)).not.toContain(";;;WD)");
@@ -374,8 +374,7 @@ test.skipIf(
 )(
   "another local user cannot read or change new and archived scan output",
   async () => {
-    const root = await temporaryDirectory();
-    await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+    const root = await sharedRoot();
     const writableParent = join(root, "writable parent");
     await mkdir(writableParent);
     await icacls(writableParent, "/grant", "*S-1-1-0:(OI)(CI)M");
@@ -404,28 +403,13 @@ test.skipIf(
       join(import.meta.dir, "support", "windows-other-user-access.ps1"),
       "utf8",
     );
-    const system = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32");
-    const result = await exec(
-      join(system, "WindowsPowerShell", "v1.0", "powershell.exe"),
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-EncodedCommand",
-        Buffer.from(script, "utf16le").toString("base64"),
-      ],
-      {
-        env: {
-          ...process.env,
-          CODEX_SECURITY_TEST_ACCESS_PATHS: JSON.stringify([
-            shared,
-            ...privateProbes,
-          ]),
-          PSModulePath: join(system, "WindowsPowerShell", "v1.0", "Modules"),
-        },
-      },
-    );
-    expect(JSON.parse(result.stdout)).toEqual([
+    const result = await runPowerShell(script, {
+      CODEX_SECURITY_TEST_ACCESS_PATHS: JSON.stringify([
+        shared,
+        ...privateProbes,
+      ]),
+    });
+    expect(JSON.parse(result)).toEqual([
       { read: true, write: true },
       ...privateProbes.map(() => ({ read: false, write: false })),
     ]);
