@@ -22,10 +22,6 @@ import {
 } from "./hosted-git-remotes.js";
 import { CodexSecurityError } from "./errors.js";
 import {
-  forwardExternalImportSetting,
-  requireExternalImports,
-} from "./external-imports-feature.js";
-import {
   externalImportDisposition,
   NoPublishableFindingsError,
   cloneImportPreview,
@@ -678,10 +674,9 @@ async function localContext(
   mode: "import" | "read" = "import",
 ) {
   dependencies.signal?.throwIfAborted();
-  const selected = dependencies.environment ?? process.env;
-  const environment = workbenchEnvironment(selected);
-  forwardExternalImportSetting(selected, environment);
-  requireExternalImports(environment);
+  const environment = workbenchEnvironment(
+    dependencies.environment ?? process.env,
+  );
   const path = expandHome(selectedRepository, environment);
   const repository =
     mode === "read"
@@ -726,7 +721,6 @@ export async function prepareNormalizedLocalImport(
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   return prepareLocalImport(
     input,
     snapshotImportOptions(options),
@@ -1451,7 +1445,6 @@ export async function listLocalExternalFindings(
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<StoredExternalFinding[]> {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
   const { repository, options } = await localContext(
     selection.repository,

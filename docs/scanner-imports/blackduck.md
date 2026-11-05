@@ -7,8 +7,7 @@ download URL alone can't establish that link. [Export the collection](#export-th
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report), then open the matching
-checkout. Choose a saved report or export one.
+From the matching checkout, choose a saved report or export one.
 
 **Saved report.** Set `report` to the complete BOM-6 collection. For a selection,
 use an array of native rows that each identify the same project version.
