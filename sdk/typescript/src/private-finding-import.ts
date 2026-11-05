@@ -278,6 +278,8 @@ const checkpointSchema = z.object({
   repository: z.object({ id: z.string(), repo_connector_id: z.string() }),
   uploadRequestId: z.uuid(),
   jobRequestId: z.uuid(),
+  // Earlier checkpoints used the unversioned job route.
+  jobApiVersion: z.literal(2).optional(),
   fileId: fileId.optional(),
   jobId: jobSchema.shape.id.optional(),
   receipt: jobSchema
@@ -288,6 +290,10 @@ const checkpointSchema = z.object({
 
 export function unsuccessfulJob(job: PrivateImportJob | undefined) {
   return job?.status === "failed" || job?.status === "cancelled";
+}
+
+export function parsePrivateCheckpoint(serialized: string) {
+  return checkpointSchema.parse(JSON.parse(serialized));
 }
 
 export function readPrivateCheckpoint(
@@ -302,10 +308,11 @@ export function readPrivateCheckpoint(
     repository: { id: string; repo_connector_id: string };
   },
 ) {
-  const checkpoint = checkpointSchema.parse(JSON.parse(serialized));
+  const checkpoint = parsePrivateCheckpoint(serialized);
   const {
     uploadRequestId,
     jobRequestId,
+    jobApiVersion,
     fileId,
     jobId,
     receipt,
@@ -366,7 +373,7 @@ export function privateImportClient(
 ) {
   async function request(path: string, body?: FormData | string) {
     const timeout = AbortSignal.timeout(body === undefined ? 30_000 : 60_000);
-    const response = await fetch(`${base}/finding-imports/${path}`, {
+    const response = await fetch(`${base}${path}`, {
       method: body === undefined ? "GET" : "POST",
       body,
       redirect: "error",
@@ -398,7 +405,9 @@ export function privateImportClient(
   }
   return {
     async context() {
-      return contextSchema.parse(await (await request("context")).json());
+      return contextSchema.parse(
+        await (await request("/finding-imports/context")).json(),
+      );
     },
     async upload(input: {
       requestId: string;
@@ -410,7 +419,9 @@ export function privateImportClient(
       let response: Response | undefined;
       if (input.recovering) {
         try {
-          response = await request(`file-requests/${input.requestId}`);
+          response = await request(
+            `/finding-imports/file-requests/${input.requestId}`,
+          );
         } catch (error) {
           if (
             !(error instanceof PrivateImportRequestError) ||
@@ -430,7 +441,7 @@ export function privateImportClient(
           new Blob([input.bytes], { type: "application/json" }),
           "findings.json",
         );
-        response = await request("files", form);
+        response = await request("/finding-imports/files", form);
       }
       const file = fileSchema.parse(await response.json());
       if (
@@ -451,14 +462,19 @@ export function privateImportClient(
         source: ImportSource;
         repository: { id: string; repo_connector_id: string };
         jobId?: string;
+        jobApiVersion?: 2;
       },
       accepted: (id: string) => Promise<void>,
     ) {
+      const jobs =
+        input.jobApiVersion === 2
+          ? "/v2/finding-imports/jobs"
+          : "/finding-imports/jobs";
       let id = input.jobId;
       let response = id
-        ? await request(`jobs/${id}`)
+        ? await request(`${jobs}/${id}`)
         : await request(
-            "jobs",
+            jobs,
             JSON.stringify({
               request_id: input.requestId,
               context_version: input.contextVersion,
@@ -514,7 +530,7 @@ export function privateImportClient(
           undefined,
           { signal },
         );
-        response = await request(`jobs/${id}`);
+        response = await request(`${jobs}/${id}`);
       }
     },
   };

@@ -1,4 +1,5 @@
-# Required-check policy prerequisites, including merge-time freshness, are in the README.
+# Configure branch protection and merge-time freshness before requiring this check.
+# https://github.com/openai/codex-security/tree/main/github-action#scan-pull-requests
 name: Codex Security PR
 on:
   pull_request:
@@ -9,7 +10,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  # Group names are case-insensitive; the run ID also separates case-only retargets.
+  # Each push gets its own group. A rerun cannot cancel a newer scan, even
+  # when the target branch changed only in case.
   group: codex-security-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
   cancel-in-progress: true
 

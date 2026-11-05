@@ -6,28 +6,42 @@ state. It uses the same bidirectional JSON-RPC transport as [record deduplicatio
 Use `--records` alone or with `--runs N`; model execution remains host-provided.
 
 The SDK exports `classifySeverityRecords`, `classifySeverityRecordsInputSchema`,
-and their input, result, and review-request types. The protocol and input have
-version `1`. Before using the protocol, confirm that your installed CLI lists
-`--records` in `classify-severity --help`.
+and their input, result, and review-request types. The protocol and input use version `1`.
 
 ## Immutable inputs
 
-Send one newline-delimited JSON-RPC request with `method: "run"` and these params:
+Send one JSON-RPC `run` request. This Node.js example prints the complete
+request as one line of JSON. Replace the model name with one your host
+authorizes. Write that line to the CLI's stdin and keep the pipe open to
+[reply to each review](#host-execution-contract).
 
-```ts
-{
+```js
+import { createHash } from "node:crypto";
+
+const id = "canonical-one";
+const findingJson = JSON.stringify({
+  findingId: id,
+  title: "Missing tenant filter",
+  summary: "The invoice lookup omits the tenant ID.",
+});
+const inputSha256 = createHash("sha256")
+  .update(findingJson, "utf8")
+  .digest("hex");
+const params = {
   version: 1,
-  rubric: { revision: 4, markdown: rubricMarkdown, sha256: rubricSha256 },
   model: "your-authorized-model",
   effort: "high",
-  records: [{ id: "canonical-one", revision: 7, findingJson, inputSha256 }]
-}
+  records: [{ id, revision: 7, findingJson, inputSha256 }],
+};
+console.log(
+  JSON.stringify({ jsonrpc: "2.0", id: "run-1", method: "run", params }),
+);
 ```
 
 The `rubric` field is optional. Omit it to classify with the
 [built-in severity rubric](https://github.com/openai/codex-security/blob/main/plugins/codex-security/references/default-severity-rubric.md), using the same configured
 independent host reviews and usage accounting. The result echoes its built-in
-revision (currently `1`) and exact Markdown SHA-256. Supplying a custom rubric
+revision and exact Markdown SHA-256. Supplying a custom rubric
 replaces the default completely and preserves the supplied revision/hash binding.
 Do not reuse cached results across differing rubric hashes; preserve the default
 snapshot from the review prompt alongside its returned binding. Default revisions
