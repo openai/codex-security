@@ -93,6 +93,7 @@ export const runSchema = z
         })
         .optional(),
       scanDir: requiredString,
+      workerUsageDirectory: optionalString,
       dispatchedCount: nonNegativeInteger,
       completionSequence: nonNegativeInteger.optional(),
       noNewStreak: nonNegativeInteger,
