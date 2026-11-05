@@ -1,4 +1,4 @@
-"""Check the physical contents of the targets registered for a fresh Deep Scan."""
+"""Validate the registered selections and require a current in-scope file before dispatch."""
 
 from __future__ import annotations
 
@@ -8,6 +8,9 @@ import os
 import stat
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_target import directory_has_regular_file
 
 
 def check_selected_targets(root: Path, selections: list[str], file_paths: list[str]) -> None:
@@ -53,8 +56,10 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
             if regular:
                 return
             with os.scandir(target) as entries:
-                if next(entries, None) is not None:
-                    return
+                if next(entries, None) is None:
+                    continue
+            if directory_has_regular_file(target):
+                return
         except OSError as exc:
             if selection in files:
                 raise

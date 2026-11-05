@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, rm, symlink, watch, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -61,8 +62,7 @@ test("only registered paths determine whether the target is empty", async () => 
   );
   await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
 
-  // Any entry counts, even if normal source inventory would ignore it.
-  await writeFile(join(right, ".gitignore"), "*");
+  await writeFile(join(right, "source.py"), "");
   await inspect(run);
   run.includePaths.reverse();
   await inspect(run);
@@ -106,12 +106,17 @@ test(
     const { run } = await fixtureRun();
     const denied = join(run.targetPath, "denied");
     await mkdir(denied, { recursive: true });
-    await writeFile(join(run.targetPath, "ok"), "");
     await chmod(denied, 0);
     try {
       run.includePaths = ["denied"];
       await assert.rejects(inspect(run), /permission denied|EACCES/iu);
-      run.includePaths.push("ok");
+      const nested = join(run.targetPath, "nested");
+      await mkdir(nested);
+      run.includePaths = ["."];
+      await assert.rejects(inspect(run), /permission denied|EACCES/iu);
+      await writeFile(join(nested, "source.py"), "");
+      await inspect(run);
+      run.includePaths = ["denied", "nested"];
       await inspect(run);
     } finally {
       await chmod(denied, 0o700);
@@ -165,9 +170,13 @@ test(
   },
 );
 
-for (const stop of ["cancellation", "deadline"]) {
+for (const [stop, blockedOperation] of [
+  ["cancellation", "directory read"],
+  ["deadline", "directory read"],
+  ["cancellation", "Git inventory"],
+]) {
   test(
-    `a blocked directory read cannot delay ${stop}`,
+    `a blocked ${blockedOperation} cannot delay ${stop}`,
     { timeout: 15_000 },
     async (t) => {
       const fixture = await fixtureRun();
@@ -178,20 +187,29 @@ for (const stop of ["cancellation", "deadline"]) {
       const markerDir = join(dirname(run.targetPath), "ready");
       await mkdir(markerDir);
       const scriptName = "check_deep_scan_target.py";
+      await writeFile(join(run.targetPath, "source.py"), "");
       // Stop the real helper inside enumeration. The marker arms the interruption
       // only once the child owns the request, even on slow hosts.
       await writeFile(
         join(scripts, scriptName),
         `
-import os, runpy, sys, time
+import os, runpy, subprocess, sys, time
 from pathlib import Path
+marker_dir = ${JSON.stringify(markerDir)}
 real_scan = os.scandir
 def blocked(path):
-    if os.fsdecode(path) == ${JSON.stringify(run.targetPath)}:
-        Path(${JSON.stringify(markerDir)}, str(os.getpid())).touch()
+    if ${JSON.stringify(blockedOperation)} == "directory read" and os.fsdecode(path) == ${JSON.stringify(run.targetPath)}:
+        Path(marker_dir, str(os.getpid())).touch()
         time.sleep(30)
     return real_scan(path)
 os.scandir = blocked
+if ${JSON.stringify(blockedOperation)} == "Git inventory":
+    real_run = subprocess.run
+    def slow_git(command, **kwargs):
+        assert "rev-parse" in command
+        script = "import os, sys, time; from pathlib import Path; Path(sys.argv[1], str(os.getpid())).touch(); time.sleep(10)"
+        return real_run([sys.executable, "-c", script, marker_dir], **kwargs)
+    subprocess.run = slow_git
 sys.path.insert(0, ${JSON.stringify(join(pluginRoot, "scripts"))})
 runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_name="__main__")
 `,
@@ -243,9 +261,15 @@ runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_n
         await eventually(() => {
           try {
             process.kill(pid, 0);
-            return false;
+            // A container's init may defer reaping the killed Git grandchild.
+            return (
+              process.platform === "linux" &&
+              /^State:\s+Z/m.test(readFileSync(`/proc/${pid}/status`, "utf8"))
+            );
           } catch (error) {
-            return (error as NodeJS.ErrnoException).code === "ESRCH";
+            return ["ESRCH", "ENOENT"].includes(
+              (error as NodeJS.ErrnoException).code ?? "",
+            );
           }
         });
       } finally {
@@ -281,30 +305,6 @@ test("legacy setup workers still require admission before the first discovery", 
   assert.equal(executor.discoveryCalls, 0);
 });
 
-test("a zero-dispatch resume is re-admitted after its only file is removed", async () => {
-  const fixture = await fixtureRun();
-  const { run } = fixture;
-  await mkdir(run.targetPath, { recursive: true });
-  const only = join(run.targetPath, "source.py");
-  await writeFile(only, "x = 1\n");
-  // The run persisted its discovery phase but never dispatched a worker, and
-  // its only source file was removed before the lease expired.
-  run.discoveryStarted = true;
-  await rm(only);
-  let admissionCalls = 0;
-  const executor = new FakeExecutor();
-  const result = await runCoordinator(fixture, new FakeStore(run), executor, {
-    checkFreshTarget: async (state) => {
-      admissionCalls += 1;
-      await inspect(state);
-    },
-  });
-  assert.equal(admissionCalls, 1);
-  assert.equal(result?.status, "failed");
-  assert.match(result.error, /target is empty.*no security audit/iu);
-  assert.equal(executor.discoveryCalls, 0);
-});
-
 test("prior dispatch history bypasses fresh admission", async () => {
   const fixture = await fixtureRun({ maxDiscoveryRuns: 2 });
   fixture.run.dispatchedCount = 1;
@@ -319,22 +319,6 @@ test("prior dispatch history bypasses fresh admission", async () => {
   assert.equal(executor.discoveryCalls, 1);
 });
 
-test("a target holding only an empty subdirectory has no inventory to scan", async () => {
-  const fixture = await fixtureRun();
-  const { run } = fixture;
-  await mkdir(join(run.targetPath, "sub"), { recursive: true });
-  // The physical probe admits this target (the subdirectory is an entry),
-  // but the registered scope inventory counted zero regular files.
-  run.scopeFileCount = 0;
-  const executor = new FakeExecutor();
-  const result = await runCoordinator(fixture, new FakeStore(run), executor, {
-    checkFreshTarget: inspect,
-  });
-  assert.equal(result?.status, "failed");
-  assert.match(result.error, /target is empty.*no security audit/iu);
-  assert.equal(executor.discoveryCalls, 0);
-});
-
 test("a target holding only a Git-ignored file has no inventory to scan", async () => {
   const fixture = await fixtureRun();
   const { run } = fixture;
@@ -342,56 +326,13 @@ test("a target holding only a Git-ignored file has no inventory to scan", async 
   await mkdir(child, { recursive: true });
   await writeFile(join(run.targetPath, ".gitignore"), "child/\n");
   await writeFile(join(child, "ignored.py"), "x = 1\n");
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", run.targetPath, ...args], {
-      encoding: "utf8",
-      stdio: "pipe",
-    });
-  git("init", "-q");
-  // The scan's own inventory excludes the ignored file from the scope.
-  assert.equal(
-    git(
-      "ls-files",
-      "--cached",
-      "--others",
-      "--exclude-standard",
-      "--",
-      "child",
-    ).trim(),
-    "",
-  );
+  execFileSync("git", ["-C", run.targetPath, "init", "-q"]);
   run.scope = "child";
   run.includePaths = ["child"];
-  run.scopeFileCount = 0;
-  const executor = new FakeExecutor();
-  const result = await runCoordinator(fixture, new FakeStore(run), executor, {
-    checkFreshTarget: inspect,
-  });
-  assert.equal(result?.status, "failed");
-  assert.match(result.error, /target is empty.*no security audit/iu);
-  assert.equal(executor.discoveryCalls, 0);
-});
+  await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
 
-test("an explicitly selected Git-ignored file is not gated by its directory inventory", async () => {
-  const fixture = await fixtureRun();
-  const { run } = fixture;
-  const child = join(run.targetPath, "child");
-  await mkdir(child, { recursive: true });
-  await writeFile(join(run.targetPath, ".gitignore"), "child/\n");
-  await writeFile(join(child, "ignored.py"), "x = 1\n");
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", run.targetPath, ...args], { stdio: "pipe" });
-  git("init", "-q");
-  run.scope = "child";
+  // Registration treats an explicitly selected file as in scope even if Git ignores it.
   run.includePaths = ["child/ignored.py"];
   run.filePaths = ["child/ignored.py"];
-  // Registration counts an explicitly selected file itself, so the
-  // registered inventory for this selection is one, not zero.
-  run.scopeFileCount = 1;
-  const executor = new FakeExecutor();
-  const result = await runCoordinator(fixture, new FakeStore(run), executor, {
-    checkFreshTarget: inspect,
-  });
-  assert.equal(result?.status, "succeeded", result?.error);
-  assert.equal(executor.discoveryCalls, 1);
+  await inspect(run);
 });

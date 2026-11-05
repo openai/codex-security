@@ -53,6 +53,7 @@ export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } fro
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
 await testJoiningCallerAdmission(false);
 await testJoiningCallerAdmission(true);
+await testJoiningCallerAdmission(true, "added");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
@@ -74,7 +75,10 @@ await testCoordinatorCommitResponseRecovery();
 await testCoordinatorCommitResponseRecovery("record-deep-scan-iteration");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
 
-async function testJoiningCallerAdmission(afterDiscoveryProgress: boolean) {
+async function testJoiningCallerAdmission(
+  afterDiscoveryProgress: boolean,
+  change: "added" | "removed" = "removed",
+) {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-joining-caller-",
   );
@@ -89,6 +93,9 @@ async function testJoiningCallerAdmission(afterDiscoveryProgress: boolean) {
   registry.start = (options: CoordinatorOptions) =>
     start({ ...options, executor });
   try {
+    const source = path.join(targetPath, "fixture.py");
+    await mkdir(path.join(targetPath, "empty"));
+    if (change === "added") await rm(source);
     const created = await owner.begin({ targetPath, threadId, scanRoot });
     const lease = { scanId: created.scanId, threadId };
     // The joining caller sees the run before its owner starts discovery.
@@ -109,7 +116,8 @@ async function testJoiningCallerAdmission(afterDiscoveryProgress: boolean) {
       assert.equal(observer.run.dispatchedCount, 0);
       await expireLease(environment, created.scanId);
     }
-    await rm(path.join(targetPath, "fixture.py"));
+    if (change === "added") await writeFile(source, "pass\n");
+    else await rm(source);
     const { coordinator } = await startDeepScanEngine({
       run: joined,
       store: joiner,
@@ -121,6 +129,26 @@ async function testJoiningCallerAdmission(afterDiscoveryProgress: boolean) {
       threadId,
     });
     try {
+      if (change === "added") {
+        await Promise.race([
+          executor.discoveryStarted.promise,
+          coordinator
+            .wait(undefined, 30_000)
+            .then((run: { error?: string } | undefined) =>
+              assert.fail(
+                run?.error ?? "No worker dispatched after a file was added",
+              ),
+            ),
+        ]);
+        const recovered = await joiner.get(created.scanId, threadId);
+        assert.equal(recovered.coordinatorGeneration, 3);
+        assert.ok(recovered.dispatchedCount > 0);
+        await assert.rejects(
+          owner.updateProgress({ scanId: created.scanId, phase: "discovery" }),
+          /newer generation/,
+        );
+        return;
+      }
       const terminal = await coordinator.wait(undefined, 30_000);
       assert.equal(terminal?.status, "failed");
       assert.match(terminal.error, /target is empty.*no security audit/iu);

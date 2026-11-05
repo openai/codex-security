@@ -305,11 +305,6 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
     """
     run = require_deep_scan_run(connection, scan_id)
     scan = dependencies().require_scan(connection, run["scan_id"])
-    progress = connection.execute(
-        "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?",
-        (run["scan_id"],),
-    ).fetchone()
-    scope_file_count = progress["scope_file_count"] if progress is not None else None
     worker_rows = saved_deep_workers(connection, scan)
     input_rows = connection.execute(
         """
@@ -376,7 +371,6 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
             "maxTimeHours": run["max_time_hours"],
         },
         "dispatchedCount": run["discovery_runs_dispatched"],
-        "scopeFileCount": scope_file_count,
         "completionSequence": run["completion_sequence"],
         "noNewStreak": run["consecutive_no_new"],
         "consecutiveErrors": run["consecutive_errors"],

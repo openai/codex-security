@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -114,14 +114,15 @@ export function runPythonWithInput(
   input: string | Buffer,
   label: string,
   signal?: AbortSignal,
+  spawnHelper: (
+    command: string,
+    args: string[],
+    signal?: AbortSignal,
+  ) => ChildProcessWithoutNullStreams = (command, args, signal) =>
+    spawn(command, args, { signal, killSignal: "SIGKILL", windowsHide: true }),
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(python, ["-B", ...args], {
-      signal,
-      killSignal: "SIGKILL",
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    const child = spawnHelper(python, ["-B", ...args], signal);
     const output: string[] = [],
       errors: string[] = [];
     child.stdout
