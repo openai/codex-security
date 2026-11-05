@@ -1,3 +1,5 @@
+"""Exercise sealing and recovery of scan bundles, including inputs that change during finalization."""
+
 from __future__ import annotations
 
 import copy
@@ -20,6 +22,14 @@ from workbench_test_support import ScanFixtureTestCase, windows_file_backend
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "legacy-completed-scan"
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
+SOURCE_EVIDENCE = {
+    "id": "source",
+    "label": "Source",
+    "path": "src/extract.py",
+    "startLine": 41,
+    "code": "read_input()",
+    "explanation": "Reads the input.",
+}
 
 
 class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
@@ -819,6 +829,33 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     self.scan_file_bytes(*canonical),
                 )
 
+    @pytest.mark.cross_platform
+    def test_informational_report_note_preserves_sealed_findings_and_exports(self) -> None:
+        self.findings["findings"][0]["severity"]["level"] = "informational"
+        self.write_sealed_scan()
+        canonical = self.scan_file_bytes(*CANONICAL_FILES)
+        report_path = self.scan_dir / "report.md"
+        first_report = report_path.read_bytes()
+        self.assertIn(b"This report omits details for 1 informational finding.", first_report)
+        self.assertEqual(
+            self.read_json("findings.json")["findings"][0]["severity"]["level"],
+            "informational",
+        )
+
+        sarif = json.loads(FINALIZER.build_findings_export(self.scan_dir, "sarif"))
+        self.assertEqual(sarif["runs"][0]["results"][0]["level"], "note")
+        rows = list(
+            csv.DictReader(
+                io.StringIO(FINALIZER.build_findings_export(self.scan_dir, "csv").decode())
+            )
+        )
+        self.assertEqual([row["severity"] for row in rows], ["informational"])
+
+        report_path.unlink()
+        FINALIZER.finalize_scan(self.scan_dir)
+        self.assertEqual(first_report, report_path.read_bytes())
+        self.assertEqual(canonical, self.scan_file_bytes(*CANONICAL_FILES))
+
     def test_deep_csv_export_includes_the_canonical_candidate_id(self) -> None:
         self.coverage["mode"] = "deep_repository"
         self.finding["extensions"] = {"candidateId": "DSS-145", "reportId": "DSS-145-rogue"}
@@ -1563,7 +1600,9 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
     @pytest.mark.cross_platform
     def test_new_findings_use_current_fields_without_coercion(self) -> None:
         invalid_details = [
+            {"codeEvidence": [{"id": "incomplete"}]},
             {"code_evidence": []},
+            {"taxonomy": {"category": "path-traversal"}},
             {"root_cause": "A legacy cause."},
             {"rootCause": {"summary": "Cause.", "code": "legacy()"}},
             {"rootCause": {"summary": "Cause.", "language": "python"}},
@@ -2214,16 +2253,107 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
-    def test_stopped_recovery_preserves_finding_with_malformed_optional_remediation_fields(
-        self,
-    ) -> None:
+    def test_stopped_recovery_preserves_supported_evidence_and_its_references(self) -> None:
+        finding = self.findings["findings"][0]
+        legacy = {"id": "legacy", "code": "inspect_input()"}
+        duplicate = {**SOURCE_EVIDENCE, "id": "ambiguous"}
+        finding["codeEvidence"] = [
+            SOURCE_EVIDENCE,
+            {"id": "legacy"},
+            {**SOURCE_EVIDENCE, "id": "outside", "path": "../other.py"},
+            duplicate,
+            {**duplicate, "startLine": 99},
+        ]
+        finding["code_evidence"] = [legacy]
+        refs = ["outside", "legacy", {}, "ambiguous", "source"]
+        finding["rootCause"] = {"summary": "Source review.", "evidenceRefs": refs}
+        finding["validation"] = {"evidence_refs": refs}
+        finding["attackPath"] = {"dataFlow": {"evidenceRefs": refs}}
+        self.write_scan()
+
+        prepared = FINALIZER._prepare_scan_finalization(
+            self.scan_dir,
+            completion_binding={**self.completion_binding(), "status": "interrupted"},
+            recover_unsealed=True,
+        )
+        FINALIZER._write_prepared_scan_finalization(prepared)
+        (saved,) = self.read_json("findings.json")["findings"]
+        self.assertEqual(saved["codeEvidence"], [SOURCE_EVIDENCE])
+        self.assertEqual(saved["code_evidence"], [legacy])
+        surviving_refs = ["legacy", "source"]
+        self.assertEqual(saved["rootCause"]["evidenceRefs"], surviving_refs)
+        self.assertEqual(saved["validation"]["evidence_refs"], surviving_refs)
+        self.assertEqual(saved["attackPath"]["dataFlow"]["evidenceRefs"], surviving_refs)
+        self.assertEqual(saved["taxonomy"], finding["taxonomy"])
+        self.assertTrue(any("codeEvidence" in warning for warning in prepared.warnings))
+
+    def test_recovery_uses_the_selected_evidence_schema(self) -> None:
+        evidence = [{**SOURCE_EVIDENCE, "explanation": " "}]
+        for current in (False, True):
+            with self.subTest(current_contract=current):
+                draft = copy.deepcopy(self.findings)
+                draft["findings"][0]["codeEvidence"] = evidence
+                discarded = FINALIZER._recover_unsealed_findings(
+                    self.manifest,
+                    draft,
+                    EXAMPLE_DIR.parents[1] / "schemas",
+                    self.scan_dir,
+                    [],
+                    current_contract=current,
+                )
+                self.assertEqual(discarded, [])
+                (saved,) = draft["findings"]
+                self.assertEqual(saved.get("codeEvidence"), None if current else evidence)
+
+    def test_stopped_recovery_backfills_missing_cwe_and_rejects_invalid_findings(self) -> None:
+        missing_cwe = copy.deepcopy(self.finding)
+        del missing_cwe["taxonomy"]["cwe"]
+        invalid_cwe = copy.deepcopy(self.finding)
+        invalid_cwe["taxonomy"]["cwe"] = "CWE-22"
+        missing_identity = copy.deepcopy(missing_cwe)
+        del missing_identity["identity"]
+        missing_rationale = copy.deepcopy(missing_cwe)
+        del missing_rationale["confidence"]["rationale"]
+        missing_rationale["codeEvidence"] = "A source excerpt."
+        self.findings["findings"] = [missing_cwe, invalid_cwe, missing_identity, missing_rationale]
+        self.write_scan()
+
+        prepared = FINALIZER._prepare_scan_finalization(
+            self.scan_dir,
+            completion_binding={**self.completion_binding(), "status": "canceled"},
+            recover_unsealed=True,
+        )
+        FINALIZER._write_prepared_scan_finalization(prepared)
+        (saved,) = self.read_json("findings.json")["findings"]
+        self.assertEqual(saved["title"], missing_cwe["title"])
+        self.assertEqual(saved["taxonomy"], {**missing_cwe["taxonomy"], "cwe": []})
+        self.assertFalse(
+            any(w.startswith("Skipped malformed codeEvidence") for w in prepared.warnings)
+        )
+        self.assertTrue(
+            any(
+                "finding 1" in warning and "cwe" in warning.lower() for warning in prepared.warnings
+            )
+        )
+        for number, field in ((2, "cwe"), (3, "identity"), (4, "rationale")):
+            self.assertFalse(any(f"Recovered finding {number}:" in w for w in prepared.warnings))
+            self.assertTrue(
+                any(
+                    f"Skipped malformed finding {number}:" in warning and field in warning
+                    for warning in prepared.warnings
+                ),
+                prepared.warnings,
+            )
+
+    def test_stopped_recovery_preserves_finding_with_malformed_optional_fields(self) -> None:
         for field, value in (
+            ("codeEvidence", "A source excerpt."),
             ("remediationTests", "Reject unsafe archive paths."),
             ("remediationTests", [{"test": "Reject unsafe archive paths."}]),
             ("preventiveControls", "Validate every archive path."),
         ):
             with self.subTest(field=field, value=value):
-                self.findings["findings"][0][field] = value
+                self.findings["findings"] = [{**self.finding, field: value}]
                 self.write_scan()
 
                 prepared = FINALIZER._prepare_scan_finalization(
@@ -2241,7 +2371,6 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                         for warning in prepared.warnings
                     )
                 )
-                self.findings["findings"][0].pop(field)
 
     def test_recovery_publishes_findings_without_unsafe_deferred_paths(self) -> None:
         valid = {"id": "review", "reason": "Repository review is incomplete.", "paths": ["."]}

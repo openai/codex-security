@@ -540,6 +540,7 @@ describe("multiscan", () => {
     ["zero attempt", '{"id":"receipt","attempt":0}', false],
     ["fractional attempt", '{"id":"receipt","attempt":1.5}', true],
     ["incomplete task identity", '{"id":"receipt","attempt":1}', true],
+    ["non-string operation ID", { operationId: { id: "other" } }, false],
   ] as const)(
     "CLI identifies the %s and preserves committed history",
     async (_name, bad, middle) => {
@@ -560,8 +561,12 @@ describe("multiscan", () => {
       expect(await createCliTest(main).runCli(args, configured)).toBe(0);
       const ledger = join(paths.output, "results.jsonl");
       const valid = await readFile(ledger, "utf8");
+      const invalid =
+        typeof bad === "string"
+          ? bad
+          : JSON.stringify({ ...JSON.parse(valid), ...bad });
       const damaged = Buffer.concat([
-        Buffer.from(`${valid}\n${bad}\n`),
+        Buffer.from(`${valid}\n${invalid}\n`),
         ...(middle ? [Buffer.from(valid), Buffer.from([0xe2, 0x82])] : []),
       ]);
       await writeFile(ledger, damaged);
@@ -581,6 +586,45 @@ describe("multiscan", () => {
       expect(run).toHaveBeenCalledTimes(1);
     },
   );
+
+  test("a receipt for a different repository reserves its attempt without sharing its operation", async () => {
+    const { paths } = await repositoryFixture("receipt-identity", "repo");
+    const first = await runMultiscan(options(paths, client(completeRun)));
+    const [receipt] = await results(first.resultsPath);
+    const foreign = {
+      ...receipt,
+      repository: "other-repository",
+      operationId: "other-operation",
+    };
+    const prior = `${JSON.stringify(foreign)}\n`;
+    await writeFile(first.resultsPath, prior);
+    const manifest = join(
+      paths.output,
+      "artifacts",
+      "repo",
+      "attempt-1",
+      "scan-manifest.json",
+    );
+    const original = await readFile(manifest);
+    const recoverScan = mock(resolving<undefined, [string]>(undefined));
+    const recovered = await runMultiscan(
+      options(paths, client(completeRun), { recoverScan }),
+    );
+    expect(recoverScan).not.toHaveBeenCalled();
+    expect(recovered).toMatchObject({ completed: 1, skipped: 0 });
+    const latest = (await results(recovered.resultsPath)).at(-1);
+    expect(latest).toMatchObject({
+      id: "repo",
+      attempt: 2,
+      status: "completed",
+    });
+    expect(latest?.["operationId"]).toBeString();
+    expect(latest?.["operationId"]).not.toBe(foreign.operationId);
+    expect((await readFile(first.resultsPath, "utf8")).startsWith(prior)).toBe(
+      true,
+    );
+    expect(await readFile(manifest)).toEqual(original);
+  });
 
   test.each(["rerun", "recover receipt", "recover directory"])(
     "preserves exhausted attempt numbers on %s",
@@ -1130,7 +1174,25 @@ describe("multiscan", () => {
         scanPrompt: "Shared scan instructions.",
         scanOptionsByMode: { standard: { failureSeverity: "high" } },
       });
-      await runMultiscan(configured);
+      const initial = await runMultiscan(configured);
+      const [receipt] = await results(initial.resultsPath);
+      const operationId = receipt?.["operationId"];
+      expect(operationId).toBeString();
+      const measurement = {
+        coverage: "partial" as const,
+        cost: null,
+        observedAt: "2026-10-01T00:00:00.000Z",
+        threadCount: 1,
+        missingThreadCount: 1,
+        usage: {
+          input_tokens: 17,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 2,
+          reasoning_output_tokens: 0,
+          total_tokens: 19,
+        },
+      };
       await mkdir(join(paths.output, "artifacts", "repo", "attempt-1"), {
         recursive: true,
       });
@@ -1138,6 +1200,8 @@ describe("multiscan", () => {
         ...configured,
         recoverScan: async (scanDir, prompts) => {
           expect(prompts.scanPrompt).toBe("Shared scan instructions.");
+          expect(prompts.telemetryContext?.operationId).toBe(operationId);
+          prompts.onMeasurement?.(measurement);
           await completedScan(scanDir);
           const findingsPath = join(scanDir, "findings.json");
           const saved = JSON.parse(
@@ -1153,6 +1217,7 @@ describe("multiscan", () => {
             review: recovered.review,
             mode: recovered.mode,
             cost: recovered.cost,
+            usage: measurement.usage,
             findings: recovered.findings,
           };
         },
@@ -1164,6 +1229,9 @@ describe("multiscan", () => {
       });
       expect((await results(result.resultsPath)).at(-1)).toMatchObject({
         attempt: 1,
+        operationId,
+        measurement,
+        usage: measurement.usage,
         policyFailed: severity === "high",
       });
       expect(await runMultiscan(configured)).toMatchObject({
@@ -1556,11 +1624,14 @@ describe("multiscan", () => {
     const knowledgeBasePaths = [document];
 
     let attempts = 0;
+    const operationIds: string[] = [];
     const summary = await runMultiscan(
       options(
         paths,
         client(async (_repository, scanOptions = {}) => {
           expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
+          expect(scanOptions.telemetryContext?.operationId).toBeString();
+          operationIds.push(scanOptions.telemetryContext!.operationId);
           attempts += 1;
           if (attempts === 1) {
             scanOptions.onWarning?.("Warning from the failed attempt.");
@@ -1573,6 +1644,7 @@ describe("multiscan", () => {
     );
 
     expect(attempts).toBe(2);
+    expect(new Set(operationIds).size).toBe(1);
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(summary).not.toHaveProperty("warnings");
     expect(await results(summary.resultsPath)).toMatchObject([
@@ -1580,10 +1652,16 @@ describe("multiscan", () => {
         id: "retry",
         status: "failed",
         attempt: 1,
+        operationId: operationIds[0],
         error: failure,
         warnings: ["Warning from the failed attempt."],
       },
-      { id: "retry", status: "completed", attempt: 2 },
+      {
+        id: "retry",
+        status: "completed",
+        attempt: 2,
+        operationId: operationIds[0],
+      },
     ]);
   });
 

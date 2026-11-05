@@ -41,6 +41,7 @@ Cloud private inbox imports came after [version 0.8.2](https://github.com/openai
 | [Amazon Inspector](inspector.md)                            | Inspector2 `ListFindings` JSON for one Code Security repository                 |
 | [AWS Continuum](continuum.md)                               | Code finding summaries or a detailed finding verified for one repository        |
 | [Black Duck SCA](blackduck.md)                              | BOM component vulnerabilities for one project version                           |
+| [Checkmarx SAST](checkmarx.md)                              | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |
 | [Endor Labs](endor.md)                                      | Finding JSON from `endorctl`, or SARIF with finding UUIDs                       |
 | [GitHub code scanning](github-code-scanning.md)             | Alerts selected for one repository and Git ref                                  |
 | [GitHub Dependabot](github-dependabot.md)                   | Dependency alerts exported from one repository                                  |
@@ -49,6 +50,7 @@ Cloud private inbox imports came after [version 0.8.2](https://github.com/openai
 | [Semgrep](semgrep.md)                                       | CLI/CI JSON, SARIF, selected Guardian findings, or Platform Web API reports     |
 | [Snyk](snyk.md)                                             | CLI JSON, plugin exports, SARIF, or monitored Code and Open Source issues       |
 | [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
+| [Trivy](trivy.md)                                           | Native schema-v2 repository or filesystem JSON, optionally gzip-compressed      |
 | [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |
 | [Wiz](wiz.md)                                               | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV |
 

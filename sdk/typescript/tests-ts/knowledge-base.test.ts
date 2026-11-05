@@ -887,6 +887,7 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
     await writeFile(join(root, "policy.pdf"), pdf("Access policy."));
+    await writeFile(join(root, "._policy.md"), "Keep audit records.");
     const appleDouble = Buffer.alloc(82);
     appleDouble.write("\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X", "latin1");
     await writeFile(join(root, "._guide.md"), appleDouble);
@@ -897,6 +898,7 @@ describe("scan knowledge bases", () => {
 
     expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
       "Access policy.",
+      "Keep audit records.",
       "Rotate admin keys monthly.",
     ]);
   });
