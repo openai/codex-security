@@ -9853,17 +9853,20 @@ export function skillCommandFailure(
   authentication: ScanAuthentication | null = null,
 ): string {
   // Exclude paths and parser locations from advice, but keep the original diagnostic for display.
-  const diagnosticDetail = connectionAdviceDetail(detail)
-    .replace(/[^\s"'()<>,]*[/\\][^\s"'()<>,]*/gu, (token) =>
-      /^HTTP\/\d+(?:\.\d+)?$/iu.test(token) ? token : "…",
-    )
-    .replace(/\binvalid[ _-]token\b/giu, (code) =>
-      /\b(?:syntax\s*error|pars(?:e|er|ing)|unexpected token|at (?:line|column) \d+)\b/iu.test(
-        detail,
-      )
-        ? ""
-        : code,
+  const containsParserError =
+    /\b(?:syntax\s*error|pars(?:e|er|ing)|unexpected token|at (?:line|column) \d+)\b/iu.test(
+      detail,
     );
+  const withoutPaths = connectionAdviceDetail(detail).replace(
+    /[^\s"'()<>,]+/gu,
+    (token) =>
+      /[/\\]/u.test(token) && !/^HTTP\/\d+(?:\.\d+)?$/iu.test(token)
+        ? "…"
+        : token,
+  );
+  const diagnosticDetail = containsParserError
+    ? withoutPaths.replace(/\binvalid[ _-]token\b/giu, "")
+    : withoutPaths;
   const classificationDetail = diagnosticDetail.replace(
     /(?<![\w./\\-])(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?(?:code|status)|(?:(?:http\.)?response\.)?status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)(?![\w/\\-]|\.(?=\S))|\b(?:401|403|429)\b/giu,
     (match, status: string | undefined) => (status ? match : ""),
