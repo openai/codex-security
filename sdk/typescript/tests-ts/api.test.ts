@@ -91,6 +91,7 @@ import {
   PLUGIN_ROOT,
 } from "./plugin-root.js";
 import {
+  BUDGET_TEST_CONFIG,
   EXTERNAL_PROVIDER_CASES,
   measuredScanUsage,
   mockScanRegistration,
@@ -619,8 +620,8 @@ describe("CodexSecurity orchestration", () => {
         source: "OPENAI_API_KEY",
         verified: false,
       },
-      model: "gpt-5.6-sol",
-      reasoningEffort: "xhigh",
+      model: "gpt-6.1-sol",
+      reasoningEffort: "high",
     });
     await expect(
       client.preflight(repository, { outputDir: join(repository, "scan") }),
@@ -696,7 +697,7 @@ describe("CodexSecurity orchestration", () => {
 
     await expect(
       client.preflight(repository, { maxCostUsd: 5 }),
-    ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
+    ).resolves.toMatchObject({ model: "gpt-6.1-sol", maxCostUsd: 5 });
     for (const model of [
       "gpt-6-astra",
       "gpt-6-sol",
@@ -1215,7 +1216,7 @@ describe("CodexSecurity orchestration", () => {
       expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject(credentials);
       expect(createCodex.mock.lastCall?.[0]?.config).toMatchObject({
         model_reasoning_summary: "none",
-        model_reasoning_effort: "xhigh",
+        model_reasoning_effort: "high",
       });
       const configuration = JSON.parse(
         await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
@@ -1317,7 +1318,7 @@ describe("CodexSecurity orchestration", () => {
     });
     expect(createCodex.mock.lastCall?.[0]?.config).toMatchObject({
       model_reasoning_summary: "none",
-      model_reasoning_effort: "xhigh",
+      model_reasoning_effort: "high",
     });
     expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
       "OPENAI_API_KEY",
@@ -1563,7 +1564,7 @@ describe("CodexSecurity orchestration", () => {
           profiles: {
             "cloud.production": {
               model: "synthetic-profile-model",
-              model_reasoning_effort: "high",
+              model_reasoning_effort: "xhigh",
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
@@ -1602,7 +1603,7 @@ describe("CodexSecurity orchestration", () => {
         const expectedModel = {
           model:
             index === 3 ? "synthetic-profile-model" : "openai.gpt-5.6-luna",
-          model_reasoning_effort: index === 3 ? "high" : "xhigh",
+          model_reasoning_effort: index === 3 ? "xhigh" : "high",
         };
         const scanDir = join(root, `scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
@@ -14644,7 +14645,7 @@ if __name__ == "__main__":
       events: completedEvents(threadId),
     }));
     const thread = { id: threadId, runStreamed };
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       canRunDirectDeepScan: () => false,
       readDeepScanParentConfig: readConfig,
@@ -15043,7 +15044,7 @@ if __name__ == "__main__":
       };
     });
     let budgetSignal: AbortSignal | undefined;
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: recordingWorkbench(commands, () =>
         measuredScanUsage(measured, 0, 0),
@@ -15112,7 +15113,7 @@ if __name__ == "__main__":
         if (cost.inputTokens === 950) nextCost.resolve();
       });
       let budgetSignal: AbortSignal | undefined;
-      const client = TestClient.withDependencies({
+      const client = new TestClient(BUDGET_TEST_CONFIG, {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input) => {
           commands.push(args);
@@ -15255,12 +15256,12 @@ if __name__ == "__main__":
         return { events: events() };
       },
     );
-    const cost = estimateScanCost("gpt-5.6-sol", {
+    const cost = estimateScanCost(BUDGET_TEST_CONFIG.codexOverrides.model, {
       input_tokens: 1_250,
       cached_input_tokens: 200,
       output_tokens: 30,
     })!;
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: recordingWorkbench(commands, {
         ...measuredScanUsage(1_250, 200, 30),
@@ -15390,7 +15391,7 @@ if __name__ == "__main__":
           return { events: events() };
         },
       );
-      const client = TestClient.withDependencies({
+      const client = new TestClient(BUDGET_TEST_CONFIG, {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
           _options: unknown,
@@ -15955,13 +15956,13 @@ if __name__ == "__main__":
   });
 
   test.each([
-    ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-5.6-sol", undefined],
+    ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-6.1-sol", undefined],
     ...EXTERNAL_PROVIDER_CASES,
     [
       "managed custom",
       "synthetic.gateway",
       "OPENAI_API_KEY",
-      "gpt-5.6-sol",
+      "gpt-6.1-sol",
       {
         name: "Synthetic",
         wire_api: "responses",
@@ -16102,7 +16103,7 @@ if __name__ == "__main__":
     const clients = await Promise.all(
       (
         [
-          ["OPENAI_API_KEY", "gpt-5.6-sol", undefined],
+          ["OPENAI_API_KEY", "gpt-6.1-sol", undefined],
           ["OPENROUTER_API_KEY", "anthropic/claude-sonnet-4.5", "openrouter"],
         ] as const
       ).map(async ([apiKey, model, provider], index) => {

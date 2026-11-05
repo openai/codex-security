@@ -50,13 +50,13 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
   if (dryRun && failOnSeverity !== 'none')
     throw new Error('dry-run requires fail-on-severity: none. Configuration validation cannot satisfy a required security review.');
   const provider = choice('provider', ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'], 'openai');
-  const model = str('model', provider === 'openai' ? 'gpt-5.6-sol' : '');
+  const model = str('model', provider === 'openai' ? 'gpt-6.1-sol' : '');
   const cyberAccessProgram = str('cyber-access-program')
     ? choice('cyber-access-program', ['standard', 'daybreak_blue', 'daybreak_red'], 'standard')
     : undefined;
   return {
     repository: str('repository', workspace), scope, paths, diffBase, mode, cyberAccessProgram,
-    provider, model, effort: str('effort', 'xhigh'),
+    provider, model, effort: str('effort', 'high'),
     maxCost: num('max-cost', false, Number.MIN_VALUE), maxTimeHours, failOnSeverity,
     verbose: bool('verbose', true), dryRun,
     summary: bool('summary', true), annotations: bool('annotations', true),
