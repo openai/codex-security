@@ -107,6 +107,8 @@
 - share workbench arguments and simplify SDK and eval workflows ([#2325](https://github.com/openai/codex-security/pull/2325))
 - reject directory trees emptied before dispatch ([#2181](https://github.com/openai/codex-security/pull/2181))
 - bump node from 26.12.1-bookworm-slim to 26.13-bookworm-slim ([#2351](https://github.com/openai/codex-security/pull/2351))
+- import Tenable One code repository findings locally ([#2343](https://github.com/openai/codex-security/pull/2343))
+- restore usage accounting on preview databases ([#2352](https://github.com/openai/codex-security/pull/2352))
 
 </details>
 
