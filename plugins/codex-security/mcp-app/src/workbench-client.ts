@@ -108,6 +108,8 @@ async function executeWorkbench(
       windowsHide: true,
       env: {
         ...process.env,
+        CODEX_MCP_NODE_PATH:
+          process.env.CODEX_MCP_NODE_PATH || process.execPath,
         _CODEX_SECURITY_INSTRUCTION_ROOT: INSTRUCTION_COMMANDS.has(
           args[0] ?? "",
         )

@@ -1744,6 +1744,14 @@ export async function runWorkbench(
           ],
       pluginHelperEnvironment({
         ...(node?.environment ?? options.environment),
+        // Python's compressed-rollout reader needs the selected Node even when
+        // this SDK was launched by absolute path without Node on PATH.
+        ...(!native &&
+        !process.versions["bun"] &&
+        environmentValue(options.environment, "CODEX_MCP_NODE_PATH") ===
+          undefined
+          ? { CODEX_MCP_NODE_PATH: process.execPath }
+          : {}),
         _CODEX_SECURITY_INSTRUCTION_ROOT:
           arguments_[0] === "register-cli-scan"
             ? options.pluginRoot

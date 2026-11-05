@@ -1052,3 +1052,20 @@ class ScanFixtureTestCase(TestCase):
 
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()
+
+
+def usage_counts(
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_write_input_tokens: int = 0,
+) -> dict[str, int]:
+    return {
+        "inputTokens": input_tokens,
+        "cachedInputTokens": cached_input_tokens,
+        "cacheWriteInputTokens": cache_write_input_tokens,
+        "outputTokens": output_tokens,
+        "reasoningOutputTokens": 0,
+        "totalTokens": input_tokens + output_tokens,
+    }
