@@ -7150,7 +7150,10 @@ export async function main(
           dependencies.environment,
         );
         const authentication = scanAuthentication(dependencies.environment);
-        const loginEnvironment = withoutCodexHome(dependencies.environment);
+        const loginEnvironment = (home: string) => ({
+          ...withoutCodexHome(dependencies.environment),
+          CODEX_HOME: home,
+        });
         const runLogin = (home: string) =>
           dependencies.runCodex(
             [
@@ -7161,25 +7164,20 @@ export async function main(
               ...(options.withAccessToken ? ["--with-access-token"] : []),
             ],
             undefined,
-            { ...loginEnvironment, CODEX_HOME: home },
+            loginEnvironment(home),
           );
         exitCode =
           args.action === "status" && authentication.method !== "api_key"
             ? await withStatusCredentialHome(
                 scanCodexHome(dependencies.environment),
                 credentialHome,
-                async () => {
-                  const command = resolveCodexCommand(dependencies.environment);
-                  const current = await accountStatus(
-                    command,
-                    { ...loginEnvironment, CODEX_HOME: credentialHome },
+                (home) =>
+                  accountStatus(
+                    resolveCodexCommand(dependencies.environment),
+                    loginEnvironment(home),
                     undefined,
                     parse(process.execPath).root,
-                  );
-                  return current.authenticated
-                    ? await runLogin(credentialHome)
-                    : undefined;
-                },
+                  ),
                 runLogin,
               )
             : await runLogin(credentialHome);

@@ -4,6 +4,8 @@ import {
   resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
+import { chatGptTokens } from "./support/chatgpt-credentials.js";
+import { readJsonLines, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { nodeCommand, runCommand } from "./support/shell.js";
@@ -714,16 +716,10 @@ describe("CodexSecurity orchestration", () => {
       const observed = join(root, "native-arguments.jsonl");
       await mkdir(home, { mode: 0o700 });
       await mkdir(state, { mode: 0o700 });
-      await writeFile(
-        join(home, "auth.json"),
-        JSON.stringify({
-          auth_mode: "chatgpt",
-          tokens: {
-            access_token: "synthetic-access",
-            refresh_token: "synthetic-refresh",
-          },
-        }),
-      );
+      await writeJson(join(home, "auth.json"), {
+        auth_mode: "chatgpt",
+        tokens: chatGptTokens,
+      });
       const provider = {
         name: "Synthetic",
         wire_api: "responses",
@@ -769,9 +765,6 @@ console.log("Logged in using ChatGPT");
         if (operation === "account") {
           // The native store already has a login despite the absence of a file.
           expect((await client.account()).authenticated).toBe(true);
-          expect(
-            (await readFile(observed, "utf8")).trim().split("\n"),
-          ).toHaveLength(1);
           expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(
             false,
           );
@@ -780,13 +773,11 @@ console.log("Logged in using ChatGPT");
         } else {
           await client.logout();
         }
-        const arguments_ = (await readFile(observed, "utf8"))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line) as string[])
-          .find((args) =>
-            args.includes(operation === "logout" ? "logout" : "login"),
-          );
+        const invocations = await readJsonLines<string[]>(observed);
+        if (operation === "account") expect(invocations).toHaveLength(1);
+        const arguments_ = invocations.find((args) =>
+          args.includes(operation === "logout" ? "logout" : "login"),
+        );
         expect(arguments_).toBeDefined();
         const definitions = arguments_!.find((argument) =>
           argument.startsWith("model_providers="),
@@ -900,17 +891,10 @@ console.log("Logged in using ChatGPT");
       const stateDir = join(root, "state");
       await mkdir(ambientHome);
       await mkdir(stateDir, { mode: 0o700 });
-      await writeFile(
-        join(ambientHome, "auth.json"),
-        JSON.stringify({
-          auth_mode: "chatgpt",
-          tokens: {
-            id_token: "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.c2ln",
-            access_token: "synthetic-access",
-            refresh_token: "synthetic-refresh",
-          },
-        }),
-      );
+      await writeJson(join(ambientHome, "auth.json"), {
+        auth_mode: "chatgpt",
+        tokens: chatGptTokens,
+      });
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
         {

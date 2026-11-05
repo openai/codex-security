@@ -3,7 +3,7 @@ import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
-import { isNonEmptyString, notify } from "./value.js";
+import { isNonEmptyString, notify, parseJson } from "./value.js";
 import {
   execFile as execFileCallback,
   spawn,
@@ -2355,97 +2355,77 @@ export async function createIsolatedHome(
   }
 }
 
-async function ambientAuthFile(ambientHome: string): Promise<string | null> {
-  const source = join(expandHome(ambientHome), "auth.json");
-  let metadata;
-  try {
-    metadata = await stat(source);
-  } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") return null;
-    throw new PluginBootstrapError(
-      `Unable to inspect ambient Codex authentication: ${source}`,
-      {
-        cause: error,
-      },
-    );
-  }
-  return metadata.isFile() ? source : null;
-}
-
 export async function importAmbientAuth(
   ambientHome: string,
   isolatedHome: string,
 ): Promise<boolean> {
-  const source = await ambientAuthFile(ambientHome);
-  if (source === null) return false;
-  return await installAmbientAuth(isolatedHome, (temporary) =>
-    copyFile(source, temporary, constants.COPYFILE_EXCL),
-  );
+  return (await prepareAmbientAuth(ambientHome, isolatedHome, "scan")) === true;
 }
 
-// Read the source once so a concurrent Codex login cannot change a static
-// credential into a renewable one between classification and installation.
-export async function prepareStatusCredentials(
-  ambientHome: string,
-  credentialHome: string,
-): Promise<string | null> {
-  const source = await ambientAuthFile(ambientHome);
-  if (source === null) return null;
+// Native login status validates the ID token without refreshing or calling the model.
+function renewableStatusProbe(contents: Buffer): string | undefined {
+  const record = parseJson(() => contents.toString("utf8"));
+  if (!isRecord(record)) return undefined;
+  const { auth_mode: mode, OPENAI_API_KEY: apiKey, tokens } = record;
+  const chatGpt = mode === "chatgpt" || (mode == null && apiKey == null);
   if (
-    (await lstat(join(credentialHome, "config.toml")).catch(
-      nullIfMissingFileError,
-    )) !== null
-  ) {
-    // The configured native backend may be bound to this particular home.
-    await importAmbientAuth(ambientHome, credentialHome);
-    return null;
-  }
-  const contents = await readFile(source).catch((cause: unknown) => {
+    !chatGpt ||
+    !isRecord(tokens) ||
+    !isNonEmptyString(tokens["refresh_token"])
+  )
+    return undefined;
+
+  tokens["refresh_token"] = "";
+  if (typeof tokens["access_token"] === "string") tokens["access_token"] = "";
+  return JSON.stringify(record);
+}
+
+/** Return a token-stripped native status probe, or whether credentials were installed. */
+export async function prepareAmbientAuth(
+  ambientHome: string,
+  isolatedHome: string,
+  purpose: "scan" | "status",
+): Promise<boolean | string> {
+  if (
+    purpose === "status" &&
+    (!(await codexSecurityCredentialAllowsAmbientImport(isolatedHome)) ||
+      (await codexSecurityHasStoredFileCredentials(isolatedHome)))
+  )
+    return false;
+  const source = join(expandHome(ambientHome), "auth.json");
+  const metadata = await stat(source).catch((cause: unknown) => {
+    if (nodeErrorCode(cause) === "ENOENT") return null;
     throw new PluginBootstrapError(
-      "Unable to copy ambient Codex authentication.",
+      `Unable to inspect ambient Codex authentication: ${source}`,
       { cause },
     );
   });
-  let record: unknown;
-  try {
-    record = JSON.parse(contents.toString("utf8"));
-  } catch {
-    // Preserve native diagnostics and import behavior for unrecognized files.
+  if (!metadata?.isFile()) return false;
+  if (purpose === "scan") {
+    await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
+      await chmod(isolatedHome, 0o700);
+    }
+    if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   }
-  if (
-    isRecord(record) &&
-    (record["auth_mode"] === "chatgpt" ||
-      (record["auth_mode"] == null && record["OPENAI_API_KEY"] == null)) &&
-    isRecord(record["tokens"]) &&
-    typeof record["tokens"]["refresh_token"] === "string" &&
-    record["tokens"]["refresh_token"] !== ""
-  ) {
-    // Native login status validates the record and ID-token claims without
-    // calling the model or refreshing. Never give the probe a renewable token.
-    record["tokens"]["refresh_token"] = "";
-    if (typeof record["tokens"]["access_token"] === "string")
-      record["tokens"]["access_token"] = "";
-    return JSON.stringify(record);
-  }
-  await installAmbientAuth(credentialHome, (temporary) =>
-    writeFile(temporary, contents, { mode: 0o600, flag: "wx" }),
-  );
-  return null;
-}
-
-async function installAmbientAuth(
-  isolatedHome: string,
-  writeTemporary: (temporary: string) => Promise<void>,
-): Promise<boolean> {
-  await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
-    await chmod(isolatedHome, 0o700);
-  }
-  if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   const destination = join(isolatedHome, "auth.json");
   const temporary = join(isolatedHome, `.auth-${randomUUID()}.tmp`);
   try {
-    await writeTemporary(temporary);
+    // Configured stores can be bound to this home. For a fresh status check,
+    // classify and install the same bytes even if the ambient login changes.
+    if (
+      purpose === "status" &&
+      !(await lstat(join(isolatedHome, "config.toml")).catch(
+        nullIfMissingFileError,
+      ))
+    ) {
+      const contents = await readFile(source);
+      const probe = renewableStatusProbe(contents);
+      if (probe !== undefined) return probe;
+      await writeFile(temporary, contents, { mode: 0o600, flag: "wx" });
+    } else {
+      await copyFile(source, temporary, constants.COPYFILE_EXCL);
+    }
     await chmod(temporary, 0o600);
     try {
       try {

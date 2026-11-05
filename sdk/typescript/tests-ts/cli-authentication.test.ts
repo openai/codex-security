@@ -9,7 +9,6 @@ import {
   mkdir,
   realpath,
   readFile,
-  readdir,
   rm,
   stat,
   symlink,
@@ -40,6 +39,8 @@ import {
   failingSecurity,
 } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import { chatGptTokens } from "./support/chatgpt-credentials.js";
+import { readJson, writeJson } from "./support/json.js";
 import { throwing } from "./support/errors.js";
 
 import {
@@ -1256,75 +1257,49 @@ describe("CLI authentication", () => {
     },
   );
 
-  test.each([false, true])(
-    "checks ambient login status without persisting credentials on a fresh state directory (home-relative: %p)",
-    async (homeRelative) => {
-      const root = await realpath(
-        await temporaryDirectory("codex-security-cli-ambient-auth-"),
+  test.each(["success", "failure"])(
+    "uses and removes the temporary ambient status home on %s",
+    async (outcome) => {
+      const ambientHome = join(stateDirectory, "ambient");
+      await mkdir(ambientHome);
+      const source = join(ambientHome, "auth.json");
+      const auth =
+        outcome === "success"
+          ? { auth_mode: "chatgpt", tokens: chatGptTokens }
+          : { tokens: chatGptTokens };
+      await writeJson(source, auth);
+      await writeFile(join(ambientHome, "config.toml"), "not valid TOML");
+
+      let probeHome: string | undefined;
+      let probe: unknown;
+      let hasConfig: boolean | undefined;
+      const deps = dependencies({
+        environment: {
+          HOME: stateDirectory,
+          USERPROFILE: stateDirectory,
+          CODEX_HOME: outcome === "success" ? "~/ambient" : ambientHome,
+        },
+      });
+      deps.runCodex = async (_args, _output, env) => {
+        probeHome = env!["CODEX_HOME"]!;
+        probe = await readJson(join(probeHome, "auth.json"));
+        hasConfig = existsSync(join(probeHome, "config.toml"));
+        if (outcome === "failure") throw new Error("synthetic status error");
+        return 0;
+      };
+      expect(await runCapturedCli(main, ["login", "status"], deps)).toBe(
+        outcome === "success" ? 0 : 2,
       );
-      try {
-        const ambientHome = join(root, "ambient-codex");
-        await mkdir(ambientHome, { mode: 0o700 });
-        const auth = {
-          ...(homeRelative ? {} : { auth_mode: "chatgpt" }),
-          tokens: {
-            id_token: "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.c2ln",
-            access_token: "synthetic-access",
-            refresh_token: "synthetic-refresh",
-          },
-        };
-        await writeFile(join(ambientHome, "auth.json"), JSON.stringify(auth));
-        await writeFile(join(ambientHome, "config.toml"), "not valid TOML");
-
-        const stdout = capture();
-        const stderr = capture();
-        let forwardedHome: string | undefined;
-        const deps = dependencies({
-          environment: {
-            HOME: root,
-            USERPROFILE: root,
-            CODEX_HOME: homeRelative ? "~/ambient-codex" : ambientHome,
-            CODEX_SECURITY_STATE_DIR: stateDirectory,
-          },
-        });
-        deps.runCodex = async (_args, _output, authEnvironment) => {
-          forwardedHome = authEnvironment?.["CODEX_HOME"];
-          const probe = JSON.parse(
-            await readFile(join(forwardedHome!, "auth.json"), "utf8"),
-          );
-          expect(probe).toEqual({
-            ...auth,
-            tokens: { ...auth.tokens, access_token: "", refresh_token: "" },
-          });
-          expect(existsSync(join(forwardedHome!, "config.toml"))).toBe(false);
-          return 0;
-        };
-
-        expect(
-          await main(["login", "status"], stdout.stream, stderr.stream, deps),
-        ).toBe(0);
-        expect(forwardedHome).toBeDefined();
-        expect(existsSync(forwardedHome!)).toBe(false);
-        expect(
-          existsSync(join(stateDirectory, "codex-home", "auth.json")),
-        ).toBe(false);
-        expect(
-          JSON.parse(await readFile(join(ambientHome, "auth.json"), "utf8")),
-        ).toEqual(auth);
-        deps.runCodex = async () => {
-          throw new Error("synthetic status error");
-        };
-        expect(
-          await main(["login", "status"], stdout.stream, stderr.stream, deps),
-        ).toBe(2);
-        expect(
-          (await readdir(join(stateDirectory, "codex-home"))).filter((name) =>
-            name.startsWith("openai-codex-security-home-"),
-          ),
-        ).toEqual([]);
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
+      expect(probe).toEqual({
+        ...auth,
+        tokens: { ...chatGptTokens, access_token: "", refresh_token: "" },
+      });
+      expect(hasConfig).toBe(false);
+      expect(existsSync(probeHome!)).toBe(false);
+      expect(existsSync(join(stateDirectory, "codex-home", "auth.json"))).toBe(
+        false,
+      );
+      expect(await readJson(source)).toEqual(auth);
     },
   );
 

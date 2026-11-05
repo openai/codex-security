@@ -254,7 +254,7 @@ import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
-  prepareStatusCredentials,
+  prepareAmbientAuth,
   withCredentialHomeLock,
   bootstrapPlugin,
   bundledPluginRoot,
@@ -4207,11 +4207,8 @@ export class CodexSecurity {
       return await withStatusCredentialHome(
         scanCodexHome(this.#dependencies.environment),
         authentication.codexHome,
-        async () => {
-          const current = await status(authentication.codexHome);
-          return current.authenticated ? current : undefined;
-        },
         status,
+        (home, known) => known ?? status(home),
         this.#abortController.signal,
       );
     });
@@ -5635,26 +5632,19 @@ export function scanCodexHome(environment: ProcessEnvironment): string {
 export async function withStatusCredentialHome<T>(
   ambientHome: string,
   credentialHome: string,
-  nativeLoginStatus: () => Promise<T | undefined>,
-  status: (home: string) => Promise<T>,
+  nativeLoginStatus: (home: string) => Promise<AccountStatus>,
+  status: (home: string, known?: AccountStatus) => T | Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
   const probe = await withCredentialHomeLock(
     credentialHome,
-    async () => {
-      if (
-        !(await codexSecurityCredentialAllowsAmbientImport(credentialHome)) ||
-        (await codexSecurityHasStoredFileCredentials(credentialHome))
-      )
-        return null;
-      return await prepareStatusCredentials(ambientHome, credentialHome);
-    },
+    () => prepareAmbientAuth(ambientHome, credentialHome, "status"),
     signal,
   );
-  if (probe === null) return await status(credentialHome);
+  if (typeof probe !== "string") return await status(credentialHome);
   // Device policy can select a keyring even without a local config file.
-  const current = await nativeLoginStatus();
-  if (current !== undefined) return current;
+  const current = await nativeLoginStatus(credentialHome);
+  if (current.authenticated) return await status(credentialHome, current);
   const temporary = await createIsolatedHome(credentialHome);
   try {
     await requireSecureCredentialHome(temporary);
