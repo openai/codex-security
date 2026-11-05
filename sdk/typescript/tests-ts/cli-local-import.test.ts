@@ -117,6 +117,55 @@ async function fixture() {
   return { root, repository, file, record, state, deps, command };
 }
 
+test.each(["local", "cloud"])(
+  "zero-record OpenGrep imports to %s preserve scanner diagnostics",
+  async (destination) => {
+    const f = await fixture();
+    const command = [
+      ...f.command,
+      "--source-repository-url",
+      "https://github.com/example/project",
+    ];
+    command[command.indexOf("--provider") + 1] = "opengrep";
+    command[command.indexOf("--to") + 1] = destination;
+    if (destination === "cloud")
+      command[command.indexOf("--repository") + 1] = "example/project";
+    const input = { ...opengrepJson(), results: [] };
+    await writeFile(f.file, JSON.stringify(input));
+    const failed = createCliTest(main);
+    expect(await failed.runCli([...command, "--dry-run"], f.deps)).toBe(2);
+    expect(JSON.parse(failed.stdout.text())).toMatchObject({
+      error: expect.stringContaining(input.errors[0]!.message),
+      report: { errors: input.errors, paths: input.paths },
+    });
+
+    const paths = { scanned: ["src/example\u001b[2J\u009b.ts"] };
+    await writeFile(f.file, JSON.stringify({ ...input, errors: [], paths }));
+    const clean = createCliTest(main);
+    expect(await clean.runCli(command, f.deps)).toBe(0);
+    expect(JSON.parse(clean.stdout.text())).toMatchObject({
+      read: 0,
+      ready: 0,
+      findings: [],
+      excluded: [],
+      report: { errors: [], paths },
+      ...(destination === "local" && {
+        counts: { created: 0, updated: 0, unchanged: 0 },
+      }),
+    });
+    const terminal = createCliTest(main);
+    expect(
+      await terminal.runCli(
+        command.map((arg) => (arg === "json" ? "md" : arg)),
+        f.deps,
+      ),
+    ).toBe(0);
+    expect(terminal.stdout.text()).toContain("src/example");
+    expect(terminal.stdout.text()).not.toMatch(/[\u001b\u009b]/u);
+    await expect(readdir(f.state)).rejects.toThrow("ENOENT");
+  },
+);
+
 test("local preview and declined confirmation do not create database state or use Cloud", async () => {
   const f = await fixture();
   const preview = createCliTest(main);
@@ -333,6 +382,24 @@ test("CLI imports OpenGrep evidence locally without assessing it", async () => {
       },
     },
   });
+});
+
+test("local dry runs and imports reject an entirely excluded report before opening the workbench", async () => {
+  const f = await fixture();
+  await writeFile(
+    f.file,
+    JSON.stringify([{ ...f.record, vendorSeverity: "unsupported" }]),
+  );
+  for (const flags of [["--dry-run"], ["--yes"]]) {
+    const cli = createCliTest(main);
+    expect(await cli.runCli([...f.command, ...flags], f.deps)).toBe(2);
+    expect(JSON.parse(cli.stdout.text())).toMatchObject({
+      read: 1,
+      ready: 0,
+      excluded: [{ position: 1, reason: expect.any(String) }],
+    });
+    await expect(readdir(f.state)).rejects.toThrow("ENOENT");
+  }
 });
 
 test("local import confirms exclusions and returns partial status after storing ready records", async () => {

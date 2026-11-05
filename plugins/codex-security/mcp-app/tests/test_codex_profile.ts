@@ -137,7 +137,7 @@ async function fixture(mode = "success") {
       emit({ type: "item.completed", item: { type: "agent_message", id: "fixture-item", text: "synthetic token=fixture-secret" } });
       const completion = { type: "turn.completed" };
       if (process.env.PROFILE_TEST_MODE === "null_usage") completion.usage = null;
-      else if (process.env.PROFILE_TEST_MODE !== "missing_usage") completion.usage = { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) };
+      else if (process.env.PROFILE_TEST_MODE !== "missing_usage") completion.usage = { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}), ...(process.env.PROFILE_TEST_MODE === "cache_zero" ? { cache_write_input_tokens: 0 } : {}) };
       emit(completion);
       process.exit(0);
     }
@@ -227,6 +227,7 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
         input_tokens: 2,
         cached_input_tokens: 1,
         cache_write_input_tokens: 0,
+        cache_write_input_tokens_reported: false,
         output_tokens: 3,
         reasoning_output_tokens: 0,
       },
@@ -303,6 +304,22 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
     if (previousEnvironment === undefined)
       delete process.env.PROFILE_CLIENT_SHOULD_NOT_LEAK;
     else process.env.PROFILE_CLIENT_SHOULD_NOT_LEAK = previousEnvironment;
+    await f.cleanup();
+  }
+});
+
+test("native profiles distinguish explicitly reported zero cache writes", async () => {
+  const f = await fixture("cache_zero");
+  try {
+    const result = await createCodexProfileClient<ThreadEvent>(f.options)
+      .startThread()
+      .run("synthetic prompt");
+    assert.equal(result.usage?.cache_write_input_tokens, 0);
+    assert.equal(
+      Object.hasOwn(result.usage!, "cache_write_input_tokens_reported"),
+      false,
+    );
+  } finally {
     await f.cleanup();
   }
 });

@@ -452,6 +452,15 @@ try {
       "existing output",
     );
     for (const outputDir of [
+      join(selected, "scan-output"),
+      join(owner, "selected", "scan-output"),
+    ]) {
+      await assert.rejects(
+        writer.run(selected, { mock: true, outputDir, workflowId: "guard" }),
+        outside,
+      );
+    }
+    for (const outputDir of [
       workflowOutput,
       `${entry}/link/../workflow-output`,
     ]) {
