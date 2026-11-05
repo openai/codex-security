@@ -750,33 +750,28 @@ async function removeCheckout(path: string): Promise<string | undefined> {
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {
-  const metadata = await lstat(path, { bigint: true }).catch(
+  let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
-  if (metadata?.isSymbolicLink()) {
-    throw new Error("Multiscan output directories must not be symbolic links.");
-  }
-  if (metadata !== undefined && !metadata.isDirectory()) {
-    throw new Error("Multiscan output paths must be directories.");
-  }
   let prepared = path;
   if (metadata === undefined) {
-    prepared =
-      process.platform === "win32"
-        ? await canonicalWindowsCreationPath(path)
-        : path;
     if (process.platform === "win32") {
+      prepared = await canonicalWindowsCreationPath(path);
       await createWindowsOutputDirectory(prepared, true);
     } else {
       await mkdir(prepared, { recursive: true, mode: 0o700 });
     }
+    metadata = await lstat(prepared, { bigint: true });
+  }
+  if (metadata.isSymbolicLink()) {
+    throw new Error("Multiscan output directories must not be symbolic links.");
+  }
+  if (!metadata.isDirectory()) {
+    throw new Error("Multiscan output paths must be directories.");
   }
   const canonical = await realpath(prepared);
   const directory = await lstat(canonical, { bigint: true });
-  if (
-    metadata !== undefined &&
-    (directory.dev !== metadata.dev || directory.ino !== metadata.ino)
-  ) {
+  if (directory.dev !== metadata.dev || directory.ino !== metadata.ino) {
     throw new Error("Multiscan output directories changed during preparation.");
   }
   if (process.platform === "win32") return canonical;
