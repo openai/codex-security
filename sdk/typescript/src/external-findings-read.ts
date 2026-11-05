@@ -4,7 +4,6 @@ import type {
   ExternalPublicationInput,
   ExternalSourceRepository,
 } from "./external-findings.js";
-import { hasNoExternalRecords } from "./external-findings.js";
 import { readScannerJson, sarifRunRepositories } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
@@ -21,16 +20,30 @@ import {
   readSemgrepReport,
 } from "./semgrep-findings.js";
 import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
-import { readTrivyFindings } from "./trivy-findings.js";
+import {
+  normalizeTrivyFindings,
+  needsPreviousTrivyProjection,
+  normalizePreviousTrivyFindings,
+} from "./trivy-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import {
   normalizeEndorFindings,
+  needsPreviousEndorProjection,
+  normalizePreviousEndorFindings,
   endorRepositoryUrls,
 } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSonarFindings } from "./sonar-findings.js";
-import { readVeracodeFindings } from "./veracode-findings.js";
-import { readBlackDuckFindings } from "./blackduck-findings.js";
+import {
+  needsPreviousVeracodeProjection,
+  normalizeVeracodeFindings,
+  normalizePreviousVeracodeFindings,
+} from "./veracode-findings.js";
+import {
+  needsPreviousBlackDuckProjection,
+  normalizeBlackDuckFindings,
+  normalizePreviousBlackDuckFindings,
+} from "./blackduck-findings.js";
 import {
   normalizeContinuumFindings,
   normalizePreviousContinuumFindings,
@@ -164,6 +177,13 @@ function sarifFileRepositories(
     return input["runs"].flatMap((run) => sarifRunRepositories(run, producer));
 }
 
+/** Repository claims from every project or SARIF run, even those with no findings. */
+export function snykFileRepositories(input: unknown) {
+  return (
+    sarifFileRepositories(input, "Snyk") ?? emptySnykReportRepositories(input)
+  );
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
@@ -172,10 +192,26 @@ export async function readExternalFindings(
   references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
-  if (provider === "trivy")
+  if (provider === "trivy") {
+    const input = await readScannerJson(path);
+    const findings = normalizeTrivyFindings(
+      input,
+      target,
+      options.trivyScanRoot,
+    );
     return {
-      findings: await readTrivyFindings(path, target, options.trivyScanRoot),
+      findings,
+      previousFindings:
+        target === "cloud" && needsPreviousTrivyProjection(findings)
+          ? () =>
+              normalizePreviousTrivyFindings(
+                input,
+                target,
+                options.trivyScanRoot,
+              )
+          : undefined,
     };
+  }
   if (provider === "sonar") {
     const url = options.sourceRepositoryUrl;
     const findings = await readSonarFindings(path, url ?? "", target);
@@ -202,15 +238,20 @@ export async function readExternalFindings(
     const findings = snyk
       ? await normalizeSnykFile(input, target, references)
       : normalizeEndorFindings(input, target);
-    const header = sarifFileRepositories(input, snyk ? "Snyk" : "Endor");
-    const sourceRepositories =
-      header ??
-      (snyk && hasNoExternalRecords(findings)
-        ? emptySnykReportRepositories(input)
-        : findings.findings.flatMap((row) =>
-            localFindingRepositories(provider, row),
-          ));
-    return { findings, sourceRepositories };
+    const sourceRepositories = snyk
+      ? snykFileRepositories(input)
+      : (sarifFileRepositories(input, "Endor") ??
+        findings.findings.flatMap((row) =>
+          localFindingRepositories(provider, row),
+        ));
+    return {
+      findings,
+      sourceRepositories,
+      previousFindings:
+        !snyk && target === "cloud" && needsPreviousEndorProjection(findings)
+          ? () => normalizePreviousEndorFindings(input, target)
+          : undefined,
+    };
   }
   if (provider === "semgrep") {
     const input = await readSemgrepReport(path);
@@ -230,44 +271,56 @@ export async function readExternalFindings(
   }
   if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };
-  if (provider === "inspector" || provider === "continuum") {
+  if (provider === "checkmarx") {
     const url = options.sourceRepositoryUrl ?? "";
-    const mapping =
-      options.inspectorProjectMap && new Map(options.inspectorProjectMap);
-    const input = await readScannerJson(path);
-    const normalize =
-      provider === "inspector"
-        ? normalizeInspectorFindings
-        : normalizeContinuumFindings;
-    const previous =
-      provider === "inspector"
-        ? normalizePreviousInspectorFindings
-        : normalizePreviousContinuumFindings;
-    // Both projections describe the same captured file, including rows admitted
-    // by just one reader. Detail arrays are new to Continuum.
-    const wasSupported = provider === "inspector" || !Array.isArray(input);
     return {
-      findings: normalize(input, url, target, mapping),
-      previousFindings:
-        target === "cloud" && wasSupported
-          ? () => previous(input, url, target, mapping)
-          : undefined,
+      findings: await readCheckmarxFindings(path, url, target),
       sourceRepositories: [{ url }],
     };
   }
   if (
-    provider === "checkmarx" ||
+    provider === "inspector" ||
+    provider === "continuum" ||
     provider === "blackduck" ||
     provider === "veracode"
   ) {
     const url = options.sourceRepositoryUrl ?? "";
-    const read = {
-      checkmarx: readCheckmarxFindings,
-      blackduck: readBlackDuckFindings,
-      veracode: readVeracodeFindings,
-    }[provider];
+    const mapping =
+      options.inspectorProjectMap && new Map(options.inspectorProjectMap);
+    const input = await readScannerJson(path);
+    const [normalize, previous, couldDiffer] = (
+      {
+        inspector: [
+          normalizeInspectorFindings,
+          normalizePreviousInspectorFindings,
+          () => true,
+        ],
+        continuum: [
+          normalizeContinuumFindings,
+          normalizePreviousContinuumFindings,
+          () => !Array.isArray(input),
+        ],
+        blackduck: [
+          normalizeBlackDuckFindings,
+          normalizePreviousBlackDuckFindings,
+          needsPreviousBlackDuckProjection,
+        ],
+        veracode: [
+          normalizeVeracodeFindings,
+          normalizePreviousVeracodeFindings,
+          needsPreviousVeracodeProjection,
+        ],
+      } as const
+    )[provider];
+    // Each version must see the same captured rows, including excluded ones.
+    // The earlier Continuum reader did not accept detail arrays.
+    const findings = normalize(input, url, target, mapping);
     return {
-      findings: await read(path, url, target),
+      findings,
+      previousFindings:
+        target === "cloud" && couldDiffer(findings)
+          ? () => previous(input, url, target, mapping)
+          : undefined,
       sourceRepositories: [{ url }],
     };
   }

@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import {
   normalizeSemgrepPlatformFindings,
   isSemgrepPlatformFormat,
@@ -196,9 +197,59 @@ export function normalizeSemgrepFindings(
       { ...options, sourceRepositoryUrl: options?.sourceRepositoryUrl ?? "" },
       target,
     );
+  return normalizeSemgrepJson(document, options, target);
+}
+
+const changedNativeProjections = new WeakSet<ExternalFindings>();
+
+/** @internal Check the projection just read for a possible historical Cloud request. */
+export function needsPreviousSemgrepProjection(findings: ExternalFindings) {
+  return changedNativeProjections.has(findings);
+}
+
+function nativeProjection(target: ExternalImportTarget, previous: boolean) {
+  let changed = false;
+  return {
+    location(raw: string) {
+      const oldPath = relativePath(raw);
+      if (!oldPath || previous) return oldPath;
+      // A native filename can contain POSIX backslashes or Windows separators.
+      // Validate both interpretations, but keep the scanner's own spelling.
+      const portable = posix.normalize(raw).replaceAll("\\", "/");
+      const path = relativePath(posix.normalize(portable)) ? raw : null;
+      if (path !== oldPath) changed = true;
+      return path;
+    },
+    finish(findings: ExternalFindings, omittedExplanations = false) {
+      if (target === "cloud" && (changed || omittedExplanations))
+        changedNativeProjections.add(findings);
+      return findings;
+    },
+  };
+}
+
+/** @internal Rebuild the native JSON or SARIF that an earlier reader approved. */
+export function normalizePreviousSemgrepFindings(
+  input: unknown,
+  options: Partial<SemgrepImportOptions>,
+): ExternalFindings {
+  const document = record(input, "Semgrep report");
+  return document["version"] === "2.1.0" && document["runs"] !== undefined
+    ? normalizeSarif(document, options, "cloud", true)
+    : normalizeSemgrepJson(document, options, "cloud", true);
+}
+
+function normalizeSemgrepJson(
+  document: Record<string, unknown>,
+  options: Partial<SemgrepImportOptions>,
+  target: ExternalImportTarget,
+  previous = false,
+): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
   const { results, paths: _paths, time: _time, ...context } = document;
+  const omitExplanations = !previous && Object.hasOwn(context, "explanations");
+  if (omitExplanations) delete context["explanations"];
   const rows = array(results, "Semgrep results");
   if (!rows.length && document["errors"] === undefined)
     throw new Error("An empty Semgrep report must include its errors array.");
@@ -206,19 +257,24 @@ export function normalizeSemgrepFindings(
     throw new Error(
       "The Semgrep report contains scan errors; supply a successful report before importing findings.",
     );
-  return normalizeRecords(
+  const projection = nativeProjection(target, previous);
+  const findings = normalizeRecords(
     rows,
-    (value) =>
-      projectNativeJsonResult(parseNativeJsonResult(value, "Semgrep"), {
+    (value) => {
+      const parsed = parseNativeJsonResult(value, "Semgrep");
+      parsed.path = projection.location(parsed.rawPath);
+      return projectNativeJsonResult(parsed, {
         origin: "Semgrep",
         repositoryUrl,
         severity,
         reportContext: context,
         target,
-      }),
+      });
+    },
     jsonIdentity,
     target,
   );
+  return projection.finish(findings, omitExplanations);
 }
 
 export function isSemgrepSarifDriver(name: string): boolean {
@@ -229,6 +285,15 @@ export function normalizeSemgrepSarif(
   input: unknown,
   options: SemgrepImportOptions,
   target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  return normalizeSarif(input, options, target);
+}
+
+function normalizeSarif(
+  input: unknown,
+  options: Partial<SemgrepImportOptions>,
+  target: ExternalImportTarget,
+  previous = false,
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
   const repositoryKey = cloudRepositoryUrlKey(repositoryUrl);
@@ -253,7 +318,8 @@ export function normalizeSemgrepSarif(
       throw new Error("Expected a Semgrep SARIF producer.");
     return sarifRunResults(context, "Semgrep");
   });
-  return normalizeRecords(
+  const projection = nativeProjection(target, previous);
+  const findings = normalizeRecords(
     entries,
     ({ result: value, context }) => {
       const result = record(value, "Semgrep result");
@@ -306,7 +372,7 @@ export function normalizeSemgrepSarif(
         typeof artifact["uri"] === "string" &&
         /^[a-z][a-z\d+.-]*:/iu.test(artifact["uri"]);
       const path =
-        rawPath === null || absoluteUri ? null : relativePath(rawPath);
+        rawPath === null || absoluteUri ? null : projection.location(rawPath);
       return validateExternalEvidence(
         {
           title: ruleId,
@@ -346,6 +412,7 @@ export function normalizeSemgrepSarif(
     ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
   );
+  return projection.finish(findings);
 }
 
 /** @internal Read the original file before resolving repository provenance. */

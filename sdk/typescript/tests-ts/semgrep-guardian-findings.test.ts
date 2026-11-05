@@ -242,6 +242,12 @@ test("normalized Guardian imports verify the original finding against the select
   );
   const normalized = normalizeSemgrepFindings(capture, {}, "local");
   const original = normalized.findings[0]!;
+  await expect(
+    fixture.prepareNormalized({
+      ...normalized,
+      findings: [{ ...original, source_finding_id: "another-source-id" }],
+    }),
+  ).rejects.toThrow(/original Guardian finding/);
   for (const changed of [
     { ...row, repository: { name: "other/service" } },
     { ...row, ref: "refs/heads/other" },

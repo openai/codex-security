@@ -34,7 +34,7 @@ Ask it to preview the report with your configured model.
 
 With imports enabled, run `codex-security publish findings --help` to check the
 providers in your installed CLI. The guides cover local and Cloud imports
-unless an input is marked local only. Cloud must support the selected provider. For AWS inbox imports, use a CLI and workspace that support v2 finding import jobs. Check for `privateImport` in the dry-run preview.
+unless an input is marked local only.
 
 | Guide                                                       | Supported input                                                                          |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -73,6 +73,14 @@ Set `--to cloud` and pass the connected repository URL or Cloud ID to
 `--repository`. Preview again with `--dry-run`. Check the account, endpoint,
 destination, findings, and exclusions. Remove `--dry-run` and confirm. [Cloud setup](../../sdk/typescript/docs/cli.md#preview-and-publish)
 
+Add `--format json` to see which destination your workspace offers.
+When the preview includes `privateImport`, confirming sends the findings to
+your private inbox with the selected repository and connector. GitHub code scanning,
+Dependabot and advisories use the GitHub provider. OpenGrep uses the Semgrep
+provider. For Amazon Inspector or AWS Continuum, the CLI and workspace must
+support v2 import jobs. For Black Duck, Checkmarx, SonarQube Cloud, Trivy or
+Veracode, they must support v3 to use the private inbox.
+
 ### Verify the import
 
 For a local import, list the saved findings using the checkout path from the preview.
@@ -87,6 +95,10 @@ For a Cloud import, check the receipt for the destination shown in the preview.
 | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Private inbox (`privateImport`)                   | Check that `privateJob.status` is `completed` and its counts account for the selected findings, with zero errors or unprocessed rows. Review exclusions. |
 | Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                                                    |
+
+If the repository publisher requires a reported severity, the preview excludes
+findings whose severity the scanner left unknown. You can keep those findings
+in a local import or a private inbox when available.
 
 If `publish findings` stops and returns `savedSubmission`, [resume from that checkpoint](schema-guide.md#retry-a-cloud-submission).
 

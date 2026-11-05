@@ -25,6 +25,7 @@ type NativeRecord = Record<string, unknown>;
 
 const urlScheme = /^[a-z][a-z\d+.-]*:\/\//iu;
 const javaArchiveAncestor = /\.(?:jar|war|ear|par)\//iu;
+const cloudLocationLimit = 100;
 
 const curlUrlPrefix = /^(?:(?:https?|ftps?)::)?(?:https?|ftps?):\/{1,3}/iu;
 const unsafeRepositoryUrl =
@@ -379,6 +380,31 @@ export function normalizeTrivyFindings(
   target: ExternalImportTarget = "cloud",
   scanRoot?: string,
 ): ExternalFindings {
+  return normalizeReport(input, target, scanRoot, false);
+}
+
+/** @internal Only a finding at the Cloud location limit can have a different prior selection. */
+export function needsPreviousTrivyProjection({ findings }: ExternalFindings) {
+  return findings.some(
+    ({ evidence }) => evidence.locations?.length === cloudLocationLimit,
+  );
+}
+
+/** @internal Reconstruct the original selection for an interrupted Cloud request. */
+export function normalizePreviousTrivyFindings(
+  input: unknown,
+  target: ExternalImportTarget = "cloud",
+  scanRoot?: string,
+): ExternalFindings {
+  return normalizeReport(input, target, scanRoot, true);
+}
+
+function normalizeReport(
+  input: unknown,
+  target: ExternalImportTarget,
+  scanRoot: string | undefined,
+  previous: boolean,
+): ExternalFindings {
   const document = record(input, "Trivy report");
   if (document["SchemaVersion"] !== 2)
     throw new Error(
@@ -512,7 +538,10 @@ export function normalizeTrivyFindings(
                   .filter(Boolean) ?? [],
             },
           ],
-          locations,
+          locations:
+            target === "cloud" && !previous
+              ? locations.slice(0, cloudLocationLimit)
+              : locations,
           branch: text(metadata["Branch"]),
           source_scan_id: text(document["ReportID"]),
           source_data: structuredClone({

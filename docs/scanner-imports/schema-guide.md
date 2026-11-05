@@ -80,10 +80,19 @@ repository path from the preview. Each record includes
 unprocessed findings. Open a finding in the inbox to assess it and publish
 the assessment when you're ready to share it.
 
+Reimporting identical evidence for the same occurrence leaves the saved
+observation in place. If the job reports `source_order_unknown`, Cloud
+received different evidence for an existing finding and needs its current
+observation version before replacing it. Check the previous observation and
+the new evidence before retrying. A newer scanner timestamp alone cannot
+authorize that update.
+
 **Cloud repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
 Check the per-item result for conflicts. The receipt's source-report,
 observation and canonical-finding IDs identify Cloud records. Read the source
-report for the imported evidence.
+report for the imported evidence. If this destination requires a known
+severity, findings whose scanner reported no severity appear in the preview's
+exclusions. The private inbox also accepts unknown severity.
 
 The repository publisher allows up to 256 KiB and 20 levels of nesting per finding. The publisher
 batches up to 100 items and 5 MiB per request. Local file imports do not apply

@@ -1,5 +1,8 @@
-import type { ExternalImportTarget } from "./external-import-contract.js";
-import { validateExternalEvidence } from "./external-import-contract.js";
+import {
+  type ExternalImportTarget,
+  validateEnrichedExternalEvidence,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
 import { asRecord } from "./record.js";
 import {
@@ -101,6 +104,29 @@ export function normalizeEndorFindings(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
+  return normalizeReport(input, target, false);
+}
+
+const changedNativeProjections = new WeakSet<ExternalFindings>();
+
+/** @internal Look up historical requests only when the native projection changed. */
+export function needsPreviousEndorProjection(findings: ExternalFindings) {
+  return changedNativeProjections.has(findings);
+}
+
+/** @internal Reproduce the selection from before malware and fully qualified package mapping. */
+export function normalizePreviousEndorFindings(
+  input: unknown,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  return normalizeReport(input, target, true);
+}
+
+function normalizeReport(
+  input: unknown,
+  target: ExternalImportTarget,
+  previous: boolean,
+): ExternalFindings {
   const root = Array.isArray(input) ? null : record(input, "Endor report");
   if (root?.["version"] === "2.1.0" && root["runs"] !== undefined)
     return normalizeEndorSarif(root, target);
@@ -110,14 +136,18 @@ export function normalizeEndorFindings(
       : Array.isArray(input)
         ? input
         : [input];
-  return normalizeRecords(
+  let changed = false;
+  const result = normalizeRecords(
     values,
     (value) => {
       const finding = record(value, "Endor finding");
       const meta = record(finding["meta"], "Endor meta");
       const spec = record(finding["spec"], "Endor spec");
       requiredText(spec["project_uuid"], "Endor project_uuid");
-      const name = text(spec["target_dependency_name"]);
+      const bareName = text(spec["target_dependency_name"]);
+      const name =
+        bareName ??
+        (previous ? null : text(spec["target_dependency_package_name"]));
       const paths = [
         ...new Set(
           strings(spec["dependency_file_paths"])
@@ -168,6 +198,17 @@ export function normalizeEndorFindings(
       const aliases = strings(
         record(vulnerability["spec"] ?? {}, "Vulnerability spec")["aliases"],
       );
+      const vulnerabilityIds = [
+        ...new Set([...(advisory ? [advisory] : []), ...aliases]),
+      ];
+      const advisories = new Set(vulnerabilityIds);
+      const malware = previous ? undefined : asRecord(metadata["malware"]);
+      if (malware) {
+        const id = text(asRecord(malware["meta"])?.["name"]);
+        if (id) advisories.add(id);
+        for (const alias of strings(asRecord(malware["spec"])?.["aliases"]))
+          advisories.add(alias);
+      }
       const level = text(spec["level"])
         ?.replace(/^FINDING_LEVEL_/u, "")
         .toLowerCase();
@@ -190,7 +231,12 @@ export function normalizeEndorFindings(
         : [];
       const context = record(finding["context"] ?? {}, "Endor context");
       const updated = text(meta["update_time"]);
-      return validateExternalEvidence(
+      const malwareIds =
+        advisories.size > vulnerabilityIds.length
+          ? { advisory_ids: [...advisories] }
+          : undefined;
+      const fallbackPackage = name !== bareName ? { packages } : undefined;
+      const evidence = validateEnrichedExternalEvidence(
         {
           title: requiredText(meta["name"], "Endor finding title"),
           description:
@@ -212,15 +258,22 @@ export function normalizeEndorFindings(
           ),
           source_updated_at:
             updated === null ? null : Math.floor(Date.parse(updated) / 1000),
-          advisory_ids: [
-            ...new Set([...(advisory ? [advisory] : []), ...aliases]),
-          ],
-          packages,
+          advisory_ids: vulnerabilityIds,
+          packages: bareName ? packages : [],
           locations,
           source_data: structuredClone(finding),
         },
         target,
+        malwareIds && fallbackPackage && { ...malwareIds, ...fallbackPackage },
+        malwareIds,
+        fallbackPackage,
       );
+      if (
+        (evidence.advisory_ids?.length ?? 0) > vulnerabilityIds.length ||
+        (fallbackPackage && evidence.packages?.length)
+      )
+        changed = true;
+      return evidence;
     },
     (value) =>
       requiredText(
@@ -229,6 +282,8 @@ export function normalizeEndorFindings(
       ),
     target,
   );
+  if (target === "cloud" && changed) changedNativeProjections.add(result);
+  return result;
 }
 
 /** Endor's documented SARIF producer uses properties.finding-uuid, not its rule name. */

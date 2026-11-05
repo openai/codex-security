@@ -22,7 +22,10 @@ import {
 } from "./support/semgrep-import-fixtures.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
-import { normalizeEndorFindings } from "../src/endor-findings.js";
+import {
+  normalizeEndorFindings,
+  normalizePreviousEndorFindings,
+} from "../src/endor-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
 import { hash } from "node:crypto";
@@ -60,7 +63,10 @@ import {
   selectSemgrepPlatformFindings,
   semgrepPlatformFormat,
 } from "../src/semgrep-platform-findings.js";
-import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
+import {
+  normalizePreviousSemgrepFindings,
+  normalizeSemgrepFindings,
+} from "../src/semgrep-findings.js";
 import { collectSemgrepPlatformFindings } from "../src/semgrep-platform-collector.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
 import releasedSnykCheckpoints from "./fixtures/snyk-released-checkpoints.json" with { type: "json" };
@@ -81,6 +87,7 @@ import {
   selectPrivateReport,
 } from "../src/private-finding-import.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
+import { normalizeOpenGrepFindings } from "../src/opengrep-findings.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
@@ -101,7 +108,10 @@ import {
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
-import { normalizeTrivyFindings } from "../src/trivy-findings.js";
+import {
+  normalizePreviousTrivyFindings,
+  normalizeTrivyFindings,
+} from "../src/trivy-findings.js";
 import {
   normalizeInspectorFindings,
   normalizePreviousInspectorFindings,
@@ -109,6 +119,7 @@ import {
 import { normalizePreviousContinuumFindings } from "../src/continuum-findings.js";
 import {
   trivyReport,
+  trivyReportWithManyLocations,
   trivyRepositoryHeader,
 } from "./support/trivy-import-fixtures.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
@@ -123,9 +134,16 @@ import {
   continuumDetail,
   continuumRepository,
 } from "./support/continuum-import-fixtures.js";
-import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
-import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
 import {
+  normalizeBlackDuckFindings,
+  normalizePreviousBlackDuckFindings,
+} from "../src/blackduck-findings.js";
+import {
+  normalizePreviousVeracodeFindings,
+  normalizeVeracodeFindings,
+} from "../src/veracode-findings.js";
+import {
+  veracodeMixedPolicyPage,
   veracodePolicyPage,
   veracodePolicyRow,
 } from "./support/veracode-import-fixtures.js";
@@ -381,6 +399,15 @@ test("Wiz's gzip JSON report retains finding identity, evidence and repository l
       source_data: report,
     },
   });
+  f.state.repositoryUrl = otherRepository;
+  await expect(
+    prepareExternalPublication(f.file, options, f.deps),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  await expect(
+    prepareNormalizedExternalPublication(parsed, options, f.deps),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(0);
+  f.state.repositoryUrl = exampleRepository;
   const result = await (
     await prepareExternalPublication(f.file, options, f.deps)
   ).publish();
@@ -900,6 +927,172 @@ async function fixture(
     },
   };
 }
+
+test.each([true, false])(
+  "repository severity exclusions keep the approved requests on retry (initial advertisement %s)",
+  async (advertised) => {
+    const f = await fixture([
+      normalized("unreported", "unknown"),
+      normalized("invalid", "unsupported"),
+      normalized("reported", "high"),
+    ]);
+    let current = advertised;
+    const lookups: string[] = [];
+    const prepare = () =>
+      prepareExternalPublication(f.file, options, {
+        ...f.deps,
+        fetch: async (url, init) => {
+          const request = new URL(url);
+          const response = await f.deps.fetch(url, init);
+          if (request.pathname.endsWith("/source_reports"))
+            lookups.push(request.searchParams.get("source_finding_id")!);
+          if (!request.pathname.endsWith("/repositories") || !current)
+            return response;
+          const headers = new Headers(response.headers);
+          headers.set(
+            "Codex-Security-Repository-Import-Severities",
+            "critical,high,medium,low,informational",
+          );
+          return new Response(response.body, { headers });
+        },
+      });
+    const first = await prepare();
+    const selected = advertised ? ["reported"] : ["unreported", "reported"];
+    expect(first.preview.findings.map((f) => f.source_finding_id)).toEqual(
+      selected,
+    );
+    expect(lookups.sort()).toEqual([...selected].sort());
+    expect(first.preview.excluded.map(({ position }) => position)).toEqual(
+      advertised ? [1, 2] : [2],
+    );
+    if (advertised)
+      expect(first.preview.excluded[0]?.reason).toContain('severity "unknown"');
+    await f.loseResponse(first);
+    current = !current;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(first.preview.requests);
+    expect(retry.preview.excluded).toEqual(first.preview.excluded);
+    const result = await retry.publish();
+    expect(result).toMatchObject({
+      status: "partial",
+      read: 3,
+      ready: selected.length,
+      verified: selected.length,
+      unacknowledged: 0,
+    });
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+  },
+);
+
+test.each([
+  "equivalent",
+  "other path",
+  "raw change",
+  "manifest change",
+  "URL",
+] as const)(
+  "direct readback compares qualified literal scanner paths without changing the approved request (%s)",
+  async (mode) => {
+    const path =
+      mode === "URL" ? "https://example.test/file.json" : "schema:prod.json";
+    const input = normalized();
+    const f = await fixture([
+      {
+        ...input,
+        evidence: {
+          ...input.evidence,
+          locations: [{ path, line: 5 }],
+          packages: [{ name: "example", manifest_path: path }],
+          source_data: { original_path: path },
+        },
+      },
+    ]);
+    const prepare = () =>
+      prepareExternalPublication(f.file, options, {
+        ...f.deps,
+        fetch: async (url, init) => {
+          const response = await f.deps.fetch(url, init);
+          if (!new URL(url).pathname.includes("/source_reports/"))
+            return response;
+          const report = await response.json();
+          report.evidence.locations[0].path =
+            mode === "other path" ? "./different:file.json" : `./${path}`;
+          report.evidence.packages[0].manifest_path =
+            mode === "manifest change" ? "different.json" : `./${path}`;
+          if (mode === "raw change")
+            report.evidence.source_data.original_path = `./${path}`;
+          return Response.json(report);
+        },
+      });
+    const first = await prepare();
+    await f.loseResponse(first);
+    const resumed = await prepare();
+    expect(resumed.preview.requests).toEqual(first.preview.requests);
+    const result = resumed.publish();
+    if (mode === "equivalent") expect((await result).verified).toBe(1);
+    else await expect(result).rejects.toThrow("Cloud readback did not match");
+    expect(f.posts[1]).toBe(f.posts[0]);
+    expect(JSON.parse(f.posts[0]!).items[0].evidence).toMatchObject({
+      locations: [{ path }],
+      packages: [{ manifest_path: path }],
+      source_data: { original_path: path },
+    });
+  },
+);
+
+test("private inbox preview retains unreported severity when direct publishing requires it", async () => {
+  const f = await fixture([normalized("unscored", "unknown")]);
+  const { preview } = await prepareExternalPublication(f.file, options, {
+    ...f.deps,
+    fetch: async (url, init) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/repositories")) {
+        const response = await f.deps.fetch(url, init);
+        return new Response(response.body, {
+          headers: {
+            "Codex-Security-Private-Import-Providers": "wiz",
+            "Codex-Security-Repository-Import-Severities": "high,medium,low",
+          },
+        });
+      }
+      expect(path).toEndWith("/finding-imports/context");
+      return privateInboxContext();
+    },
+  });
+  expect(preview.privateImport).toBeDefined();
+  expect(preview.findings).toHaveLength(1);
+  expect(preview.findings[0]?.evidence.severity).toBe("unknown");
+  expect(preview.excluded).toEqual([]);
+});
+
+test("repository preview excludes all unreported severities before source lookups", async () => {
+  const f = await fixture([normalized("unreported", "unknown")]);
+  let requests = 0;
+  const prepare = prepareExternalPublication(f.file, options, {
+    ...f.deps,
+    fetch: async (url, init) => {
+      expect(new URL(url).pathname).toEndWith("/repositories");
+      requests++;
+      const response = await f.deps.fetch(url, init);
+      return new Response(response.body, {
+        headers: {
+          "Codex-Security-Repository-Import-Severities":
+            "critical,high,medium,low,informational",
+        },
+      });
+    },
+  });
+  await expect(prepare).rejects.toMatchObject({
+    selection: {
+      read: 1,
+      findings: [],
+      excluded: [{ position: 1, source_finding_id: "unreported" }],
+    },
+  });
+  expect(requests).toBe(1);
+  expect(f.posts).toHaveLength(0);
+});
 
 test("a zero-record report needs no Cloud account, destination lookup, confirmation, or submission", async () => {
   const f = await fixture([]);
@@ -3600,16 +3793,15 @@ test.each([
   },
 );
 
-test("Sonar replays the selected evidence locally and to Cloud without signing in to Sonar again", async () => {
-  const repo = "https://github.com/example/project";
-  const source = {
+function sonarCapture(repositoryUrl: string) {
+  return {
     format: "sonar-issues/v1" as const,
     server: "https://sonarcloud.io",
     organization: "example",
     project: "example_project",
     branch: "main",
     projectBase: "",
-    repositoryUrl: repo,
+    repositoryUrl,
     pages: [
       {
         paging: { pageIndex: 1, pageSize: 100, total: 1 },
@@ -3638,6 +3830,11 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
       },
     ],
   };
+}
+
+test("Sonar replays the selected evidence locally and to Cloud without signing in to Sonar again", async () => {
+  const repo = "https://github.com/example/project";
+  const source = sonarCapture(repo);
   const f = await fixture(source, repo);
   const checkout = join(f.root, "checkout");
   const git = promisify(execFile);
@@ -4235,13 +4432,17 @@ async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
   return { f, input, project, map, prepare, loseResponse };
 }
 
-test("Checkmarx publishes a native SAST finding only to its declared Cloud repository", async () => {
-  const row = {
+function checkmarxSastRow() {
+  return {
     type: "sast",
     similarityId: "17",
     severity: "MEDIUM",
     data: { resultHash: "c97c", queryName: "Example_Query" },
   };
+}
+
+test("Checkmarx publishes a native SAST finding only to its declared Cloud repository", async () => {
+  const row = checkmarxSastRow();
   const f = await fixture({ scanID: "scan-a", totalCount: 1, results: [row] });
   const selected = {
     ...options,
@@ -4550,6 +4751,15 @@ function inspectorReportWithRelatedCves() {
   return { findings: [inspectorCodeFinding(), pkg] };
 }
 
+const exampleRepository = "https://github.com/example/project";
+const githubOrigin = {
+  ...blackDuckBomRow(),
+  componentVersionOriginName: "github",
+  componentVersionOriginId: "example/library/v1",
+  packageUrl: "pkg:github/Example/Library@v1",
+};
+const nativeSemgrep = semgrepJson();
+
 test.each([
   {
     provider: "inspector",
@@ -4569,6 +4779,53 @@ test.each([
       "22307dedb51cefecf56d11fd68f45324dceb5226bfddfbd48c635a462bb68fb5",
     expectedCount: 1,
   },
+  {
+    provider: "blackduck",
+    raw: blackDuckBomReport([githubOrigin]),
+    normalizePrevious: normalizePreviousBlackDuckFindings,
+    sourceRepositoryUrl: exampleRepository,
+    previousDigest:
+      "ade8411242d3cac1fb490a86159d1b4a3b57a7d7f18bee64cadc971e3433185e",
+    expectedCount: 1,
+  },
+  {
+    provider: "veracode",
+    raw: veracodeMixedPolicyPage(),
+    normalizePrevious: normalizePreviousVeracodeFindings,
+    sourceRepositoryUrl: exampleRepository,
+    previousDigest:
+      "0ca5d464a797a1a17e18a69f9b4cad172a458be2955c8a24048df78e2798b8b6",
+    expectedCount: 2,
+  },
+  {
+    provider: "semgrep",
+    raw: {
+      ...nativeSemgrep,
+      explanations: [
+        {
+          op: "And",
+          matches: [{ ...nativeSemgrep.results[0]!, path: "src/other.ts" }],
+          children: [],
+        },
+      ],
+    },
+    normalizePrevious: (raw: unknown, sourceRepositoryUrl: string) =>
+      normalizePreviousSemgrepFindings(raw, { sourceRepositoryUrl }),
+    sourceRepositoryUrl: exampleRepository,
+    previousDigest:
+      "2265f4b64025fe061d950e8b20eba222563001a781b645846646000fbbcdc4a0",
+    expectedCount: 1,
+  },
+  {
+    provider: "trivy",
+    raw: trivyReportWithManyLocations(),
+    normalizePrevious: (raw: unknown) =>
+      normalizePreviousTrivyFindings(raw, "cloud", "."),
+    sourceRepositoryUrl: exampleRepository,
+    previousDigest:
+      "b4158738af7b92798b6f2b77d8f07343a9422cfb0ffafe4db6410a2bfe7d3b1e",
+    expectedCount: 2,
+  },
 ] as const)(
   "a raw $provider retry preserves the repository request from the previous reader",
   async ({
@@ -4580,7 +4837,13 @@ test.each([
     expectedCount,
   }) => {
     const f = await fixture(raw, sourceRepositoryUrl);
-    const settings = { ...options, provider, sourceRepositoryUrl };
+    const settings = {
+      ...options,
+      provider,
+      ...(provider === "trivy"
+        ? { trivyScanRoot: "." }
+        : { sourceRepositoryUrl }),
+    };
     const prepare = () => prepareExternalPublication(f.file, settings, f.deps);
 
     // Round-trip the previous SDK's output through JSON as a saved caller artifact.
@@ -4609,8 +4872,25 @@ test.each([
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.findings).toHaveLength(expectedCount);
     expect(fresh.preview.findings).not.toEqual(original.preview.findings);
+    expect((await fresh.publish()).verified).toBe(expectedCount);
   },
 );
+
+test("publishes a filtered numeric Veracode CWE that the previous reader rejected", async () => {
+  const raw = veracodeMixedPolicyPage();
+  raw._links.self.href += "&cwe=79";
+  const f = await fixture(raw, exampleRepository);
+  const settings = {
+    ...options,
+    provider: "veracode" as const,
+    sourceRepositoryUrl: exampleRepository,
+  };
+  expect(() =>
+    normalizePreviousVeracodeFindings(raw, exampleRepository),
+  ).toThrow("Veracode cwe must be an object");
+  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  expect((await prepared.publish()).verified).toBe(2);
+});
 
 test("a fresh AWS publication waits for the previous reader to save its request", async () => {
   const raw = continuumDetail();
@@ -4667,7 +4947,6 @@ const savedDependabotData = {
 };
 
 const checkmarxFormat = { format: "cxsast-xml" };
-const exampleRepository = "https://github.com/example/project";
 const otherRepository = "https://github.com/example/other";
 const savedEndorData = (repositoryUri: string) => ({
   ...checkmarxFormat,
@@ -6982,13 +7261,18 @@ test("readback retry preserves acknowledged findings and scanner diagnostics", a
   expect(f.posts).toHaveLength(1);
 });
 
-test("repository selection is sent on every discovery page", async () => {
-  const f = await fixture();
+test("each discovery page requests the repository and refreshes its private import capabilities", async () => {
+  const f = await fixture(blackDuckBomReport());
   const repository = `${f.destination().url}.git`;
   const queries: URLSearchParams[] = [];
   const prepared = await prepareExternalPublication(
     f.file,
-    { ...options, repository },
+    {
+      ...options,
+      repository,
+      provider: "blackduck",
+      sourceRepositoryUrl: f.destination().url,
+    },
     {
       ...f.deps,
       fetch: async (input, init) => {
@@ -6997,15 +7281,26 @@ test("repository selection is sent on every discovery page", async () => {
           return f.deps.fetch(input, init);
         queries.push(url.searchParams);
         const first = queries.length === 1;
-        return Response.json({
-          object: "page",
-          data: first ? [] : [f.destination()],
-          has_more: first,
-          next: first ? "next-page" : null,
-        });
+        return Response.json(
+          {
+            object: "page",
+            data: first ? [] : [f.destination()],
+            has_more: first,
+            next: first ? "next-page" : null,
+          },
+          {
+            headers: first
+              ? {
+                  "Codex-Security-Private-Import-Job-Version": "3",
+                  "Codex-Security-Private-Import-Providers": "blackduck",
+                }
+              : {},
+          },
+        );
       },
     },
   );
+  expect(prepared.preview.privateImport).toBeUndefined();
   expect(prepared.preview.destination.id).toBe(options.repository);
   expect(queries.map((query) => query.get("repository"))).toEqual([
     repository,
@@ -7386,6 +7681,44 @@ test("GitHub publication previews, imports, re-imports, updates and resumes sele
   expect(differentRef.counts.created).toBe(1);
   expect(f.reports.size).toBe(2);
 });
+
+test.each([
+  ["code scanning", () => normalizeGitHubCodeScanningAlerts([importedAlert()])],
+  [
+    "repository advisory",
+    () => normalizeGitHubAdvisories([importedAdvisory()]),
+  ],
+] as const)(
+  "the retained GitHub %s export binds its SDK projection to the original repository",
+  async (_, make) => {
+    const input = make();
+    const evidence = input.findings[0]!.evidence;
+    const f = await fixture(undefined, otherRepository);
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider: "github" },
+        f.deps,
+      );
+    evidence.details!.repository!.url = otherRepository;
+    await expect(prepare()).rejects.toThrow(
+      "does not match the original GitHub finding",
+    );
+    delete evidence.details;
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect(f.posts).toHaveLength(0);
+
+    f.state.repositoryUrl = exampleRepository;
+    await f.loseResponse(await prepare());
+    f.state.repositoryUrl = otherRepository;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts[1]).toBe(f.posts[0]);
+  },
+);
 
 test("GitHub imports reject a different Cloud destination before uploading", async () => {
   const imported = importedAlert("refs/heads/main", "git.example.test");
@@ -9255,6 +9588,50 @@ for (const [provider, report, normalize, dryRunTitle] of [
     expect(f.posts).toHaveLength(0);
   });
 
+  test(`${provider} checks empty SARIF runs before a fresh submission`, async () => {
+    const source = report();
+    const run = {
+      ...source.runs[0]!,
+      results: [],
+      versionControlProvenance: [
+        {
+          repositoryUri:
+            provider === "snyk"
+              ? "git+ssh://git@github.com/example/project.git"
+              : exampleRepository,
+        },
+      ],
+    };
+    const input = { ...source, runs: [...source.runs, run] };
+    const f = await fixture(input);
+    const selected = { ...options, provider };
+    const prepare = () => prepareExternalPublication(f.file, selected, f.deps);
+    expect((await prepare()).preview.findings).toHaveLength(1);
+
+    run.versionControlProvenance[0]!.repositoryUri = otherRepository;
+    await writeFile(f.file, JSON.stringify(input));
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect(f.posts).toHaveLength(0);
+
+    // An SDK selection carries only its result-bearing run. Existing approved
+    // requests must send those exact bytes, even if the native file has other runs.
+    const sdk = await prepareNormalizedExternalPublication(
+      normalize(input),
+      selected,
+      f.deps,
+    );
+    await f.loseResponse(sdk);
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+  });
+
   test.each([
     { uris: ["https://github.com/other/project"] },
     {
@@ -9294,6 +9671,25 @@ for (const [provider, report, normalize, dryRunTitle] of [
     },
   );
 }
+
+test("Snyk checks empty projects alongside findings in a CLI JSON export", async () => {
+  const project = { ...snykJson(), path: exampleRepository };
+  const other = {
+    ...project,
+    ok: true,
+    vulnerabilities: [],
+    path: otherRepository,
+  };
+  const f = await fixture([project, other]);
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      { ...options, provider: "snyk" },
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(0);
+});
 
 test("native Snyk remote tests bind file and normalized imports to the reported GitHub repository", async () => {
   const input = snykJson();
@@ -9882,6 +10278,11 @@ test.each([
     gitHubProject,
   ] as const,
   ["plugin", "unknown", gitHubProject] as const,
+  [
+    "plugin",
+    "git+ssh://git@github.com/example/project.git",
+    gitHubProject,
+  ] as const,
 ])(
   "Snyk %s export imports and replays with repository remote %s",
   async (format, repository, destination) => {
@@ -10058,6 +10459,11 @@ test.each([
     gitHubProject,
   ] as const,
   ["SARIF", "unknown", gitHubProject] as const,
+  [
+    "plugin",
+    "ssh://git@github.com/example/project.git?other",
+    gitHubProject,
+  ] as const,
 ])(
   "Snyk %s repository claim %s cannot target %s",
   async (format, repository, destination) => {
@@ -10242,6 +10648,67 @@ test("OpenGrep publication retains grouped evidence through Cloud readback and r
   expect(updated.evidence.source_data!["results"]).toEqual(
     expect.arrayContaining(input.results),
   );
+});
+
+test("repository severity exclusions identify every original OpenGrep trace", async () => {
+  const report = opengrepTraceJson();
+  const [first, second] = report.results;
+  const other = { ...first!, path: "src/other.ts" };
+  const input = {
+    ...report,
+    errors: [],
+    results: [first, other, null, second],
+  };
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "opengrep" as const,
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const parsed = normalizeOpenGrepFindings(input, settings);
+  const ids = new Map(
+    parsed.findings.map(({ source_finding_id, evidence }) => [
+      evidence.locations![0]!.path,
+      source_finding_id,
+    ]),
+  );
+  const deps = {
+    ...f.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const response = await f.deps.fetch(url, init);
+      if (!new URL(url).pathname.endsWith("/repositories")) return response;
+      const headers = new Headers(response.headers);
+      headers.set("Codex-Security-Repository-Import-Severities", "high");
+      return new Response(response.body, { headers });
+    },
+  };
+  for (const prepare of [
+    () => prepareExternalPublication(f.file, settings, deps),
+    () =>
+      prepareNormalizedExternalPublication(
+        { ...parsed },
+        { ...settings, provider: "semgrep" },
+        deps,
+      ),
+  ]) {
+    const failure = await prepare().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(NoPublishableFindingsError);
+    const { selection } = failure as NoPublishableFindingsError;
+    expect(selection.read).toBe(4);
+    expect(
+      selection.excluded.map(({ position, source_finding_id }) => [
+        position,
+        source_finding_id,
+      ]),
+    ).toEqual([
+      [1, ids.get(first!.path)!],
+      [2, ids.get(other.path)!],
+      [3, null],
+      [4, ids.get(first!.path)!],
+    ]);
+    expect(selection.excluded[2]).toEqual(parsed.excluded[0]);
+  }
+  expect(f.posts).toHaveLength(0);
 });
 
 test("empty OpenGrep Cloud imports retain scanner diagnostics without uploading", async () => {
@@ -11266,7 +11733,46 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
   expect(f.posts.map((body) => hash("sha256", body))).toEqual([bodyHash]);
 });
 
+const sonarReport = sonarCapture(exampleRepository);
+const trivy = trivyReport();
+const structuredPrivateProviders = [
+  {
+    provider: "blackduck",
+    raw: blackDuckBomReport(),
+    retained: { row: blackDuckBomRow() },
+    sourceRepositoryUrl: exampleRepository,
+  },
+  {
+    provider: "checkmarx",
+    raw: { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
+    retained: { row: checkmarxSastRow() },
+    sourceRepositoryUrl: exampleRepository,
+  },
+  {
+    provider: "sonar",
+    raw: sonarReport,
+    retained: { issue: sonarReport.pages[0]!.issues[0]! },
+    sourceRepositoryUrl: exampleRepository,
+  },
+  {
+    provider: "trivy",
+    raw: trivy,
+    retained: { vulnerability: trivy.Results[0]!.Vulnerabilities[0]! },
+  },
+  {
+    provider: "veracode",
+    raw: veracodePolicyPage(),
+    retained: { row: veracodePolicyRow() },
+    sourceRepositoryUrl: exampleRepository,
+  },
+] as const;
+
 test.each([
+  ...structuredPrivateProviders.map((scenario) => ({
+    ...scenario,
+    format: "security.findings.v1" as const,
+    jobVersion: 3 as const,
+  })),
   {
     provider: "github",
     format: "security.findings.v1",
@@ -11276,6 +11782,7 @@ test.each([
     provider: "inspector",
     format: "security.findings.v1",
     raw: inspectorReportWithRelatedCves(),
+    jobVersion: 2,
     sourceRepositoryUrl: inspectorRepositoryUrl,
     previousReader: normalizePreviousInspectorFindings,
     previousSha256:
@@ -11285,12 +11792,31 @@ test.each([
     provider: "continuum",
     format: "security.findings.v1",
     raw: continuumDetail(),
+    jobVersion: 2,
     sourceRepositoryUrl: continuumRepository,
     previousReader: normalizePreviousContinuumFindings,
     previousSha256:
       "98f888f8b748bb54a209b19de53af40867f5f129049a99da0387e697895aa320",
   },
   { provider: "snyk", format: "security.findings.v1", raw: snykSarif() },
+  {
+    provider: "endor",
+    format: "security.findings.v1",
+    raw: [
+      {
+        uuid: "malware-example",
+        meta: { name: "Malicious package" },
+        spec: {
+          project_uuid: "project",
+          target_dependency_package_name: "npm://example@1.0.0",
+          finding_metadata: { malware: { meta: { name: "MAL-2099-0001" } } },
+        },
+      },
+    ],
+    previousReader: (report: unknown) => normalizePreviousEndorFindings(report),
+    previousSha256:
+      "a6a869d6ac1ac02acf44849bbd55d571e350ff9ef3c8ca8562891eb8cdd64708",
+  },
   {
     provider: "endor",
     format: "endor.findings_json.v1",
@@ -11319,7 +11845,12 @@ test.each([
         : undefined;
     const f = await fixture(raw);
     const originalBytes = await readFile(f.file, "utf8");
-    const settings = { ...options, provider, sourceRepositoryUrl };
+    const settings = {
+      ...options,
+      provider,
+      sourceRepositoryUrl,
+      ...(provider === "trivy" && { trivyScanRoot: "." }),
+    };
     let contextVersion = "generation-a";
     let formats = [
       "security.findings.v1",
@@ -11332,9 +11863,15 @@ test.each([
     let terminal: "completed" | "failed" | "cancelled" = "completed";
     let advertised = false;
     const v1Jobs = "/finding-imports/jobs";
-    const v2Jobs = "/v2" + v1Jobs;
-    let supportsJobV2 = provider !== "inspector";
-    let expectedJobsPath = provider === "continuum" ? v2Jobs : v1Jobs;
+    const jobVersion =
+      "jobVersion" in scenario ? scenario.jobVersion : undefined;
+    const requestedVersion = String(jobVersion ?? 2);
+    const versionedJobs = jobVersion ? `/v${jobVersion}${v1Jobs}` : v1Jobs;
+    const upgrade = provider === "inspector" || provider === "checkmarx";
+    // An older acknowledgement also keeps the provider on its unversioned route.
+    let acknowledgedVersion = upgrade ? undefined : requestedVersion;
+    if (provider === "checkmarx") acknowledgedVersion = "2";
+    let expectedJobsPath = upgrade ? v1Jobs : versionedJobs;
     let canCreate = true;
     let fileRequest: string | undefined;
     let fileHash: string | undefined;
@@ -11397,13 +11934,10 @@ test.each([
           const response = await f.deps.fetch(url, init);
           const headers = new Headers();
           if (advertised)
-            headers.set(
-              "Codex-Security-Private-Import-Providers",
-              "snyk,github,endor,wiz,inspector,continuum",
-            );
+            headers.set("Codex-Security-Private-Import-Providers", provider);
           const version = "Codex-Security-Private-Import-Job-Version";
-          expect(new Headers(init.headers).get(version)).toBe("2");
-          if (supportsJobV2) headers.set(version, "2");
+          expect(new Headers(init.headers).get(version)).toBe(requestedVersion);
+          if (acknowledgedVersion) headers.set(version, acknowledgedVersion);
           return new Response(response.body, { headers });
         }
         if (path.startsWith("/external/")) return f.deps.fetch(url, init);
@@ -11432,6 +11966,12 @@ test.each([
             expect(doc.findings[0].source_finding_id).toBeTruthy();
             expect(doc.findings[0].evidence.source_data).toBeTruthy();
             reportCount = doc.findings.length;
+            if ("retained" in scenario) {
+              expect(doc.findings).toHaveLength(1);
+              expect(doc.findings[0].evidence.source_data).toMatchObject(
+                scenario.retained,
+              );
+            }
             if (provider === "inspector" || provider === "continuum") {
               const native = provider === "inspector" ? raw.findings : [raw];
               const expected = loseResponses ? native.slice(0, 1) : native;
@@ -11514,6 +12054,7 @@ test.each([
     expect(original.preview.privateImport?.format).toBe(format);
     const cli = createCliTest(main);
     const dryRun = [...f.command, "--dry-run"];
+    if (provider === "trivy") dryRun.push("--trivy-scan-root", ".");
     if (sourceRepositoryUrl)
       dryRun.push("--source-repository-url", sourceRepositoryUrl);
     dryRun[dryRun.indexOf("--provider") + 1] = provider;
@@ -11530,14 +12071,14 @@ test.each([
     canCreate = false;
     await expect(prepare()).rejects.toThrow("unavailable");
     canCreate = true;
-    // Stage the older AWS reader's serialized evidence to reproduce an upgrade
+    // Stage the older reader's serialized evidence to reproduce an upgrade
     // after upload. A fresh context below must use the current reader again.
     const staged =
-      scenario.previousReader && scenario.sourceRepositoryUrl
+      "previousReader" in scenario && scenario.previousReader
         ? await prepareNormalizedExternalPublication(
             JSON.parse(
               JSON.stringify(
-                scenario.previousReader(raw, scenario.sourceRepositoryUrl),
+                scenario.previousReader(raw, sourceRepositoryUrl ?? ""),
               ),
             ),
             settings,
@@ -11553,7 +12094,7 @@ test.each([
     const saved = JSON.parse(
       await readFile(interrupted.result.savedSubmission!, "utf8"),
     );
-    expect(saved.jobApiVersion).toBe(provider === "continuum" ? 2 : undefined);
+    expect(saved.jobApiVersion).toBe(upgrade ? undefined : jobVersion);
     expect(fileHash).toBe(saved.sha256);
     expect(fileRequest).toBe(saved.uploadRequestId);
     if ("previousSha256" in scenario) {
@@ -11573,30 +12114,30 @@ test.each([
     await expect(resumed.publish()).rejects.toThrow("lost job response");
     expect(jobRequest).toBe(saved.jobRequestId);
     expect(calls.at(-1)).toBe(`POST ${expectedJobsPath}`);
-    if (provider === "inspector") {
-      // The upgraded server accepts the same job request only on v2.
-      supportsJobV2 = true;
-      expectedJobsPath = v2Jobs;
+    if (upgrade) {
+      // The upgraded server accepts the same approved request on its new route.
+      acknowledgedVersion = requestedVersion;
+      expectedJobsPath = versionedJobs;
       loseNextJobResponse = true;
       await expect((await prepare()).publish()).rejects.toThrow(
         "lost job response",
       );
-      expect(calls.at(-1)).toBe(`POST ${v2Jobs}`);
+      expect(calls.at(-1)).toBe(`POST ${versionedJobs}`);
       expect(jobBodies).toHaveLength(2);
       expect(jobBodies[1]).toBe(jobBodies[0]);
       const promoted = JSON.parse(
         await readFile(interrupted.result.savedSubmission!, "utf8"),
       );
       expect(promoted).toMatchObject({
-        jobApiVersion: 2,
+        jobApiVersion: jobVersion,
         jobRequestId: saved.jobRequestId,
         uploadRequestId: saved.uploadRequestId,
         sha256: saved.sha256,
         fileId,
       });
     }
-    // A saved v2 job can still be retrieved if the catalogue acknowledgement disappears.
-    supportsJobV2 = false;
+    // Saved jobs retain their route if the catalogue acknowledgement disappears.
+    acknowledgedVersion = undefined;
     const completed = await (await prepare()).publish();
     expect(completed.privateJob?.counts.created).toBe(1);
     expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${jobId}`);
@@ -11611,7 +12152,7 @@ test.each([
     if (provider === "inspector") {
       // A completed old job cannot account for the newly admitted package finding.
       advertised = true;
-      supportsJobV2 = true;
+      acknowledgedVersion = requestedVersion;
       loseResponses = false;
       const next = await prepare();
       expect(next.preview.resumed).toBe(false);
@@ -11630,7 +12171,7 @@ test.each([
     }
     canCreate = false;
     advertised = false;
-    supportsJobV2 = true;
+    acknowledgedVersion = requestedVersion;
     expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
     expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${jobId}`);
     unavailable = true;
@@ -11651,8 +12192,7 @@ test.each([
     formats = ["security.findings.v1"];
     expect((await prepare()).preview.privateImport?.format).toBe(format);
     contextVersion = "generation-c";
-    expectedJobsPath =
-      provider === "inspector" || provider === "continuum" ? v2Jobs : v1Jobs;
+    expectedJobsPath = versionedJobs;
     unorderedUpdates = 0;
     advertised = true;
     canCreate = true;
@@ -11670,23 +12210,27 @@ test.each([
     expect((await fresh.publish()).privateJob?.status).toBe(terminal);
     expect(fileHash).toBe(fresh.preview.privateImport?.sha256);
     const failedJob = jobId;
-    if (expectedJobsPath === v2Jobs) {
-      // Losing AWS write access still allows the failed or cancelled job to be read.
-      advertised = false;
-      const before = calls.length;
-      const readOnly = await prepare();
-      expect(readOnly.preview.privateImport?.retryOfJobId).toBeUndefined();
-      expect((await readOnly.publish()).privateJob).toMatchObject({
-        id: failedJob,
-        status: terminal,
-      });
-      expect(calls.at(-1)).toBe(`GET ${v2Jobs}/${failedJob}`);
-      expect(
-        calls.slice(before).filter((call) => call.startsWith("POST")),
-      ).toEqual([]);
-      advertised = true;
-      supportsJobV2 = false; // The saved version also applies to its replacement attempt.
-    }
+    // The saved receipt remains readable after this provider drops out of discovery.
+    advertised = false;
+    acknowledgedVersion = undefined;
+    const before = calls.length;
+    const readOnly = await prepare();
+    expect(readOnly.preview.privateImport?.retryOfJobId).toBeUndefined();
+    expect((await readOnly.publish()).privateJob).toMatchObject({
+      id: failedJob,
+      status: terminal,
+    });
+    expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${failedJob}`);
+    contextVersion = "different-inbox";
+    await expect(prepare()).rejects.toThrow(
+      "Private findings import is unavailable",
+    );
+    expect(
+      calls.slice(before).filter((call) => call.startsWith("POST")),
+    ).toEqual([]);
+    contextVersion = "generation-c";
+    advertised = true;
+    acknowledgedVersion = undefined; // The saved version also applies to its replacement attempt.
     const retry = await prepare();
     const secondPreview = await prepare();
     expect(retry.preview.resumed).toBe(false);

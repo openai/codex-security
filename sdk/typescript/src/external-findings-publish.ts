@@ -20,6 +20,7 @@ import {
 } from "node:util/types";
 import {
   privateImportClient,
+  privateJobVersions,
   selectPrivateReport,
   type PrivateImportFormat,
   readPrivateCheckpoint,
@@ -49,6 +50,7 @@ import {
   EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
   semgrepSarifRepositories,
+  snykFileRepositories,
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import {
@@ -58,10 +60,14 @@ import {
 } from "./record.js";
 import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { wizFindingRepository } from "./wiz-findings.js";
+import { isWizPackageFinding, wizFindingRepository } from "./wiz-findings.js";
+import { getOpenGrepSourcePositions } from "./opengrep-findings.js";
 import { previousReaderSelection } from "./reader-selection.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
+import { retainedGitHubRepository } from "./github-findings.js";
 import {
+  needsPreviousSemgrepProjection,
+  normalizePreviousSemgrepFindings,
   normalizeSemgrepFindings,
   readSemgrepReport,
 } from "./semgrep-findings.js";
@@ -225,6 +231,7 @@ interface SavedSubmission {
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: {
+    repositorySeverities?: string[];
     retainedHostedSelection?: true;
     semgrepPartialScopeDigest?: string;
     identityFormat?: 2;
@@ -292,6 +299,67 @@ function wireJson(value: unknown): string {
 
 function jsonDigest(value: unknown, serialize = wireJson): string {
   return hash("sha256", serialize(value));
+}
+
+function matchesRepositoryEvidence(
+  expected: ExternalFindings["findings"][number]["evidence"],
+  stored: ExternalFindings["findings"][number]["evidence"],
+): boolean {
+  const storedWire = wireJson(stored);
+  if (wireJson(expected) === storedWire) return true;
+  // A repository can store a literal first-component colon with an explicit
+  // relative prefix. Match only that spelling in typed locations and their manifests.
+  const qualified = new Map<string, string>();
+  const locations = expected.locations?.map((location, index) => {
+    const { path } = location;
+    const actual = stored.locations?.[index]?.path;
+    if (actual !== `./${path}` || !/^[^/:\\@]+:[^/\\]/u.test(path))
+      return location;
+    qualified.set(path, actual);
+    return { ...location, path: actual };
+  });
+  if (!qualified.size) return false;
+  const packages = expected.packages?.map((item) => {
+    const path = item.manifest_path && qualified.get(item.manifest_path);
+    return path ? { ...item, manifest_path: path } : item;
+  });
+  return wireJson({ ...expected, locations, packages }) === storedWire;
+}
+
+function repositorySelection(
+  report: ExternalFindings,
+  severities: readonly string[] | undefined,
+  sourcePositions: PublicationSelection["sourcePositions"],
+): ExternalFindings {
+  if (
+    !severities ||
+    report.findings.every(({ evidence }) =>
+      severities.includes(evidence.severity),
+    )
+  )
+    return report;
+  const excluded = [...report.excluded];
+  const skipped = new Set(excluded.map(({ position }) => position));
+  let position = 0;
+  const findings = report.findings.filter(({ source_finding_id, evidence }) => {
+    do {
+      position++;
+    } while (skipped.has(position));
+    if (severities.includes(evidence.severity)) return true;
+    // OpenGrep can combine several nonconsecutive traces into one occurrence.
+    for (const row of sourcePositions?.get(source_finding_id) ?? [position])
+      excluded.push({
+        position: row,
+        source_finding_id,
+        reason: `The repository publisher does not accept severity ${JSON.stringify(evidence.severity)}. A local import or an available private inbox can retain this finding.`,
+      });
+    return false;
+  });
+  return {
+    ...report,
+    findings,
+    excluded: excluded.sort((a, b) => a.position - b.position),
+  };
 }
 
 function sameSubmission(
@@ -609,6 +677,7 @@ export async function prepareExternalPublication(
   );
   const provider = EXTERNAL_FINDINGS_PROVIDERS[settings.provider];
   let input: PreparePublicationInput;
+  let fileRepositories: (() => readonly ExternalSourceRepository[]) | undefined;
   if (settings.provider === "semgrep" || settings.provider === "snyk") {
     const semgrep = settings.provider === "semgrep";
     const report = await (semgrep
@@ -620,23 +689,26 @@ export async function prepareExternalPublication(
         url,
         semgrep ? platform : undefined,
       );
+      const semgrepOptions = {
+        sourceRepositoryUrl: settings.sourceRepositoryUrl,
+        sourceRepositories: references,
+      };
       const findings = semgrep
-        ? normalizeSemgrepFindings(
-            report,
-            {
-              sourceRepositoryUrl: settings.sourceRepositoryUrl,
-              sourceRepositories: references,
-            },
-            "cloud",
-          )
+        ? normalizeSemgrepFindings(report, semgrepOptions, "cloud")
         : await normalizeSnykFile(report, "cloud", references);
-      return normalizedPublicationInput(findings, provider);
+      const selection = normalizedPublicationInput(findings, provider);
+      if (semgrep && needsPreviousSemgrepProjection(findings))
+        selection.readPreviousFindings = () =>
+          normalizePreviousSemgrepFindings(report, semgrepOptions);
+      return selection;
     };
     const hosted =
       isRecord(report) &&
       (semgrep
         ? isSemgrepPlatformFormat(report["format"])
         : isSnykRestFormat(report["format"]));
+    if (!semgrep && !hosted)
+      fileRepositories = () => snykFileRepositories(report);
     input = hosted
       ? async (destination) => {
           try {
@@ -675,10 +747,12 @@ export async function prepareExternalPublication(
   } else {
     const parsed = await readExternalFindings(path, settings);
     rejectGuardianSelection(parsed.findings);
+    if (provider === "endor")
+      fileRepositories = () => parsed.sourceRepositories ?? [];
     input =
       parsed.publication ??
       normalizedPublicationInput(parsed.findings, provider);
-    input.previousAws = parsed.previousFindings;
+    input.readPreviousFindings = parsed.previousFindings;
   }
   return preparePublicationInput(
     input,
@@ -687,6 +761,7 @@ export async function prepareExternalPublication(
     readerSources,
     settings.sourceRepositoryUrl,
     path,
+    fileRepositories,
   );
 }
 
@@ -900,7 +975,8 @@ function hostedRepositoryMatcher(
 }
 
 interface PublicationSelection extends ExternalPublicationInput {
-  previousAws?: () => ExternalFindings;
+  sourcePositions?: ReadonlyMap<string, readonly number[]>;
+  readPreviousFindings?: () => ExternalFindings;
   original?: {
     parsed: ExternalFindings;
     identity: unknown;
@@ -1023,10 +1099,18 @@ function previousNormalizedFindings(
   return snapshot;
 }
 
-function publicationIdentity(parsed: ExternalFindings) {
-  return parsed.report === undefined
-    ? parsed.findings
-    : { findings: parsed.findings, report: reportForJson(parsed.report) };
+function publicationIdentity(
+  parsed: ExternalFindings,
+  provider?: NormalizedExternalPublicationOptions["provider"],
+) {
+  // For Trivy, the independently checked header binds the repository. Files
+  // and normalized rows use the same checkpoint when their findings agree.
+  if (
+    parsed.report === undefined ||
+    (provider === "trivy" && isTrivyReportHeader(parsed.report))
+  )
+    return parsed.findings;
+  return { findings: parsed.findings, report: reportForJson(parsed.report) };
 }
 
 function validatePublicationFindings(
@@ -1205,19 +1289,13 @@ function normalizedPublicationInput(
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
   rejectGuardianSelection(current);
-  // A Trivy header provides repository provenance for its findings. Either entrypoint
-  // can resume the same immutable request when the independently checked rows agree.
-  const identity =
-    provider === "trivy" &&
-    current.report &&
-    isTrivyReportHeader(current.report)
-      ? current.findings
-      : publicationIdentity(current);
+  const identity = publicationIdentity(current, provider);
   return {
     current,
     legacy: current,
     currentIdentity: identity,
     legacyIdentity: identity,
+    sourcePositions: getOpenGrepSourcePositions(ownData(input, "findings")),
     original,
     freshError,
     unprovenIdPrefixes: reader?.unprovenIdPrefixes,
@@ -1399,6 +1477,7 @@ async function preparePublicationInput(
   readerSources: readonly ExternalSourceRepository[],
   declaredUrl?: string,
   nativePath?: string,
+  fileRepositories?: () => readonly ExternalSourceRepository[],
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
   const progress = (event: ExternalPublicationProgress): void =>
@@ -1428,12 +1507,13 @@ async function preparePublicationInput(
     ? (url: string) => cloudSourceKey(url, "github")
     : cloudRepositoryUrlKey;
   const state = externalPublicationStateDirectory(environment);
-  let previousAws: ExternalFindings | undefined;
-  async function previousAwsIfSaved(
+  let previousFindings: ExternalFindings | undefined;
+  async function previousFindingsIfSaved(
     input: PublicationSelection,
     currentKey?: string,
   ) {
-    if (!input.previousAws || previousAws) return previousAws;
+    if (!input.readPreviousFindings || previousFindings)
+      return previousFindings;
     // An empty state directory (or just this current receipt) needs only the
     // current reader for its preview.
     const entries = await readdir(state).catch(
@@ -1449,8 +1529,8 @@ async function preparePublicationInput(
           name.split(".", 1)[0] !== currentKey,
       )
     )
-      previousAws = input.previousAws();
-    return previousAws;
+      previousFindings = input.readPreviousFindings();
+    return previousFindings;
   }
   async function checkSelection(input: PublicationSelection) {
     const parsed = input.current;
@@ -1465,7 +1545,7 @@ async function preparePublicationInput(
       !input.uncertainFindingIds?.length &&
       !input.unprovenOccurrenceCount &&
       !input.unprovenIdPrefixes?.length &&
-      !(await previousAwsIfSaved(input))?.findings.length
+      !(await previousFindingsIfSaved(input))?.findings.length
     )
       throw new NoPublishableFindingsError(parsed);
   }
@@ -1479,10 +1559,13 @@ async function preparePublicationInput(
     dependencies.credentials ?? (() => readCloudCredentials(environment))
   )();
   let privateProviders: Set<string> | undefined;
+  let repositorySeverities: string[] | undefined;
   const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
-  let jobApiVersion: 2 | undefined;
-  const aws =
-    options.provider === "inspector" || options.provider === "continuum";
+  const providerJobVersion = privateJobVersions[options.provider];
+  // Older services recognize an exact v2 request for AWS. Only ask for v3
+  // when publishing a provider introduced by that contract.
+  const requestedJobVersion = String(providerJobVersion ?? 2);
+  let jobApiVersion: typeof providerJobVersion;
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -1499,7 +1582,9 @@ async function preparePublicationInput(
           Authorization: `Bearer ${credentials.access_token}`,
           "ChatGPT-Account-ID": credentials.account_id,
           Accept: "application/json",
-          ...(repositoryCatalog ? { [jobVersionHeader]: "2" } : {}),
+          ...(repositoryCatalog
+            ? { [jobVersionHeader]: requestedJobVersion }
+            : {}),
           ...(body ? { "Content-Type": "application/json" } : {}),
         },
         ...(body ? { body: JSON.stringify(body) } : {}),
@@ -1520,15 +1605,21 @@ async function preparePublicationInput(
       );
     }
     if (repositoryCatalog) {
+      repositorySeverities = response.headers
+        .get("Codex-Security-Repository-Import-Severities")
+        ?.split(",")
+        .map((severity) => severity.trim());
       jobApiVersion =
-        aws && response.headers.get(jobVersionHeader) === "2" ? 2 : undefined;
+        response.headers.get(jobVersionHeader) === requestedJobVersion
+          ? providerJobVersion
+          : undefined;
       const advertised = response.headers.get(
         "Codex-Security-Private-Import-Providers",
       );
-      if (advertised !== null)
-        privateProviders = new Set(
-          advertised.split(",").map((provider) => provider.trim()),
-        );
+      privateProviders =
+        advertised === null
+          ? undefined
+          : new Set(advertised.split(",").map((provider) => provider.trim()));
     }
     return response.json();
   }
@@ -1628,7 +1719,7 @@ async function preparePublicationInput(
       if (capturedPending !== undefined) break;
     }
   }
-  // Changed AWS projections get new keys, but both transports must replay the
+  // Changed reader projections get new keys, but both transports must replay the
   // exact bytes already approved by the earlier reader when a checkpoint exists.
   const privateClient = privateImportClient(
     apiBaseUrl,
@@ -1637,18 +1728,22 @@ async function preparePublicationInput(
     dependencies.signal,
   );
   let previewContext: PrivateImportContext | undefined;
-  const currentAwsKey = resolved.previousAws
+  const currentReaderKey = resolved.readPreviousFindings
     ? scopeKey(resolved.currentIdentity)
     : undefined;
-  let previousAwsKey: string | undefined;
+  let previousReaderKey: string | undefined;
   let alternateKey: string | undefined;
-  let resumingPreviousAws = false;
+  let resumingPreviousReader = false;
   function previousCandidateKey(previous: ExternalFindings | undefined) {
     if (!previous?.findings.length) return;
     // The file reader already validated plain JSON evidence for Cloud. Only a
     // matching checkpoint needs the full normalized publication snapshot.
-    previousAwsKey ??= scopeKey(publicationIdentity(previous));
-    return previousAwsKey !== currentAwsKey ? previousAwsKey : undefined;
+    previousReaderKey ??= scopeKey(
+      publicationIdentity(previous, options.provider),
+    );
+    return previousReaderKey !== currentReaderKey
+      ? previousReaderKey
+      : undefined;
   }
   async function hasPrivateCheckpoint(
     key: string,
@@ -1662,10 +1757,13 @@ async function preparePublicationInput(
     // A completed import cannot acknowledge findings newly admitted by the
     // current reader. Pending uploads and jobs always retain their original bytes.
     if (
-      key === previousAwsKey &&
-      previousAws &&
+      key === previousReaderKey &&
+      previousFindings &&
       checkpoint.receipt?.status === "completed" &&
-      !sameFindingSelection(previousAws.findings, resolved.current.findings)
+      !sameFindingSelection(
+        previousFindings.findings,
+        resolved.current.findings,
+      )
     )
       return false;
     return checkpoint.contextVersion === (await context()).context_version;
@@ -1681,16 +1779,16 @@ async function preparePublicationInput(
       (await hasPrivateCheckpoint(otherKey, context))
     )
       throw new CodexSecurityError(
-        resumingPreviousAws
-          ? "Both AWS reader versions have saved publications for this report. Resume either one using its original normalized findings."
+        resumingPreviousReader
+          ? "Both reader versions have saved publications for this report. Resume either one using its original normalized findings."
           : "Another publication prepared this input. Run the command again to review and resume the saved request.",
       );
   }
-  if (currentAwsKey)
+  if (currentReaderKey)
     alternateKey = previousCandidateKey(
-      await previousAwsIfSaved(resolved, currentAwsKey),
+      await previousFindingsIfSaved(resolved, currentReaderKey),
     );
-  if (alternateKey && previousAws) {
+  if (alternateKey && previousFindings) {
     capturedPending = await readOptionalFile(
       join(state, alternateKey + ".pending.json"),
     );
@@ -1700,9 +1798,12 @@ async function preparePublicationInput(
       capturedPending !== undefined ||
       (await hasPrivateCheckpoint(alternateKey, context))
     ) {
-      projection = normalizedPublicationInput(previousAws, options.provider);
-      resumingPreviousAws = true;
-      alternateKey = currentAwsKey;
+      projection = normalizedPublicationInput(
+        previousFindings,
+        options.provider,
+      );
+      resumingPreviousReader = true;
+      alternateKey = currentReaderKey;
       await assertNoAlternateCheckpoint(context);
     }
   }
@@ -2047,8 +2148,12 @@ async function preparePublicationInput(
     const content = readSaved(record);
     const saved = submissionFindings(content.requests);
     const wire = wireJson(saved);
-    const expected = legacy ? legacyParsed.findings : parsed.findings;
     const projection = content.inputProjection;
+    const expected = repositorySelection(
+      legacy ? legacyParsed : parsed,
+      projection?.repositorySeverities,
+      input.sourcePositions,
+    ).findings;
     if (
       projection &&
       (!sameFindingSelection(saved, expected) ||
@@ -2709,9 +2814,9 @@ async function preparePublicationInput(
   async function underPublishLocks<T>(operation: () => Promise<T>) {
     // An older publisher may already hold its lock before its checkpoint exists.
     // Derive that key for actual writes, even after a checkpoint-free preview.
-    if (resolved.previousAws && !previousAws) {
-      previousAws = resolved.previousAws();
-      alternateKey = previousCandidateKey(previousAws);
+    if (resolved.readPreviousFindings && !previousFindings) {
+      previousFindings = resolved.readPreviousFindings();
+      alternateKey = previousCandidateKey(previousFindings);
       if (alternateKey) lockKeys.push(alternateKey);
     }
     return underLocks(lockKeys, operation);
@@ -2876,7 +2981,7 @@ async function preparePublicationInput(
 
   function checkRepositories(
     { findings, report }: Pick<ExternalFindings, "findings" | "report">,
-    historicalCheckmarx = Boolean(saved),
+    historical = Boolean(saved),
   ) {
     checkTrivyReportProvider(options.provider, report);
     // A catalog casing or spelling change keeps the original source comparison target.
@@ -2911,6 +3016,16 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
+    // An immutable retry may refer to an earlier repository name. Additional
+    // file declarations outside its saved findings authorize no new writes.
+    if (!historical)
+      for (const { url } of fileRepositories?.() ?? [])
+        requireDestination(
+          "Source report",
+          options.provider === "snyk"
+            ? normalizeHostedGitRepositoryUrl(url, destination.url, true)
+            : url,
+        );
     // Historical checkpoints already fixed the provider and request bytes.
     // Recheck any projected source against the destination discovered for this retry.
     const replay =
@@ -2929,7 +3044,7 @@ async function preparePublicationInput(
       findings,
       report,
       "cloud",
-      historicalCheckmarx,
+      historical,
     );
     requireDestination("Checkmarx source", checkmarx.reportUrl);
     const repositories = replay
@@ -2991,7 +3106,8 @@ async function preparePublicationInput(
         checkmarxRepository(finding)?.url,
         evidence.details?.repository?.url,
         options.provider === "wiz"
-          ? hasProjection
+          ? hasProjection ||
+            (!historical && isWizPackageFinding(evidence.source_data))
             ? wizFindingRepository(evidence, "cloud")?.url
             : wizCsvRepositoryUrl(evidence)
           : undefined,
@@ -3006,6 +3122,9 @@ async function preparePublicationInput(
               Boolean(replay && !blackDuckUrl),
             )
           : []),
+        options.provider === "github" && !historical
+          ? retainedGitHubRepository(finding)
+          : undefined,
         options.provider === "github"
           ? dependabotRepository(finding)
           : undefined,
@@ -3031,7 +3150,7 @@ async function preparePublicationInput(
   // Existing repository submissions keep their original request bodies and receipts.
   const privatePath = join(state, `${key}.private-import.json`);
   const privateSaved = await readOptionalFile(privatePath);
-  if (resumingPreviousAws && !saved && privateSaved === undefined)
+  if (resumingPreviousReader && !saved && privateSaved === undefined)
     throw new CodexSecurityError(
       "The saved publication changed. Run the command again to preview this report.",
     );
@@ -3114,7 +3233,7 @@ async function preparePublicationInput(
         : readPrivateCheckpoint(data, binding);
     }
     const previous = checkpointForContext(privateSaved);
-    const canStartJob = !aws || privateProviders?.has(source.provider) === true;
+    const canStartJob = privateProviders?.has(source.provider) === true;
     function requireAccess(value: typeof context, saved: typeof previous) {
       if (
         !value.can_read ||
@@ -3128,7 +3247,6 @@ async function preparePublicationInput(
           "Private findings import is unavailable for this account or report format.",
         );
     }
-    requireAccess(context, previous);
     const retryOfJobId =
       unsuccessfulJob(previous?.receipt) &&
       canStartJob &&
@@ -3139,6 +3257,7 @@ async function preparePublicationInput(
         : undefined;
     const resumed = previous !== undefined && retryOfJobId === undefined;
     checkRepositories(parsed, resumed);
+    requireAccess(context, previous);
     const privateImport = {
       format: report.format,
       contextVersion: binding.contextVersion,
@@ -3169,7 +3288,7 @@ async function preparePublicationInput(
           const stored = checkpointForContext(
             await readOptionalFile(privatePath),
           );
-          if (resumingPreviousAws && !stored)
+          if (resumingPreviousReader && !stored)
             throw new CodexSecurityError(
               "The saved private import changed. Run the command again to preview this report.",
             );
@@ -3184,7 +3303,7 @@ async function preparePublicationInput(
               "A repository submission is pending. Review its saved request before continuing.",
             );
           // Both routes share request IDs. A server upgrade can promote an
-          // existing AWS job, and its saved route also survives gate rollback.
+          // existing job, and its saved route also survives gate rollback.
           const checkpoint = {
             ...(active ?? {
               ...binding,
@@ -3282,16 +3401,22 @@ async function preparePublicationInput(
     };
   }
 
+  // The original selection and request bytes govern a retry even if discovery changes.
+  const severities = saved
+    ? saved.inputProjection?.repositorySeverities
+    : repositorySeverities;
+  const direct = repositorySelection(parsed, severities, input.sourcePositions);
+  if (!direct.findings.length) throw new NoPublishableFindingsError(direct);
   let requests = saved?.requests;
   if (!requests) {
     let preparedCount = 0;
     progress({
       phase: "preparing",
       completed: 0,
-      total: parsed.findings.length,
+      total: direct.findings.length,
     });
     const previousReports = await readInBatches(
-      parsed.findings,
+      direct.findings,
       async (finding): Promise<SourceReportSummary | undefined> => {
         const query = new URLSearchParams({
           provider: source.provider,
@@ -3321,7 +3446,7 @@ async function preparePublicationInput(
         progress({
           phase: "preparing",
           completed: ++preparedCount,
-          total: parsed.findings.length,
+          total: direct.findings.length,
         });
         return previous;
       },
@@ -3329,7 +3454,7 @@ async function preparePublicationInput(
     requests = [];
     let current: FindingImportRequest | undefined;
     let currentBytes = 0;
-    for (const [index, finding] of parsed.findings.entries()) {
+    for (const [index, finding] of direct.findings.entries()) {
       const previous = previousReports[index];
       const environmentId =
         previous?.environment_id ?? destination.import_environment_id;
@@ -3391,6 +3516,7 @@ async function preparePublicationInput(
     legacyApproval: saved?.legacyApproval,
     wireKey: saved?.wireKey ?? (fileKey === key ? undefined : key),
     inputProjection: saved?.inputProjection ?? {
+      ...(direct !== parsed && { repositorySeverities: severities }),
       identityFormat: saved ? undefined : 2,
       ...(scopedSemgrepReport && { retainedHostedSelection: true }),
       ...(bindSemgrepScope && {
@@ -3413,7 +3539,7 @@ async function preparePublicationInput(
     submission.approvedRepositoryPlatform = "other";
   if (inspectorProjectMap) submission.inspectorProjectMapRequired = true;
   const preview: ExternalPublicationPreview = {
-    ...parsed,
+    ...direct,
     findings: submissionFindings(requests),
     cloudApiUrl,
     cloudUrl: cloudFindingsUrl(environment, destination.id),
@@ -3453,18 +3579,18 @@ async function preparePublicationInput(
           cloudApiUrl,
           cloudUrl: preview.cloudUrl,
           status:
-            parsed.excluded.length || counts.error ? "partial" : "complete",
+            direct.excluded.length || counts.error ? "partial" : "complete",
           read: parsed.read,
           ...(parsed.report === undefined
             ? {}
             : snapshotNormalizedFindings({ report: parsed.report })),
-          ready: parsed.findings.length,
-          excluded: parsed.excluded,
+          ready: direct.findings.length,
+          excluded: direct.excluded,
           receipts: acknowledged,
           counts,
           failures,
           unacknowledged:
-            parsed.findings.length -
+            direct.findings.length -
             Object.values(counts).reduce((sum, count) => sum + count, 0),
           verified,
         };
@@ -3593,7 +3719,7 @@ async function preparePublicationInput(
           progress({
             phase: "uploading",
             completed: 0,
-            total: parsed.findings.length,
+            total: direct.findings.length,
           });
           let acknowledgedCount = 0;
           for (const [batchIndex, batch] of requests.entries()) {
@@ -3607,7 +3733,7 @@ async function preparePublicationInput(
             progress({
               phase: "uploading",
               completed: acknowledgedCount,
-              total: parsed.findings.length,
+              total: direct.findings.length,
             });
             if (batchIndex === receipts.length) {
               receipts.push(receipt);
@@ -3652,7 +3778,10 @@ async function preparePublicationInput(
               report.version < item.version! ||
               (report.version === item.version &&
                 (report.observation_id !== item.observation_id ||
-                  wireJson(report.evidence) !== wireJson(expected.evidence))) ||
+                  !matchesRepositoryEvidence(
+                    expected.evidence,
+                    report.evidence,
+                  ))) ||
               report.source_finding_id !== expected.source_finding_id ||
               report.repo_id !== destination.id ||
               report.repo_connector_id !== destination.repo_connector_id ||
