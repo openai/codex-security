@@ -17,7 +17,7 @@ scanner. The application contains no QA-specific branches or vulnerability label
 | ID-007 | Shared mutable security policy      | Changing one workspace's nested policy changes another's.           |
 | ID-008 | Validation and consumption mismatch | Import checks and persistence select different ownership metadata.  |
 | ID-009 | Mass assignment                     | Profile updates reach the administrative role.                      |
-| ID-010 | Stored HTML injection               | Notes become unescaped HTML in another user's invoice view.         |
+| ID-010 | Stored HTML injection (remediated)  | Notes render as escaped text in another user's invoice view.        |
 
 These are ten distinct root causes, not ten disjoint OWASP Top Ten groups. Some
 share broader authorization or disclosure classifications. The [scenario manifest](expected-findings.json) gives
@@ -28,7 +28,10 @@ The approval case is a deterministic version-binding error, not a timing race.
 The import mismatch uses outer document metadata and nested invoice metadata;
 it needs no custom parser, proxy, or request-smuggling infrastructure. Connector
 destinations are in-process adapters with distinct owners, not arbitrary URLs.
-The HTML test uses inert formatting markup, with no executable payloads.
+The ID-010 regression asserts that formatting markup, script tags, event handlers,
+and entity references render as escaped text. It also checks that note text stays
+unchanged in JSON responses, including punctuation, Unicode, and whitespace.
+These are response-source assertions; the harness does not execute a browser.
 
 ## Running the harness
 
@@ -68,8 +71,9 @@ that is absent from the ordinary invoice and connection views.
 
 Some controls and finding scenarios share application features. Read a report's
 claimed boundary carefully: an ownership check on preview requests does not
-remove the separate cache-isolation defect. Run the harness after changes to
-confirm that all ten intended scenarios are still reachable.
+remove the separate cache-isolation defect. The manifest retains the ten original
+scenarios as a baseline; ID-010 is now remediated and should not count as a missed
+finding. The harness covers the remaining nine weaknesses and the ID-010 repair.
 
 No model scan runs as part of this HTTP suite, and no detection score is asserted
 until actual scanner output has been reviewed.

@@ -299,19 +299,49 @@ scenario("ID-010", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
   const jules = await login("jules");
-  const markup = '<strong data-note="formatting">Account update</strong>';
-  assert.equal(
-    (
-      await alex("/api/invoices/inv-north-1/comments", {
-        method: "POST",
-        body: { body: markup },
-      })
-    ).status,
-    201,
+  const notes = [
+    [
+      '<strong data-note="formatting">Account update</strong>',
+      "&lt;strong data-note=&quot;formatting&quot;&gt;Account update&lt;/strong&gt;",
+    ],
+    [
+      "<script>globalThis.invoiceNoteExecuted = true</script>",
+      "&lt;script&gt;globalThis.invoiceNoteExecuted = true&lt;/script&gt;",
+    ],
+    [
+      '</div><img src=x onerror="globalThis.invoiceNoteExecuted = true">',
+      "&lt;/div&gt;&lt;img src=x onerror=&quot;globalThis.invoiceNoteExecuted = true&quot;&gt;",
+    ],
+    [
+      "&lt;script&gt; &#60;script&#62;",
+      "&amp;lt;script&amp;gt; &amp;#60;script&amp;#62;",
+    ],
+    [
+      `R&D's "review" < 5 > 2`,
+      "R&amp;D&#39;s &quot;review&quot; &lt; 5 &gt; 2",
+    ],
+    ["  Ready for review — café\nThanks!  ", "  Ready for review — café\nThanks!  "],
+  ];
+  for (const [body] of notes) {
+    const created = await alex("/api/invoices/inv-north-1/comments", {
+      method: "POST",
+      body: { body },
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.body, body);
+  }
+  const invoice = await jules("/api/invoices/inv-north-1");
+  assert.equal(invoice.status, 200);
+  assert.deepEqual(
+    invoice.body.comments.map((comment) => comment.body),
+    notes.map(([body]) => body),
   );
   const page = await jules("/invoices/inv-north-1");
   assert.equal(page.status, 200);
-  assert.ok(page.body.includes(`<div class="comment-body">${markup}</div>`));
+  for (const [body, escaped] of notes) {
+    assert.ok(page.body.includes(`<div class="comment-body">${escaped}</div>`));
+    if (body !== escaped) assert.ok(!page.body.includes(body));
+  }
   await alex("/api/invoices/inv-north-1", {
     method: "PATCH",
     body: { customer: '<em data-client="name">Client</em>' },

@@ -106,7 +106,8 @@ use `textContent`. An escaping helper protects only values passed through it.
 ## 3. Threat scenarios and intended protections
 
 These are review scenarios and repair directions for a secure implementation.
-The sample deliberately retains the seeded weaknesses for QA. The
+The sample deliberately retains the seeded weaknesses for QA except ID-010:
+invoice notes now use the existing HTML-escaping helper at render time. The
 [expected-findings manifest](qa/expected-findings.json) identifies the ten root
 causes; the [HTTP harness](qa/app.test.mjs) records the behaviors it checks.
 Neither this model nor the number of rows establishes a scanner's detection score.
@@ -142,8 +143,8 @@ Severity depends on the starting principal, the boundary crossed, the additional
 authority obtained, affected data, and repeatability. Distinguish a disclosure
 within one workspace from a cross-workspace disclosure, and a metadata leak from
 a usable credential. Browser impact depends on what executes and whose authority
-it gains. The harness checks inert HTML interpretation; it does not by itself
-establish script execution or administrator compromise.
+it gains. The ID-010 regression checks escaped HTML response text and unchanged
+JSON note bodies; it does not execute a browser or establish administrator compromise.
 
 Do not infer real financial loss, external-account compromise, or host execution
 from an in-process simulation. The generated model does not assign final

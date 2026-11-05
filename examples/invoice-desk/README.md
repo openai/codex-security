@@ -8,7 +8,8 @@ For a first scan, follow the [walkthrough](walkthrough.md). It copies only
 `app/` into a new directory, then takes you through inspecting a finding,
 patching it and verifying the fix. Keep this sample guide, the [sample threat
 model](SECURITY.md), the [QA answer key](qa/README.md), and previous results
-outside the copy. All ten seeded scenarios are in the app itself.
+outside the copy. The original baseline has ten seeded scenarios. Stored HTML
+injection (ID-010) is now remediated; the other nine remain in the app.
 
 To evaluate a pull request or inspect the scheduled baseline, see
 [CI and OpenAI scans](#ci-and-openai-scans).
@@ -43,11 +44,10 @@ node --test examples/invoice-desk/qa/app.test.mjs
 ```
 
 The tests start their own loopback servers on available ports and clean them up.
-They exercise all ten seeded behaviors, ordinary application workflows, and
-secure controls. **Passing scenario tests mean the intended weaknesses remain
-present.** They do not mean the application is secure or that a scanner found
-ten issues. The repository's Invoice Desk workflow runs this suite in CI without
-installing dependencies.
+They exercise nine seeded weaknesses, the ID-010 escaping regression, ordinary
+application workflows, and secure controls. **Passing scenario tests do not mean
+the application is secure or that a scanner found every issue.** The repository's
+Invoice Desk workflow runs this suite in CI without installing dependencies.
 
 ## Scan without including the answer key
 
