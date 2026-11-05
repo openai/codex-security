@@ -18,7 +18,12 @@ from deep_scan_config import resolve_deep_scan_setup
 from finalize_scan_contract import _validate_finding_evidence, manifest_is_sealed
 from workbench.handoff import require_current_continuation
 from workbench.saved_sources import selected_iteration_result_path
-from workbench.storage import archived_deep_path, create_private_directory, saved_deep_workers
+from workbench.storage import (
+    archived_deep_path,
+    create_private_directory,
+    saved_deep_workers,
+    worker_usage_directory,
+)
 from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count, require_scan_target_unchanged
@@ -404,6 +409,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
             else scan["user_context"]
         ),
         "scanDir": scan["scan_dir"],
+        "workerUsageDirectory": str(worker_usage_directory(run["scan_id"])),
         "schemaVersion": run["schema_version"],
         **(
             {"evidenceRepairRequired": True} if selected_evidence_repair_required(scan, run) else {}

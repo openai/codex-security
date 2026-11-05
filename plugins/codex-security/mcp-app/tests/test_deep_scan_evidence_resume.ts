@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { WorkerTelemetryOptions } from "../src/deep-scan/types.js";
+import { workerUsage } from "./deep_scan_worker_usage_assertions.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import { readJson, writeJson } from "./support/json.ts";
 import {
@@ -90,9 +92,24 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
   const acceptedBytes = await Promise.all(
     acceptedPaths.map((file) => readFile(file, "utf8")),
   );
+  const evidenceAttempts = new Set<string>();
   let repairCalls = 0;
   const executor = Object.assign(new FakeExecutor(), {
-    async repairFindingEvidence(prompt: string, cwd: string) {
+    async repairFindingEvidence(
+      prompt: string,
+      cwd: string,
+      _signal: AbortSignal,
+      _schema: Record<string, unknown>,
+      telemetry?: WorkerTelemetryOptions,
+    ) {
+      assert.ok(telemetry?.attemptId);
+      assert.equal(
+        telemetry.workerUsageDirectory,
+        fixture.run.workerUsageDirectory,
+      );
+      evidenceAttempts.add(telemetry.attemptId);
+      await telemetry.onThreadStarted?.(`evidence-${telemetry.attemptId}`);
+      await telemetry.onUsage?.(workerUsage(1), "evidence-turn");
       assert.equal(
         cwd,
         join(fixture.run.scanDir, "artifacts", "deep_discovery"),
@@ -128,6 +145,17 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
     "repair must honor the discovery cap",
   );
   assert.equal(repairCalls, withLaterBatch ? 3 : 2);
+  assert.equal(evidenceAttempts.size, repairCalls);
+  for (const attempt of evidenceAttempts) {
+    const receipt = await readJson(
+      join(fixture.run.workerUsageDirectory!, `${attempt}.json`),
+    );
+    assert.equal(receipt.kind, "evidence");
+    assert.equal(receipt.outcome, "succeeded");
+    assert.equal(receipt.threadId, `evidence-${attempt}`);
+    assert.equal(receipt.turnId, "evidence-turn");
+    assert.deepEqual(receipt.usage, workerUsage(1));
+  }
   assert.equal(store.run.dispatchedCount, withLaterBatch ? 2 : 1);
   assert.equal(store.failureMessages.length, 0);
   assert.equal(published.length, 1);

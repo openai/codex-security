@@ -197,6 +197,24 @@ test("an exact repeat of a merged source saturates without another comparison", 
   );
 });
 
+test("reordered extension fields do not spend a comparison or restart the no-new streak", async () => {
+  const first = {
+    ...base,
+    extensions: { observed: { input: "request", operation: "lookup" } },
+  };
+  const repeat = {
+    ...base,
+    extensions: { observed: { operation: "lookup", input: "request" } },
+  };
+  const { terminal, draft } = await scanLoop([[first], [repeat]], {
+    maxDiscoveryRuns: 2,
+    stopAfterNoNew: 1,
+  });
+  assert.equal(terminal.terminalReason, "saturated");
+  assert.equal(draft.findings.length, 1);
+  assert.equal(draft.findings[0].provenance.sourceFindings?.length, 2);
+});
+
 test("one scan's distinct rule and anchor survive a cross-scan alias", async () => {
   const extract = {
     ...base,

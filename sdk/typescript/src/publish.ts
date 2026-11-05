@@ -1,4 +1,9 @@
 import { findingEntry, notify } from "./value.js";
+import {
+  PublicationTelemetryRecorder,
+  type PublicationTelemetry,
+  type PublicationTelemetryObserver,
+} from "./publication-telemetry.js";
 import type { CodexSecuritySurface } from "./api.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
@@ -80,6 +85,8 @@ export interface PublishScanOptions extends Pick<
   dryRun?: boolean;
   skipExisting?: boolean;
   onProgress?: (event: PublishScanProgress) => void;
+  /** Best-effort content-free outcome accounting, including preparation failures. */
+  onTelemetry?: PublicationTelemetryObserver;
 }
 
 export type PublishScanProgress =
@@ -130,6 +137,7 @@ export interface PublishScanResult {
   issues?: PreparedPublicationIssue[];
   indeterminate?: boolean;
   warnings?: string[];
+  telemetry?: PublicationTelemetry;
 }
 
 export type CheckScanPublicationOptions = Pick<
@@ -240,6 +248,42 @@ export async function publishScanInternal(
   options: PublishScanOptions,
   dependencies: PublishScanDependencies = {},
 ): Promise<PublishScanResult> {
+  const telemetry = new PublicationTelemetryRecorder(
+    "linear",
+    options.onTelemetry,
+  );
+  try {
+    const result = await publishScanAttempt(
+      scanDirectory,
+      options,
+      dependencies,
+      telemetry,
+    );
+    result.telemetry ??= telemetry.snapshot(
+      options.dryRun ? "preview" : "completed",
+    );
+    telemetry.notify(result.telemetry);
+    return result;
+  } catch (error) {
+    telemetry.notify(
+      telemetry.snapshot(
+        telemetry.outcome === "indeterminate"
+          ? "indeterminate"
+          : options.signal?.aborted
+            ? "canceled"
+            : "failed",
+      ),
+    );
+    throw error;
+  }
+}
+
+async function publishScanAttempt(
+  scanDirectory: string,
+  options: PublishScanOptions,
+  dependencies: PublishScanDependencies,
+  telemetry: PublicationTelemetryRecorder,
+): Promise<PublishScanResult> {
   options.signal?.throwIfAborted();
   const environment = dependencies.environment ?? process.env;
   const linearApiKey = publicationApiKey(options, environment);
@@ -249,6 +293,7 @@ export async function publishScanInternal(
     { ...options, environment },
   );
   let prepared = preparedScan;
+  telemetry.counts.selected = preparedScan.issues.length;
   options.signal?.throwIfAborted();
   const result: PublishScanResult = {
     scanId: prepared.scanId,
@@ -267,6 +312,7 @@ export async function publishScanInternal(
       dependencies.inspectPublicationStore ?? inspectPublicationStore
     )(preparedScan, environment, options.signal);
     result.counts.skipped = result.skipped.length;
+    telemetry.counts.reused = result.skipped.length;
     const recorded = new Set(result.skipped.map((issue) => issue.findingId));
     prepared = {
       ...preparedScan,
@@ -276,7 +322,22 @@ export async function publishScanInternal(
     };
     options.signal?.throwIfAborted();
   }
-  const saveReceipt = dependencies.writeReceipt ?? writePublicationReceipt;
+  const saveReceipt = async (
+    receipt: PublishScanResult,
+    environment: NodeJS.ProcessEnv,
+  ) => {
+    receipt.telemetry = telemetry.snapshot(
+      receipt.indeterminate
+        ? "indeterminate"
+        : options.signal?.aborted
+          ? "canceled"
+          : telemetry.outcome,
+    );
+    await (dependencies.writeReceipt ?? writePublicationReceipt)(
+      receipt,
+      environment,
+    );
+  };
   if (options.dryRun) {
     return { ...result, dryRun: true, issues: prepared.issues };
   }
@@ -325,6 +386,12 @@ export async function publishScanInternal(
     total: prepared.issues.length,
   });
   let invocation: PublicationCodexResult | undefined;
+  telemetry.attempted = true;
+  telemetry.counts.submitted = prepared.issues.length;
+  telemetry.counts.created = null;
+  telemetry.counts.acknowledged = null;
+  telemetry.counts.failed = null;
+  telemetry.outcome = "indeterminate";
   if (linearClient !== undefined) {
     await publishLinearApiIssues(
       prepared,
@@ -340,6 +407,7 @@ export async function publishScanInternal(
       {
         surface: dependencies.surface ?? "sdk",
         command: "publish",
+        attemptId: telemetry.attemptId,
         // Native Codex resolves provider and metadata from all its config layers.
         providerResolved: false,
       },
@@ -436,6 +504,16 @@ export async function publishScanInternal(
   }
   result.failed = handoffResults.failed;
   result.counts.failed = result.failed.length;
+  telemetry.counts.created = handoffResults.created.length;
+  telemetry.counts.acknowledged = handoffResults.created.length;
+  telemetry.counts.failed = handoffResults.indeterminate
+    ? null
+    : handoffResults.failed.length;
+  telemetry.outcome = handoffResults.indeterminate
+    ? "indeterminate"
+    : handoffResults.failed.length > 0
+      ? "failed"
+      : "completed";
   if (progressObserver !== undefined) {
     const outcomes = new Map(
       [...handoffResults.created, ...handoffResults.failed].map(findingEntry),
