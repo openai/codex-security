@@ -62,7 +62,13 @@ export async function readScanBudgetUsage(
     ? tokenUsage(counts)
     : null;
   const scope = result["coverageScope"];
+  const warnings = result["warnings"];
   const ownership = {
+    ...(Array.isArray(warnings) &&
+    warnings.length > 0 &&
+    warnings.every((item): item is string => typeof item === "string")
+      ? { warnings }
+      : {}),
     ...(isSafeNonNegativeInteger(result["threadCount"])
       ? { threadCount: result["threadCount"] }
       : {}),
@@ -358,6 +364,8 @@ export interface ScanUsageMeasurement {
   missingThreadCount: number;
   /** Known thread/attempt identities for reconciling coverage, not metric labels. */
   coverageScope?: string[];
+  /** Workbench diagnostic codes explaining coverage or price completeness. */
+  warnings?: string[];
 }
 
 export interface ScanCostSnapshot {
@@ -2381,7 +2389,7 @@ export class ScanCostTracker {
           false,
           previous.threadCount,
           Math.max(1, previous.missingThreadCount),
-          previous.coverageScope,
+          previous,
         );
         throw error;
       }
@@ -2416,8 +2424,8 @@ export class ScanCostTracker {
       measured.complete,
       measured.threadCount ?? (measured.usage === null ? 0 : 1),
       measured.missingThreadCount ??
-        (measured.complete || measured.coverageScope !== undefined ? 0 : 1),
-      measured.coverageScope,
+        (measured.complete || measured.warnings?.length ? 0 : 1),
+      measured,
     );
   }
 
@@ -2794,14 +2802,17 @@ export class ScanCostTracker {
         complete,
         threadCount,
         missingThreadCount,
-        collectionErrors.length === 0
-          ? [
-              ...[...included].map((id) => `thread:${id}`),
-              ...[...workerReceipts.attemptIds].map(
-                (id) => `worker-attempt:${id}`,
-              ),
-            ].sort()
-          : undefined,
+        {
+          coverageScope:
+            collectionErrors.length === 0
+              ? [
+                  ...[...included].map((id) => `thread:${id}`),
+                  ...[...workerReceipts.attemptIds].map(
+                    (id) => `worker-attempt:${id}`,
+                  ),
+                ].sort()
+              : undefined,
+        },
         // A blocking read leaves a native-only subtotal unconfirmed until the retry.
         blockingReadError === undefined ||
           this.#receipts.size > 0 ||
@@ -2821,7 +2832,7 @@ export class ScanCostTracker {
     complete: boolean,
     threadCount: number,
     missingThreadCount: number,
-    coverageScope?: string[],
+    details?: Pick<ScanUsageMeasurement, "coverageScope" | "warnings">,
     reportCost = true,
   ): void {
     const cost = estimateScanCost(this.#options.model, usage);
@@ -2831,7 +2842,7 @@ export class ScanCostTracker {
       complete,
       threadCount,
       missingThreadCount,
-      coverageScope,
+      details,
     );
     if (complete) this.#reportUsage(usage);
     if (reportCost) this.#reportCost(cost, complete);
@@ -2843,7 +2854,7 @@ export class ScanCostTracker {
     complete: boolean,
     threadCount: number,
     missingThreadCount: number,
-    coverageScope?: string[],
+    details?: Pick<ScanUsageMeasurement, "coverageScope" | "warnings">,
   ): void {
     const data = {
       usage,
@@ -2852,7 +2863,12 @@ export class ScanCostTracker {
         usage === null ? "unavailable" : complete ? "complete" : "partial",
       threadCount,
       missingThreadCount,
-      ...(coverageScope === undefined ? {} : { coverageScope }),
+      ...(details?.coverageScope === undefined
+        ? {}
+        : { coverageScope: details.coverageScope }),
+      ...(details?.warnings === undefined
+        ? {}
+        : { warnings: details.warnings }),
     } as const;
     const measurement = { ...data, observedAt: new Date().toISOString() };
     this.#snapshot = {

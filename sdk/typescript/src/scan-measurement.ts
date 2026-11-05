@@ -29,8 +29,12 @@ export function combineMeasurements(
   for (const value of values) {
     if (value.usage !== null) usage = addTokenUsage(usage, value.usage);
   }
+  const warnings = [
+    ...new Set(values.flatMap((value) => value.warnings ?? [])),
+  ].sort();
   return {
     ...measurementFromUsage(usage, model),
+    ...(warnings.length ? { warnings } : {}),
     coverage:
       usage === null
         ? "unavailable"
@@ -65,6 +69,10 @@ export function measuredScanCost(
       observedAt: measurement.observedAt,
       threadCount: measurement.threadCount,
       missingThreadCount: measurement.missingThreadCount,
+      // The workbench accepts up to 32 diagnostic codes across all stages.
+      ...(measurement.warnings?.length
+        ? { warnings: measurement.warnings.slice(0, 32) }
+        : {}),
       ...(measurement.coverageScope === undefined
         ? {}
         : { coverageScope: measurement.coverageScope }),

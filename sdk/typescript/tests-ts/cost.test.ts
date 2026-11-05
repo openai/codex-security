@@ -21,6 +21,7 @@ import {
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
+import { measuredScanCost } from "../src/scan-measurement.js";
 import { readScanLogs } from "../src/scan-logs.js";
 import { sessionParentThreadId } from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
@@ -63,6 +64,34 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 afterEach(cleanup);
+
+test("warning-only budget measurements keep the reason for partial coverage in terminal receipts", async () => {
+  const tracker = new ScanCostTracker({
+    model: "synthetic-unpriced-model",
+    codexHome: await codexHome(),
+    readBudgetUsage: (threadId) =>
+      readScanBudgetUsage(
+        async () => ({
+          ...ownedPythonUsage,
+          threadCount: 1,
+          coverage: "partial",
+          coverageScope: ["thread:primary"],
+          warnings: ["turn_interrupted"],
+        }),
+        "scan",
+        threadId,
+      ),
+  });
+  tracker.start("primary");
+  const { measurement } = await tracker.stop();
+  expect(measuredScanCost(measurement)?.usage).toMatchObject({
+    coverage: "partial",
+    threadCount: 1,
+    missingThreadCount: 0,
+    warnings: ["turn_interrupted"],
+    totalTokens: ownedPythonUsage.totalTokens,
+  });
+});
 
 test("a partial owned subtotal includes spending absent from local session logs", async () => {
   const home = await codexHome();

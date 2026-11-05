@@ -38,12 +38,14 @@ test("disjoint stage measurements retain the union of known coverage scopes", ()
   const first = {
     ...measurementFromUsage(usage, "synthetic-unpriced-model"),
     coverageScope: ["thread:first", "worker-attempt:first"],
+    warnings: ["cost_estimate_covers_earlier_usage"],
   };
   const second = {
     ...measurementFromUsage(usage, "synthetic-unpriced-model"),
     coverage: "partial" as const,
     missingThreadCount: 1,
     coverageScope: ["thread:second", "thread:missing", "worker-attempt:second"],
+    warnings: ["turn_in_progress", "cost_estimate_covers_earlier_usage"],
   };
   const combined = combineMeasurements(
     [first, second],
@@ -55,6 +57,10 @@ test("disjoint stage measurements retain the union of known coverage scopes", ()
     "thread:second",
     "worker-attempt:first",
     "worker-attempt:second",
+  ]);
+  expect(measuredScanCost(combined)?.usage.warnings).toEqual([
+    "cost_estimate_covers_earlier_usage",
+    "turn_in_progress",
   ]);
   expect(combined.coverage).toBe("partial");
   expect(combined.usage?.total_tokens).toBe(24);
