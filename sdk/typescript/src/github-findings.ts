@@ -298,9 +298,10 @@ function advisoryFinding(record: Record<string, unknown>): {
 }
 
 /** Keep the repository from a retained collector export when SDK callers supply their own projection. */
-export function retainedGitHubRepository({
-  evidence,
-}: ExternalFinding): string | undefined {
+export function retainedGitHubRepository(
+  { evidence }: ExternalFinding,
+  repositoryKey = cloudRepositoryUrlKey,
+): string | undefined {
   const data = evidence.source_data;
   if (!data?.["url"] || !data["repository"]) return;
   let source;
@@ -328,10 +329,7 @@ export function retainedGitHubRepository({
   } else return;
   const native = `${source.origin}/${source.repository}`;
   const projected = evidence.details?.repository?.url;
-  if (
-    projected &&
-    cloudRepositoryUrlKey(projected) !== cloudRepositoryUrlKey(native)
-  )
+  if (projected && repositoryKey(projected) !== repositoryKey(native))
     throw new CodexSecurityError(
       "The normalized repository does not match the original GitHub finding.",
     );

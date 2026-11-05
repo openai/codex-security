@@ -959,7 +959,10 @@ export async function prepareLocalImport(
     }
     const { evidence } = finding;
     if (options.provider === "github") {
-      const source = retainedGitHubRepository(finding);
+      const source = retainedGitHubRepository(
+        finding,
+        (url) => identify(url).key,
+      );
       if (source) sources.set(source, { url: source, platform: "github" });
     }
     const guardian = guardianFindingSourceData(finding);

@@ -82,7 +82,8 @@ test.each(["code-scanning", "repository-advisory"] as const)(
         ? normalizeGitHubCodeScanningAlerts([importedAlert()], "local")
         : normalizeGitHubAdvisories([importedAdvisory()], "local");
     const row = input.findings[0]!;
-    row.evidence.details!.repository!.url = wrongRepository;
+    const details = row.evidence.details!;
+    details.repository!.url = wrongRepository;
     await expect(fixture.prepareNormalized(input)).rejects.toThrow(
       "does not match the original GitHub finding",
     );
@@ -96,6 +97,15 @@ test.each(["code-scanning", "repository-advisory"] as const)(
       "origin",
       "git@github.com:Example/Project.git",
     );
+    expect(
+      (await fixture.prepareNormalized(input)).preview.findings,
+    ).toHaveLength(1);
+    row.evidence.details = details;
+    details.repository!.url = "https://github.com:8443/example/project";
+    await expect(fixture.prepareNormalized(input)).rejects.toThrow(
+      "does not match the original GitHub finding",
+    );
+    details.repository!.url = "https://github.com:443/example/project";
     row.source_finding_id = "existing-sdk-occurrence";
     const saved = await (await fixture.prepareNormalized(input)).import();
     expect(saved.counts.created).toBe(1);
