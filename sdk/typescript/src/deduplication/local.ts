@@ -20,6 +20,7 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDINGS_URL,
   type FindingEmbedder,
+  type EmbeddingUsageObserver,
 } from "../server/embeddings.js";
 import { retryDelay, waitForRetry } from "./retry.js";
 
@@ -49,6 +50,7 @@ export class LocalDeduplication {
     private readonly signal?: AbortSignal,
     private readonly workbench: typeof runWorkbench = runWorkbench,
     embedding?: FindingEmbeddingBinding,
+    onEmbeddingUsage?: EmbeddingUsageObserver,
     private readonly nodeDiscovery?: SavedToolDiscovery,
   ) {
     const endpoint =
@@ -66,6 +68,7 @@ export class LocalDeduplication {
         embeddingRequest,
         endpoint,
         signal,
+        onEmbeddingUsage,
       ),
     };
     // The digest keeps endpoint/namespace details out of persisted cache keys.

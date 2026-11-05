@@ -34,6 +34,7 @@ import {
 } from "../../../scripts/codex_profile.mjs";
 import { executablePathForSpawn } from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
+import { workerTokenUsage } from "./usage-receipt.js";
 import {
   classifyCodexWorkerError,
   codexWorkerTurnError,
@@ -52,6 +53,7 @@ import type {
   CodexWorkerExecutor,
   CodexWorkerRequest,
   CodexWorkerResult,
+  WorkerTelemetryOptions,
   DeepScanConfig,
 } from "./types.js";
 
@@ -96,14 +98,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   // Each live coordinator keeps the executable selected for its first worker.
   private codexExecutable?: Promise<BoundCodexExecutable>;
   private parentCyberAccessProgram?: Promise<CyberAccessProgram | undefined>;
+  private pluginVersion?: Promise<string | undefined>;
 
   constructor(
     private readonly modelSettings: CodexSdkWorkerModelSettings = {},
   ) {}
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
-    const { threadId, diagnostics } = await this.runTurn(request);
-    return { threadId, ...(diagnostics && { diagnostics }) };
+    const { threadId, turnId, usage, diagnostics } =
+      await this.runTurn(request);
+    return { threadId, turnId, usage, ...(diagnostics && { diagnostics }) };
   }
 
   async compareFindings(
@@ -111,8 +115,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     workingDirectory: string,
     signal: AbortSignal,
     schema: Record<string, unknown>,
+    telemetry?: WorkerTelemetryOptions,
   ): Promise<string> {
     const turn = await this.runTurn({
+      ...telemetry,
       kind: "compare",
       prompt,
       workingDirectory,
@@ -125,13 +131,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private async runTurn(
     request:
       | CodexWorkerRequest
-      | {
+      | (WorkerTelemetryOptions & {
           kind: "compare";
           prompt: string;
           workingDirectory: string;
           signal: AbortSignal;
           schema: Record<string, unknown>;
-        },
+        }),
   ) {
     const discovery = request.kind === "discovery" ? request : undefined;
     const includePaths = this.modelSettings.artifactContext?.includePaths;
@@ -150,7 +156,17 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           "Deep Scan cannot start a read-only worker without verified parent sandbox metadata.",
         );
       }
-      const workerProfile = workerPermissionProfile(parentSandbox);
+      const workerProfile = workerPermissionProfile(
+        request.workerUsageDirectory
+          ? {
+              ...parentSandbox,
+              literalFilesystemDenies: [
+                ...(parentSandbox.literalFilesystemDenies ?? []),
+                request.workerUsageDirectory,
+              ],
+            }
+          : parentSandbox,
+      );
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
@@ -207,18 +223,67 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
+      const inheritedMetadata = isRecord(
+        runtimeSettings.config.responses_api_metadata,
+      )
+        ? runtimeSettings.config.responses_api_metadata
+        : {};
+      const attemptId = request.attemptId ?? randomUUID();
+      const operationId =
+        typeof inheritedMetadata.codex_security_operation_id === "string"
+          ? inheritedMetadata.codex_security_operation_id
+          : this.modelSettings.artifactContext?.scanId;
+      const parentAttemptId =
+        typeof inheritedMetadata.codex_security_attempt_id === "string"
+          ? inheritedMetadata.codex_security_attempt_id
+          : undefined;
+      const pluginRootForVersion =
+        this.modelSettings.artifactContext?.pluginRoot;
+      const pluginVersion =
+        pluginRootForVersion === undefined
+          ? undefined
+          : await (this.pluginVersion ??= fs
+              .readFile(
+                join(pluginRootForVersion, ".codex-plugin", "plugin.json"),
+                "utf8",
+              )
+              .then((text) => {
+                const manifest: unknown = JSON.parse(text);
+                return isRecord(manifest) &&
+                  typeof manifest.version === "string"
+                  ? manifest.version
+                  : undefined;
+              })
+              .catch(() => undefined));
+      try {
+        request.onAttribution?.({ operationId, attemptId, parentAttemptId });
+      } catch {
+        // Optional observability cannot interrupt a worker.
+      }
       const configOverrides = profileConfigOverrides({
         ...runtimeSettings.config,
         responses_api_metadata: {
           codex_security_surface: "plugin",
           codex_security_command: "scan",
           codex_security_scan_mode: "deep",
+          ...(pluginVersion === undefined
+            ? {}
+            : {
+                codex_security_plugin_version: pluginVersion,
+              }),
           // Keep the host's integration/provider context as this coordinator
           // launches or resumes workers with a different role.
-          ...(isRecord(runtimeSettings.config.responses_api_metadata)
-            ? runtimeSettings.config.responses_api_metadata
-            : {}),
+          ...inheritedMetadata,
           codex_security_worker_role: request.kind,
+          ...(operationId === undefined
+            ? {}
+            : { codex_security_operation_id: operationId }),
+          codex_security_attempt_id: attemptId,
+          ...(parentAttemptId === undefined
+            ? {}
+            : {
+                codex_security_parent_attempt_id: parentAttemptId,
+              }),
         },
         ...(this.modelSettings.reasoningEffort
           ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -355,6 +420,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               ...codexOptions,
               profileName: runtimeSettings.nativeProfile,
             });
+      // The pinned SDK defaults missing cache writes to zero; native profiles
+      // preserve field presence before defaulting in our profile adapter.
+      const readUsage = (value: unknown) =>
+        workerTokenUsage(value, runtimeSettings.nativeProfile === undefined);
       const threadOptions = {
         ...(this.modelSettings.model
           ? { model: this.modelSettings.model }
@@ -392,11 +461,26 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             parentProgram ?? runtimeSettings.cyberAccessProgram,
         });
         const diagnostics: CodexWorkerDiagnostic[] = [];
+        let turnId: string | undefined;
         const turn = await readCodexSessionTurn({
           thread,
           events,
           stopOnCompletion: true,
           onEvent: async (event) => {
+            if (
+              (event.type === "turn.started" ||
+                event.type === "turn.completed") &&
+              "turn_id" in event &&
+              typeof event.turn_id === "string"
+            )
+              turnId = event.turn_id;
+            if (event.type === "turn.completed") {
+              try {
+                await request.onUsage?.(readUsage(event.usage), turnId);
+              } catch {
+                // Retaining optional usage must not change turn acceptance.
+              }
+            }
             const item = event.type === "item.completed" ? event.item : event;
             if (item.type === "error") {
               const fallbackError = deepScanPermissionProfileFallbackError(
@@ -408,7 +492,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               }
             }
             if (event.type === "thread.started") {
-              await discovery?.onThreadStarted?.(event.thread_id);
+              await request.onThreadStarted?.(event.thread_id);
             } else if (event.type === "item.completed") {
               appendItemDiagnostic(diagnostics, event.item);
             } else if (event.type === "turn.completed") {
@@ -435,6 +519,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         return {
           finalResponse: turn.finalResponse,
           threadId: turn.threadId ?? thread.id ?? undefined,
+          ...(turnId === undefined ? {} : { turnId }),
+          usage: readUsage(turn.usage),
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         };
       } finally {
