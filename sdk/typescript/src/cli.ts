@@ -5590,7 +5590,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Run the versioned records JSON-RPC protocol on stdin/stdout; use alone.",
+            "Run the versioned records JSON-RPC protocol on stdin/stdout; use alone. Supports failurePolicy: isolate.",
           ),
         workflowId: optionValue("--workflow-id")
           .optional()

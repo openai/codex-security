@@ -213,6 +213,10 @@ export class FindingDeduplicator<
     private readonly reviewer: DeduplicationReviewer<T>,
     private readonly signal?: AbortSignal,
     private readonly concurrency = DEFAULT_DEDUPE_CONCURRENCY,
+    private readonly isolateFailure?: (
+      error: unknown,
+      findingIds: string[],
+    ) => readonly string[],
   ) {}
 
   async run(findingIds: readonly string[]): Promise<DeduplicationResult> {
@@ -221,8 +225,13 @@ export class FindingDeduplicator<
     const ids = [...new Set(findingIds)];
     const findings = new Map<string, T>();
     const refusals = new Map<string, DeduplicationRefusal>();
-    const recordRefusal = (error: unknown, ids: string[]): void => {
+    const isolated = new Set<string>();
+    const recordFailure = (error: unknown, ids: string[]): void => {
       this.signal?.throwIfAborted();
+      if (this.isolateFailure) {
+        for (const id of this.isolateFailure(error, ids)) isolated.add(id);
+        return;
+      }
       if (
         !(error instanceof DeduplicationReviewError) ||
         error.metadata.category !== "refusal"
@@ -282,12 +291,17 @@ export class FindingDeduplicator<
     const ready: Job[] = [];
     const pending = neighborhoods
       .filter((neighborhood) => neighborhood.length > 1)
-      .map((neighborhood) => async () => {
+      .map((originalNeighborhood) => async () => {
+        if (isolated.has(originalNeighborhood[0]!.findingId)) return;
+        const neighborhood = originalNeighborhood.filter(
+          (finding) => !isolated.has(finding.findingId),
+        );
+        if (neighborhood.length < 2) return;
         let screening: ScreeningResult | undefined;
         try {
           screening = await this.reviewer.screen(neighborhood);
         } catch (error) {
-          recordRefusal(
+          recordFailure(
             error,
             neighborhood.map((finding) => finding.findingId),
           );
@@ -310,6 +324,7 @@ export class FindingDeduplicator<
           // prevent verification, including a verification that could fail.
           if (state.remaining === 0 && !state.rejected) {
             ready.push(async () => {
+              if (state.ids.some((id) => isolated.has(id))) return;
               try {
                 state.decision = (
                   await this.reviewer.reviewPair(
@@ -317,7 +332,7 @@ export class FindingDeduplicator<
                   )
                 ).decision;
               } catch (error) {
-                recordRefusal(error, state.ids);
+                recordFailure(error, state.ids);
               }
             });
           }
@@ -330,6 +345,8 @@ export class FindingDeduplicator<
     const rejected: [string, string][] = [];
     for (const state of pairs.values()) {
       this.signal?.throwIfAborted();
+      // Remove prior successes too: a failed anchor cannot remain a merge bridge.
+      if (state.ids.some((id) => isolated.has(id))) continue;
       if (state.decision === "SAME") supported.push(state.ids);
       else rejected.push(state.ids);
     }

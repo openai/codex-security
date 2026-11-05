@@ -37,6 +37,16 @@ const response = z.union([
 export class PendingReviewSubmission {
   constructor(readonly submission: unknown) {}
 }
+export class HostExecutionError extends Error {
+  constructor(
+    message: string,
+    readonly code: number,
+    readonly data?: unknown,
+  ) {
+    super(message);
+  }
+}
+
 type Output = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
   off?(event: "error", listener: (error: Error) => void): unknown;
@@ -315,7 +325,13 @@ export async function runHostProtocol(
     const execution = pending;
     pending = undefined;
     if ("error" in reply.data)
-      execution.reject(new Error(reply.data.error.message));
+      execution.reject(
+        new HostExecutionError(
+          reply.data.error.message,
+          reply.data.error.code,
+          reply.data.error.data,
+        ),
+      );
     else if ("reviewPending" in reply.data)
       execution.resolve(new PendingReviewSubmission(reply.data.result));
     else execution.resolve(reply.data.result);

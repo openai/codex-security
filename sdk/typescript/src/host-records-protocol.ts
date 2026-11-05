@@ -8,6 +8,7 @@ import {
 import { missingSubmissionPrompt } from "./deduplication/deduplication-prompts.js";
 import {
   runRecords,
+  RecordsReviewFailure,
   type DeduplicateRecordsInput,
 } from "./deduplication/records.js";
 import type { DeduplicationReviewRequest } from "./deduplication/review.js";
@@ -65,7 +66,7 @@ async function runDeduplicationReview(
     "review.continue",
   );
   if (missingSubmission.safeParse(result).success)
-    throw new Error(
+    throw new RecordsReviewFailure(
       "Review ended without a terminal submission after correction.",
     );
   return result;

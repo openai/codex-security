@@ -1,5 +1,6 @@
 import { hash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { HostExecutionError } from "../host-protocol.js";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
@@ -25,6 +26,16 @@ import type {
   DeduplicationReviewRequest,
   DeduplicationReviewRunner,
 } from "./review.js";
+
+/** A completed review failed without an unresolved execution or cleanup outcome. */
+export class RecordsReviewFailure extends Error {}
+
+const isolatableHostFailure = z.object({
+  reviewFailure: z.object({
+    version: z.literal(1),
+    disposition: z.literal("isolate"),
+  }),
+});
 
 export function recordsReviewAttribution(
   findingIds: readonly string[] | undefined,
@@ -87,6 +98,7 @@ const record = z.discriminatedUnion("kind", [
 
 const deduplicateRecordsInputSchema = z.strictObject({
   version: z.literal(1),
+  failurePolicy: z.literal("isolate").optional(),
   observations: z.array(record),
   candidateRelationships: z.array(
     z.strictObject({
@@ -109,6 +121,11 @@ export interface DeduplicateRecordsResult {
   groups: {
     representativeObservationId: string;
     observationIds: string[];
+  }[];
+  isolated?: {
+    observationId: string;
+    reason: "review_failed";
+    message: string;
   }[];
   unresolved: {
     observationId: string;
@@ -180,6 +197,7 @@ export async function runRecords(
     groups: [],
     unresolved: [],
   };
+  if (data.failurePolicy === "isolate") result.isolated = [];
   const sourceFindingIds = [...relationships.keys()].map(
     (id) => observations.get(id)!.findingId,
   );
@@ -192,35 +210,43 @@ export async function runRecords(
       try {
         return await abortable(async () => {
           signal?.throwIfAborted();
-          return validate(
-            await runReview(
-              {
-                ...review,
-                requestId: randomUUID(),
-                attribution: recordsReviewAttribution(
-                  findingIds,
-                  references,
-                  relationships,
-                ),
-                trustedInstructions: [
-                  sourceReviewInstructions,
-                  review.stage === "screening"
-                    ? screeningInstructions
-                    : pairReviewInstructions,
-                  review.stage === "screening"
-                    ? screeningFindingFormatInstructions
-                    : pairFindingFormatInstructions,
-                ].join("\n\n"),
-                findingSchema: structuredClone(
-                  reviewFindingSchema(findingIds ?? [], importedIds),
-                ),
-              },
-              validate,
-            ),
+          const submission = await runReview(
+            {
+              ...review,
+              requestId: randomUUID(),
+              attribution: recordsReviewAttribution(
+                findingIds,
+                references,
+                relationships,
+              ),
+              trustedInstructions: [
+                sourceReviewInstructions,
+                review.stage === "screening"
+                  ? screeningInstructions
+                  : pairReviewInstructions,
+                review.stage === "screening"
+                  ? screeningFindingFormatInstructions
+                  : pairFindingFormatInstructions,
+              ].join("\n\n"),
+              findingSchema: structuredClone(
+                reviewFindingSchema(findingIds ?? [], importedIds),
+              ),
+            },
+            validate,
           );
+          try {
+            return validate(submission);
+          } catch (error) {
+            throw new RecordsReviewFailure(
+              error instanceof Error
+                ? error.message
+                : "Invalid review submission.",
+              { cause: error },
+            );
+          }
         }, signal);
       } catch (error) {
-        // Records mode discards the batch after any failed review.
+        // The default records policy treats refusals as batch failures.
         if (
           error instanceof DeduplicationReviewError &&
           error.metadata.category === "refusal"
@@ -246,6 +272,37 @@ export async function runRecords(
     reviewer,
     signal,
     1,
+    data.failurePolicy === "isolate"
+      ? (error, findingIds) => {
+          if (
+            !(error instanceof RecordsReviewFailure) &&
+            !(
+              error instanceof HostExecutionError &&
+              isolatableHostFailure.safeParse(error.data).success
+            )
+          )
+            throw error;
+          const attribution = recordsReviewAttribution(
+            findingIds,
+            references,
+            relationships,
+          );
+          const isolated = result.isolated!;
+          for (const observationId of attribution.beneficiaryObservationIds) {
+            if (
+              !isolated.some((entry) => entry.observationId === observationId)
+            )
+              isolated.push({
+                observationId,
+                reason: "review_failed",
+                message: error.message,
+              });
+          }
+          return attribution.beneficiaryObservationIds.map(
+            (id) => observations.get(id)!.findingId,
+          );
+        }
+      : undefined,
   );
   let groups: string[][];
   try {
@@ -254,6 +311,7 @@ export async function runRecords(
     groups = decisions.duplicateGroups;
   } catch (error) {
     signal?.throwIfAborted();
+    if (data.failurePolicy === "isolate") throw error;
     result.status = "unresolved";
     result.unresolved = [...relationships.keys()].map((id) => ({
       observationId: id,

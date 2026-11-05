@@ -1110,3 +1110,269 @@ test("records isolates each host review's finding schema", async () => {
     }
   }
 });
+
+function isolatableFailure() {
+  return new records.RecordsReviewFailure(
+    "Synthetic execution failed after cleanup",
+  );
+}
+
+test("records isolation removes prior bridge edges and preserves subsequent independent merges", async () => {
+  const data: DeduplicateRecordsInput = {
+    version: 1,
+    failurePolicy: "isolate",
+    observations: ["a", "b", "c", "d", "e", "f", "g", "h"].map((id) =>
+      record(id, "shared"),
+    ),
+    candidateRelationships: [
+      { observationId: "g", candidateObservationIds: ["h"] },
+      { observationId: "a", candidateObservationIds: ["b", "c", "d"] },
+      { observationId: "b", candidateObservationIds: [] },
+      { observationId: "c", candidateObservationIds: [] },
+      { observationId: "e", candidateObservationIds: ["f", "a"] },
+    ],
+  };
+  const requests: DeduplicationReviewRequest[] = [];
+  const result = await deduplicateRecords(data, {
+    reviewRunner: {
+      async run(review) {
+        requests.push(review);
+        if (
+          review.stage === "pair-review" &&
+          review.attribution!.contextObservationIds.includes("d")
+        )
+          throw isolatableFailure();
+        return answer(review);
+      },
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(result.isolated).toEqual([
+    {
+      observationId: "a",
+      reason: "review_failed",
+      message: "Synthetic execution failed after cleanup",
+    },
+  ]);
+  expect(
+    result.groups.map((group) => [...group.observationIds].sort()).sort(),
+  ).toEqual([["a"], ["b"], ["c"], ["e", "f"], ["g", "h"]]);
+  const later = requests.find(
+    (request) =>
+      request.stage === "screening" &&
+      request.attribution!.beneficiaryObservationIds.includes("e"),
+  )!;
+  expect(later.attribution!.beneficiaryObservationIds).toEqual(["e"]);
+});
+
+test.each(["screening", "pair-review"])(
+  "records isolation attributes a failed %s to both selected anchors only",
+  async (stage) => {
+    const data: DeduplicateRecordsInput = {
+      version: 1,
+      failurePolicy: "isolate",
+      observations: ["a", "b", "candidate"].map((id) => record(id, "shared")),
+      candidateRelationships: [
+        { observationId: "a", candidateObservationIds: ["b", "candidate"] },
+        { observationId: "b", candidateObservationIds: [] },
+      ],
+    };
+    const result = await deduplicateRecords(data, {
+      reviewRunner: {
+        async run(review) {
+          if (review.stage === stage) throw isolatableFailure();
+          return answer(review);
+        },
+      },
+    });
+    expect(result.isolated!.map((entry) => entry.observationId)).toEqual([
+      "a",
+      "b",
+    ]);
+    expect(result.groups.map((group) => group.observationIds).sort()).toEqual([
+      ["a"],
+      ["b"],
+    ]);
+  },
+);
+
+test("records isolation leaves successful grouping unchanged and rejects unclassified failures", async () => {
+  const normal = await deduplicateRecords(input(), {
+    reviewRunner: {
+      async run(review) {
+        return answer(review);
+      },
+    },
+  });
+  const isolated = await deduplicateRecords(
+    { ...input(), failurePolicy: "isolate" },
+    {
+      reviewRunner: {
+        async run(review) {
+          return answer(review);
+        },
+      },
+    },
+  );
+  expect(isolated).toEqual({ ...normal, isolated: [] });
+  await expect(
+    deduplicateRecords(
+      { ...input(), failurePolicy: "isolate" },
+      {
+        reviewRunner: {
+          async run() {
+            throw new Error("Access denied or cleanup uncertain");
+          },
+        },
+      },
+    ),
+  ).rejects.toThrow("Access denied or cleanup uncertain");
+});
+
+test("records isolation propagates cancellation even with an isolatable failure", async () => {
+  const controller = new AbortController();
+  await expect(
+    deduplicateRecords(
+      { ...input(), failurePolicy: "isolate" },
+      {
+        signal: controller.signal,
+        reviewRunner: {
+          async run() {
+            controller.abort(new Error("stop"));
+            throw isolatableFailure();
+          },
+        },
+      },
+    ),
+  ).rejects.toThrow("stop");
+});
+
+test.each([
+  "marked",
+  "invalid",
+  "missing",
+  "release",
+  "cancel",
+  "unmarked",
+  "unmarked-release",
+  "unmarked-cancel",
+])(
+  "isolation protocol handles %s review failures according to confirmed cleanup",
+  async (failure) => {
+    const data: DeduplicateRecordsInput = {
+      version: 1,
+      failurePolicy: "isolate",
+      observations: [
+        record("a"),
+        record("candidate"),
+        record("b"),
+        record("other"),
+      ],
+      candidateRelationships: [
+        { observationId: "a", candidateObservationIds: ["candidate"] },
+        { observationId: "b", candidateObservationIds: ["other"] },
+      ],
+    };
+    let reviewedUnaffected = false;
+    const host = fakeHost((message, send) => {
+      if (
+        message.method === "review.run" &&
+        message.params.attribution!.beneficiaryObservationIds.includes("b")
+      ) {
+        reviewedUnaffected = true;
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: answer(message.params),
+        });
+        return;
+      }
+      if (
+        ["marked", "cancel", "unmarked", "unmarked-cancel"].includes(failure) ||
+        message.method === "review.release"
+      ) {
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: {
+            code: failure.endsWith("cancel") ? -32800 : -32000,
+            message: "Synthetic failure",
+            ...(failure.startsWith("unmarked")
+              ? {}
+              : {
+                  data: {
+                    reviewFailure: { version: 1, disposition: "isolate" },
+                  },
+                }),
+          },
+        });
+      } else if (failure === "missing") {
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { status: "missing_submission" },
+        });
+      } else if (failure.endsWith("release")) {
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: answer(message.params),
+          reviewPending: true,
+        });
+      } else {
+        send({ jsonrpc: "2.0", id: message.id, result: { decisions: {} } });
+      }
+    });
+    const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
+    host.send({ ...run, params: data });
+    const fatal = failure.startsWith("unmarked");
+    expect(await done).toBe(fatal ? 2 : 0);
+    expect(reviewedUnaffected).toBe(!fatal);
+    if (fatal) expect(host.messages.at(-1)?.error).toBeDefined();
+    else
+      expect(host.messages.at(-1)?.result).toMatchObject({
+        status: "completed",
+        groups: [
+          { representativeObservationId: "a", observationIds: ["a"] },
+          { representativeObservationId: "b", observationIds: ["b"] },
+        ],
+        isolated: [{ observationId: "a", reason: "review_failed" }],
+      });
+    host.stream.destroy();
+  },
+);
+
+test.each(["cancel", "disconnect"])(
+  "isolation stops the whole run on %s",
+  async (stop) => {
+    let reviews = 0;
+    const host = fakeHost((_message, send, stream) => {
+      reviews++;
+      if (stop === "cancel")
+        send({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } });
+      else stream.destroy();
+    });
+    const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
+    host.send({ ...run, params: { ...input(), failurePolicy: "isolate" } });
+    expect(await done).toBe(2);
+    expect(reviews).toBe(1);
+    expect(host.messages.at(-1)?.result).toBeUndefined();
+    host.stream.destroy();
+  },
+);
+
+test("dedupe help advertises the records isolation capability without a new flag", async () => {
+  const stdout = capture();
+  const stderr = capture();
+  expect(
+    await main(
+      ["dedupe", "--help"],
+      stdout.stream,
+      stderr.stream,
+      dependencies(),
+    ),
+  ).toBe(0);
+  expect(stdout.text().replace(/\s+/g, " ")).toContain(
+    "failurePolicy: isolate",
+  );
+});

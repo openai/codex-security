@@ -200,9 +200,11 @@ For failure or an inconclusive review, send an explicit error:
 }
 ```
 
-A host error ends the review without another submission. Invalid final model
-answers, missing final decisions, and host errors make the whole batch unresolved;
-previous successful reviews in that run do not become persistence decisions.
+A host error ends the review without another submission. By default, invalid
+final model answers, missing final decisions, and host errors make the whole
+batch unresolved. No groups are returned, even if earlier reviews succeeded.
+The host must not persist those earlier reviews as final decisions. Hosts can
+opt into the narrower failure handling described below.
 The existing algorithm treats a validated `DISTINCT` as a nonmatch, when
 supplied finding content is insufficient to establish a shared correction. If the host considers the review
 inconclusive, it must return an error rather than manufacture a `DISTINCT` answer.
@@ -213,6 +215,61 @@ severity-based representative selection are reused. No local review checkpoints
 are read or written in records mode. Local saved-scan execution retains its
 existing tool-submission validation and workflow checkpoints.
 
+### Opt-in review failure isolation
+
+The default is all-or-nothing: omit `failurePolicy` to retain the behavior above
+and the existing result shape. To continue processing unaffected observations,
+add `"failurePolicy": "isolate"` to the version-1 `run.params` object (or the SDK
+input). This is an input field, not a CLI flag.
+
+Use a CLI release that supports this policy before enabling it in the host.
+Older releases reject the field. Supporting releases advertise
+`failurePolicy: isolate` in the existing `dedupe --help` description. Normalize
+help-output whitespace before checking this marker; it may wrap across lines.
+Changing or removing the marker requires versioning the capability contract.
+
+**Affected observations.** Every ID in the failed review's
+`beneficiaryObservationIds` is isolated. These are all review participants that
+also have an anchor entry in this run, not just the anchor that started a
+screening review. For example, if screening compares A with B and C and both A
+and B are selected anchors, a recoverable failure isolates A and B. Candidate-only
+C is not isolated or published as a singleton. A failed pair review likewise
+isolates both participants when both are selected anchors.
+
+An isolated anchor becomes a singleton in `groups`. The CLI removes all earlier
+and future merge edges involving it, then groups the remaining observations using
+the normal rules. This prevents a failed anchor from continuing to join other
+observations as a merge bridge. Unaffected reviews continue; their successful
+comparisons remain available for grouping. Isolation is a fallback, not a
+validated `DISTINCT` verdict.
+
+**Recoverable and fatal failures.**
+
+- An invalid final submission, or a second `missing_submission` after the one
+  allowed correction, can be isolated after the host returns a terminal result.
+  The host must still finish execution and cleanup before returning it.
+- For a recoverable host execution failure, return JSON-RPC error data
+  `{ "reviewFailure": { "version": 1, "disposition": "isolate" } }` only after
+  execution has ended and cleanup is confirmed. SDK hosts may instead throw
+  `RecordsReviewFailure` under the same conditions.
+- Error category alone does not prevent isolation. Review-level cancellation,
+  unclassified execution errors, and failed `review.release` calls can all carry
+  the marker once the host confirms execution has ended and cleanup succeeded,
+  including through recovery after an initial cleanup failure. Isolation does not
+  authorize retrying denied access or broadening permissions.
+- Unmarked errors and uncertain execution or cleanup outcomes stop the run:
+  the CLI has no confirmation that it is safe to continue. Cancellation of the
+  whole run (an aborted SDK signal, `cancel` notification, or SIGINT/SIGTERM) and
+  a host disconnect also stop scheduling. These are distinct from a canceled
+  individual review. A stopped run returns no usable grouping result.
+
+A successful isolation-mode run returns `status: "completed"`, `unresolved: []`,
+and an `isolated` array of `{ observationId, reason: "review_failed", message }`
+entries. The array is empty if no observations were isolated. Each listed ID
+also appears as a singleton in `groups`; unaffected groups are returned alongside
+it. Here, `completed` means the run finished, not that every review succeeded.
+The `isolated` field is omitted when the policy is not enabled.
+
 ### Continuing a review
 
 A `review.run` request with `supportsContinuation: true` can receive the result
@@ -222,8 +279,10 @@ review session open. The CLI then sends one `review.continue` request with a
 fresh JSON-RPC ID and `params: {requestId, prompt}`. The request ID in the
 parameters identifies the original review. Submit the prompt in the same
 session and reply on the new JSON-RPC ID. The correction omits
-`supportsContinuation`, so the host releases the session after that turn. A second missing submission ends
-the review as unresolved. A pending tool call stays in the original turn.
+`supportsContinuation`, so the host releases the session after that turn. A second
+missing submission fails the review: the default policy makes the batch unresolved;
+isolation mode isolates its beneficiaries after confirmed cleanup. A pending tool
+call stays in the original turn.
 An uncertain outcome or explicit blocker follows the
 existing error path. Hosts without continuation support can ignore the field.
 
@@ -266,9 +325,12 @@ anchor; they are not assigned singleton dispositions. Groups can join observatio
 from different scans and include a severity-selected representative from any
 member. All returned IDs identify original observations, never canonical records.
 
-A failed or inconclusive review returns no groups and marks every anchor unresolved
-with reason `review_failed`, an `observationId`, and a diagnostic `message`.
-Any unresolved entry makes `status` equal `unresolved`.
+Under the default policy, a failed or inconclusive review returns no groups and
+marks every anchor unresolved with reason `review_failed`, an `observationId`, and
+a diagnostic `message`. Any unresolved entry makes `status` equal `unresolved`.
+With `failurePolicy: "isolate"`, recoverable failures instead produce the completed
+result and explicitly identified fallback singletons described above. Fatal
+failures still produce no usable decisions.
 
 The host creates canonical records and memberships, then removes pending
 observations only after that persistence succeeds. Results contain decisions,
@@ -299,7 +361,8 @@ Invalid run parameters yield `-32602`. Disconnects use `-32000`. Fatal errors
 use the active run ID, or `null` if no run was accepted, and provide no decisions.
 Envelopes must contain exactly one of `result` or `error` for a response.
 
-Exit codes: `0` completed; `1` unresolved decisions; `2` input/protocol failure,
+Exit codes: `0` completed (including a completed run with isolated observations);
+`1` unresolved decisions; `2` input/protocol failure,
 disconnect, or protocol cancellation; `130` SIGINT; `143` SIGTERM. The host
 controls timeouts by sending cancellation or terminating the process. It must
 keep reading both stdout and stderr and must not share one execution session or
