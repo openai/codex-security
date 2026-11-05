@@ -35,6 +35,25 @@ def test_empty_directories_and_explicit_files_do_not_need_git(tmp_path, monkeypa
 
 
 @pytest.mark.cross_platform
+def test_selected_file_removed_during_sibling_validation_is_rejected(
+    tmp_path, monkeypatch, check_targets
+):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.touch()
+    second.touch()
+    lstat = Path.lstat
+
+    def remove_first_before_checking_second(path):
+        if path == second:
+            first.unlink(missing_ok=True)
+        return lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", remove_first_before_checking_second)
+    with pytest.raises(FileNotFoundError):
+        check_targets(tmp_path, ["first", "second"], ["first", "second"])
+
+
+@pytest.mark.cross_platform
 def test_nested_read_failure_is_preserved_unless_another_selection_has_content(
     tmp_path, monkeypatch, check_targets
 ):

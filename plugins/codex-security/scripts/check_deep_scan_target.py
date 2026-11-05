@@ -44,10 +44,9 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
             raise OSError(errno.ENOTDIR, "Expected a regular file or directory", str(target))
         return target, regular
 
-    # Validate all siblings before deciding whether any selected file admits the run.
-    targets = [check_path(selection) for selection in selections]
-    if any(regular for _, regular in targets):
-        return
+    # Every selection must be valid, even when another file or directory is usable.
+    for selection in selections:
+        check_path(selection)
 
     def has_leaf(directory: Path, pending: list[str]) -> bool:
         with os.scandir(directory) as entries:
@@ -68,6 +67,8 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
             current = pending.pop()
             try:
                 target, regular = check_path(current)
+                if current == selection and regular:
+                    return True
                 if regular or has_leaf(target, pending):
                     break
             except OSError as exc:
@@ -98,6 +99,8 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
             if has_content(selection):
                 return
         except OSError as exc:
+            if selection in files:
+                raise
             if failure is None:
                 failure = exc
     if failure is not None:
