@@ -301,6 +301,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  logoutCredentialHome,
   executablePathForSpawn,
   environmentWithGit,
   expandHome,
@@ -7238,20 +7239,18 @@ export async function main(
         const credentialHome = await prepareCodexSecurityCredentialHome(
           dependencies.environment,
         );
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        await withCredentialHomeLock(credentialHome, async () => {
-          exitCode = await dependencies.runCodex(
-            ["logout"],
-            undefined,
-            authenticationEnvironment,
-          );
-          if (exitCode === 0) {
-            await setCodexSecurityCredentialLogout(credentialHome, true);
-          }
-        });
+        const runLogout = () =>
+          dependencies.runCodex(["logout"], undefined, {
+            ...dependencies.environment,
+            CODEX_HOME: credentialHome,
+          });
+        exitCode = await withCredentialHomeLock(credentialHome, () =>
+          logoutCredentialHome(
+            credentialHome,
+            scanCodexHome(dependencies.environment),
+            runLogout,
+          ),
+        );
       },
     })
     .command("init", {

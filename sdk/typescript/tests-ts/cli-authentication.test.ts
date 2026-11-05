@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   realpath,
   readFile,
@@ -146,6 +147,56 @@ describe("CLI authentication", () => {
         await codexSecurityCredentialAllowsAmbientImport(expectedHome),
       ).toBe(argv[0] !== "logout");
     }
+  });
+
+  test("logout detaches only a separate ambient hard link before native failure", async () => {
+    const home = await createCredentialHome();
+    const auth = join(home, "auth.json");
+    const ambient = join(stateDirectory, "ambient");
+    await mkdir(ambient);
+    const source = join(ambient, "auth.json");
+    const backing = join(ambient, "backing.json");
+    await writeFile(auth, "session", { mode: 0o600 });
+    await link(auth, backing);
+
+    const logout = async (sourceHome: string, expectDetached: boolean) => {
+      const deps = dependencies({ environment: { CODEX_HOME: sourceHome } });
+      deps.runCodex = async () => {
+        expect(existsSync(auth)).toBe(!expectDetached);
+        return 19;
+      };
+      const { runCli, stderr } = createCliTest(main);
+      const status = await runCli(["logout"], deps);
+      expect(status, stderr.text()).toBe(19);
+      expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(
+        !expectDetached,
+      );
+    };
+
+    // A backup link in another directory does not make an independent sign-in shared.
+    await writeFile(source, "independent", { mode: 0o600 });
+    await logout(ambient, false);
+    expect(await readFile(source, "utf8")).toBe("independent");
+    await rm(source);
+    // ENOTDIR makes the ambient file uninspectable even when tests run as root.
+    await logout(backing, false);
+
+    const alias = join(ambient, "home-alias");
+    await symlink(
+      home,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await logout(alias, false);
+
+    if (process.platform !== "win32") {
+      await symlink(backing, source);
+      await logout(ambient, false);
+      await rm(source);
+    }
+    await link(auth, source);
+    await logout(ambient, true);
+    expect(await readFile(source, "utf8")).toBe("session");
   });
 
   test.skipIf(process.platform === "win32")(

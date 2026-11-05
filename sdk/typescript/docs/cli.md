@@ -110,6 +110,12 @@ Stored OpenAI credentials live in
 outside the target and every enclosing Git worktree. It also serves providers
 with `requires_openai_auth = true`.
 
+If you manually hard-linked the two homes’ `auth.json` files, keep both homes
+accessible when running `codex-security logout`. When the CLI verifies the
+two hard links, it removes the private link before invoking native logout.
+If the ambient home is unavailable, the configured credential store handles
+logout normally.
+
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
