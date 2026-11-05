@@ -393,9 +393,11 @@ test.skipIf(
   async () => {
     const root = await temporaryDirectory();
     await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
-    const shared = join(root, "shared.txt");
+    const writableParent = join(root, "writable parent");
+    await mkdir(writableParent);
+    await icacls(writableParent, "/grant", "*S-1-1-0:(OI)(CI)M");
+    const shared = join(writableParent, "shared.txt");
     await writeFile(shared, "synthetic shared data");
-    await icacls(shared, "/grant", "*S-1-1-0:M");
     const explicit = await runtime.prepareOutputDir(
       join(root, "explicit"),
       "fixture",
@@ -410,7 +412,10 @@ test.skipIf(
     }
     const archive = await archiveWorkbenchOutput(generated, root);
     await writeFile(join(generated, "probe.txt"), "synthetic private data");
-    const campaign = await createMultiscanCampaign(root);
+    const campaign = await createMultiscanCampaign(
+      root,
+      join(writableParent, "campaign"),
+    );
     await writeFile(join(campaign, "probe.txt"), "synthetic private data");
     const paths = [
       shared,
