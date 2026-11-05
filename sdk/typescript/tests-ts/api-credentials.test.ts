@@ -8,14 +8,7 @@ import { rejecting } from "./support/errors.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { nodeCommand, runCommand } from "./support/shell.js";
 import { existsSync } from "node:fs";
-import {
-  chmod,
-  link,
-  mkdir,
-  readFile,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
@@ -42,48 +35,6 @@ const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test("logout detaches an ambient hard link before running native logout", async () => {
-    const root = await temporaryDirectory();
-    const ambientHome = join(root, "ambient");
-    const state = join(root, "state");
-    const credentialHome = join(state, "codex-home");
-    await mkdir(ambientHome);
-    await mkdir(credentialHome, { recursive: true, mode: 0o700 });
-    const ambient = join(ambientHome, "auth.json");
-    await writeFile(ambient, "synthetic sign-in", { mode: 0o600 });
-    await link(ambient, join(credentialHome, "auth.json"));
-
-    const script = join(root, "native-logout.mjs");
-    await writeFile(
-      script,
-      `
-      import assert from "node:assert/strict";
-      import { existsSync, writeFileSync } from "node:fs";
-      import { join } from "node:path";
-      assert.equal(process.argv[2], "logout");
-      assert.equal(existsSync(join(process.env.CODEX_HOME, "auth.json")), false);
-      writeFileSync(${JSON.stringify(join(root, "observed"))}, "logout");
-    `,
-    );
-    const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
-      {
-        environment: {
-          CODEX_HOME: ambientHome,
-          CODEX_SECURITY_STATE_DIR: state,
-        },
-        resolveCodexCommand: () => ({ ...nodeCommand(), args: [script] }),
-      },
-    );
-    try {
-      await client.logout();
-      expect(await readFile(ambient, "utf8")).toBe("synthetic sign-in");
-      expect(await readFile(join(root, "observed"), "utf8")).toBe("logout");
-    } finally {
-      await client.close();
-    }
-  });
-
   test.each([
     "direct",
     "profile",

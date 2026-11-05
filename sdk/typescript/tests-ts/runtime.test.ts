@@ -78,7 +78,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
-  detachAmbientAuthForLogout,
+  logoutCredentialHome,
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
@@ -1741,40 +1741,39 @@ for await (const line of createInterface({ input: process.stdin })) {
   });
 
   test("distinguishes hard links from aliases of the same credential entry", async () => {
-    const root = await temporaryDirectory();
-    const local = join(root, "local");
-    const ambient = join(root, "ambient");
-    await mkdir(local, { mode: 0o700 });
-    await mkdir(ambient, { mode: 0o700 });
+    const local = await temporaryDirectory();
+    const ambient = await temporaryDirectory();
     const auth = join(local, "auth.json");
     const backing = join(ambient, "backing.json");
     await writeFile(auth, "synthetic", { mode: 0o600 });
     await link(auth, backing);
-    const directoryAlias = join(root, "alias");
+
+    const logout = (sourceHome: string) =>
+      logoutCredentialHome(local, sourceHome, async () => 1);
+    const alias = join(ambient, "home-alias");
     await symlink(
       local,
-      directoryAlias,
+      alias,
       process.platform === "win32" ? "junction" : "dir",
     );
-    expect(await detachAmbientAuthForLogout(local, directoryAlias)).toBe(false);
-    expect(await readFile(auth, "utf8")).toBe("synthetic");
-    if (process.platform !== "win32") {
-      const source = join(ambient, "auth.json");
-      await symlink(auth, source);
-      expect(await detachAmbientAuthForLogout(local, ambient)).toBe(false);
-      await rm(source);
-      // Exercise case-only basenames on filesystems that admit both entries.
-      const alternate = join(local, "AUTH.JSON");
-      if (existsSync(alternate)) {
-        await symlink(backing, source);
-      } else {
-        await link(auth, alternate);
-        await symlink(alternate, source);
-      }
-      expect(await detachAmbientAuthForLogout(local, ambient)).toBe(true);
-      expect(existsSync(auth)).toBe(false);
-      expect(await readFile(source, "utf8")).toBe("synthetic");
-    }
+    await logout(alias);
+    expect(existsSync(auth)).toBe(true);
+    if (process.platform === "win32") return;
+
+    const source = join(ambient, "auth.json");
+    await symlink(auth, source);
+    await logout(ambient);
+    expect(existsSync(auth)).toBe(true);
+
+    // A case-sensitive volume can hold a distinct link named AUTH.JSON.
+    const alternate = join(local, "AUTH.JSON");
+    const target = existsSync(alternate) ? backing : alternate;
+    if (target === alternate) await link(auth, target);
+    await rm(source);
+    await symlink(target, source);
+    await logout(ambient);
+    expect(existsSync(auth)).toBe(false);
+    expect(await readFile(source, "utf8")).toBe("synthetic");
   });
 
   test("imports ambient auth with private permissions", async () => {

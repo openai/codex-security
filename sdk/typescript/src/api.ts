@@ -264,7 +264,7 @@ import {
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
   createIsolatedHome,
-  detachAmbientAuthForLogout,
+  logoutCredentialHome,
   executablePathForSpawn,
   expandHome,
   importAmbientAuth,
@@ -4218,35 +4218,25 @@ export class CodexSecurity {
 
   public async logout(): Promise<void> {
     await this.#trackOperation(async () => {
-      const authentication = await this.#authentication();
+      const { codexHome, environment } = await this.#authentication();
+      const signal = this.#abortController.signal;
       this.#requireOpen();
-      const clearStoredCredentials = () => {
-        if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
-        this.#runtimeCredentialSource = null;
-      };
       await withCredentialHomeLock(
-        authentication.codexHome,
+        codexHome,
         async () => {
           const command = await this.#providerPreflightCommand();
-          const detached = await detachAmbientAuthForLogout(
-            authentication.codexHome,
+          await logoutCredentialHome(
+            codexHome,
             scanCodexHome(this.#dependencies.environment),
+            () => codexLogout(command, environment, signal),
+            () => {
+              if (this.#runtime !== null)
+                this.#runtime.credentialsAvailable = false;
+              this.#runtimeCredentialSource = null;
+            },
           );
-          if (detached) clearStoredCredentials();
-          await codexLogout(
-            command,
-            authentication.environment,
-            this.#abortController.signal,
-          );
-          if (!detached) {
-            await setCodexSecurityCredentialLogout(
-              authentication.codexHome,
-              true,
-            );
-            clearStoredCredentials();
-          }
         },
-        this.#abortController.signal,
+        signal,
       );
       this.#requireOpen();
     });

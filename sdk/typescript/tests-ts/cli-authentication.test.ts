@@ -145,7 +145,7 @@ describe("CLI authentication", () => {
   });
 
   test.each(["shared", "unrelated"] as const)(
-    "preserves logout intent after native failure with a %s hard link",
+    "preserves logout intent after native failure with %s hard links",
     async (kind) => {
       const credentialHome = await createCredentialHome();
       const localAuth = join(credentialHome, "auth.json");
@@ -153,12 +153,9 @@ describe("CLI authentication", () => {
       const ambientAuth = join(ambientHome, "auth.json");
       await mkdir(ambientHome);
       await writeFile(ambientAuth, "ambient", { mode: 0o600 });
-      if (kind === "shared") {
-        await link(ambientAuth, localAuth);
-      } else {
-        await writeFile(localAuth, "private", { mode: 0o600 });
-        await link(localAuth, join(credentialHome, "backup"));
-      }
+      const backup = join(credentialHome, "backup");
+      await writeFile(backup, "private", { mode: 0o600 });
+      await link(kind === "shared" ? ambientAuth : backup, localAuth);
 
       const deps = dependencies();
       deps.runCodex = async (args, _output, environment) => {

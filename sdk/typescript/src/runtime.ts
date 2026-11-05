@@ -1462,50 +1462,63 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   return true;
 }
 
-/** Called under the credential-home lock, before native logout can revoke a shared session. */
-export async function detachAmbientAuthForLogout(
-  codexHome: string,
+function sameInode(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function sharedAuthPath(
+  localPath: string,
+  ambientHome: string,
+): Promise<string | null> {
+  const local = await lstat(localPath, { bigint: true });
+  if (!local.isFile() || local.nlink < 2n) return null;
+  const source = await realpath(join(ambientHome, "auth.json"));
+  return sameInode(local, await stat(source, { bigint: true })) ? source : null;
+}
+
+/** A shared inode can have two hard links, or two paths to one directory entry. */
+async function hasSeparateAmbientLink(
+  localPath: string,
   ambientHome: string,
 ): Promise<boolean> {
-  const localPath = join(codexHome, "auth.json");
-  const local = await lstat(localPath, { bigint: true }).catch(
+  const source = await sharedAuthPath(localPath, ambientHome).catch(
     nullIfMissingFileError,
   );
-  if (!local?.isFile() || local.nlink < 2n) return false;
+  if (source === null) return false;
+  const name = basename(source);
+  if (name.toLowerCase() !== "auth.json") return true;
+  const localHome = dirname(localPath);
+  const [localDir, sourceDir] = await Promise.all([
+    stat(localHome, { bigint: true }),
+    stat(dirname(source), { bigint: true }),
+  ]);
+  if (!sameInode(localDir, sourceDir)) return true;
+  if (name === "auth.json") return false;
+  // A case-insensitive volume can accept both spellings for one directory entry.
+  const entries = await readdir(localHome);
+  return entries.includes("auth.json") && entries.includes(name);
+}
 
-  // An ambient symlink can lead to another hard link or back to the local entry.
-  const ambientPath = await realpath(join(ambientHome, "auth.json")).catch(
-    nullIfMissingFileError,
-  );
-  if (ambientPath === null) return false;
-  const ambient = await stat(ambientPath, { bigint: true }).catch(
-    nullIfMissingFileError,
-  );
-  if (
-    ambient === null ||
-    local.dev !== ambient.dev ||
-    local.ino !== ambient.ino
-  )
-    return false;
-  const sourceName = basename(ambientPath);
-  if (sourceName.toLowerCase() === "auth.json") {
-    const [localHome, sourceHome] = await Promise.all([
-      stat(codexHome, { bigint: true }),
-      stat(dirname(ambientPath), { bigint: true }),
-    ]);
-    if (localHome.dev === sourceHome.dev && localHome.ino === sourceHome.ino) {
-      if (sourceName === "auth.json") return false;
-      // A case-insensitive volume may accept both spellings for one entry.
-      const names = await readdir(codexHome);
-      if (!names.includes("auth.json") || !names.includes(sourceName))
-        return false;
-    }
-  }
+/** Run under the credential-home lock so status cannot reimport the sign-in during logout. */
+export async function logoutCredentialHome<T extends number | void>(
+  home: string,
+  ambientHome: string,
+  nativeLogout: () => Promise<T>,
+  onLoggedOut?: () => void,
+): Promise<T> {
+  const localPath = join(home, "auth.json");
+  const shared = await hasSeparateAmbientLink(localPath, ambientHome);
+  const recordLogout = async () => {
+    await setCodexSecurityCredentialLogout(home, true);
+    if (shared) await rm(localPath);
+    onLoggedOut?.();
+  };
 
-  // A failed native logout or interrupted process must not let a scan reimport the token.
-  await setCodexSecurityCredentialLogout(codexHome, true);
-  await rm(localPath);
-  return true;
+  // Detach before native logout can revoke a shared token, even if native cleanup fails.
+  if (shared) await recordLogout();
+  const status = await nativeLogout();
+  if (!shared && (status === undefined || status === 0)) await recordLogout();
+  return status;
 }
 
 export async function setCodexSecurityCredentialLogout(
@@ -3678,9 +3691,7 @@ export function sameFile(left: string, right: string): Promise<boolean> {
     stat(left, { bigint: true }),
     stat(right, { bigint: true }),
   ]).then(
-    ([leftMetadata, rightMetadata]) =>
-      leftMetadata.dev === rightMetadata.dev &&
-      leftMetadata.ino === rightMetadata.ino,
+    ([leftMetadata, rightMetadata]) => sameInode(leftMetadata, rightMetadata),
     () => false,
   );
 }

@@ -297,7 +297,7 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
-  detachAmbientAuthForLogout,
+  logoutCredentialHome,
   executablePathForSpawn,
   environmentWithGit,
   expandHome,
@@ -7225,24 +7225,18 @@ export async function main(
         const credentialHome = await prepareCodexSecurityCredentialHome(
           dependencies.environment,
         );
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        await withCredentialHomeLock(credentialHome, async () => {
-          const detached = await detachAmbientAuthForLogout(
+        const runLogout = () =>
+          dependencies.runCodex(["logout"], undefined, {
+            ...dependencies.environment,
+            CODEX_HOME: credentialHome,
+          });
+        exitCode = await withCredentialHomeLock(credentialHome, () =>
+          logoutCredentialHome(
             credentialHome,
             scanCodexHome(dependencies.environment),
-          );
-          exitCode = await dependencies.runCodex(
-            ["logout"],
-            undefined,
-            authenticationEnvironment,
-          );
-          if (exitCode === 0 && !detached) {
-            await setCodexSecurityCredentialLogout(credentialHome, true);
-          }
-        });
+            runLogout,
+          ),
+        );
       },
     })
     .command("init", {
