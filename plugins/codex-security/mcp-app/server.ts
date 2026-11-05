@@ -859,8 +859,7 @@ export function createCodexSecurityServer(): McpServer {
       );
       const setup = await runWorkbench([
         "inspect-setup",
-        "--target-path",
-        selected.targetPath,
+        `--target-path=${selected.targetPath}`,
         `--scope=${scope}`,
         "--mode",
         mode,
@@ -905,8 +904,7 @@ export function createCodexSecurityServer(): McpServer {
             "save-workspace",
             "--workspace-id",
             sessionId,
-            "--target-path",
-            selected.targetPath,
+            `--target-path=${selected.targetPath}`,
             `--scope=${scope}`,
             "--mode",
             mode,
@@ -1221,9 +1219,20 @@ export function createCodexSecurityServer(): McpServer {
       ...optionalArg("--thread-id", threadId),
     ];
     let workspace: Awaited<ReturnType<typeof runWorkbench>> | undefined;
-    if (threadId && deepScanCoordinators.get(scanId)) {
+    const coordinator = deepScanCoordinators.get(scanId);
+    if (threadId && coordinator) {
       await deepScanStore.get(scanId, threadId);
     }
+    const ownerThreadId = coordinator?.owningThreadId;
+    const readOwnedParent = async (owner: string) => {
+      return await runWorkbench([
+        "get-deep-scan",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        owner,
+      ]);
+    };
     const canceledLocally = await deepScanCoordinators.cancelAndWait(
       scanId,
       "user_canceled_scan",
@@ -1231,6 +1240,19 @@ export function createCodexSecurityServer(): McpServer {
         workspace = await runWorkbench(args);
       },
       async () => {
+        if (ownerThreadId) {
+          // The live coordinator owns this scan even if its checkout was replaced.
+          const parent = (await readOwnedParent(ownerThreadId))[
+            "parentScan"
+          ] as JsonObject;
+          return {
+            status: parent["status"] as string,
+            failureMessage:
+              typeof parent["failureMessage"] === "string"
+                ? parent["failureMessage"]
+                : undefined,
+          };
+        }
         const current = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
           "workspace"
         ] as JsonObject;
@@ -1250,11 +1272,13 @@ export function createCodexSecurityServer(): McpServer {
     );
     if (workspace === undefined && canceledLocally) {
       // A joined caller did not perform the write. Read the requested parent.
-      const saved = (await runWorkbench(workbenchArgs("get-scan", { scanId })))
-        .workspace as WorkspaceState;
-      const scan = saved.results;
+      const parent = ownerThreadId
+        ? await readOwnedParent(ownerThreadId)
+        : await runWorkbench(workbenchArgs("get-scan", { scanId }));
+      const saved = parent.workspace as WorkspaceState | undefined;
+      const scan = saved?.results;
       const progress = isJsonObject(scan?.progress) ? scan.progress : undefined;
-      if (progress?.status !== "running") {
+      if (saved && progress?.status !== "running") {
         return workspaceResult(
           saved,
           progress?.status === "canceled" && scan?.scanId === scanId
@@ -1392,6 +1416,7 @@ export function createCodexSecurityServer(): McpServer {
       scanActionResult(
         await runWorkbench([
           "list-global-findings",
+          ...(status === "closed" ? ["--include-resolved"] : []),
           ...optionalArg("--query", query),
           ...optionalArg("--severity", severity),
           ...optionalArg("--status", status),
@@ -2046,8 +2071,7 @@ async function startPromptOnlyScan(
       "start-prompt-only-scan",
       "--thread-id",
       threadId,
-      "--target-path",
-      targetPath,
+      `--target-path=${targetPath}`,
       `--scope=${scope}`,
       "--mode",
       mode,
@@ -2078,8 +2102,7 @@ async function startHeadlessStandardScan(
       "start-headless-standard-scan",
       "--thread-id",
       threadId,
-      "--target-path",
-      input.targetPath,
+      `--target-path=${input.targetPath}`,
       `--scope=${input.scope ?? "."}`,
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),

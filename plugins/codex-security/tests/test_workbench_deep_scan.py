@@ -226,6 +226,12 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN instruction_digest")
         connection.execute("ALTER TABLE scans DROP COLUMN prepared_instruction_digests_json")
         connection.execute("ALTER TABLE deep_scan_workers DROP COLUMN instruction_digest")
+        connection.execute("DROP TRIGGER record_scan_admission_insert")
+        connection.execute("DROP TRIGGER record_scan_admission_update")
+        connection.execute("DROP TABLE scan_admissions")
+        connection.execute("ALTER TABLE finding_decisions DROP COLUMN admission_sequence")
+        connection.execute("ALTER TABLE finding_decisions DROP COLUMN scan_sequence")
+        connection.execute("ALTER TABLE finding_decisions DROP COLUMN decision_sequence")
         connection.execute(
             "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json"
         )

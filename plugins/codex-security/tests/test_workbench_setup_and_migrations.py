@@ -108,7 +108,10 @@ EXPECTED_MIGRATIONS = [
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
     (63, "retain unverified Deep Scan worker attempts"),
-    (64, "record scan and worker instruction digests"),
+    (64, "preserve finding decision append chronology"),
+    (65, "bind new finding decisions to admitted scans"),
+    (66, "record first scan result admission order"),
+    (67, "record scan and worker instruction digests"),
 ]
 
 
@@ -904,12 +907,12 @@ def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) 
         ).fetchone() == (1,)
 
 
-@pytest.mark.parametrize("preview", [59, 61, 63])
+@pytest.mark.parametrize("preview", [59, 61, 63, 64])
 def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
     workbench_api,
     preview: int,
 ) -> None:
-    digest_migration = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 64)
+    digest_migration = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 67)
     connection, migrate = create_historical_database(preview, ((preview, *digest_migration[1:]),))
     digest = "sha256:" + "a" * 64
     try:
@@ -918,28 +921,27 @@ def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
         insert_legacy_scan(connection, "timestamp", instruction_digest=digest)
         migrate(connection)
         migrate(connection)
-        assert (
-            migration_name_row(connection, 59)["name"]
-            == "retain the launching Deep Scan service tier"
-        )
-        assert (
-            migration_name_row(connection, 63)["name"]
-            == "retain unverified Deep Scan worker attempts"
-        )
-        assert migration_name_row(connection, 64)["name"] == digest_migration[1]
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            )
+        ] == EXPECTED_MIGRATIONS
         assert connection.execute("SELECT instruction_digest FROM scans").fetchone()[0] == digest
     finally:
         connection.close()
 
 
-def test_instruction_digest_migration_rejects_unknown_receipt() -> None:
-    connection, migrate = create_historical_database(64)
+def test_instruction_digest_migration_rolls_back_on_unknown_receipt(workbench_api) -> None:
+    digest = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 67)
+    connection, migrate = create_historical_database(64, ((64, *digest[1:]),))
     with closing(connection):
         rename_migration(connection, 63, "unrecognized preview")
-        with pytest.raises(SystemExit, match="unsupported instruction digest migration history"):
+        with pytest.raises(SystemExit, match="Unsupported workbench migration receipt"):
             migrate(connection)
         assert migration_name_row(connection, 63)["name"] == "unrecognized preview"
-        assert migration_name_row(connection, 64) is None
+        assert migration_name_row(connection, 64)["name"] == digest[1]
+        assert migration_name_row(connection, 67) is None
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -2823,3 +2825,112 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
             ).fetchone()
             is not None
         ) is supported
+
+
+@pytest.mark.parametrize(
+    ("installed_version", "migration_count"),
+    [(version, count) for version in [42, 43, 48, 50, 53, 54, 61, 63] for count in (1, 2)]
+    + [(54, 3), (61, 3), (63, 3), (64, 3)],
+)
+def test_decision_history_upgrade_preserves_published_sequences(
+    installed_version: int, migration_count: int
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    timestamp = "2026-09-01T00:00:00Z"
+    historical = [
+        (version, name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if version < installed_version
+    ]
+    historical.extend(
+        (version - (64 - installed_version), name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if 64 <= version < 64 + migration_count
+    )
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        create_migration_history(connection)
+        apply_historical_migrations(connection, historical, timestamp)
+        decision_columns = (
+            "id, occurrence_id, status, close_reason, note, created_at, decision_sequence"
+        )
+        if migration_count >= 2:
+            decision_columns += ", scan_sequence"
+        connection.executescript("""
+            INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', 'created', 'updated');
+            INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode,
+                scan_dir, status, phase, started_at, created_at, updated_at)
+            VALUES ('scan', 'workspace', '/synthetic/repository', 'synthetic', '.', 'standard',
+                '/synthetic/output', 'complete', 'reporting', 'started', 'created', 'updated');
+            INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+            VALUES ('finding', 'synthetic', 'rule', 'anchor', 'created', 'updated');
+            INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity,
+                confidence, remediation, created_at)
+            VALUES ('occurrence', 'finding', 'scan', 'Synthetic finding', 'Synthetic summary',
+                'high', 'high', 'Synthetic remediation', 'created');
+        """)
+        values = (
+            "decision",
+            "occurrence",
+            "closed",
+            "false_positive",
+            "Retained decision",
+            "original-time",
+            17,
+        )
+        if migration_count >= 2:
+            values += (1,)
+        if migration_count == 3:
+            connection.execute("UPDATE scan_admissions SET sequence = 29 WHERE scan_id = 'scan'")
+            decision_columns += ", admission_sequence"
+            values += (29,)
+        connection.execute(
+            f"INSERT INTO finding_decisions ({decision_columns}) VALUES ({','.join('?' for _ in values)})",
+            values,
+        )
+        if installed_version == 54:
+            connection.execute(
+                "INSERT INTO external_source_reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "external-report",
+                    "/synthetic/repository",
+                    "snyk",
+                    "synthetic-source",
+                    "synthetic-finding",
+                    '{"title":"Synthetic external finding"}',
+                    1,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        before = tuple(
+            connection.execute(f"SELECT {decision_columns} FROM finding_decisions").fetchone()
+        )
+        receipts = {
+            row["name"]: row["applied_at"]
+            for row in connection.execute("SELECT * FROM schema_migrations")
+        }
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
+        assert (
+            tuple(
+                connection.execute(f"SELECT {decision_columns} FROM finding_decisions").fetchone()
+            )
+            == before
+        )
+        assert "name" in {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        current = {
+            row["name"]: row["applied_at"]
+            for row in connection.execute("SELECT * FROM schema_migrations")
+        }
+        assert all(current[name] == applied_at for name, applied_at in receipts.items())
+        if migration_count == 3:
+            assert connection.execute("SELECT sequence FROM scan_admissions").fetchone()[0] == 29
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("SELECT COUNT(*) FROM external_source_reports").fetchone()[0] == (
+            1 if installed_version == 54 else 0
+        )
+        assert {row[0] for row in connection.execute("SELECT version FROM schema_migrations")} == {
+            version for version, _, _ in namespace["MIGRATIONS"]
+        }

@@ -2890,6 +2890,16 @@ export async function bootstrapPlugin(
 
   if (!stagedMatches) {
     if (existing !== null) {
+      const sourceRelative = relative(await realpath(marketplace), root);
+      if (
+        sourceRelative !== ".." &&
+        !sourceRelative.startsWith(`..${sep}`) &&
+        !isAbsolute(sourceRelative)
+      ) {
+        throw new PluginBootstrapError(
+          `Cannot refresh the SDK plugin marketplace because it contains the selected plugin source: ${marketplace}. Copy the selected plugin outside this directory and retry.`,
+        );
+      }
       await rm(marketplace, { recursive: true, force: true });
     }
     await createMarketplace(codexHome, root, options.signal);
@@ -3415,6 +3425,11 @@ export async function probeCodexSandbox(
       `Codex exited with status ${result.exitCode}.`;
   } catch (error) {
     signal?.throwIfAborted();
+    if (timeout.aborted)
+      throw new SandboxUnavailableError(
+        `Codex sandbox probe timed out after ${SANDBOX_PROBE_TIMEOUT_MILLISECONDS / 1000} seconds.`,
+        { cause: error },
+      );
     detail = processErrorDetail(error);
   }
   const guidance =

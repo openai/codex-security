@@ -1349,6 +1349,13 @@ try {
     code: "ENOENT",
   });
 
+  const dashQuery = await request(8999, "tools/call", {
+    name: "list_codex_security_scans",
+    arguments: { query: "--synthetic-query", limit: 50 },
+  });
+  assertNoError(dashQuery);
+  assert.deepEqual(dashQuery.result.structuredContent.scans, []);
+
   const findTool = (name: string) => {
     const tool = toolList.result.tools.find(
       (tool: { name: string }) => tool.name === name,
@@ -1702,6 +1709,7 @@ try {
   assert.equal(listGlobalFindings.annotations.readOnlyHint, true);
   assert.deepEqual(listGlobalFindings._meta.ui.visibility, ["app"]);
   assert.deepEqual(listGlobalFindings.inputSchema.required ?? [], []);
+  assert.ok(listGlobalFindings.inputSchema.properties.offset);
   assert.equal(listGlobalFindings.inputSchema.properties.limit.maximum, 20);
   assert.equal(listRepositories.annotations.readOnlyHint, true);
   assert.deepEqual(listRepositories._meta.ui.visibility, ["app"]);
@@ -2474,9 +2482,13 @@ try {
       occurrenceId,
       status: "closed",
       closeReason: "false_positive",
-      note: "The archive path is normalized before the write.",
+      note: "--synthetic triage note",
     },
   });
+  assert.equal(
+    closedFinding.structuredContent.scan.findings[0].triage.note,
+    "--synthetic triage note",
+  );
   assert.equal(
     closedFinding.structuredContent.scan.findings[0].triage.status,
     "closed",
@@ -2791,9 +2803,10 @@ try {
       query: "SRC/A.PY",
       severity: "high",
       status: "open",
-      limit: 1,
+      limit: 50,
     },
   });
+  assert.equal(filteredFindingsPage.structuredContent.findingsPage.limit, 50);
   assert.deepEqual(
     filteredFindingsPage.structuredContent.findingsPage.findings.map(
       (finding: { occurrenceId: string }) => finding.occurrenceId,

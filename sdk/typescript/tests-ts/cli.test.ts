@@ -932,6 +932,8 @@ describe("CLI", () => {
       "verify-fix [findings...]",
       "patch [issues...]",
       "findings false-positive <occurrenceId>",
+      "findings list",
+      "findings show <occurrenceId>",
       "scans list [repository]",
       "scans show [scanId]",
       "scans rerun [scanId]",
@@ -984,6 +986,8 @@ describe("CLI", () => {
       ["scans", "rerun"],
       ["scans", "match"],
       ["scans", "compare"],
+      ["findings", "list"],
+      ["findings", "show"],
       ["findings", "false-positive"],
       ["findings", "list"],
     ] as const;
@@ -1983,7 +1987,7 @@ describe("CLI", () => {
     const findings: JsonObject[] = [
       {
         findingId: "internal-finding-id",
-        occurrenceId: "internal-occurrence-id",
+        occurrenceId: "occ_saved_finding",
         severity: { level: "critical" },
         title: "Login SQL injection bypasses authentication",
         locations: [{ path: "routes/login.ts", startLine: 34 }],
@@ -2050,7 +2054,7 @@ describe("CLI", () => {
       expect(text).toContain("New basket authorization bypass");
       expect(text).toContain("/demo/threat-models");
       expect(text).not.toContain("internal-finding-id");
-      expect(text).not.toContain("internal-occurrence-id");
+      expect(text).toContain("ID occ_saved_finding");
       if (showLinkedFindings) {
         expect(text).toContain("LINKED FINDINGS");
         expect(text).toContain("MATCHED SCAN");
@@ -2192,7 +2196,7 @@ describe("CLI", () => {
 
     expect(
       await runCli(
-        ["info", "--json", "--filter-output", "model,reasoningEffort,nextStep"],
+        ["info", "--json", "--filter-output=model,reasoningEffort,nextStep"],
         deps,
       ),
     ).toBe(0);
@@ -3201,6 +3205,7 @@ describe("CLI", () => {
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
       ],
       [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [["--codex", 'model = "gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
       [
         ["--codex", 'model_reasoning_effort="high"'],
         { model_reasoning_effort: "high" },
@@ -5161,6 +5166,7 @@ describe("CLI", () => {
       ["--token-limit", "4"],
       ["--token-offset", "1"],
       ["--token-offset", "1", "--token-limit", "4"],
+      ["--token-offset=1", "--token-limit=4"],
     ] as const) {
       const stdout = captureCli(main, "stdout");
       expect(await stdout.run(["scan", ...arguments_], dependencies())).toBe(0);

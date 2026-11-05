@@ -234,7 +234,7 @@ export function applyMigrations(
       else if (applied.has(item.version)) {
         if (
           [
-            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61, 64,
+            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61, 67,
           ].includes(item.version)
         )
           repairAdditive(database, item.version);
