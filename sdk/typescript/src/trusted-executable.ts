@@ -1,3 +1,4 @@
+// Generated from the plugin mcp-app/src/trusted-executable.ts. Run pnpm build.
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import {

@@ -1,11 +1,11 @@
 import {
-  declaredNodemailerVersion,
   excerpts,
   installedNodemailerVersion,
   mail390,
   nodemailerFile,
 } from "./case-data.mts";
 import type { ReachabilityCase, StageFile } from "./cases.mts";
+import { mimeReceiverSources } from "./receiver-data.mts";
 
 function bundleCase(id: string, byName: boolean): ReachabilityCase {
   const source = (file: string, name = file): StageFile => ({
@@ -25,6 +25,7 @@ function bundleCase(id: string, byName: boolean): ReachabilityCase {
     },
     nodemailerFile("package.json"),
     nodemailerFile("lib/addressparser/index.js"),
+    ...mimeReceiverSources,
   ];
   return {
     id,
@@ -38,7 +39,7 @@ function bundleCase(id: string, byName: boolean): ReachabilityCase {
       "CVE-2025-14874 in Nodemailer requires a sender-controlled address header to reach the parser. " +
       "Can an arbitrary To address chosen by this caller reach the installed address parser through this feature? " +
       "Assess this input prerequisite and report the installed Nodemailer version.",
-    verdict: byName ? "exploitable" : "ruled_out",
+    verdict: byName ? "potentially_exploitable" : "ruled_out",
     version: "7.0.10",
     stage,
     evidenceGroups: [
@@ -51,16 +52,31 @@ function bundleCase(id: string, byName: boolean): ReachabilityCase {
         "bundle/catalog.py",
         byName ? "archive.read(member.filename)" : "archive.read(member)",
       ),
+      excerpts("bundle/gateway.py", "headers != ENVELOPE"),
       excerpts(
         "bundle/gateway.py",
-        "headers != ENVELOPE",
-        "To: archive@example.invalid",
+        'raise ValueError("expected an archive notification")',
+      ),
+      excerpts("bundle/gateway.py", "From: relay@example.invalid"),
+      excerpts("bundle/gateway.py", "To: archive@example.invalid"),
+      excerpts(
+        "bundle/gateway.py",
+        "Content-Type: text/plain; charset=us-ascii",
       ),
       excerpts("bundle/gateway.py", "jobs.put(upload)"),
       excerpts("bundle/worker.py", "input=archive.read(member)"),
+      excerpts("bundle/index-mail.cjs", 'require("../index.js")'),
       excerpts("bundle/index-mail.cjs", "simpleParser(input)"),
       excerpts("lib/mail-parser.js", "addressparser(value)"),
-      [...installedNodemailerVersion, ...declaredNodemailerVersion],
+      ...(byName
+        ? [
+            excerpts(
+              "node_modules/nodemailer/lib/addressparser/index.js",
+              "addressparser(data.group.join(','))",
+            ),
+          ]
+        : []),
+      installedNodemailerVersion,
     ],
   };
 }

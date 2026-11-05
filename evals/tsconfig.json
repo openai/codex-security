@@ -8,6 +8,7 @@
     "../plugins/codex-security/mcp-app/src/assets.d.ts",
     "deep-reducer/*.mts",
     "dependency-reachability/*.mts",
+    "package-application-mapping/*.mts",
     "secret-discovery/*.mts",
     "standard-time-budget/*.mts",
     "workflow-routing/*.mts",

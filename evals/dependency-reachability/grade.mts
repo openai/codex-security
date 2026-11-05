@@ -5,7 +5,11 @@ import { windowsUnsafePathComponent } from "../../sdk/typescript/src/windows-pat
 
 const verdicts = ["exploitable", "ruled_out", "unknown"] as const;
 export type Verdict = (typeof verdicts)[number];
-export type EvidenceGroup = readonly { path: string; contains?: string }[];
+export type EvidenceGroup = readonly {
+  path: string;
+  contains?: string;
+  completeFile?: boolean;
+}[];
 
 interface Citation {
   path: string;
@@ -93,6 +97,7 @@ export async function gradeEvidence(
 ) {
   const root = await realpath(repoRoot);
   const sources = new Map<string, string[]>();
+  const sourceLengths = new Map<string, number>();
   const verified: Citation[] = [];
   const errors: string[] = [];
   if (!Array.isArray(evidence) || !evidence.length) {
@@ -131,6 +136,7 @@ export async function gradeEvidence(
             `Source mismatch at ${entry.path}:${entry.startLine}-${entry.endLine}`,
           );
         } else {
+          sourceLengths.set(posix.normalize(entry.path), source.length);
           verified.push({ ...entry, path: posix.normalize(entry.path), code });
         }
       } catch (error) {
@@ -141,17 +147,31 @@ export async function gradeEvidence(
     }
   }
   for (const group of groups) {
-    const supported = group.some((anchor) =>
-      verified.some(
-        (citation) =>
-          citation.path === anchor.path &&
-          (!anchor.contains || citation.code.includes(anchor.contains)),
-      ),
-    );
+    const supported = group.some((anchor) => {
+      const citations = verified.filter((cite) => cite.path === anchor.path);
+      if (
+        !citations.some(
+          (cite) => !anchor.contains || cite.code.includes(anchor.contains),
+        )
+      )
+        return false;
+      if (!anchor.completeFile) return true;
+
+      // An absence claim needs the whole bounded source record. Separate or
+      // overlapping citations are sufficient when their union covers the file.
+      let through = 0;
+      for (const cite of citations.sort((a, b) => a.startLine - b.startLine)) {
+        if (cite.startLine > through + 1) return false;
+        through = Math.max(through, cite.endLine);
+      }
+      return through === sourceLengths.get(anchor.path);
+    });
     if (!supported) {
-      const choices = group.map((anchor) =>
-        anchor.contains ? `${anchor.path} (${anchor.contains})` : anchor.path,
-      );
+      const choices = group.map((anchor) => {
+        const marker = anchor.contains ? ` (${anchor.contains})` : "";
+        const coverage = anchor.completeFile ? " (complete file)" : "";
+        return `${anchor.path}${marker}${coverage}`;
+      });
       errors.push(`Missing source evidence: ${choices.join(" or ")}`);
     }
   }

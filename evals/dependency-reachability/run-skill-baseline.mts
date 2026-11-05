@@ -174,7 +174,10 @@ async function execute(state: {
           answerSchema,
         );
         const analysisMs = Math.round(performance.now() - ready);
-        const grade = await gradeAnswer(answer, c, repo);
+        // These historical prompts supply the caller and deployment assumptions.
+        const verdict =
+          c.verdict === "potentially_exploitable" ? "exploitable" : c.verdict;
+        const grade = await gradeAnswer(answer, { ...c, verdict }, repo);
         results.push({
           id: c.id,
           suite: c.suite,

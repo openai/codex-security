@@ -1,3 +1,5 @@
+"""Exercise history updates and reruns against the original checkout, scope, and revisions."""
+
 from __future__ import annotations
 
 import copy
@@ -27,6 +29,7 @@ from workbench_test_support import (
     run_workbench,
     scan_command,
     set_triage,
+    source_plugin_version,
     stable_target_id,
     write_completed_contract,
 )
@@ -54,6 +57,9 @@ def test_rename_persists_without_changing_scan_results(
 
     assert renamed == {"scanId": scan["scanId"], "name": "Release audit"}
     after = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert get_scan(state_dir, scan["scanId"][:8], "--progress-only") == {
+        "scan": {"progress": after["progress"]}
+    }
     assert after == {**before, "name": "Release audit"}
     listed = run_workbench(state_dir, "list-scans", "--query", "release audit")["scans"]
     assert [(item["scanId"], item["name"]) for item in listed] == [
@@ -183,12 +189,15 @@ def create_cli_scan(
     extra_anchors: tuple[str, ...] = (),
     finding: bool = True,
     identity_anchor: str = "archive-entry-write-without-containment",
+    identity_instance: str | None = None,
+    locations: list[dict[str, Any]] | None = None,
     mode: str = "standard",
     parent_scan_id: str | None = None,
     paths: list[str] | None = None,
     cost: dict[str, Any] | None = None,
     target: dict[str, Any] | None = None,
     target_revision: str | None = None,
+    surface: str = "cli",
 ) -> dict[str, Any]:
     scan_dir = root / str(uuid.uuid4())
     scan_dir.mkdir(mode=0o700, parents=True)
@@ -204,12 +213,15 @@ def create_cli_scan(
         str(scan_dir),
         "--repository",
         str(repository),
-        "--recipe-json",
-        json.dumps(recipe),
+        "--registration-json-stdin",
     ]
     if parent_scan_id is not None:
         arguments.extend(("--parent-scan-id", parent_scan_id))
-    launched = run_workbench(state_dir, *arguments)
+    launched = run_workbench(
+        state_dir,
+        *arguments,
+        input_text=json.dumps({"recipe": recipe, "surface": surface, "packageVersion": "1.2.3"}),
+    )
     if not complete:
         return launched
     if mode == "deep":
@@ -237,9 +249,13 @@ def create_cli_scan(
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
     )
-    if not finding or extra_anchors:
+    if not finding or extra_anchors or identity_instance is not None or locations is not None:
         findings_path = scan_dir / "findings.json"
         findings = json.loads(findings_path.read_text())
+        if locations is not None:
+            findings["findings"][0]["locations"] = locations
+        if identity_instance is not None:
+            findings["findings"][0]["identity"]["instance"] = identity_instance
         if not finding:
             findings["findings"] = []
         else:
@@ -379,13 +395,14 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
     (repository / "src").mkdir(parents=True)
     (repository / "tests").mkdir()
     root = tmp_path / "results"
-    first = create_cli_scan(state_dir, root, repository)
+    first = create_cli_scan(state_dir, root, repository, surface="sdk")
     rerun = create_cli_scan(
         state_dir,
         root,
         repository,
         parent_scan_id=first["scanId"],
         paths=["src", "tests"],
+        finding=False,
     )
     failed = create_cli_scan(state_dir, root, repository, complete=False)
     fail_scan(state_dir, failed["scanId"], "interrupted")
@@ -400,6 +417,12 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
         assert connection.execute(
             "SELECT parent_scan_id FROM scans WHERE id = ?", (rerun["scanId"],)
         ).fetchone() == (first["scanId"],)
+        snapshots = {
+            scan_id: json.loads(snapshot)
+            for scan_id, snapshot in connection.execute(
+                "SELECT scan_id, snapshot FROM scan_lifecycles"
+            )
+        }
     assert scan_command(state_dir, "get-scan-recipe", first["scanId"])["recipe"]["config"] == {
         "model": "gpt-5.6-sol",
         "model_reasoning_effort": "high",
@@ -416,6 +439,37 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
         rerun["scanId"],
         failed["scanId"],
     }
+    by_id = {row["scanId"]: row for row in history["scans"]}
+    for launch, surface, status, has_findings in (
+        (first, "sdk", "completed", True),
+        (rerun, "cli", "completed", False),
+        (failed, "cli", "failed", None),
+    ):
+        row = by_id[launch["scanId"]]
+        assert launch["lifecycle"] == {
+            "scanId": launch["scanId"],
+            "startedAt": row["startedAt"],
+            "mode": "standard",
+            "status": "running",
+            "finishedAt": None,
+            "hasReportableFindings": None,
+            "surface": surface,
+            "packageVersion": "1.2.3",
+            "pluginVersion": source_plugin_version(),
+            "mock": False,
+        }
+        assert row["completedAt"]
+        assert row["lifecycle"] == {
+            **launch["lifecycle"],
+            "status": status,
+            "finishedAt": row["completedAt"],
+            "hasReportableFindings": has_findings,
+        }
+        snapshot = snapshots[launch["scanId"]]
+        assert snapshot == row["lifecycle"]
+        assert snapshot["hasReportableFindings"] is has_findings
+        assert snapshot["mock"] is False
+    assert detail["scan"]["lifecycle"] == by_id[rerun["scanId"]]["lifecycle"]
     assert any(scan["progress"]["status"] == "failed" for scan in history["scans"])
     assert all(scan["recipeAvailable"] for scan in history["scans"])
     assert len(run_workbench(state_dir, "list-scans", "--repository", str(other))["scans"]) == 1
@@ -642,9 +696,16 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
                 json.dumps(
                     {
                         "usage": {
-                            "status": "complete",
+                            "source": "codex_runtime",
+                            "coverage": "complete",
+                            "threadCount": 1,
+                            "missingThreadCount": 0,
                             "inputTokens": 5_000,
+                            "cachedInputTokens": 0,
+                            "cacheWriteInputTokens": 0,
                             "outputTokens": 120,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 5_120,
                         }
                     }
                 ),
@@ -1047,6 +1108,127 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM scan_comparisons").fetchall() == comparisons
         assert connection.execute("SELECT * FROM finding_occurrences").fetchall() == occurrences
+
+
+def test_scan_matching_selects_cross_mode_evidence_for_compatible_instances(tmp_path: Path) -> None:
+    state_dir, repository = empty_history_paths(tmp_path)
+    root = tmp_path / "results"
+    before = {
+        instance: create_cli_scan(state_dir, root, repository, identity_instance=instance)
+        for instance in (None, "entry")
+    }
+    after = {
+        instance: create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            mode="deep",
+            identity_anchor="unchecked-extraction",
+            identity_instance=instance,
+        )
+        for instance in (None, "entry", "other")
+    }
+    for old_instance, old in before.items():
+        for new_instance, new in after.items():
+            inputs = compare_scan_pair(state_dir, old, new, "--include-matching-inputs")[
+                "matchingInputs"
+            ]
+            if old_instance == new_instance:
+                assert inputs["crossModeOccurrenceIds"] == [
+                    inputs[side][0]["occurrenceId"] for side in ("before", "after")
+                ]
+            else:
+                assert "crossModeOccurrenceIds" not in inputs
+
+
+def test_cross_mode_matching_uses_the_first_displayed_control(tmp_path: Path) -> None:
+    state_dir, repository = empty_history_paths(tmp_path)
+    root = tmp_path / "results"
+    witness = {"role": "source", "path": "request.py", "startLine": 2}
+    primary = {"role": "expected_control", "path": "extract.py", "startLine": 41}
+    secondary = {"role": "concrete_implementation", "path": "preview.py", "startLine": 66}
+    before = create_cli_scan(state_dir, root, repository, locations=[witness, primary, secondary])
+    for locations, same_control in [
+        ([{**witness, "path": "upload.py"}, {**primary, "role": "concrete_implementation"}], True),
+        ([witness, secondary, primary], False),
+    ]:
+        after = create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            mode="deep",
+            identity_anchor="unchecked-write",
+            locations=locations,
+        )
+        inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
+            "matchingInputs"
+        ]
+        if same_control:
+            assert inputs["crossModeOccurrenceIds"] == [
+                inputs[side][0]["occurrenceId"] for side in ("before", "after")
+            ]
+        else:
+            assert "crossModeOccurrenceIds" not in inputs
+
+
+def test_matching_plan_keeps_cross_mode_context_with_each_scan_pair(tmp_path: Path) -> None:
+    state_dir, repository = empty_history_paths(tmp_path)
+    root = tmp_path / "results"
+    before = create_cli_scan(state_dir, root, repository)
+    after = create_cli_scan(
+        state_dir, root, repository, mode="deep", identity_anchor="unchecked-write"
+    )
+    # In mixed history, only Standard vs Deep pairs receive this context.
+    later = create_cli_scan(
+        state_dir, root, repository, mode="deep", identity_anchor="untrusted-output"
+    )
+    plan = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    first, second = plan["batches"]
+    old = first["beforeScans"][0]
+    assert old["crossModeOccurrenceIds"] == [
+        old["findings"][0]["occurrenceId"],
+        first["afterFindings"][0]["occurrenceId"],
+    ]
+    assert second["afterScanId"] == later["scanId"]
+    prior, same_mode = second["beforeScans"]
+    assert prior["crossModeOccurrenceIds"] == [
+        old["findings"][0]["occurrenceId"],
+        second["afterFindings"][0]["occurrenceId"],
+    ]
+    assert "crossModeOccurrenceIds" not in same_mode
+    compared = save_scan_matches(state_dir, before, after)
+    assert sorted(item["status"] for item in compared["findings"]) == ["new", "not_observed"]
+
+
+def test_scan_comparison_keeps_changed_content_and_ambiguous_locations_for_semantic_matching(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "extract.py").write_text("original\n")
+    root = tmp_path / "results"
+    original = create_cli_scan(state_dir, root, repository)
+    (repository / "extract.py").write_text("changed\n")
+    changed = create_cli_scan(
+        state_dir, root, repository, mode="deep", identity_anchor="renamed-archive-entry-write"
+    )
+    compared = compare_scan_pair(state_dir, original, changed, "--include-matching-inputs")
+    assert "crossModeOccurrenceIds" not in compared["matchingInputs"]
+    assert compared["summary"]["new"] == 1
+    assert compared["summary"]["not_observed"] == 1
+
+    siblings = create_cli_scan(
+        state_dir,
+        root,
+        repository,
+        identity_anchor="sibling-archive-entry-write",
+        extra_anchors=("second-sibling-archive-entry-write",),
+    )
+    ambiguous = compare_scan_pair(state_dir, changed, siblings, "--include-matching-inputs")
+    assert "crossModeOccurrenceIds" not in ambiguous["matchingInputs"]
+    assert ambiguous["summary"]["new"] == 2
+    assert ambiguous["summary"]["not_observed"] == 1
 
 
 def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
@@ -1765,3 +1947,16 @@ def test_cli_diff_launch_accepts_equal_refs_and_distinct_working_tree_base(tmp_p
                 base_revision,
                 head,
             )
+
+
+def test_scan_list_honors_advertised_page_size(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    for index in range(21):
+        output = tmp_path / f"scan-{index}"
+        output.mkdir(mode=0o700)
+        create_cli_scan(state_dir, output, repository, complete=False)
+    page = run_workbench(state_dir, "list-scans", "--limit", "50")
+    assert len(page["scans"]) == 21
+    assert page["nextOffset"] is None

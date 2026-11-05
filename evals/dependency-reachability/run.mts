@@ -28,11 +28,13 @@ const { values } = parseArgs({
     case: { type: "string" },
     suite: { type: "string" },
     jobs: { type: "string", default: "1" },
+    model: { type: "string" },
+    cli: { type: "string" },
     help: { type: "boolean", short: "h" },
   },
 });
 const usage =
-  "Usage: run.mts --repos DIR [--case ID] [--suite SUITE] [--jobs N]\n       run.mts --case mixed-services";
+  "Usage: run.mts --repos DIR [--case ID] [--suite SUITE] [--jobs N] [--model MODEL] [--cli PATH]\n       run.mts --case mixed-services [--model MODEL]";
 if (values.help) {
   console.log(usage);
   console.log(cases.map((c) => c.id).join(", "));
@@ -63,7 +65,9 @@ for (const c of selected) {
 }
 
 const sourceRoot = join(import.meta.dirname, "../..");
-const binary = join(sourceRoot, "sdk/typescript/bin/codex-security.mjs");
+const binary = values.cli
+  ? resolve(values.cli)
+  : join(sourceRoot, "sdk/typescript/bin/codex-security.mjs");
 const reports = join(import.meta.dirname, "reports");
 await mkdir(reports, { recursive: true });
 const directory = await mkdtemp(join(reports, "command-"));
@@ -91,6 +95,7 @@ type CaseGrade = { pass: boolean; errors: string[] };
 async function runCase(c: ReachabilityCase | typeof smoke) {
   let root: string | undefined;
   const argv = [binary, "exploitability", "check", c.cve, "--json"];
+  if (values.model !== undefined) argv.push("--model", values.model);
   let snapshotSha256: string | undefined;
   let answer: unknown;
   let grade: CaseGrade | undefined;

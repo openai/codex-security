@@ -1,6 +1,5 @@
 import { excerpts } from "./case-data.mts";
-import type { ReachabilityCase, StageFile } from "./cases.mts";
-import type { Verdict } from "./grade.mts";
+import type { CommandVerdict, ReachabilityCase, StageFile } from "./cases.mts";
 
 const before = "985238ce5b8f999edccd3c4ba83fba636db51272";
 const after = "29a91ff19585ca3eebd4bf53d275f600a093a73d";
@@ -43,7 +42,7 @@ const stage: StageFile[] = [
 function rolloutCase(
   id: string,
   portNumber: number,
-  verdict: Verdict,
+  verdict: CommandVerdict,
 ): ReachabilityCase {
   const prior = portNumber === 9100;
   const missing = verdict === "unknown";
@@ -51,6 +50,7 @@ function rolloutCase(
   const dial = `127.0.0.1:${portNumber}`;
   const revision = prior ? "1.3.1-r1" : "1.3.1-r0";
   const inode = prior ? "3741" : "8930";
+  const pid = prior ? "431" : "692";
   const endpoint = "edge/caddy.json";
   const question =
     "Assess CVE-2023-4863 for the next anonymous POST /thumbnail in the captured deployment. " +
@@ -102,19 +102,61 @@ function rolloutCase(
     evidenceGroups: [
       excerpts(endpoint, dial),
       excerpts(workers, dial),
+      excerpts(workers, `pid=${pid},fd=3`),
+      excerpts(workers, `${pid} gunicorn: worker [app.thumbnail:application]`),
+      excerpts(workers, `# /proc/${pid}/maps`),
       excerpts(workers, `08:01 ${inode} /usr/lib/libwebp.so`),
-      excerpts(packages, `libwebp-${missing ? "1.3.1-r0" : revision}`),
       excerpts(
-        root + revision + "/APKBUILD",
-        prior ? "CVE-2023-4863.patch" : "libwebp-$pkgver.tar.gz",
+        workers,
+        `pillow_webp_version_info{pid="${pid}",version="1.3.1"}`,
       ),
+      ...(missing
+        ? [
+            [
+              {
+                path: packages,
+                contains: "transaction\tdevice\tinode\tpath\tpackage",
+                completeFile: true,
+              },
+            ],
+          ]
+        : [
+            excerpts(packages, `08:01\t${inode}\t/usr/lib/libwebp.so`),
+            excerpts(packages, `libwebp-${revision}`),
+            excerpts(
+              root + revision + "/APKBUILD",
+              prior ? "CVE-2023-4863.patch" : "libwebp-$pkgver.tar.gz",
+            ),
+          ]),
+      ...(verdict !== "ruled_out"
+        ? [
+            excerpts(
+              "app/thumbnail.py",
+              'Image.open(BytesIO(environ["wsgi.input"].read()))',
+            ),
+            excerpts("app/thumbnail.py", "image.load()"),
+            excerpts(
+              "src/PIL/WebPImagePlugin.py",
+              "_webp.WebPAnimDecoder(self.fp.read())",
+            ),
+            excerpts("src/PIL/WebPImagePlugin.py", "self._decoder.get_next()"),
+            excerpts("src/_webp.c", "WebPAnimDecoderGetNext(decp->dec"),
+          ]
+        : []),
       ...(verdict === "ruled_out"
         ? [
             excerpts(
               patch,
+              "+      BuildHuffmanTable(NULL, root_bits, code_lengths, code_lengths_size, NULL);",
+            ),
+            excerpts(
+              patch,
               "+  if (root_table->curr_segment->curr_table + total_size >=",
-              "+    next->size = total_size > segment_size",
-              "BuildHuffmanTable is called to check if the data is valid.\nIf it is and the table is not big enough, more memory is allocated.",
+            ),
+            excerpts(patch, "+    next->size = total_size > segment_size"),
+            excerpts(
+              patch,
+              "+        (HuffmanCode*)WebPSafeMalloc(next->size, sizeof(*next->start));",
             ),
           ]
         : []),
@@ -124,6 +166,7 @@ function rolloutCase(
 
 export const rolloutCases = [
   rolloutCase("thumbnail-blue", 9100, "ruled_out"),
-  rolloutCase("thumbnail-green", 9101, "exploitable"),
+  // The running worker is observed, but the edge route is only configuration.
+  rolloutCase("thumbnail-green", 9101, "potentially_exploitable"),
   rolloutCase("thumbnail-receipt-window", 9100, "unknown"),
 ];

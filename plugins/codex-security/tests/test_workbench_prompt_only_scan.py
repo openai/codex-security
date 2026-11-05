@@ -1,3 +1,5 @@
+"""Check ownership, target identity, and backwards compatibility when starting scans without setup."""
+
 from __future__ import annotations
 
 import argparse
@@ -144,6 +146,10 @@ def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> 
     assert first["startDisposition"] == "created"
     assert Path(first["scan"]["scanDir"]).parent == scan_root / target.name
     assert joined["startDisposition"] == "joined"
+    assert first["scan"]["lifecycle"]["surface"] == "plugin"
+    assert first["scan"]["lifecycle"]["packageVersion"] is None
+    assert first["scan"]["lifecycle"]["mock"] is False
+    assert joined["scan"]["lifecycle"] == first["scan"]["lifecycle"]
     assert joined["scan"]["scanId"] == first["scan"]["scanId"]
     assert joined["scan"]["handoffClaimToken"] == first["scan"]["handoffClaimToken"]
     assert other["startDisposition"] == "created"
@@ -477,6 +483,7 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
     target = tmp_path / "target"
     head = initialize_git_repository(target)
     (target / "README.md").write_text("changed fixture\n")
+    (target / "binary.dat").write_bytes(b"\0")
     started = start_prompt_only_scan(
         state_dir,
         target,
@@ -485,6 +492,7 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
         mode="diff",
         extra_args=("--diff-target-kind", "working_tree"),
     )
+    assert started["scan"]["progress"]["coverage"]["filesTotal"] == 1
     assert started["scan"]["diffTarget"]["kind"] == "working_tree"
     assert started["scan"]["diffTarget"]["baseRevision"] == head
     assert started["scan"]["diffTarget"]["headRevision"] == head

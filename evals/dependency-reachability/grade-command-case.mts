@@ -1,12 +1,14 @@
 import { isRecord } from "../../sdk/typescript/src/record.ts";
-import { gradeEvidence, type EvidenceGroup, type Verdict } from "./grade.mts";
+import type { CommandVerdict } from "./cases.mts";
+import { gradeEvidence, type EvidenceGroup } from "./grade.mts";
 
 interface ExpectedUse {
   cve: string;
   component: string;
   version: string;
+  commandVersion?: string | null;
   versionAliases?: readonly string[];
-  verdict: Verdict;
+  verdict: CommandVerdict;
   evidenceGroups: readonly EvidenceGroup[];
 }
 
@@ -33,19 +35,29 @@ export async function gradeCommandCase(
   const uses: Record<string, unknown>[] = Array.isArray(result.uses)
     ? result.uses.filter(isRecord)
     : [];
-  const positive = uses.some((use) => use.verdict === "exploitable");
+  const status =
+    ["exploitable", "potentially_exploitable", "unknown", "ruled_out"].find(
+      (verdict) => uses.some((use) => use.verdict === verdict),
+    ) ?? "unknown";
+  // Known uses can all be ruled out while checkout coverage remains incomplete.
+  const consistent =
+    result.status === status ||
+    (status === "ruled_out" && result.status === "unknown");
   const overallCorrect =
-    positive || expected.verdict === "exploitable"
-      ? positive && result.status === "exploitable"
-      : result.status === "unknown" ||
-        (result.status === "ruled_out" &&
-          uses.every((use) => use.verdict === "ruled_out"));
-  if (!overallCorrect)
-    errors.push("Incorrect overall verdict for the reported uses");
+    consistent &&
+    (status !== "exploitable" || expected.verdict === "exploitable");
+  if (!consistent)
+    errors.push(`Expected aggregate ${status} for the reported uses`);
+  // No sibling use in these snapshots has separately demonstrated runtime access.
+  if (status === "exploitable" && expected.verdict !== "exploitable")
+    errors.push("The snapshot does not establish a confirmed exploitable use");
 
   // A library checkout can expose another use of the same dependency with a
   // different verdict. Only the use citing this case's route and controls counts.
-  const versions = [expected.version, ...(expected.versionAliases ?? [])];
+  const versions =
+    expected.commandVersion !== undefined
+      ? [expected.commandVersion]
+      : [expected.version, ...(expected.versionAliases ?? [])];
   const matches = uses.filter((use) =>
     namesComponent(use.component, expected.component),
   );
@@ -58,12 +70,17 @@ export async function gradeCommandCase(
       "ranges",
     );
     const evidenceCorrect = !issues.length;
-    const versionCorrect =
-      typeof use.version === "string" && versions.includes(use.version);
+    const versionCorrect = versions.some((version) => use.version === version);
     const verdictCorrect = use.verdict === expected.verdict;
     if (!versionCorrect)
-      issues.push(`Expected dependency version ${versions.join(" or ")}`);
+      issues.push(
+        `Expected dependency version ${versions
+          .map((version) => (version === null ? "null" : version))
+          .join(" or ")}`,
+      );
     if (!verdictCorrect) issues.push(`Expected verdict ${expected.verdict}`);
+    if (use.verdict === "exploitable" && use.deployment !== "confirmed")
+      issues.push("An exploitable verdict requires confirmed deployment");
     if (typeof use.reason !== "string" || !use.reason.trim())
       issues.push("Missing reason");
     if (typeof use.location !== "string" || !use.location.trim())

@@ -25,6 +25,7 @@ const localSchema = JSON.parse(
     key === "maxLength" || key === "maxItems" ? undefined : value,
   ),
 ) as typeof schema;
+export const DEFAULT_CLOUD_STRING_BYTES = 512;
 const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
   description: 65536,
   snippet: 65536,
@@ -85,7 +86,7 @@ function validateModelStrings(
         throw new Error(
           `${field} must be nonempty and contain no NUL characters.`,
         );
-      const limit = STRING_BYTE_LIMITS[field] ?? 512;
+      const limit = STRING_BYTE_LIMITS[field] ?? DEFAULT_CLOUD_STRING_BYTES;
       if (target === "cloud" && Buffer.byteLength(value) > limit)
         throw new Error(
           `${field} exceeds its Cloud limit of ${limit} UTF-8 bytes.`,
@@ -228,7 +229,7 @@ export const validateSourceReports =
 export const validateSourceReport = validator<SourceReport>("SourceReport");
 
 // Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
-export function canonicalNumber(token: string): string {
+export function canonicalNumber(token: string, fixedDigits = 21): string {
   const [, sign = "", integer, fraction = "", exponent = "0"] =
     /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
   const significant = (integer + fraction).replace(/^0+/u, "");
@@ -238,7 +239,7 @@ export function canonicalNumber(token: string): string {
   const digits = significant.slice(0, end);
   const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
   // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
-  if (point > -6n && point <= 21n) {
+  if (point > -6n && point <= BigInt(fixedDigits)) {
     const split = Number(point);
     if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
     if (split >= digits.length) return sign + digits.padEnd(split, "0");
@@ -277,6 +278,16 @@ export function validateExternalReport(
   serializeImportJson(report, checkReportNumber);
 }
 
+export function validateCodeLineRange(
+  firstLine: number | null | undefined,
+  endLine: number | null | undefined,
+) {
+  if (endLine != null && (firstLine == null || endLine < firstLine))
+    throw new Error(
+      "The code end line requires a first source location line and cannot precede it.",
+    );
+}
+
 export function validateExternalEvidenceFields(
   input: unknown,
   target: ExternalImportTarget = "cloud",
@@ -313,14 +324,10 @@ export function validateExternalEvidenceFields(
         throw new Error("Advisory source context requires advisory evidence.");
     }
   }
-  const endLine = result.details?.code?.end_line;
-  if (endLine !== null && endLine !== undefined) {
-    const firstLine = result.locations?.[0]?.line;
-    if (firstLine === null || firstLine === undefined || endLine < firstLine)
-      throw new Error(
-        "The code end line requires a first source location line and cannot precede it.",
-      );
-  }
+  validateCodeLineRange(
+    result.locations?.[0]?.line,
+    result.details?.code?.end_line,
+  );
   const urls = [
     result.url,
     result.details?.repository?.url,
@@ -366,6 +373,23 @@ const previousAdmissions = new WeakMap<
 
 export function previousAdmission(value: object) {
   return previousAdmissions.get(value);
+}
+
+/** Keep a valid native record when its optional structured fields exceed the target's bounds. */
+export function validateEnrichedExternalEvidence(
+  evidence: Record<string, unknown>,
+  target: ExternalImportTarget,
+  ...projections: (Record<string, unknown> | undefined)[]
+): ExternalFindingEvidence {
+  for (const extra of projections) {
+    if (!extra) continue;
+    try {
+      return validateExternalEvidence({ ...evidence, ...extra }, target);
+    } catch {
+      // Try the next projection. The native record must pass the same validation.
+    }
+  }
+  return validateExternalEvidence(evidence, target);
 }
 
 export function validateExternalEvidence(

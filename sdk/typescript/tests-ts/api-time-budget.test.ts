@@ -25,6 +25,7 @@ test("rejects an unrepresentable deadline before scan setup", async () => {
     throw new Error("Unexpected model preparation");
   });
   const runWorkbench = mock(async () => ({}));
+  const onLifecycle = mock();
   const now = mock(() => Date.UTC(2026, 0, 1));
   await using client = TestClient.withDependencies({
     prepareRuntime,
@@ -35,12 +36,13 @@ test("rejects an unrepresentable deadline before scan setup", async () => {
   await expect(
     client.preflight(repository, { maxTimeMinutes }),
   ).rejects.toThrow("deadline within the supported date range");
-  await expect(client.run(repository, { maxTimeMinutes })).rejects.toThrow(
-    "deadline within the supported date range",
-  );
+  await expect(
+    client.run(repository, { maxTimeMinutes, onLifecycle }),
+  ).rejects.toThrow("deadline within the supported date range");
   expect(prepareRuntime).not.toHaveBeenCalled();
   expect(createCodex).not.toHaveBeenCalled();
   expect(runWorkbench).not.toHaveBeenCalled();
+  expect(onLifecycle).not.toHaveBeenCalled();
   expect(now).not.toHaveBeenCalled();
 });
 
@@ -177,8 +179,11 @@ test("explicit cancellation remains authoritative with an advisory allowance", a
       signal: controller.signal,
     }),
   ).rejects.toBeInstanceOf(ScanInterruptedError);
-  expect(state.commands).toContain("fail-scan");
-  expect(state.commands).not.toContain("complete-scan");
+  expect(
+    state.commands.filter((command) =>
+      ["cancel-scan", "fail-scan", "complete-scan"].includes(command),
+    ),
+  ).toEqual(["cancel-scan"]);
 });
 
 test("preflight exposes the effective Deep limit in minutes and leaves Standard unset", async () => {

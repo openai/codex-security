@@ -10,7 +10,9 @@ import { sanitizerCases } from "./sanitizer-cases.mts";
 import { serviceCases } from "./service-cases.mts";
 import { rolloutCases } from "./rollout-cases.mts";
 import { zipCases } from "./zip-cases.mts";
+import { mimeReceiverSources } from "./receiver-data.mts";
 
+export type CommandVerdict = Verdict | "potentially_exploitable";
 export type Suite = "pillow" | "mailparser" | "backstage";
 export type Repository =
   | "alpinelinux/aports"
@@ -39,8 +41,10 @@ export interface ReachabilityCase {
   repository: Repository;
   revision: string;
   question: string;
-  verdict: Verdict;
+  verdict: CommandVerdict;
   version: string;
+  // CLI-only copy override; null explicitly requires an unresolved version.
+  commandVersion?: string | null;
   versionAliases?: readonly string[];
   evidenceGroups: readonly EvidenceGroup[];
   stage: readonly StageFile[];
@@ -61,18 +65,27 @@ function pillowCase(
   id: string,
   revision: string,
   operation: string,
-  verdict: Verdict,
+  verdict: CommandVerdict,
 ): ReachabilityCase {
   const fixed = revision === pillowFixed;
   const version = fixed ? "1.3.2" : "1.3.1";
-  const versionSources = [
-    ...excerpts(wheelRecipe, `LIBWEBP_VERSION=${version}`),
-    ...(fixed
-      ? excerpts(
-          "docs/releasenotes/10.0.1.rst",
-          "wheels to include libwebp 1.3.2",
-        )
-      : []),
+  const release = fixed ? "10.0.1" : "10.0.0";
+  const filename = `Pillow-${release}-cp312-cp312-manylinux_2_28_x86_64.whl`;
+  const wheelSha256 = fixed
+    ? "4ce90f8a24e1c15465048959f1e94309dfef93af272633e8f37361b824532e91"
+    : "d72e2ecc68a942e8cf9739619b7f408cc7b272b279b56b2c83c6123fcfa5cdff";
+  const downloadPath = fixed
+    ? "0c/ce/3cceae2fab54118a5fcdfd9a2ddd0167c21169446c05378c5dc10b0d5093"
+    : "5f/82/39a266a0626d2c0dd4ee341639fe7749268fc871429b90006eeb1583f24b";
+  const artifact = "service/wheel-artifact.json";
+  const bundledLibrary = fixed
+    ? "libwebp-850e2bec.so.7.1.8"
+    : "libwebp-8b6d8948.so.7.1.7";
+  const versionEvidence = [
+    excerpts("service/deployment.json", wheelSha256),
+    excerpts(artifact, wheelSha256),
+    excerpts(artifact, `"version": "${version}"`),
+    excerpts(artifact, `"neededLibrary": "${bundledLibrary}"`),
   ];
   return {
     id,
@@ -95,29 +108,25 @@ function pillowCase(
               "service/media.py",
               'Image.open(BytesIO(environ["wsgi.input"].read()))',
             ),
-            versionSources,
-            excerpts(
-              webpPlugin,
-              "_webp.WebPAnimDecoder(self.fp.read())",
-              "self._decoder.get_next()",
-            ),
-            excerpts(
-              webpNative,
-              "WebPAnimDecoderGetNext(decp->dec",
-              "WebPAnimDecoderNew(&(decp->data)",
-            ),
+            excerpts("service/media.py", "image.load()"),
+            ...versionEvidence,
+            ...(fixed
+              ? []
+              : [
+                  excerpts(webpPlugin, "_webp.WebPAnimDecoder(self.fp.read())"),
+                  excerpts(webpPlugin, "self._decoder.get_next()"),
+                  excerpts(webpNative, "WebPAnimDecoderGetNext(decp->dec"),
+                ]),
           ]
         : [
             excerpts(
               "service/media.py",
               'Image.frombytes("RGB", (64, 64), pixels)',
             ),
-            versionSources,
-            excerpts(
-              webpPlugin,
-              "data = _webp.WebPEncode(",
-              "register_save(WebPImageFile.format, _save)",
-            ),
+            excerpts("service/media.py", "size = 64 * 64 * 3"),
+            excerpts("service/media.py", "if len(pixels) != size:"),
+            ...versionEvidence,
+            excerpts(webpPlugin, "data = _webp.WebPEncode("),
             excerpts(webpNative, "WebPEncode(&config, &pic)"),
           ],
     stage: [
@@ -135,9 +144,19 @@ function pillowCase(
         value: {
           command: ["gunicorn", "--chdir", "service", "media:application"],
           wheels: [
-            `Pillow-${fixed ? "10.0.1" : "10.0.0"}-cp312-cp312-manylinux_2_28_x86_64.whl`,
+            {
+              filename,
+              url: `https://files.pythonhosted.org/packages/${downloadPath}/${filename}`,
+              sha256: wheelSha256,
+              metadata: artifact,
+            },
           ],
         },
+      },
+      {
+        kind: "fixture",
+        source: `fixtures/media/pillow-${release}-wheel.json`,
+        destination: artifact,
       },
       {
         kind: "git",
@@ -198,29 +217,34 @@ const linkVersion = [
     "linkify-it-5.0.0.tgz",
   ),
 ];
-const addressVersion = [
-  ...excerpts("package.json", '"nodemailer": "7.0.10"'),
-  ...excerpts(
-    "package-lock.json",
-    '"nodemailer": "7.0.10"',
-    "nodemailer-7.0.10.tgz",
-    '"node_modules/nodemailer": {\n            "version": "7.0.10"',
-  ),
-  ...installedNodemailerVersion,
-];
+const addressVersion = installedNodemailerVersion;
 const directRoute = excerpts(deployment, '"/inbox": "direct"');
-const parseBody = excerpts(
-  parse,
-  "simpleParser(",
-  "skipTextLinks: config.skipTextLinks",
-);
+const parseBody = excerpts(parse, "return simpleParser(");
+const parserSelection = [
+  excerpts(parse, "require('../index.js')"),
+  excerpts("lib/simple-parser.js", "new MailParser(options)"),
+  excerpts("lib/simple-parser.js", "parser.end(input)"),
+];
+const directParsing = [
+  directRoute,
+  excerpts(server, "require('./parse.cjs')"),
+  excerpts(server, "config.routes[req.url]"),
+  excerpts(server, "for await (const chunk of req) chunks.push(chunk)"),
+  excerpts(server, "const raw = Buffer.concat(chunks)"),
+  excerpts(
+    server,
+    "if (delivery === 'direct') {\n    const mail = await parse(raw);",
+  ),
+  parseBody,
+  ...parserSelection,
+];
+const linkText = excerpts(mail, "text.map(part => this.textToHtml(part))");
 const matchLinks = excerpts(mail, "linkify.match(str)");
-const parseAddress = excerpts(
+const addressSelection = excerpts(
   mail,
-  "addressparser(value)",
-  "case 'from':",
-  "case 'to':",
+  "require('nodemailer/lib/addressparser')",
 );
+const parseAddress = excerpts(mail, "addressparser(value)");
 
 function mailFiles(
   profile: MailProfile,
@@ -239,6 +263,7 @@ function mailFiles(
     files.push(
       nodemailerFile("package.json"),
       nodemailerFile(addressSource, addressRevision),
+      ...mimeReceiverSources,
     );
   }
   if (profile.nativeCharset) {
@@ -288,15 +313,20 @@ export const challengeCases: readonly ReachabilityCase[] = [
 ];
 
 export const cases: readonly ReachabilityCase[] = [
-  pillowCase("affected-decode", pillowAffected, decode, "exploitable"),
+  pillowCase(
+    "affected-decode",
+    pillowAffected,
+    decode,
+    "potentially_exploitable",
+  ),
   pillowCase("fixed-decode", pillowFixed, decode, "ruled_out"),
   pillowCase("affected-encode-only", pillowAffected, encode, "ruled_out"),
   {
     ...linkCase,
     id: "direct-links",
-    verdict: "exploitable",
+    verdict: "potentially_exploitable",
     stage: mailFiles(direct),
-    evidenceGroups: [directRoute, parseBody, matchLinks, linkVersion],
+    evidenceGroups: [...directParsing, linkText, matchLinks, linkVersion],
   },
   {
     ...linkCase,
@@ -304,6 +334,7 @@ export const cases: readonly ReachabilityCase[] = [
     verdict: "ruled_out",
     stage: mailFiles({ ...direct, skipTextLinks: true }),
     evidenceGroups: [
+      ...directParsing,
       excerpts(deployment, '"skipTextLinks": true'),
       excerpts(parse, "skipTextLinks: config.skipTextLinks"),
       excerpts(mail, "if (!this.options.skipTextLinks)"),
@@ -313,21 +344,26 @@ export const cases: readonly ReachabilityCase[] = [
   {
     ...linkCase,
     id: "queued-links",
-    verdict: "exploitable",
+    verdict: "potentially_exploitable",
     stage: mailFiles({ ...queue, worker: "local" }),
     evidenceGroups: [
-      excerpts(deployment, '"/inbox": "queue"', '"worker": "local"'),
+      excerpts(deployment, '"/inbox": "queue"'),
+      excerpts(deployment, '"worker": "local"'),
+      excerpts(server, "config.routes[req.url]"),
+      excerpts(server, "config.worker === 'local'"),
       excerpts(
         server,
-        "worker.send(raw)",
-        "fork(require.resolve('./worker.cjs')",
+        "fork(require.resolve('./worker.cjs'), [], { serialization: 'advanced' })",
       ),
-      excerpts(
-        "service/worker.cjs",
-        "process.on('message'",
-        "await parse(raw)",
-      ),
+      excerpts(server, "for await (const chunk of req) chunks.push(chunk)"),
+      excerpts(server, "const raw = Buffer.concat(chunks)"),
+      excerpts(server, "if (worker) {\n    worker.send(raw);"),
+      excerpts("service/worker.cjs", "process.on('message'"),
+      excerpts("service/worker.cjs", "require('./parse.cjs')"),
+      excerpts("service/worker.cjs", "await parse(raw)"),
       parseBody,
+      ...parserSelection,
+      linkText,
       matchLinks,
       linkVersion,
     ],
@@ -339,11 +375,10 @@ export const cases: readonly ReachabilityCase[] = [
     stage: mailFiles({ routes: {} }),
     evidenceGroups: [
       excerpts(deployment, '"routes": {}'),
+      excerpts(server, "config.routes[req.url]"),
       excerpts(
         server,
-        "!delivery",
-        "res.writeHead(404)",
-        "config.routes[req.url]",
+        "if (req.method !== 'POST' || !delivery) {\n    res.writeHead(404).end();\n    return;",
       ),
       linkVersion,
     ],
@@ -352,25 +387,33 @@ export const cases: readonly ReachabilityCase[] = [
     ...linkCase,
     id: "external-worker",
     verdict: "unknown",
+    // The selected HTTP receiver is absent; the local 5.0.0 is not its version.
+    commandVersion: null,
     stage: mailFiles({
       ...queue,
       worker: "external",
       workerUrl: "http://mail-worker:8080/jobs",
     }),
     evidenceGroups: [
-      excerpts(deployment, '"worker": "external"', '"workerUrl":'),
-      excerpts(server, "fetch(config.workerUrl"),
-      linkVersion,
+      excerpts(deployment, '"/inbox": "queue"'),
+      excerpts(deployment, '"worker": "external"'),
+      excerpts(deployment, '"workerUrl":'),
+      excerpts(server, "config.worker === 'local'"),
+      excerpts(
+        server,
+        "fetch(config.workerUrl, { method: 'POST', body: raw })",
+      ),
+      excerpts("service/worker.cjs", "process.on('message'"),
     ],
   },
   {
     ...addressCase,
     id: "address-groups",
-    verdict: "exploitable",
+    verdict: "potentially_exploitable",
     stage: mailFiles(direct, nodemailer7010),
     evidenceGroups: [
-      directRoute,
-      parseBody,
+      ...directParsing,
+      addressSelection,
       parseAddress,
       addressVersion,
       excerpts(installedAddress, "addressparser(data.group.join(','))"),
@@ -382,8 +425,21 @@ export const cases: readonly ReachabilityCase[] = [
     verdict: "ruled_out",
     stage: mailFiles(direct, nodemailer7011),
     evidenceGroups: [
+      ...directParsing,
+      addressSelection,
+      parseAddress,
       addressVersion,
-      excerpts(installedAddress, "depth > MAX_NESTED_GROUP_DEPTH"),
+      excerpts(installedAddress, "const MAX_NESTED_GROUP_DEPTH = 50"),
+      excerpts(installedAddress, "let depth = options._depth || 0"),
+      excerpts(installedAddress, "_handleAddress(address, depth)"),
+      excerpts(
+        installedAddress,
+        "addressparser(data.group.join(','), { _depth: depth + 1 })",
+      ),
+      excerpts(
+        installedAddress,
+        "if (depth > MAX_NESTED_GROUP_DEPTH) {\n        return [];",
+      ),
     ],
   },
   {
@@ -392,14 +448,25 @@ export const cases: readonly ReachabilityCase[] = [
     verdict: "ruled_out",
     stage: mailFiles({ ...direct, stripHeaders: true }, nodemailer7010),
     evidenceGroups: [
+      ...directParsing,
       excerpts(deployment, '"stripHeaders": true'),
-      excerpts(parse, "replaceHeaders(raw) : raw"),
       excerpts(
         parse,
-        "From: sender@example.invalid",
-        "To: archive@example.invalid",
-        "Buffer.concat([envelope, raw.subarray(",
+        "simpleParser(config.stripHeaders ? replaceHeaders(raw) : raw, options)",
       ),
+      excerpts(parse, "From: sender@example.invalid"),
+      excerpts(parse, "To: archive@example.invalid"),
+      excerpts(parse, "Content-Type: text/plain; charset=utf-8"),
+      excerpts(parse, "  '',\n  '',\n].join('\\r\\n')"),
+      excerpts(parse, "const lf = raw.indexOf(0x0a, start)"),
+      excerpts(
+        parse,
+        "lf === start || (lf === start + 1 && raw[start] === 0x0d)",
+      ),
+      excerpts(parse, "Buffer.concat([envelope, raw.subarray(lf + 1)])"),
+      excerpts(parse, "throw new Error('Missing end of message headers')"),
+      addressSelection,
+      parseAddress,
       addressVersion,
     ],
   },
@@ -454,39 +521,85 @@ export const cases: readonly ReachabilityCase[] = [
         '"vm2@npm:^3.9.18":\n  version: 3.9.19',
       ),
       excerpts("portal/portal.conf", "location = /api/scaffolder/v2/tasks"),
+      excerpts("portal/portal.conf", "limit_except POST { deny all; }"),
+      excerpts("portal/portal.conf", "location / { return 404; }"),
       [
-        ...excerpts("portal/app-config.yaml", "readonly: true"),
-        ...excerpts(
-          "portal/compose.yaml",
-          "/app/catalog/template.yaml:ro",
-          "/app/catalog/content:ro",
-        ),
+        {
+          path: "portal/app-config.yaml",
+          contains: "readonly: true",
+          completeFile: true,
+        },
       ],
-      excerpts("portal/template.yaml", "parameters.name", "url: ./content"),
+      excerpts("portal/compose.yaml", "/app/catalog/template.yaml:ro"),
+      excerpts("portal/compose.yaml", "/app/catalog/content:ro"),
+      excerpts(
+        "portal/compose.yaml",
+        "dockerfile: packages/backend/Dockerfile",
+      ),
+      excerpts(
+        "portal/compose.yaml",
+        "--config, app-config.yaml, --config, portal.yaml",
+      ),
+      excerpts(
+        "packages/backend/package.json",
+        '"@backstage/plugin-scaffolder-backend": "workspace:^"',
+      ),
+      excerpts(
+        "packages/backend/Dockerfile",
+        "yarn.lock package.json packages/backend/dist/skeleton.tar.gz",
+      ),
+      excerpts(
+        "packages/backend/Dockerfile",
+        "packages/backend/dist/bundle.tar.gz",
+      ),
+      excerpts("app-config.yaml", "connection: ':memory:'"),
+      excerpts("portal/template.yaml", "additionalProperties: false"),
+      excerpts("portal/template.yaml", "parameters.name"),
+      excerpts("portal/template.yaml", "url: ./content"),
+      ...["catalog-info.yaml", "index.js", "package.json"].map((name) => [
+        {
+          path:
+            "packages/create-app/templates/default-app/examples/template/content/" +
+            name,
+          contains: "${{ values.name",
+          completeFile: true,
+        },
+      ]),
+      excerpts(scaffolder + "service/router.ts", "values = req.body.values"),
       excerpts(
         scaffolder + "service/router.ts",
-        "values = req.body.values",
-        "parameters: values",
-        "steps: template.spec.steps",
-        "await taskBroker.dispatch",
+        "validate(values, parameters)",
       ),
+      excerpts(scaffolder + "service/router.ts", "parameters: values"),
+      excerpts(scaffolder + "service/router.ts", "steps: template.spec.steps"),
       excerpts(
         scaffolder + "scaffolder/tasks/NunjucksWorkflowRunner.ts",
         "parameters: task.spec.parameters",
-        "this.render(\n            step.input,",
+      ),
+      excerpts(
+        scaffolder + "scaffolder/tasks/NunjucksWorkflowRunner.ts",
         "renderTemplate(value, context)",
         "renderTemplate(wrappedDumped, context)",
       ),
       excerpts(
         scaffolder + "scaffolder/actions/builtin/fetch/template.ts",
         "renderTemplate(inputFileContents, context)",
+      ),
+      excerpts(
+        scaffolder + "scaffolder/actions/builtin/fetch/template.ts",
         "'values']: values",
         "ctx.input.values",
       ),
       excerpts(
         scaffolder + "lib/templating/SecureTemplater.ts",
         "env.renderString(str, JSON.parse(values))",
+      ),
+      excerpts(
+        scaffolder + "lib/templating/SecureTemplater.ts",
         "vm.setGlobal('templateValues'",
+      ),
+      excerpts(
+        scaffolder + "lib/templating/SecureTemplater.ts",
         "vm.run(`render(templateStr, templateValues)`)",
       ),
     ],

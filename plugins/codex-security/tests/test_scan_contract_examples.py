@@ -1,3 +1,5 @@
+"""Validate the checked-in scan examples and exercise schema boundaries for evidence and coverage."""
+
 from __future__ import annotations
 
 import copy
@@ -7,7 +9,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+from jsonschema import Draft202012Validator, FormatChecker, SchemaError, ValidationError
 from referencing import Registry, Resource
 from workbench_test_support import saved_coverage
 
@@ -54,14 +56,11 @@ class ScanContractExamplesTest(unittest.TestCase):
             with self.subTest(schema=schema_path.name):
                 Draft202012Validator.check_schema(read_object(schema_path))
 
-    def test_deep_reducer_schema_accepts_standard_findings_without_coverage(self) -> None:
-        validator = schema_validator(
-            "tools/deep-reducer", "definitions/artifact-common", "tools/scan-draft"
-        )
-        reduction_input = validator.schema["$defs"]["reductionInput"]
-        self.assertNotIn("reviewState", reduction_input["properties"])
-        self.assertEqual(set(reduction_input["required"]), {"scanId", "findings"})
-        self.assertFalse(reduction_input["additionalProperties"])
+    def test_schema_rejects_invalid_reference(self) -> None:
+        with self.assertRaisesRegex(SchemaError, "is not a 'uri-reference'"):
+            Draft202012Validator.check_schema({"$ref": "invalid reference"})
+
+    def test_standard_draft_requires_review_state(self) -> None:
         finding = {
             "ruleId": "cross-site-scripting.response",
             "identity": {"anchor": "response-output"},
@@ -82,24 +81,10 @@ class ScanContractExamplesTest(unittest.TestCase):
             "explicitExclusions": [{"pattern": "docs/", "reason": "Documentation only."}],
         }
 
-        Draft202012Validator.check_schema(validator.schema)
         request = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [finding],
         }
-
-        validator.validate(request)
-        validator.validate(
-            {
-                **request,
-                "complete": True,
-                "handoffClaimToken": "2ea75b4f-f9b2-49b4-a5a9-2a8de8ca9047",
-                "scope": {"summary": "HTTP responses"},
-                "threatModel": {"summary": "Untrusted requests reach responses."},
-            }
-        )
-        validator.validate({**request, "findings": []})
-        self.assertFalse(validator.is_valid({**request, "reviewState": coverage}))
 
         standard_validator = schema_validator("tools/scan-draft", "definitions/artifact-common")
         standard_request = {
@@ -116,16 +101,6 @@ class ScanContractExamplesTest(unittest.TestCase):
                 self.assertFalse(
                     standard_validator.is_valid({**standard_request, "reviewState": partial})
                 )
-        for extra_field in (
-            "source_worker_id",
-            "unknown_field",
-            "resultPath",
-            "consumedWorkerIds",
-            "schemaVersion",
-        ):
-            with self.subTest(extra_field=extra_field):
-                self.assertFalse(validator.is_valid({**request, extra_field: "not allowed"}))
-
         for missing_field in (
             "ruleId",
             "title",
@@ -141,21 +116,11 @@ class ScanContractExamplesTest(unittest.TestCase):
                 incomplete_finding = {
                     field: value for field, value in finding.items() if field != missing_field
                 }
-                self.assertFalse(validator.is_valid({**request, "findings": [incomplete_finding]}))
                 self.assertFalse(
                     standard_validator.is_valid(
                         {**standard_request, "findings": [incomplete_finding]}
                     )
                 )
-
-        for missing_field in ("scanId", "findings"):
-            with self.subTest(missing_field=missing_field):
-                self.assertFalse(
-                    validator.is_valid(
-                        {field: value for field, value in request.items() if field != missing_field}
-                    )
-                )
-        self.assertFalse(validator.is_valid({"candidates": [], "merges": []}))
 
     def test_manifest_identifies_and_hashes_the_example_documents(self) -> None:
         scan = example("scan-manifest")["scan"]

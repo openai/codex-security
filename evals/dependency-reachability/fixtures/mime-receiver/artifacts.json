@@ -1,0 +1,113 @@
+{
+  "lockRepository": "nodemailer/mailparser",
+  "lockRevision": "3e1e0291d7757501d334d19fe6553a78b45cc1eb",
+  "lockPath": "package-lock.json",
+  "artifacts": [
+    {
+      "name": "@zone-eu/mailsplit",
+      "version": "5.4.7",
+      "resolved": "https://registry.npmjs.org/@zone-eu/mailsplit/-/mailsplit-5.4.7.tgz",
+      "integrity": "sha512-jApX86aDgolMz08pP20/J2zcns02NSK3zSiYouf01QQg4250L+GUAWSWicmS7eRvs+Z7wP7QfXrnkaTBGrIpwQ==",
+      "archiveSha256": "bde3026379d9c758ed0b30aff53ce0e1d604d24d70415fe7f1edaa6884139212",
+      "files": [
+        {
+          "path": "LICENSE.EUPL-1.2",
+          "sha256": "1dc969d706e1c7f06961186aadb674ed4886a669fe91b31914ac4fd8dbec83dc"
+        },
+        {
+          "path": "lib/chunked-passthrough.js",
+          "sha256": "1c4ae413a06850f0ec76810fc354161eb7a6693256e15c8f0c0a0a781616be6b"
+        },
+        {
+          "path": "lib/flowed-decoder.js",
+          "sha256": "753ac3191bb26821974233007cfe1e6a39b9185cf3a3d6d0e82b754c9c8a34b6"
+        },
+        {
+          "path": "lib/headers.js",
+          "sha256": "64f108083f788574b9edc1bfe2c9c60db8200598c2944392bda885cd0c4a074c"
+        },
+        {
+          "path": "index.js",
+          "sha256": "8882bf48c57a2e627dc9625df9355bf303bd6d3c508738f7eb10e4f5afb4f3f0"
+        },
+        {
+          "path": "lib/message-joiner.js",
+          "sha256": "9a51e8ad999ebc2f1c5e41142b222eacec3c9aa4df8716b5043c5c8ce6d665cf"
+        },
+        {
+          "path": "lib/message-splitter.js",
+          "sha256": "a21903a389a3f935d79fd71e2ce51b3592a8bd30839385c5464859b52f570f6e"
+        },
+        {
+          "path": "lib/mime-node.js",
+          "sha256": "6e8a42e0fc3da4dc4e9ea00b08327d2bf9274a717e34bb960db6cea54a526179"
+        },
+        {
+          "path": "lib/node-rewriter.js",
+          "sha256": "eb355c8db330948884fa58ebcca1fb37ec6d0077fca64581c9691a276e7d2ce6"
+        },
+        {
+          "path": "lib/node-streamer.js",
+          "sha256": "7043f324c6cfaf30586170963a407a1baf9951c1c9763d6284af46bb9e6bb88d"
+        },
+        {
+          "path": "package.json",
+          "sha256": "0c6f19012271b765f97cd4db0da3b143ce68851cfc4b0aedd22433d2c355b8b9"
+        },
+        {
+          "path": "README.md",
+          "sha256": "2a7d427c00bfd91e3328498d410bfba782e209d3bb23628eb264935219dec70d"
+        },
+        {
+          "path": "LICENSE.MIT",
+          "sha256": "412ad6764b495ece74454c3b1d1816a4bf9b533f94158d23bfe4342559d8ca46"
+        }
+      ]
+    },
+    {
+      "name": "libmime",
+      "version": "5.3.7",
+      "resolved": "https://registry.npmjs.org/libmime/-/libmime-5.3.7.tgz",
+      "integrity": "sha512-FlDb3Wtha8P01kTL3P9M+ZDNDWPKPmKHWaU/cG/lg5pfuAwdflVpZE+wm9m7pKmC5ww6s+zTxBKS1p6yl3KpSw==",
+      "archiveSha256": "083a9eaa0265c5ef8cb316d0ffb41a4ab60165c39b5d4f196825a2e4c804443a",
+      "files": [
+        {
+          "path": "LICENSE",
+          "sha256": "0f2482bc852021c3226c1df9d75b610a9b795a5a88032cda51098dce3dae6740"
+        },
+        {
+          "path": "lib/charset.js",
+          "sha256": "406c33148e93e170552b34f889938a136ab14495197b8a9a87a954fa48aa4e90"
+        },
+        {
+          "path": "lib/charsets.js",
+          "sha256": "59c0db03af27af6b3b0845504fce18155b10e4da907af31db1b3ec677f2d9502"
+        },
+        {
+          "path": "lib/get-charset-name.js",
+          "sha256": "ae38c683eaafffb80a91ec01bfa074740e0f4021e6f1c241d09575d2388881d5"
+        },
+        {
+          "path": "lib/libmime.js",
+          "sha256": "475fd68c6394b725dbd80d33fd62731fef02956f1387b3c0951ce5365b25b39e"
+        },
+        {
+          "path": "lib/mimetypes.js",
+          "sha256": "f1874f88379955b71f94b3c17804e0ac2e4862524c90a324674e09fa0a0ce0bf"
+        },
+        {
+          "path": "package.json",
+          "sha256": "9a9d407ec999f8f71fd456a494800e558f4f8c076d6ab5818a9f192809a53d2a"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "sha256": "07e1551f60518d9364a6f721a23148adef89e1b0184bdef1ee1712b7c9ad475e"
+        },
+        {
+          "path": "README.md",
+          "sha256": "df8a850f44971c6c4137e1a8da092519c460411b0c32d6cda583fd79c901c641"
+        }
+      ]
+    }
+  ]
+}

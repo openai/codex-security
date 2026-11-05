@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import os
 import re
@@ -12,6 +13,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
 
@@ -41,6 +44,11 @@ def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision:
 
 
 def diff_snapshot_digest(scan: sqlite3.Row, manifest: dict[str, Any] | None) -> str | None:
+    """Return the content identity used for a stored diff, or None when unavailable.
+
+    Working-tree scans use their recorded content digest. Commit and range scans
+    reuse the sealed manifest value during recovery or derive a digest from both revisions.
+    """
     if scan["diff_target_kind"] == "working_tree":
         return scan["diff_content_digest"]
     if scan["diff_target_kind"] in {"commit", "range"}:
@@ -62,8 +70,12 @@ def git_output(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    offline: bool = False,
 ) -> str | None:
-    completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
+    """Return decoded Git stdout with one trailing newline removed, or None on failure or empty output."""
+    completed = git_command(
+        target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
+    )
     output = os.fsdecode(completed.stdout)
     if sys.platform == "win32" and output.endswith("\r\n"):
         output = output[:-2]
@@ -77,9 +89,117 @@ def git_bytes(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    offline: bool = False,
 ) -> bytes | None:
-    completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
+    completed = git_command(
+        target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
+    )
     return completed.stdout if completed.returncode == 0 else None
+
+
+def git_blob_binary_flags(
+    target: Path,
+    object_names: list[str],
+    *,
+    git_dir: Path | None = None,
+    work_tree: Path | None = None,
+) -> list[bool | None]:
+    """Classify ordered blobs without retaining their contents."""
+    if not object_names:
+        return []
+
+    # Git before 2.38 rejects -z, so only names with line breaks need it.
+    nul_input = any("\n" in name or "\r" in name for name in object_names)
+    separator = b"\0" if nul_input else b"\n"
+    request = separator.join(os.fsencode(name) for name in object_names) + separator
+    read_fd, write_fd = os.pipe()
+    with (
+        ThreadPoolExecutor(max_workers=1) as reader,
+        os.fdopen(read_fd, "rb") as output,
+        os.fdopen(write_fd, "wb") as sink,
+    ):
+
+        def read_samples() -> list[bool | None]:
+            # Closing the reader also unblocks Git if framing is invalid.
+            with output:
+                return _read_git_batch_flags(output, object_names)
+
+        samples = reader.submit(read_samples)
+        try:
+            completed = git_command(
+                target,
+                "cat-file",
+                "--batch",
+                *(["-z"] if nul_input else []),
+                text=False,
+                input_data=request,
+                git_dir=git_dir,
+                work_tree=work_tree,
+                stdout_file=sink,
+                offline=True,
+            )
+        finally:
+            # Git may fail before producing all requested records.
+            sink.close()
+        if completed.returncode != 0:
+            return [None] * len(object_names)
+        try:
+            return samples.result()
+        except ValueError:
+            return [None] * len(object_names)
+
+
+def _read_git_batch_flags(output: BinaryIO, object_names: list[str]) -> list[bool | None]:
+    """Read the older-Git-compatible -z protocol without buffering blob bodies."""
+    samples: list[bool | None] = []
+    for name in object_names:
+        header = output.readline()
+        raw_name = os.fsencode(name)
+        # Missing lookups echo the whole request, including any embedded newlines.
+        if header and raw_name.startswith(header):
+            header += output.read(len(raw_name) - len(header)) + output.readline()
+        if header in (raw_name + b" missing\n", raw_name + b" ambiguous\n"):
+            samples.append(None)
+            continue
+        fields = header.split(b" ")
+        if len(fields) != 3 or not header.endswith(b"\n"):
+            raise ValueError("invalid batch header")
+        size = int(fields[2])
+        if size < 0:
+            raise ValueError("invalid blob size")
+        # Consume non-blob objects too, so subsequent records stay aligned.
+        sample = _stream_is_binary(output, size, drain=True)
+        if output.read(1) != b"\n":
+            raise ValueError("missing blob terminator")
+        samples.append(sample if fields[1] == b"blob" else None)
+    return samples
+
+
+def _is_binary_sample(data: bytes) -> bool:
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return "\0" in data.decode("utf-16", errors="ignore")
+    return b"\0" in data
+
+
+def _stream_is_binary(output: BinaryIO, size: int, *, drain: bool = False) -> bool:
+    read_size = 64 * 1024
+    sample_size = min(size, read_size)
+    sample = output.read(sample_size)
+    if len(sample) != sample_size:
+        raise ValueError("truncated blob")
+    binary = _is_binary_sample(sample)
+    bom = sample[:2] if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else b""
+    remaining = size - sample_size
+    while remaining and (drain or not binary):
+        chunk_size = min(remaining, read_size)
+        chunk = output.read(chunk_size)
+        if len(chunk) != chunk_size:
+            raise ValueError("truncated blob")
+        # Even-sized reads keep UTF-16 code units aligned; preserve the original byte order.
+        if not binary:
+            binary = _is_binary_sample(bom + chunk) if bom else b"\0" in chunk
+        remaining -= chunk_size
+    return binary
 
 
 def _protected_repository_root(target: Path) -> Path:
@@ -158,16 +278,26 @@ def git_command(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
     stdout_file: BinaryIO | None = None,
-    pathspec_environment: dict[str, str] | None = None,
+    environment_overrides: dict[str, str] | None = None,
+    offline: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    """Run Git against target and return the completed process with its exit status.
+
+    Pass git_dir and work_tree together to select an explicit checkout. Set
+    offline to disable transports and lazy fetches. The text flag selects
+    decoded or binary output, and stdout_file can redirect it to a file.
+    """
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
     environment = os.environ.copy()
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
-    if pathspec_environment is not None:
-        environment.update(pathspec_environment)
+    if environment_overrides is not None:
+        environment.update(environment_overrides)
+    if offline:
+        # Deny transports even on Git versions that do not honor GIT_NO_LAZY_FETCH.
+        environment.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
     executable = trusted_git_executable(target)
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
@@ -208,7 +338,7 @@ def git_command(
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
-def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[str, str, str | None]]:
     """Return changed regular files from the selected side of each change."""
     result = git_command(
         repo,
@@ -220,31 +350,36 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         *diff_args,
         "--",
         text=False,
+        offline=True,
     )
     result.check_returncode()
     fields = result.stdout.split(b"\0")
     if fields and not fields[-1]:
         fields.pop()
 
-    changed: list[tuple[Path, str]] = []
+    changed: list[tuple[str, str, str | None]] = []
     index = 0
     while index < len(fields):
         metadata = fields[index].split()
         status = chr(metadata[-1][0])
         index += 1
+        rename_source = os.fsdecode(fields[index]) if status == "R" else None
         if status in {"C", "R"}:
             index += 1
-        path = repo / os.fsdecode(fields[index])
+        path = os.fsdecode(fields[index])
         index += 1
         selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
         if selected_mode.startswith(b"100"):
-            changed.append((path, status))
+            changed.append((path, status, rename_source))
     return changed
 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        return run_git_changed_paths(repo, [f"{base}..{head}"])
+        return [
+            (repo / name, status)
+            for name, status, _ in run_git_changed_paths(repo, [f"{base}..{head}"])
+        ]
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
@@ -255,22 +390,78 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             "--exclude-standard",
             "-z",
             text=False,
+            offline=True,
         )
         untracked.check_returncode()
-        combined = dict(staged)
-        combined.update(unstaged)
-        combined.update(
-            (repo / os.fsdecode(relative), "A")
-            for relative in untracked.stdout.split(b"\0")
-            if relative and not relative.endswith(b"/")
-        )
-        return sorted(
-            (path, status)
-            for path, status in combined.items()
-            if SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts)
-            and (status == "D" or (not path.is_symlink() and path.is_file()))
-        )
+        combined = {name: (status, source) for name, status, source in [*staged, *unstaged]}
+        selected: dict[str, str] = {}
+        linked_prefixes: dict[str, bool] = {}
+
+        def local_status(name: str, status: str) -> str | None:
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(PurePosixPath(name).parts):
+                return None
+            if status == "D":
+                return status
+            path = repo / name
+            try:
+                if (
+                    status in {"M", "R"}
+                    and _directory_link_boundary(repo, path, linked_prefixes) != path
+                ):
+                    return "D" if status == "M" else None
+                return status if stat.S_ISREG(path.lstat().st_mode) else None
+            except (FileNotFoundError, NotADirectoryError):
+                return None
+
+        for name, (status, source) in combined.items():
+            if chosen := local_status(name, status):
+                selected[name] = chosen
+            elif source is not None and local_status(source, "D"):
+                selected.setdefault(source, "D")
+        for relative in untracked.stdout.split(b"\0"):
+            if relative and not relative.endswith(b"/"):
+                name = os.fsdecode(relative)
+                if local_status(name, "A"):
+                    selected[name] = "A"
+        return sorted((repo / name, status) for name, status in selected.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
+
+
+def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int | None:
+    base, head = diff_target["baseRevision"], diff_target["headRevision"]
+    local = diff_target["kind"] == "working_tree"
+    selected: list[str] = []
+    committed: dict[str, str] = {}
+    try:
+        changes = git_changed_paths(target, base, head, "local-patch" if local else "revisions")
+    except subprocess.CalledProcessError:
+        # A partial clone can lack a tree needed even to enumerate the changed paths.
+        return None
+    for path, status in changes:
+        name = path.relative_to(target).as_posix()
+        if not local or status == "D":
+            committed[name] = f"{base if status == 'D' else head}:{name}"
+        else:
+            try:
+                resolved = path.resolve(strict=True)
+                if not resolved.is_relative_to(target):
+                    continue
+                with resolved.open("rb") as stream:
+                    binary = _stream_is_binary(stream, os.fstat(stream.fileno()).st_size)
+            except (OSError, ValueError):
+                continue
+            if not binary:
+                selected.append(name)
+    for name, binary in zip(
+        committed, git_blob_binary_flags(target, list(committed.values())), strict=True
+    ):
+        if binary is None:
+            return None
+        if not binary:
+            selected.append(name)
+    if any("\n" in name or "\r" in name for name in selected):
+        return None
+    return len(selected)
 
 
 def candidate_source_lines(
@@ -334,7 +525,14 @@ def candidate_source_lines(
         source: dict[str, Any] = {"path": name}
         if raw in location_set:
             if name not in counts:
-                blob = git_command(target, "cat-file", "blob", f"{revision}:{name}", text=False)
+                blob = git_command(
+                    target,
+                    "cat-file",
+                    "blob",
+                    f"{revision}:{name}",
+                    text=False,
+                    offline=True,
+                )
                 blob.check_returncode()
                 data = blob.stdout
                 counts[name] = len(re.split(rb"\r\n|[\r\n]", data)) - int(
@@ -356,6 +554,27 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def _update_regular_file_digest(digest: Any, path: Path, prefix: bytes = b"") -> None:
+    """Record the file kind, byte count, and SHA-256 in the snapshot digest."""
+    content = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            content.update(chunk)
+            size += len(chunk)
+    update_digest_field(digest, prefix + b"kind", b"file")
+    update_digest_field(digest, prefix + b"size", str(size).encode())
+    update_digest_field(digest, prefix + b"content-sha256", content.digest())
+
+
+def _visible_git_character(char: str) -> str:
+    if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}:
+        return char
+    if ord(char) <= 0xFF:
+        return f"\\x{ord(char):02x}"
+    return ascii(char)[1:-1]
+
+
 def _update_digest_field_from_git(
     digest: Any,
     label: bytes,
@@ -363,7 +582,7 @@ def _update_digest_field_from_git(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
-) -> bool:
+) -> None:
     with tempfile.TemporaryFile() as output:
         completed = git_command(
             target,
@@ -374,17 +593,23 @@ def _update_digest_field_from_git(
             stdout_file=output,
         )
         if completed.returncode != 0:
-            return False
+            detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
+                "\r\n", "\n"
+            )
+            detail = "".join(map(_visible_git_character, detail))
+            raise SystemExit(
+                f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
+            )
         output.seek(0, os.SEEK_END)
         value_size = output.tell()
         _update_digest_field_header(digest, label, value_size)
         output.seek(0)
         for chunk in iter(lambda: output.read(1024 * 1024), b""):
             digest.update(chunk)
-    return True
 
 
 def worktree_content_digest(target: Path) -> str:
+    """Return the worktree digest for the selected path after checking the state of its submodules."""
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
     return worktree_content_digest_for_context(repository, pathspec)
@@ -398,6 +623,7 @@ def remediation_checkout_snapshot(
         "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
     ),
 ) -> tuple[str, str | None]:
+    """Return the current revision and content digest after verifying the recorded checkout identity and required revision."""
     target = require_scan_target_identity(scan)
     revision = git_revision(target)
     required_revision = expected_revision or scan["target_revision"]
@@ -463,7 +689,7 @@ def worktree_content_digest_for_context(
         ":(top,glob,exclude)**/.svn",
         ":(top,glob,exclude)**/.svn/**",
     ]
-    tracked_ok = _update_digest_field_from_git(
+    _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
@@ -492,7 +718,7 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if not tracked_ok or untracked is None:
+    if untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
@@ -522,26 +748,10 @@ def worktree_content_digest_for_context(
                 directory_content_digest(path.resolve()).encode(),
             )
         elif stat.S_ISREG(metadata.st_mode):
-            content_digest = hashlib.sha256()
-            content_size = 0
             try:
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        content_digest.update(chunk)
-                        content_size += len(chunk)
+                _update_regular_file_digest(digest, path, prefix=b"untracked-")
             except OSError as exc:
                 raise SystemExit(f"Could not read untracked file: {relative_path}") from exc
-            update_digest_field(digest, b"untracked-kind", b"file")
-            update_digest_field(
-                digest,
-                b"untracked-size",
-                str(content_size).encode(),
-            )
-            update_digest_field(
-                digest,
-                b"untracked-content-sha256",
-                content_digest.digest(),
-            )
         else:
             raise SystemExit(f"Unsupported untracked file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
@@ -809,7 +1019,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 input_data=b"\0".join(candidates) + b"\0",
                 git_dir=Path(git_directory),
                 work_tree=repository,
-                pathspec_environment={
+                environment_overrides={
                     "GIT_NOGLOB_PATHSPECS": "0",
                 },
             )
@@ -900,18 +1110,10 @@ def directory_content_digest(
         elif stat.S_ISDIR(mode):
             update_digest_field(digest, b"kind", b"directory")
         elif stat.S_ISREG(mode):
-            content_digest = hashlib.sha256()
-            content_size = 0
             try:
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        content_digest.update(chunk)
-                        content_size += len(chunk)
+                _update_regular_file_digest(digest, path)
             except OSError as exc:
                 raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
-            update_digest_field(digest, b"kind", b"file")
-            update_digest_field(digest, b"size", str(content_size).encode())
-            update_digest_field(digest, b"content-sha256", content_digest.digest())
         else:
             raise UnsupportedLocalFileType(f"Unsupported local file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
@@ -1089,7 +1291,16 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
     branch = git_output(target, "symbolic-ref", "--quiet", "--short", "HEAD")
     metadata.update({"branch": branch, "detachedHead": revision is not None and branch is None})
     if revision is not None:
-        subject = git_bytes(target, "show", "-s", "--no-show-signature", "--format=%s", "HEAD")
+        subject = git_bytes(
+            target,
+            "log",
+            "-1",
+            "--no-patch",
+            "--no-show-signature",
+            "--format=%s",
+            "HEAD",
+            offline=True,
+        )
         metadata.update(
             {
                 "commitSubject": (subject or b"").decode("utf-8", errors="replace").strip() or None,
@@ -1118,6 +1329,7 @@ def require_remediation_target(value: str) -> Path:
 
 
 def require_scan_target_identity(scan: sqlite3.Row) -> Path:
+    """Return the recorded checkout path or raise SystemExit if it no longer identifies the original directory."""
     target = require_remediation_target(scan["target_path"])
     expected_inode = scan["target_inode"]
     if expected_inode is None:

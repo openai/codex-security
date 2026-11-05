@@ -1,17 +1,16 @@
 # Evaluations
 
-Model-based evaluations live here so they can evolve with the plugin without
-being embedded in its source tree or shipped npm runtime.
+Start with the [deterministic triage checks](triage-finding/README.md#check-the-harness) or the harness tests linked below. These run locally without model calls. Model evaluations are opt-in and consume usage on the account you configure.
 
 - Dependency reachability runs 23 public CLI checks across five CVEs, grades
   the expected dependency uses, and records command wall time and token usage.
   It also includes a standalone two-service smoke case and the historical
   caller-scoped skill baseline. [Setup and cases](dependency-reachability/README.md)
+- [Package-to-application mapping](package-application-mapping/README.md) checks
+  which configured applications use a package and verifies the recorded graph
+  edges on tiny synthetic checkouts.
 - [Triage finding](triage-finding/README.md): Promptfoo input contracts, OSS
   calibration, and SastBench. This suite owns its private package and lockfile.
-- [Deep reducer](deep-reducer/README.md): optional model evaluation of real IPC
-  size-limit recovery, pagination, and finding retention. It reuses the MCP
-  test helpers and dependencies.
 - [Secret discovery](secret-discovery/README.md): checks whether the production
   core audit finds synthetic credentials in source and keeps them in its final
   findings, with deterministic grading and harness checks.
@@ -21,7 +20,18 @@ being embedded in its source tree or shipped npm runtime.
 - [Workflow routing](workflow-routing/README.md): checks whether repository-installed
   production skills route natural-language requests to the appropriate workflow,
   stopping before workflow execution.
+- The [skill review fixtures](check-skills/README.md) cover pre-install decisions
+  for individual skill files and bundles, including cross-file behavior.
 
-Model runs are opt-in. CI runs the deterministic triage, dependency-reachability,
-secret-discovery, time-budget, and workflow-routing helper checks and the real-IPC reducer
-regression through the normal MCP test suite.
+CI runs the deterministic triage, dependency-reachability, [secret-discovery](secret-discovery/README.md#deterministic-checks), [time-budget](standard-time-budget/README.md#interpretation-and-checks), and [workflow-routing](workflow-routing/README.md#deterministic-checks) checks. The [MCP suite](../plugins/codex-security/mcp-app/TESTING.md) covers Deep Scan iterations, recovery, publication, and the real-IPC reducer regression.
+
+## Build the evaluation tools
+
+For the dependency-reachability, package-to-application mapping, secret-discovery, Standard time-budget and workflow-routing suites, [install the SDK and MCP dependencies](../sdk/typescript/TESTING.md#install-dependencies), then run these commands from the repository root. The eval type-check includes the triage sources, so it needs the triage package’s dependencies too.
+
+```sh
+pnpm --dir evals/triage-finding install --frozen-lockfile
+pnpm --dir sdk/typescript run build:evals
+```
+
+For Promptfoo triage and SastBench runs, use the [triage setup](triage-finding/README.md#set-up-the-runner), which also builds the native policy helper for your platform.

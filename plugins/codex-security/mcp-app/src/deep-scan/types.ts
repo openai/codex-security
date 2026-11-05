@@ -1,6 +1,7 @@
-import type { DeepReducerContext } from "../artifact-io.js";
+import type { DiscoveryBoardContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
+import type { WorkerTokenUsage } from "./usage-receipt.js";
 import type {
   configSchema,
   dedupInputSchema,
@@ -44,37 +45,29 @@ export type DeepScanWorkerMutation = Omit<
   "completionSequence" | "consecutiveErrors" | "mergeState"
 > & {
   scanId: string;
+  terminalFailure?: boolean;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
 };
 
 export type DeepScanReplaceableFailureKind =
   "policy_refusal" | "transient_error" | "invalid_discovery_artifacts";
 
-/** Inputs committed atomically when a reducer finishes. */
-export interface DedupCommit {
-  id: string;
-  scanId: string;
-  newFindings: number;
-  resultManifestPath: string;
-  candidateLedgerPath?: string;
-}
-
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
   WorkbenchDeepScanStore,
-  "begin" | "coordinatorLeaseArgs"
+  "begin" | "coordinatorGeneration"
 >;
 
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {
   root: string;
-  layout: "worker" | "reducer";
-  deepReducer?: DeepReducerContext;
+  layout: "worker";
+  discoveryBoard?: DiscoveryBoardContext;
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
-export interface CodexWorkerRequest {
-  kind: DeepScanWorkerKind;
+export interface CodexWorkerRequest extends WorkerTelemetryOptions {
+  kind: "discovery";
   promptPath: string;
   workingDirectory: string;
   subagents: number;
@@ -82,12 +75,31 @@ export interface CodexWorkerRequest {
   resumeThreadId?: string;
   continuationPrompt?: string;
   artifactContext?: CodexWorkerArtifactContext;
-  onThreadStarted?: (threadId: string) => Promise<void> | void;
   onNonRetryableError?: (error: Error) => void;
+}
+
+export interface WorkerTelemetryOptions {
+  attemptId?: string;
+  /** Host-bound receipt storage, excluded from model filesystem access. */
+  workerUsageDirectory?: string;
+  onThreadStarted?: (threadId: string) => Promise<void> | void;
+  onAttribution?: (attribution: WorkerAttribution) => void;
+  onUsage?: (
+    usage: WorkerTokenUsage | null,
+    turnId?: string,
+  ) => Promise<void> | void;
+}
+
+export interface WorkerAttribution {
+  operationId?: string;
+  attemptId: string;
+  parentAttemptId?: string;
 }
 
 export interface CodexWorkerResult {
   threadId?: string;
+  turnId?: string;
+  usage?: WorkerTokenUsage | null;
   diagnostics?: CodexWorkerDiagnostic[];
 }
 
@@ -103,6 +115,13 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
+  compareFindings?(
+    prompt: string,
+    workingDirectory: string,
+    signal: AbortSignal,
+    schema: Record<string, unknown>,
+    telemetry?: WorkerTelemetryOptions,
+  ): Promise<string>;
 }
 
 export interface DeepScanClock {
@@ -120,9 +139,18 @@ export interface DeepScanLogEvent {
   count?: number;
   completed?: number;
   newFindings?: number;
+  retainedFindings?: number;
   pass?: number;
   reason?: string;
   total?: number;
+  timestamp?: string;
+  durationMs?: number;
+  outcome?: "succeeded" | "failed" | "canceled";
+  retry?: boolean;
+  resumed?: boolean;
+  attemptId?: string;
+  operationId?: string;
+  parentAttemptId?: string;
 }
 
 export type DeepScanLogger = (event: DeepScanLogEvent) => void;

@@ -16,7 +16,7 @@ export async function collectReports(result: ScanResults): Promise<Map<string, B
   }
   return reports;
 }
-export async function uploadReports(reports: Map<string, Buffer>, inputs: Inputs, tempRoot: string): Promise<void> {
+export async function uploadReports(reports: Map<string, Buffer>, inputs: Inputs, tempRoot: string): Promise<number | undefined> {
   if (!reports.size) throw new Error('Artifact upload requested, but no validated reports are available.');
   const staging = await mkdtemp(join(tempRoot, 'codex-security-upload-'));
   try {
@@ -27,6 +27,7 @@ export async function uploadReports(reports: Map<string, Buffer>, inputs: Inputs
       await writeFile(dest, bytes, {mode: 0o600, flag: 'wx'});
       files.push(dest);
     }
-    await new DefaultArtifactClient().uploadArtifact(inputs.artifactName, files, staging, {retentionDays: inputs.retentionDays, compressionLevel: 0});
+    const artifact = await new DefaultArtifactClient().uploadArtifact(inputs.artifactName, files, staging, {retentionDays: inputs.retentionDays, compressionLevel: 0});
+    return artifact.id;
   } finally { await rm(staging, {recursive: true, force: true}); }
 }

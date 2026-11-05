@@ -169,6 +169,17 @@
       },
       "additionalProperties": { "$ref": "#/definitions/__schema0" }
     },
+    "exploitability": {
+      "type": "object",
+      "properties": {
+        "service_catalog_mcps": {
+          "description": "Read-only service catalog servers selected from codex.mcp_servers for service identities, running revisions and access observations in exploitability checks. Defaults to none.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
     "limits": {
       "type": "object",
       "properties": {

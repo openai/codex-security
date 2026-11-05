@@ -32,7 +32,7 @@ export async function readFixture(directory = fixture) {
 }
 
 const expectedUses = [
-  { service: "notes", version: "5.0.0", verdict: "exploitable" },
+  { service: "notes", version: "5.0.0", verdict: "potentially_exploitable" },
   { service: "reviews", version: "5.0.1", verdict: "ruled_out" },
 ] as const;
 
@@ -84,8 +84,10 @@ export function gradeCommand(
 ) {
   const result = isRecord(answer) ? answer : {};
   const errors: string[] = [];
-  if (result.cve !== cve || result.status !== "exploitable")
-    errors.push(`Expected ${cve} with aggregate status exploitable`);
+  if (result.cve !== cve || result.status !== "potentially_exploitable")
+    errors.push(
+      `Expected ${cve} with aggregate status potentially_exploitable`,
+    );
   const uses: unknown[] = Array.isArray(result.uses) ? result.uses : [];
   if (uses.length !== expectedUses.length)
     errors.push(`Expected two uses, received ${uses.length}`);
@@ -146,7 +148,7 @@ export function gradeCommand(
           "Missing evidence that the image installs this service's lockfile and runs the shared handler",
         );
       if (
-        verdict === "exploitable" &&
+        verdict === "potentially_exploitable" &&
         !cites("server.mjs", "links.match(await text(request))")
       )
         issues.push("Missing request processing evidence");

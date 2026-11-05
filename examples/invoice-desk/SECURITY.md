@@ -1,5 +1,9 @@
 # Invoice Desk threat model
 
+This sample threat model is for people evaluating Invoice Desk. For a security
+issue in Codex Security itself, follow the repository's [private reporting
+instructions](../../SECURITY.md).
+
 Generated with Codex Security CLI 0.1.30 (`policy`, OpenAI `gpt-5.6-sol`, high
 effort), then reviewed against the source and condensed. The CLI inspected a
 standalone copy of `app/`. The local QA scope and intended properties below also

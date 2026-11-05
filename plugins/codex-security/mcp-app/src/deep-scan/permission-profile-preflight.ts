@@ -15,6 +15,8 @@ export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
   "codex_security_deep_scan_worker";
 
 export interface DeepScanPermissionProfilePreflightOptions {
+  /** Selected MCP servers for the standalone dependency check. */
+  readonly allowedMcpServers?: readonly string[];
   /** The exact Codex executable that will run the worker turn. */
   readonly codexPath: string;
   /** The worker cwd used for app-server startup and cwd-scoped config RPCs. */
@@ -47,26 +49,80 @@ type PendingRequest = {
 
 type RuntimeConfigReadOptions = Pick<
   DeepScanPermissionProfilePreflightOptions,
-  "codexPath" | "cwd" | "configOverrides" | "env" | "signal" | "context"
+  "codexPath" | "cwd" | "configOverrides" | "env" | "signal"
 > & {
+  readonly context?: PreflightContext;
   readonly commandArgs?: readonly string[];
+  readonly configCwd?: string;
   /** Full app-server invocation for callers that already constructed its arguments. */
   readonly appServerArgs?: readonly string[];
   readonly providerConfigOverrides?: readonly string[];
 };
 
+type PreflightContext = "helper" | "parent-config";
+
 /** Read native effective settings, including managed provider requirements, without a turn. */
 export async function readDeepScanRuntimeConfig(
-  options: RuntimeConfigReadOptions,
-): Promise<JsonRecord> {
+  options: RuntimeConfigReadOptions & {
+    readonly plugin?: { marketplacePath: string; pluginName: string };
+  },
+  inspect?: (
+    config: JsonRecord,
+    hasEmptyCatalog: (server: string) => Promise<boolean>,
+  ) => Promise<JsonRecord>,
+): Promise<JsonRecord | undefined> {
   return withPreflightClient(options, async (client) => {
     const response = await client.request("config/read", {
-      cwd: options.cwd,
+      cwd: options.configCwd ?? options.cwd,
       includeLayers: false,
     });
-    const config = record(response.config);
+    let config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
-    return config;
+    // Portable plugins expose their admitted server names through native discovery.
+    // Preserve native routing if the selected Codex cannot provide that metadata.
+    if (options.plugin) {
+      const detail = await client
+        .request("plugin/read", options.plugin)
+        .catch(() => undefined);
+      options.signal.throwIfAborted();
+      const plugin = record(detail?.plugin);
+      const summary = record(plugin?.summary);
+      const servers = plugin?.mcpServers;
+      if (
+        summary?.installed !== true ||
+        summary.enabled !== true ||
+        !Array.isArray(servers) ||
+        !servers.every((name) => typeof name === "string")
+      )
+        return undefined;
+      config = {
+        ...config,
+        mcp_servers: {
+          ...Object.fromEntries(servers.map((name) => [name, {}])),
+          ...record(config.mcp_servers),
+        },
+      };
+    }
+    if (!inspect) return config;
+    return inspect(config, async (serverName) => {
+      const result = await client
+        .request("mcpServerStatus/list", {
+          serverName,
+          detail: "toolsAndAuthOnly",
+        })
+        .catch(() => undefined);
+      options.signal.throwIfAborted();
+      const match = Array.isArray(result?.data)
+        ? result.data.map(record).find((entry) => entry?.name === serverName)
+        : undefined;
+      const tools = record(match?.tools);
+      // Native status applies tool filters before it returns the catalog.
+      return (
+        match?.toolsError === null &&
+        tools !== undefined &&
+        Object.keys(tools).length === 0
+      );
+    });
   });
 }
 
@@ -221,12 +277,17 @@ export async function prepareCliDeepScanSession(
  */
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
-): Promise<{ useOpenAiApiKey: boolean }> {
+): Promise<{ useOpenAiApiKey: boolean; mcpServerNames: string[] }> {
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
-      includeLayers: false,
+      includeLayers: options.allowedMcpServers !== undefined,
     });
+    if (options.allowedMcpServers !== undefined)
+      verifyStandaloneMcpLayers(
+        configResponse.layers,
+        options.allowedMcpServers,
+      );
     const catalog = await client.readPermissionProfileCatalog(options.cwd);
     const matchingEntries = catalog.filter(
       (entry) => entry.id === DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
@@ -244,11 +305,13 @@ export async function preflightDeepScanWorkerPermissionProfile(
       catalogEntry,
       requirementsResponse,
     );
+    const config = record(configResponse.config);
+    const mcpServerNames = Object.keys(record(config?.mcp_servers) ?? {});
     if (
       !options.allowOpenAiApiKeyFallback ||
-      record(configResponse.config)?.forced_login_method === "chatgpt"
+      config?.forced_login_method === "chatgpt"
     ) {
-      return { useOpenAiApiKey: false };
+      return { useOpenAiApiKey: false, mcpServerNames };
     }
     // Reuse Codex's selected credential store, including keyring, instead of
     // interpreting auth.json here. Custom provider auth is loaded privately by exec.
@@ -256,17 +319,48 @@ export async function preflightDeepScanWorkerPermissionProfile(
       refreshToken: false,
     });
     return {
+      mcpServerNames,
       useOpenAiApiKey:
         account.requiresOpenaiAuth === true && account.account === null,
     };
   });
 }
 
+function verifyStandaloneMcpLayers(
+  layers: unknown,
+  allowed: readonly string[],
+): void {
+  if (!Array.isArray(layers))
+    throw new Error(
+      "Codex did not return configuration layers for the dependency check.",
+    );
+  for (const entry of layers) {
+    const layer = record(entry);
+    const source = record(layer?.name)?.type;
+    if (typeof source !== "string" || !record(layer?.config))
+      throw new Error(
+        "Codex returned an invalid configuration layer for the dependency check.",
+      );
+    if (layer?.disabledReason != null) continue;
+    const servers = record(record(layer?.config)?.mcp_servers) ?? {};
+    for (const [name, settings] of Object.entries(servers)) {
+      const selected = allowed.includes(name);
+      if (source === "sessionFlags" && selected) continue;
+      // Even a disabled lower-layer entry can merge extra env or args into a selected server.
+      if (!selected && record(settings)?.enabled === false) continue;
+      throw new Error(
+        `Dependency check cannot isolate MCP server ${JSON.stringify(name)} from the ${source} configuration layer.`,
+      );
+    }
+  }
+}
+
 async function withPreflightClient<T>(
   options: RuntimeConfigReadOptions,
   operation: (client: AppServerPreflightClient) => Promise<T>,
 ): Promise<T> {
-  if (options.signal.aborted) throw abortError(options.signal.reason);
+  if (options.signal.aborted)
+    throw abortError(options.signal.reason, options.context);
   const client = new AppServerPreflightClient(options);
   try {
     await client.initialize();
@@ -320,6 +414,7 @@ class AppServerPreflightClient {
         args.push("--config", override);
       }
       args.push("app-server", "--stdio");
+      if (options.configCwd !== undefined) args.push("--cd", options.configCwd);
     }
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {
@@ -361,7 +456,7 @@ class AppServerPreflightClient {
     });
 
     const onAbort = () => {
-      this.fail(abortError(options.signal.reason));
+      this.fail(abortError(options.signal.reason, options.context));
       this.stopChild();
     };
     options.signal.addEventListener("abort", onAbort, { once: true });
@@ -667,21 +762,28 @@ function profileCollisionError(context?: "helper"): DeepScanNonRetryableError {
   );
 }
 
-function malformedPreflightError(context?: "helper"): Error {
+function failedOperation(context?: PreflightContext): string {
+  return context === "parent-config"
+    ? "Could not read the Deep Scan parent configuration"
+    : `${subject(context)} cannot safely verify its read-only worker permission profile`;
+}
+
+function malformedPreflightError(context?: PreflightContext): Error {
   return new Error(
-    `${subject(context)} cannot safely verify its read-only worker permission profile with this Codex configuration. ${subject(context)} did not run.`,
+    context === "parent-config"
+      ? `${failedOperation(context)}. Codex returned an invalid app-server response.`
+      : `${failedOperation(context)} with this Codex configuration. ${subject(context)} did not run.`,
   );
 }
 
 function unsupportedCodexApiError(
   codexPath: string,
   api: string,
-  context?: "helper",
+  context?: PreflightContext,
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    subject(context) +
-      " cannot safely verify its read-only worker permission profile because " +
-      "the selected Codex executable " +
+    failedOperation(context) +
+      " because the selected Codex executable " +
       JSON.stringify(codexPath) +
       " does not support the required " +
       JSON.stringify(api) +
@@ -698,7 +800,7 @@ function jsonRpcPreflightError(
   codexPath: string,
   method: string,
   value: unknown,
-  context?: "helper",
+  context?: PreflightContext,
 ): Error {
   const error = record(value);
   const code =
@@ -712,9 +814,8 @@ function jsonRpcPreflightError(
     return failure;
   }
   return new Error(
-    subject(context) +
-      " cannot safely verify its read-only worker permission profile because " +
-      "the selected Codex executable " +
+    failedOperation(context) +
+      " because the selected Codex executable " +
       JSON.stringify(codexPath) +
       " returned an error for " +
       JSON.stringify(method) +
@@ -730,7 +831,7 @@ function jsonRpcPreflightError(
 function codexExecutableStartError(
   codexPath: string,
   error: Error,
-  context?: "helper",
+  context?: PreflightContext,
 ): Error {
   const value = "code" in error ? error.code : undefined;
   const code =
@@ -754,22 +855,24 @@ function codexExecutableExitError(
   codexPath: string,
   code: number | null,
   signal: NodeJS.Signals | null,
-  context?: "helper",
+  context?: PreflightContext,
 ): Error {
+  const operation =
+    context === "parent-config"
+      ? "the configuration read"
+      : "permission-profile verification";
   const detail =
     code !== null
-      ? "exited before permission-profile verification completed with code " +
-        code
+      ? `exited before ${operation} completed with code ${code}`
       : signal !== null
-        ? "was terminated before permission-profile verification completed by signal " +
-          signal
-        : "exited before permission-profile verification completed";
+        ? `was terminated before ${operation} completed by signal ${signal}`
+        : `exited before ${operation} completed`;
   return new Error(codexExecutableFailureMessage(codexPath, detail, context));
 }
 
 function codexExecutableStdioError(
   codexPath: string,
-  context?: "helper",
+  context?: PreflightContext,
 ): Error {
   return new Error(
     codexExecutableFailureMessage(
@@ -783,8 +886,10 @@ function codexExecutableStdioError(
 function codexExecutableFailureMessage(
   codexPath: string,
   detail: string,
-  context?: "helper",
+  context?: PreflightContext,
 ): string {
+  if (context === "parent-config")
+    return `${failedOperation(context)}. Codex executable ${JSON.stringify(codexPath)} ${detail}.`;
   return (
     subject(context) +
     " cannot safely verify its read-only worker permission profile because " +
@@ -822,7 +927,7 @@ export function deepScanPermissionProfileFallbackError(
   );
 }
 
-function subject(context?: "helper"): string {
+function subject(context?: PreflightContext): string {
   return context === "helper" ? "Read-only Codex helper" : "Deep Scan";
 }
 
@@ -830,10 +935,12 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-function abortError(reason: unknown): Error {
+function abortError(reason: unknown, context?: PreflightContext): Error {
   if (reason instanceof Error) return reason;
   return new DOMException(
-    "Deep Scan worker permission profile preflight aborted.",
+    context === "parent-config"
+      ? "Deep Scan parent configuration read aborted."
+      : "Deep Scan worker permission profile preflight aborted.",
     "AbortError",
   );
 }

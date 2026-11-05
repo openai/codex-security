@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import (
     UnreadableLocalFile,
     UnsupportedLocalFileType,
@@ -19,6 +20,7 @@ from workbench_target import (
     git_bytes,
     git_revision,
 )
+from workbench_validation import _valid_legacy_scan_cost
 
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
@@ -31,13 +33,81 @@ WORKFLOW_BINDINGS = {
 WORKFLOW_STAGES = ("scan", "publish", "dedupe")
 
 
+def _usable_cost_range(value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("context") != "unknown" or "max" not in value:
+        return False
+    minimum, maximum = value.get("min"), value["max"]
+    return (
+        type(minimum) in (int, float)
+        and 0 <= minimum <= sys.float_info.max
+        and (
+            maximum is None
+            or type(maximum) in (int, float)
+            and minimum <= maximum <= sys.float_info.max
+        )
+    )
+
+
+def _recorded_cost(value: str | None) -> dict[str, Any] | None:
+    """Recover the SDK cost fields that are usable from this historical receipt."""
+    try:
+        cost = stored_scan_cost_fields(value).get("cost")
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not _valid_legacy_scan_cost(cost):
+        return None
+
+    fields = (
+        "model",
+        "inputTokens",
+        "cachedInputTokens",
+        "cacheWriteInputTokens",
+        "outputTokens",
+        "estimatedUsd",
+    )
+    result = {field: cost[field] for field in fields}
+    if isinstance(cost.get("cacheWriteInputTokensReported"), bool):
+        result["cacheWriteInputTokensReported"] = cost["cacheWriteInputTokensReported"]
+    bounds = cost.get("estimatedUsdRange")
+    if _usable_cost_range(bounds):
+        result["estimatedUsdRange"] = {field: bounds[field] for field in ("min", "max", "context")}
+
+    pricing = cost.get("pricing")
+    if (
+        isinstance(pricing, dict)
+        and pricing.get("serviceTier") == "standard"
+        and pricing.get("context") == "short"
+        and isinstance(pricing.get("source"), str)
+        and isinstance(pricing.get("asOf"), str)
+    ):
+        details = {field: pricing[field] for field in ("source", "asOf", "serviceTier", "context")}
+        rate_keys = ("input", "cacheRead", "cacheWrite", "output")
+        for field in ("usdPerMillionTokens", "longContextUsdPerMillionTokens"):
+            rates = pricing.get(field)
+            if isinstance(rates, dict) and all(
+                type(rates.get(key)) in (int, float) and 0 <= rates[key] <= sys.float_info.max
+                for key in rate_keys
+            ):
+                details[field] = {key: rates[key] for key in rate_keys}
+        if "usdPerMillionTokens" in details:
+            result["pricing"] = details
+    return result
+
+
 def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str, Any] | None:
+    """Return the stored stages, scope, and available scan cost, or None if the workflow ID is unknown."""
     row = connection.execute(
-        "SELECT * FROM finding_workflows WHERE id = ?", (workflow_id,)
+        """SELECT w.*, s.cost_json FROM finding_workflows AS w
+           LEFT JOIN scans AS s ON s.id = w.scan_id AND s.scan_dir = w.scan_dir
+                               AND s.status = 'complete'
+           WHERE w.id = ?""",
+        (workflow_id,),
     ).fetchone()
     if row is None:
         return None
     state = {"id": row["id"], "stages": {}}
+    if (cost := _recorded_cost(row["cost_json"])) is not None:
+        state["recordedCost"] = cost
     for field, column in WORKFLOW_BINDINGS.items():
         if row[column] is not None:
             state[field] = row[column]
@@ -59,6 +129,7 @@ def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str,
 
 
 def save_workflow(connection: sqlite3.Connection, state: dict[str, Any], timestamp: str) -> None:
+    """Insert or update the workflow bindings, scope, stage statuses, and saved results in the caller’s connection."""
     values = {"id": state["id"]}
     values.update({column: state.get(field) for field, column in WORKFLOW_BINDINGS.items()})
     scope = state.get("scope", {})
@@ -91,6 +162,7 @@ def save_workflow(connection: sqlite3.Connection, state: dict[str, Any], timesta
 
 
 def bind_workflow(state: dict[str, Any], binding: dict[str, Any]) -> None:
+    """Add bindings to the supplied state in place, raising SystemExit for unknown or conflicting fields."""
     for field, value in binding.items():
         if field not in WORKFLOW_BINDINGS and field != "scope":
             raise SystemExit("Unknown workflow binding.")
@@ -113,9 +185,22 @@ def register_workflow_scan(
         raise SystemExit("The workflow scan is already complete.")
     previous = state.get("scanId")
     if previous is not None:
-        row = connection.execute("SELECT status FROM scans WHERE id = ?", (previous,)).fetchone()
-        if row is not None and row["status"] == "complete":
-            raise SystemExit("Reuse the workflow's completed scan instead of registering another.")
+        row = connection.execute(
+            """SELECT saved.status, saved.recipe_json AS saved, attempt.recipe_json AS attempt
+               FROM scans AS saved JOIN scans AS attempt ON attempt.id = ? WHERE saved.id = ?""",
+            (scan_id, previous),
+        ).fetchone()
+        if row is not None:
+            if row["status"] == "complete":
+                raise SystemExit(
+                    "Reuse the workflow's completed scan instead of registering another."
+                )
+            saved = json.loads(row["saved"] or "{}")
+            attempt = json.loads(row["attempt"] or "{}")
+            if saved.get("severityRubric") != attempt.get("severityRubric"):
+                raise SystemExit(
+                    "Another attempt registered a different severity rubric. Retry this workflow to reuse its saved rubric."
+                )
     state["scanId"] = scan_id
     state["scanDir"] = scan_dir
     save_workflow(connection, state, timestamp)
@@ -124,6 +209,7 @@ def register_workflow_scan(
 def finding_workflow(
     connection: sqlite3.Connection, payload: dict[str, Any], timestamp: str
 ) -> dict[str, Any]:
+    """Dispatch a workflow request by ID and return its state, source snapshot, or review as the action specifies."""
     workflow_id = payload["id"]
     if not isinstance(workflow_id, str) or not workflow_id.strip():
         raise SystemExit("workflowId must be a nonempty string.")

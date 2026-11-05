@@ -13,7 +13,7 @@ const notes = {
   location: "notes",
   component: "linkify-it",
   version: "5.0.0",
-  verdict: "exploitable",
+  verdict: "potentially_exploitable",
   deployment: "configured",
   reason: "The HTTP handler passes submitted text to the affected version.",
   evidence: [
@@ -36,13 +36,18 @@ const reviews = {
     image,
   ],
 };
-const result = { cve, status: "exploitable", uses: [reviews, notes] };
+const result = {
+  cve,
+  status: "potentially_exploitable",
+  uses: [reviews, notes],
+};
 
 test("requires an independent grounded verdict for both configured services", () => {
   assert.equal(gradeCommand(result, files).pass, true);
   for (const uses of [
     [notes],
     [notes, notes],
+    [{ ...notes, verdict: "exploitable" }, reviews],
     [notes, { ...reviews, verdict: "exploitable" }],
     [notes, { ...reviews, deployment: "confirmed" }],
     [{ ...notes, evidence: reviews.evidence }, reviews],

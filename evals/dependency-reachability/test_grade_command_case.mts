@@ -41,14 +41,24 @@ test("a protected use can coexist with a separate affected library use", async (
   const library = {
     ...use,
     location: "library API",
-    verdict: "exploitable",
+    verdict: "potentially_exploitable",
     reason: "The library passes input to the decoder.",
     evidence: [version, { path: "service.js", startLine: 2, endLine: 2 }],
   };
-  const mixed = { ...answer, status: "exploitable", uses: [library, use] };
+  const mixed = {
+    ...answer,
+    status: "potentially_exploitable",
+    uses: [library, use],
+  };
   const grade = await gradeCommandCase(mixed, expected, root);
   assert.equal(grade.pass, true);
   assert.equal(grade.location, use.location);
+  const overclaim = {
+    ...mixed,
+    status: "exploitable",
+    uses: [{ ...library, verdict: "exploitable" }, use],
+  };
+  assert.equal((await gradeCommandCase(overclaim, expected, root)).pass, false);
   assert.equal((await gradeCommandCase(answer, expected, root)).pass, true);
   assert.equal(
     (await gradeCommandCase({ ...mixed, uses: [library] }, expected, root))
@@ -59,12 +69,25 @@ test("a protected use can coexist with a separate affected library use", async (
 
 test("requires matching advisory, component, version and use verdict in a positive report", async (t) => {
   const { root, expected, answer, use } = await fixture(t);
-  const positive = { ...expected, verdict: "exploitable" as const };
-  const subject = { ...use, verdict: "exploitable", version: expected.version };
-  const valid = { ...answer, status: "exploitable", uses: [subject] };
+  const positive = { ...expected, verdict: "potentially_exploitable" as const };
+  const subject = {
+    ...use,
+    verdict: "potentially_exploitable",
+    version: expected.version,
+  };
+  const valid = {
+    ...answer,
+    status: "potentially_exploitable",
+    uses: [subject],
+  };
   assert.equal((await gradeCommandCase(valid, positive, root)).pass, true);
   for (const invalid of [
     { ...valid, cve: "CVE-2023-0000" },
+    {
+      ...valid,
+      status: "exploitable",
+      uses: [{ ...subject, verdict: "exploitable" }],
+    },
     { ...valid, status: "unknown" },
     { ...valid, uses: [] },
     { ...valid, uses: [{ ...subject, component: "Pillow" }] },
@@ -75,6 +98,16 @@ test("requires matching advisory, component, version and use verdict in a positi
   ]) {
     assert.equal((await gradeCommandCase(invalid, positive, root)).pass, false);
   }
+});
+
+test("accepts incomplete checkout coverage when all observed uses are ruled out", async (t) => {
+  const { root, expected, answer } = await fixture(t);
+  const report = {
+    ...answer,
+    status: "unknown",
+    limitations: ["The search did not finish."],
+  };
+  assert.equal((await gradeCommandCase(report, expected, root)).pass, true);
 });
 
 test("checks source ranges in the checkout without borrowing evidence from another use", async (t) => {

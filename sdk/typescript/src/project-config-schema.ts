@@ -81,6 +81,16 @@ export const ProjectConfigInputSchema = z.strictObject({
     .describe(
       "Native Codex overrides. Common key types are checked here; existing native and wrapper restrictions still apply.",
     ),
+  exploitability: z
+    .strictObject({
+      service_catalog_mcps: z
+        .array(nonempty)
+        .optional()
+        .describe(
+          "Read-only service catalog servers selected from codex.mcp_servers for service identities, running revisions and access observations in exploitability checks. Defaults to none.",
+        ),
+    })
+    .optional(),
   limits: z
     .strictObject({
       max_cost_usd_per_scan: ScanSettingsSchema.shape.maxCostUsd.describe(

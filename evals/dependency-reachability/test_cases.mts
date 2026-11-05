@@ -81,7 +81,7 @@ for (const [exploitable, ruledOut, path, vulnerableValue, safeValue] of [
     assert.equal(positive.repository, negative.repository);
     assert.equal(positive.revision, negative.revision);
     assert.equal(positive.version, negative.version);
-    assert.equal(positive.verdict, "exploitable");
+    assert.equal(positive.verdict, "potentially_exploitable");
     assert.equal(negative.verdict, "ruled_out");
     const before = overlay(positive, path);
     const after = overlay(negative, path);
@@ -123,7 +123,7 @@ test("Pillow independently varies the release and the calling operation", () => 
     decode.stage.filter((file) => file.destination !== "service/media.py"),
   );
   assert.notEqual(encode.question, decode.question);
-  assert.equal(decode.verdict, "exploitable");
+  assert.equal(decode.verdict, "potentially_exploitable");
   assert.equal(fixed.verdict, "ruled_out");
   assert.equal(encode.verdict, "ruled_out");
 });
@@ -134,7 +134,7 @@ test("the two ZIP imports differ only in their deployed catalog", () => {
   assert.equal(first.question, second.question);
   assert.deepEqual(
     [first.verdict, second.verdict],
-    ["exploitable", "ruled_out"],
+    ["potentially_exploitable", "ruled_out"],
   );
   const catalog = "bundle/catalog.py";
   assert.notDeepEqual(overlay(first, catalog), overlay(second, catalog));
@@ -150,7 +150,7 @@ test("the backport changes only the installed address parser, keeping the vulner
   assert.equal(raw.revision, patched.revision);
   assert.equal(raw.question, patched.question);
   assert.equal(raw.version, patched.version);
-  assert.equal(raw.verdict, "exploitable");
+  assert.equal(raw.verdict, "potentially_exploitable");
   assert.equal(patched.verdict, "ruled_out");
   const path = "node_modules/nodemailer/lib/addressparser/index.js";
   const before = overlay(raw, path);
@@ -173,7 +173,7 @@ test("unknown remote processing cannot be proved by citing the available local w
   assert.equal(local.question, remote.question);
   assert.equal(local.revision, remote.revision);
   assert.equal(local.version, remote.version);
-  assert.equal(local.verdict, "exploitable");
+  assert.equal(local.verdict, "potentially_exploitable");
   assert.equal(remote.verdict, "unknown");
   const worker = "service/worker.cjs";
   assert.ok(

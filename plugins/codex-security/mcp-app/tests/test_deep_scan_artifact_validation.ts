@@ -15,18 +15,13 @@ import {
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.ts";
-import type { DeepReductionInput } from "../src/deep-scan/artifact-validation.ts";
+import type { ScanUnion } from "../src/deep-scan/artifact-validation.ts";
 import type { JsonObject } from "../src/types.ts";
 
-const {
-  validateDiscoveryArtifacts,
-  validateReducerArtifacts,
-  aggregateSourceCoverage,
-  deepReductionForPersistence,
-  projectDiscoveryCoverage,
-} = await importSource(
-  path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-);
+const { addScanCoverage, scanCoverage, validateDiscoveryArtifacts } =
+  await importSource(
+    path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+  );
 
 const {
   recordCodexSecurityWorkerScanDraft,
@@ -47,6 +42,7 @@ try {
   await testWorkerPublicationBeforeCheckpoint(root);
   await testLegacyDeferredPublication(root);
   testResolvedDeferredPublication();
+  testDistinctThreatModels();
   await testMissingReceiptRepair(root);
   for (const reverse of [false, true])
     await testMissingReceiptRepair(root, { shared: true, reverse });
@@ -70,14 +66,38 @@ try {
   for (const candidate of [false, true])
     for (const reverse of [false, true])
       await testCurrentAnonymousReceiptSelection(root, candidate, reverse);
-  await testReducerValidation(root);
-  await testReducerLineageConvergence(root);
-  await testEmptyDiscoveryAndReduction(root);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
 console.log("deep scan artifact validation tests passed");
+
+function testDistinctThreatModels() {
+  const aggregate: ScanUnion = { scanId, findings: [] };
+  const first = { summary: "An unauthenticated caller can reach the service." };
+  const other = {
+    format: "markdown",
+    content: "A worker can also submit a job.",
+  };
+  for (const [i, threatModel] of [first, { ...first }, other].entries()) {
+    addScanCoverage(
+      aggregate,
+      {
+        id: `worker-${i}`,
+        attempt: 1,
+        resultPath: "worker/output/result.json",
+        result: draft([], { threatModel }),
+      },
+      ".",
+    );
+  }
+  assert.deepEqual(aggregate.threatModel, first);
+  assert.deepEqual(aggregate.sourceCoverage?.reviews, [
+    { workerId: "worker-0", attempt: 1 },
+    { workerId: "worker-1", attempt: 1 },
+    { workerId: "worker-2", attempt: 1, threatModel: other },
+  ]);
+}
 
 function testResolvedDeferredPublication() {
   const source = {
@@ -86,21 +106,21 @@ function testResolvedDeferredPublication() {
     deferred: [{ id: "pending", reason: "A separate task remains." }],
     resolvedDeferred: [{ id: "1", reason: "The original review finished." }],
   };
-  let previous: DeepReductionInput | null = null;
+  const previous: ScanUnion = { scanId, findings: [] };
   for (const worker of [
     { id: "first", attempt: 1 },
     { id: "second", attempt: 1 },
     { id: "first", attempt: 2 },
   ]) {
-    const coverage = projectDiscoveryCoverage(source, worker, "worker/output");
-    const result = { scanId, findings: [] };
-    previous = {
-      ...result,
-      sourceCoverage: aggregateSourceCoverage(
-        [{ workerId: worker.id, coverage, result }],
-        previous,
-      ),
-    };
+    addScanCoverage(
+      previous,
+      {
+        ...worker,
+        resultPath: "worker/output/result.json",
+        result: draft([], { reviewState: source }),
+      },
+      ".",
+    );
   }
   const parsed: ScanDraftInput = parseScanDraft({
     ...draft([]),
@@ -238,18 +258,17 @@ async function testLegacyDeferredPublication(root: string) {
     worker.resultPath,
     scanId,
   );
-  const coverage = projectDiscoveryCoverage(
-    accepted.reviewState,
-    { id: worker.id, attempt: 1 },
-    "artifacts/deep_discovery/workers/discovery-0001/output",
+  const coverage = scanCoverage(
+    { ...worker, result: accepted },
+    worker.artifacts.scanDir,
   );
   const parent = parseScanDraft({ ...result, reviewState: coverage });
   assert.deepEqual(
     parent.reviewState.deferred.map((row: { id: string }) => row.id),
     [
-      "first-attempt-1-deferred-1",
-      "first-attempt-1-deferred-2",
-      "first-attempt-1-deferred-3",
+      "first-attempt-unknown-deferred-1",
+      "first-attempt-unknown-deferred-2",
+      "first-attempt-unknown-deferred-3",
     ],
   );
   assert.deepEqual(
@@ -690,6 +709,10 @@ async function testCoveragePublicationParity(root: string) {
     "artifacts/review.md",
     "artifacts/./review.md",
     "artifacts//review.md",
+    workerReceiptRef(output, "artifacts/review.md").replace(
+      "/workers/",
+      "/./workers//",
+    ),
   ]) {
     const result = structuredClone(original);
     result.reviewState.surfaces[0].receiptRefs = [ref];
@@ -697,7 +720,7 @@ async function testCoveragePublicationParity(root: string) {
       {
         id: "review",
         reason: "Review another route.",
-        paths: [".", "./src//api.ts"],
+        paths: [".", "./src//api.ts", "é:helper.ts"],
         surfaceIds: ["api"],
         receiptRefs: { external: "opaque metadata" },
       },
@@ -717,16 +740,18 @@ async function testCoveragePublicationParity(root: string) {
       worker.resultPath,
       scanId,
     );
-    const coverage = projectDiscoveryCoverage(
-      accepted.reviewState,
-      { id: worker.id, attempt: 1 },
-      "artifacts/deep_discovery/workers/discovery-0001/output",
+    const coverage = scanCoverage(
+      { ...worker, result: accepted },
+      worker.artifacts.scanDir,
     );
+    assert.deepEqual(coverage.surfaces[0].receiptRefs, [
+      workerReceiptRef(output, "artifacts/review.md"),
+    ]);
     assert.deepEqual(coverage.deferred[0].receiptRefs, {
       external: "opaque metadata",
     });
     assert.deepEqual(coverage.deferred[0].surfaceIds, [
-      "first-attempt-1-surface-1",
+      "first-attempt-unknown-surface-1",
     ]);
     assert.deepEqual(coverage.explicitExclusions[0].receiptRefs, [
       "opaque/missing.md",
@@ -765,6 +790,41 @@ async function testCoveragePublicationParity(root: string) {
       error: /well-formed Unicode/,
     },
   ];
+  const closure = { id: "route", reason: "Reviewed route." };
+  cases.push(
+    {
+      patch: (result) => {
+        result.reviewState.resolvedDeferred = [closure, closure];
+      },
+      error: /repeats resolved deferred id/,
+    },
+    {
+      patch: (result) => {
+        result.reviewState.deferred = [
+          { id: "route", reason: "Still pending." },
+        ];
+        result.reviewState.resolvedDeferred = [closure];
+      },
+      error: /deferred work is still active/,
+    },
+    {
+      patch: (result) => {
+        result.reviewState.deferred = [
+          { id: "other", candidateId: "route", reason: "Needs evidence." },
+        ];
+        result.reviewState.resolvedDeferred = [closure];
+      },
+      error: /deferred work is still active/,
+    },
+    {
+      patch: (result) => {
+        result.reviewState.resolvedDeferred = [
+          { ...closure, reason: "Invalid \ud800 text." },
+        ];
+      },
+      error: /well-formed Unicode/,
+    },
+  );
   for (const ref of ["artifacts/conİn$", "artifacts/conın$"]) {
     cases.push({
       patch: (result) => {
@@ -786,15 +846,20 @@ async function testCoveragePublicationParity(root: string) {
     path.join(output, "artifacts/Review.md"),
     "Other case-sensitive evidence.\n",
   );
-  cases.push({
-    patch: (result) => {
-      result.reviewState.surfaces[0].receiptRefs = [
-        "artifacts/review.md",
-        "artifacts/Review.md",
-      ];
-    },
-    error: /duplicate artifact path/,
-  });
+  for (const second of [
+    "artifacts/Review.md",
+    workerReceiptRef(output, "artifacts/Review.md"),
+  ]) {
+    cases.push({
+      patch: (result) => {
+        result.reviewState.surfaces[0].receiptRefs = [
+          "artifacts/review.md",
+          second,
+        ];
+      },
+      error: /duplicate artifact path/,
+    });
+  }
   for (const { patch, error } of cases) {
     const result = structuredClone(original);
     patch(result);
@@ -920,696 +985,6 @@ async function testDiscoveryValidation(root: string) {
       /escaped its scan directory|canonical non-symlink path/,
     );
   }
-}
-
-async function testReducerValidation(root: string) {
-  const firstFinding = finding("shared", "src/a.js");
-  const secondFinding = finding("independent", "src/b.js");
-  const { artifacts, ...first } = await createWorker(
-    path.join(root, "reducer"),
-    "worker-001",
-    draft([firstFinding]),
-  );
-  const artifactDir = path.join(artifacts.dedupRoot, "dedup-0001", "output");
-  const resultPath = path.join(artifactDir, "result.json");
-  await mkdir(artifactDir, { recursive: true });
-  await writeResult(resultPath, reduction([firstFinding]));
-
-  const sources: import("../src/deep-scan/artifact-validation.js").DeepReductionSources =
-    {
-      discoveries: [
-        {
-          workerId: first.id,
-          result: reduction([firstFinding, secondFinding]),
-        },
-      ],
-      previous: null,
-    };
-  const validateSnapshot = (reducerId = "dedup-0001", snapshot = sources) =>
-    validateReducerArtifacts(
-      { artifacts, artifactDir, resultPath, reducerId, sources: snapshot },
-      scanId,
-    );
-  await assert.rejects(validateSnapshot(), /unaccounted source findings/);
-  await writeResult(resultPath, reduction([firstFinding, secondFinding]));
-  await writeFile(first.resultPath, "{source changed after dispatch");
-  const validatedSnapshot = await validateSnapshot();
-  assert.equal(validatedSnapshot.newFindings, 2);
-  const admitted = await readJson(resultPath);
-  const { sourceCoverage, ...persistedResult } = validatedSnapshot.result;
-  assert.ok(sourceCoverage);
-  assert.equal(sourceCoverage.completeness, undefined);
-  assert.deepEqual(
-    persistedResult,
-    admitted,
-    "accepted findings retain the legacy persisted shape while coverage stays host-owned",
-  );
-  assert.equal(Object.hasOwn(admitted, "reviewState"), false);
-  assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
-    "worker-001:1",
-  ]);
-  sources.previous = structuredClone(admitted);
-  sources.previous!.findings[0].summary =
-    "Additional proof established by the previous reducer.";
-  await writeResult(resultPath, reduction([firstFinding, secondFinding]));
-  assert.equal((await validateSnapshot()).newFindings, 0);
-  assert.equal(
-    (await readJson(resultPath)).findings[0].provenance.previousFindings[0]
-      .summary,
-    sources.previous!.findings[0].summary,
-  );
-
-  const inheritedThreatModel = {
-    summary: "Internet requests reach the shared handler.",
-  };
-  const threatModelSources = {
-    discoveries: [
-      {
-        workerId: first.id,
-        result: reduction([firstFinding], {
-          threatModel: inheritedThreatModel,
-        }),
-      },
-    ],
-    previous: null,
-  };
-  await writeResult(resultPath, reduction([firstFinding]));
-  await validateSnapshot("dedup-threat-model", threatModelSources);
-  assert.deepEqual(
-    (await readJson(resultPath)).threatModel,
-    inheritedThreatModel,
-    "a reducer cannot erase the accepted discovery threat model by omission",
-  );
-
-  await writeResult(resultPath, reduction([]));
-  await assert.rejects(
-    validateSnapshot("dedup-ambiguous-threat-model", {
-      discoveries: [
-        {
-          workerId: "worker-a",
-          result: reduction([], {
-            threatModel: { summary: "Public API." },
-            scope: { summary: "Public API" },
-          }),
-        },
-        {
-          workerId: "worker-b",
-          result: reduction([], {
-            threatModel: { summary: "Local operator." },
-            scope: { summary: "Local operator" },
-          }),
-        },
-      ],
-      previous: null,
-    }),
-    /ambiguous threat models/i,
-  );
-
-  const inheritedScope = {
-    summary: "Shared request handlers",
-    includePaths: ["src"],
-  };
-  await writeResult(resultPath, reduction([firstFinding]));
-  await validateSnapshot("dedup-scope", {
-    discoveries: [
-      {
-        workerId: first.id,
-        result: reduction([firstFinding], { scope: inheritedScope }),
-      },
-    ],
-    previous: null,
-  });
-  assert.deepEqual(
-    (await readJson(resultPath)).scope,
-    inheritedScope,
-    "a reducer cannot erase an unambiguous accepted scope by omission",
-  );
-
-  await writeResult(resultPath, reduction([]));
-  await assert.rejects(
-    validateSnapshot("dedup-ambiguous-scope", {
-      discoveries: [
-        {
-          workerId: "worker-a",
-          result: reduction([], { scope: { summary: "Public API" } }),
-        },
-        {
-          workerId: "worker-b",
-          result: reduction([], { scope: { summary: "Admin API" } }),
-        },
-      ],
-      previous: null,
-    }),
-    /ambiguous scopes/i,
-  );
-
-  const collidingOriginalA = firstFinding;
-  const collidingOriginalB = {
-    ...firstFinding,
-    title: "Second independently reachable instance",
-    summary: "A second route reaches the same vulnerable control.",
-    locations: [{ path: "src/second-route.js", startLine: 4 }],
-  };
-  const previousCollisionA = {
-    ...collidingOriginalA,
-    summary: "Previous evidence for the first route.",
-    provenance: {
-      source: "local_plugin",
-      sourceFindingIds: ["origin:a"],
-      sourceFindings: [{ id: "origin:a", finding: collidingOriginalA }],
-    },
-  };
-  const previousCollisionB = {
-    ...collidingOriginalB,
-    summary: "Previous evidence for the second route.",
-    provenance: {
-      source: "local_plugin",
-      sourceFindingIds: ["origin:b"],
-      sourceFindings: [{ id: "origin:b", finding: collidingOriginalB }],
-    },
-  };
-  const collidingSources = {
-    discoveries: [],
-    previous: reduction([previousCollisionA, previousCollisionB]),
-  };
-  await writeResult(
-    resultPath,
-    reduction([
-      {
-        ...collidingOriginalA,
-        provenance: { source: "local_plugin", sourceFindingIds: ["origin:a"] },
-      },
-      {
-        ...collidingOriginalB,
-        provenance: { source: "local_plugin", sourceFindingIds: ["origin:b"] },
-      },
-    ]),
-  );
-  await validateSnapshot("dedup-colliding-previous", collidingSources);
-  const reconciledCollisions = (await readJson(resultPath)).findings;
-  assert.deepEqual(
-    reconciledCollisions.map(
-      (item: { provenance: { sourceFindingIds: string[] } }) =>
-        item.provenance.sourceFindingIds,
-    ),
-    [["origin:a"], ["origin:b"]],
-  );
-  assert.deepEqual(
-    reconciledCollisions.map(
-      (item: { provenance: { previousFindings: { summary: string }[] } }) =>
-        item.provenance.previousFindings[0].summary,
-    ),
-    [previousCollisionA.summary, previousCollisionB.summary],
-  );
-  const referenced = <Finding extends Record<string, unknown>>(
-    original: Finding,
-    refs: string[],
-  ) => ({
-    ...original,
-    provenance: { source: "local_plugin", sourceFindingIds: refs },
-  });
-  for (const [label, previous, output, expected] of [
-    [
-      "independent",
-      [previousCollisionA],
-      [
-        referenced(collidingOriginalA, ["origin:a"]),
-        referenced(collidingOriginalB, ["fresh:0"]),
-      ],
-      1,
-    ],
-    [
-      "repeat",
-      [previousCollisionA],
-      [referenced(collidingOriginalA, ["origin:a", "fresh:0"])],
-      0,
-    ],
-    [
-      "consolidate",
-      [previousCollisionA, previousCollisionB],
-      [
-        referenced(collidingOriginalA, ["origin:a", "origin:b"]),
-        referenced(collidingOriginalB, ["fresh:0"]),
-      ],
-      1,
-    ],
-    [
-      "legacy",
-      [
-        {
-          ...referenced(collidingOriginalA, ["legacy-id-without-body"]),
-          summary: "Previously accepted legacy evidence.",
-        },
-      ],
-      [
-        referenced(collidingOriginalB, ["fresh:0"]),
-        referenced(collidingOriginalA, ["previous:0"]),
-      ],
-      1,
-    ],
-  ] as const) {
-    const snapshot = {
-      discoveries: [
-        { workerId: "fresh", result: reduction([collidingOriginalB]) },
-      ],
-      previous: reduction([...previous]),
-    };
-    await writeResult(resultPath, reduction([...output]));
-    const accepted = await validateSnapshot(`dedup-${label}`, snapshot);
-    assert.equal(accepted.newFindings, expected, label);
-    if (label === "legacy") {
-      assert.equal(
-        accepted.result.findings[0].provenance.previousFindings,
-        undefined,
-      );
-      assert.equal(
-        accepted.result.findings[1].provenance.previousFindings[0].title,
-        collidingOriginalA.title,
-      );
-    }
-    // Reopening the accepted JSON keeps the same ancestry and adds no finding.
-    assert.equal(
-      (
-        await validateSnapshot(`resume-${label}`, {
-          discoveries: [],
-          previous: await readJson(resultPath),
-        })
-      ).newFindings,
-      0,
-      label,
-    );
-  }
-  await writeResult(first.resultPath, draft([firstFinding]));
-  await writeResult(resultPath, reduction([firstFinding]));
-
-  const validate = (previousReducerResultPath?: string) =>
-    validateReducerArtifacts(
-      {
-        artifacts,
-        artifactDir,
-        resultPath,
-        reducerId: "dedup-0001",
-        ...(previousReducerResultPath ? { previousReducerResultPath } : {}),
-      },
-      scanId,
-    );
-
-  assert.equal((await validate()).newFindings, 1);
-
-  await writeResult(resultPath, draft([firstFinding]));
-  const invalidArtifact = await readFile(resultPath, "utf8");
-  await assert.rejects(validate(), /reviewState/);
-  assert.equal(await readFile(resultPath, "utf8"), invalidArtifact);
-  await writeResult(resultPath, reduction([firstFinding], { complete: false }));
-  await assert.rejects(validate(), /only a checkpoint|not complete/);
-
-  await writeResult(resultPath, reduction([]));
-  assert.equal((await validate()).newFindings, 0);
-
-  await writeResult(resultPath, {
-    ...reduction([firstFinding]),
-    resultPath: "/tmp/result.json",
-  });
-  await assert.rejects(validate(), /resultPath/);
-
-  await writeResult(resultPath, reduction([firstFinding, secondFinding]));
-  assert.equal((await validate()).newFindings, 2);
-
-  const previousReducerResultPath = path.join(
-    artifacts.dedupRoot,
-    "dedup-0000",
-    "output",
-    "result.json",
-  );
-  await mkdir(path.dirname(previousReducerResultPath), { recursive: true });
-  await writeResult(previousReducerResultPath, reduction([firstFinding]));
-  const previousArtifact = await readFile(previousReducerResultPath, "utf8");
-  assert.equal(
-    (await validate(previousReducerResultPath)).newFindings,
-    1,
-    "only findings absent from the previous reducer are new",
-  );
-  assert.equal(
-    await readFile(previousReducerResultPath, "utf8"),
-    previousArtifact,
-    "reading a previous reducer must not rewrite it",
-  );
-
-  const renamedTitle = {
-    ...firstFinding,
-    title: "Stronger explanation of the same finding.",
-  };
-  await writeResult(resultPath, reduction([renamedTitle, secondFinding]));
-  assert.equal((await validate(previousReducerResultPath)).newFindings, 1);
-
-  await writeResult(
-    previousReducerResultPath,
-    reduction([firstFinding, secondFinding]),
-  );
-  await writeResult(resultPath, reduction([secondFinding]));
-  await assert.rejects(
-    validate(previousReducerResultPath),
-    (error: NodeJS.ErrnoException) =>
-      error.code === "merge_traceability_unstable_candidate_id",
-  );
-
-  const replacement = finding("replacement", "src/c.js");
-  await writeResult(
-    resultPath,
-    reduction([firstFinding, secondFinding, replacement]),
-  );
-  assert.equal((await validate(previousReducerResultPath)).newFindings, 1);
-
-  const implicitFirst = { ...firstFinding };
-  delete (implicitFirst as { identity?: unknown }).identity;
-  const implicitRenamed = {
-    ...implicitFirst,
-    summary: "More complete evidence.",
-  };
-  await writeResult(previousReducerResultPath, reduction([implicitFirst]));
-  await writeResult(resultPath, reduction([implicitRenamed]));
-  assert.equal((await validate(previousReducerResultPath)).newFindings, 0);
-  await writeResult(
-    resultPath,
-    reduction([
-      {
-        ...implicitRenamed,
-        locations: [
-          ...implicitRenamed.locations,
-          { path: "src/another-affected-location.js", startLine: 4 },
-        ],
-      },
-    ]),
-  );
-  assert.equal(
-    (await validate(previousReducerResultPath)).newFindings,
-    0,
-    "An existing finding without an explicit identity may gain affected locations.",
-  );
-
-  await writeResult(resultPath, {
-    ...reduction([firstFinding]),
-    scanId: otherScanId,
-  });
-  await assert.rejects(
-    validate(),
-    (error: NodeJS.ErrnoException) =>
-      error.name !== "DeepScanNonRetryableError" &&
-      /different scan/.test(error.message),
-  );
-
-  await writeResult(resultPath, reduction([firstFinding]));
-  await writeResult(first.resultPath, {
-    ...draft([firstFinding]),
-    scanId: otherScanId,
-  });
-  assert.equal(
-    (await validate()).newFindings,
-    1,
-    "A completed aggregate must not reread already-consumed Standard results.",
-  );
-  await writeFile(first.resultPath, "{invalid Standard scan\n");
-  assert.equal(
-    (await validate()).newFindings,
-    1,
-    "Accepted Standard inputs were already validated by the reducer writer.",
-  );
-  await writeResult(first.resultPath, draft([firstFinding]));
-
-  await writeResult(previousReducerResultPath, {
-    ...reduction([firstFinding]),
-    scanId: otherScanId,
-  });
-  await assert.rejects(validate(previousReducerResultPath), /different scan/);
-
-  if (process.platform !== "win32") {
-    const actualResult = path.join(artifactDir, "actual-result.json");
-    await writeResult(actualResult, reduction([firstFinding]));
-    await rm(resultPath);
-    await symlink(actualResult, resultPath, "file");
-    await assert.rejects(validate(), /canonical non-symlink path/);
-  }
-}
-
-async function testReducerLineageConvergence(root: string) {
-  const { artifacts } = await createWorker(
-    path.join(root, "lineage-convergence"),
-    "worker-lineage",
-    draft([]),
-  );
-  const artifactDir = path.join(artifacts.dedupRoot, "dedup-current", "output");
-  const resultPath = path.join(artifactDir, "result.json");
-  const previousReducerResultPath = path.join(
-    artifacts.dedupRoot,
-    "dedup-previous",
-    "output",
-    "result.json",
-  );
-  await mkdir(artifactDir, { recursive: true });
-  await mkdir(path.dirname(previousReducerResultPath), { recursive: true });
-  const originals = {
-    a: finding("root-a", "src/a.js"),
-    b: finding("alias-b", "src/b.js"),
-    c: finding("fresh-c", "src/c.js"),
-  };
-  const referenced = (name: string, refs: string[]) => ({
-    ...finding(name, `src/${name}.js`),
-    provenance: { source: "local_plugin", sourceFindingIds: refs },
-  });
-  const retained = (name: string, keys: (keyof typeof originals)[]) => ({
-    ...referenced(
-      name,
-      keys.map((key) => `origin:${key}`),
-    ),
-    provenance: {
-      source: "local_plugin",
-      sourceFindingIds: keys.map((key) => `origin:${key}`),
-      sourceFindings: keys.map((key) => ({
-        id: `origin:${key}`,
-        finding: originals[key],
-      })),
-    },
-  });
-  const previousA = retained("root-a", ["a"]);
-  const previousB = {
-    ...retained("alias-b", ["b"]),
-    rootCause:
-      "The previous reduction established another reachable response branch.",
-  };
-  const discoveries = [{ workerId: "fresh", result: reduction([originals.c]) }];
-  for (const [label, previous, output, newFindings] of [
-    [
-      "retain-canonical-alias",
-      [previousA, previousB],
-      [referenced("root-a", ["origin:a", "origin:b", "fresh:0"])],
-      0,
-    ],
-    [
-      "new-canonical-alias",
-      [previousA, previousB],
-      [referenced("merged-root", ["origin:a", "origin:b", "fresh:0"])],
-      0,
-    ],
-    [
-      "independent-root",
-      [previousA, previousB],
-      [
-        referenced("merged-root", ["origin:a", "origin:b"]),
-        referenced("fresh-c", ["fresh:0"]),
-      ],
-      1,
-    ],
-    [
-      "keep-independent-instances",
-      [previousA, previousB],
-      [
-        referenced("root-a", ["origin:a", "fresh:0"]),
-        referenced("alias-b", ["origin:b"]),
-      ],
-      0,
-    ],
-  ] as const) {
-    await writeResult(resultPath, reduction([...output]));
-    await writeResult(previousReducerResultPath, reduction([...previous]));
-    const input = { artifacts, artifactDir, resultPath, reducerId: label };
-    const accepted = await validateReducerArtifacts(
-      {
-        ...input,
-        sources: { discoveries, previous: reduction([...previous]) },
-      },
-      scanId,
-    );
-    assert.equal(accepted.newFindings, newFindings, label);
-    const saved = await readJson(resultPath);
-    assert.deepEqual(deepReductionForPersistence(accepted.result), saved);
-    assert.equal(
-      (
-        await validateReducerArtifacts(
-          { ...input, previousReducerResultPath },
-          scanId,
-        )
-      ).newFindings,
-      newFindings,
-      `${label}: reopening the saved reduction must reconstruct the same novelty`,
-    );
-    if (label === "new-canonical-alias") {
-      assert.deepEqual(
-        saved.findings[0].provenance.previousFindings.map(
-          (item: JsonObject) => item.title,
-        ),
-        [previousA.title, previousB.title],
-        "semantic consolidation keeps both prior canonical bodies",
-      );
-      for (const field of ["summary", "rootCause"]) {
-        const degraded = structuredClone(saved);
-        degraded.findings[0][field] = "X";
-        await writeResult(resultPath, degraded);
-        await assert.rejects(
-          validateReducerArtifacts(
-            {
-              ...input,
-              sources: { discoveries, previous: reduction([...previous]) },
-            },
-            scanId,
-          ),
-          /placeholder.*origin:/,
-          "renaming merged aliases cannot bypass original or synthesized content preservation",
-        );
-        await assert.rejects(
-          validateReducerArtifacts(
-            { ...input, previousReducerResultPath },
-            scanId,
-          ),
-          /placeholder.*origin:/,
-          "stored recovery rejects the same content loss as live reduction",
-        );
-        assert.deepEqual(await readJson(resultPath), degraded);
-      }
-    }
-  }
-  for (const [label, previous, output] of [
-    [
-      "split-previous-group",
-      [retained("root-a", ["a", "b"])],
-      [
-        referenced("root-a", ["origin:a"]),
-        referenced("alias-b", ["origin:b", "fresh:0"]),
-      ],
-    ],
-    [
-      "rename-independent-root",
-      [previousA],
-      [referenced("renamed-root", ["origin:a", "fresh:0"])],
-    ],
-    [
-      "ambiguous-previous-group",
-      [previousA],
-      [
-        referenced("root-a", ["origin:a"]),
-        referenced("alias-b", ["origin:a", "fresh:0"]),
-      ],
-    ],
-  ] as const) {
-    await writeResult(resultPath, reduction([...output]));
-    await writeResult(previousReducerResultPath, reduction([...previous]));
-    const input = { artifacts, artifactDir, resultPath, reducerId: label };
-    await assert.rejects(
-      validateReducerArtifacts(
-        {
-          ...input,
-          sources: { discoveries, previous: reduction([...previous]) },
-        },
-        scanId,
-      ),
-      /previously accepted finding|more than once/,
-      label,
-    );
-    await assert.rejects(
-      validateReducerArtifacts({ ...input, previousReducerResultPath }, scanId),
-      /previously accepted finding/,
-      `${label}: stored recovery must enforce the same assignment`,
-    );
-  }
-  const legacy = reduction([originals.a, originals.b]);
-  const legacyMerge = reduction([
-    referenced("merged-root", ["previous:0", "previous:1"]),
-  ]);
-  const validateLegacy = (previous: typeof legacy) =>
-    validateReducerArtifacts(
-      {
-        artifacts,
-        artifactDir,
-        resultPath,
-        reducerId: "legacy-consolidation",
-        sources: { discoveries: [], previous },
-      },
-      scanId,
-    );
-  await writeResult(resultPath, legacyMerge);
-  await assert.rejects(
-    validateLegacy(legacy),
-    /previously accepted finding identity/,
-    "legacy findings without retained source bodies keep their identities",
-  );
-  await writeResult(resultPath, legacy);
-  const upgraded = (await validateLegacy(legacy)).result;
-  assert.deepEqual(
-    upgraded.findings.map(
-      (item: { provenance: { sourceFindingIds: string[] } }) =>
-        item.provenance.sourceFindingIds,
-    ),
-    [["previous:0"], ["previous:1"]],
-  );
-  await writeResult(resultPath, legacyMerge);
-  assert.equal(
-    (await validateLegacy(upgraded)).newFindings,
-    0,
-    "host-retained legacy source bodies support later alias consolidation",
-  );
-  await writeResult(
-    previousReducerResultPath,
-    deepReductionForPersistence(upgraded),
-  );
-  assert.equal(
-    (
-      await validateReducerArtifacts(
-        {
-          artifacts,
-          artifactDir,
-          resultPath,
-          reducerId: "legacy-consolidation-recovery",
-          previousReducerResultPath,
-        },
-        scanId,
-      )
-    ).newFindings,
-    0,
-  );
-}
-
-async function testEmptyDiscoveryAndReduction(root: string) {
-  const { artifacts, ...worker } = await createWorker(
-    path.join(root, "empty"),
-    "worker-empty",
-    draft([]),
-  );
-  await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId);
-  const artifactDir = path.join(artifacts.dedupRoot, "dedup-empty", "output");
-  const resultPath = path.join(artifactDir, "result.json");
-  await mkdir(artifactDir, { recursive: true });
-  await writeResult(resultPath, { scanId, findings: [] });
-  const result = await validateReducerArtifacts({
-    artifacts,
-    artifactDir,
-    resultPath,
-    reducerId: "dedup-empty",
-  });
-  assert.equal(result.newFindings, 0);
-  assert.deepEqual(
-    result.result,
-    { scanId, findings: [] },
-    "reducers submit and return results without reviewState",
-  );
 }
 
 async function createWorker(scanDir: string, id: string, result: unknown) {

@@ -24,6 +24,7 @@ import {
   type ProjectScope,
 } from "./project-config-schema.js";
 import { expandHome } from "./runtime.js";
+import { isRecord } from "./record.js";
 import {
   DEFAULT_SCAN_AUTH,
   DEFAULT_SCAN_MODE,
@@ -43,6 +44,30 @@ export interface ProjectConfigSource {
   path?: string;
   directory: string;
   input: ProjectConfigInput;
+}
+
+export function exploitabilityMcpServers(
+  input: ProjectConfigInput | undefined,
+): JsonObject {
+  const names = input?.exploitability?.service_catalog_mcps ?? [];
+  const servers = input?.codex?.["mcp_servers"];
+  const selected = new Map<string, JsonObject>();
+  for (const name of names) {
+    if (name.replace(/[-.:@/]/gu, "_") === "codex_security_dependency")
+      throw new ConfigurationError(
+        `Reserved dependency trace server name: ${name}`,
+      );
+    const server =
+      isRecord(servers) && Object.hasOwn(servers, name)
+        ? servers[name]
+        : undefined;
+    if (!isRecord(server))
+      throw new ConfigurationError(
+        `MCP server ${JSON.stringify(name)} selected by exploitability.service_catalog_mcps must be defined in codex.mcp_servers.`,
+      );
+    if (server["enabled"] !== false) selected.set(name, server);
+  }
+  return Object.fromEntries(selected);
 }
 
 export interface ResolvedProjectConfig {

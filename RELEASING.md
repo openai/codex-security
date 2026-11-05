@@ -12,6 +12,12 @@ exact CLI version. The npm release contains the package archive and canonical
 changelog. The Action release contains its manifest and SBOM, links to that
 changelog, and lists the full distribution commit SHA for consumers to pin.
 
+## Release checklist
+
+1. Review the [rolling release PR](#rolling-release-prs). Verify the version, edit the [highlights and migration steps](#editing-the-release-notes), and complete the [pre-merge checks](#prepare-a-release). Squash-merge the reviewed revision.
+2. Wait for CI on the merged commit and the release verification jobs. Approve the **npm** deployment for the [package and container release](#publish). Follow the progress comment on the merged PR through the installation checks and applicable Action and container jobs.
+3. If the release includes the Action, [publish its companion release to Marketplace](#publish-to-github-marketplace). [Verify the public artifacts](#verify) before announcing the version. For a partial publication, use the [recovery procedure](#recover-or-repair-a-release) with the original tag.
+
 ## Pull request titles and categories
 
 Pull request titles must follow this form:
@@ -162,15 +168,17 @@ additional changes, then rerun the updater to resume.
 ### Editing the release notes
 
 The committed `.github/release-notes.md` is authoritative. The updater
-drafts highlights from merged titles and lists marked breaking changes for
-migration review; it does not infer migration instructions from source code.
-Review and refine these suggestions before releasing.
+collects candidate highlights from merged titles in a disclosure and puts marked breaking changes in a separate draft section. Before merging, select the changes users will notice. Replace each breaking title with the affected audience, previous behavior and required action. Link to the versioned procedure when the migration needs several steps.
 
 Keep the published notes easy to scan:
 
 - Start with a short overview and the main user-facing highlights. Use bold
   topic labels to make the bullets easy to skim. Put secondary improvements
   in a `<details>` block when they would crowd out upgrade guidance.
+- When bundled instructions change how scans discover or validate findings
+  or assign severity, describe the change in the highlights or upgrade notes.
+  Name the affected scan modes and behaviors or finding categories. If a
+  benchmark measured the effect, report the result and its scope.
 - Keep breaking changes and required upgrade actions visible. Long migration
   procedures can go in a clearly named `<details>` block under the relevant
   upgrade note. Keep code fences, tables, and lists intact.

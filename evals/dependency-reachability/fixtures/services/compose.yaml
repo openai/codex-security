@@ -1,6 +1,7 @@
-# MAIL_IMAGE contains the application and its dependencies under /opt/mail.
 x-app: &app
-  image: ${MAIL_IMAGE:?}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
   working_dir: /opt/mail
 
 x-archive: &archive

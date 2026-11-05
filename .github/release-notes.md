@@ -1,17 +1,12 @@
-<!-- release-version: 0.8.2 -->
+<!-- release-version: 0.8.3 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.8.2 adds threat-model explorers and Amazon Inspector imports, and improves scan progress and finding review.
-
-- **Threat-model explorers.** Turn an existing threat model into a shareable HTML explorer with interactive architecture, scenarios, controls, and source evidence. Export HTML or SVG from the bundled skill.
-- **Amazon Inspector imports.** With external imports enabled, import a complete Inspector Code Security repository findings export while retaining each finding's identity across imports. See the [Inspector import guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docs/scanner-imports/inspector.md).
-- **Dedupe corrections.** Hosted reviewers can correct rejected decisions in the original open review when the host supports pending-call validation.
-- **Interactive scans.** Finding review shows critical findings first, followed by high, medium, and low severity. Component tables show saved review progress, and scan titles resolve relative directory names.
-- **Output directories.** Existing scan output directories keep their permissions across scans, saved-result reads, and resume. Newly created directories remain private by default.
-- **Container releases.** The release workflow builds Debian and Wolfi images from the same verified scanner package and frozen runtime dependency lock. See the [container guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docker/README.md).
+- **Scans and reporting.** Run a local scan without connecting an app. Standard and Deep scans include more concrete guidance for finding issues in source. The GitHub Action lists the highest-severity findings first in its job summary and annotations. Published evidence links to Markdown files open the cited source lines on GitHub.
+- **Scanner imports.** Import Black Duck SCA project-version vulnerabilities, Veracode static policy flaws and AWS Continuum code findings. The [scanner guides](https://github.com/openai/codex-security/tree/npm-v0.8.3/docs/scanner-imports) describe the accepted formats and destinations.
+- **Severity and remediation.** Standard scans can use a host-supplied severity rubric. Standalone classification reports the rubric it used. Generated patches for completed scans can be saved with the scan.
 
 <!-- release-section: highlights:end -->
 
@@ -19,8 +14,6 @@ Codex Security 0.8.2 adds threat-model explorers and Amazon Inspector imports, a
 
 ## Upgrade notes
 
-No migration is required for existing CLI workflows. Hosted integrations that opt into pending-call validation must keep the original review session open until they handle the CLI's feedback; existing hosts can continue returning final results.
-
-Inspector imports remain opt-in. Cloud publication requires a connected GitHub repository and a deployment that accepts the Inspector provider. The import guide describes repository matching and complete-export requirements.
+- See [Upgrading to 0.8.3](https://github.com/openai/codex-security/blob/main/CHANGELOG.md#upgrading-to-083) for changes to cost limits, required PR checks, and the tracking and deduplication helpers.
 
 <!-- release-section: upgrades:end -->

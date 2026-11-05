@@ -61,8 +61,7 @@ async function executeWorkbench(
     "begin-deep-scan",
     "cancel-scan",
     "fail-scan",
-    "claim-deep-scan-dedup",
-    "commit-deep-scan-dedup",
+    "record-deep-scan-iteration",
     "complete-scan",
     "export-findings",
     "finish-deep-scan",
@@ -98,7 +97,11 @@ async function executeWorkbench(
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,
-      env: process.env,
+      env: {
+        ...process.env,
+        CODEX_MCP_NODE_PATH:
+          process.env.CODEX_MCP_NODE_PATH || process.execPath,
+      },
       encoding: "utf8" as const,
       maxBuffer: Infinity,
       timeout,

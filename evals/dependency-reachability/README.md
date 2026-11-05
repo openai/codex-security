@@ -2,17 +2,35 @@
 
 The default eval runs 23 checks against fresh snapshots of MailParser, Pillow,
 and Backstage. Each check invokes the shipped CLI with only a CVE identifier.
-The CLI fetches the advisory from OSV and runs the bundled `attack-path-analysis`
-skill. The checkout combines pinned upstream source with synthetic application
-and deployment files. Case IDs, caller descriptions, and expected answers stay
-outside the checkout.
+The CLI fetches the advisory from OSV and runs the bundled `dependency-exploitability`
+skill with a fresh in-memory graph for each check. The checkout combines pinned
+upstream source with synthetic application and deployment files. Case IDs,
+caller descriptions, and expected answers stay outside the checkout.
 
 ```sh
 codex-security exploitability check CVE-2025-14874 --json
 ```
 
-The goal is to reduce command wall time and token use while preserving the
-accuracy of the verdicts and the evidence for each dependency use.
+The CLI reviewer checks the evidence before the command returns a report.
+The eval then grades that report against the expected verdict and source
+citations for the case. Only the eval grader has those expectations.
+Record wall time and token use alongside accuracy. Use `--cli PATH` to select
+a specific built CLI, allowing concurrent evals of frozen builds.
+
+The wheel fixtures select official artifacts by URL and SHA256. Their bundled
+library manifests record static inspection of those exact wheels: native library
+hashes, version getters, dynamic linkage and matching Python source. These are
+artifact facts, not observations of a running service. The archive-worker
+fixtures select a local Docker build that copies the application and installs
+its locked dependencies; an unspecified external image would not establish
+those same source or dependency facts.
+
+The Nodemailer cases also include the locked `@zone-eu/mailsplit` and `libmime`
+source, with artifact hashes and original licenses. Their npm tarballs were
+verified against the upstream lockfile's integrity values before extraction.
+This makes MIME boundary and header handling available to the repository-only
+reviewer, including on the corresponding negative cases. These source fixtures
+are evidence for the selected packages, not a runnable dependency installation.
 
 | Package | CVE | What varies across snapshots |
 | --- | --- | --- |
@@ -73,6 +91,8 @@ Use `--case ID` for one snapshot or `--suite mailparser`, `--suite pillow`, or
 `--suite backstage` for one project. `--suite challenge` selects the ten patch,
 attachment, archived-mail, and ZIP cases. Checks run sequentially by default.
 Set `--jobs N` to run up to N commands concurrently.
+Use `--model MODEL` to select the assessment model. Omitting it uses the CLI's
+default model. The selected model is recorded in each case's command arguments.
 
 ## Grade and compare runs
 
@@ -84,6 +104,33 @@ for consistency with the reported uses. The smoke case requires both service
 verdicts and their deployment evidence. A failed grade or CLI error exits
 nonzero.
 
+Evidence groups are conjunctive: every group must be covered, while alternatives
+within a group express equivalent evidence for one fact. A `completeFile` anchor
+requires the union of validated citation ranges to cover the entire file, for
+example when the deciding fact is an absent receipt. `evidenceCorrect` measures
+this source coverage, not the semantic quality of the explanation; the CLI's
+reviewer handles the latter. A passing target use does not certify every other
+use in the report.
+
+The Backstage target is the configured portal task path, including workflow and
+fixed-skeleton rendering. Its expected exclusion does not cover standalone
+backends elsewhere in the upstream checkout.
+It assesses configured checkout behavior, not the contents of an observed
+running image; citing a particular convenience build script is not required.
+
+The external-worker case requires `version: null` for its absent HTTP receiver.
+The local checkout's known version does not identify that receiver. Its
+`commandVersion` override applies only to CLI grading; the historical scoped
+question separately asks for the local image version. Other cases retain exact
+version matching, including explicitly listed distribution-version aliases.
+
+The current 23 snapshots have nine expected `potentially_exploitable` uses,
+twelve `ruled_out` and two `unknown`. None establishes both a running
+affected use and access by the relevant caller. A captured worker can prove
+what is running while a desired route leaves public access unconfirmed.
+Earlier runs used `exploitable` for some code-level findings and are scored
+under their original contract.
+
 Each `reports/command-*/report.json` records the command, source revision,
 snapshot digest, per-case grade, command wall time, and token usage when
 available. Compare the same cases, snapshot digests, model settings, and job
@@ -91,9 +138,14 @@ count across runs. Check pass counts and individual use grades alongside time
 and input, cached input, and output tokens. Unavailable usage is reported as
 `null`.
 
+Changes to artifact selection or build fixtures change snapshot digests. Keep
+the earlier scores and rerun those cases with the corrected inputs; do not
+rescore old outputs as though they had received the new evidence. Changes only
+to grading can be evaluated against saved reports on their original snapshots.
+
 ## Historical skill baseline
 
-`run-skill-baseline.mts` runs the skill directly on the 23 caller-scoped
+`run-skill-baseline.mts` runs `attack-path-analysis` directly on the 23 caller-scoped
 questions. It supplies the entry point, caller permissions, and advisory.
 Earlier scores used those scoped prompts and earlier fixture digests. Use
 fresh CLI runs to measure changes to the CVE-only command.

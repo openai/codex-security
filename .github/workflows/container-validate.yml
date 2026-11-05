@@ -183,23 +183,7 @@ jobs:
           [[ "$(docker run --rm --entrypoint id codex-security:release-candidate -u)" == 10001 ]]
 
       - name: Verify entrypoint preserves Codex sandbox settings
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint /bin/sh codex-security:release-candidate -ec '
-            command_directory="$(mktemp -d)"
-            trap '\''rm -rf "$command_directory"'\'' EXIT
-            printf "%s\\n" "#!/bin/sh" '\''printf "%s\\n" "$@"'\'' > "$command_directory/codex-security"
-            chmod 755 "$command_directory/codex-security"
-
-            actual="$(
-              PATH="$command_directory:$PATH" \
-                /usr/local/bin/codex-security-entrypoint \
-                bulk-scan /input/repositories.csv --output-dir /output
-            )"
-            expected="$(printf "%s\\n" bulk-scan /input/repositories.csv --output-dir /output)"
-            test "$actual" = "$expected"
-          '
+        run: docker run --rm -i --entrypoint /bin/sh codex-security:release-candidate -s < docker/verify-container-entrypoint.sh
 
       - name: Verify hardened Codex command sandbox
         run: bash docker/verify-container-sandbox.sh codex-security:release-candidate
@@ -269,24 +253,10 @@ jobs:
 
           # The single-quoted program is evaluated inside the customer container.
           # shellcheck disable=SC2016
-          "${compose[@]}" run --rm --entrypoint /bin/sh codex-security -ec '
+          "${compose[@]}" run --rm -T --entrypoint /bin/sh codex-security -ec '
             test "$(cat /proc/self/attr/current)" = "codex-security-container (enforce)"
-            command_directory="$(mktemp -d)"
-            trap '\''rm -rf "$command_directory"'\'' EXIT
-            printf "%s\\n" "#!/bin/sh" '\''printf "%s\\n" "$@"'\'' \
-              > "$command_directory/codex-security"
-            chmod 755 "$command_directory/codex-security"
-            actual="$(
-              PATH="$command_directory:$PATH" \
-                /usr/local/bin/codex-security-entrypoint \
-                bulk-scan /input/repositories.csv --output-dir /output
-            )"
-            if printf "%s\\n" "$actual" |
-              grep -Fxq features.use_legacy_landlock=true; then
-              printf "%s\\n" "The AppArmor profile must retain the preferred Codex sandbox." >&2
-              exit 1
-            fi
-          '
+            exec /bin/sh
+          ' < docker/verify-container-entrypoint.sh
 
           "${compose[@]}" run --rm --entrypoint /bin/sh codex-security -ec '
             cd "$(dirname "$(readlink -f /usr/local/bin/codex-security)")"

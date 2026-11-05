@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import {
+  exploitabilityMcpServers,
   readProjectConfig,
   resolveScanSettings,
 } from "../src/project-config.js";
@@ -23,6 +24,21 @@ afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
+  [
+    "removed deployment server setting",
+    { exploitability: { deployment_status_mcps: ["releases"] } },
+    false,
+  ],
+  [
+    "catalog servers",
+    { exploitability: { service_catalog_mcps: ["catalog"] } },
+    true,
+  ],
+  [
+    "catalog servers must be a list",
+    { exploitability: { service_catalog_mcps: "catalog" } },
+    false,
+  ],
   ["owner artifact enabled", { scan: { owner_suggestions: true } }, true],
   ["owner artifact disabled", { scan: { owner_suggestions: false } }, true],
   [
@@ -150,6 +166,51 @@ const cases: [string, unknown, boolean][] = [
   ["nonpositive cost", { limits: { max_cost_usd_per_scan: 0 } }, false],
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
+
+test("dependency checks use only explicitly selected service catalog servers", () => {
+  const releases = {
+    url: "https://releases.example/mcp",
+    enabled_tools: ["lookup"],
+  };
+  const jobs = { command: "service-catalog" };
+  const codex = {
+    mcp_servers: {
+      releases,
+      jobs,
+      removed: { enabled: false },
+      unrelated: { command: "other" },
+    },
+  };
+  expect(exploitabilityMcpServers(undefined)).toEqual({});
+  expect(exploitabilityMcpServers({ codex })).toEqual({});
+  expect(
+    exploitabilityMcpServers({
+      codex,
+      exploitability: {
+        service_catalog_mcps: ["jobs", "releases", "removed"],
+      },
+    }),
+  ).toEqual({ jobs, releases });
+  for (const name of [
+    "missing",
+    "toString",
+    "codex_security_dependency",
+    "codex-security-dependency",
+  ]) {
+    expect(() =>
+      exploitabilityMcpServers({
+        codex,
+        exploitability: { service_catalog_mcps: [name] },
+      }),
+    ).toThrow(ConfigurationError);
+  }
+  expect(() =>
+    exploitabilityMcpServers({
+      codex: { mcp_servers: { releases: "invalid" } },
+      exploitability: { service_catalog_mcps: ["releases"] },
+    }),
+  ).toThrow(ConfigurationError);
+});
 
 test("minute and deprecated hour settings follow source precedence", () => {
   const directory = process.cwd();
