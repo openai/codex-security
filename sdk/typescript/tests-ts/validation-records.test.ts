@@ -26,29 +26,32 @@ const result = {
   rationale: "Authentication does not restrict the destination.",
 };
 
-test("passes source-only instructions and context to one host review", async () => {
-  const run = mock(async (request: ValidationReviewRequest) => {
-    expect(request.trustedInstructions).toBe(
-      await standaloneValidationPrompt(await bundledPluginRoot()),
-    );
-    expect(request.prompt).toContain(JSON.stringify(input.findings));
-    expect(request.prompt).toContain(JSON.stringify(input.context));
-    expect(request.prompt).toContain(JSON.stringify(input.knowledgeBasePath));
-    expect(request.schema).toEqual(input.outputSchema);
-    expect(request.model).toBe("example-model");
-    expect(request.effort).toBe("high");
-    return result;
-  });
-  expect(
-    await validateRecords(
-      { ...input, model: "example-model", effort: "high" },
-      {
-        reviewRunner: { run },
-      },
-    ),
-  ).toEqual(result);
-  expect(run).toHaveBeenCalledTimes(1);
-});
+test.each(["", "\t", " synthetic-effort "])(
+  "passes source-only instructions, context and effort %p to one host review",
+  async (effort) => {
+    const run = mock(async (request: ValidationReviewRequest) => {
+      expect(request.trustedInstructions).toBe(
+        await standaloneValidationPrompt(await bundledPluginRoot()),
+      );
+      expect(request.prompt).toContain(JSON.stringify(input.findings));
+      expect(request.prompt).toContain(JSON.stringify(input.context));
+      expect(request.prompt).toContain(JSON.stringify(input.knowledgeBasePath));
+      expect(request.schema).toEqual(input.outputSchema);
+      expect(request.model).toBe("example-model");
+      expect(request.effort).toBe(effort);
+      return result;
+    });
+    expect(
+      await validateRecords(
+        { ...input, model: "example-model", effort },
+        {
+          reviewRunner: { run },
+        },
+      ),
+    ).toEqual(result);
+    expect(run).toHaveBeenCalledTimes(1);
+  },
+);
 
 test("rejects invalid input and duplicate host identities before execution", async () => {
   const run = mock(async () => result);
