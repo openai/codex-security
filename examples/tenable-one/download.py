@@ -48,8 +48,8 @@ def tenable_request(access_key, secret_key):
             headers["Content-Type"] = "application/json"
             body = json.dumps(payload)
         # A chunk GET may return 204 while its contents are being prepared.
-        attempts = 5 if method == "GET" and "/download/" in path else 1
-        for attempt in range(1, attempts + 1):
+        retries_left = 4 if method == "GET" and "/download/" in path else 0
+        while True:
             connection = http.client.HTTPSConnection("cloud.tenable.com", timeout=30)
             try:
                 connection.request(method, path, body=body, headers=headers)
@@ -59,11 +59,13 @@ def tenable_request(access_key, secret_key):
                     if len(data) > MAX_CHUNK_BYTES:
                         raise ValueError("Tenable response exceeds the requested chunk size")
                     return data
-                if response.status != 204 or attempt == attempts:
-                    raise ValueError(f"Tenable returned HTTP {response.status} for {method} {path}")
+                if response.status != 204 or retries_left == 0:
+                    break
             finally:
                 connection.close()
+            retries_left -= 1
             time.sleep(2)
+        raise ValueError(f"Tenable returned HTTP {response.status} for {method} {path}")
 
     return request
 
