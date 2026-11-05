@@ -967,12 +967,18 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   const treePath = win32.toNamespacedPath(path);
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
-  const powershell = join(
+  const powershellDirectory = join(
     systemDirectory,
     "WindowsPowerShell",
     "v1.0",
-    "powershell.exe",
   );
+  const powershell = join(powershellDirectory, "powershell.exe");
+  const powershellArgs = [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+  ];
   const inheritedEnvironment = Object.fromEntries(
     Object.entries(process.env).filter(
       ([name]) => name.toUpperCase() !== "PSMODULEPATH",
@@ -983,12 +989,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       ...inheritedEnvironment,
       CODEX_SECURITY_CREDENTIAL_ACL_PATH: path,
       CODEX_SECURITY_CREDENTIAL_TREE_PATH: treePath,
-      PSModulePath: join(
-        systemDirectory,
-        "WindowsPowerShell",
-        "v1.0",
-        "Modules",
-      ),
+      PSModulePath: join(powershellDirectory, "Modules"),
     },
     encoding: "utf8" as const,
     windowsHide: true,
@@ -1062,6 +1063,13 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl $descriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
   ].join("; ");
   const resolvedAliases: Record<string, string> = {};
+  function requireNumericSid(value: string): string {
+    if (!WINDOWS_SID.test(value))
+      throw new Error(
+        "Windows credential ACL contains an unresolvable identity",
+      );
+    return value;
+  }
   const resolvePrincipal = async (principal: string): Promise<void> => {
     if (
       !/^[A-Z]{2}$/u.test(principal) ||
@@ -1072,13 +1080,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     }
     const resolved = await execFile(
       powershell,
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        resolvePrincipalScript,
-      ],
+      [...powershellArgs, resolvePrincipalScript],
       {
         ...processOptions,
         env: {
@@ -1087,13 +1089,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
         },
       },
     );
-    const numeric = resolved.stdout.trim();
-    if (!WINDOWS_SID.test(numeric)) {
-      throw new Error(
-        "Windows credential ACL contains an unresolvable identity",
-      );
-    }
-    resolvedAliases[principal] = numeric;
+    resolvedAliases[principal] = requireNumericSid(resolved.stdout.trim());
   };
   const resolveDescriptorAliases = async (
     descriptor: string,
@@ -1113,7 +1109,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   const readAcl = async (): Promise<WindowsCredentialAcl> => {
     const snapshot = await inspectWindowsCredentialAclSnapshot(path, sid, {
       command: powershell,
-      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      args: [...powershellArgs, script],
       environment: processOptions.env,
       resolvedAliases,
       resolveDescriptorAliases,
@@ -1122,28 +1118,28 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     return snapshot.home;
   };
 
-  const icacls = join(systemDirectory, "icacls.exe");
-  const installTrustedAcl = async (target = path): Promise<void> => {
-    await execFile(
-      icacls,
-      [
-        target,
-        "/inheritance:r",
-        "/grant:r",
-        `*${sid}:(OI)(CI)F`,
-        `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
-        `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
-      ],
+  const icacls = (target: string, ...args: string[]) =>
+    execFile(
+      join(systemDirectory, "icacls.exe"),
+      [target, ...args],
       processOptions,
     );
-  };
+  const installTrustedAcl = () =>
+    icacls(
+      path,
+      "/inheritance:r",
+      "/grant:r",
+      `*${sid}:(OI)(CI)F`,
+      `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
+      `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
+    );
   let existing: WindowsCredentialAcl | undefined;
   for (let attempt = 0; existing === undefined && attempt < 3; attempt += 1) {
     try {
       existing = await readAcl();
     } catch (error) {
       if (error instanceof RepairableWindowsCredentialOwnerError) {
-        await execFile(icacls, [path, "/setowner", `*${sid}`], processOptions);
+        await icacls(path, "/setowner", `*${sid}`);
       } else if (error instanceof RepairableWindowsCredentialAclError) {
         await installTrustedAcl();
       } else {
@@ -1159,7 +1155,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     existing.untrustedPrincipals.length === 0 &&
     !existing.protected
   ) {
-    await execFile(icacls, [path, "/inheritance:d"], processOptions);
+    await icacls(path, "/inheritance:d");
     existing = await readAcl();
   }
 
@@ -1171,29 +1167,12 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   ) {
     await installTrustedAcl();
     verified = await readAcl();
-    for (const principal of verified.untrustedPrincipals) {
-      if (!WINDOWS_SID.test(principal)) {
-        throw new Error(
-          "Windows credential ACL contains an unresolvable identity",
-        );
-      }
-      await execFile(
-        icacls,
-        [path, "/remove:g", `*${principal}`],
-        processOptions,
-      );
-    }
-    for (const principal of verified.deniedPrincipals) {
-      if (!WINDOWS_SID.test(principal)) {
-        throw new Error(
-          "Windows credential ACL contains an unresolvable identity",
-        );
-      }
-      await execFile(
-        icacls,
-        [path, "/remove:d", `*${principal}`],
-        processOptions,
-      );
+    for (const [remove, principals] of [
+      ["/remove:g", verified.untrustedPrincipals],
+      ["/remove:d", verified.deniedPrincipals],
+    ] as const) {
+      for (const principal of principals)
+        await icacls(path, remove, `*${requireNumericSid(principal)}`);
     }
     if (
       verified.untrustedPrincipals.length !== 0 ||
@@ -1214,11 +1193,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     throw new Error("Windows credential ACL grants access to another identity");
   }
   if (!descendantsArePrivate) {
-    await execFile(
-      icacls,
-      [join(treePath, "*"), "/reset", "/t", "/q"],
-      processOptions,
-    );
+    await icacls(join(treePath, "*"), "/reset", "/t", "/q");
     await readAcl();
     if (!descendantsArePrivate) {
       throw new Error("Windows credential descendants remain accessible");
