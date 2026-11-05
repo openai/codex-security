@@ -1,3 +1,5 @@
+"""Check repository matching and finding relationships across legacy, linked, and unlinked scan records."""
+
 from __future__ import annotations
 
 import json
@@ -416,7 +418,10 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
         )
 
     def batches(result):
-        return [(batch["afterScanId"], batch["beforeScanIds"]) for batch in result["batches"]]
+        return [
+            (batch["afterScanId"], [scan["scanId"] for scan in batch["beforeScans"]])
+            for batch in result["batches"]
+        ]
 
     result = pending()
     assert result["scanCount"] == 3

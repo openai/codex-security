@@ -104,6 +104,13 @@ the stored login. Patch follow-up assessments and `scan --patch` retain the
 chosen authentication. Environment keys do not replace the saved login.
 The SDK uses `auth` on `run()`, `validate()`, and `preflight()`.
 
+For a scan using a custom native provider, `auto` and `api-key` use the
+environment variable declared by `model_providers.<id>.env_key`, including
+when a Codex file profile selects that provider. Set that variable before
+starting the scan. To use `--auth chatgpt`, select a provider configured for
+account authentication. A custom provider that requires its own key cannot
+honor that combination.
+
 Stored OpenAI credentials live in
 `$CODEX_SECURITY_STATE_DIR/codex-home`, or
 `$CODEX_HOME/state/plugins/codex-security/codex-home`. Keep this private home
@@ -123,8 +130,19 @@ after logout completes.
 Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
 `HOME` or `USERPROFILE` environment setting.
 
-If credentials cannot refresh, run `login status`. Retry if the sign-in recently
-changed; otherwise run `logout`, then `login`.
+If you use file-based ChatGPT credentials with both Codex and Codex Security,
+run `codex-security login` before your first scan or status check to give Codex
+Security its own session. An imported sign-in shares a single-use refresh token.
+When either client renews it, the other client's next refresh can fail even
+while its login status reports that it is signed in.
+
+If Codex Security reports that the refresh token was already used, run
+`codex-security logout`, then `codex-security login`. If your Codex CLI or app
+reports that error, sign out and sign back in there.
+
+For other refresh errors, check `codex-security login status`. Retry if the
+sign-in recently changed. Otherwise run `codex-security logout`, then
+`codex-security login`.
 Some cybersecurity requests and protected findings require
 [Trusted Access for Cyber](https://chatgpt.com/cyber).
 
@@ -437,6 +455,10 @@ codex-security scan . --output-dir /path/outside/repository/results --dry-run
 show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
+
+When a cost limit is configured, `scan --dry-run` shows the resolved
+`maxCostUsd` and a `costLimitNote` explaining how the scan measures usage
+against the limit and why in-flight requests can exceed it.
 
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.
@@ -780,7 +802,8 @@ individual scan folder.
 Failures do not stop other components. Failed scans or
 failed matching return `2`; severity-policy violations return `1`. Retry with
 `--components-file retry-components.json` and a new empty output directory.
-The retry report covers only those components.
+The retry report covers only those components. Each registered component keeps its
+scan ID in the summary, including when the scan fails.
 
 `--max-cost` applies per component, excluding planning and matching. `--model`
 and `--effort` also apply to matching; `--auth` applies throughout. Planning and
@@ -845,7 +868,9 @@ codex-security scan . --mode deep --workers 2 --subagents 0 \
 ```
 
 Deep Scan repeats Standard scans in batches of up to `--workers`, with
-`--subagents` per scan. It merges each completed batch in launch order.
+`--subagents` per scan. Workers can share what they are investigating, ask each
+other to check a source location, and reply while their audits are running. Each
+worker verifies the evidence it reports. Deep Scan merges each completed batch in launch order.
 It uses source locations, cited code and weakness descriptions to match repeated
 findings. Each group keeps its first description, all reported locations, and
 the original observations. Later batches receive the titles and primary
@@ -976,8 +1001,10 @@ publication uses the same request attribution; embedding requests identify
 the package and version in their `User-Agent`.
 
 These fields provide request attribution for supported inference providers, including
-Bedrock. They do not create a separate telemetry collector, record command
-starts or outcomes, or make another provider's traffic visible to OpenAI.
+Bedrock. They do not create a separate telemetry collector or make another
+provider's traffic visible to OpenAI. Local operation receipts separately record
+starts, outcomes, duration, and usage coverage; see
+[telemetry and measurement](telemetry.md).
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
@@ -997,6 +1024,9 @@ findings. Use `codex-security scans list --json` for the current repository.
 To find an offline import, use `codex-security scans list --scan-root <DIR> --json`
 with its output directory. Imported scans have lifecycle mode `import`. The SDK
 exposes `onLifecycle`, and the CLI includes observations in verbose diagnostics.
+Canceling a newly registered SDK scan through its abort signal, closing the
+client during the scan, or receiving a canceled hosted execution records
+`canceled`. A scan that has already completed keeps its committed outcome.
 Applications can choose how to collect and export these observations.
 
 For filesystem and approval behavior, see the
@@ -1038,7 +1068,8 @@ works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage
 ### Troubleshooting
 
 Use `--verbose` or `CODEX_SECURITY_LOG_LEVEL=debug` for lifecycle, configuration,
-retry, and worker diagnostics on stderr. Diagnostic text is preserved in output,
+retry, and worker diagnostics on stderr. Direct Deep Scans include coordinator events
+such as worker retries and duplicate-comparison failures. Diagnostic text is preserved in output,
 saved failures, receipts, and patch-risk summaries. Review it for sensitive
 information before sharing; upstream Codex output may already be redacted.
 
@@ -1130,13 +1161,24 @@ attempt. Post-scan prompts run after cost tracking and are outside this limit.
 Automatic history matching gets at most one extra call with a limit; if more
 work is needed, the scan is preserved and you can run `scans match --all`.
 
-When Deep discovery has finished at a cost stop, the scan returns a sealed
+A scan with a cost limit requires complete token usage for its recorded scan,
+worker, and custom validation sessions before the SDK returns a completed result.
+Verifying compressed `.jsonl.zst` sessions requires Python 3.14 or later, or
+`backports.zstd` installed in the selected Python environment.
+Missing or unreadable usage fails budget verification. Without a limit, usage
+reporting remains best effort.
+
+When Deep discovery has finished at a cost stop and usage is verified, the scan returns a sealed
 report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report returns `0` by default, or `1` if findings
 meet a configured failure threshold.
 
-When Codex reports an exhausted usage limit, Deep Scan cancels active workers
-and stops retrying or launching replacements. Completed worker artifacts are retained.
+When a worker turn fails with a known cybersecurity policy refusal or an
+exhausted usage limit, Deep Scan stops retries and replacements, cancels active
+siblings, and retains completed worker artifacts. A capability check can succeed
+before a later request is refused. Use `scans show SCAN_ID` to inspect the failed
+scan and its retained results. To run it again from a saved recipe, use
+`scans rerun SCAN_ID`, which starts fresh discovery.
 
 At 80% of a single interactive scan's limit, the dashboard offers a higher total
 budget. Enter a larger total, or leave it blank/press Escape to keep the limit.
@@ -1275,10 +1317,12 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
-If a nonempty committed line in `results.jsonl` contains invalid JSON or lacks
-a string task ID, the command reports its line number and leaves the ledger untouched.
-Restore a complete ledger backup that includes every committed attempt, or start
-a separate campaign in a new `--output-dir`.
+Each nonempty committed line in `results.jsonl` must be valid JSON with a string
+task ID and a positive safe integer attempt number. If a line fails these checks,
+the command reports its line number and preserves the ledger. Restore a complete
+ledger backup that includes every committed attempt, or start a separate campaign
+in a new `--output-dir`. If a repository exhausts its attempt numbers, starting
+a fresh attempt requires a new campaign.
 
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
@@ -1382,6 +1426,13 @@ To [collect a full Semgrep project and branch](https://github.com/openai/codex-s
 For completed scans exported in the Codex Security JSON or CSV format, use
 [scan import](#import-findings-as-a-saved-scan).
 
+For Checkmarx One CLI JSON or CxSAST XML, use `--provider checkmarx` and pass the
+verified Git URL with `--source-repository-url`. See the [Checkmarx SAST guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md).
+
+## Import Trivy dependency findings
+
+Use `--provider trivy` to read a schema-v2 repository or filesystem report (JSON or gzip). Pass `--trivy-scan-root .` for a whole checkout or a checkout-relative path for a subtree. A corroborated remote repository scan can infer the root. See the [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md) for a preview command, repository matching, and how to save or publish the results.
+
 ## Import Endor Labs findings
 
 Use `--provider endor` for one Endor project and context. The
@@ -1466,10 +1517,22 @@ review the new submission before confirming.
 
 | Status        | Exit code | Meaning                                                                                |
 | ------------- | --------- | -------------------------------------------------------------------------------------- |
+| `empty`       | 0         | No records were available to upload.                                                   |
 | `complete`    | 0         | The inbox job processed every record successfully, or the publisher verified each one. |
 | `partial`     | 1         | The import had exclusions or record errors, or the inbox job failed or was cancelled.  |
 | `interrupted` | 2         | The CLI stopped while uploading, checking the result or saving a receipt.              |
 | `failed`      | 2         | Preparation failed before upload.                                                      |
+
+A clean empty report needs no confirmation. Self-contained file imports can
+finish before Cloud sign-in; Semgrep Platform and Snyk REST captures use the
+Cloud catalog to verify their repository. Local imports still validate the
+checkout and create no workbench database. Explicit scanner errors
+and selections containing only excluded records fail; JSON output retains their
+diagnostics and exclusion reasons. Existing findings stay open.
+
+For automation, check the scanner's exit status as well as the import's. SARIF
+can contain no runs or omit results in a rules-only export. `empty` describes
+the selected report, not whether a scan completed successfully.
 
 For a partial or interrupted import, check `excluded` and any `error` before
 retrying. Some records may already have reached Cloud.
@@ -2066,9 +2129,21 @@ history. Inspect its saved status before choosing resume or rerun, and supply
 the original custom prompt files for reruns. Structured history and log output
 and command selection defaults are unchanged.
 
-Recipes save settings and authentication choice, not credentials. Reruns use the
-current checkout/context files and do not reload project files. Supply replacement
-scan and custom-validation prompts when the original used them:
+Reruns use the current checkout/context files and do not reload project files.
+The readable scan recipe records your authentication choice. A separate private
+replay profile stores explicit `openai_base_url`, `chatgpt_base_url`, and custom
+`model_providers` settings, including any credentials written directly in
+`http_headers`. If you use `env_key` or `env_http_headers`, the profile stores
+the variable names. Set those variables when you rerun or resume. Settings
+inherited from a named file profile are reloaded from that file. If an older
+scan omitted your endpoint, start a new scan with the original `--codex` override.
+
+When routing through environment variables, set them for each launch, including
+rerun and resume. Deep workers inherit `CODEX_OSS_BASE_URL` and `CODEX_OSS_PORT`
+for Ollama and LM Studio, and `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`,
+and `GOOGLE_APPLICATION_CREDENTIALS` for Vertex AI.
+
+Supply replacement scan and custom-validation prompts when the original used them:
 
 ```bash
 codex-security scans rerun SCAN_ID --scan-prompt-file instructions.md
@@ -2090,11 +2165,10 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
-Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
-Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
-compressed sessions are unavailable to `scans logs`, feedback attachments, and
-`scans resume`. Upgrade Node.js to read or resume these sessions. Plain `.jsonl`
-logs work on all supported runtimes.
+Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
+work on all supported Node.js versions, including logs, feedback attachments,
+usage accounting, and saved-session discovery for resume. A bundled decoder
+reads concatenated frames and reports truncated streams as collection errors.
 
 ### Resuming an interrupted Deep Scan
 
@@ -2136,6 +2210,13 @@ One comparison ID is compared with the latest completed scan.
 ```bash
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
 ```
+
+When a saved Standard scan and a Deep scan have the same recorded target,
+revision, and snapshot digest, matching flags findings that have different
+anchors but share a unique rule, first displayed source range, and optional
+instance. Matching preserves the case of saved paths. Codex can request the
+saved evidence to distinguish separate causes at that site. Automatic matching
+under a cost limit keeps its single comparison call.
 
 Only high-confidence root-cause matches are grouped. Uncertain and related
 findings remain separate. Rebuilding retains stable identities, triage, and
@@ -2733,10 +2814,11 @@ truncating any selected finding. The CLI prints verdicts in selection order
 after every request returns valid results. For these selections the CLI omits
 per-event progress and update notices so stderr cannot delay the verdicts.
 
-If one finding exceeds the input limit on its own, verification stops before
-the first request. The error reports its occurrence ID and required request
-size. To verify another open occurrence from that scan, run
-`codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID`.
+If a finding would exceed the input limit, `validate`, `patch`, and `verify-fix`
+automatically put the complete finding data in a temporary file and ask Codex
+to read it in bounded chunks. No manual splitting or truncation is needed.
+The file remains available until the task finishes and is then removed. The
+SDK's local `validate()` and `patch()` methods use the same fallback.
 
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.

@@ -74,14 +74,16 @@ function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
 function fakeCodex(response: unknown) {
   const calls: {
     prompt?: string;
+    turns: number;
     threadOptions?: ThreadOptions;
     turnOptions?: TurnOptions;
-  } = {};
+  } = { turns: 0 };
   const codex: NonNullable<ScanComparisonOptions["codex"]> = {
     startThread(options) {
       calls.threadOptions = options;
       return {
         async run(prompt, turnOptions) {
+          calls.turns++;
           calls.prompt = prompt;
           calls.turnOptions = turnOptions;
           return { finalResponse: modelResponseText(response) };
@@ -128,50 +130,42 @@ function captureProfileClient() {
 }
 
 describe("semantic scan comparison", () => {
-  test("requires the current workbench plan only for pending automatic matches", async () => {
-    const before = { occurrenceId: "before" };
-    const after = { occurrenceId: "after" };
-    const legacyBatch = {
-      afterScanId: "current",
-      afterFindings: [after],
-      beforeScans: [{ scanId: "previous", findings: [before] }],
-    };
-    const match = (plan: JsonObject) =>
-      matchCompletedScan({
-        scanId: "current",
-        repository: "/repository",
-        previousFindings: [before],
-        falsePositives: [],
-        findings: [after],
-        workbench: async ([command]) => {
-          expect(command).toBe("list-unmatched-scan-pairs");
-          return plan;
+  test.each([false, true])(
+    "suggests full evidence for selected cross-mode sites (single turn %s)",
+    async (singleTurn) => {
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      await matchScanFindingsInternal(
+        {
+          before: [
+            { occurrenceId: "older", findingId: "same" },
+            { occurrenceId: "representative", findingId: "same" },
+            { occurrenceId: "unrelated" },
+          ],
+          after: [
+            {
+              occurrenceId: "current",
+              rootCause: { code: "synthetic source excerpt" },
+            },
+          ],
+          crossModeOccurrenceIds: ["older", "current"],
         },
-        matchFindings: () => fail("Invalid plans must not start matching."),
-      });
-    await expect(match({ batches: [] })).resolves.toBeUndefined();
-    await expect(match({ batches: [legacyBatch] })).rejects.toThrow(
-      "Update the custom plugin or use the bundled plugin.",
-    );
-    await expect(
-      match({
-        findingsByScanId: { current: [after], previous: [before] },
-        batches: [legacyBatch],
-      }),
-    ).rejects.toThrow("Update the custom plugin or use the bundled plugin.");
-    await expect(
-      match({
-        findingsByScanId: { previous: [before] },
-        batches: [{ ...legacyBatch, beforeScanIds: ["previous"] }],
-      }),
-    ).rejects.toThrow("Matching plan is missing findings for scan current.");
-    await expect(
-      match({
-        findingsByScanId: { current: [after], "7": [before] },
-        batches: [{ afterScanId: "current", beforeScanIds: [7] }],
-      }),
-    ).rejects.toThrow("Matching plan is missing findings for scan 7.");
-  });
+        { codex },
+        { surface: "cli", singleTurn },
+      );
+      const { before, after } = JSON.parse(
+        calls.prompt!.split("\n").at(-1)!,
+      ).findings;
+      expect(before[0].occurrenceId).toBe("representative");
+      expect(Boolean(before[0].crossModeSite)).toBe(!singleTurn);
+      expect(before[1].crossModeSite).toBeUndefined();
+      expect(Boolean(after[0].crossModeSite)).toBe(!singleTurn);
+      expect(calls.prompt!.includes("Cards marked crossModeSite")).toBe(
+        !singleTurn,
+      );
+      expect(calls.prompt).not.toContain("synthetic source excerpt");
+      expect(calls.turns).toBe(1);
+    },
+  );
 
   test.each([
     ["sdk", "matching"],
@@ -257,13 +251,28 @@ describe("semantic scan comparison", () => {
   );
 
   test.each([false, true])(
-    "preserves literal metadata keys in SDK arguments with provider profile %p",
+    "preserves literal metadata and provider header values in SDK children with a private profile %p",
     async (withProfile) => {
       const home = await temporaryDirectory();
+      const repository = await temporaryDirectory();
+      await writeFile(join(repository, "source.ts"), "export {};\n");
+      const gateway = (env_key = "SYNTHETIC_GATEWAY_TOKEN") => ({
+        model_provider: "gateway",
+        model_providers: {
+          gateway: {
+            name: "Synthetic",
+            wire_api: "responses",
+            base_url: "https://provider.example.test/v1",
+            env_key,
+            env_http_headers: { "X-Gateway-Key": "CODEX_API_KEY" },
+          },
+        },
+      });
       const preload = join(home, "capture-codex.mjs");
       await writeFile(
         join(home, "config.toml"),
         stringify({
+          ...(withProfile ? {} : gateway()),
           responses_api_metadata: {
             "team.tag": "from-home",
             "overlap.tag": "home",
@@ -276,51 +285,65 @@ describe("semantic scan comparison", () => {
           "for await (const _chunk of process.stdin) {}",
           "const send = (event) => console.log(JSON.stringify(event));",
           'send({ type: "thread.started", thread_id: "fixture-thread" });',
-          'send({ type: "item.completed", item: { id: "reply", type: "agent_message", text: JSON.stringify(process.argv.slice(2)) } });',
+          "const { SYNTHETIC_GATEWAY_TOKEN: primary, CODEX_API_KEY: header, OPENAI_API_KEY: account } = process.env;",
+          "const text = JSON.stringify({ args: process.argv.slice(2), credentials: { primary, header, account } });",
+          'send({ type: "item.completed", item: { id: "reply", type: "agent_message", text } });',
           'send({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } });',
           "process.exit(0);",
         ].join("\n"),
       );
       let captured: CodexOptions | undefined;
       const profileClient = captureProfileClient();
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const { codex } = fakeCodex(
+        withProfile
+          ? { components: [{ name: "Source", paths: ["source.ts"] }] }
+          : { matches: [], uncertain: [] },
+      );
       const startThread = observeCodexOptions(codex, (options) => {
         captured = options;
       });
       try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            environment: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_HOME: home,
-              CODEX_SECURITY_STATE_DIR: join(home, "state"),
-              OPENAI_API_KEY: "synthetic-key",
-            },
-            workingDirectory: home,
-            config: {
-              codexOverrides: {
-                responses_api_metadata: {
-                  "caller.tag": "from-caller",
-                  "overlap.tag": "caller",
-                },
-                ...(withProfile
-                  ? {
-                      model_provider: "synthetic",
-                      model_providers: {
-                        synthetic: {
-                          name: "Synthetic",
-                          wire_api: "responses",
-                          base_url: "https://provider.example.test/v1",
-                        },
-                      },
-                    }
-                  : {}),
+        const options = {
+          environment: {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: join(home, "state"),
+            OPENAI_API_KEY: "synthetic-unrelated-account",
+            CODEX_API_KEY: " synthetic-header ",
+            SYNTHETIC_GATEWAY_TOKEN: "synthetic-primary",
+          },
+          workingDirectory: home,
+          config: {
+            codexOverrides: {
+              responses_api_metadata: {
+                "caller.tag": "from-caller",
+                "overlap.tag": "caller",
               },
+              ...(withProfile ? gateway() : {}),
             },
           },
-        );
+        };
+        if (withProfile) {
+          await planComponents(repository, options);
+          await expect(
+            planComponents(repository, { ...options, auth: "chatgpt" }),
+          ).rejects.toThrow(
+            "ChatGPT authentication cannot use the gateway provider's required SYNTHETIC_GATEWAY_TOKEN",
+          );
+          await expect(
+            planComponents(repository, {
+              ...options,
+              config: { codexOverrides: gateway("CODEX_API_KEY") },
+              environment: { ...options.environment, CODEX_API_KEY: undefined },
+            }),
+          ).rejects.toThrow("Set CODEX_API_KEY");
+          expect(startThread).toHaveBeenCalledTimes(1);
+        } else
+          await matchScanFindings(
+            { before: [finding("before")], after: [finding("after")] },
+            options,
+          );
       } finally {
         startThread.mockRestore();
         profileClient.spy.mockRestore();
@@ -338,7 +361,18 @@ describe("semantic scan comparison", () => {
       const turn = await capture
         .startThread({ workingDirectory: home, skipGitRepoCheck: true })
         .run("Capture the invocation.");
-      const args: string[] = JSON.parse(turn.finalResponse);
+      const {
+        args,
+        credentials,
+      }: {
+        args: string[];
+        credentials: Record<string, string>;
+      } = JSON.parse(turn.finalResponse);
+      expect(credentials).toEqual({
+        primary: "synthetic-primary",
+        header: " synthetic-header ",
+      });
+      expect(captured!.apiKey).toBeUndefined();
       const metadataOverrides = args
         .flatMap((arg, index) => (arg === "--config" ? [args[index + 1]!] : []))
         .filter((value) => value.startsWith("responses_api_metadata"));
@@ -349,7 +383,7 @@ describe("semantic scan comparison", () => {
           "caller.tag": "from-caller",
           "overlap.tag": "caller",
           codex_security_surface: "sdk",
-          codex_security_command: "compare",
+          codex_security_command: withProfile ? "scan-components" : "compare",
           codex_security_package_version: VERSION,
           ...(withProfile ? { codex_security_provider: "custom" } : {}),
         },
@@ -509,8 +543,13 @@ describe("semantic scan comparison", () => {
           async workbench(args) {
             if (args[0] === "list-unmatched-scan-pairs") {
               return {
-                findingsByScanId: { prior: [before], current: [after] },
-                batches: [{ afterScanId: "current", beforeScanIds: ["prior"] }],
+                batches: [
+                  {
+                    afterScanId: "current",
+                    afterFindings: [after],
+                    beforeScans: [{ scanId: "prior", findings: [before] }],
+                  },
+                ],
               };
             }
             saved = args[0] === "save-scan-comparison";
@@ -1449,14 +1488,13 @@ describe("semantic scan comparison", () => {
               async workbench(args) {
                 return args[0] === "list-unmatched-scan-pairs"
                   ? {
-                      findingsByScanId: {
-                        [`prior-${index}`]: [before],
-                        [scanId]: [after],
-                      },
                       batches: [
                         {
                           afterScanId: scanId,
-                          beforeScanIds: [`prior-${index}`],
+                          afterFindings: [after],
+                          beforeScans: [
+                            { scanId: `prior-${index}`, findings: [before] },
+                          ],
                         },
                       ],
                     }
@@ -2127,16 +2165,18 @@ describe("semantic scan comparison", () => {
           commands.push({ args, input: commandInput });
           return args[0] === "list-unmatched-scan-pairs"
             ? {
-                findingsByScanId: {
-                  "another-target": [{ ...dismissed, occurrenceId: "foreign" }],
-                  prior: [open, dismissed],
-                  current: [after],
-                },
                 batches: [
                   {
                     afterScanId: "current",
-                    beforeScanIds: ["another-target", "prior"],
+                    afterFindings: [after],
                     knownFindingGroups: [["dismissed", "historical-alias"]],
+                    beforeScans: [
+                      {
+                        scanId: "another-target",
+                        findings: [{ ...dismissed, occurrenceId: "foreign" }],
+                      },
+                      { scanId: "prior", findings: [open, dismissed] },
+                    ],
                   },
                 ],
               }
@@ -2216,15 +2256,31 @@ describe("semantic scan comparison", () => {
         if (args[0] === "list-unmatched-scan-pairs") {
           return {
             findingsByScanId: {
+              current: [after],
               unselected: [unselected],
               first: [firstShared, firstOther],
               latest: [latestShared],
-              current: [after],
             },
             batches: [
               {
                 afterScanId: "current",
-                beforeScanIds: ["unselected", "first", "latest"],
+                beforeScans: [
+                  {
+                    scanId: "unselected",
+                    crossModeOccurrenceIds: [
+                      unselected.occurrenceId,
+                      after.occurrenceId,
+                    ],
+                  },
+                  { scanId: "first" },
+                  {
+                    scanId: "latest",
+                    crossModeOccurrenceIds: [
+                      latestShared.occurrenceId,
+                      after.occurrenceId,
+                    ],
+                  },
+                ],
               },
             ],
           };
@@ -2235,9 +2291,10 @@ describe("semantic scan comparison", () => {
       matchFindings,
     });
 
-    expect(matchFindings.mock.lastCall?.[0]).toEqual({
+    expect(matchFindings.mock.lastCall?.[0]).toMatchObject({
       before: [firstShared, firstOther, latestShared],
       after: [after],
+      crossModeOccurrenceIds: [latestShared.occurrenceId, after.occurrenceId],
     });
     expect(model.calls.turnOptions?.cyberAccessProgram).toBe("daybreak_red");
     expect([...saved.keys()]).toEqual(["first", "latest"]);
@@ -2280,8 +2337,13 @@ describe("semantic scan comparison", () => {
       const workbench = mock(async (args: readonly string[]) => {
         return args[0] === "list-unmatched-scan-pairs"
           ? {
-              findingsByScanId: { prior: [before], current: [after] },
-              batches: [{ afterScanId: "current", beforeScanIds: ["prior"] }],
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: [after],
+                  beforeScans: [{ scanId: "prior", findings: [before] }],
+                },
+              ],
             }
           : {};
       });
@@ -2342,11 +2404,11 @@ describe("semantic scan comparison", () => {
         async workbench(args, commandInput) {
           if (args[0] === "list-unmatched-scan-pairs") {
             return {
-              findingsByScanId: { prior: before, current: after },
               batches: [
                 {
                   afterScanId: "current",
-                  beforeScanIds: ["prior"],
+                  afterFindings: after,
+                  beforeScans: [{ scanId: "prior", findings: before }],
                   knownFindingGroups,
                 },
               ],
@@ -2410,8 +2472,13 @@ describe("semantic scan comparison", () => {
         async workbench(args, commandInput) {
           if (args[0] === "list-unmatched-scan-pairs")
             return {
-              findingsByScanId: { prior: before, current: after },
-              batches: [{ afterScanId: "current", beforeScanIds: ["prior"] }],
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: after,
+                  beforeScans: [{ scanId: "prior", findings: before }],
+                },
+              ],
             };
           saved.push(JSON.parse(commandInput!) as ScanComparisonResult);
           return {};

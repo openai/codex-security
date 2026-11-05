@@ -199,7 +199,7 @@ for (const previewVersion of [58, 59]) {
 }
 
 for (const { missingVersions, legacyCheckpoint, mainReader } of [
-  { missingVersions: [57, 58, 59, 60], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [57], legacyCheckpoint: 0, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
   { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
@@ -227,6 +227,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         migrations
           .filter(
             ({ version }) =>
+              version <= 57 &&
               !missingVersions.includes(version) &&
               !(firstMissing && version >= firstMissing && version <= 56),
           )
@@ -365,8 +366,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
   });
 }
 
-test("worker thread history survives retry, replay, and worker retirement", (t) => {
-  const database = memory(t, 49);
+function insertRunningWorker(database: DatabaseSync) {
   insertScan(database);
   database.exec(`
     INSERT INTO deep_scan_runs (
@@ -379,6 +379,30 @@ test("worker thread history survives retry, replay, and worker retirement", (t) 
     ) VALUES ('worker', 'scan', 'discovery', 'running', '/synthetic/prompt.md',
       '/synthetic/output', 1, 'first-thread', 'created', 'updated');
   `);
+}
+
+test("legacy retries can reuse a recorded thread and still verify usage", (t) => {
+  for (const thread of ["first-thread", "retry-thread", null]) {
+    const database = memory(t, 62);
+    insertRunningWorker(database);
+    database
+      .prepare(
+        "UPDATE deep_scan_workers SET attempt = 3, started_at = 'started', sdk_thread_id = ?",
+      )
+      .run(thread);
+    if (thread === null) database.exec("DELETE FROM deep_scan_worker_threads");
+    applyMigrations(database);
+    assert.equal(
+      database.prepare("SELECT worker_usage_gap FROM deep_scan_runs").get()
+        ?.worker_usage_gap,
+      thread === null ? 1 : 0,
+    );
+  }
+});
+
+test("worker thread history survives retry, replay, and worker retirement", (t) => {
+  const database = memory(t, 49);
+  insertRunningWorker(database);
   applyMigrations(database);
   database.exec(`
     UPDATE deep_scan_workers SET sdk_thread_id = 'retry-thread', attempt = 2;

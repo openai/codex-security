@@ -12,11 +12,14 @@ COMMIT_EXIT = 23
 
 
 class CrashBeforeCommit(sqlite3.Connection):
+    """Terminate the child at its commit call so the parent can test recovery with unpublished database state."""
+
     def commit(self):
         os._exit(COMMIT_EXIT)
 
 
 def interrupt_finish_before_commit(database, scan, hash_seed):
+    """Run deadline completion in a child with the requested hash seed and require the simulated crash exit code."""
     result = subprocess.run(
         [
             sys.executable,

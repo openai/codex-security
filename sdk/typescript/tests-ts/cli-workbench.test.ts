@@ -794,9 +794,12 @@ describe("CLI workbench", () => {
                     scanCount: 2,
                     unavailableScans: 0,
                     skippedPairs: 0,
-                    findingsByScanId: { before, after },
                     batches: [
-                      { afterScanId: "after", beforeScanIds: ["before"] },
+                      {
+                        afterScanId: "after",
+                        afterFindings: after,
+                        beforeScans: [{ scanId: "before", findings: before }],
+                      },
                     ],
                   };
                 }
@@ -925,9 +928,12 @@ describe("CLI workbench", () => {
               return command[0] === "compare-scans"
                 ? { matchingInputs: { before, after } }
                 : {
-                    findingsByScanId: { before, after },
                     batches: [
-                      { afterScanId: "after", beforeScanIds: ["before"] },
+                      {
+                        afterScanId: "after",
+                        afterFindings: after,
+                        beforeScans: [{ scanId: "before", findings: before }],
+                      },
                     ],
                   };
             },
@@ -984,7 +990,7 @@ describe("CLI workbench", () => {
                   summary: { persisting: 1 },
                 };
               if (command[0] === "list-unmatched-scan-pairs")
-                return { findingsByScanId: {}, batches: [] };
+                return { batches: [] };
               return { summary: { persisting: 1 } };
             },
           }),
@@ -1044,28 +1050,50 @@ describe("CLI workbench", () => {
 
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
-    const confirmed = (
-      beforeOccurrenceIds: string[],
-      afterOccurrenceIds: string[],
-    ) => ({
-      beforeOccurrenceIds,
-      afterOccurrenceIds,
-      confidence: "high" as const,
-      reason: "Same root cause.",
-    });
-
+    const findingsByScanId = {
+      "scan-a": [finding("a"), finding("a-shared")],
+      "scan-b": [finding("b"), finding("b-shared")],
+      "scan-c": [finding("c"), finding("c-shared")],
+    };
+    const batches: JsonObject[] = [
+      { afterScanId: "scan-b", beforeScans: [{ scanId: "scan-a" }] },
+      {
+        afterScanId: "scan-c",
+        beforeScans: [
+          { scanId: "scan-a" },
+          { scanId: "scan-b", crossModeOccurrenceIds: ["b", "c"] },
+        ],
+      },
+    ];
     const calls: Array<readonly string[]> = [];
     const inputs: Array<string | undefined> = [];
     const matcherCalls = mock<typeof matchScanFindings>(async (input) => {
       return input.after[0]?.occurrenceId === "b"
         ? {
-            matches: [confirmed(["a"], ["b"])],
+            matches: [
+              {
+                beforeOccurrenceIds: ["a"],
+                afterOccurrenceIds: ["b"],
+                confidence: "high",
+                reason: "Same root cause.",
+              },
+            ],
             uncertain: [],
           }
         : {
             matches: [
-              confirmed(["a", "b"], ["c"]),
-              confirmed(["a-shared"], ["c-shared"]),
+              {
+                beforeOccurrenceIds: ["a", "b"],
+                afterOccurrenceIds: ["c"],
+                confidence: "high",
+                reason: "Same root cause.",
+              },
+              {
+                beforeOccurrenceIds: ["a-shared"],
+                afterOccurrenceIds: ["c-shared"],
+                confidence: "high",
+                reason: "Same root cause.",
+              },
             ],
             uncertain: [
               {
@@ -1091,18 +1119,8 @@ describe("CLI workbench", () => {
                   scanCount: 5,
                   unavailableScans: 2,
                   skippedPairs: 1,
-                  findingsByScanId: {
-                    "scan-a": [finding("a"), finding("a-shared")],
-                    "scan-b": [finding("b"), finding("b-shared")],
-                    "scan-c": [finding("c"), finding("c-shared")],
-                  },
-                  batches: [
-                    { afterScanId: "scan-b", beforeScanIds: ["scan-a"] },
-                    {
-                      afterScanId: "scan-c",
-                      beforeScanIds: ["scan-a", "scan-b"],
-                    },
-                  ],
+                  findingsByScanId,
+                  batches,
                 }
               : {};
           },
@@ -1111,6 +1129,9 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(matcherCalls).toHaveBeenCalledTimes(2);
+    expect(matcherCalls.mock.calls[1]?.[0]).toMatchObject({
+      crossModeOccurrenceIds: ["b", "c"],
+    });
     expect(calls[0]).toEqual([
       "list-unmatched-scan-pairs",
       "--repository",
@@ -1184,14 +1205,13 @@ describe("CLI workbench", () => {
                   scanCount: 2,
                   unavailableScans: 0,
                   skippedPairs: 0,
-                  findingsByScanId: {
-                    "earlier-scan": before,
-                    "later-scan": after,
-                  },
                   batches: [
                     {
                       afterScanId: "later-scan",
-                      beforeScanIds: ["earlier-scan"],
+                      afterFindings: after,
+                      beforeScans: [
+                        { scanId: "earlier-scan", findings: before },
+                      ],
                       knownFindingGroups,
                     },
                   ],
@@ -1235,21 +1255,21 @@ describe("CLI workbench", () => {
                   scanCount: 4,
                   unavailableScans: 0,
                   skippedPairs: 0,
-                  findingsByScanId: {
-                    "first-scan": [first],
-                    "third-scan": [third],
-                    "second-scan": [second],
-                    "fourth-scan": [fourth],
-                  },
                   batches: [
                     {
                       afterScanId: "third-scan",
-                      beforeScanIds: ["first-scan"],
+                      afterFindings: [third],
+                      beforeScans: [
+                        { scanId: "first-scan", findings: [first] },
+                      ],
                       knownFindingGroups: existingGroups,
                     },
                     {
                       afterScanId: "fourth-scan",
-                      beforeScanIds: ["second-scan"],
+                      afterFindings: [fourth],
+                      beforeScans: [
+                        { scanId: "second-scan", findings: [second] },
+                      ],
                       knownFindingGroups: existingGroups,
                     },
                   ],
@@ -1280,54 +1300,6 @@ describe("CLI workbench", () => {
     ]);
   });
 
-  test.each(["older plugin", "missing scan ID"] as const)(
-    "preserves earlier saves when bulk matching rejects a plan (%s)",
-    async (scenario) => {
-      const saved: string[][] = [];
-      const stderr = captureCli(main, "stderr");
-      expect(
-        await stderr.run(
-          ["scans", "match", "--all"],
-          dependencies({
-            onWorkbench: (args): JsonObject => {
-              if (args[0] === "list-unmatched-scan-pairs")
-                return scenario === "older plugin"
-                  ? {
-                      batches: [
-                        {
-                          afterScanId: "last",
-                          afterFindings: [],
-                          beforeScans: [{ scanId: "first", findings: [] }],
-                        },
-                      ],
-                    }
-                  : {
-                      findingsByScanId: { first: [], second: [], last: [] },
-                      batches: [
-                        { afterScanId: "second", beforeScanIds: ["first"] },
-                        { afterScanId: "last", beforeScanIds: ["missing"] },
-                      ],
-                    };
-              saved.push([args[2]!, args[4]!]);
-              return {};
-            },
-            onMatch: rejecting(
-              "Empty or incomplete batches must not start matching.",
-            ),
-          }),
-        ),
-      ).toBe(2);
-      expect(stderr.text()).toContain(
-        scenario === "older plugin"
-          ? "Update the custom plugin"
-          : "Matching plan is missing findings for scan missing.",
-      );
-      expect(saved).toEqual(
-        scenario === "older plugin" ? [] : [["first", "second"]],
-      );
-    },
-  );
-
   test("saves empty comparisons without starting Codex", async () => {
     const calls: Array<readonly string[]> = [];
     let comparisonInput: string | undefined;
@@ -1345,7 +1317,9 @@ describe("CLI workbench", () => {
                 before: [{ occurrenceId: "before" }],
                 after: [],
               },
-              batches: [{ afterScanId: "after", beforeScanIds: ["before"] }],
+              batches: [
+                { afterScanId: "after", beforeScans: [{ scanId: "before" }] },
+              ],
             }
           : {};
       },
@@ -1360,6 +1334,38 @@ describe("CLI workbench", () => {
       matches: [],
       uncertain: [],
     });
+  });
+
+  test("rejects a missing scan before matching or saving the batch", async () => {
+    const calls: string[] = [];
+    const stderr = captureCli(main, "stderr");
+    const match = mock(rejecting("unexpected matching call"));
+    expect(
+      await stderr.run(
+        ["scans", "match", "--all"],
+        dependencies({
+          onWorkbench: ([command]): JsonObject => {
+            calls.push(command!);
+            return {
+              findingsByScanId: {
+                before: [{ occurrenceId: "before" }],
+                after: [{ occurrenceId: "after" }],
+              },
+              batches: [
+                {
+                  afterScanId: "after",
+                  beforeScans: [{ scanId: "before" }, { scanId: "missing" }],
+                },
+              ],
+            };
+          },
+          onMatch: match,
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("missing findings for scan missing");
+    expect(match).not.toHaveBeenCalled();
+    expect(calls).toEqual(["list-unmatched-scan-pairs"]);
   });
 
   test("projects historical uncertainty per scan without losing a known match", async () => {
@@ -1380,19 +1386,31 @@ describe("CLI workbench", () => {
               scanCount: 3,
               unavailableScans: 0,
               skippedPairs: 1,
-              findingsByScanId: {
-                before: [{ occurrenceId: "confirmed", findingId: "shared" }],
-                earlier: [
-                  {
-                    occurrenceId: "earlier-uncertain",
-                    findingId: "earlier-other",
-                  },
-                  { occurrenceId: "uncertain", findingId: "other" },
-                ],
-                after: [{ occurrenceId: "after", findingId: "shared" }],
-              },
               batches: [
-                { afterScanId: "after", beforeScanIds: ["before", "earlier"] },
+                {
+                  afterScanId: "after",
+                  afterFindings: [
+                    { occurrenceId: "after", findingId: "shared" },
+                  ],
+                  beforeScans: [
+                    {
+                      scanId: "before",
+                      findings: [
+                        { occurrenceId: "confirmed", findingId: "shared" },
+                      ],
+                    },
+                    {
+                      scanId: "earlier",
+                      findings: [
+                        {
+                          occurrenceId: "earlier-uncertain",
+                          findingId: "earlier-other",
+                        },
+                        { occurrenceId: "uncertain", findingId: "other" },
+                      ],
+                    },
+                  ],
+                },
               ],
             };
           },
