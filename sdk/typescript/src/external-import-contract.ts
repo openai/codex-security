@@ -375,6 +375,23 @@ export function previousAdmission(value: object) {
   return previousAdmissions.get(value);
 }
 
+/** Keep a valid native record when its optional structured fields exceed the target's bounds. */
+export function validateEnrichedExternalEvidence(
+  evidence: Record<string, unknown>,
+  target: ExternalImportTarget,
+  ...projections: (Record<string, unknown> | undefined)[]
+): ExternalFindingEvidence {
+  for (const extra of projections) {
+    if (!extra) continue;
+    try {
+      return validateExternalEvidence({ ...evidence, ...extra }, target);
+    } catch {
+      // Try the next projection. The native record must pass the same validation.
+    }
+  }
+  return validateExternalEvidence(evidence, target);
+}
+
 export function validateExternalEvidence(
   input: unknown,
   target: ExternalImportTarget = "cloud",
