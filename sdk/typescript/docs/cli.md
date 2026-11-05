@@ -280,6 +280,45 @@ See the [Bedrock guide](https://github.com/openai/codex-security/blob/main/docs/
 for credential alternatives, restricted-model access, cost estimates, and
 reasoning-summary configuration.
 
+### Google Cloud Vertex AI cost estimates
+
+The SDK estimates Standard online inference costs for OpenAI models served by
+Google Cloud's Model as a Service (MaaS). Rates are in USD per million tokens.
+[Google Cloud partner model pricing](https://cloud.google.com/model-garden/partner-models/pricing)
+and [OpenAI model locations](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/maas/openai).
+
+| Managed model ID           | Location                | Input | Cached input | Output |
+| -------------------------- | ----------------------- | ----: | -----------: | -----: |
+| `openai/gpt-oss-120b-maas` | `global`                | $0.09 |        $0.09 |  $0.36 |
+| `openai/gpt-oss-20b-maas`  | `us-central1` (retired) | $0.07 |       $0.007 |  $0.25 |
+
+Google publishes a cache-hit discount only for 20B, so the estimator uses the
+ordinary input rate for cached 120B tokens. Google retired the managed 20B
+endpoint on October 21, 2026. The SDK retains its rates for historical usage.
+[Google Cloud retirement schedule](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/deprecations/open-models).
+
+To estimate recorded usage locally, pass the managed model ID and the GCP
+provider to `estimateScanCost`.
+
+```ts
+import { estimateScanCost } from "@openai/codex-security";
+
+const cost = estimateScanCost(
+  "openai/gpt-oss-120b-maas",
+  { input_tokens: 1_000_000, output_tokens: 500_000 },
+  { provider: "gcp" },
+);
+// cost?.estimatedUsd is 0.27.
+```
+
+Google documents the managed GPT OSS IDs on its shared chat-completions API.
+The bundled Codex `gcp` provider uses Google's Responses API with a separate
+frontier model catalog. Google has published no Standard token rates for that
+catalog, including GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra, and GPT-6 Luna.
+Those scans record token usage and require a published price to use
+`--max-cost`. Self-deployed Model Garden endpoints incur infrastructure charges.
+[Google Cloud's preview announcement](https://cloud.google.com/blog/products/ai-machine-learning/google-cloud-brings-openai-models-to-customers).
+
 ## Generate a security policy
 
 Use `policy` to draft or update `SECURITY.md` before a scan. The policy describes
@@ -1143,6 +1182,7 @@ mean allowance was unavailable. There is no token-to-allowance conversion here.
 Cost displays use Standard token rates for the model. OpenAI models use
 [OpenAI API pricing](https://developers.openai.com/api/docs/pricing). OpenAI
 models on Bedrock use [AWS pricing for the model, inference route, and region](https://github.com/openai/codex-security/blob/main/docs/bedrock.md#scan-cost-estimates).
+For managed OpenAI models on Vertex AI, see [Google Cloud Vertex AI cost estimates](#google-cloud-vertex-ai-cost-estimates).
 The short/long-context range estimates usage at published rates. Other service
 tiers, account discounts, and ChatGPT subscription allowance are outside that
 estimate. Models without known prices have no estimate.

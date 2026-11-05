@@ -14470,13 +14470,20 @@ if __name__ == "__main__":
     }
   });
 
-  test("reports unpriced model usage without letting its observer stop the scan", async () => {
+  test("reports unpriced GCP usage without letting its observer stop the scan", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const usages: unknown[] = [];
     const observerErrors: string[] = [];
     const commands: Array<readonly string[]> = [];
     const client = new TestClient(
-      { codexOverrides: { model: "synthetic-unpriced-model" } },
+      {
+        codexOverrides: {
+          model: "gpt-6-astra",
+          model_provider: "openai",
+          profile: "review",
+          profiles: { review: { model_provider: "gcp" } },
+        },
+      },
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench(commands),
@@ -14484,6 +14491,13 @@ if __name__ == "__main__":
       },
     );
     try {
+      await expect(
+        client.preflight(repository, { maxCostUsd: 1 }),
+      ).rejects.toThrow("cost limit is not available for the configured model");
+      await expect(client.preflight(repository)).resolves.toMatchObject({
+        model: "gpt-6-astra",
+        modelProvider: "gcp",
+      });
       const result = await client.run(repository, {
         onUsage: async (usage) => {
           usages.push(usage);
@@ -14516,9 +14530,15 @@ if __name__ == "__main__":
     }
   });
   const prices = [
-    { model: "gpt-6-astra", min: 0.000232, max: 0.000429 },
-    { model: "gpt-6-cyber", min: 0.000464, max: null },
-    { model: "gpt-5.6-cyber", min: 0.0003275, max: null },
+    { model: "gpt-6-astra", provider: "openai", min: 0.000232, max: 0.000429 },
+    { model: "gpt-6-cyber", provider: "openai", min: 0.000464, max: null },
+    { model: "gpt-5.6-cyber", provider: "openai", min: 0.0003275, max: null },
+    {
+      model: "openai/gpt-oss-120b-maas",
+      provider: "gcp",
+      min: 0.00000198,
+      max: 0.00000198,
+    },
   ];
   test.each(prices)("tracks live and saved $model costs", async (price) => {
     const { model, min, max } = price;
@@ -14535,6 +14555,7 @@ if __name__ == "__main__":
           profiles: {
             review: {
               model,
+              model_provider: price.provider,
               model_reasoning_effort: "high",
             },
           },

@@ -744,6 +744,8 @@ describe("live scan dashboard", () => {
       { provider: "amazon-bedrock", region: "us-gov-west-1" },
       false,
     ],
+    ["gpt-6-astra", { provider: "gcp" }, false],
+    ["openai/gpt-oss-120b-maas", { provider: "gcp" }, true],
   ] as const)(
     "shows a cost row only when %s has pricing in %j",
     (model, pricingContext, priced) => {
