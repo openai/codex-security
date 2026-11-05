@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import {
   type ExternalImportTarget,
   validateExternalEvidence,
@@ -59,10 +60,23 @@ export function position(value: unknown, label: string): number {
   return value;
 }
 
+// Validate both POSIX filenames and Windows separators before a reader emits a path.
+export function nativeResultPath(
+  raw: string,
+  relative = relativePath(raw),
+): string | null {
+  if (relative === null) return null;
+  const path = posix.normalize(raw);
+  return relativePath(posix.normalize(path.replaceAll("\\", "/")))
+    ? path
+    : null;
+}
+
 /** Parse the native code-result fields shared by Semgrep and OpenGrep. */
 export function parseNativeJsonResult(
   value: unknown,
   origin: "Semgrep" | "OpenGrep",
+  projectPath: (raw: string) => string | null,
 ) {
   const result = record(value, `${origin} result`);
   const extra = record(result["extra"], `${origin} extra`);
@@ -100,7 +114,7 @@ export function parseNativeJsonResult(
     metadata,
     rule,
     rawPath,
-    path: relativePath(rawPath),
+    path: projectPath(rawPath),
     line,
     column,
     endLine,

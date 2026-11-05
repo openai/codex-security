@@ -1,9 +1,10 @@
+import { hasPreviousCloudProjection } from "../src/reader-selection.js";
 import { expect, test } from "bun:test";
 import {
-  needsPreviousEndorProjection,
   normalizeEndorFindings,
   normalizeEndorSarif,
   normalizePreviousEndorFindings,
+  requiresStructuredEndorReport,
 } from "../src/endor-findings.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 
@@ -36,128 +37,101 @@ test("Endor JSON preserves the complete source, UUID, severity, aliases and repo
   });
 });
 
-test("Endor imports fully qualified package names and orders malware IDs after vulnerability IDs", () => {
-  const base = endorFinding();
-  const { target_dependency_name: bareName, ...spec } = base.spec;
-  const vulnerability = spec.finding_metadata.vulnerability;
-  const input = {
-    ...base,
-    spec: {
-      ...spec,
-      target_dependency_package_name: "npm://@example/package@1.0.0",
-      finding_metadata: {
-        vulnerability,
-        malware: {
-          meta: { name: "MAL-2099-0001" },
-          spec: { aliases: [vulnerability.meta.name, "malware-alias"] },
-        },
-      },
-    },
-  };
-  const current = normalizeEndorFindings(input);
-  const previous = normalizePreviousEndorFindings(input);
-  expect(current.findings[0]).toMatchObject({
-    source_finding_id: input.uuid,
-    evidence: {
-      advisory_ids: [
-        vulnerability.meta.name,
-        ...vulnerability.spec.aliases,
-        "MAL-2099-0001",
-        "malware-alias",
-      ],
-      source_data: input,
-    },
-  });
-  expect(current.findings[0]!.evidence.packages!.map((p) => p.name)).toEqual(
-    spec.dependency_file_paths.map(
-      () => input.spec.target_dependency_package_name,
-    ),
-  );
-  expect(previous.findings[0]).toMatchObject({
-    source_finding_id: input.uuid,
-    evidence: {
-      packages: [],
-      advisory_ids: [vulnerability.meta.name, ...vulnerability.spec.aliases],
-      source_data: input,
-    },
-  });
-  expect(needsPreviousEndorProjection(current)).toBe(true);
-  expect(needsPreviousEndorProjection(previous)).toBe(false);
-
-  const same = normalizeEndorFindings({
-    ...input,
-    spec: {
-      ...input.spec,
-      target_dependency_name: bareName,
-      finding_metadata: { vulnerability, malware: vulnerability },
-    },
-  });
-  expect(same.findings[0]!.evidence.packages![0]!.name).toBe(bareName);
-  expect(needsPreviousEndorProjection(same)).toBe(false);
-});
-
-test("malformed optional malware metadata stays in the original Endor evidence", () => {
-  const base = endorFinding();
-  for (const malware of ["unavailable", { meta: [], spec: "unknown" }]) {
-    const input = {
-      ...base,
-      spec: { ...base.spec, finding_metadata: { malware } },
-    };
-    const current = normalizeEndorFindings(input);
-    expect(current).toEqual(normalizePreviousEndorFindings(input));
-    expect(current.findings[0]!.evidence).toMatchObject({
-      advisory_ids: [],
-      source_data: input,
-    });
-    expect(needsPreviousEndorProjection(current)).toBe(false);
-  }
-});
-
 test.each([
+  { oversizedPackage: false, oversizedAliases: false },
   { oversizedPackage: false, oversizedAliases: true },
   { oversizedPackage: true, oversizedAliases: false },
   { oversizedPackage: true, oversizedAliases: true },
 ])(
-  "Endor keeps the importable evidence when new fields exceed Cloud limits %p",
+  "Endor retains the source and projects the package and malware IDs that fit %p",
   ({ oversizedPackage, oversizedAliases }) => {
     const base = endorFinding();
     const { target_dependency_name: _, ...spec } = base.spec;
+    const { vulnerability } = spec.finding_metadata;
+    const originalIds = [
+      vulnerability.meta.name,
+      ...vulnerability.spec.aliases,
+    ];
     const name = oversizedPackage ? "x".repeat(513) : "npm://example@1.0.0";
     const aliases = oversizedAliases
       ? Array.from({ length: 100 }, (_, i) => `MAL-alias-${i}`)
       : ["MAL-alias"];
-    const { vulnerability } = spec.finding_metadata;
+    const malwareId = "MAL-2099-0001";
     const input = {
       ...base,
       spec: {
         ...spec,
         target_dependency_package_name: name,
-        finding_metadata: { vulnerability, malware: { spec: { aliases } } },
+        finding_metadata: {
+          vulnerability,
+          malware: {
+            meta: { name: malwareId },
+            spec: { aliases: [originalIds[0], ...aliases] },
+          },
+        },
       },
     };
     const previous = normalizePreviousEndorFindings(input);
+    expect(previous.findings[0]).toMatchObject({
+      source_finding_id: input.uuid,
+      evidence: { packages: [], advisory_ids: originalIds, source_data: input },
+    });
+    expect(hasPreviousCloudProjection(previous)).toBe(false);
+
     const current = normalizeEndorFindings(input);
     expect(current.excluded).toEqual([]);
     expect(current.findings[0]).toMatchObject({
       source_finding_id: input.uuid,
       evidence: {
-        advisory_ids: [
-          vulnerability.meta.name,
-          ...vulnerability.spec.aliases,
-          ...(oversizedAliases ? [] : aliases),
-        ],
+        advisory_ids: oversizedAliases
+          ? originalIds
+          : [...originalIds, malwareId, ...aliases],
         source_data: input,
       },
     });
-    expect(current.findings[0]!.evidence.packages?.map((p) => p.name)).toEqual(
+    expect(current.findings[0]!.evidence.packages!.map((p) => p.name)).toEqual(
       oversizedPackage ? [] : spec.dependency_file_paths.map(() => name),
     );
-    expect(needsPreviousEndorProjection(current)).toBe(
+    expect(hasPreviousCloudProjection(current)).toBe(
       !oversizedPackage || !oversizedAliases,
+    );
+    expect(requiresStructuredEndorReport(current)).toBe(
+      oversizedPackage || oversizedAliases,
     );
     if (oversizedPackage && oversizedAliases) expect(current).toEqual(previous);
   },
 );
+
+test("Endor keeps its original projection for duplicate or malformed malware metadata", () => {
+  const base = endorFinding();
+  const { vulnerability } = base.spec.finding_metadata;
+  for (const finding_metadata of [
+    { vulnerability, malware: vulnerability },
+    { malware: "unavailable" },
+    { malware: { meta: [], spec: "unknown" } },
+  ]) {
+    const input = {
+      ...base,
+      spec: {
+        ...base.spec,
+        target_dependency_package_name: "npm://another-package@2.0.0",
+        finding_metadata,
+      },
+    };
+    const current = normalizeEndorFindings(input);
+    expect(current.findings[0]!.evidence).toMatchObject({
+      advisory_ids: finding_metadata.vulnerability
+        ? [vulnerability.meta.name, ...vulnerability.spec.aliases]
+        : [],
+      source_data: input,
+    });
+    expect(current.findings[0]!.evidence.packages![0]!.name).toBe(
+      base.spec.target_dependency_name,
+    );
+    expect(current).toEqual(normalizePreviousEndorFindings(input));
+    expect(hasPreviousCloudProjection(current)).toBe(false);
+  }
+});
 
 test("arrays and ListFindingsResponse use the same identities and empty lists are empty", () => {
   const input = endorFinding();

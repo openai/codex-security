@@ -1,4 +1,4 @@
-import { posix } from "node:path";
+import { markPreviousCloudProjection } from "./reader-selection.js";
 import {
   normalizeSemgrepPlatformFindings,
   isSemgrepPlatformFormat,
@@ -22,6 +22,7 @@ import type {
 } from "./external-findings.js";
 import {
   messageText,
+  nativeResultPath,
   parseNativeJsonResult,
   position,
   projectNativeJsonResult,
@@ -200,29 +201,20 @@ export function normalizeSemgrepFindings(
   return normalizeSemgrepJson(document, options, target);
 }
 
-const changedNativeProjections = new WeakSet<ExternalFindings>();
-
-/** @internal Check the projection just read for a possible historical Cloud request. */
-export function needsPreviousSemgrepProjection(findings: ExternalFindings) {
-  return changedNativeProjections.has(findings);
-}
-
 function nativeProjection(target: ExternalImportTarget, previous: boolean) {
   let changed = false;
   return {
     location(raw: string) {
       const oldPath = relativePath(raw);
-      if (!oldPath || previous) return oldPath;
-      // A native filename can contain POSIX backslashes or Windows separators.
-      // Validate both interpretations, but keep the scanner's own spelling.
-      const portable = posix.normalize(raw).replaceAll("\\", "/");
-      const path = relativePath(posix.normalize(portable)) ? raw : null;
+      if (previous) return oldPath;
+      // Semgrep retains its raw spelling; OpenGrep groups by the normalized path.
+      const path = nativeResultPath(raw, oldPath) === null ? null : raw;
       if (path !== oldPath) changed = true;
       return path;
     },
     finish(findings: ExternalFindings, omittedExplanations = false) {
       if (target === "cloud" && (changed || omittedExplanations))
-        changedNativeProjections.add(findings);
+        markPreviousCloudProjection(findings);
       return findings;
     },
   };
@@ -260,17 +252,17 @@ function normalizeSemgrepJson(
   const projection = nativeProjection(target, previous);
   const findings = normalizeRecords(
     rows,
-    (value) => {
-      const parsed = parseNativeJsonResult(value, "Semgrep");
-      parsed.path = projection.location(parsed.rawPath);
-      return projectNativeJsonResult(parsed, {
-        origin: "Semgrep",
-        repositoryUrl,
-        severity,
-        reportContext: context,
-        target,
-      });
-    },
+    (value) =>
+      projectNativeJsonResult(
+        parseNativeJsonResult(value, "Semgrep", projection.location),
+        {
+          origin: "Semgrep",
+          repositoryUrl,
+          severity,
+          reportContext: context,
+          target,
+        },
+      ),
     jsonIdentity,
     target,
   );

@@ -1,10 +1,10 @@
+import { hasPreviousCloudProjection } from "../src/reader-selection.js";
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
-  needsPreviousVeracodeProjection,
   normalizePreviousVeracodeFindings,
   normalizeVeracodeFindings,
   readVeracodeFindings,
@@ -78,22 +78,12 @@ test("accepts schema and expanded CWE and category fields under one policy flaw 
   for (const target of ["local", "cloud"] as const) {
     const expanded = normalize(page, target);
     const result = normalize(mixed, target);
-    expect(needsPreviousVeracodeProjection(expanded)).toBe(false);
-    expect(needsPreviousVeracodeProjection(result)).toBe(target === "cloud");
+    expect(hasPreviousCloudProjection(expanded)).toBe(false);
+    expect(hasPreviousCloudProjection(result)).toBe(target === "cloud");
     expect(result.excluded).toEqual([]);
-    expect(result.findings).toEqual([
-      expanded.findings[0]!,
-      {
-        ...expanded.findings[1]!,
-        evidence: {
-          ...expanded.findings[1]!.evidence,
-          source_data: {
-            ...expanded.findings[1]!.evidence.source_data,
-            row: scalar,
-          },
-        },
-      },
-    ]);
+    // Only the native row spelling should distinguish the two projections.
+    expanded.findings[1]!.evidence.source_data!["row"] = scalar;
+    expect(result.findings).toEqual(expanded.findings);
     const previous = normalizePreviousVeracodeFindings(
       mixed,
       repository,
@@ -110,7 +100,7 @@ test("accepts schema and expanded CWE and category fields under one policy flaw 
   mixed._links.self.href += "&cwe=79";
   const filtered = normalize(mixed);
   expect(filtered.findings).toHaveLength(2);
-  expect(needsPreviousVeracodeProjection(filtered)).toBe(false);
+  expect(hasPreviousCloudProjection(filtered)).toBe(false);
   mixed._links.self.href += "&finding_category=4";
   expect(() => normalize(mixed)).toThrow(/finding_category ID/);
 });

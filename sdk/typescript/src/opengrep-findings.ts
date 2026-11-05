@@ -1,4 +1,3 @@
-import { posix } from "node:path";
 import {
   previousAdmission,
   validateExternalEvidenceJson,
@@ -10,6 +9,7 @@ import { errorMessage } from "./errors.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
   messageText,
+  nativeResultPath,
   parseNativeJsonResult,
   projectNativeJsonResult,
   sourceRepositoryUrl,
@@ -19,7 +19,6 @@ import {
   array,
   readScannerJson,
   record,
-  relativePath,
   requiredText,
   stableId,
 } from "./scanner-import.js";
@@ -178,15 +177,7 @@ export function normalizeOpenGrepFindings(
   for (const [index, value] of values.entries()) {
     let id: string | null = null;
     try {
-      const parsed = parseNativeJsonResult(value, "OpenGrep");
-      if (parsed.path !== null) {
-        // Validate the emitted spelling across platforms, keeping literal POSIX backslashes.
-        const path = posix.normalize(parsed.rawPath);
-        parsed.path =
-          relativePath(posix.normalize(path.replaceAll("\\", "/"))) === null
-            ? null
-            : path;
-      }
+      const parsed = parseNativeJsonResult(value, "OpenGrep", nativeResultPath);
       // Native fingerprint counters change when another analysis pass adds matches.
       // A source move creates a new occurrence; this is not cross-revision matching.
       id = stableId("opengrep-location", [

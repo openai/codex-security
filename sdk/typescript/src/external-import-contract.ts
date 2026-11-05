@@ -375,35 +375,21 @@ export function previousAdmission(value: object) {
   return previousAdmissions.get(value);
 }
 
-const enrichmentFallbacks = new WeakSet<ExternalFindingEvidence>();
-
-/** Whether validation selected a reduced projection of the optional typed fields. */
-export function usedEnrichmentFallback(evidence: ExternalFindingEvidence) {
-  return enrichmentFallbacks.has(evidence);
-}
-
 /** Keep a valid native record when its optional structured fields exceed the target's bounds. */
 export function validateEnrichedExternalEvidence(
   evidence: Record<string, unknown>,
   target: ExternalImportTarget,
   ...projections: (Record<string, unknown> | undefined)[]
 ): ExternalFindingEvidence {
-  let usedFallback = false;
-  function validate(projection: Record<string, unknown>) {
-    const result = validateExternalEvidence(projection, target);
-    if (usedFallback) enrichmentFallbacks.add(result);
-    return result;
-  }
   for (const extra of projections) {
     if (!extra) continue;
     try {
-      return validate({ ...evidence, ...extra });
+      return validateExternalEvidence({ ...evidence, ...extra }, target);
     } catch {
-      usedFallback = true;
       // Try the next projection. The native record must pass the same validation.
     }
   }
-  return validate(evidence);
+  return validateExternalEvidence(evidence, target);
 }
 
 export function validateExternalEvidence(

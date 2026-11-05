@@ -1,3 +1,4 @@
+import { markPreviousCloudProjection } from "./reader-selection.js";
 import {
   type ExternalImportTarget,
   validateEnrichedExternalEvidence,
@@ -107,11 +108,11 @@ export function normalizeEndorFindings(
   return normalizeReport(input, target, false);
 }
 
-const changedNativeProjections = new WeakSet<ExternalFindings>();
+const reducedReports = new WeakSet<ExternalFindings>();
 
-/** @internal Look up historical requests only when the native projection changed. */
-export function needsPreviousEndorProjection(findings: ExternalFindings) {
-  return changedNativeProjections.has(findings);
+/** A native upload would ask the worker to reconstruct fields that Cloud could not accept. */
+export function requiresStructuredEndorReport(findings: ExternalFindings) {
+  return reducedReports.has(findings);
 }
 
 /** @internal Reproduce the selection from before malware and fully qualified package mapping. */
@@ -137,6 +138,7 @@ function normalizeReport(
         ? input
         : [input];
   let changed = false;
+  let reduced = false;
   const result = normalizeRecords(
     values,
     (value) => {
@@ -201,14 +203,12 @@ function normalizeReport(
       const vulnerabilityIds = [
         ...new Set([...(advisory ? [advisory] : []), ...aliases]),
       ];
-      const advisories = new Set(vulnerabilityIds);
       const malware = previous ? undefined : asRecord(metadata["malware"]);
-      if (malware) {
-        const id = text(asRecord(malware["meta"])?.["name"]);
-        if (id) advisories.add(id);
-        for (const alias of strings(asRecord(malware["spec"])?.["aliases"]))
-          advisories.add(alias);
-      }
+      const advisories = new Set([
+        ...vulnerabilityIds,
+        ...strings([asRecord(malware?.["meta"])?.["name"]]),
+        ...strings(asRecord(malware?.["spec"])?.["aliases"]),
+      ]);
       const level = text(spec["level"])
         ?.replace(/^FINDING_LEVEL_/u, "")
         .toLowerCase();
@@ -268,11 +268,13 @@ function normalizeReport(
         malwareIds,
         fallbackPackage,
       );
-      if (
-        (evidence.advisory_ids?.length ?? 0) > vulnerabilityIds.length ||
-        (fallbackPackage && evidence.packages?.length)
-      )
-        changed = true;
+      const acceptedIds = evidence.advisory_ids!.length;
+      const acceptedPackages = evidence.packages!.length;
+      changed ||=
+        acceptedIds > vulnerabilityIds.length ||
+        (!bareName && acceptedPackages > 0);
+      reduced ||=
+        acceptedIds < advisories.size || acceptedPackages < packages.length;
       return evidence;
     },
     (value) =>
@@ -282,7 +284,10 @@ function normalizeReport(
       ),
     target,
   );
-  if (target === "cloud" && changed) changedNativeProjections.add(result);
+  if (target === "cloud") {
+    if (changed) markPreviousCloudProjection(result);
+    if (reduced) reducedReports.add(result);
+  }
   return result;
 }
 
