@@ -198,6 +198,7 @@ import {
   resolveCodexProfile,
   mergedCodexConfig,
   readCodexFileProfile,
+  scanPricingContext,
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
@@ -5893,14 +5894,17 @@ export async function main(
             dependencies.environment["CI"] === undefined &&
             dependencies.environment["TERM"] !== "dumb"
           ) {
+            const dashboardConfig = await mergedCodexConfig(
+              config,
+              scanCodexHome(dependencies.environment),
+            );
             const candidate = new ScanDashboard(errorOutput, {
               repository,
               presentation: "components",
-              model: scanModelConfiguration(
-                await mergedCodexConfig(
-                  config,
-                  scanCodexHome(dependencies.environment),
-                ),
+              model: scanModelConfiguration(dashboardConfig),
+              pricingContext: scanPricingContext(
+                dashboardConfig,
+                dependencies.environment,
               ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
@@ -10472,6 +10476,10 @@ async function executeScan(
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(effectiveConfiguration),
+        pricingContext: scanPricingContext(
+          effectiveConfiguration,
+          dependencies.environment,
+        ),
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),

@@ -20,20 +20,18 @@ test.each([
   "%s bounds each token category with verified rates",
   (model, short, long) => {
     for (const category of [0, 1, 2, 3] as const) {
-      for (const selected of [model, `openai.${model}`]) {
-        const cost = estimateScanCost(selected, {
-          input_tokens: category === 3 ? 0 : 1_000_000,
-          cached_input_tokens: category === 1 ? 1_000_000 : 0,
-          cache_write_input_tokens: category === 2 ? 1_000_000 : 0,
-          output_tokens: category === 3 ? 1_000_000 : 0,
-        })!;
-        expect(cost.estimatedUsd).toBe(short[category]);
-        expect(cost.estimatedUsdRange).toEqual({
-          min: short[category],
-          max: long[category],
-          context: "unknown",
-        });
-      }
+      const cost = estimateScanCost(model, {
+        input_tokens: category === 3 ? 0 : 1_000_000,
+        cached_input_tokens: category === 1 ? 1_000_000 : 0,
+        cache_write_input_tokens: category === 2 ? 1_000_000 : 0,
+        output_tokens: category === 3 ? 1_000_000 : 0,
+      })!;
+      expect(cost.estimatedUsd).toBe(short[category]);
+      expect(cost.estimatedUsdRange).toEqual({
+        min: short[category],
+        max: long[category],
+        context: "unknown",
+      });
     }
   },
 );
@@ -62,8 +60,8 @@ test("prices the exact Bedrock Daybreak Blue ID with AWS short and long context 
     estimatedUsdRange: { min: 6.138, max: 11.176, context: "unknown" },
     pricing: {
       source:
-        "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
-      asOf: "2026-10-01",
+        "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
+      asOf: "2026-11-05",
       serviceTier: "standard",
       context: "short",
       usdPerMillionTokens: {
@@ -124,8 +122,8 @@ test("prices the exact Bedrock Daybreak Red ID without inventing long-context ra
     estimatedUsdRange: { min: 20.55625, max: null, context: "unknown" },
     pricing: {
       source:
-        "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html",
-      asOf: "2026-10-01",
+        "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html",
+      asOf: "2026-11-05",
       serviceTier: "standard",
       context: "short",
       usdPerMillionTokens: {
@@ -150,6 +148,69 @@ test.each([1, 3])(
     expect(cost?.estimatedUsd).toBe((written * 17.1875) / 1_000_000);
   },
 );
+
+// USD per million tokens in the AWS Standard short-context tables.
+test.each([
+  ["us.openai.gpt-5.4", "us-east-2", 2.75, 0.275, 2.75, 16.5],
+  ["us.openai.gpt-5.5", "us-east-1", 5.5, 0.55, 5.5, 33],
+  ["openai.gpt-5.4", "us-gov-west-1", 3.375, 0.3375, 3.375, 20.25],
+  ["openai.gpt-5.6-cyber", "us-gov-east-1", 16.875, 1.6875, 21.09375, 101.25],
+  ["openai.gpt-5.6-terra", "us-gov-west-1", 2.7, 0.27, 3.375, 16.2],
+  ["us-gov.openai.gpt-5.6-luna", "us-gov-east-1", 0.27, 0.027, 0.3375, 1.62],
+  ["openai.gpt-6.1-sol", "us-east-1", 2.2, 0.11, 2.75, 11],
+  ["us.openai.gpt-6.1-sol", "us-east-1", 2.2, 0.11, 2.75, 11],
+  ["global.openai.gpt-6.1-sol", "us-east-1", 2, 0.1, 2.5, 10],
+] as const)(
+  "uses the Standard rates for %s in %s",
+  (model, region, input, cacheRead, cacheWrite, output) => {
+    const cost = estimateScanCost(
+      model,
+      {
+        input_tokens: 3,
+        cached_input_tokens: 1,
+        cache_write_input_tokens: 1,
+        output_tokens: 1,
+      },
+      region,
+    );
+    expect(cost?.pricing?.usdPerMillionTokens).toEqual({
+      input,
+      cacheRead,
+      cacheWrite,
+      output,
+    });
+    expect(cost?.estimatedUsd).toBeCloseTo(
+      (input + cacheRead + cacheWrite + output) / 1_000_000,
+      15,
+    );
+  },
+);
+
+test("keeps unverified Bedrock IDs, regions, and long-context rates unpriced", () => {
+  const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+  for (const [model, region] of [
+    ["global.openai.gpt-5.5", "us-east-1"],
+    ["openai.gpt-6-cyber", "us-east-2"],
+    ["gpt-5.6-cyber", "us-gov-east-1"],
+    ["openai.gpt-5.5-2026-04-23", "us-east-1"],
+    ["openai.gpt-5.6-cyber", "us-gov-west-1"],
+    ["openai.gpt-daybreak-blue-5.6-sol", "us-gov-east-1"],
+    ["global.openai.gpt-5.6-terra", "us-gov-west-1"],
+  ] as const) {
+    expect(estimateScanCost(model, usage, region)).toBeNull();
+  }
+  expect(
+    estimateScanCost("openai.gpt-5.4", usage, "us-gov-west-1")
+      ?.estimatedUsdRange,
+  ).toEqual({ min: 3.375, max: null, context: "unknown" });
+  expect(
+    estimateScanCost(
+      "openai.gpt-5.6-luna",
+      { ...usage, cache_write_input_tokens: 0 },
+      "us-gov-west-1",
+    )?.estimatedUsdRange,
+  ).toEqual({ min: 0.27, max: 0.54, context: "unknown" });
+});
 
 test("reports a range for cache-heavy scans without changing the budget baseline", () => {
   const cost = estimateScanCost("gpt-5.6-sol", {

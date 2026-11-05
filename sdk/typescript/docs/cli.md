@@ -1133,10 +1133,12 @@ their own timestamps, window durations, and reset times. These are historical
 observations, not a live allowance check or scan-only consumption. Empty readings
 mean allowance was unavailable. There is no token-to-allowance conversion here.
 
-Cost displays use [standard API prices](https://developers.openai.com/api/docs/pricing)
-and show a short/long-context range. They estimate model usage, excluding other
-tiers, fees, surcharges, and account-specific pricing. They do not measure ChatGPT
-subscription allowance. Models without known prices have no estimate.
+Cost displays use Standard token rates for the model. OpenAI models use
+[OpenAI API pricing](https://developers.openai.com/api/docs/pricing). OpenAI
+models on Bedrock use [AWS pricing for the model, inference route, and region](https://github.com/openai/codex-security/blob/main/docs/bedrock.md#scan-cost-estimates).
+The short/long-context range estimates usage at published rates. Other service
+tiers, account discounts, and ChatGPT subscription allowance are outside that
+estimate. Models without known prices have no estimate.
 
 JSON, history, and bulk receipts include `cost.estimatedUsdRange` (`min`, `max`,
 and `context: "unknown"`). A null maximum means no upper estimate is available.
