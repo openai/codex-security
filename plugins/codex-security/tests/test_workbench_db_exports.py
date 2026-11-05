@@ -1,3 +1,5 @@
+"""Export saved findings from stopped scans while retaining newer drafts across recovery."""
+
 from __future__ import annotations
 
 import copy
