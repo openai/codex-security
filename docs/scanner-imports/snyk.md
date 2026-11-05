@@ -223,6 +223,8 @@ plugin scan's `issueCount`, can update a stored snapshot of the same
 occurrence. [Imported evidence and identity](schema-guide.md)
 
 Known source Git URLs must match a comparable local remote when available,
-or the selected Cloud repository. For Snyk Code, use the
+or the selected Cloud repository. Plugin and SARIF reports can identify a
+connected GitHub repository by its HTTPS or standard Git SSH clone URL.
+For Snyk Code, use the
 [monitored project collector](#existing-issues-from-snyk). Container, IaC and
 SBOM results fall outside these import routes.
