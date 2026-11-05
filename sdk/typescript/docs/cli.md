@@ -130,8 +130,19 @@ after logout completes.
 Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
 `HOME` or `USERPROFILE` environment setting.
 
-If credentials cannot refresh, run `login status`. Retry if the sign-in recently
-changed; otherwise run `logout`, then `login`.
+If you use file-based ChatGPT credentials with both Codex and Codex Security,
+run `codex-security login` before your first scan or status check to give Codex
+Security its own session. An imported sign-in shares a single-use refresh token.
+When either client renews it, the other client's next refresh can fail even
+while its login status reports that it is signed in.
+
+If Codex Security reports that the refresh token was already used, run
+`codex-security logout`, then `codex-security login`. If your Codex CLI or app
+reports that error, sign out and sign back in there.
+
+For other refresh errors, check `codex-security login status`. Retry if the
+sign-in recently changed. Otherwise run `codex-security logout`, then
+`codex-security login`.
 Some cybersecurity requests and protected findings require
 [Trusted Access for Cyber](https://chatgpt.com/cyber).
 
@@ -1158,7 +1169,14 @@ attempt. Post-scan prompts run after cost tracking and are outside this limit.
 Automatic history matching gets at most one extra call with a limit; if more
 work is needed, the scan is preserved and you can run `scans match --all`.
 
-When Deep discovery has finished at a cost stop, the scan returns a sealed
+A scan with a cost limit requires complete token usage for its recorded scan,
+worker, and custom validation sessions before the SDK returns a completed result.
+Verifying compressed `.jsonl.zst` sessions requires Python 3.14 or later, or
+`backports.zstd` installed in the selected Python environment.
+Missing or unreadable usage fails budget verification. Without a limit, usage
+reporting remains best effort.
+
+When Deep discovery has finished at a cost stop and usage is verified, the scan returns a sealed
 report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report returns `0` by default, or `1` if findings
 meet a configured failure threshold.

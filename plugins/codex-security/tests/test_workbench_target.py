@@ -1,3 +1,5 @@
+"""Exercise Git discovery, snapshot identity, scoped inventory, and patch handling across filesystem aliases."""
+
 from __future__ import annotations
 
 import difflib
