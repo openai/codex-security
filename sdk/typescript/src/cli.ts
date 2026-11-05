@@ -343,7 +343,7 @@ import {
   type HistoryCommand,
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
-import { graphemes } from "./terminal-columns.js";
+import { fitCell, graphemes } from "./terminal-columns.js";
 import {
   ACCOUNT_LIMITS_UNAVAILABLE,
   formatAccountLimits,
@@ -668,27 +668,6 @@ function publicationScanAge(timestamp: string, now: number): string {
     }
   }
   return "just now";
-}
-
-function publicationDisplayWidth(value: string): number {
-  const segments = graphemes.segment(stripVTControlCharacters(value));
-  let width = 0;
-
-  for (const { segment } of segments) {
-    if (/^[\p{Mark}\p{Cf}]+$/u.test(segment)) continue;
-    width +=
-      /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Emoji_Presentation}\p{Regional_Indicator}\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6\u20E3\uFE0F]/u.test(
-        segment,
-      )
-        ? 2
-        : 1;
-  }
-
-  return width;
-}
-
-function padPublicationColumn(value: string, width: number): string {
-  return `${value}${" ".repeat(width - publicationDisplayWidth(value))}`;
 }
 
 function fitProgressLine(line: string, width: number): string {
@@ -3607,16 +3586,16 @@ export async function main(
               field: "repository" | "findings" | "age",
             ) =>
               Math.max(
-                publicationDisplayWidth(heading),
-                ...rows.map((row) => publicationDisplayWidth(row[field])),
+                stringWidth(heading),
+                ...rows.map((row) => stringWidth(row[field])),
               );
             const repositoryWidth = columnWidth("REPOSITORY", "repository");
             const findingsWidth = columnWidth("FINDINGS", "findings");
             const ageWidth = columnWidth("AGE", "age");
             const header = [
-              padPublicationColumn("REPOSITORY", repositoryWidth),
-              padPublicationColumn("FINDINGS", findingsWidth),
-              padPublicationColumn("AGE", ageWidth),
+              fitCell("REPOSITORY", repositoryWidth),
+              fitCell("FINDINGS", findingsWidth),
+              fitCell("AGE", ageWidth),
               "SCAN ID",
             ].join("  ");
             const choices = rows.map((row) => {
@@ -3626,9 +3605,9 @@ export async function main(
 
               return {
                 label: [
-                  padPublicationColumn(repository, repositoryWidth),
-                  padPublicationColumn(row.findings, findingsWidth),
-                  padPublicationColumn(row.age, ageWidth),
+                  fitCell(repository, repositoryWidth),
+                  fitCell(row.findings, findingsWidth),
+                  fitCell(row.age, ageWidth),
                   row.scanId,
                 ].join("  "),
                 short: `${repository} · ${row.scanId}`,
@@ -5292,7 +5271,8 @@ export async function main(
       },
     })
     .command("install-hook", {
-      description: "Install an advisory Git pre-commit check.",
+      description:
+        "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
       hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
       mcp: false,
@@ -7415,7 +7395,9 @@ export async function main(
           codexVersion: CODEX_EXECUTABLE_VERSION,
           codexSdkVersion: CODEX_SDK_VERSION,
           ...scanModelConfiguration(codex),
-          nextStep: "codex-security scan . --dry-run",
+          nextStep: project
+            ? "Run codex-security scan . -c FILE --dry-run, replacing FILE with the project configuration you selected."
+            : "codex-security scan . --dry-run",
           configuration: {
             ...(project?.path === undefined ? {} : { path: project.path }),
             settings: { ...resolved.options, ...deep?.settings },

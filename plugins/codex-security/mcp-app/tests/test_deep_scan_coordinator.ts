@@ -1660,7 +1660,7 @@ async function testStoreConfirmedReplacementSurvivesReadFailure() {
       );
       if (replaced) {
         assert.equal(reads, confirmation === "mutation" ? 3 : 4);
-        assert.deepEqual(store.coordinatorLeaseArgs(run.scanId), []);
+        assert.equal(store.coordinatorGeneration(run.scanId), undefined);
       } else {
         assert.equal(
           reads,

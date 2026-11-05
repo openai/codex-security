@@ -42,14 +42,9 @@ npm install --global @openai/codex-security
 cs --version
 ```
 
-`cs` is a short alias for `codex-security`; both commands run the same CLI.
-The installation creates both commands in npm's global executable directory,
-which must be on your `PATH`. If `cs` already resolves to another tool, use
-`codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
-`npx @openai/codex-security` without a global installation.
-
-Continue with the [CLI walkthrough](#cli). To run without a global installation,
-replace `cs` in the CLI examples with `npx @openai/codex-security`.
+Continue with the [CLI walkthrough](#cli). You can use the full command
+`codex-security` if `cs` names another tool on your PATH. If installation
+fails with `EEXIST`, use `npx @openai/codex-security` in place of `cs`.
 
 ### Install the TypeScript SDK
 
@@ -58,24 +53,6 @@ Install the package locally in your TypeScript project:
 ```bash
 npm install @openai/codex-security
 ```
-
-### Package and plugin versions
-
-For bug reports, run `npx @openai/codex-security info --json` in the project
-where the SDK is installed, or `codex-security info --json` for a global install.
-Include the npm version (`cliVersion` and `sdkVersion`), bundled plugin manifest
-version (`bundledPluginVersion`), and Codex runtime and SDK pins (`codexVersion`
-and `codexSdkVersion`). If you used a marketplace plugin, a plugin supplied by
-path, or a custom Codex executable, include its version separately.
-
-For example, `npm view @openai/codex-security@0.1.5 gitHead dist.integrity`
-shows the registry's source commit and tarball digest. Compare `gitHead` with
-the commit for tag `npm-v0.1.5`. `npm pack @openai/codex-security@0.1.5` downloads
-the archive, including `package/_bundled_plugin/.codex-plugin/plugin.json`.
-
-The [release workflow](https://github.com/openai/codex-security/blob/main/.github/workflows/node-github-release.yml)
-verifies the signed attestation that binds the tarball to the tagged commit.
-For `0.1.0` and `0.1.1`, npm omits `gitHead`. Use the commit from the verified attestation.
 
 ## Authentication
 
@@ -131,39 +108,6 @@ Bedrock scans use AWS credentials and model access. They do not require
 [Bedrock guide](https://github.com/openai/codex-security/blob/main/docs/bedrock.md)
 for setup, model selection, and verification.
 
-## Read existing Cloud findings
-
-The Security plugin includes `$cloud-findings` for accounts where Codex Security
-Cloud is available. Install the plugin through your configured Codex marketplace,
-sign in to Codex with ChatGPT, and complete the Cloud connection interactively in
-the intended account and workspace. Installation alone does not authenticate the
-connection. Local scans do not require Cloud, and an API key used for scanning
-does not replace the Cloud connection.
-
-In Codex desktop or the interactive Codex CLI, ask:
-
-> Use $cloud-findings to list findings for example/security-demo in my selected
-> workspace. Inspect the highest-severity finding and its report, and show its
-> recorded assignee, patch links, verification results, and latest scan status.
-> Do not change anything.
-
-After completing connection setup, the same host connection can be used by
-`codex exec`:
-
-```bash
-codex exec --ephemeral --json -s read-only 'Use $codex-security:cloud-findings to read findings and the latest scan status for example/security-demo in my selected workspace. Inspect one finding and its report. If the workspace or repository is ambiguous, explain the required selection and stop. Do not change anything.'
-```
-
-Noninteractive execution needs an existing authenticated connection; it cannot
-complete first-time sign-in. If authentication expires, the app is unavailable,
-or workspace policy denies access, complete the reported setup action before
-retrying. Those failures do not mean the repository has no findings.
-
-Assignment, issue validation, patch checks, periodic fix checks, and finding
-lifecycle status are separate records. Some finding sources do not provide all
-of them. The read workflow reports missing data and incomplete evidence pages,
-and does not describe failed or unfinished scans as clean.
-
 ## Run a scan from TypeScript
 
 Scan a repository you own or have permission to assess:
@@ -198,7 +142,8 @@ permissions; newly created directories are private to you by default.
 | --------------------------------- | ---------------------------------------------------------------- |
 | `findings.findings`               | Findings from this scan.                                         |
 | `reportPath`                      | Path to the Markdown report.                                     |
-| `review`                          | Excluded paths and saved candidate proof gaps, when present.     |
+| `review.excludedPaths`            | Additional paths the scan excluded.                              |
+| `review.unresolvedCandidates`     | Saved proof gaps. Several rows can refer to one candidate.       |
 | `unresolvedCandidateCount`        | Saved candidate identities requiring follow-up.                  |
 | `unresolvedCandidates`            | Saved candidate evidence and reasons for follow-up.              |
 | `repositoryFindings`              | This scan's findings plus earlier open findings, when available. |
@@ -206,13 +151,15 @@ permissions; newly created directories are private to you by default.
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |
 | `cost`                            | Estimated model usage cost, or `null` when unavailable.          |
 
-Review the requested paths and exclusions alongside the execution outcome.
-`reviewState.deferred` records unfinished requested work, while
-`reviewState.openQuestions` records optional follow-up separately.
+Read `result.manifest.scan.status` and `result.manifest.scan.scope` alongside
+`result.review.excludedPaths` to see the outcome, the requested scope and any
+additional exclusions. A completed scan can report zero findings within that scope.
 
-Review the scan status and scope alongside findings. A report with no findings does not establish
-that the repository is secure. Reports and logs can contain source code,
-vulnerability details, and credentials; review them before sharing.
+If the run retained a draft or checkpoint, its `reviewState.deferred` lists
+unfinished work and `reviewState.openQuestions` lists follow-up questions.
+See [saved scan files](docs/cli.md#understand-scan-scope-and-follow-up-work)
+for the current and legacy layouts. Reports and logs can include source code,
+vulnerability details and credentials. Review them before sharing.
 
 Saved-history excerpts use scanned Git objects without fetching missing data.
 Working-tree diff scans omit excerpts, as do historical scans whose source or
@@ -486,6 +433,10 @@ See [progress and cost](docs/cli.md#progress-and-cost) for accounting and budget
 
 ### Validate an existing finding
 
+`validate()` sends the finding to your configured model provider. The model's
+review tools can read the checkout, with network access and web search disabled.
+Validation uses source evidence and skips builds, tests and application execution.
+
 ```ts
 import { writeFile } from "node:fs/promises";
 
@@ -500,15 +451,10 @@ console.log(result.disposition, result.report);
 await writeFile("/path/to/reports/assessment.md", result.report, "utf8");
 ```
 
-Pass finding text or a JSON-serializable object, not a file path. Standalone
-validation uses source evidence in a read-only, offline session. It does not build
-the target, execute application code, run tests or PoCs, or add a scan to history.
-The validator returns the assessment without writing report files. The example
-saves `result.report` in an existing directory. `outputDir` selects the session
-directory, not a report destination. Callers that previously read reports from it
-must save `result.report` instead.
-Callers needing runtime proof must arrange a separate reproduction step. Standard,
-Deep, and diff scan validation keep their existing workflows.
+Pass literal finding text or a JSON-serializable object. The assessment is
+returned to the caller and has no scan history entry. The example saves
+`result.report` in an existing directory. Use `outputDir` to select the
+session directory. If you need runtime evidence, arrange a separate check.
 
 The disposition is `reportable`, `suppressed`, `not_applicable`, or `deferred`.
 `reportable` can rely on static analysis; `deferred` means there is insufficient
@@ -528,6 +474,8 @@ See [host-provided standalone validation](docs/validate-records.md).
 workspace that the caller has intentionally made writable:
 
 ```ts
+import { CodexSecurity } from "@openai/codex-security";
+
 const security = new CodexSecurity();
 try {
   const result = await security.patch({
@@ -537,7 +485,6 @@ try {
       summary: "User input reaches a raw SQL query.",
       locations: [{ path: "src/query.ts", startLine: 42 }],
     },
-    signal,
     onActivity(activity) {
       console.log(activity.description);
     },
@@ -595,22 +542,15 @@ After [installing the CLI](#install-the-cli), sign in if needed:
 cs login
 ```
 
-From your repository, optionally [draft a `SECURITY.md`](#generate-a-security-policy)
-that explains what counts as a security issue in your project:
-
-```bash
-cs policy .
-```
-
-The draft is saved outside your repository. Review the diff and notes, edit the
-draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
-to keep your current policy or scan without one.
-
-Then scan the repository:
+From the repository you want to review, run:
 
 ```bash
 cs scan .
 ```
+
+Open the report at the path printed on completion. To inspect the latest
+completed scan for this checkout, run `cs scans show`. To provide a project
+policy for future scans, [draft and review a `SECURITY.md`](#generate-a-security-policy).
 
 To narrow the scan scope or check the configuration before scanning:
 
@@ -684,6 +624,39 @@ Use `suggest-owners` or the SDK's `suggestOwners()` to suggest contributors base
 on CODEOWNERS, source, and Git history. Declared owners take priority over Git
 contributors. Suggestions do not assign tickets. See
 [owner suggestions](docs/cli.md#suggest-finding-owners) for input and output examples.
+
+### Read existing Cloud findings
+
+The Security plugin includes `$cloud-findings` for accounts where Codex Security
+Cloud is available. Install the plugin through your configured Codex marketplace,
+sign in to Codex with ChatGPT, and complete the Cloud connection interactively in
+the intended account and workspace. Installation alone does not authenticate the
+connection. Local scans do not require Cloud, and an API key used for scanning
+does not replace the Cloud connection.
+
+In Codex desktop or the interactive Codex CLI, ask:
+
+> Use $cloud-findings to list findings for example/security-demo in my selected
+> workspace. Inspect the highest-severity finding and its report, and show its
+> recorded assignee, patch links, verification results, and latest scan status.
+> Do not change anything.
+
+After completing connection setup, the same host connection can be used by
+`codex exec`:
+
+```bash
+codex exec --ephemeral --json -s read-only 'Use $codex-security:cloud-findings to read findings and the latest scan status for example/security-demo in my selected workspace. Inspect one finding and its report. If the workspace or repository is ambiguous, explain the required selection and stop. Do not change anything.'
+```
+
+Noninteractive execution needs an existing authenticated connection; it cannot
+complete first-time sign-in. If authentication expires, the app is unavailable,
+or workspace policy denies access, complete the reported setup action before
+retrying. Those failures do not mean the repository has no findings.
+
+Assignment, issue validation, patch checks, periodic fix checks, and finding
+lifecycle status are separate records. Some finding sources do not provide all
+of them. The read workflow reports missing data and incomplete evidence pages,
+and does not describe failed or unfinished scans as clean.
 
 ### Publish findings to Cloud
 
@@ -822,6 +795,18 @@ access to other targets, disclosure of credentials, or writes outside approved
 paths. Keep state and scan artifacts private and outside the repository.
 
 ## Compatibility
+
+### Package and plugin versions
+
+When reporting a problem, run `codex-security info --json` with the installation
+that produced it. For a local SDK installation, run
+`npx @openai/codex-security info --json` in that project. Include `cliVersion`,
+`sdkVersion`, `bundledPluginVersion`, `codexVersion` and `codexSdkVersion`. If
+you supplied a separate plugin or Codex executable, include its version too.
+
+For package provenance, compare the registry's `gitHead` and `dist.integrity`
+with the release tag and tarball. If a package omits `gitHead`, use the commit
+in its [verified release attestation](https://github.com/openai/codex-security/blob/main/.github/workflows/node-github-release.yml).
 
 ### Custom plugins
 
