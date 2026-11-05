@@ -160,7 +160,9 @@ describe("CLI authentication", () => {
         expect(existsSync(auth)).toBe(!expectDetached);
         return 19;
       };
-      expect(await createCliTest(main).runCli(["logout"], deps)).toBe(19);
+      const { runCli, stderr } = createCliTest(main);
+      const status = await runCli(["logout"], deps);
+      expect(status, stderr.text()).toBe(19);
       expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(
         !expectDetached,
       );
@@ -171,6 +173,8 @@ describe("CLI authentication", () => {
     await logout(ambient, false);
     expect(await readFile(source, "utf8")).toBe("independent");
     await rm(source);
+    // ENOTDIR makes the ambient file uninspectable even when tests run as root.
+    await logout(backing, false);
 
     const alias = join(ambient, "home-alias");
     await symlink(
@@ -180,18 +184,12 @@ describe("CLI authentication", () => {
     );
     await logout(alias, false);
 
-    if (process.platform === "win32") {
-      await link(backing, source);
-    } else {
-      await symlink(auth, source);
+    if (process.platform !== "win32") {
+      await symlink(backing, source);
       await logout(ambient, false);
       await rm(source);
-      // Case-sensitive volumes can hold two entries with case-only differences.
-      const alternate = join(home, "AUTH.JSON");
-      const target = existsSync(alternate) ? backing : alternate;
-      if (target === alternate) await link(auth, target);
-      await symlink(target, source);
     }
+    await link(auth, source);
     await logout(ambient, true);
     expect(await readFile(source, "utf8")).toBe("session");
   });

@@ -1466,34 +1466,31 @@ function sameInode(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-/** A shared inode can have two hard links, or two paths to one directory entry. */
+/** Distinguish two hard links from two paths to the same directory entry. */
 async function hasSeparateAmbientLink(
   localPath: string,
   ambientHome: string,
 ): Promise<boolean> {
-  let source: string;
   try {
     const local = await lstat(localPath, { bigint: true });
-    if (!local.isFile() || local.nlink < 2n) return false;
-    source = await realpath(join(ambientHome, "auth.json"));
-    if (!sameInode(local, await stat(source, { bigint: true }))) return false;
-  } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") return false;
-    throw error;
+    if (!local.isFile() || local.nlink < 2n || local.ino === 0n) return false;
+    const ambient = await lstat(join(ambientHome, "auth.json"), {
+      bigint: true,
+    });
+    if (!ambient.isFile() || !sameInode(local, ambient)) return false;
+    const [localDir, ambientDir] = await Promise.all([
+      stat(dirname(localPath), { bigint: true }),
+      stat(ambientHome, { bigint: true }),
+    ]);
+    return (
+      localDir.ino !== 0n &&
+      ambientDir.ino !== 0n &&
+      !sameInode(localDir, ambientDir)
+    );
+  } catch {
+    // Without a verified second link, leave logout to the configured native store.
+    return false;
   }
-
-  const name = basename(source);
-  if (name.toLowerCase() !== "auth.json") return true;
-  const localHome = dirname(localPath);
-  const [localDir, sourceDir] = await Promise.all([
-    stat(localHome, { bigint: true }),
-    stat(dirname(source), { bigint: true }),
-  ]);
-  if (!sameInode(localDir, sourceDir)) return true;
-  if (name === "auth.json") return false;
-  // A case-insensitive volume can accept both spellings for one directory entry.
-  const entries = await readdir(localHome);
-  return entries.includes("auth.json") && entries.includes(name);
 }
 
 /** Run under the credential-home lock so status cannot reimport the sign-in during logout. */
