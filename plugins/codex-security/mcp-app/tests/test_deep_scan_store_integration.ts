@@ -51,9 +51,9 @@ export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } fro
 });
 
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
-await testJoiningCallerAdmission(false);
-await testJoiningCallerAdmission(true);
-await testJoiningCallerAdmission(true, "added");
+await testJoiningCallerAdmission("fresh-empty");
+await testJoiningCallerAdmission("resumed-empty");
+await testJoiningCallerAdmission("resumed-with-source");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
@@ -76,8 +76,7 @@ await testCoordinatorCommitResponseRecovery("record-deep-scan-iteration");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
 
 async function testJoiningCallerAdmission(
-  afterDiscoveryProgress: boolean,
-  change: "added" | "removed" = "removed",
+  scenario: "fresh-empty" | "resumed-empty" | "resumed-with-source",
 ) {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-joining-caller-",
@@ -93,9 +92,6 @@ async function testJoiningCallerAdmission(
   registry.start = (options: CoordinatorOptions) =>
     start({ ...options, executor });
   try {
-    const source = path.join(targetPath, "fixture.py");
-    await mkdir(path.join(targetPath, "empty"));
-    if (change === "added") await rm(source);
     const created = await owner.begin({ targetPath, threadId, scanRoot });
     const lease = { scanId: created.scanId, threadId };
     // Admission uses the later claim, even if the owner entered discovery before it expired.
@@ -105,7 +101,7 @@ async function testJoiningCallerAdmission(
     } as const;
     const joined = await joiner.begin({ ...lease, scanRoot });
     assert.equal(joined.discoveryStarted, false);
-    if (afterDiscoveryProgress) {
+    if (scenario !== "fresh-empty") {
       const claimed = await owner.claimCoordinator(lease);
       assert.equal(claimed.acquired, true);
       await owner.updateProgress(discoveryProgress);
@@ -115,8 +111,8 @@ async function testJoiningCallerAdmission(
       assert.equal(observer.run.dispatchedCount, 0);
       await expireLease(environment, created.scanId);
     }
-    if (change === "added") await writeFile(source, "pass\n");
-    else await rm(source);
+    if (scenario !== "resumed-with-source")
+      await rm(path.join(targetPath, "fixture.py"));
     const { coordinator } = await startDeepScanEngine({
       run: joined,
       store: joiner,
@@ -133,9 +129,9 @@ async function testJoiningCallerAdmission(
         coordinator.wait(undefined, 30_000),
       ]);
       const persisted = await joiner.get(created.scanId, threadId);
-      if (afterDiscoveryProgress)
+      if (scenario !== "fresh-empty")
         assert.equal(persisted.coordinatorGeneration, 3);
-      if (change === "added") {
+      if (scenario === "resumed-with-source") {
         assert.ok(executor.discoveryCalls > 0, terminal?.error);
         assert.ok(persisted.dispatchedCount > 0);
         await assert.rejects(

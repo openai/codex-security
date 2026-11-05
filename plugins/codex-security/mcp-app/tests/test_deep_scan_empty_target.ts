@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { chmod, mkdir, rm, symlink, watch, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -44,8 +43,8 @@ test("a directory tree emptied after registration dispatches no workers", async 
   // A registration-time inventory count remains positive after its file is removed.
   Object.assign(fixture.run, { scopeFileCount: 1 });
   await rm(source);
-  const executor = new FakeExecutor();
-  const outcome = await runCoordinator(
+  const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+  const coordinator = createCoordinator(
     fixture,
     new FakeStore(fixture.run),
     executor,
@@ -53,11 +52,23 @@ test("a directory tree emptied after registration dispatches no workers", async 
       checkFreshTarget: inspect,
     },
   );
-  assert.equal(outcome?.status, "failed", outcome?.error);
-  assert.match(outcome.error, /target is empty.*no security audit/iu);
-  assert.equal(executor.discoveryCalls, 0);
-  await writeFile(source, "");
-  await inspect(fixture.run);
+  coordinator.start();
+  try {
+    const outcome = await Promise.race([
+      coordinator.settled(),
+      executor.discoveryStarted.promise.then(() =>
+        assert.fail("Empty directory tree dispatched a worker"),
+      ),
+    ]);
+    assert.equal(outcome.status, "failed", outcome.error);
+    assert.match(outcome.error ?? "", /target is empty.*no security audit/iu);
+    assert.equal(executor.discoveryCalls, 0);
+    await writeFile(source, "");
+    await inspect(fixture.run);
+  } finally {
+    coordinator.cancel("fixture cleanup");
+    await coordinator.settled();
+  }
 });
 
 test("only registered paths determine whether the target is empty", async () => {
@@ -89,17 +100,8 @@ test("only registered paths determine whether the target is empty", async () => 
   );
   await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
 
-  await writeFile(join(run.targetPath, ".gitignore"), "right/\n");
-  await writeFile(join(right, "ignored.py"), "");
-  await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
-  // A registered file remains in scope even when its directory inventory ignores it.
-  await inspect({
-    ...run,
-    includePaths: ["right/ignored.py"],
-    filePaths: ["right/ignored.py"],
-  });
-
-  await rm(join(run.targetPath, ".gitignore"));
+  // A file counts even when normal source inventory would ignore it.
+  await writeFile(join(right, ".gitignore"), "*");
   await inspect(run);
   run.includePaths.reverse();
   await inspect(run);
@@ -143,17 +145,12 @@ test(
     const { run } = await fixtureRun();
     const denied = join(run.targetPath, "denied");
     await mkdir(denied, { recursive: true });
+    await writeFile(join(run.targetPath, "ok"), "");
     await chmod(denied, 0);
     try {
       run.includePaths = ["denied"];
       await assert.rejects(inspect(run), /permission denied|EACCES/iu);
-      const nested = join(run.targetPath, "nested");
-      await mkdir(nested);
-      run.includePaths = ["."];
-      await assert.rejects(inspect(run), /permission denied|EACCES/iu);
-      await writeFile(join(nested, "source.py"), "");
-      await inspect(run);
-      run.includePaths = ["denied", "nested"];
+      run.includePaths.push("ok");
       await inspect(run);
     } finally {
       await chmod(denied, 0o700);
@@ -207,53 +204,43 @@ test(
   },
 );
 
-for (const [stop, blockedOperation] of [
-  ["cancellation", "directory read"],
-  ["deadline", "directory read"],
-  ["cancellation", "nested directory read"],
-  ["deadline", "nested directory read"],
-  ["cancellation", "Git inventory"],
-]) {
+for (const [stop, nested] of [
+  ["cancellation", false],
+  ["deadline", false],
+  ["cancellation", true],
+  ["deadline", true],
+] as const) {
   test(
-    `a blocked ${blockedOperation} cannot delay ${stop}`,
+    `a blocked ${nested ? "nested " : ""}directory read cannot delay ${stop}`,
     { timeout: 15_000 },
     async (t) => {
       const fixture = await fixtureRun();
       const { run } = fixture;
-      const blockedPath =
-        blockedOperation === "nested directory read"
-          ? join(run.targetPath, "nested")
-          : run.targetPath;
-      await mkdir(blockedPath, { recursive: true });
+      await mkdir(run.targetPath);
+      const blockedPath = nested
+        ? join(run.targetPath, "nested")
+        : run.targetPath;
+      if (nested) await mkdir(blockedPath);
       const scripts = join(fixture.pluginRoot, "scripts");
       await mkdir(scripts, { recursive: true });
       const markerDir = join(dirname(run.targetPath), "ready");
       await mkdir(markerDir);
       const scriptName = "check_deep_scan_target.py";
-      await writeFile(join(blockedPath, "source.py"), "");
-      const markAndWait = `Path(${JSON.stringify(markerDir)}, str(os.getpid())).touch(); time.sleep(30)`;
-      const gitChild = `import os, time; from pathlib import Path; ${markAndWait}`;
-      const blockEnumeration =
-        blockedOperation === "Git inventory"
-          ? `
-real_run = subprocess.run
-def slow_git(command, **kwargs):
-    assert "rev-parse" in command
-    return real_run([sys.executable, "-c", ${JSON.stringify(gitChild)}], **kwargs)
-subprocess.run = slow_git`
-          : `
+      // Stop the real helper inside enumeration. The marker arms the interruption
+      // only once the child owns the request, even on slow hosts.
+      await writeFile(
+        join(scripts, scriptName),
+        `
+import os, runpy, sys, time
+from pathlib import Path
 real_scan = os.scandir
 def blocked(path):
     if os.fsdecode(path) == ${JSON.stringify(blockedPath)}:
-        ${markAndWait}
+        Path(${JSON.stringify(markerDir)}, str(os.getpid())).touch()
+        time.sleep(30)
     return real_scan(path)
-os.scandir = blocked`;
-      // Arm the interruption only once the helper or its Git child owns the request.
-      await writeFile(
-        join(scripts, scriptName),
-        `import os, runpy, subprocess, sys, time
-from pathlib import Path
-${blockEnumeration}
+os.scandir = blocked
+sys.path.insert(0, ${JSON.stringify(join(pluginRoot, "scripts"))})
 runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_name="__main__")
 `,
       );
@@ -304,15 +291,9 @@ runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_n
         await eventually(() => {
           try {
             process.kill(pid, 0);
-            // A container's init may defer reaping the killed Git grandchild.
-            return (
-              process.platform === "linux" &&
-              /^State:\s+Z/m.test(readFileSync(`/proc/${pid}/status`, "utf8"))
-            );
+            return false;
           } catch (error) {
-            return ["ESRCH", "ENOENT"].includes(
-              (error as NodeJS.ErrnoException).code ?? "",
-            );
+            return (error as NodeJS.ErrnoException).code === "ESRCH";
           }
         });
       } finally {

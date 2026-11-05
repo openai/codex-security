@@ -1175,8 +1175,7 @@ function cloneState(state: DeepScanRunState): DeepScanRunState {
 }
 
 function isFreshRun(state: DeepScanRunState): boolean {
-  // A run that persisted its discovery phase before the first dispatch has no
-  // accepted discovery work to protect, so it is admitted like a fresh run.
+  // A coordinator can persist the discovery phase before dispatching its first worker.
   return (
     state.dispatchedCount === 0 &&
     !state.persistedWorkers?.some((worker) => worker.kind !== "setup") &&

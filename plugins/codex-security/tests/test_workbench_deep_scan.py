@@ -107,8 +107,6 @@ def test_target_admission_stops_at_the_first_non_directory_entry(
     events = []
 
     class FileEntry:
-        name = "file.py"
-
         def is_dir(self, *, follow_symlinks):
             assert not follow_symlinks
             return False

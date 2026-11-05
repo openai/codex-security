@@ -1,4 +1,4 @@
-"""Check registered Deep Scan selections for current in-scope content."""
+"""Reject registered Deep Scan targets containing only empty directories."""
 
 from __future__ import annotations
 
@@ -8,9 +8,6 @@ import os
 import stat
 import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import SOURCE_METADATA_DIRECTORIES, iter_git_directory_snapshot_paths
 
 
 def check_selected_targets(root: Path, selections: list[str], file_paths: list[str]) -> None:
@@ -48,18 +45,6 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
     for selection in selections:
         check_path(selection)
 
-    def has_leaf(directory: Path, pending: list[str]) -> bool:
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                if entry.name in SOURCE_METADATA_DIRECTORIES:
-                    continue
-                if not entry.is_dir(follow_symlinks=False) or (
-                    getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0) & 0x20000000
-                ):
-                    return True
-                pending.append(str(Path(entry.path).relative_to(root)))
-        return False
-
     def has_content(selection: str) -> bool:
         pending = [selection]
         failure = None
@@ -67,30 +52,24 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
             current = pending.pop()
             try:
                 target, regular = check_path(current)
-                if current == selection and regular:
+                if regular:
                     return True
-                if regular or has_leaf(target, pending):
-                    break
+                with os.scandir(target) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=False):
+                            return True
+                        # Preserve link entries as content without traversing their targets.
+                        if (
+                            getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0)
+                            & 0x20000000
+                        ):
+                            return True
+                        pending.append(str(Path(entry.path).relative_to(root)))
             except OSError as exc:
                 if failure is None:
                     failure = exc
-        else:
-            if failure is not None:
-                raise failure
-            return False
-
-        # A directory containing only ignored files still has no inventory. Recheck
-        # the selected path before invoking Git after a potentially long directory walk.
-        target, regular = check_path(selection)
-        if regular:
-            return True
-        paths = iter_git_directory_snapshot_paths(target)
-        if paths is None:
-            return True
-        for path in paths:
-            info = path.lstat()
-            if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_reparse_tag", 0) & 0x20000000:
-                return True
+        if failure is not None:
+            raise failure
         return False
 
     failure = None

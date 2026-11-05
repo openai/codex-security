@@ -14,7 +14,6 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
@@ -758,9 +757,8 @@ def worktree_content_digest_for_context(
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def git_worktree_context(target: Path, root: str | None = None) -> tuple[Path, str]:
-    if root is None:
-        root = git_output(target, "rev-parse", "--show-toplevel")
+def git_worktree_context(target: Path) -> tuple[Path, str]:
+    root = git_output(target, "rev-parse", "--show-toplevel")
     if root is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
     repository = Path(root).resolve()
@@ -864,19 +862,10 @@ def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str
 
 
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
-    paths = iter_git_directory_snapshot_paths(target)
-    if paths is None:
+    repository_root = git_output(target, "rev-parse", "--show-toplevel")
+    if repository_root is None:
         return None
-    return sorted({str(path): path for path in paths}.values(), key=str)
-
-
-def iter_git_directory_snapshot_paths(target: Path) -> Iterator[Path] | None:
-    root = git_output(target, "rev-parse", "--show-toplevel")
-    return _iter_git_snapshot_paths(target, root) if root is not None else None
-
-
-def _iter_git_snapshot_paths(target: Path, root: str) -> Iterator[Path]:
-    repository, pathspec = git_worktree_context(target, root)
+    repository, pathspec = git_worktree_context(target)
     scope = repository / pathspec
     scope_depth = len(Path(pathspec).parts)
     matching_prefixes: dict[str, bool] = {}
@@ -907,6 +896,7 @@ def _iter_git_snapshot_paths(target: Path, root: str) -> Iterator[Path]:
     )
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
+    paths: list[Path] = []
     junctions: dict[tuple[int, int], Path] = {}
     nested_worktrees: set[tuple[int, int]] = set()
     for entry in (entry for entry in listed.split(b"\0") if entry):
@@ -943,15 +933,20 @@ def _iter_git_snapshot_paths(target: Path, root: str) -> Iterator[Path]:
             if entry[:1] != b"?" or identity not in junctions:
                 junctions[identity] = path
             continue
-        yield path
-        if not stat.S_ISDIR(metadata.st_mode):
+        paths.append(path)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+        ):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
-            nested_worktrees.add((metadata.st_dev, metadata.st_ino))
-            yield from _iter_git_snapshot_paths(path, nested_repository_root)
-            continue
-        yield from source_directory_snapshot_paths(path)
+            nested_paths = git_directory_snapshot_paths(path)
+            if nested_paths is not None:
+                nested_worktrees.add((metadata.st_dev, metadata.st_ino))
+                paths.extend(nested_paths)
+                continue
+        paths.extend(source_directory_snapshot_paths(path))
 
     if _WINDOWS:
         # Git omits empty untracked directories from its file listing. Inventory
@@ -989,7 +984,7 @@ def _iter_git_snapshot_paths(target: Path, root: str) -> Iterator[Path]:
                 if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
                     junctions.setdefault((metadata.st_dev, metadata.st_ino), path)
                 elif stat.S_ISLNK(metadata.st_mode):
-                    yield path
+                    paths.append(path)
                 elif stat.S_ISDIR(metadata.st_mode):
                     if (metadata.st_dev, metadata.st_ino) in nested_worktrees:
                         # Its own inventory already applied its repository exclusions.
@@ -1032,7 +1027,8 @@ def _iter_git_snapshot_paths(target: Path, root: str) -> Iterator[Path]:
                 raise SystemExit("Could not inspect directories in the selected Git working tree.")
             excluded = set(ignored.stdout.split(b"\0"))
             pending = [path for raw, path in candidates.items() if raw not in excluded]
-    yield from junctions.values()
+    paths.extend(junctions.values())
+    return sorted({str(path): path for path in paths}.values(), key=str)
 
 
 def source_directory_snapshot_paths(
