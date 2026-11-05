@@ -264,6 +264,7 @@ import {
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
   createIsolatedHome,
+  logoutCredentialHome,
   executablePathForSpawn,
   expandHome,
   importAmbientAuth,
@@ -4217,25 +4218,26 @@ export class CodexSecurity {
 
   public async logout(): Promise<void> {
     await this.#trackOperation(async () => {
-      const authentication = await this.#authentication();
+      const { codexHome, environment } = await this.#authentication();
+      const signal = this.#abortController.signal;
       this.#requireOpen();
       await withCredentialHomeLock(
-        authentication.codexHome,
+        codexHome,
         async () => {
-          await codexLogout(
-            await this.#providerPreflightCommand(),
-            authentication.environment,
-            this.#abortController.signal,
-          );
-          await setCodexSecurityCredentialLogout(
-            authentication.codexHome,
-            true,
+          const command = await this.#providerPreflightCommand();
+          await logoutCredentialHome(
+            codexHome,
+            scanCodexHome(this.#dependencies.environment),
+            () => codexLogout(command, environment, signal),
+            () => {
+              if (this.#runtime !== null)
+                this.#runtime.credentialsAvailable = false;
+              this.#runtimeCredentialSource = null;
+            },
           );
         },
-        this.#abortController.signal,
+        signal,
       );
-      if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
-      this.#runtimeCredentialSource = null;
       this.#requireOpen();
     });
   }
