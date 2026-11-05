@@ -1063,6 +1063,50 @@ such as worker retries and duplicate-comparison failures. Diagnostic text is pre
 saved failures, receipts, and patch-risk summaries. Review it for sensitive
 information before sharing; upstream Codex output may already be redacted.
 
+Use `scan --diagnostics` to retain observable evidence for one local scan:
+
+```sh
+codex-security scan . --path src --diagnostics --output-dir ../scan-results
+```
+
+The SDK equivalent is `security.run(repository, { diagnostics: true })`.
+Collection is off by default and does not change model settings, authentication,
+budgets, or review requirements. It is not a saved project setting. To collect
+another attempt while resuming an interrupted Deep Scan, pass
+`scans resume SCAN_ID --diagnostics` again; the previous attempt is preserved.
+
+Each attempt saves `scan-diagnostics-<attempt-id>.jsonl` with observable tool
+calls, retained outputs, public reasoning summaries, usage, and lifecycle events.
+The companion `.json` contains termination and budget metadata, available
+session/response identifiers, and file/line observations matched against the
+current checkout. Diagnostics cover the scan and its observed workers, including
+workers discovered during resume. A resumed attempt can replay earlier records
+from the same scan; their original timestamps remain in the trace. Diagnostics
+exclude later owner suggestions, publication, and other post-scan operations.
+They are separate from the sealed
+report and do not change its reported review coverage.
+
+The coverage analyzer recognizes literal `cat`, `sed`, `nl`, supported `head`
+pipelines, and numbered `rg` output. It distinguishes complete content, excerpts,
+and search hits, retains references to the calls, and marks truncated or
+unattributed output. Unsupported calls remain in the trace. A content match does
+not prove semantic review, and an absent match does not prove a file was never
+read. Source changes can reduce attribution. Captured process output is retained
+separately because it can contain text omitted from the model-facing tool response.
+
+These files can include repository content and tool diagnostics. Review them
+before sharing. Collection never requests raw model-token capture or exports
+private reasoning. Request IDs and viewer links are reported as unavailable when
+the runtime does not expose them; response IDs and trace IDs are not relabeled
+as request IDs. Server-side capture requires a supported, authorized route and
+separate confirmation of capture at the receiving service. Local traces cannot
+establish that capture occurred or explain an unreported reason for stopping.
+
+Diagnostics are best effort: a collection or write failure warns without changing
+the scan outcome. Files are saved when the invocation settles, so a forcibly
+terminated process might not produce them. Mock scans and preflight-only runs do
+not execute a model and do not produce a diagnostic trace.
+
 Keep state and reports when recovering authentication or locking problems.
 Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the

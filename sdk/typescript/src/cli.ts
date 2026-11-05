@@ -1147,6 +1147,7 @@ interface ScanArguments extends ResolvedScanSettings {
   workflowId?: string;
   safetyIdentifier?: string;
   verbose?: boolean;
+  diagnostics?: boolean;
   repository?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -2870,6 +2871,12 @@ export async function main(
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
       }),
       options: z.object({
+        diagnostics: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Save observable scan events and content coverage for this resume only.",
+          ),
         showCost: SHOW_COST_OPTION,
         verbose: z
           .boolean()
@@ -2925,6 +2932,7 @@ export async function main(
           // Resume uses the installed engine with the saved recipe and checkpoints.
           scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
+          scanArguments.diagnostics = options.diagnostics;
           scanArguments.showCost = options.showCost;
         } catch (error) {
           const message = errorMessage(error);
@@ -5025,6 +5033,12 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
+          diagnostics: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Save observable tool calls, outputs, summaries, and content coverage in the scan directory (default: off).",
+            ),
           host: z
             .boolean()
             .default(false)
@@ -5249,6 +5263,7 @@ export async function main(
               workflowId: options.workflowId,
               safetyIdentifier: options.safetyIdentifier,
               verbose: options.verbose,
+              diagnostics: options.diagnostics,
               repository: args.repository,
               archiveExisting: options.archiveExisting,
               pluginPath: options.pluginPath,
@@ -10547,6 +10562,7 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      ...(arguments_.diagnostics ? { diagnostics: true } : {}),
       ...(arguments_.rubricPath === undefined
         ? {}
         : { rubricPath: arguments_.rubricPath }),

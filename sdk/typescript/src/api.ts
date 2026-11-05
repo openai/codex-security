@@ -1,4 +1,8 @@
 /// <reference lib="esnext.disposable" preserve="true" />
+import {
+  ScanDiagnostics,
+  type ScanDiagnosticOutcome,
+} from "./scan-diagnostics.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
@@ -380,6 +384,8 @@ const scanLifecycleSchema = z.object({
 export type ScanLifecycle = Readonly<z.infer<typeof scanLifecycleSchema>>;
 
 export interface ScanOptions extends ScanSettings {
+  /** Save observable scan events and content coverage for this invocation only. Off by default. */
+  diagnostics?: boolean;
   /** Explicit policy for the initial scan and its workers. */
   severityRubric?: SeverityRubricSnapshot;
   /** Markdown policy file to capture when starting a new scan. */
@@ -2173,6 +2179,45 @@ export class CodexSecurity {
     let latestMeasurement: Readonly<ScanUsageMeasurement> | null = null;
     let notifiedLimit: number | undefined;
     let scanDir = "";
+    let diagnostics: ScanDiagnostics | null = null;
+    let diagnosticWriter: ScanArtifactRestorer | null = null;
+    let diagnosticSessionComplete = false;
+    let diagnosticMeasurement: Readonly<ScanUsageMeasurement> | undefined;
+    let diagnosticResult: ScanResult | undefined;
+    let diagnosticError: unknown;
+    let diagnosticStatus: ScanDiagnosticOutcome["status"] = "failed";
+    let diagnosticStopReason: ScanDiagnosticOutcome["stopReason"] = "unknown";
+    let diagnosticProgress:
+      { filesCompleted?: number; filesTotal?: number } | undefined;
+    const recordDiagnostic = (
+      record: (trace: ScanDiagnostics) => void,
+    ): void => {
+      if (diagnostics === null) return;
+      try {
+        record(diagnostics);
+      } catch (error) {
+        notifyObserver(
+          options,
+          "onWarning",
+        )(`Could not record scan diagnostics: ${errorMessage(error)}`);
+      }
+    };
+    async function* diagnosticEvents(
+      events: AsyncGenerator<ScanEvent>,
+      threadId?: string | null,
+    ) {
+      for await (const event of events) {
+        if (
+          event.type === "thread.started" &&
+          typeof event["thread_id"] === "string"
+        )
+          threadId = event["thread_id"];
+        recordDiagnostic((trace) =>
+          trace.recordSdk(event, threadId ?? undefined),
+        );
+        yield event;
+      }
+    }
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
@@ -2557,6 +2602,7 @@ export class CodexSecurity {
           tracker.setExpectedFilesTotal(filesTotal);
         }
         reviewedFileCount = progress.filesCompleted;
+        diagnosticProgress = { filesCompleted: reviewedFileCount, filesTotal };
         if (liveEvent !== undefined)
           tracker.acceptParentProgress(progress, liveEvent);
         if (
@@ -2926,6 +2972,46 @@ export class CodexSecurity {
         );
       }
       const scanId = registeredScanId;
+      if (options.diagnostics) {
+        try {
+          diagnosticWriter = await prepareArtifactRestorer(
+            workbenchOptions,
+            scanDir,
+          );
+          diagnostics = new ScanDiagnostics({
+            scanId,
+            scanDirectory: scanDir,
+            repository: repo,
+            scopePaths:
+              normalized.kind === "paths" ? normalized.paths : undefined,
+            mode,
+            ...scanModelConfiguration(effectiveConfig),
+            pluginVersion: runtime.plugin.version,
+            authentication:
+              authentication.method === "stored_credentials"
+                ? {
+                    method: authentication.method,
+                    credentialType: authentication.credentialType,
+                  }
+                : { method: authentication.method },
+            maxTimeMinutes:
+              deepScanConfiguration === undefined
+                ? options.maxTimeMinutes
+                : deepScanConfiguration.settings.maxTimeHours * 60,
+            deepScan: deepScanConfiguration?.settings,
+            maxCostUsd: options.maxCostUsd,
+            scopeFileCount:
+              typeof registration["scopeFileCount"] === "number"
+                ? registration["scopeFileCount"]
+                : undefined,
+          });
+        } catch (error) {
+          notifyObserver(
+            options,
+            "onWarning",
+          )(`Could not prepare scan diagnostics: ${errorMessage(error)}`);
+        }
+      }
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
@@ -2986,9 +3072,13 @@ export class CodexSecurity {
             ? undefined
             : (event) => notifyObserver(options, "onWorkerEvent")(event),
         onSessionEvent:
-          options.onSessionEvent === undefined
+          diagnostics === null && options.onSessionEvent === undefined
             ? undefined
-            : (event) => notifyObserver(options, "onSessionEvent")(event),
+            : (event) => {
+                if (!diagnosticSessionComplete)
+                  recordDiagnostic((trace) => trace.recordSession(event));
+                notifyObserver(options, "onSessionEvent")(event);
+              },
         onProgress:
           options.onProgress === undefined
             ? undefined
@@ -3470,7 +3560,8 @@ export class CodexSecurity {
 
       let result = await runScanEvents({
         thread,
-        events,
+        events:
+          diagnostics === null ? events : diagnosticEvents(events, thread.id),
         signal,
         scanDir,
         scanId,
@@ -3563,6 +3654,9 @@ export class CodexSecurity {
                     })
                   ).events,
                   onEvent: (event) => {
+                    recordDiagnostic((trace) =>
+                      trace.recordSdk(event, validationThread.id ?? undefined),
+                    );
                     if (
                       event.type === "thread.started" &&
                       typeof event["thread_id"] === "string"
@@ -3610,6 +3704,8 @@ export class CodexSecurity {
               measurement: latestMeasurement,
             };
           });
+          diagnosticMeasurement = snapshot.measurement ?? undefined;
+          diagnosticSessionComplete = true;
           throwIfAborted(signal, scanDir);
           if (maxCostUsd !== undefined && snapshot.cost === null) {
             runPostScan = null;
@@ -3857,6 +3953,7 @@ export class CodexSecurity {
           )(`Could not generate owner suggestions: ${errorMessage(error)}`);
         }
       }
+      diagnosticResult = result;
       if (this.#dependencies.hostedScan !== undefined) return result;
       try {
         const runWorkbench = (args: readonly string[], input?: string) =>
@@ -3901,6 +3998,7 @@ export class CodexSecurity {
           "onWarning",
         )(`Could not update repository findings: ${errorMessage(error)}`);
       }
+      diagnosticResult = result;
       return result;
     } catch (error) {
       // Capture who stopped the scan before cleanup can fire another signal.
@@ -3915,6 +4013,25 @@ export class CodexSecurity {
         signal.aborted && callerCancellation === undefined
           ? signal.reason
           : error;
+      diagnosticError = priorTurnFailure ?? failure;
+      diagnosticStatus = this.#dependencies.hostedScan
+        ? hostedScanFailureStatus(failure, callerCancellation) === "canceled"
+          ? "canceled"
+          : "failed"
+        : priorTurnFailure === undefined &&
+            explicitlyCanceled(callerCancellation)
+          ? "canceled"
+          : "failed";
+      diagnosticStopReason =
+        failure instanceof ScanCostLimitExceededError
+          ? "cost_limit"
+          : priorTurnFailure !== undefined
+            ? "turn_failed"
+            : diagnosticStatus === "canceled"
+              ? "caller_abort"
+              : terminalScanTurnStatus() === "failed"
+                ? "turn_failed"
+                : "error";
       // Hosted terminal failures can carry the only receipt for consumed tokens.
       const measuredExecution =
         error instanceof ScanExecutionError && error.receiptMatchesRequest
@@ -3933,6 +4050,10 @@ export class CodexSecurity {
       const snapshot = await costTracker
         ?.stop(measuredExecution?.usage)
         .catch(() => null);
+      if (!diagnosticSessionComplete)
+        diagnosticMeasurement =
+          snapshot?.measurement ?? latestMeasurement ?? undefined;
+      diagnosticSessionComplete = true;
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       const terminalTurnStatus = terminalScanTurnStatus();
       const verifiedCost = snapshot?.measurement.cost;
@@ -4022,6 +4143,7 @@ export class CodexSecurity {
                 : undefined,
             );
           }
+          diagnosticResult = result;
           return result;
         } catch {}
       }
@@ -4119,6 +4241,31 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      if (diagnostics !== null && diagnosticWriter !== null) {
+        try {
+          await diagnostics.finish(diagnosticWriter, {
+            status:
+              diagnosticResult !== undefined ? "completed" : diagnosticStatus,
+            turnStatus: terminalScanTurnStatus(),
+            stopReason:
+              diagnosticResult !== undefined &&
+              diagnosticStopReason === "unknown"
+                ? "completed"
+                : diagnosticStopReason,
+            ...(diagnosticError === undefined
+              ? {}
+              : { error: errorMessage(diagnosticError) }),
+            maxCostUsd,
+            measurement: diagnosticMeasurement,
+            modelReportedCoverage: diagnosticProgress,
+          });
+        } catch (error) {
+          notifyObserver(
+            options,
+            "onWarning",
+          )(`Could not save scan diagnostics: ${errorMessage(error)}`);
+        }
+      }
       budgetAbortController.abort();
       scanProgressTracker?.stop();
       // Temporary-input cleanup must not replace the scan's outcome.
