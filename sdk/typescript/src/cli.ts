@@ -5292,7 +5292,8 @@ export async function main(
       },
     })
     .command("install-hook", {
-      description: "Install an advisory Git pre-commit check.",
+      description:
+        "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
       hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
       mcp: false,
@@ -7415,7 +7416,9 @@ export async function main(
           codexVersion: CODEX_EXECUTABLE_VERSION,
           codexSdkVersion: CODEX_SDK_VERSION,
           ...scanModelConfiguration(codex),
-          nextStep: "codex-security scan . --dry-run",
+          nextStep: project
+            ? "Run codex-security scan . -c FILE --dry-run, replacing FILE with the project configuration you selected."
+            : "codex-security scan . --dry-run",
           configuration: {
             ...(project?.path === undefined ? {} : { path: project.path }),
             settings: { ...resolved.options, ...deep?.settings },
