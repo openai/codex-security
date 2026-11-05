@@ -682,6 +682,8 @@ async function fixture(
     brokenReadback: false,
     throttle: false,
     catalogReads: 0,
+    catalogHeaders: {} as Record<string, string>,
+    sourceLookups: [] as string[],
     postBudget: Infinity,
     finalError: false,
   };
@@ -705,6 +707,8 @@ async function fixture(
       const url = new URL(incoming.url!, "http://localhost");
       if (url.pathname.endsWith("/repositories")) {
         state.catalogReads++;
+        for (const [name, value] of Object.entries(state.catalogHeaders))
+          response.setHeader(name, value);
         return json(response, {
           object: "page",
           data: [destination()],
@@ -713,7 +717,9 @@ async function fixture(
         });
       }
       if (url.pathname.endsWith("/source_reports")) {
-        const report = reports.get(url.searchParams.get("source_finding_id")!);
+        const id = url.searchParams.get("source_finding_id")!;
+        state.sourceLookups.push(id);
+        const report = reports.get(id);
         let summary;
         if (report) {
           const { evidence, last_import: _lastImport, ...rest } = report;
@@ -936,39 +942,23 @@ test.each([true, false])(
       normalized("invalid", "unsupported"),
       normalized("reported", "high"),
     ]);
-    let current = advertised;
-    const lookups: string[] = [];
-    const prepare = () =>
-      prepareExternalPublication(f.file, options, {
-        ...f.deps,
-        fetch: async (url, init) => {
-          const request = new URL(url);
-          const response = await f.deps.fetch(url, init);
-          if (request.pathname.endsWith("/source_reports"))
-            lookups.push(request.searchParams.get("source_finding_id")!);
-          if (!request.pathname.endsWith("/repositories") || !current)
-            return response;
-          const headers = new Headers(response.headers);
-          headers.set(
-            "Codex-Security-Repository-Import-Severities",
-            "critical,high,medium,low,informational",
-          );
-          return new Response(response.body, { headers });
-        },
-      });
+    const header = "Codex-Security-Repository-Import-Severities";
+    const severities = "critical,high,medium,low,informational";
+    if (advertised) f.state.catalogHeaders[header] = severities;
+    const prepare = () => prepareExternalPublication(f.file, options, f.deps);
     const first = await prepare();
     const selected = advertised ? ["reported"] : ["unreported", "reported"];
     expect(first.preview.findings.map((f) => f.source_finding_id)).toEqual(
       selected,
     );
-    expect(lookups.sort()).toEqual([...selected].sort());
+    expect(f.state.sourceLookups.sort()).toEqual([...selected].sort());
     expect(first.preview.excluded.map(({ position }) => position)).toEqual(
       advertised ? [1, 2] : [2],
     );
     if (advertised)
       expect(first.preview.excluded[0]?.reason).toContain('severity "unknown"');
     await f.loseResponse(first);
-    current = !current;
+    f.state.catalogHeaders = advertised ? {} : { [header]: severities };
     const retry = await prepare();
     expect(retry.preview.resumed).toBe(true);
     expect(retry.preview.requests).toEqual(first.preview.requests);
@@ -1043,22 +1033,16 @@ test.each([
 
 test("private inbox preview retains unreported severity when direct publishing requires it", async () => {
   const f = await fixture([normalized("unscored", "unknown")]);
+  f.state.catalogHeaders = {
+    "Codex-Security-Private-Import-Providers": "wiz",
+    "Codex-Security-Repository-Import-Severities": "high,medium,low",
+  };
   const { preview } = await prepareExternalPublication(f.file, options, {
     ...f.deps,
-    fetch: async (url, init) => {
-      const path = new URL(url).pathname;
-      if (path.endsWith("/repositories")) {
-        const response = await f.deps.fetch(url, init);
-        return new Response(response.body, {
-          headers: {
-            "Codex-Security-Private-Import-Providers": "wiz",
-            "Codex-Security-Repository-Import-Severities": "high,medium,low",
-          },
-        });
-      }
-      expect(path).toEndWith("/finding-imports/context");
-      return privateInboxContext();
-    },
+    fetch: (url, init) =>
+      new URL(url).pathname.endsWith("/finding-imports/context")
+        ? Promise.resolve(privateInboxContext())
+        : f.deps.fetch(url, init),
   });
   expect(preview.privateImport).toBeDefined();
   expect(preview.findings).toHaveLength(1);
@@ -1068,21 +1052,9 @@ test("private inbox preview retains unreported severity when direct publishing r
 
 test("repository preview excludes all unreported severities before source lookups", async () => {
   const f = await fixture([normalized("unreported", "unknown")]);
-  let requests = 0;
-  const prepare = prepareExternalPublication(f.file, options, {
-    ...f.deps,
-    fetch: async (url, init) => {
-      expect(new URL(url).pathname).toEndWith("/repositories");
-      requests++;
-      const response = await f.deps.fetch(url, init);
-      return new Response(response.body, {
-        headers: {
-          "Codex-Security-Repository-Import-Severities":
-            "critical,high,medium,low,informational",
-        },
-      });
-    },
-  });
+  f.state.catalogHeaders["Codex-Security-Repository-Import-Severities"] =
+    "high";
+  const prepare = prepareExternalPublication(f.file, options, f.deps);
   await expect(prepare).rejects.toMatchObject({
     selection: {
       read: 1,
@@ -1090,7 +1062,8 @@ test("repository preview excludes all unreported severities before source lookup
       excluded: [{ position: 1, source_finding_id: "unreported" }],
     },
   });
-  expect(requests).toBe(1);
+  expect(f.state.catalogReads).toBe(1);
+  expect(f.state.sourceLookups).toEqual([]);
   expect(f.posts).toHaveLength(0);
 });
 
@@ -10672,51 +10645,30 @@ test("repository severity exclusions identify every original OpenGrep trace", as
       source_finding_id,
     ]),
   );
-  const deps = {
-    ...f.deps,
-    fetch: async (url: string, init: RequestInit) => {
-      const response = await f.deps.fetch(url, init);
-      if (!new URL(url).pathname.endsWith("/repositories")) return response;
-      const headers = new Headers(response.headers);
-      headers.set("Codex-Security-Repository-Import-Severities", "high");
-      return new Response(response.body, { headers });
-    },
-  };
-  for (const prepare of [
-    () => prepareExternalPublication(f.file, settings, deps),
-    () =>
-      prepareNormalizedExternalPublication(
-        { ...parsed },
-        { ...settings, provider: "semgrep" },
-        deps,
-      ),
-  ]) {
-    const failure = await prepare().catch((error: unknown) => error);
-    expect(failure).toBeInstanceOf(NoPublishableFindingsError);
-    const { selection } = failure as NoPublishableFindingsError;
-    expect(selection.read).toBe(4);
-    expect(
-      selection.excluded.map(({ position, source_finding_id }) => [
-        position,
-        source_finding_id,
-      ]),
-    ).toEqual([
-      [1, ids.get(first!.path)!],
-      [2, ids.get(other.path)!],
-      [3, null],
-      [4, ids.get(first!.path)!],
-    ]);
-    expect(selection.excluded[2]).toEqual(parsed.excluded[0]);
-  }
-  for (const saved of [
-    structuredClone(parsed),
-    JSON.parse(JSON.stringify(parsed)),
-  ]) {
-    const failure = await prepareNormalizedExternalPublication(
-      saved,
+  f.state.catalogHeaders["Codex-Security-Repository-Import-Severities"] =
+    "high";
+  const prepare = (input: ExternalFindings) =>
+    prepareNormalizedExternalPublication(
+      input,
       { ...settings, provider: "semgrep" },
-      deps,
-    ).catch((error: unknown) => error);
+      f.deps,
+    );
+  const originalIds = [
+    ids.get(first!.path)!,
+    ids.get(other.path)!,
+    null,
+    ids.get(first!.path)!,
+  ];
+  for (const [load, expectedIds] of [
+    [() => prepareExternalPublication(f.file, settings, f.deps), originalIds],
+    [() => prepare({ ...parsed }), originalIds],
+    [() => prepare(structuredClone(parsed)), [null, null, null, null]],
+    [
+      () => prepare(JSON.parse(JSON.stringify(parsed))),
+      [null, null, null, null],
+    ],
+  ] as const) {
+    const failure = await load().catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(NoPublishableFindingsError);
     const { selection, summary } = failure as NoPublishableFindingsError;
     expect(summary).toContain("4 read, 4 excluded");
@@ -10725,7 +10677,7 @@ test("repository severity exclusions identify every original OpenGrep trace", as
     ]);
     expect(
       selection.excluded.map(({ source_finding_id }) => source_finding_id),
-    ).toEqual([null, null, null, null]);
+    ).toEqual([...expectedIds]);
     expect(selection.excluded[2]).toEqual(parsed.excluded[0]);
   }
   expect(f.posts).toHaveLength(0);

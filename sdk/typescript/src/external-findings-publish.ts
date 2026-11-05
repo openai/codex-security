@@ -62,11 +62,13 @@ import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { isWizPackageFinding, wizFindingRepository } from "./wiz-findings.js";
 import { getOpenGrepSourcePositions } from "./opengrep-findings.js";
-import { previousReaderSelection } from "./reader-selection.js";
+import {
+  previousReaderSelection,
+  hasPreviousCloudProjection,
+} from "./reader-selection.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { retainedGitHubRepository } from "./github-findings.js";
 import {
-  needsPreviousSemgrepProjection,
   normalizePreviousSemgrepFindings,
   normalizeSemgrepFindings,
   readSemgrepReport,
@@ -103,7 +105,10 @@ import {
 } from "./hosted-git-repository.js";
 import { trivyRemoteKey, trivyRepositoryUrl } from "./trivy-findings.js";
 import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
-import { endorRepositoryUrls } from "./endor-findings.js";
+import {
+  endorRepositoryUrls,
+  requiresStructuredEndorReport,
+} from "./endor-findings.js";
 import {
   blackDuckReportRepositories,
   projectedBlackDuckRepositoryUrl,
@@ -138,7 +143,6 @@ import {
   canonicalNumber,
   cloudRepositoryUrlKey,
   CloudEvidenceDepthError,
-  usedEnrichmentFallback,
   validateImportRequest,
   validateExternalEvidence,
   validatePreviousCloudEvidence,
@@ -354,6 +358,7 @@ function repositorySelection(
     )
   )
     return report;
+  const findings: ExternalFindings["findings"] = [];
   const excluded = [...report.excluded];
   const skipped = new Set(excluded.map(({ position }) => position));
   function exclude(position: number, id: string | null, severity: string) {
@@ -373,22 +378,19 @@ function repositorySelection(
         : null;
     for (let row = 1; row <= report.read; row++)
       if (!skipped.has(row)) exclude(row, id, "unknown");
-    return {
-      ...report,
-      findings: [],
-      excluded: excluded.sort((a, b) => a.position - b.position),
-    };
+  } else {
+    let position = 0;
+    for (const finding of report.findings) {
+      do {
+        position++;
+      } while (skipped.has(position));
+      const { source_finding_id, evidence } = finding;
+      if (severities.includes(evidence.severity)) findings.push(finding);
+      else
+        for (const row of sourcePositions?.get(source_finding_id) ?? [position])
+          exclude(row, source_finding_id, evidence.severity);
+    }
   }
-  let position = 0;
-  const findings = report.findings.filter(({ source_finding_id, evidence }) => {
-    do {
-      position++;
-    } while (skipped.has(position));
-    if (severities.includes(evidence.severity)) return true;
-    for (const row of sourcePositions?.get(source_finding_id) ?? [position])
-      exclude(row, source_finding_id, evidence.severity);
-    return false;
-  });
   return {
     ...report,
     findings,
@@ -731,7 +733,7 @@ export async function prepareExternalPublication(
         ? normalizeSemgrepFindings(report, semgrepOptions, "cloud")
         : await normalizeSnykFile(report, "cloud", references);
       const selection = normalizedPublicationInput(findings, provider);
-      if (semgrep && needsPreviousSemgrepProjection(findings))
+      if (semgrep && hasPreviousCloudProjection(findings))
         selection.readPreviousFindings = () =>
           normalizePreviousSemgrepFindings(report, semgrepOptions);
       return selection;
@@ -781,16 +783,16 @@ export async function prepareExternalPublication(
   } else {
     const parsed = await readExternalFindings(path, settings);
     rejectGuardianSelection(parsed.findings);
-    if (provider === "endor")
-      fileRepositories = () => parsed.sourceRepositories ?? [];
     input =
       parsed.publication ??
       normalizedPublicationInput(parsed.findings, provider);
     input.readPreviousFindings = parsed.previousFindings;
-    if (provider === "endor")
-      input.requiresStructuredReport = parsed.findings.findings.some(
-        ({ evidence }) => usedEnrichmentFallback(evidence),
+    if (provider === "endor") {
+      fileRepositories = () => parsed.sourceRepositories ?? [];
+      input.requiresStructuredReport = requiresStructuredEndorReport(
+        parsed.findings,
       );
+    }
   }
   return preparePublicationInput(
     input,
@@ -1597,7 +1599,7 @@ async function preparePublicationInput(
   const credentials = await (
     dependencies.credentials ?? (() => readCloudCredentials(environment))
   )();
-  let privateProviders: Set<string> | undefined;
+  let canStartJob = false;
   let repositorySeverities: string[] | undefined;
   const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
   const providerJobVersion = privateJobVersions[options.provider];
@@ -1644,21 +1646,22 @@ async function preparePublicationInput(
       );
     }
     if (repositoryCatalog) {
-      repositorySeverities = response.headers
-        .get("Codex-Security-Repository-Import-Severities")
-        ?.split(",")
-        .map((severity) => severity.trim());
+      const advertised = (header: string) =>
+        response.headers
+          .get(header)
+          ?.split(",")
+          .map((item) => item.trim());
+      repositorySeverities = advertised(
+        "Codex-Security-Repository-Import-Severities",
+      );
+      canStartJob =
+        advertised("Codex-Security-Private-Import-Providers")?.includes(
+          options.provider,
+        ) ?? false;
       jobApiVersion =
         response.headers.get(jobVersionHeader) === requestedJobVersion
           ? providerJobVersion
           : undefined;
-      const advertised = response.headers.get(
-        "Codex-Security-Private-Import-Providers",
-      );
-      privateProviders =
-        advertised === null
-          ? undefined
-          : new Set(advertised.split(",").map((provider) => provider.trim()));
     }
     return response.json();
   }
@@ -3115,6 +3118,11 @@ async function preparePublicationInput(
       );
       if (binding) requireDestination(binding.findingId, binding.url);
     }
+    const checkOnlyProjected =
+      replay &&
+      !["inspector", "veracode", "checkmarx", "continuum", "sonar"].includes(
+        options.provider,
+      );
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
       checkRetainedTrivyProvider(options.provider, finding);
@@ -3130,16 +3138,7 @@ async function preparePublicationInput(
         : projectedBlackDuckRepositoryUrl(finding, "cloud");
       const hasProjection =
         !!blackDuckUrl || checkmarx.projections.has(finding);
-      if (
-        replay &&
-        !hasProjection &&
-        options.provider !== "inspector" &&
-        options.provider !== "veracode" &&
-        options.provider !== "checkmarx" &&
-        options.provider !== "continuum" &&
-        options.provider !== "sonar"
-      )
-        continue;
+      if (checkOnlyProjected && !hasProjection) continue;
       const urls = [
         blackDuckUrl,
         checkmarxRepository(finding)?.url,
@@ -3194,8 +3193,7 @@ async function preparePublicationInput(
       "The saved publication changed. Run the command again to preview this report.",
     );
   const usePrivateImport =
-    !saved &&
-    (privateProviders?.has(source.provider) || privateSaved !== undefined);
+    !saved && (canStartJob || privateSaved !== undefined);
   if (!usePrivateImport) checkRepositories(parsed);
   // A retry sends its saved projection, which may differ from today's reader.
   if (saved) {
@@ -3273,15 +3271,14 @@ async function preparePublicationInput(
         : readPrivateCheckpoint(data, binding);
     }
     const previous = checkpointForContext(privateSaved);
-    const canStartJob = privateProviders?.has(source.provider) === true;
+    const acceptsJob = (value: typeof context) =>
+      value.can_create_import_jobs && value.formats.includes(report.format);
     function requireAccess(value: typeof context, saved: typeof previous) {
       if (
         !value.can_read ||
         (!saved && !canStartJob) ||
         (!saved?.jobId &&
-          ((!saved?.fileId && !value.can_upload) ||
-            !value.can_create_import_jobs ||
-            !value.formats.includes(report.format)))
+          ((!saved?.fileId && !value.can_upload) || !acceptsJob(value)))
       )
         throw new CodexSecurityError(
           "Private findings import is unavailable for this account or report format.",
@@ -3291,8 +3288,7 @@ async function preparePublicationInput(
       unsuccessfulJob(previous?.receipt) &&
       canStartJob &&
       context.can_upload &&
-      context.can_create_import_jobs &&
-      context.formats.includes(report.format)
+      acceptsJob(context)
         ? previous?.jobId
         : undefined;
     const resumed = previous !== undefined && retryOfJobId === undefined;

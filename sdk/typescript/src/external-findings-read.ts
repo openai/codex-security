@@ -28,14 +28,12 @@ import {
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import {
   normalizeEndorFindings,
-  needsPreviousEndorProjection,
   normalizePreviousEndorFindings,
   endorRepositoryUrls,
 } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSonarFindings } from "./sonar-findings.js";
 import {
-  needsPreviousVeracodeProjection,
   normalizeVeracodeFindings,
   normalizePreviousVeracodeFindings,
 } from "./veracode-findings.js";
@@ -53,6 +51,7 @@ import {
   normalizeInspectorFindings,
   normalizePreviousInspectorFindings,
 } from "./inspector-findings.js";
+import { hasPreviousCloudProjection } from "./reader-selection.js";
 import { isRecord } from "./record.js";
 import {
   readLocalWizFindings,
@@ -192,65 +191,63 @@ export async function readExternalFindings(
   references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
-  if (provider === "trivy") {
-    const input = await readScannerJson(path);
-    const findings = normalizeTrivyFindings(
-      input,
-      target,
-      options.trivyScanRoot,
-    );
+  const url = options.sourceRepositoryUrl ?? "";
+  // Both projections describe the same captured rows, including exclusions.
+  function withReplay(
+    findings: ExternalFindings,
+    couldDiffer: (findings: ExternalFindings) => boolean,
+    previous: () => ExternalFindings,
+  ): ReadExternalFindings {
     return {
       findings,
       previousFindings:
-        target === "cloud" && needsPreviousTrivyProjection(findings)
-          ? () =>
-              normalizePreviousTrivyFindings(
-                input,
-                target,
-                options.trivyScanRoot,
-              )
-          : undefined,
+        target === "cloud" && couldDiffer(findings) ? previous : undefined,
     };
   }
+  if (provider === "trivy") {
+    const args = [
+      await readScannerJson(path),
+      target,
+      options.trivyScanRoot,
+    ] as const;
+    return withReplay(
+      normalizeTrivyFindings(...args),
+      needsPreviousTrivyProjection,
+      () => normalizePreviousTrivyFindings(...args),
+    );
+  }
   if (provider === "sonar") {
-    const url = options.sourceRepositoryUrl;
-    const findings = await readSonarFindings(path, url ?? "", target);
+    const findings = await readSonarFindings(path, url, target);
     const binding = findings.report?.["repositoryUrl"];
     return {
       findings,
       sourceRepositories: typeof binding === "string" ? [{ url: binding }] : [],
     };
   }
-  if (provider === "opengrep") {
-    const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
-    return {
-      findings: await readOpenGrepFindings(
-        path,
-        { sourceRepositoryUrl },
-        target,
-      ),
-      sourceRepositories: [{ url: sourceRepositoryUrl }],
-    };
+  if (provider === "opengrep" || provider === "checkmarx") {
+    const findings =
+      provider === "opengrep"
+        ? await readOpenGrepFindings(path, { sourceRepositoryUrl: url }, target)
+        : await readCheckmarxFindings(path, url, target);
+    return { findings, sourceRepositories: [{ url }] };
   }
-  if (provider === "snyk" || provider === "endor") {
-    const snyk = provider === "snyk";
-    const input = await (snyk ? readSnykReport : readScannerJson)(path);
-    const findings = snyk
-      ? await normalizeSnykFile(input, target, references)
-      : normalizeEndorFindings(input, target);
-    const sourceRepositories = snyk
-      ? snykFileRepositories(input)
-      : (sarifFileRepositories(input, "Endor") ??
+  if (provider === "snyk") {
+    const input = await readSnykReport(path);
+    const findings = await normalizeSnykFile(input, target, references);
+    return { findings, sourceRepositories: snykFileRepositories(input) };
+  }
+  if (provider === "endor") {
+    const input = await readScannerJson(path);
+    const findings = normalizeEndorFindings(input, target);
+    return {
+      ...withReplay(findings, hasPreviousCloudProjection, () =>
+        normalizePreviousEndorFindings(input, target),
+      ),
+      sourceRepositories:
+        sarifFileRepositories(input, "Endor") ??
         findings.findings.flatMap((row) =>
           localFindingRepositories(provider, row),
-        ));
-    return {
-      findings,
-      sourceRepositories,
-      previousFindings:
-        !snyk && target === "cloud" && needsPreviousEndorProjection(findings)
-          ? () => normalizePreviousEndorFindings(input, target)
-          : undefined,
+        ),
     };
   }
   if (provider === "semgrep") {
@@ -271,71 +268,50 @@ export async function readExternalFindings(
   }
   if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };
-  if (provider === "checkmarx") {
-    const url = options.sourceRepositoryUrl ?? "";
+  if (provider === "wiz") {
+    const wiz =
+      target === "local"
+        ? await readLocalWizFindings(path)
+        : await readVendorFindingsForPublication(path, target);
+    const sourceRepositories = wiz.current.findings.flatMap((finding) =>
+      localFindingRepositories("wiz", finding),
+    );
     return {
-      findings: await readCheckmarxFindings(path, url, target),
-      sourceRepositories: [{ url }],
+      findings: wiz.current,
+      ...("legacy" in wiz && { publication: wiz }),
+      sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
     };
   }
-  if (
-    provider === "inspector" ||
-    provider === "continuum" ||
-    provider === "blackduck" ||
-    provider === "veracode"
-  ) {
-    const url = options.sourceRepositoryUrl ?? "";
-    const mapping =
-      options.inspectorProjectMap && new Map(options.inspectorProjectMap);
-    const input = await readScannerJson(path);
-    const [normalize, previous, couldDiffer] = (
-      {
-        inspector: [
-          normalizeInspectorFindings,
-          normalizePreviousInspectorFindings,
-          () => true,
-        ],
-        continuum: [
-          normalizeContinuumFindings,
-          normalizePreviousContinuumFindings,
-          () => !Array.isArray(input),
-        ],
-        blackduck: [
-          normalizeBlackDuckFindings,
-          normalizePreviousBlackDuckFindings,
-          needsPreviousBlackDuckProjection,
-        ],
-        veracode: [
-          normalizeVeracodeFindings,
-          normalizePreviousVeracodeFindings,
-          needsPreviousVeracodeProjection,
-        ],
-      } as const
-    )[provider];
-    // Each version must see the same captured rows, including excluded ones.
-    // The earlier Continuum reader did not accept detail arrays.
-    const findings = normalize(input, url, target, mapping);
-    return {
-      findings,
-      previousFindings:
-        target === "cloud" && couldDiffer(findings)
-          ? () => previous(input, url, target, mapping)
-          : undefined,
-      sourceRepositories: [{ url }],
-    };
-  }
-  // A new reader must choose its parser before reaching the Wiz replay path.
-  provider satisfies "wiz";
-  const wiz =
-    target === "local"
-      ? await readLocalWizFindings(path)
-      : await readVendorFindingsForPublication(path, target);
-  const sourceRepositories = wiz.current.findings.flatMap((finding) =>
-    localFindingRepositories("wiz", finding),
-  );
+  const mapping =
+    options.inspectorProjectMap && new Map(options.inspectorProjectMap);
+  const input = await readScannerJson(path);
+  const [normalize, previous, couldDiffer] = (
+    {
+      inspector: [
+        normalizeInspectorFindings,
+        normalizePreviousInspectorFindings,
+        () => true,
+      ],
+      continuum: [
+        normalizeContinuumFindings,
+        normalizePreviousContinuumFindings,
+        () => !Array.isArray(input),
+      ],
+      blackduck: [
+        normalizeBlackDuckFindings,
+        normalizePreviousBlackDuckFindings,
+        needsPreviousBlackDuckProjection,
+      ],
+      veracode: [
+        normalizeVeracodeFindings,
+        normalizePreviousVeracodeFindings,
+        hasPreviousCloudProjection,
+      ],
+    } as const
+  )[provider];
+  const args = [input, url, target, mapping] as const;
   return {
-    findings: wiz.current,
-    ...("legacy" in wiz && { publication: wiz }),
-    sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
+    ...withReplay(normalize(...args), couldDiffer, () => previous(...args)),
+    sourceRepositories: [{ url }],
   };
 }
