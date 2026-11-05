@@ -10,10 +10,11 @@ import re
 import sqlite3
 import sys
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, BinaryIO, Iterator, Mapping
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -93,6 +94,7 @@ def collect_scan_usage(
     scan: sqlite3.Row,
     *,
     thread_id: str | None = None,
+    validation_thread_id: str | None = None,
     completed_at: str | None = None,
     completed_turn_id: str | None = None,
 ) -> dict[str, Any]:
@@ -105,7 +107,11 @@ def collect_scan_usage(
 
     roots = _scan_root_thread_ids(connection, scan, thread_id)
     parent_ids = set(_scan_root_thread_ids(connection, scan, thread_id, include_workers=False))
-    worker_directories = _scan_worker_directories(connection, scan)
+    if validation_thread_id:
+        roots.append(validation_thread_id)
+        parent_ids.add(validation_thread_id)
+    warnings: set[str] = set()
+    worker_directories = _scan_worker_directories(connection, scan, warnings)
     if not roots and not worker_directories:
         return _unavailable_usage("scan_thread_unavailable")
 
@@ -119,7 +125,6 @@ def collect_scan_usage(
     if started_at is None:
         return _unavailable_usage("scan_window_unavailable")
 
-    warnings: set[str] = set()
     try:
         sessions, missing_thread_ids = _discover_rollout_sessions(
             state_database,
@@ -180,7 +185,7 @@ def collect_scan_usage(
         for key, snapshot in usage.rate_limits.items():
             if key not in rate_limits or snapshot["observedAt"] > rate_limits[key]["observedAt"]:
                 rate_limits[key] = snapshot
-        if "token_usage_unavailable" in usage.warnings:
+        if usage.warnings & {"token_usage_unavailable", "token_breakdown_unavailable"}:
             missing_thread_ids.add(session.thread_id)
             continue
         role = by_role["parent" if session.thread_id in parent_ids else "workers"]
@@ -195,9 +200,12 @@ def collect_scan_usage(
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
     thread_count = sum(role["threadCount"] for role in by_role.values())
     if not thread_count:
-        return _unavailable_usage(
-            "token_usage_unavailable", warnings=warnings, rate_limits=rate_limits
+        reason = (
+            "token_breakdown_unavailable"
+            if "token_breakdown_unavailable" in warnings
+            else "token_usage_unavailable"
         )
+        return _unavailable_usage(reason, warnings=warnings, rate_limits=rate_limits)
 
     if any(
         usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
@@ -279,19 +287,35 @@ def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row
     )
 
 
-def _scan_worker_directories(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
+def _scan_worker_directories(
+    connection: sqlite3.Connection, scan: sqlite3.Row, warnings: set[str]
+) -> dict[str, bool]:
     if scan["mode"] != "deep":
-        return set()
+        return {}
+    if connection.execute(
+        "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? AND worker_usage_gap = 1", (scan["id"],)
+    ).fetchone():
+        warnings.add("worker_thread_unavailable")
     artifacts = Path(scan["scan_dir"]) / "artifacts"
-    # Finding comparisons start independent sessions before the batch checkpoint is saved.
-    return {str(artifacts / "deep_discovery")} | {
-        row["artifact_dir"] if row["kind"] == "discovery" else str(artifacts)
-        for row in connection.execute(
-            "SELECT kind, artifact_dir FROM deep_scan_workers "
-            "WHERE scan_id = ? AND kind IN ('discovery', 'dedup')",
-            (scan["id"],),
-        )
-    }
+    # Comparison turns run in this directory without a discovery worker row.
+    directories = {str(artifacts / "deep_discovery"): False}
+    for row in connection.execute(
+        "SELECT kind, artifact_dir, started_at, sdk_thread_id, attempt FROM deep_scan_workers "
+        "WHERE scan_id = ? AND kind IN ('discovery', 'dedup')",
+        (scan["id"],),
+    ):
+        if row["kind"] == "discovery":
+            if row["sdk_thread_id"] and row["attempt"] == 1:
+                continue  # The first attempt already has an exact thread identity.
+            # An attempt that started without a saved ID must be found by its assigned cwd.
+            missing_thread = bool(row["started_at"] and not row["sdk_thread_id"])
+            directories[row["artifact_dir"]] = missing_thread
+        else:
+            directories[str(artifacts)] = False
+        if row["attempt"] > 1 and row["started_at"] and not row["sdk_thread_id"]:
+            # Retries share a cwd. A rollout from an older attempt cannot prove the new one.
+            warnings.add("worker_thread_unavailable")
+    return directories
 
 
 def _codex_state_database() -> Path | None:
@@ -336,7 +360,7 @@ def _discover_rollout_sessions(
     roots: list[str],
     warnings: set[str],
     *,
-    worker_directories: set[str],
+    worker_directories: dict[str, bool],
     scan_directory: Path | None = None,
     started_at: datetime,
     completed_at: datetime | None,
@@ -357,11 +381,11 @@ def _discover_rollout_sessions(
             if not required.issubset(columns):
                 raise ValueError("Codex state graph does not expose the required thread columns.")
             if table == "threads" and worker_directories and not {"cwd", "created_at"} <= columns:
-                worker_directories = set()
+                worker_directories = {}
                 warnings.add("worker_directories_unavailable")
         sessions: dict[str, RolloutSession] = {}
         missing_thread_ids: set[str] = set()
-        root_ids = dict.fromkeys(roots)
+        root_ids: dict[str, str | None] = dict.fromkeys(roots)
         started_millisecond = started_at.replace(microsecond=started_at.microsecond // 1000 * 1000)
         completed_timestamp = int(completed_at.timestamp()) if completed_at is not None else None
         directory_expression = "cwd"
@@ -372,9 +396,14 @@ def _discover_rollout_sessions(
                 "codex_security_path_key", 1, _normalized_windows_path, deterministic=True
             )
             directory_expression = "codex_security_path_key(cwd)"
-            worker_directories = {_normalized_windows_path(value) for value in worker_directories}
+            worker_directories = {
+                _normalized_windows_path(path): required
+                for path, required in worker_directories.items()
+            }
             if scan_directory is not None:
                 scan_directory = Path(_normalized_windows_path(scan_directory))
+        unmatched = {path for path, required in worker_directories.items() if required}
+        directory_sources = {path: {path} for path in worker_directories}
         if worker_directories and scan_directory and ".previous-" in scan_directory.name:
             # Archived files move, but session working directories describe where execution ran.
             # Confirm the original output with an already-bound session before including peers.
@@ -387,7 +416,7 @@ def _discover_rollout_sessions(
                 )
             }
             relatives = {
-                Path(path).relative_to(scan_directory)
+                Path(path).relative_to(scan_directory): path
                 for path in worker_directories
                 if Path(path).is_relative_to(scan_directory)
             }
@@ -395,23 +424,24 @@ def _discover_rollout_sessions(
                 if marker.start() == 0:
                     continue
                 original = scan_directory.with_name(scan_directory.name[: marker.start()])
-                candidates = {original / relative for relative in relatives}
+                candidates = {original / relative: path for relative, path in relatives.items()}
                 # Older archives kept absolute discovery paths in their original directory.
                 if (
                     original in bound_directories
-                    or candidates & bound_directories
+                    or candidates.keys() & bound_directories
                     or any(Path(path).is_relative_to(original) for path in worker_directories)
                 ):
-                    worker_directories = worker_directories | {str(path) for path in candidates}
-        for directory in sorted(worker_directories):
+                    for candidate, path in candidates.items():
+                        directory_sources.setdefault(str(candidate), set()).add(path)
+        for directory in sorted(directory_sources):
             for row in database.execute(
                 "SELECT id FROM threads WHERE cwd IS NOT NULL "
                 f"AND {directory_expression} = ? AND created_at >= ? "
                 "AND (? IS NULL OR created_at <= ?) ORDER BY id",
                 (directory, int(started_at.timestamp()), completed_timestamp, completed_timestamp),
             ):
-                root_ids[row["id"]] = None
-        for root in root_ids:
+                root_ids[row["id"]] = directory
+        for root, directory in root_ids.items():
             row = database.execute(
                 "SELECT id, rollout_path FROM threads WHERE id = ?",
                 (root,),
@@ -427,7 +457,7 @@ def _discover_rollout_sessions(
                 continue
             if root not in roots:
                 try:
-                    with path.open("rb") as source:
+                    with _open_rollout(path) as source:
                         metadata = json.loads(source.readline())
                 except (OSError, ValueError):
                     missing_thread_ids.add(root)
@@ -446,6 +476,8 @@ def _discover_rollout_sessions(
                     )
                 ):
                     continue
+            if directory is not None:
+                unmatched.difference_update(directory_sources[directory])
             sessions[root] = RolloutSession(root, None, path)
             descendants = database.execute(
                 """
@@ -503,6 +535,8 @@ def _discover_rollout_sessions(
                     warnings.add("rollout_unavailable")
                     continue
                 sessions[child_id] = RolloutSession(child_id, parent_id, path)
+        if unmatched:
+            warnings.add("worker_thread_unavailable")
         return list(sessions.values()), missing_thread_ids
     finally:
         database.close()
@@ -515,6 +549,13 @@ def _rollout_path(value: object) -> Path | None:
     if not candidate.is_absolute():
         return None
     try:
+        try:
+            filesystem_path(candidate).lstat()
+        except FileNotFoundError:
+            # Native cold storage may compress an indexed JSONL file in place.
+            if candidate.suffix != ".jsonl":
+                return None
+            candidate = candidate.with_suffix(".jsonl.zst")
         resolved = filesystem_path(candidate).resolve(strict=True)
         if not resolved.is_file():
             return None
@@ -531,6 +572,32 @@ def _rollout_path(value: object) -> Path | None:
     return None
 
 
+@contextmanager
+def _open_rollout(path: Path, *, verify_end: bool = False) -> Iterator[BinaryIO]:
+    if path.suffix != ".zst":
+        with path.open("rb") as source:
+            yield source
+        return
+    try:
+        from compression import zstd  # Python 3.14+
+    except ImportError:
+        try:
+            from backports import zstd
+        except ImportError:
+            raise OSError(
+                "Compressed Codex rollouts require Python 3.14+ or backports.zstd."
+            ) from None
+    try:
+        with zstd.open(path, "rb") as source:
+            yield source
+            # A requested completion turn may stop parsing before the frame checksum.
+            if verify_end:
+                while source.read(64 * 1024):
+                    pass
+    except (zstd.ZstdError, EOFError) as error:
+        raise ValueError("Invalid compressed Codex rollout.") from error
+
+
 def _read_rollout_usage(
     session: RolloutSession,
     *,
@@ -543,8 +610,13 @@ def _read_rollout_usage(
     total = result.tokens
     warnings = result.warnings
     previous = _empty_token_usage()
+    previous_cache_writes_reported = True
+    prefix_unclassified = 0
+    prefix_missing_cache: set[str] = set()
+    ambiguous_legacy_cache = False
     boundary_reached = False
     legacy_usage = _empty_token_usage()
+    completed_legacy_usage = _empty_token_usage()
     response_usage: dict[str, int] | None = None
     observed_response_usage = _empty_token_usage()
     response_ids: set[str] = set()
@@ -564,7 +636,7 @@ def _read_rollout_usage(
             and (completed_turn_id is None or turn_id != completed_turn_id)
         )
 
-    with session.path.open("rb") as source:
+    with _open_rollout(session.path, verify_end=True) as source:
         for line_number, raw_line in enumerate(source, start=1):
             if not raw_line.endswith(b"\n"):
                 warnings.add("rollout_record_incomplete")
@@ -626,7 +698,14 @@ def _read_rollout_usage(
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
-                        previous = inherited_usage
+                        missing_cache = _missing_cache_fields(payload)
+                        baseline = _retain_cache_baseline(previous, inherited_usage, missing_cache)
+                        if baseline is None:
+                            warnings.add("token_breakdown_unavailable")
+                        else:
+                            previous = baseline
+                            prefix_unclassified = _uncached_input(baseline)
+                            prefix_missing_cache = missing_cache
                 if not boundary_reached:
                     continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
@@ -644,6 +723,11 @@ def _read_rollout_usage(
                 _add_token_usage(
                     total, response_usage if response_usage is not None else legacy_usage
                 )
+                if response_usage is None:
+                    _add_token_usage(completed_legacy_usage, legacy_usage)
+                    if ambiguous_legacy_cache:
+                        warnings.add("token_breakdown_unavailable")
+                ambiguous_legacy_cache = False
                 legacy_usage = _empty_token_usage()
                 response_usage = None
                 if payload.get("turn_id") != current_turn_id:
@@ -762,25 +846,91 @@ def _read_rollout_usage(
             if timestamp is None or snapshot is None:
                 warnings.add("token_record_invalid")
                 continue
+            reset = snapshot["totalTokens"] < previous["totalTokens"]
+            if reset:
+                prefix_unclassified = 0
+            missing_cache = _missing_cache_fields(payload)
+            cache_writes_reported = "cacheWriteInputTokens" not in missing_cache
+            baseline = _retain_cache_baseline(previous, snapshot, missing_cache)
+            if baseline is None:
+                if not past_scan_end(timestamp, current_turn_id):
+                    warnings.add("token_breakdown_unavailable")
+                continue
+            if baseline is previous:
+                cache_writes_reported = previous_cache_writes_reported and cache_writes_reported
+            refines_classification = (
+                baseline["inputTokens"] >= previous["inputTokens"]
+                and baseline["outputTokens"] >= previous["outputTokens"]
+                and baseline["cachedInputTokens"] >= previous["cachedInputTokens"]
+                and baseline["cacheWriteInputTokens"] >= previous["cacheWriteInputTokens"]
+                and (
+                    (not previous_cache_writes_reported and cache_writes_reported)
+                    or baseline["cachedInputTokens"] > previous["cachedInputTokens"]
+                    or baseline["cacheWriteInputTokens"] > previous["cacheWriteInputTokens"]
+                )
+            )
+            previous_cache_writes_reported = cache_writes_reported
             delta = {
-                key: value - previous[key] if value >= previous[key] else value
+                key: value if reset or value < previous[key] else value - previous[key]
                 for key, value in snapshot.items()
             }
-            previous = snapshot
+            previous = baseline
             if past_scan_end(timestamp, current_turn_id):
                 continue
             if isinstance(current_turn_id, str):
                 measured_turns.add(current_turn_id)
             if timestamp < started_at:
+                prefix_unclassified = _uncached_input(baseline)
+                prefix_missing_cache = missing_cache
                 continue
             if completed_turn_id is not None and current_turn_id == completed_turn_id:
                 completed_turn_measured = True
             result.tokens_updated_at = max(result.tokens_updated_at or timestamp, timestamp)
-            if delta["totalTokens"] <= 0:
+            delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
+            if delta["totalTokens"] <= 0 and not refines_classification:
                 continue
+            cache_write_capacity = (
+                _uncached_input(legacy_usage) + delta["inputTokens"]
+                if refines_classification
+                else delta["inputTokens"]
+            )
+            # Late cumulative cache details can classify an earlier legacy turn.
+            completed_capacity = (
+                _uncached_input(completed_legacy_usage)
+                if refines_classification and response_usage is None
+                else 0
+            )
+            if (
+                prefix_unclassified > 0
+                and refines_classification
+                and (
+                    any(delta[key] > 0 for key in prefix_missing_cache)
+                    # Even explicit counters can revise earlier input when the
+                    # newly classified tokens exceed all in-scan capacity.
+                    or delta["cachedInputTokens"] + delta["cacheWriteInputTokens"]
+                    > cache_write_capacity + completed_capacity
+                )
+            ):
+                # The newly classified tokens could have occurred before this scan.
+                ambiguous_legacy_cache = True
+            for key in ("cacheWriteInputTokens", "cachedInputTokens"):
+                current = min(delta[key], cache_write_capacity)
+                completed = min(delta[key] - current, completed_capacity)
+                if completed and ambiguous_legacy_cache:
+                    warnings.add("token_breakdown_unavailable")
+                delta[key] = current
+                cache_write_capacity -= current
+                completed_capacity -= completed
+                completed_legacy_usage[key] += completed
+                total[key] += completed
+            delta["reasoningOutputTokens"] = min(
+                delta["reasoningOutputTokens"], delta["outputTokens"]
+            )
             _add_token_usage(legacy_usage, delta)
 
     _add_token_usage(total, response_usage if response_usage is not None else legacy_usage)
+    if response_usage is None and ambiguous_legacy_cache:
+        warnings.add("token_breakdown_unavailable")
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
     elif result.tokens_updated_at is None and not direct_control_session:
@@ -849,6 +999,47 @@ def valid_account_rate_limit(value: object) -> bool:
         ):
             return False
     return True
+
+
+def _missing_cache_fields(payload: Mapping[str, Any]) -> set[str]:
+    usage = payload["info"]["total_token_usage"]
+    missing: set[str] = set()
+    if "cached_input_tokens" not in usage:
+        missing.add("cachedInputTokens")
+    if "cache_write_input_tokens" not in usage and "cache_write_tokens" not in usage:
+        missing.add("cacheWriteInputTokens")
+    return missing
+
+
+def _uncached_input(usage: dict[str, int]) -> int:
+    return usage["inputTokens"] - usage["cachedInputTokens"] - usage["cacheWriteInputTokens"]
+
+
+def _retain_cache_baseline(
+    previous: dict[str, int], snapshot: dict[str, int], missing: set[str]
+) -> dict[str, int] | None:
+    baseline = snapshot
+    if (
+        missing
+        and snapshot["inputTokens"] >= previous["inputTokens"]
+        and snapshot["outputTokens"] >= previous["outputTokens"]
+    ):
+        baseline = {**snapshot, **{key: previous[key] for key in missing}}
+        if (
+            baseline["cachedInputTokens"] + baseline["cacheWriteInputTokens"]
+            > baseline["inputTokens"]
+        ):
+            return None
+    if (
+        baseline["inputTokens"] == previous["inputTokens"]
+        and baseline["outputTokens"] == previous["outputTokens"]
+        and (
+            baseline["cachedInputTokens"] < previous["cachedInputTokens"]
+            or baseline["cacheWriteInputTokens"] < previous["cacheWriteInputTokens"]
+        )
+    ):
+        return previous
+    return baseline
 
 
 def _session_parent_thread_id(payload: Mapping[str, Any]) -> str | None:
