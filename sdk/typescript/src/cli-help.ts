@@ -15,6 +15,7 @@ const COMMAND_GROUPS: readonly Group[] = [
       "suggest-owners",
       "export",
       "import",
+      "hackerone",
       "publish",
     ],
   ],

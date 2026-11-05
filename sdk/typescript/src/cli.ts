@@ -131,6 +131,7 @@ import {
   externalImportsEnabled,
 } from "./external-imports-feature.js";
 import { listLocalExternalFindings } from "./external-findings-local.js";
+import { exportHackerOneReports } from "./hackerone-reports.js";
 import type { collectSonarIssues } from "./sonar-collector.js";
 import { prepareSonarImport } from "./sonar-import.js";
 import {
@@ -7424,6 +7425,44 @@ export async function main(
         };
       },
     });
+
+  if (importsEnabled) {
+    cli.command(
+      Cli.create("hackerone", {
+        description: "Read explicitly selected HackerOne reports.",
+      }).command("export", {
+        description: "Write a private JSON file with selected report fields.",
+        mcp: false,
+        destructive: true,
+        options: z.object({
+          programId: optionValue("--program-id").describe(
+            "Expected HackerOne program ID.",
+          ),
+          reportIds: optionValue("--report-ids").describe(
+            "Comma-separated report IDs (1–100).",
+          ),
+          output: optionValue("--output").describe("New private JSON file."),
+          capture: optionValue("--capture")
+            .optional()
+            .describe("Advance capture ticket file for a refresh."),
+        }),
+        async run({ options }) {
+          if (options.output === "-")
+            throw new Error("Choose a file for --output.");
+          const dir = dependencies.currentDirectory();
+          return exportHackerOneReports({
+            programId: options.programId,
+            reportIds: options.reportIds,
+            output: resolveCliPath(dir, options.output),
+            ...(options.capture === undefined
+              ? {}
+              : { capture: resolveCliPath(dir, options.capture) }),
+            environment: dependencies.environment,
+          });
+        },
+      }),
+    );
+  }
 
   const commands = Cli.toCommands.get(cli)!;
   let valueOptions = cliValueOptions(commands);

@@ -1,0 +1,22 @@
+{
+  "format": "hackerone.reports_json.v1",
+  "program_id": "11",
+  "reports": [
+    {
+      "id": "7101",
+      "program_id": "11",
+      "title": "Example title",
+      "state": "triaged",
+      "severity_rating": "medium",
+      "last_activity_at": "2026-10-01T12:00:00.000187Z"
+    },
+    {
+      "id": "9007199254740993",
+      "program_id": "11",
+      "title": "Example title",
+      "state": "triaged",
+      "severity_rating": "none",
+      "last_activity_at": "2026-10-01T12:00:00.000187Z"
+    }
+  ]
+}

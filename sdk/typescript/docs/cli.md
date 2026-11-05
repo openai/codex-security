@@ -2255,6 +2255,16 @@ Progress callback failures do not stop matching.
 
 Export saved findings and threat models without rerunning a scan or signing in.
 
+### Export selected HackerOne reports
+
+Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` to enable `hackerone export`, which saves report fields to a new local file. Set `HACKERONE_API_USERNAME` to the Customer API token identifier and `HACKERONE_API_TOKEN` to its value in the command environment. Use a token authorized for the selected program. Keep credentials out of command arguments.
+
+```sh
+codex-security hackerone export --program-id 11 --report-ids 7101,7102 --output reports.json
+```
+
+Supply 1–100 distinct report IDs from one program. The file includes the source IDs, title, state and available severity, timestamps, CVEs and scope metadata. It does not export report bodies, reporter identities, attachments or API credentials as fields. Titles are copied verbatim and may contain personal or sensitive information; review the file before sharing it. If any report is unavailable or belongs to another program, the command writes no file. It preserves existing files. If your import UI provided a capture ticket before collection, pass its text file with `--capture PATH` to bind the export to that capture. This command only creates the local file.
+
 ### Export findings
 
 To save a completed scan's findings as SARIF, run:
