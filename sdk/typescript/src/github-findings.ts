@@ -80,7 +80,7 @@ function codeScanningPrefix(
 }
 
 function codeScanningSource(record: Record<string, unknown>) {
-  const repository = repositoryName(record["repository"]);
+  const name = repositoryName(record["repository"]);
   const alert = asRecord(record["alert"]);
   const number = record["number"];
   if (
@@ -97,20 +97,20 @@ function codeScanningSource(record: Record<string, unknown>) {
   if (!url || url !== alert["html_url"])
     throw new Error("GitHub alert URL must match the original alert.");
   const link = sourceUrl(url);
-  const prefix = codeScanningPrefix(link, repository, number);
+  const prefix = codeScanningPrefix(link, name, number);
   if (!prefix)
     throw new Error(
       "GitHub alert URL does not match the selected repository and alert.",
     );
-  return { alert, number, prefix, url, repository, origin: link.origin };
+  const repository = { url: `${link.origin}/${name}`, name };
+  return { alert, number, prefix, url, repository };
 }
 
 function codeScanningFinding(record: Record<string, unknown>): {
   source_finding_id: string;
   evidence: unknown;
 } {
-  const { alert, number, prefix, url, repository, origin } =
-    codeScanningSource(record);
+  const { alert, number, prefix, url, repository } = codeScanningSource(record);
   const rule = asRecord(alert["rule"]);
   const instance = asRecord(alert["most_recent_instance"]);
   const ref = text(instance?.["ref"]);
@@ -155,10 +155,7 @@ function codeScanningFinding(record: Record<string, unknown>): {
       source_data: record,
       details: {
         kind: "sast",
-        repository: {
-          url: `${origin}/${repository}`,
-          name: repository,
-        },
+        repository,
         // Dismissal covers every branch; detection state belongs to the selected ref.
         source_status:
           alert["state"] === "dismissed"
@@ -184,7 +181,7 @@ function advisorySourceId(
 }
 
 function advisorySource(record: Record<string, unknown>) {
-  const repository = repositoryName(record["repository"]);
+  const name = repositoryName(record["repository"]);
   const advisory = asRecord(record["advisory"]);
   const id = text(record["ghsaId"]);
   const selection = record["selection"];
@@ -209,7 +206,7 @@ function advisorySource(record: Record<string, unknown>) {
     selection === "global" && parsedUrl.host === "github.com";
   const expectedPath =
     selection === "repository"
-      ? `/${repository}/security/advisories/${id}`
+      ? `/${name}/security/advisories/${id}`
       : `/advisories/${id}`;
   if (
     !host ||
@@ -219,14 +216,15 @@ function advisorySource(record: Record<string, unknown>) {
     throw new Error(
       "GitHub advisory URL does not match the selected source and GHSA ID.",
     );
-  return { advisory, id, selection, url, host, origin, repository } as const;
+  const repository = { url: `${origin}/${name}`, name };
+  return { advisory, id, selection, url, host, repository } as const;
 }
 
 function advisoryFinding(record: Record<string, unknown>): {
   source_finding_id: string;
   evidence: unknown;
 } {
-  const { advisory, id, selection, url, host, origin, repository } =
+  const { advisory, id, selection, url, host, repository } =
     advisorySource(record);
   const vulnerabilities =
     advisory["vulnerabilities"] === null ? [] : advisory["vulnerabilities"];
@@ -263,7 +261,7 @@ function advisoryFinding(record: Record<string, unknown>): {
   });
   const cwes = Array.isArray(advisory["cwes"]) ? advisory["cwes"] : [];
   return {
-    source_finding_id: advisorySourceId(host, selection, repository, id),
+    source_finding_id: advisorySourceId(host, selection, repository.name, id),
     evidence: {
       title: text(advisory["summary"]) ?? id,
       severity: severity(advisory["severity"]),
@@ -276,14 +274,7 @@ function advisoryFinding(record: Record<string, unknown>): {
       details: {
         kind: "advisory",
         advisory: { source: selection },
-        ...(selection === "repository"
-          ? {
-              repository: {
-                url: `${origin}/${repository}`,
-                name: repository,
-              },
-            }
-          : {}),
+        ...(selection === "repository" ? { repository } : {}),
         source_status: text(advisory["withdrawn_at"])
           ? "withdrawn"
           : (text(advisory["state"]) ??
@@ -327,7 +318,7 @@ export function retainedGitHubRepository(
       return;
     }
   } else return;
-  const native = `${source.origin}/${source.repository}`;
+  const native = source.repository.url;
   const projected = evidence.details?.repository?.url;
   if (projected && repositoryKey(projected) !== repositoryKey(native))
     throw new CodexSecurityError(

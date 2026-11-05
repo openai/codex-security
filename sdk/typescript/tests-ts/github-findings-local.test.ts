@@ -69,7 +69,7 @@ test.each(["code-scanning", "repository-advisory", "global-advisory"] as const)(
 );
 
 test.each(["code-scanning", "repository-advisory"] as const)(
-  "normalized GitHub %s uses the retained export to check repository scope",
+  "GitHub %s checks repository scope for raw and previously normalized findings",
   async (kind) => {
     const wrongRepository = "https://github.com/example/other";
     await using fixture = await localReportFixture(
@@ -77,10 +77,15 @@ test.each(["code-scanning", "repository-advisory"] as const)(
       { provider: "github", sourceKey: "github/example/project" },
       { remote: wrongRepository },
     );
+    const source = githubSource(kind);
+    await fixture.writeJson([source]);
+    await expect(fixture.prepare()).rejects.toThrow(/repository/iu);
+    expect(await fixture.read()).toEqual([]);
+
     const input =
-      kind === "code-scanning"
-        ? normalizeGitHubCodeScanningAlerts([importedAlert()], "local")
-        : normalizeGitHubAdvisories([importedAdvisory()], "local");
+      source.source === "github-code-scanning"
+        ? normalizeGitHubCodeScanningAlerts([source], "local")
+        : normalizeGitHubAdvisories([source], "local");
     const row = input.findings[0]!;
     const details = row.evidence.details!;
     details.repository!.url = wrongRepository;
@@ -139,20 +144,6 @@ test("a retained global advisory may be investigated in another repository", asy
     "Global advisory evidence cannot claim a source repository",
   );
 });
-
-test.each(["code-scanning", "repository-advisory"] as const)(
-  "GitHub %s refuses to attach another repository's evidence locally",
-  async (kind) => {
-    await using fixture = await localReportFixture(
-      "github.json",
-      { provider: "github", sourceKey: "github/example/project" },
-      { remote: "https://github.com/example/other" },
-    );
-    await fixture.writeJson([githubSource(kind)]);
-    await expect(fixture.prepare()).rejects.toThrow(/repository/iu);
-    expect(await fixture.read()).toEqual([]);
-  },
-);
 
 test.each(["code-scanning", "repository-advisory"] as const)(
   "GitHub %s matches custom Enterprise repository names without changing source evidence",
