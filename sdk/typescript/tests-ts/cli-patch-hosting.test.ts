@@ -223,7 +223,7 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each(["local", "include"] as const)(
+  test.each(["local", "include", "separate caller include"] as const)(
     "publication preflight refuses a checkout-selected SSH command from %s",
     async (source) => {
       const { directory, git } = await publicationRepository();
@@ -236,8 +236,12 @@ describe("patch change tracking", () => {
       );
       const commandPath = (value: string) => `"${value.replaceAll("\\", "/")}"`;
       const config = join(directory, "transport.gitconfig");
+      const separate = source === "separate caller include";
+      const tree = separate
+        ? await fixtures.create("patch-ssh-worktree-")
+        : directory;
       const environment: NodeJS.ProcessEnv = {};
-      if (source === "include") {
+      if (source !== "local") {
         environment["GIT_CONFIG_GLOBAL"] = join(external, "user.gitconfig");
         git(
           "config",
@@ -249,13 +253,18 @@ describe("patch change tracking", () => {
       }
       git(
         "config",
-        ...(source === "include" ? ["--file", config] : []),
+        ...(source !== "local" ? ["--file", config] : []),
         "core.sshCommand",
         [process.execPath, script, marker].map(commandPath).join(" "),
       );
-      if (source === "include") {
+      if (source !== "local") {
         git("add", "transport.gitconfig");
         git("commit", "-m", "Synthetic checkout configuration");
+      }
+      if (separate) {
+        git("--work-tree=" + tree, "checkout-index", "--all");
+        environment["GIT_WORK_TREE"] = tree;
+        environment["GIT_DIR"] = join(directory, ".git");
       }
       git(
         "remote",
@@ -265,12 +274,14 @@ describe("patch change tracking", () => {
       );
       const model = mock(async () => 0);
       const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        separate
+          ? ["patch", "Synthetic issue", "--create-pr", "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
           environment,
           onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+            savedScan(resultWithFindings(["high"]), "scan-1", tree),
           onCodex: model,
           onRepositoryCommand: (command, args, cwd, options) =>
             command === "git"
@@ -290,12 +301,77 @@ describe("patch change tracking", () => {
   );
 
   test.each([
+    ["core.gitProxy", "git://gitlab.com/test/project.git", "core.gitProxy"],
+    [
+      "http.proxy",
+      "https://gitlab.com/test/project.git",
+      "checkout-selected HTTP",
+    ],
+    [
+      "remote.origin.proxy",
+      "https://gitlab.com/test/project.git",
+      "remote.origin.proxy",
+    ],
+    [
+      "credential.helper",
+      "https://gitlab.com/test/project.git",
+      "fixture credentials checked",
+    ],
+  ] as const)(
+    "excludes caller-owned %s for a separate worktree",
+    async (setting, remote, error) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-separate-config-");
+      const tree = join(external, "tree");
+      await mkdir(tree);
+      git("--work-tree=" + tree, "checkout-index", "--all");
+      const included = join(directory, "transport.gitconfig");
+      const global = join(external, "global.gitconfig");
+      git("config", "--file", global, "include.path", included);
+      git("config", "--file", included, setting, "fixture-caller-value");
+      git("remote", "set-url", "origin", remote);
+      const environment = {
+        GIT_DIR: join(directory, ".git"),
+        GIT_WORK_TREE: tree,
+        GIT_CONFIG_GLOBAL: global,
+      };
+      const model = mock(() => 0);
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment,
+          onCodex: model,
+          onRepositoryCommand: (tool, args, cwd, options) => {
+            if (tool !== "git") return "";
+            if (args.includes("ls-remote")) {
+              expect(setting).toBe("credential.helper");
+              expect(Object.values(options?.environment ?? {})).not.toContain(
+                "fixture-caller-value",
+              );
+              throw new Error("fixture credentials checked");
+            }
+            return runGitRepositoryCommand(tool, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            });
+          },
+        },
+        { localHosting: false },
+      );
+      expect(outcome.stderr).toContain(error);
+      expect(model).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
     "relative external command",
     "relative external executable",
     "relative external core command",
     "checkout program",
     "shell expansion",
     "checkout SSH configuration",
+    "ambiguous known-hosts list",
   ])("binds the %s before running a patch", async (kind) => {
     const { directory, git } = await publicationRepository();
     const external = await realpath(
@@ -316,6 +392,10 @@ describe("patch change tracking", () => {
       environment["GIT_CONFIG_GLOBAL"] = config;
     } else if (kind.endsWith("executable")) {
       environment["GIT_SSH"] = relativeHelper;
+    } else if (kind === "ambiguous known-hosts list") {
+      const hosts = join(external, "known hosts");
+      await writeFile(hosts, "");
+      environment["GIT_SSH_COMMAND"] = `ssh -o "UserKnownHostsFile=${hosts}"`;
     } else {
       environment["GIT_SSH_COMMAND"] =
         kind === "shell expansion"
@@ -1175,9 +1255,11 @@ process.exit(result.status ?? 1);
       );
       const ssh = join(tools, process.platform === "win32" ? "ssh.exe" : "ssh");
       await writeFile(ssh, "", { mode: 0o700 });
+      // Use native separators, including the literal backslashes in a
+      // double-quoted Windows path passed through Git for Windows.
       const config = join(tools, "synthetic config");
       await writeFile(config, "");
-      const configuredCommand = `ssh -F "${config.replaceAll("\\", "/")}"`;
+      const configuredCommand = `ssh -F "${config}"`;
       const coreCommand = transport.includes("core")
         ? configuredCommand
         : transport.endsWith("command")

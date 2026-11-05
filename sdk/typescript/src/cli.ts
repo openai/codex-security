@@ -9292,6 +9292,7 @@ async function patchPreflightRemoteSettings(
         entries[index]!,
         entries[index + 1]!,
         repository,
+        dependencies,
       ))
     )
       throw new CodexSecurityError(
@@ -9515,20 +9516,41 @@ function isSshPatchRemote(remote: string): boolean {
   );
 }
 
+async function patchTransportDirectories(
+  repository: string,
+  dependencies: CliDependencies,
+) {
+  const root = await realpath(
+    await patchRepositoryRoot(repository, dependencies),
+  );
+  const caller = await realpath(
+    dependencies.patchCallerDirectory ?? repository,
+  );
+  const directory = isOutsidePath(relative(root, caller)) ? caller : root;
+  return { root, caller, directory };
+}
+
 async function operatorPatchConfig(
   scope: string,
   origin: string,
   repository: string,
+  dependencies: CliDependencies,
 ): Promise<boolean> {
-  return (
-    (scope === "system" || scope === "global" || scope === "command") &&
-    (!origin.startsWith("file:") ||
-      isOutsidePath(
-        relative(
-          await realpath(repository),
-          await realpath(resolve(repository, origin.slice(5))),
-        ),
-      ))
+  if (scope !== "system" && scope !== "global" && scope !== "command")
+    return false;
+  if (!origin.startsWith("file:")) return true;
+  const { root, caller, directory } = await patchTransportDirectories(
+    repository,
+    dependencies,
+  );
+  const file = origin.slice(5);
+  // Git reports relative origins from its working directory. Preserve
+  // symlink/.. traversal until the filesystem resolves the include itself.
+  const physical = await realpath(
+    isAbsolute(file) ? file : `${directory}${sep}${file}`,
+  );
+  return [root, caller].every((root) =>
+    isOutsidePath(relative(root, physical)),
   );
 }
 
@@ -9590,7 +9612,12 @@ async function patchTransportEnvironment(
         if (!command || command === "none") continue;
         hasProxyCommand = true;
         if (
-          !(await operatorPatchConfig(proxies[i]!, proxies[i + 1]!, repository))
+          !(await operatorPatchConfig(
+            proxies[i]!,
+            proxies[i + 1]!,
+            repository,
+            dependencies,
+          ))
         ) {
           throw new CodexSecurityError(
             "Patch publication cannot run checkout-selected core.gitProxy. Select the Git proxy through your user Git configuration or GIT_PROXY_COMMAND.",
@@ -9631,6 +9658,7 @@ async function patchTransportEnvironment(
       entries[i]!,
       entries[i + 1]!,
       repository,
+      dependencies,
     );
     if (key.startsWith("http.")) {
       if (!trusted)
@@ -9648,8 +9676,10 @@ async function patchTransportEnvironment(
 // evaluating the operator's command in a checkout the patch can change.
 async function pinPublicationSshCommand(
   command: string | [string],
-  repository: string,
-  dependencies: CliDependencies,
+  root: string,
+  caller: string,
+  directory: string,
+  environment: CliDependencies["environment"],
 ): Promise<string> {
   const unsupported = () =>
     new CodexSecurityError(
@@ -9660,7 +9690,7 @@ async function pinPublicationSshCommand(
     words = command;
   } else {
     const literal =
-      /(?:[a-zA-Z0-9_./:@%+,=~-]+|'[^'\r\n]*'|"[^"$\x60\\\r\n]*")(?=[ \t]|$)/gy;
+      /(?:[a-zA-Z0-9_./:@%+,=~-]+|'[^'\r\n]*'|"(?:[^"$\x60\\\r\n]|\\[^"$\x60\\\r\n])*")(?=[ \t]|$)/gy;
     words = [];
     const text = command.trim();
     for (let offset = 0; offset < text.length;) {
@@ -9674,14 +9704,6 @@ async function pinPublicationSshCommand(
   }
   const [program, ...args] = words;
   if (!program) throw unsupported();
-  const root = await realpath(
-    await patchRepositoryRoot(repository, dependencies),
-  );
-  const caller = await realpath(
-    dependencies.patchCallerDirectory ?? repository,
-  );
-  const directory = isOutsidePath(relative(root, caller)) ? caller : root;
-  const environment = dependencies.environment;
   const path = [
     environmentEntry(environment, "GIT_EXEC_PATH"),
     environmentEntry(environment, "PATH") ?? process.env["PATH"],
@@ -9725,7 +9747,15 @@ async function pinPublicationSshCommand(
           value,
         );
         if (pathSetting) {
-          bound = pathSetting[1] + "=" + (await bindFile(pathSetting[2]));
+          // OpenSSH parses -o as another configuration line. A path with
+          // whitespace could name more than one known-hosts file there.
+          const physical = await bindFile(pathSetting[2]);
+          const literal =
+            process.platform === "win32"
+              ? physical.replaceAll("\\", "/")
+              : physical;
+          if (/[\s"'\\]/u.test(literal)) throw unsupported();
+          bound = pathSetting[1] + "=" + literal;
         } else if (
           !/^(?:BatchMode|IdentitiesOnly|StrictHostKeyChecking|HostKeyAlias|ConnectTimeout|LogLevel|AddressFamily)=[a-zA-Z0-9._-]+$/iu.test(
             value,
@@ -9734,6 +9764,8 @@ async function pinPublicationSshCommand(
           throw unsupported();
         }
       } else if (!/^[a-zA-Z0-9._-]+$/u.test(value)) throw unsupported();
+      // Identity and known-hosts paths can also expand OpenSSH tokens.
+      if (bound.includes("%") || bound.includes("${")) throw unsupported();
       args[i] = arg.length > 2 ? option + bound : bound;
     }
   } else if (args.length) {
@@ -9753,16 +9785,23 @@ async function publicationSshCommand(
   repository: string,
   dependencies: CliDependencies,
 ): Promise<string> {
+  const { root, caller, directory } = await patchTransportDirectories(
+    repository,
+    dependencies,
+  );
+  const pin = (command: string | [string]) =>
+    pinPublicationSshCommand(
+      command,
+      root,
+      caller,
+      directory,
+      dependencies.environment,
+    );
   const environmentCommand = environmentEntry(
     dependencies.environment,
     "GIT_SSH_COMMAND",
   );
-  if (environmentCommand !== undefined)
-    return pinPublicationSshCommand(
-      environmentCommand,
-      repository,
-      dependencies,
-    );
+  if (environmentCommand !== undefined) return pin(environmentCommand);
   const fallback =
     environmentEntry(dependencies.environment, "GIT_SSH") === undefined
       ? "ssh"
@@ -9787,16 +9826,14 @@ async function publicationSshCommand(
   if (
     !scope ||
     !origin ||
-    !(await operatorPatchConfig(scope, origin, repository))
+    !(await operatorPatchConfig(scope, origin, repository, dependencies))
   )
     throw new CodexSecurityError(
       "Patch publication cannot run checkout-selected core.sshCommand. Select the SSH command through your user Git configuration or GIT_SSH_COMMAND.",
     );
   const legacy = environmentEntry(dependencies.environment, "GIT_SSH");
-  return pinPublicationSshCommand(
+  return pin(
     command === '"$GIT_SSH"' && legacy !== undefined ? [legacy] : command!,
-    repository,
-    dependencies,
   );
 }
 
