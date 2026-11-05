@@ -17,7 +17,12 @@ import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
 from windows_paths import extended_path, filesystem_path, portable_path, portable_relative_path
 from workbench.handoff import require_current_continuation
-from workbench.storage import archived_deep_path, create_private_directory, saved_deep_workers
+from workbench.storage import (
+    archived_deep_path,
+    create_private_directory,
+    saved_deep_workers,
+    worker_usage_directory,
+)
 from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
@@ -362,6 +367,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
             else scan["user_context"]
         ),
         "scanDir": scan["scan_dir"],
+        "workerUsageDirectory": str(portable_path(worker_usage_directory(run["scan_id"]))),
         "schemaVersion": run["schema_version"],
         "workflowVersion": run["workflow_version"],
         "coordinatorGeneration": run["coordinator_generation"],
