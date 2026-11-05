@@ -409,7 +409,9 @@ def test_collection_pages_honor_the_advertised_limit(
     if collection == "scans":
         page = workbench_api["scan_history"].list_scans(connection, arguments)
     elif collection == "repositories":
-        page = workbench_api["native_indexes"].list_repositories(connection, arguments)
+        page = workbench_api["native_indexes"].list_repositories(
+            connection, arguments, read_coverage=workbench_api["coverage_for_comparison"]
+        )
     else:
         page = workbench_api["list_findings"](connection, arguments)["findingsPage"]
     assert page["limit"] == 50
