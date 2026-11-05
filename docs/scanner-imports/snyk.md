@@ -14,9 +14,8 @@ Both routes support local and Cloud imports.
 
 ## Quick start
 
-From the checkout root,
-set the destination and choose a key for the repository, branch, original scan
-target and format. Replace `root` with your target if you scanned a
+From the checkout root, set the destination and choose a source key for the
+repository, branch, original scan target and format. Replace `root` with your target if you scanned a
 subdirectory such as `services/api`.
 
 ```sh

@@ -40,9 +40,10 @@ Codex plugin session.
 | Track a validated finding                               | Give [`$track-findings`](../plugins/codex-security/skills/track-findings/SKILL.md) the finding and destination. See [plugin connectors](plugin-connectors.md).                                                                             | For completed scans, see [publishing to Linear](../sdk/typescript/docs/cli.md#publish-completed-scans-to-linear).     |
 | Inspect a downloaded skill                              | [Review the skill before installation](#review-a-skill-before-installation) in a trusted Codex chat.                                                                                                                                       | Use the interactive Codex CLI with the plugin enabled.                                                                |
 
-**Read a saved dependency alert.** Run `cs findings imported ./project --format json` to list the repository's
-imported records. Give the relevant record to `$resolve-dependency-alert` when
-you want Codex to check the installed versions and upgrade options.
+**Read a saved dependency alert.** Run `cs findings imported ./project --format json`
+to list the records saved for that checkout. Give the relevant record to
+`$resolve-dependency-alert` to check installed versions and upgrade options.
+To bring in an alert from your scanner, use the [scanner import guides](scanner-imports/README.md).
 
 A scan or triage request produces findings. Ask to fix a specific finding when
 you want a patch. A separate fix verification reports `fixed`,

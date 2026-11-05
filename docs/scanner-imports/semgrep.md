@@ -1,7 +1,7 @@
 # Import Semgrep findings
 
-Choose the report or
-account you have. Each route has a different source of finding IDs.
+Choose the route that matches your report or account. Each route uses a different
+source of finding IDs.
 
 | Starting point                                                   | What to collect                                                                                                                                                                                | Destination    |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |

@@ -7,8 +7,7 @@ support gzip.
 
 ## Quick start
 
-This example imports
-repository package vulnerabilities.
+This example imports package vulnerabilities from a repository branch.
 
 **Saved report.** Choose the file for your repository and branch or build.
 With a connected Wiz account, list findings for the repository and family,

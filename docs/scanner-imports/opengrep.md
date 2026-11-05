@@ -5,8 +5,8 @@ parse errors or timeouts. The preview shows both.
 
 ## Quick start
 
-From the scanned checkout
-root, choose a saved report or run OpenGrep in the same shell.
+Run these commands from the root of the scanned checkout. Use a saved report or
+generate one with OpenGrep.
 
 **Saved report.** Set the path to your OpenGrep JSON file.
 

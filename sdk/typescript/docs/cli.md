@@ -1419,7 +1419,7 @@ exits with status 1. Local imports can retain evidence that exceeds Cloud's per-
 Preview the same file and source key again for the intended destination before
 publishing. Semgrep Guardian captures support local import only. Both Web API
 formats, a selected SAST capture and a full project collection, support local
-and Cloud import. The [Semgrep input selector](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) lists the four routes.
+and Cloud import. Choose the [Semgrep import method](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) that matches your source.
 
 ## Import Trivy dependency findings
 

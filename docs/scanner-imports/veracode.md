@@ -5,8 +5,7 @@ application. Use the application context and `scan_type=STATIC`.
 
 ## Quick start
 
-Verify that the
-application maps to a single Git repository and open its checkout.
+Verify that the application maps to a single Git repository and open its checkout.
 
 **Saved report.** Set `report` to the complete Findings API page or array of
 pages for your selection. Preserve each page's HAL links and pagination fields.

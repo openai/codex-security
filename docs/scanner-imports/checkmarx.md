@@ -41,8 +41,9 @@ Python 3.10+ interpreter and vendor tools installed outside the scanned source t
   CxFlow fetches by ID and exports the full XML even when issue-tracker filters are set.
   Session credentials require confirmation for that server. [CxSAST All Scans](https://docs.checkmarx.com/en/34965-46419-viewing-results-from-all-scans.html)
 
-For a subset, an older CLI, or a custom runtime, supply a native export from
-your usual environment. Keep reports in a private directory outside the checkout.
+If you need a subset or your tools differ from the collector requirements
+above, supply a native export from your usual environment. Keep reports in
+a private directory outside the checkout.
 [Supported sign-in and collection settings](../../plugins/codex-security/skills/publish-findings/references/checkmarx-import.md).
 
 ## Export one scan manually
