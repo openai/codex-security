@@ -479,24 +479,24 @@ def _scan_local_directory_error(message: str, error: OSError) -> ContractError:
     return ScanLocalIOError(message)
 
 
-def _require_scan_directory(scan_dir: Path) -> Path:
+def _require_scan_directory(scan_dir: Path, context: str = "scan directory") -> Path:
     scan_dir = scan_dir.absolute()
     try:
         metadata = scan_dir.lstat()
     except OSError as exc:
         raise _scan_local_directory_error(
-            "scan directory: expected an existing non-symlink directory", exc
+            f"{context} {scan_dir}: expected an existing non-symlink directory: {exc}", exc
         ) from exc
     if not stat.S_ISDIR(metadata.st_mode):
-        raise ContractError("scan directory: expected an existing non-symlink directory")
+        raise ContractError(f"{context}: expected an existing non-symlink directory")
     try:
         resolved = scan_dir.resolve(strict=True)
     except OSError as exc:
         raise _scan_local_directory_error(
-            "scan directory: expected an existing non-symlink directory", exc
+            f"{context} {scan_dir}: expected an existing non-symlink directory: {exc}", exc
         ) from exc
     if os.path.normcase(resolved) != os.path.normcase(scan_dir):
-        raise ContractError("scan directory: expected a canonical non-symlink directory")
+        raise ContractError(f"{context}: expected a canonical non-symlink directory")
     return resolved
 
 
@@ -805,7 +805,9 @@ def scan_local_file_version(descriptor: int) -> tuple[os.stat_result, int]:
 def _scan_local_write_path(
     scan_dir: Path, relative_path: str, external_name: bool
 ) -> tuple[Path, str]:
-    scan_dir = _require_scan_directory(scan_dir)
+    scan_dir = _require_scan_directory(
+        scan_dir, "export output directory" if external_name else "scan directory"
+    )
     if external_name:
         if relative_path in {"", ".", ".."} or "/" in relative_path or "\0" in relative_path:
             raise ContractError("external output path: expected a safe file name")
@@ -871,6 +873,11 @@ def stage_scan_local_bytes(
     owner_read_write: bool = False,
     replace_existing: bool = False,
 ) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
+    """Stage payload under the scan directory and yield a callback that publishes it.
+
+    Call the callback inside the context to get file metadata and a platform-specific
+    change-time token. Leaving without publishing discards the staged write.
+    """
     scan_dir, relative_path = _scan_local_write_path(scan_dir, relative_path, external_name)
     if not _descriptor_relative_writes_available():
         if not _is_windows():
@@ -968,7 +975,9 @@ def _validate_remote(remote: str, context: str) -> None:
         parsed = urlsplit(remote)
     except ValueError as exc:
         # urlsplit rejects authorities with unbalanced brackets.
-        raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
+        raise ContractError(
+            f"{context}: expected a sanitized canonical absolute URL: {exc}"
+        ) from exc
     if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
     if "@" in parsed.netloc or parsed.query or parsed.fragment:
@@ -2847,6 +2856,7 @@ def _read_sealed_scan(
 def build_sarif_projection(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> dict[str, Any]:
+    """Build SARIF for a sealed scan, using the optional source directory to resolve locations."""
     if source_root is not None:
         try:
             source_root = source_root.resolve(strict=True)
@@ -2901,6 +2911,11 @@ def build_findings_export(
     schema_dir: Path | None = None,
     avit_template: Path | None = None,
 ) -> bytes:
+    """Return bytes for the requested export of a sealed scan.
+
+    JSON preserves the sealed findings bytes. SARIF can use source_root to resolve
+    locations. ServiceNow AVIT requires an application template.
+    """
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
     if export_format == "sarif":
@@ -3024,6 +3039,8 @@ def _write_sarif_projection_if_possible(
 
 
 class PreparedScanFinalization(NamedTuple):
+    """Validated in-memory scan documents, rendered report bytes, and warnings awaiting publication."""
+
     scan_dir: Path
     schema_dir: Path
     manifest: dict[str, Any]
@@ -3035,6 +3052,7 @@ class PreparedScanFinalization(NamedTuple):
 
 
 def manifest_is_sealed(scan: dict[str, Any]) -> bool:
+    """Return whether the manifest records a seal time or sealed artifacts."""
     return scan.get("sealedAt") is not None or scan.get("artifacts") not in (None, [])
 
 
@@ -3419,8 +3437,11 @@ def main() -> int:
                     )
         else:
             finalize_scan(args.scan_dir, args.schema_dir, args.source_root)
-    except ContractError as exc:
-        parser.error(str(exc))
+    except (ContractError, OSError) as exc:
+        # Keep canonical paths readable and escape control characters at the terminal boundary.
+        parser.error(
+            "".join(char if char.isprintable() else ascii(char)[1:-1] for char in str(exc))
+        )
     return 0
 
 

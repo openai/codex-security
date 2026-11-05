@@ -1,3 +1,5 @@
+"""Carry phase receipts and historical preflight diagnostics through workbench progress updates."""
+
 import json
 import sqlite3
 from pathlib import Path

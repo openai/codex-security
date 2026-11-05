@@ -79,6 +79,18 @@ export async function buildMcpApp({ output, native = "universal" }) {
   await writeRuntime("helpers", "helpers-main.ts");
   await build({
     bundle: true,
+    entryPoints: [join(root, "src/session-decompression.ts")],
+    format: "esm",
+    outfile: join(mcpDir, "session-decompression.mjs"),
+    platform: "node",
+    target: "node20",
+  });
+  await copyFile(
+    join(root, "node_modules/fzstd/LICENSE"),
+    join(mcpDir, "fzstd-LICENSE.txt"),
+  );
+  await build({
+    bundle: true,
     entryPoints: [join(root, "src/deep-scan/permission-profile-preflight.ts")],
     format: "esm",
     outfile: join(mcpDir, "permission-profile-preflight.mjs"),

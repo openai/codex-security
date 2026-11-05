@@ -270,6 +270,7 @@ export async function validateDiscoveryArtifacts(
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
+  additionalModel?: ScanDraftInput["threatModel"],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
@@ -342,7 +343,11 @@ export function scanCoverage(
     };
   });
   return {
-    reviews: [provenance],
+    reviews: [
+      additionalModel
+        ? { ...provenance, threatModel: additionalModel }
+        : provenance,
+    ],
     surfaces,
     explicitExclusions: coverage.explicitExclusions.map((item) =>
       project(item, true),
@@ -402,7 +407,13 @@ export function addScanCoverage(
   }
   if (pending.length) aggregate.unresolvedCandidates = pending;
   else delete aggregate.unresolvedCandidates;
-  const coverage = scanCoverage(worker, scanDir);
+  const model = worker.result.threatModel;
+  aggregate.threatModel ??= model;
+  const additionalModel =
+    model && !isDeepStrictEqual(model, aggregate.threatModel)
+      ? model
+      : undefined;
+  const coverage = scanCoverage(worker, scanDir, additionalModel);
   const previous = aggregate.sourceCoverage;
   if (!previous) {
     aggregate.sourceCoverage = coverage;

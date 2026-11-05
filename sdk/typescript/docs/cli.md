@@ -130,8 +130,19 @@ after logout completes.
 Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
 `HOME` or `USERPROFILE` environment setting.
 
-If credentials cannot refresh, run `login status`. Retry if the sign-in recently
-changed; otherwise run `logout`, then `login`.
+If you use file-based ChatGPT credentials with both Codex and Codex Security,
+run `codex-security login` before your first scan or status check to give Codex
+Security its own session. An imported sign-in shares a single-use refresh token.
+When either client renews it, the other client's next refresh can fail even
+while its login status reports that it is signed in.
+
+If Codex Security reports that the refresh token was already used, run
+`codex-security logout`, then `codex-security login`. If your Codex CLI or app
+reports that error, sign out and sign back in there.
+
+For other refresh errors, check `codex-security login status`. Retry if the
+sign-in recently changed. Otherwise run `codex-security logout`, then
+`codex-security login`.
 Some cybersecurity requests and protected findings require
 [Trusted Access for Cyber](https://chatgpt.com/cyber).
 
@@ -522,7 +533,9 @@ or JSONL output produce:
 { "status": "failed", "code": "SCAN_FAILED", "message": "..." }
 ```
 
-With `--full-output`, the error appears under `error` in an `ok: false` envelope.
+With `--full-output`, JSON and JSONL failures put the error under `error` in an
+`ok: false` envelope. YAML and TOON use the same failed envelope when retained
+sealed scan results are available (including TOON selected by default).
 If the scan target changed, the error explains that the results no longer
 represent the current checkout. Retained sealed results remain available under
 `data`, including their manifest, findings, review summary, scan directory, and report
@@ -534,8 +547,8 @@ selecting an unavailable field can return `null` or omit `data`.
 Saved-scan setup failures use the same output shape with
 `SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
 available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
-scan uses `SCAN_IMPORT_FAILED` if the import fails. Other output formats retain
-stderr-only failures, including when `--full-output` is selected.
+scan uses `SCAN_IMPORT_FAILED` if the import fails. YAML and TOON failures remain
+on stderr without `--full-output`, or when retained results are unavailable.
 
 Diagnostics stay on stderr. Each command's `--schema --format json` describes
 its successful output and failure codes.
@@ -990,8 +1003,10 @@ publication uses the same request attribution; embedding requests identify
 the package and version in their `User-Agent`.
 
 These fields provide request attribution for supported inference providers, including
-Bedrock. They do not create a separate telemetry collector, record command
-starts or outcomes, or make another provider's traffic visible to OpenAI.
+Bedrock. They do not create a separate telemetry collector or make another
+provider's traffic visible to OpenAI. Local operation receipts separately record
+starts, outcomes, duration, and usage coverage; see
+[telemetry and measurement](telemetry.md).
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
@@ -1171,7 +1186,14 @@ attempt. Post-scan prompts run after cost tracking and are outside this limit.
 Automatic history matching gets at most one extra call with a limit; if more
 work is needed, the scan is preserved and you can run `scans match --all`.
 
-When Deep discovery has finished at a cost stop, the scan returns a sealed
+A scan with a cost limit requires complete token usage for its recorded scan,
+worker, and custom validation sessions before the SDK returns a completed result.
+Verifying compressed `.jsonl.zst` sessions requires Python 3.14 or later, or
+`backports.zstd` installed in the selected Python environment.
+Missing or unreadable usage fails budget verification. Without a limit, usage
+reporting remains best effort.
+
+When Deep discovery has finished at a cost stop and usage is verified, the scan returns a sealed
 report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report returns `0` by default, or `1` if findings
 meet a configured failure threshold.
@@ -1431,6 +1453,10 @@ For completed scans exported in the Codex Security JSON or CSV format, use
 
 For Checkmarx One CLI JSON or CxSAST XML, use `--provider checkmarx` and pass the
 verified Git URL with `--source-repository-url`. See the [Checkmarx SAST guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md).
+
+## Import Trivy dependency findings
+
+Use `--provider trivy` to read a schema-v2 repository or filesystem report (JSON or gzip). Pass `--trivy-scan-root .` for a whole checkout or a checkout-relative path for a subtree. A corroborated remote repository scan can infer the root. See the [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md) for a preview command, repository matching, and how to save or publish the results.
 
 ## Import Endor Labs findings
 
@@ -2164,11 +2190,10 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
-Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
-Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
-compressed sessions are unavailable to `scans logs`, feedback attachments, and
-`scans resume`. Upgrade Node.js to read or resume these sessions. Plain `.jsonl`
-logs work on all supported runtimes.
+Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
+work on all supported Node.js versions, including logs, feedback attachments,
+usage accounting, and saved-session discovery for resume. A bundled decoder
+reads concatenated frames and reports truncated streams as collection errors.
 
 ### Resuming an interrupted Deep Scan
 
@@ -2814,10 +2839,11 @@ truncating any selected finding. The CLI prints verdicts in selection order
 after every request returns valid results. For these selections the CLI omits
 per-event progress and update notices so stderr cannot delay the verdicts.
 
-If one finding exceeds the input limit on its own, verification stops before
-the first request. The error reports its occurrence ID and required request
-size. To verify another open occurrence from that scan, run
-`codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID`.
+If a finding would exceed the input limit, `validate`, `patch`, and `verify-fix`
+automatically put the complete finding data in a temporary file and ask Codex
+to read it in bounded chunks. No manual splitting or truncation is needed.
+The file remains available until the task finishes and is then removed. The
+SDK's local `validate()` and `patch()` methods use the same fallback.
 
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
@@ -2838,7 +2864,9 @@ retain exit codes `130` and `143` without a result.
 
 Use `--llms` for the command manifest, `scan --schema --format json` for its
 schema, and `completions bash|zsh|fish` for shell completions. Scan output supports
-`--format toon|json|yaml|jsonl` and `--full-output`.
+`--format toon|json|yaml|jsonl` and `--full-output`. The existing `--format`,
+`--filter-output`, `--token-limit`, and `--token-offset` options accept either
+`--option value` or `--option=value`.
 
 `skills add` syncs generated CLI command guidance; it does not install the full
 Codex Security plugin. `mcp add` registers the CLI as an MCP server, exposing

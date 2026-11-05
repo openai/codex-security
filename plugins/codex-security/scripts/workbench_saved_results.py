@@ -101,6 +101,7 @@ _RESERVED_ARTIFACT_PATHS = json.loads(
 
 
 def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
+    """Return availability and provenance for a saved threat model, reporting it as unavailable when verification fails."""
     scan_dir = Path(scan["scan_dir"])
     fields: dict[str, Any] = {"threatModelAvailable": False}
     try:
@@ -378,6 +379,7 @@ def _recovery_source_digests(
 
 
 def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
+    """Return whether a failed, uncanceled scan has a publication error or saved evidence to recover."""
     if scan["status"] != "failed" or scan["canceled_at"] is not None:
         return False
     warnings = json.loads(scan["completion_warnings_json"])
@@ -435,6 +437,7 @@ def preserve_parent_head_on_error(scan_dir: Path) -> Iterator[None]:
 
 
 def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
+    """Return coverage from the verified, sealed scan or raise SystemExit if the stored scan cannot be matched."""
     if scan["seal_manifest_digest"] is None:
         raise SystemExit("Only sealed scans can be compared.")
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
@@ -920,6 +923,7 @@ def preserve_scan_results_locked(
 
 
 def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+    """Recover terminal results from saved checkpoints under the completion lock for a failed, uncanceled scan."""
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
@@ -952,6 +956,7 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+    """Publish results for a stopped scan under its completion lock and return the updated scan context."""
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
@@ -1029,6 +1034,12 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+    """Publish a staged draft for the current continuation of a running, unsealed scan.
+
+    Read the draft from its registered scan directory and bind it to the scan
+    before publishing it under the completion lock. Return the scan ID, the
+    draft_written status, and any warning about the optional threat model.
+    """
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
@@ -1267,6 +1278,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         scan = db.require_scan(connection, scan_id)
         if scan["status"] == "failed":
             connection.commit()
+            record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return db.scan_context(connection, scan["id"])
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
@@ -1279,11 +1291,10 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
-                cost_json = ?
+            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (message, timestamp, timestamp, cost_json, scan["id"]),
+            (message, timestamp, timestamp, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
@@ -1294,6 +1305,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
+    record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
     return db.scan_context(connection, scan["id"])
 
@@ -1317,6 +1329,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
             connection.commit()
+            record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return {
                 **db.workspace_state(connection, scan["workspace_id"]),
                 "canceledScanId": scan["id"],
@@ -1326,11 +1339,10 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?,
-                cost_json = COALESCE(?, cost_json)
+            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, timestamp, cost_json, scan["id"]),
+            (timestamp, timestamp, timestamp, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be canceled.")
@@ -1341,11 +1353,43 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
+    record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
     return {**db.workspace_state(connection, scan["workspace_id"]), "canceledScanId": scan["id"]}
 
 
+def record_stopped_scan_usage(
+    db: Any, connection: Any, scan_id: str, cost_json: str | None = None
+) -> None:
+    """Keep optional accounting independent of the already-persisted scan outcome."""
+
+    try:
+        scan = db.require_scan(connection, scan_id)
+        fields = db.scan_usage.merge_scan_usage_fields(
+            db.scan_usage.stored_scan_cost_fields(scan["cost_json"]),
+            db.scan_usage.stored_scan_cost_fields(cost_json),
+        )
+        fields = db.scan_usage.merge_scan_usage_fields(
+            fields,
+            {"usage": db.scan_usage.collect_scan_usage_safely(connection, scan)},
+        )
+        if fields:
+            encoded = db.parse_scan_cost(json.dumps(fields))
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'failed'",
+                    (encoded, scan_id),
+                )
+    except (Exception, SystemExit) as exc:
+        try:
+            print(f"Could not save stopped scan token usage: {exc}", file=sys.stderr)
+        except OSError:
+            # A closed diagnostic stream must not alter the persisted scan outcome.
+            pass
+
+
 def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id: str) -> None:
+    """Try to publish saved evidence after stopping a scan and record a warning if publication fails."""
     try:
         published = preserve_scan_results_locked(db, connection, scan_id)
     except (ContractError, OSError, SystemExit, ValueError) as exc:

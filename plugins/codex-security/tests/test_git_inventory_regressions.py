@@ -1,3 +1,5 @@
+"""Exercise local Git inventories for root commits, worktree changes, submodules, and optional snapshots."""
+
 from __future__ import annotations
 
 import hashlib

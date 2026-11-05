@@ -48,6 +48,7 @@ try {
   await testWorkerPublicationBeforeCheckpoint(root);
   await testLegacyDeferredPublication(root);
   testResolvedDeferredPublication();
+  testDistinctThreatModels();
   await testMissingReceiptRepair(root);
   for (const reverse of [false, true])
     await testMissingReceiptRepair(root, { shared: true, reverse });
@@ -184,6 +185,33 @@ async function testUnresolvedCandidates(root: string) {
     resumed.unresolvedCandidates,
   );
   assert.equal(Object.hasOwn(published, "unresolvedCandidates"), false);
+}
+
+function testDistinctThreatModels() {
+  const aggregate: ScanUnion = { scanId, findings: [] };
+  const first = { summary: "An unauthenticated caller can reach the service." };
+  const other = {
+    format: "markdown",
+    content: "A worker can also submit a job.",
+  };
+  for (const [i, threatModel] of [first, { ...first }, other].entries()) {
+    addScanCoverage(
+      aggregate,
+      {
+        id: `worker-${i}`,
+        attempt: 1,
+        resultPath: "worker/output/result.json",
+        result: draft([], { threatModel }),
+      },
+      ".",
+    );
+  }
+  assert.deepEqual(aggregate.threatModel, first);
+  assert.deepEqual(aggregate.sourceCoverage?.reviews, [
+    { workerId: "worker-0", attempt: 1 },
+    { workerId: "worker-1", attempt: 1 },
+    { workerId: "worker-2", attempt: 1, threatModel: other },
+  ]);
 }
 
 function testResolvedDeferredPublication() {

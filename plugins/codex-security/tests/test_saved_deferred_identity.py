@@ -1,3 +1,5 @@
+"""Track deferred observations through ID collisions, worker revisions, and frozen source order."""
+
 from __future__ import annotations
 
 import copy

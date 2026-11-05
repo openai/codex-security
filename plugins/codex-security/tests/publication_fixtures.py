@@ -1,3 +1,5 @@
+"""Build recorded workbench scans and worker artifacts for publication and crash-recovery tests."""
+
 from __future__ import annotations
 
 import copy
@@ -14,7 +16,19 @@ from workbench_test_support import read_review_state, write_completed_contract
 
 
 class PublicationScan(SimpleNamespace):
+    """Drive publication and recovery against one test scan and its persisted worker records."""
+
+    def worker_draft(self, findings=(), **coverage_updates):
+        """Build a completed worker result using this scan's coverage as the starting point."""
+        return {
+            "scanId": self.scan_id,
+            "complete": True,
+            "findings": list(findings),
+            "coverage": {**self.coverage, **coverage_updates},
+        }
+
     def add_worker(self, connection=None, *, status="succeeded") -> Path:
+        """Register a discovery worker and return the path where the test can write its result manifest."""
         worker_id = str(uuid.uuid4())
         output = self.scan_dir / "workers" / worker_id
         output.mkdir(parents=True)
@@ -221,16 +235,7 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
 def saturated_scan(publication_scan):
     scan = publication_scan()
     completed_result = scan.add_worker()
-    completed_result.write_text(
-        json.dumps(
-            {
-                "scanId": scan.scan_id,
-                "complete": True,
-                "findings": scan.findings,
-                "coverage": scan.coverage,
-            }
-        )
-    )
+    completed_result.write_text(json.dumps(scan.worker_draft(scan.findings)))
     reducer_result = scan.add_worker()
     reducer_result.write_bytes(completed_result.read_bytes())
     with scan.connection:

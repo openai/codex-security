@@ -21,6 +21,7 @@ import {
   readSemgrepReport,
 } from "./semgrep-findings.js";
 import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
+import { readTrivyFindings } from "./trivy-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import {
   normalizeEndorFindings,
@@ -30,9 +31,15 @@ import { readGitHubFindings } from "./github-findings.js";
 import { readSonarFindings } from "./sonar-findings.js";
 import { readVeracodeFindings } from "./veracode-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
-import { readContinuumFindings } from "./continuum-findings.js";
+import {
+  normalizeContinuumFindings,
+  normalizePreviousContinuumFindings,
+} from "./continuum-findings.js";
 import { readCheckmarxFindings } from "./checkmarx-findings.js";
-import { readInspectorFindings } from "./inspector-findings.js";
+import {
+  normalizeInspectorFindings,
+  normalizePreviousInspectorFindings,
+} from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
   readLocalWizFindings,
@@ -45,6 +52,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
   snyk: "snyk",
   semgrep: "semgrep",
+  trivy: "trivy",
   // OpenGrep uses the existing SAST contract; evidence retains its scanner origin.
   opengrep: "semgrep",
   endor: "endor",
@@ -68,11 +76,13 @@ export interface ExternalFindingsReaderOptions {
   provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
   inspectorProjectMap?: ReadonlyMap<string, string>;
+  trivyScanRoot?: string;
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
 export interface ReadExternalFindings {
   findings: ExternalFindings;
+  previousFindings?: () => ExternalFindings;
   /** Preserve previous Wiz projections when resuming immutable Cloud requests. */
   publication?: ExternalPublicationInput;
   sourceRepositories?: ExternalSourceRepository[];
@@ -162,6 +172,10 @@ export async function readExternalFindings(
   references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
+  if (provider === "trivy")
+    return {
+      findings: await readTrivyFindings(path, target, options.trivyScanRoot),
+    };
   if (provider === "sonar") {
     const url = options.sourceRepositoryUrl;
     const findings = await readSonarFindings(path, url ?? "", target);
@@ -216,23 +230,44 @@ export async function readExternalFindings(
   }
   if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };
+  if (provider === "inspector" || provider === "continuum") {
+    const url = options.sourceRepositoryUrl ?? "";
+    const mapping =
+      options.inspectorProjectMap && new Map(options.inspectorProjectMap);
+    const input = await readScannerJson(path);
+    const normalize =
+      provider === "inspector"
+        ? normalizeInspectorFindings
+        : normalizeContinuumFindings;
+    const previous =
+      provider === "inspector"
+        ? normalizePreviousInspectorFindings
+        : normalizePreviousContinuumFindings;
+    // Both projections describe the same captured file, including rows admitted
+    // by just one reader. Detail arrays are new to Continuum.
+    const wasSupported = provider === "inspector" || !Array.isArray(input);
+    return {
+      findings: normalize(input, url, target, mapping),
+      previousFindings:
+        target === "cloud" && wasSupported
+          ? () => previous(input, url, target, mapping)
+          : undefined,
+      sourceRepositories: [{ url }],
+    };
+  }
   if (
-    provider === "inspector" ||
-    provider === "continuum" ||
     provider === "checkmarx" ||
     provider === "blackduck" ||
     provider === "veracode"
   ) {
     const url = options.sourceRepositoryUrl ?? "";
     const read = {
-      inspector: readInspectorFindings,
-      continuum: readContinuumFindings,
       checkmarx: readCheckmarxFindings,
       blackduck: readBlackDuckFindings,
       veracode: readVeracodeFindings,
     }[provider];
     return {
-      findings: await read(path, url, target, options.inspectorProjectMap),
+      findings: await read(path, url, target),
       sourceRepositories: [{ url }],
     };
   }
