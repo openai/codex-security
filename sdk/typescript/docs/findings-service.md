@@ -1,23 +1,33 @@
 # Findings storage and deduplication
 
-Saved scans and findings persist in the local workbench SQLite database.
-Deduplication reads that database directly; no local HTTP service is needed.
-The CLI can also publish to and deduplicate against independently operated
-compatible endpoints through explicit `--findings-url` settings.
+Choose where the duplicate candidates and groups should live.
 
-For an older service deployment or helper integration, see [compatibility](#compatibility).
+- **Local workbench.** The CLI stores saved scans and findings in SQLite.
+  Use this default to search the current checkout's stored findings. New
+  embeddings and fresh reviews still need provider access.
+- **Independently operated endpoint.** To search a shared corpus, use a
+  [compatible findings endpoint](#compatible-endpoint-contract) that already
+  holds your candidates. [Publish the scan](#publish-a-scan) or import its
+  findings into the service with the matching `repositoryId` first.
 
 ## Deduplicate a scan
 
-Saved-scan deduplication uses local SQLite by default. No findings service or
-publication step is required:
+For the local workbench, run:
 
 ```bash
 codex-security dedupe --scan SCAN_ID --json
 ```
 
-See [local embedding requirements](#local-embeddings-and-backups) for endpoint,
-credential, and vector compatibility.
+For a shared corpus, supply the base URL of your endpoint:
+
+```bash
+codex-security dedupe --scan SCAN_ID --findings-url https://findings.example.com --json
+```
+
+Replace `SCAN_ID` with the ID of a completed scan, or use `latest` for the
+current repository. For local setup or migration, see
+[embedding credentials and backups](#local-embeddings-and-backups) or
+[moving from the bundled service](#local-service-removal).
 
 The CLI prepares missing or stale embeddings for the local repository's stored
 findings, searches them, and saves reviewed duplicate groups in the workbench
@@ -36,28 +46,23 @@ select logical findings using their current stored bodies; dedupe does not
 replace newer bodies with old scan artifacts. A local database does not include
 findings stored only in a separate Docker volume or remote service.
 
-To retain a centralized findings corpus, publish the scan first, or import its
-findings with `repositoryId`, and explicitly select the service:
+A scan or workflow selector is required. Use a full scan ID, a unique prefix, or
+`latest` for the current repository. The scan must be complete and its artifacts
+sealed. Reviews that read source also require the local checkout.
 
-```bash
-codex-security dedupe --scan SCAN_ID --findings-url https://findings.example.com --json
-```
+Local `latest` verifies the checkout generation and component scope. Non-Git
+targets match by exact path. Git history, including matches across worktrees or
+clones, requires a Git executable outside all saved checkout directories. For a
+legacy Git target without a recorded checkout directory, set `CODEX_SECURITY_GIT`
+to an absolute, trusted Git executable. If a saved checkout contains the
+available Git installation, select the scan by its explicit ID.
 
-A scan or workflow selector is required. `--scan`
-accepts a full ID, unique prefix, or `latest` for the current repository. The
-scan must be complete, with sealed artifacts. Review that reads source also
-requires its local checkout.
-Local `latest` lookup verifies the checkout generation and component scope.
-Non-Git targets can match by exact path; Git history and matching across worktrees
-or clones require a Git executable outside the saved checkout directories. If an
-older Git target has no recorded checkout directory, set `CODEX_SECURITY_GIT` to
-an absolute, trusted Git executable. If you use system Python, set `PYTHON` to
-its absolute path. You can also select the scan directly with
-`codex-security dedupe --scan SCAN_ID`. When running local deduplication on
-older history, use Node.js if Bun cannot locate a trusted Node.js helper.
+For older history, use an absolute `PYTHON` path when selecting system Python.
+If Bun cannot locate a trusted Node.js helper, run local deduplication with
+Node.js.
+
 By default, candidates come from its manifest's `scan.target.targetId`. Use
-`--all-repositories` to search the whole selected database or service. Explicit
-`--findings-url` retains the existing remote lookup and publication behavior.
+`--all-repositories` to search the whole selected database or service.
 
 ```typescript
 import { deduplicateScan } from "@openai/codex-security";

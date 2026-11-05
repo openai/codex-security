@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
-import { normalizeContinuumFindings } from "../src/continuum-findings.js";
+import {
+  normalizeContinuumFindings,
+  normalizePreviousContinuumFindings,
+} from "../src/continuum-findings.js";
 import {
   createAndReplayFinding,
   localReportFixture,
@@ -28,6 +31,7 @@ test("a Continuum list and a detailed finding share the AWS occurrence ARN", () 
   expect(list.findings[0]!.evidence).toMatchObject({
     title: first.title,
     severity: "critical",
+    source_updated_at: Date.parse(first.statusUpdatedAt) / 1000,
     locations: [{ path: first.filePath, line: null }],
     source_data: { sourceRepositoryUrl: continuumRepository, finding: first },
   });
@@ -43,6 +47,7 @@ test("a Continuum list and a detailed finding share the AWS occurrence ARN", () 
         source_finding_id: first.findingArn,
         evidence: {
           severity: "critical",
+          source_updated_at: Date.parse(detail.statusUpdatedAt) / 1000,
           description: detail.detailedDescription,
           locations: [
             { path: first.filePath, line: 3 },
@@ -63,14 +68,46 @@ test("a Continuum list and a detailed finding share the AWS occurrence ARN", () 
   });
 });
 
+test("a selected array retains the same evidence as separate GetCodeFinding responses", () => {
+  const first = continuumDetail();
+  const second = {
+    ...first,
+    ...continuumSummary("two"),
+    statusUpdatedAt: 1_767_312_123.5,
+  };
+  const selected = normalize([first, second]);
+  expect(selected.excluded).toEqual([]);
+  expect(selected.findings).toEqual([
+    ...normalize(first).findings,
+    ...normalize(second).findings,
+  ]);
+  expect(selected.findings[1]!.evidence.source_updated_at).toBe(1_767_312_123);
+  expect(() => normalize([first, continuumSummary("two", "other")])).toThrow(
+    /same environment/,
+  );
+  expect(normalize([first, first]).excluded).toHaveLength(2);
+});
+
 test("preserves dependency and posture evidence without classifying it as a code flaw", () => {
   const summary = continuumSummary();
+  const pkg = {
+    name: "example",
+    version: "1.0.0",
+    packageManager: "npm",
+    fixedInVersion: "1.0.1",
+  };
   const dependency = {
     ...summary,
     ocsfClass: "VULNERABILITY_FINDING",
     cveId: "CVE-2099-0001",
-    affectedPackages: [
-      { name: "example", version: "1.0.0", fixedInVersion: "1.0.1" },
+    affectedPackages: [pkg],
+    vulnerabilities: [
+      {
+        affectedPackages: [
+          pkg,
+          { name: "other", packageManager: "npm", version: "^2.0.0" },
+        ],
+      },
     ],
   };
   const posture = {
@@ -85,9 +122,108 @@ test("preserves dependency and posture evidence without classifying it as a code
     expect(evidence.details).toBeUndefined();
     expect(evidence.source_data?.["finding"]).toEqual(finding);
   }
-  expect(normalize(dependency).findings[0]!.evidence.advisory_ids).toEqual([
-    dependency.cveId,
+  expect(normalize(dependency).findings[0]!.evidence).toMatchObject({
+    advisory_ids: [dependency.cveId],
+    packages: [
+      {
+        name: "example",
+        ecosystem: "npm",
+        installed_version: "1.0.0",
+        fixed_versions: ["1.0.1"],
+      },
+      {
+        name: "other",
+        ecosystem: "npm",
+        installed_version: null,
+        fixed_versions: [],
+      },
+    ],
+  });
+});
+
+test("keeps package-manager selectors in the native finding", () => {
+  const finding = {
+    ...continuumSummary(),
+    affectedPackages: [
+      { name: "example-java", packageManager: "Gradle", version: "1.+" },
+      { name: "example-js", packageManager: "pnpm", version: "1" },
+    ],
+  };
+  const [row] = normalize(finding).findings;
+  expect(row!.evidence.packages?.map((p) => p.installed_version)).toEqual([
+    null,
+    null,
   ]);
+  expect(row!.evidence.source_data?.["finding"]).toEqual(finding);
+});
+
+test("retains status timestamps without inventing an update time from other AWS fields", () => {
+  const summary = continuumSummary();
+  for (const statusUpdatedAt of [undefined, "unknown", "2026-01-02T00:01:00"]) {
+    const { findings, excluded } = normalize({ ...summary, statusUpdatedAt });
+    expect(excluded).toEqual([]);
+    expect(findings[0]!.evidence.source_updated_at).toBeNull();
+  }
+  const offset = normalize({
+    ...summary,
+    statusUpdatedAt: "2026-01-02T01:01:00.999+01:00",
+  });
+  expect(offset.findings[0]!.evidence.source_updated_at).toBe(
+    Date.parse(summary.statusUpdatedAt) / 1000,
+  );
+});
+
+test("Cloud projects packages within its limits and retains all AWS package evidence", () => {
+  const valid = Array.from({ length: 101 }, (_, i) => ({
+    name: `package-${i}`,
+  }));
+  const finding = {
+    ...continuumSummary(),
+    affectedPackages: [{ name: "界".repeat(200) }, ...valid],
+  };
+  const cloud = normalize(finding);
+  expect(cloud.excluded).toEqual([]);
+  expect(cloud.findings[0]!.evidence.packages?.map((pkg) => pkg.name)).toEqual(
+    valid.slice(0, 100).map((pkg) => pkg.name),
+  );
+  expect(cloud.findings[0]!.evidence.source_data?.["finding"]).toEqual(finding);
+  const local = normalizeContinuumFindings(
+    finding,
+    continuumRepository,
+    "local",
+  );
+  expect(local.findings[0]!.evidence.packages).toHaveLength(102);
+});
+
+test("a Cloud finding that fits with native packages alone still imports", () => {
+  const finding = {
+    ...continuumSummary(),
+    affectedPackages: [
+      { name: "example", version: "1.0.0", packageManager: "npm" },
+    ],
+    padding: "",
+  };
+  const previous = normalizePreviousContinuumFindings(
+    finding,
+    continuumRepository,
+  );
+  const bytes = Buffer.byteLength(
+    JSON.stringify(previous.findings[0]!.evidence),
+  );
+  finding.padding = "x".repeat(256 * 1024 - bytes);
+  const result = normalize(finding);
+  expect(result.excluded).toEqual([]);
+  expect(result.findings[0]!.evidence.packages).toEqual([]);
+  expect(result.findings[0]!.evidence.source_data?.["finding"]).toEqual(
+    finding,
+  );
+  finding.padding = finding.padding.slice(10);
+  const withTimestamp = normalize(finding);
+  expect(withTimestamp.findings[0]!.evidence).toMatchObject({
+    packages: [],
+    source_updated_at: Date.parse(finding.statusUpdatedAt) / 1000,
+    source_data: { finding },
+  });
 });
 
 test("unsafe paths stay in native evidence without becoming checkout locations", () => {

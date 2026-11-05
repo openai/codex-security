@@ -6,11 +6,6 @@ In the Ona project's Settings, set **Dev Container path** to
 after changing the path. The Ona configuration uses the same image, feature
 versions, and install script as the default Dev Container.
 
-Run `install`, `build`, or `test` from Ona's task list. Dependency installation
-and builds also run during prebuilds. Before running tests, download the
-source-matched native artifact described in [SDK testing](../sdk/typescript/TESTING.md).
+From the Ona task list, select **Install dependencies**, then **Build**. These tasks also run during prebuilds. To run **Run tests**, first [download the native payload for your checkout](../plugins/codex-security/native/README.md#package-inputs).
 
-For migration from the findings service, retain its data volume and follow
-the [local findings and dedupe guide](../sdk/typescript/docs/findings-service.md).
-Keep the shared and Ona feature definitions and lockfiles aligned when updating
-the toolchain.
+When updating the toolchain, keep the shared and Ona feature definitions and lockfiles aligned.
