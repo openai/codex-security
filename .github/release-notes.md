@@ -101,6 +101,7 @@
 - import Trivy findings locally and to Cloud ([#2276](https://github.com/openai/codex-security/pull/2276))
 - preserve usage coverage and operation outcomes ([#1841](https://github.com/openai/codex-security/pull/1841))
 - preserve saved-scan errors and recovery advice ([#1266](https://github.com/openai/codex-security/pull/1266))
+- preserve AWS code scanning evidence and retries ([#2347](https://github.com/openai/codex-security/pull/2347))
 
 <!-- release-section: highlights:end -->
 
