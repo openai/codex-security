@@ -52,13 +52,10 @@ jobs. The dry-run preview shows `privateImport` when that route is available.
 | [Semgrep](semgrep.md)                                       | CLI/CI JSON, SARIF, selected Guardian findings, or Platform Web API reports     |
 | [Snyk](snyk.md)                                             | CLI JSON, plugin exports, SARIF, or monitored Code and Open Source issues       |
 | [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
+| [Tenable One](tenable.md)                                   | Selected Code Repository inventory findings (experimental, local only)          |
 | [Trivy](trivy.md)                                           | Native schema-v2 repository or filesystem JSON, optionally gzip-compressed      |
 | [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |
 | [Wiz](wiz.md)                                               | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV |
-
-**Experimental local import.** This checkout can import selected Tenable One
-inventory findings for a single Code Repository asset.
-[Tenable One pilot](tenable.md)
 
 If you selected specific findings, compare the preview with your selection.
 Check for missing, duplicate, or unexpected occurrences and resolve any

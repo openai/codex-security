@@ -74,9 +74,11 @@ export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
 export type CloudFindingsReader = Exclude<ExternalFindingsReader, "tenable">;
 
 export function requireCloudReader(
-  provider: ExternalFindingsReader,
-): asserts provider is CloudFindingsReader {
-  if (provider === "tenable")
+  options: ExternalFindingsReaderOptions,
+): asserts options is ExternalFindingsReaderOptions & {
+  provider: CloudFindingsReader;
+} {
+  if (options.provider === "tenable")
     throw new CodexSecurityError(
       "Tenable findings require a local import (--to local).",
     );
@@ -188,7 +190,7 @@ export async function readExternalFindings(
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
   if (provider === "tenable") {
-    if (target === "cloud") requireCloudReader(provider);
+    if (target === "cloud") requireCloudReader(options);
     return {
       findings: await readTenableFindings(
         path,

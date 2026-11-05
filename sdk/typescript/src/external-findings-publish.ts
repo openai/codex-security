@@ -29,6 +29,7 @@ import {
   type PrivateImportJob,
 } from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
+import type { LocalExternalImportOptions } from "./external-findings-import.js";
 import { tenableReportFormat } from "./tenable-findings.js";
 import {
   guardianFindingId,
@@ -52,7 +53,6 @@ import {
   requireCloudReader,
   semgrepSarifRepositories,
   type CloudFindingsReader,
-  type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import {
   canSnapshotWithoutGetters,
@@ -163,10 +163,7 @@ export interface NormalizedExternalPublicationOptions {
 }
 
 /** File readers accepted by the Cloud publisher. */
-export interface ExternalPublicationOptions
-  extends
-    Omit<NormalizedExternalPublicationOptions, "provider">,
-    ExternalFindingsReaderOptions {
+export interface ExternalPublicationOptions extends LocalExternalImportOptions {
   provider: CloudFindingsReader;
 }
 
@@ -589,7 +586,8 @@ function storedFindingId(finding: ExternalFinding): string {
 
 function rejectLocalOnlyFindings(input: ExternalFindings): void {
   function checkFormat(format: unknown) {
-    if (format === tenableReportFormat) requireCloudReader("tenable");
+    if (format === tenableReportFormat)
+      requireCloudReader({ provider: "tenable" });
     if (format === guardianSelectionFormat)
       throw new CodexSecurityError(
         "Semgrep Guardian findings require a local import.",
@@ -612,7 +610,7 @@ export async function prepareExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
-  requireCloudReader(settings.provider);
+  requireCloudReader(settings);
   const readerSources = snapshotSourceRepositories(
     dependencies.sourceRepositories,
   );
@@ -707,7 +705,7 @@ export async function prepareNormalizedExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
-  requireCloudReader(settings.provider);
+  requireCloudReader(settings);
   return preparePublicationInput(
     normalizedPublicationInput(input, settings.provider),
     settings,

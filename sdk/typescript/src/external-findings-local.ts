@@ -47,7 +47,10 @@ import {
   semgrepSarifRepositories,
   type LocalFindingProvider,
 } from "./external-findings-read.js";
-import { tenableReportFormat } from "./tenable-findings.js";
+import {
+  tenableReportFormat,
+  tenableSourceRepository,
+} from "./tenable-findings.js";
 import {
   guardianFindingSourceData,
   guardianSelectionFormat,
@@ -763,7 +766,8 @@ export function distinctSourceRepositories(
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
-  settings: NormalizedLocalImportOptions,
+  options: NormalizedLocalImportOptions &
+    ({ provider: "tenable" } | { provider: Provider }),
   dependencies: LocalExternalImportDependencies,
   readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),
@@ -771,21 +775,24 @@ export async function prepareLocalImport(
   parsedInput: readonly ExternalSourceRepository[] = [],
   fetchRemotes?: readonly ConfiguredFetchRemote[],
 ): Promise<PreparedLocalExternalImport> {
-  requireIdentity(settings.sourceKey, "Source key");
+  requireIdentity(options.sourceKey, "Source key");
   const parsedSources = distinctSourceRepositories(parsedInput);
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
   if (
-    settings.provider !== "tenable" &&
-    current.report?.["format"] === tenableReportFormat
+    options.provider !== "tenable" &&
+    (current.report?.["format"] === tenableReportFormat ||
+      current.findings.some(
+        (row) => row.evidence?.source_data?.["format"] === tenableReportFormat,
+      ))
   )
     throw new CodexSecurityError(
       "Retained Tenable evidence requires the tenable provider.",
     );
-  checkTrivyReportProvider(settings.provider, current.report);
+  checkTrivyReportProvider(options.provider, current.report);
   // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
   if (!("snykRestContext" in current) && "snykRestContext" in input)
     current.snykRestContext = structuredClone(input.snykRestContext);
-  if (settings.provider === "snyk" || current.snykRestContext !== undefined) {
+  if (options.provider === "snyk" || current.snykRestContext !== undefined) {
     for (const key of [
       "sourceRepositoryUrl",
       "sourceRepositoryPlatform",
@@ -804,15 +811,8 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
-    checkRetainedTrivyProvider(settings.provider, finding, "local");
-    if (
-      settings.provider !== "tenable" &&
-      finding.evidence.source_data?.["format"] === tenableReportFormat
-    )
-      throw new CodexSecurityError(
-        "Retained Tenable evidence requires the tenable provider.",
-      );
-    if (settings.provider !== "github") continue;
+    checkRetainedTrivyProvider(options.provider, finding, "local");
+    if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
     if (!native) continue;
     const claimed = finding.evidence.details?.repository?.url;
@@ -829,17 +829,31 @@ export async function prepareLocalImport(
       );
     dependabotSource = native;
   }
-  const context = await localContext(settings.repository, dependencies);
-  if (settings.provider === "tenable") {
-    await verifyTenableCheckout(
+  const context = await localContext(options.repository, dependencies);
+  if (options.provider === "tenable") {
+    const source = tenableSourceRepository(
       current,
-      settings,
+      options.sourceRepositoryUrl,
       [...readerSources, ...parsedSources],
-      context,
     );
-    return preparedLocalStorage(current, settings, context, dependencies, true);
+    const remotes = await readHostedGitRemotes(
+      context.repository,
+      [
+        ...context.options.protectedRoot,
+        await abortable(
+          () => canonicalConfigPath(process.cwd()),
+          dependencies.signal,
+        ),
+      ],
+      context.options.environment,
+      dependencies.signal,
+    );
+    if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
+      throw new CodexSecurityError(
+        "Tenable's source repository must match a configured Git fetch remote of the selected checkout.",
+      );
+    return preparedLocalStorage(current, options, context, dependencies, true);
   }
-  const options = { ...settings, provider: settings.provider };
   const { repository, options: workbenchOptions } = context;
   const sources = new Map<string, ExternalSourceRepository>();
   const references = [...readerSources, ...parsedSources];
@@ -1346,91 +1360,6 @@ export async function prepareLocalImport(
     dependencies,
     matchesRepositoryRemote,
   );
-}
-
-async function verifyTenableCheckout(
-  current: ExternalFindings,
-  options: NormalizedLocalImportOptions,
-  references: readonly ExternalSourceRepository[],
-  { repository, options: workbench }: Awaited<ReturnType<typeof localContext>>,
-) {
-  const url = declaredScannerRepositoryUrl(
-    options.sourceRepositoryUrl,
-    "Tenable",
-    "local",
-  );
-  const expected = repositoryUrlKey(url);
-  function verifyClaim(claim: unknown) {
-    if (
-      repositoryUrlKey(
-        declaredScannerRepositoryUrl(claim, "Tenable", "local"),
-      ) !== expected
-    )
-      throw new CodexSecurityError(
-        "Tenable evidence does not match the declared source repository.",
-      );
-  }
-  const report = current.report;
-  const asset = report?.["asset"];
-  if (
-    report?.["format"] !== tenableReportFormat ||
-    !isRecord(asset) ||
-    asset["asset_class"] !== "CODE_REPOSITORY" ||
-    typeof asset["asset_id"] !== "string" ||
-    !asset["asset_id"].trim()
-  )
-    throw new CodexSecurityError(
-      "Tenable imports require a report for one code repository asset.",
-    );
-  verifyClaim(report["repositoryUrl"]);
-  for (const reference of references) verifyClaim(reference.url);
-  for (const { source_finding_id, evidence } of current.findings) {
-    validateExternalEvidence(evidence, "local");
-    const data = evidence.source_data;
-    const rowAsset = data?.["asset"];
-    const finding = data?.["finding"];
-    if (
-      !data ||
-      data["format"] !== tenableReportFormat ||
-      !isRecord(rowAsset) ||
-      rowAsset["asset_class"] !== "CODE_REPOSITORY" ||
-      rowAsset["asset_id"] !== asset["asset_id"] ||
-      !isRecord(finding) ||
-      finding["finding_id"] !== source_finding_id ||
-      finding["asset_id"] !== asset["asset_id"]
-    )
-      throw new CodexSecurityError(
-        "Tenable findings must retain their native finding ID and one code repository asset.",
-      );
-    verifyClaim(data["repository_url"]);
-    if (evidence.details?.repository?.url !== undefined)
-      verifyClaim(evidence.details.repository.url);
-  }
-  const remotes = await readHostedGitRemotes(
-    repository,
-    [
-      ...workbench.protectedRoot,
-      await abortable(
-        () => canonicalConfigPath(process.cwd()),
-        workbench.signal,
-      ),
-    ],
-    workbench.environment,
-    workbench.signal,
-  );
-  const { hostname } = new URL(url);
-  const source = {
-    url,
-    platform: isGitHubCloudHost(hostname)
-      ? "github"
-      : hostname === "gitlab.com"
-        ? "gitlab"
-        : undefined,
-  };
-  if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
-    throw new CodexSecurityError(
-      "Tenable's source repository must match a configured Git fetch remote of the selected checkout.",
-    );
 }
 
 function preparedLocalStorage(

@@ -4072,10 +4072,10 @@ export async function main(
               else if (!structured) writeDiagnostic(summary);
               return { ...result };
             }
-            requireCloudReader(publicationOptions.provider);
+            requireCloudReader(publicationOptions);
             const prepared = await prepareExternalPublication(
               report,
-              { ...publicationOptions, provider: publicationOptions.provider },
+              publicationOptions,
               {
                 environment: dependencies.environment,
                 fetch: dependencies.cloudFetch,

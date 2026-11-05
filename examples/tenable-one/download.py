@@ -1,13 +1,11 @@
 """Download selected Tenable One Code Repository findings to a local selection file."""
 
-import argparse
 import csv
 import http.client
 import json
 import os
-import tempfile
 import time
-from pathlib import Path
+from io import BytesIO
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -15,6 +13,7 @@ from capture import (
     ASSET_FIELDS,
     read_asset,
     read_findings,
+    selection_parser,
     validate_repository_url,
     write_selection,
 )
@@ -70,7 +69,7 @@ def tenable_request(access_key, secret_key):
     return request
 
 
-def export_chunks(kind, property_name, selected_id, columns, directory, request, sleep):
+def export_chunks(kind, property_name, selected_id, columns, request, sleep):
     query = urlencode(
         {
             "properties": ",".join(columns),
@@ -104,9 +103,8 @@ def export_chunks(kind, property_name, selected_id, columns, directory, request,
     if len(set(chunks)) != len(chunks):
         raise ValueError("Tenable returned duplicate chunk numbers")
     for chunk in chunks:
-        path = directory / f"{job_id}-{chunk}.csv"
-        path.write_bytes(request("GET", f"{job_path}/download/{chunk}"))
-        yield path
+        path = f"{job_path}/download/{chunk}"
+        yield path, BytesIO(request("GET", path))
 
 
 def download(asset_id, finding_ids, repository_url, output, request, sleep=time.sleep):
@@ -118,39 +116,30 @@ def download(asset_id, finding_ids, repository_url, output, request, sleep=time.
     if output.exists():
         raise FileExistsError(f"Selection file already exists: {output}")
 
-    with tempfile.TemporaryDirectory() as workspace:
-        directory = Path(workspace)
-        assets = export_chunks(
-            "assets", "asset_id", asset_id, ASSET_FIELDS, directory, request, sleep
+    assets = export_chunks("assets", "asset_id", asset_id, ASSET_FIELDS, request, sleep)
+    asset = read_asset(assets, asset_id, exact=True)
+    findings = []
+    for finding_id in finding_ids:
+        # finding_id is a single-value filter. On finding exports, asset_id is read-only.
+        chunks = export_chunks(
+            "findings", "finding_id", finding_id, FINDING_PROPERTIES, request, sleep
         )
-        asset = read_asset(assets, asset_id, exact=True)
-        findings = []
-        for finding_id in finding_ids:
-            # finding_id is a single-value filter. On finding exports, asset_id is read-only.
-            chunks = export_chunks(
-                "findings", "finding_id", finding_id, FINDING_PROPERTIES, directory, request, sleep
-            )
-            rows = read_findings(chunks, asset_id, "file_path", "code_line_number")
-            if len(rows) != 1 or rows[0]["finding_id"].lower() != finding_id:
-                raise ValueError(
-                    f"Tenable did not return exactly the selected finding {finding_id}"
-                )
-            findings.extend(rows)
+        rows = read_findings(chunks, asset_id, "file_path", "code_line_number")
+        if len(rows) != 1 or rows[0]["finding_id"].lower() != finding_id:
+            raise ValueError(f"Tenable did not return exactly the selected finding {finding_id}")
+        findings.extend(rows)
     write_selection(output, asset, repository_url, findings)
     return len(findings)
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--asset-id", required=True, help="Tenable Code Repository asset UUID")
+    parser = selection_parser(__doc__)
     parser.add_argument(
         "--finding-id",
         action="append",
         required=True,
         help="Finding UUID; repeat for each selection",
     )
-    parser.add_argument("--repository-url", required=True, help="Canonical HTTPS repository URL")
-    parser.add_argument("--output", required=True, type=Path, help="New local selection JSON file")
     args = parser.parse_args()
     try:
         access_key = os.environ.get("TENABLE_ACCESS_KEY")

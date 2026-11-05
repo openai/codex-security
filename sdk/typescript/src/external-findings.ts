@@ -1,7 +1,6 @@
 import { isNativeError, isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
-import type { ExternalPublicationOptions } from "./external-findings-publish.js";
-import type { ExternalFindingsReader } from "./external-findings-read.js";
+import type { LocalExternalImportOptions } from "./external-findings-import.js";
 import {
   checkEmittedJsonNumber,
   checkReportNumber,
@@ -217,14 +216,16 @@ export interface ExternalPublicationInput {
 }
 
 /** Capture the caller's import settings before reading an export or resolving its destination. */
-export function snapshotImportOptions<P extends ExternalFindingsReader>({
+export function snapshotImportOptions<
+  P extends LocalExternalImportOptions["provider"],
+>({
   repository,
   provider,
   sourceKey,
   sourceRepositoryUrl,
   trivyScanRoot,
   inspectorProjectMap,
-}: Omit<ExternalPublicationOptions, "provider"> & { provider: P }) {
+}: LocalExternalImportOptions & { provider: P }) {
   if (provider === "trivy" && sourceRepositoryUrl !== undefined)
     throw new CodexSecurityError(
       "Trivy reads repository provenance from the report; do not supply --source-repository-url.",
