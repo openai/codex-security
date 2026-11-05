@@ -523,6 +523,11 @@ results include `verificationReport`; blocked and failed results include
 malformed results reject the promise. Failed, blocked, or interrupted operations
 can leave partial workspace changes for the caller to inspect or discard.
 
+For a checked-in credential, `verified` and `no_change` describe the current
+source. A result with `credentialRevocationPending: true` needs an owner to
+revoke the old credential or confirm its retirement. The verification report
+describes that follow-up. Codex never tries the exposed credential.
+
 `changedFiles` is model-reported metadata, not the authoritative diff.
 Patch-risk assessment is not included in this API.
 

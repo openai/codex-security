@@ -28,6 +28,7 @@ Use `standard` verification unless the caller explicitly selects `verificationMo
 5. Return one result per supplied finding, in the requested order. Treat closed tickets, unrelated passing tests, and the absence of a new scan finding as insufficient proof.
 
 For a credential finding, verify the code change without trying the credential or contacting its issuer. If only a runtime leak path is established, a verified repair can be `fixed`. State what the code proves and ask the owner to check any unknown deployment history. For a committed credential or a confirmed runtime disclosure, verify retirement separately using issuer or owner evidence that the affected credentials were disabled, revoked, or expired. A known usable credential that remains exposed is `still_vulnerable`. If cleanup is complete but the affected credentials or their retirement status are unknown, return `inconclusive` and name the missing evidence.
+A replacement in use or an ambiguous denial alone cannot establish retirement.
 
 ## Result Contract
 

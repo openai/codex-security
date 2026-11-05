@@ -2777,8 +2777,12 @@ export async function getCodexSecurityCompletedScan(
     ),
   ]);
   const scan = requireObject(manifest.scan, "completed scan manifest.scan");
+  const summary =
+    scan.coverageRef === undefined
+      ? (scan.review as JsonObject | undefined)
+      : undefined;
   const reviewState =
-    scan.coverageRef === undefined && scan.review !== undefined
+    summary !== undefined
       ? reviewStateFromSummary(scan)
       : await readArtifactJsonObject(
           context,
@@ -2799,19 +2803,20 @@ export async function getCodexSecurityCompletedScan(
     );
   }
 
-  const review =
-    scan.coverageRef === undefined && scan.review !== undefined
-      ? scan.review
-      : {
-          excludedPaths: (reviewState.explicitExclusions as JsonObject[]).map(
-            (item) => item.pattern,
-          ),
-        };
   return {
     scanId: parsed.scanId,
     manifest,
     findings,
-    review: review as JsonObject,
+    review: {
+      ...summary,
+      excludedPaths: [
+        ...new Set(
+          (reviewState.explicitExclusions as JsonObject[]).map(
+            (item) => item.pattern,
+          ),
+        ),
+      ],
+    },
   };
 }
 
