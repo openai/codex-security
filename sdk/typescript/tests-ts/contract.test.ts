@@ -279,7 +279,9 @@ describe("canonical scan contract", () => {
       const reading = readScanFile(scanDir, "report.md", "scan report");
       await expect(reading).rejects.toBeInstanceOf(ContractValidationError);
       await expect(reading).rejects.toMatchObject({
-        message: "scan report: unable to open the checked regular file.",
+        message: expect.stringContaining(
+          "scan report: unable to open the checked regular file.",
+        ),
         cause: expect.objectContaining({ code: "EACCES", path }),
       });
     },

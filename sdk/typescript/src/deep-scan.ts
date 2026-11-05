@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,6 +18,7 @@ import {
 import { isRecord } from "./record.js";
 import {
   executablePathForSpawn,
+  isDisconnectedChildStdin,
   PLUGIN_NAME,
   runCodexCommand,
   type CodexCommand,
@@ -29,7 +30,10 @@ import {
   withCodexPreflightLock,
 } from "./provider-profile.js";
 
+export type DeepScanDiagnostic = Readonly<Record<string, string | number>>;
+
 export interface DirectDeepScanOptions {
+  onDiagnostic?: (event: DeepScanDiagnostic) => void;
   codexOptions: CodexOptions & { nativeProfile?: string };
   preflightCommand: CodexCommand;
   pluginRoot: string;
@@ -407,8 +411,13 @@ export async function* runDeepScan(
     node?.executable ?? process.execPath,
     [join(options.pluginRoot, "mcp", "server.mjs"), "--deep-scan-engine"],
     node?.environment ?? environment,
-    JSON.stringify({ scanId: options.scanId, ...session }),
+    JSON.stringify({
+      scanId: options.scanId,
+      ...session,
+      ...(options.onDiagnostic && { diagnosticsVersion: 1 }),
+    }),
     options.signal,
+    options.onDiagnostic,
   );
   const completed = JSON.parse(output);
   if (
@@ -433,12 +442,33 @@ function runEngine(
   env: NodeJS.ProcessEnv,
   request: string,
   signal: AbortSignal,
+  onDiagnostic: DirectDeepScanOptions["onDiagnostic"],
 ): Promise<string> {
   signal.throwIfAborted();
   const child = spawn(executablePathForSpawn(command), args, {
     env,
     windowsHide: true,
-  });
+    serialization: "json",
+    stdio: onDiagnostic ? ["pipe", "pipe", "pipe", "ipc"] : "pipe",
+  }) as ChildProcessWithoutNullStreams;
+  if (onDiagnostic) {
+    child.on("message", (message) => {
+      if (!isRecord(message) || typeof message["event"] !== "string") return;
+      const fields: Record<string, string | number> = {};
+      for (const [name, value] of Object.entries(message)) {
+        if (
+          /^[a-zA-Z][a-zA-Z0-9]*$/u.test(name) &&
+          (typeof value === "number" || typeof value === "string")
+        )
+          fields[name] = value;
+      }
+      try {
+        void Promise.resolve(onDiagnostic(fields)).catch(() => {});
+      } catch {
+        // The optional diagnostic sink cannot stop the scan.
+      }
+    });
+  }
   // EOF requests graceful coordinator/worker cleanup on Windows as well as Unix.
   // Keep the control pipe open until completion or explicit cancellation.
   const cancel = () => child.stdin.end();
@@ -455,12 +485,7 @@ function runEngine(
     processError = error;
   });
   child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-    if (
-      !["EPIPE", "ECONNRESET", "EOF", "ERR_STREAM_DESTROYED"].includes(
-        error.code ?? "",
-      )
-    )
-      processError = error;
+    if (!isDisconnectedChildStdin(error)) processError = error;
   });
   const result = new Promise<string>((resolve, reject) => {
     child.once("close", (code) => {
