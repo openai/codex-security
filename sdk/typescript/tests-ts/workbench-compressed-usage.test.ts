@@ -95,10 +95,12 @@ with sqlite3.connect(":memory:") as db:
     db.execute("CREATE TABLE workspaces (id TEXT, thread_id TEXT)")
     db.execute("INSERT INTO workspaces VALUES ('workspace', ?)", (options["owner"],))
     db.execute("CREATE TABLE deep_scan_worker_threads (scan_id TEXT, sdk_thread_id TEXT)")
-    db.execute("CREATE TABLE deep_scan_workers (scan_id TEXT, kind TEXT, artifact_dir TEXT)")
+    db.execute("CREATE TABLE deep_scan_runs (scan_id TEXT, worker_usage_gap INTEGER)")
+    db.execute("CREATE TABLE deep_scan_workers (scan_id TEXT, kind TEXT, artifact_dir TEXT, started_at TEXT, sdk_thread_id TEXT, attempt INTEGER)")
     mode = "deep" if options.get("workerKind") else "standard"
     if mode == "deep":
-        db.execute("INSERT INTO deep_scan_workers VALUES ('scan', ?, ?)", (options["workerKind"], str(root / "artifacts" / "worker")))
+        db.execute("INSERT INTO deep_scan_runs VALUES ('scan', 0)")
+        db.execute("INSERT INTO deep_scan_workers VALUES ('scan', ?, ?, '2026-01-01T00:00:01Z', 'current-worker', 2)", (options["workerKind"], str(root / "artifacts" / "worker")))
         db.execute("INSERT INTO deep_scan_worker_threads VALUES ('scan', 'current-worker')")
     scan = db.execute("SELECT 'scan' AS id, 'workspace' AS workspace_id, ? AS mode, ? AS scan_dir, '2026-01-01T00:00:00.500123Z' AS started_at, '2026-01-01T00:00:05Z' AS completed_at, NULL AS deep_scan_owner_thread_id", (mode, str(root))).fetchone()
     print(json.dumps(collect_scan_usage(db, scan)))

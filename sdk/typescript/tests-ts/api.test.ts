@@ -3842,7 +3842,7 @@ if __name__ == "__main__":
   test.each([true, false])(
     "records a native failure only when its terminal event preceded cancellation (failure first: %p)",
     async (failureFirst) => {
-      const { repository, codexHome, scanDir } = await scanDirectories();
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
       const controller = new AbortController();
       const message = "Synthetic native turn failure";
       async function* events(): AsyncGenerator<ThreadEvent> {
@@ -3854,9 +3854,15 @@ if __name__ == "__main__":
           if (failureFirst) controller.abort();
         }
       }
+      const telemetry: Readonly<OperationTelemetryEvent>[] = [];
       let stopped: readonly string[] | undefined;
       await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
+        createOperationTelemetry: (options) =>
+          new OperationTelemetry({
+            ...options,
+            directory: join(root, "journal"),
+          }),
         createCodex: codexFactory(async () => ({ events: events() })),
         runWorkbench: async (_options, args, input) => {
           if (args[0] === "fail-scan" || args[0] === "cancel-scan")
@@ -3865,8 +3871,19 @@ if __name__ == "__main__":
         },
       });
       await expect(
-        client.run(repository, { signal: controller.signal }),
+        client.run(repository, {
+          signal: controller.signal,
+          onTelemetry: (event) => telemetry.push(event),
+        }),
       ).rejects.toThrow();
+      expect(
+        telemetry.filter((event) => event.type === "attempt_finished"),
+      ).toEqual([
+        expect.objectContaining({
+          outcome: failureFirst ? "failed" : "canceled",
+          failureCategory: failureFirst ? "execution" : "canceled",
+        }),
+      ]);
       expect(controller.signal.aborted).toBe(true);
       expect(stopped?.[0]).toBe(failureFirst ? "fail-scan" : "cancel-scan");
       if (failureFirst) expect(stopped).toContain(`--message=${message}`);

@@ -86,6 +86,7 @@ export class OperationTelemetry {
   operationId: string;
   measurement: Readonly<ScanUsageMeasurement> | undefined;
   reusedResult = false;
+  nativeTurnFailed = false;
   readonly #started = performance.now();
   readonly #startedAt = new Date().toISOString();
   readonly #options: OperationTelemetryOptions;

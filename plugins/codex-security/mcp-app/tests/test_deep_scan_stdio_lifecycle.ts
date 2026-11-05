@@ -965,7 +965,9 @@ service_tier = "ultrafast"
         resumedScanId,
       ]);
       const { accountRateLimits: _limits, ...usage } = sealed.scan.usage;
-      assert.equal(usage.coverage, "unavailable");
+      // The synthetic workers report their tokens; the parent has no usage receipt.
+      assert.equal(usage.coverage, "partial");
+      assert.ok(usage.inputTokens > 0);
       assert.ok(usage.warnings.length);
       assert.deepEqual(completion, {
         scan: {

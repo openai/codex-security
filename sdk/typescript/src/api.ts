@@ -3479,8 +3479,11 @@ export class CodexSecurity {
             !directDeepScan &&
             !this.#dependencies.hostedScan &&
             !signal.aborted
-          )
+          ) {
             nativeTurnFailure = message;
+            if (this.#operationTelemetry !== null)
+              this.#operationTelemetry.nativeTurnFailed = true;
+          }
         },
         onThreadStarted: async (threadId) => {
           if (resumeThreadId !== undefined && threadId !== resumeThreadId) {
@@ -4414,7 +4417,9 @@ export class CodexSecurity {
       );
       return result;
     } catch (error) {
-      const status = hostedScanFailureStatus(error, callerSignal);
+      const status = journal?.nativeTurnFailed
+        ? "failed"
+        : hostedScanFailureStatus(error, callerSignal);
       const canceled = status === "canceled";
       if (!invoked) release();
       await journalStarted;

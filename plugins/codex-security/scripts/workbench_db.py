@@ -1032,13 +1032,16 @@ def complete_scan(
 
 def read_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     # Validation can finish after the scan's recorded completion timestamp.
-    return scan_usage.collect_scan_usage(
+    usage = scan_usage.collect_scan_usage(
         connection,
         require_scan(connection, args.scan_id),
         thread_id=args.thread_id,
         validation_thread_id=args.validation_thread_id,
         completed_at=now(),
     )
+    if "cacheWriteInputTokens" in usage:
+        usage.setdefault("cacheWriteInputTokensReported", True)
+    return usage
 
 
 def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:

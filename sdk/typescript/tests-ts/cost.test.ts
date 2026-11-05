@@ -12,6 +12,7 @@ import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   estimateScanCost,
+  readScanBudgetUsage,
   ScanCostTracker,
   type ScanSessionEvent,
   type ScanUsageObservation,
@@ -71,19 +72,42 @@ test("a partial owned subtotal includes spending absent from local session logs"
     codexHome: home,
     model: "gpt-5.6-sol",
     maxCostUsd: 1,
-    readBudgetUsage: async () => ({
-      usage: { ...ownedSdkUsage, cache_write_input_tokens_reported: false },
-      complete,
-    }),
+    readBudgetUsage: (threadId) =>
+      readScanBudgetUsage(
+        async () => ({
+          ...ownedPythonUsage,
+          coverage: complete ? "complete" : "partial",
+          threadCount: complete ? 2 : 1,
+          missingThreadCount: complete ? 0 : 1,
+          coverageScope: ["thread:primary", "thread:worker"],
+          cacheWriteInputTokensReported: complete,
+        }),
+        "scan",
+        threadId,
+      ),
     onCost: (cost, coverage) => observed.push([cost.inputTokens, coverage]),
   });
   tracker.start("primary");
   try {
-    await tracker.refresh();
+    const partial = await tracker.refresh();
+    expect(partial.measurement).toMatchObject({
+      coverage: "partial",
+      threadCount: 1,
+      missingThreadCount: 1,
+      coverageScope: ["thread:primary", "thread:worker"],
+      usage: { ...ownedSdkUsage, cache_write_input_tokens_reported: false },
+    });
     expect(observed).toEqual([[ownedSdkUsage.input_tokens, false]]);
     complete = true;
     // The SDK's parent receipt omits the detached worker's usage.
     const final = await tracker.stop({ input_tokens: 1, output_tokens: 1 });
+    expect(final.measurement).toMatchObject({
+      coverage: "complete",
+      threadCount: 2,
+      missingThreadCount: 0,
+      coverageScope: ["thread:primary", "thread:worker"],
+    });
+    expect(final.measurement.usage).toEqual(ownedSdkUsage);
     expect(final.cost?.inputTokens).toBe(ownedSdkUsage.input_tokens);
     expect(observed.at(-1)).toEqual([ownedSdkUsage.input_tokens, true]);
   } finally {
