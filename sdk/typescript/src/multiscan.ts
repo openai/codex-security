@@ -802,7 +802,7 @@ async function runCampaign(
           }
           if (error instanceof OutputDirectoryNotEmptyError) {
             requiresRecovery = true;
-            failure = `Bulk attempt directory is not empty: ${scanDir}. Inspect the preserved artifacts and checkout before running the same bulk-scan command with --recover.`;
+            failure = `Bulk attempt directory is not empty: ${scanDir}. Inspect the preserved artifacts before running the same bulk-scan command with --recover.`;
           } else {
             failure = errorMessage(error);
           }
@@ -1765,7 +1765,7 @@ function parseInventory(
   if (errors.length > 0) {
     throw new Error(`Multiscan CSV could not be parsed: ${errors[0]!.message}`);
   }
-  const headers = rows.shift();
+  const headers = rows.shift()?.map((header) => header.trim());
   if (
     headers === undefined ||
     !["id", "repository", "revision"].every((name) => headers.includes(name)) ||
