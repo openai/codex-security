@@ -1170,6 +1170,26 @@ service_tier = "ultrafast"
         (await readLogLines(startLogPath)).length,
         workerCountBeforeRetry,
       );
+      const deadlineConfig = path.join(fixtureRoot, "deadline.yaml");
+      await writeFile(deadlineConfig, "scan: {max_time_minutes: 0.000001}\n");
+      const expired = await restartedServer.request(
+        6,
+        "tools/call",
+        toolCall(
+          "start_codex_security_deep_scan",
+          { targetPath: retryTarget, projectConfigPath: deadlineConfig },
+          "deadline-thread",
+        ),
+      );
+      assertNoError(expired);
+      assert.match(
+        expired.result.structuredContent.instructions,
+        /deadline expired before any Standard scan completed/,
+      );
+      assert.equal(
+        (await readLogLines(startLogPath)).length,
+        workerCountBeforeRetry,
+      );
     } catch (error) {
       (error as Error).message +=
         `\nRestarted MCP stderr:\n${restartedServer.stderrText()}`;

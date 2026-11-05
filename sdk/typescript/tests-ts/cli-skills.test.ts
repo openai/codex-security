@@ -1327,9 +1327,14 @@ describe("CLI skill commands", () => {
           ["validate", ...inputs],
           dependencies({
             currentDirectory: directory,
-            onCodex: (args, _output, _environment, input) => {
+            onCodex: async (args, _output, _environment, input) => {
               expect(args.at(-1)).toBe("-");
-              received = JSON.parse(input!.split("\n").at(-1)!);
+              const file = input!.match(/^".*finding\.json"$/m);
+              received = JSON.parse(
+                file === null
+                  ? input!.split("\n").at(-1)!
+                  : await filesystem.readFile(JSON.parse(file[0]), "utf8"),
+              );
               return 0;
             },
           }),

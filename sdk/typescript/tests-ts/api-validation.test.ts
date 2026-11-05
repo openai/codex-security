@@ -1,6 +1,13 @@
 import { requestMetadata } from "./support/request-metadata.js";
 import { once } from "node:events";
-import { cp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  readFile,
+  readdir,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -32,6 +39,32 @@ describe("CodexSecurity finding validation", () => {
     runtimeDirectories,
     runtimePreparer,
   } = createValidationFixtures();
+
+  test.each([false, true])(
+    "validates oversized evidence through a temporary file (failure=%p)",
+    async (fail) => {
+      const finding = {
+        evidence: "Synthetic evidence. ".repeat(100_000),
+        tail: "Final evidence",
+      };
+      let path = "";
+      const fixture = await validationClient(async function* () {
+        const prompt = fixture.captured.prompt!;
+        expect(prompt.length).toBeLessThan(1 << 20);
+        path = JSON.parse(prompt.match(/^".*finding\.json"$/m)![0]);
+        expect(JSON.parse(await readFile(path, "utf8"))).toEqual(finding);
+        if (fail) throw new Error("Synthetic validation failure");
+        yield* validationEvents();
+        expect(JSON.parse(await readFile(path, "utf8"))).toEqual(finding);
+      });
+      await using client = fixture.client;
+      const result = client.validate({ ...fixture.options, finding });
+      if (fail)
+        await expect(result).rejects.toThrow("Synthetic validation failure");
+      else expect(await result).toMatchObject(assessment);
+      await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
 
   test.each(
     ["output", "state", "runtime"].flatMap((destination) =>
