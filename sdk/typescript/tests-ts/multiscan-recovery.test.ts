@@ -27,6 +27,7 @@ import * as artifactExport from "../src/artifact-export.js";
 import { PYTHON } from "./support/security-policy.js";
 import type { ScanResult } from "../src/result.js";
 import { runMultiscan } from "../src/multiscan.js";
+import { workflowDigest } from "../src/finding-workflow.js";
 import { prepareOutputDir } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
@@ -55,6 +56,7 @@ const {
   options,
   recordFixtureRequest,
   recordFixtureAuthority,
+  fixtureRequests,
 } = createMultiscanFixtures();
 
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -584,6 +586,45 @@ describe("multiscan", () => {
         ).toEqual([]);
       }
       expect(run).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test.each([false, true])(
+    "reuses a registered request across telemetry changes (legacy digest=%p)",
+    async (legacy) => {
+      const { paths } = await repositoryFixture("receipt-digest", "repo");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run));
+      const first = await runMultiscan(configured);
+      const receipt = (await results(first.resultsPath))[0]!;
+      const outputDir = receipt["outputDir"] as string;
+      const operationId = receipt["operationId"];
+      expect(operationId).toBeString();
+      const inputs = { target: "repository", mode: "standard", outputDir };
+      const registered = fixtureRequests.get(outputDir)!;
+      expect(registered.digest).toBe(
+        workflowDigest({ config: {}, options: inputs }),
+      );
+      if (legacy) {
+        registered.digest = workflowDigest({
+          config: {},
+          options: { ...inputs, telemetryContext: { operationId } },
+        });
+        await recordFixtureAuthority(outputDir);
+      }
+
+      expect(await runMultiscan(configured)).toMatchObject({ skipped: 1 });
+      delete receipt["operationId"];
+      delete receipt["scanId"];
+      await writeFile(first.resultsPath, `${JSON.stringify(receipt)}\n`);
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        skipped: legacy ? 0 : 1,
+      });
+      expect(run).toHaveBeenCalledTimes(legacy ? 2 : 1);
+      expect((await results(first.resultsPath)).at(-1)!["attempt"]).toBe(
+        legacy ? 2 : 1,
+      );
     },
   );
 

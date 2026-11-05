@@ -79,10 +79,12 @@ export function scanRequestDigest(
   config: CodexSecurityConfig,
   options: ScanOptions,
   repository?: string,
+  legacyTelemetryContext?: ScanOptions["telemetryContext"],
 ): string {
+  // Registration identifies the scan inputs independently of attempt telemetry.
   return requestDigest(
     config,
-    options,
+    { ...options, telemetryContext: legacyTelemetryContext },
     repository,
     options.knowledgeBaseSnapshot?.documents,
   );
@@ -189,7 +191,9 @@ export class FindingWorkflow {
     const saved =
       options.knowledgeBaseSnapshot && (await this.get())?.scanRequestDigest;
     const digest =
-      saved && saved === scanRequestDigest(config, options)
+      saved &&
+      saved ===
+        scanRequestDigest(config, options, undefined, options.telemetryContext)
         ? saved
         : requestDigest(config, options);
     return this.bind({ repositoryPath, scanRequestDigest: digest });

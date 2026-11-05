@@ -441,6 +441,7 @@ async function runCampaign(
           artifactOutput,
           checkout,
           knowledgeByMode[task.mode]?.snapshot,
+          receipt.operationId,
         ),
         (warning) => {
           warnings.push({ repository: task.id, warnings: [warning] });
@@ -613,6 +614,7 @@ async function runCampaign(
                 scanDir,
                 authority?.target_path ?? normalCheckout,
                 knowledge?.snapshot,
+                recorded?.operationId,
               );
               if (
                 authority !== undefined &&
@@ -1439,6 +1441,7 @@ function campaignRequestDigests(
   scanDir: string,
   checkout: string,
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot,
+  operationId?: string,
 ): string[] {
   const scanOptions = campaignScanOptions(
     options,
@@ -1447,10 +1450,16 @@ function campaignRequestDigests(
     knowledgeBaseSnapshot,
   );
   // Retain prior request identities while accepting literal absolute CSV scopes.
-  return [
+  const digests = [
     scanRequestDigest(options.config, scanOptions),
     scanRequestDigest(options.config, scanOptions, checkout),
   ];
+  // Older registrations included the operation ID of this specific attempt.
+  if (operationId !== undefined)
+    digests.push(
+      scanRequestDigest(options.config, scanOptions, checkout, { operationId }),
+    );
+  return digests;
 }
 
 function registeredTaskMatches(
