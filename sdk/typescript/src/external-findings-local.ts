@@ -16,7 +16,10 @@ import {
   checkTrivyReportProvider,
   matchTrivyCheckout,
 } from "./trivy-import.js";
-import { readHostedGitRemotes } from "./hosted-git-remotes.js";
+import {
+  readGitRemoteNames,
+  readHostedGitRemotes,
+} from "./hosted-git-remotes.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   forwardExternalImportSetting,
@@ -520,27 +523,8 @@ export async function configuredFetchRemotes(
         ),
       signal,
     );
-  let remoteNames: string;
-  try {
-    remoteNames = await readGit(["remote"]);
-  } catch (error) {
-    signal?.throwIfAborted();
-    // A local source directory need not be a Git checkout.
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === 128 &&
-      "stderr" in error &&
-      typeof error.stderr === "string" &&
-      (error.stderr.trimEnd() ===
-        "fatal: not a git repository (or any of the parent directories): .git" ||
-        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
-          error.stderr.trimEnd(),
-        ))
-    )
-      return [];
-    throw error;
-  }
+  const remoteNames = await readGitRemoteNames(readGit, signal);
+  if (remoteNames === undefined) return [];
   const remotes: ConfiguredFetchRemote[] = [];
   const firstUrlOnly = provider === "sonar" || provider === "checkmarx";
   for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
