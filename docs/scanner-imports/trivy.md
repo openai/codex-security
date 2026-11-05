@@ -27,6 +27,7 @@ Use credential-free repository URLs. If the importer reports ambiguous or confli
 ## Read the evidence and repeat an import
 
 - Each finding retains its native vulnerability, exact `FixedVersion` expression and, when available, the matched package and declaration lines. Ambiguous archive paths stay in the raw evidence.
+- A package can appear many times in the same lockfile. Cloud projects the first 100 locations per finding. The full list of declaration ranges is in `source_data.package.Locations`.
 - Trivy can scan uncommitted files. Its reported commit stays in `source_data.report.Metadata.Commit`. Imported findings start as `not_assessed`, including when Trivy reports an upstream fix.
 - Changes to severity, installed version or declaration line update the same occurrence. A different manifest or package path identifies a separate occurrence. Duplicate identities are excluded as a group. Omitted findings stay open.
 - With the SDK, use `readTrivyFindings` for a file or `normalizeTrivyFindings` for parsed JSON. When selecting rows from a repository-bound report, retain its native header and each row’s `source_data.report` or `details.repository.url`, and import with provider `trivy`. Empty and fully excluded reports also retain their native header.

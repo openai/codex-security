@@ -88,8 +88,6 @@ import {
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
-  withStatusCredentialHome,
-  withoutCodexHome,
   scanCodexHome,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
@@ -649,6 +647,10 @@ function publicationDestination(
   };
 }
 
+function formatItemCount(count: number, singular: string): string {
+  return count === 1 ? `1 ${singular}` : `${count} ${singular}s`;
+}
+
 function publicationScanAge(timestamp: string, now: number): string {
   const completedAt = Date.parse(timestamp);
   if (!Number.isFinite(completedAt)) return "unknown";
@@ -850,7 +852,7 @@ class PublicationProgressPresenter {
         this.#dashboard.setStage(`Publishing findings · 0/${event.total}`);
       } else {
         this.#write(
-          `Publishing ${event.total} finding${event.total === 1 ? "" : "s"} to Linear.`,
+          `Publishing ${formatItemCount(event.total, "finding")} to Linear.`,
         );
       }
       return;
@@ -919,7 +921,7 @@ class PublicationProgressPresenter {
       return;
     }
 
-    const summary = `Published ${event.created}/${event.total} finding${event.total === 1 ? "" : "s"}${event.failed === 0 ? "" : ` (${event.failed} failed)`}.`;
+    const summary = `Published ${event.created}/${formatItemCount(event.total, "finding")}${event.failed === 0 ? "" : ` (${event.failed} failed)`}.`;
     if (this.#dashboard !== null) {
       this.#dashboard.setPublicationProgress(
         event.created + event.failed,
@@ -991,7 +993,7 @@ class FindingProgressPresenter {
     }
 
     this.#write(
-      `Verifying ${this.#total} finding${this.#total === 1 ? "" : "s"} against the current checkout.`,
+      `Verifying ${formatItemCount(this.#total, "finding")} against the current checkout.`,
     );
   }
 
@@ -3555,7 +3557,7 @@ export async function main(
               const findingCount = scan["findingCount"];
               const findings =
                 typeof findingCount === "number"
-                  ? `${findingCount} finding${findingCount === 1 ? "" : "s"}`
+                  ? formatItemCount(findingCount, "finding")
                   : "unknown findings";
               const shortScanId = `...${stripVTControlCharacters(scanId)
                 .replaceAll(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
@@ -3933,14 +3935,16 @@ export async function main(
                 `${local ? "Local import" : "Publication"} needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.`,
               );
             if (structured) showPreview();
-            const action = local
-              ? `Store these ${preview.findings.length} findings locally`
-              : `Publish these ${preview.findings.length} findings`;
-            return prompt.confirm(
-              `${action}${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
-              false,
-              controller.signal,
-            );
+            const count = preview.findings.length;
+            const findings =
+              count === 1 ? "this finding" : `these ${count} findings`;
+            let action = local
+              ? `Store ${findings} locally`
+              : `Publish ${findings}`;
+            const excluded = preview.excluded.length;
+            if (excluded)
+              action += ` and skip ${formatItemCount(excluded, "excluded record")}`;
+            return prompt.confirm(`${action}?`, false, controller.signal);
           };
           const showScannerReport = (preview: ExternalFindings) => {
             if (options.provider !== "opengrep") return;
@@ -7152,37 +7156,31 @@ export async function main(
           dependencies.environment,
         );
         const authentication = scanAuthentication(dependencies.environment);
-        const loginEnvironment = (home: string) => ({
-          ...withoutCodexHome(dependencies.environment),
-          CODEX_HOME: home,
-        });
-        const runLogin = (home: string) =>
-          dependencies.runCodex(
-            [
-              "login",
-              ...(args.action === undefined ? [] : [args.action]),
-              ...(options.deviceAuth ? ["--device-auth"] : []),
-              ...(options.withApiKey ? ["--with-api-key"] : []),
-              ...(options.withAccessToken ? ["--with-access-token"] : []),
-            ],
-            undefined,
-            loginEnvironment(home),
+        if (args.action === "status" && authentication.method !== "api_key") {
+          const ambientHome = scanCodexHome(dependencies.environment);
+          await withCredentialHomeLock(credentialHome, () =>
+            initialCredentialsAvailable(
+              dependencies.environment,
+              ambientHome,
+              credentialHome,
+            ),
           );
-        exitCode =
-          args.action === "status" && authentication.method !== "api_key"
-            ? await withStatusCredentialHome(
-                scanCodexHome(dependencies.environment),
-                credentialHome,
-                (home) =>
-                  accountStatus(
-                    resolveCodexCommand(dependencies.environment),
-                    loginEnvironment(home),
-                    undefined,
-                    parse(process.execPath).root,
-                  ),
-                runLogin,
-              )
-            : await runLogin(credentialHome);
+        }
+        const authenticationEnvironment = {
+          ...dependencies.environment,
+          CODEX_HOME: credentialHome,
+        };
+        exitCode = await dependencies.runCodex(
+          [
+            "login",
+            ...(args.action === undefined ? [] : [args.action]),
+            ...(options.deviceAuth ? ["--device-auth"] : []),
+            ...(options.withApiKey ? ["--with-api-key"] : []),
+            ...(options.withAccessToken ? ["--with-access-token"] : []),
+          ],
+          undefined,
+          authenticationEnvironment,
+        );
         if (args.action === undefined && exitCode === 0) {
           await setCodexSecurityCredentialLogout(credentialHome, false);
         }
@@ -7977,7 +7975,7 @@ async function runScanImport(
     if ("dryRun" in result) return { exitCode: 0, data: { ...result } };
     try {
       errorOutput.write(
-        `Imported ${result.findings.findings.length} findings as scan ${result.manifest.scan.id}.\n` +
+        `Imported ${formatItemCount(result.findings.findings.length, "finding")} as scan ${result.manifest.scan.id}.\n` +
           `Artifacts: ${result.scanDir}\n`,
       );
     } catch {}
@@ -9144,7 +9142,7 @@ async function runFindingPatches(
   }
 
   stderr.write(
-    `\nPatching ${selected.findings.length} confirmed finding${selected.findings.length === 1 ? "" : "s"}...\n`,
+    `\nPatching ${formatItemCount(selected.findings.length, "confirmed finding")}...\n`,
   );
   const patches: FindingPatch[] = [];
   for (const finding of selected.findings) {
