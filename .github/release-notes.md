@@ -99,6 +99,7 @@
 - read oversized findings from temporary files ([#2342](https://github.com/openai/codex-security/pull/2342))
 - preserve disputed comparisons across context retries ([#2321](https://github.com/openai/codex-security/pull/2321))
 - import Trivy findings locally and to Cloud ([#2276](https://github.com/openai/codex-security/pull/2276))
+- preserve usage coverage and operation outcomes ([#1841](https://github.com/openai/codex-security/pull/1841))
 
 <!-- release-section: highlights:end -->
 
