@@ -1414,11 +1414,14 @@ def upsert_deep_scan_worker(
         if error_message is None and args.status != "succeeded":
             error_message = existing["error_message"]
         started_at = existing["started_at"] or (timestamp if args.status == "running" else None)
+        thread_id = optional_text(args.sdk_thread_id, maximum=512)
+        if thread_id is None and attempt == existing["attempt"]:
+            thread_id = existing["sdk_thread_id"]
         connection.execute(
             """
             UPDATE deep_scan_workers
             SET status = ?, result_manifest_path = ?, attempt = ?,
-                sdk_thread_id = COALESCE(?, sdk_thread_id),
+                sdk_thread_id = ?,
                 completion_sequence = ?, merge_state = ?,
                 error_message = ?,
                 started_at = ?, completed_at = ?, updated_at = ?
@@ -1428,7 +1431,7 @@ def upsert_deep_scan_worker(
                 args.status,
                 result_manifest_path or existing["result_manifest_path"],
                 attempt,
-                optional_text(args.sdk_thread_id, maximum=512),
+                thread_id,
                 completion_sequence,
                 merge_state,
                 error_message,
