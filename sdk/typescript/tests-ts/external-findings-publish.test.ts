@@ -5338,7 +5338,9 @@ test.each(["human", "json"])(
             expect(cli.stderr.text()).toContain("synthetic-account");
             expect(cli.stderr.text()).toContain("environment-example");
             expect(cli.stderr.text()).toContain("Excluded: 1");
-            expect(question).toContain("skip 1 excluded");
+            expect(question).toBe(
+              "Publish this finding and skip 1 excluded record?",
+            );
             expect(cli.stderr.text()).toContain("vendor-selected [high]");
             expect(cli.stderr.text()).toContain(f.file);
             expect(cli.stderr.text()).toContain("--dry-run --format json");

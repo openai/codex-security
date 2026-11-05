@@ -3951,19 +3951,17 @@ export async function main(
                 `${local ? "Local import" : "Publication"} needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.`,
               );
             if (structured) showPreview();
+            const count = preview.findings.length;
             const findings =
-              preview.findings.length === 1
-                ? "this finding"
-                : `these ${preview.findings.length} findings`;
+              count === 1 ? "this finding" : `these ${count} findings`;
             const action = local
               ? `Store ${findings} locally`
               : `Publish ${findings}`;
             const excluded = preview.excluded.length;
-            return prompt.confirm(
-              `${action}${excluded ? ` and skip ${excluded} excluded record${excluded === 1 ? "" : "s"}` : ""}?`,
-              false,
-              controller.signal,
-            );
+            const question = excluded
+              ? `${action} and skip ${excluded} excluded record${excluded === 1 ? "" : "s"}?`
+              : `${action}?`;
+            return prompt.confirm(question, false, controller.signal);
           };
           const showScannerReport = (preview: ExternalFindings) => {
             if (options.provider !== "opengrep") return;
@@ -7989,8 +7987,9 @@ async function runScanImport(
     );
     if ("dryRun" in result) return { exitCode: 0, data: { ...result } };
     try {
+      const count = result.findings.findings.length;
       errorOutput.write(
-        `Imported ${result.findings.findings.length} finding${result.findings.findings.length === 1 ? "" : "s"} as scan ${result.manifest.scan.id}.\n` +
+        `Imported ${count} finding${count === 1 ? "" : "s"} as scan ${result.manifest.scan.id}.\n` +
           `Artifacts: ${result.scanDir}\n`,
       );
     } catch {}
