@@ -9341,6 +9341,7 @@ async function runSkill(
           JSON.parse(await readRegularInputFile(schemaPath, directory)),
         );
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
+  let standaloneFileContents: string | undefined;
   for (const input of inputs) {
     if (typeof input !== "string") {
       contents.push(
@@ -9411,6 +9412,9 @@ async function runSkill(
           throw new CodexSecurityError(
             "Finding or issue inputs must not be empty.",
           );
+        }
+        if (inputs.length === 1 && contents.length === 0) {
+          standaloneFileContents = contentsOrLiteral;
         }
       }
     }
@@ -9488,6 +9492,7 @@ async function runSkill(
       }
       return prompt;
     },
+    standaloneFileContents,
   );
   try {
     const { prompt } = preparedPrompt;
