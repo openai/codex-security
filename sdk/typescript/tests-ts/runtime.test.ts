@@ -142,6 +142,34 @@ function credentialAncestors(home: string, directory: string): string[] {
   return ancestors;
 }
 
+const credentialAclFunction = "function Write-CredentialAcl($path) {";
+
+function instrumentCredentialAcl(
+  home: string,
+  transform: (script: string) => string,
+) {
+  const originalSpawn = childProcess.spawn;
+  mock.module("node:child_process", () => ({
+    ...childProcess,
+    spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+      const [command, args, options] = spawnArgs;
+      if (
+        options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+        !Array.isArray(args)
+      )
+        return originalSpawn(...spawnArgs);
+      const index = args.indexOf("-Command") + 1;
+      const script = args[index];
+      if (typeof script !== "string" || !script.includes(credentialAclFunction))
+        return originalSpawn(...spawnArgs);
+      const instrumented = [...args];
+      instrumented[index] = transform(script);
+      return originalSpawn(command, instrumented, options);
+    },
+  }));
+  return () => restoreSpawn(originalSpawn);
+}
+
 function windowsTestCommand(
   tool: string,
   args: readonly string[],
@@ -3721,37 +3749,15 @@ describe("runtime directories and plugin Python boundary", () => {
       : win32.toNamespacedPath(descendant);
     // Replay the native error without relying on racing a filesystem deletion.
     const injection = `if (@($path) -contains '${failurePath.replaceAll("'", "''")}'${batchOnly ? " -and @($path).Count -gt 1" : ""}) { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
-    const marker = "function Write-CredentialAcl($path) {";
-    const originalSpawn = childProcess.spawn;
     let attempts = 0;
-    mock.module("node:child_process", () => ({
-      ...childProcess,
-      spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
-        const [command, args, options] = spawnArgs;
-        if (
-          options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
-          !Array.isArray(args)
-        ) {
-          return originalSpawn(...spawnArgs);
-        }
-        const scriptIndex = args.indexOf("-Command") + 1;
-        const script = args[scriptIndex];
-        if (typeof script !== "string" || !script.includes(marker)) {
-          return originalSpawn(...spawnArgs);
-        }
-        attempts += 1;
-        if (transient && attempts > 1) {
-          return originalSpawn(...spawnArgs);
-        }
-        expect(script.split(marker)).toHaveLength(2);
-        const replayArgs = [...args];
-        replayArgs[scriptIndex] = script.replace(
-          marker,
-          `${marker} ${injection}`,
-        );
-        return originalSpawn(command, replayArgs, options);
-      },
-    }));
+    const restore = instrumentCredentialAcl(home, (script) => {
+      attempts += 1;
+      if (transient && attempts > 1) return script;
+      return script.replace(
+        credentialAclFunction,
+        `${credentialAclFunction} ${injection}`,
+      );
+    });
     try {
       if (transient) {
         await requireSecureCredentialHome(home);
@@ -3765,7 +3771,7 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(attempts).toBe(persistent ? 3 : 1);
       }
     } finally {
-      restoreSpawn(originalSpawn);
+      restore();
     }
   });
 
@@ -3779,51 +3785,32 @@ describe("runtime directories and plugin Python boundary", () => {
       await mkdir(cache);
       for (let index = 0; index < 8; index++)
         await writeFile(join(cache, `entry-${index}.txt`), "fixture\n");
-      const trace = join(root, "acl-queries.txt").replaceAll("'", "''");
-      const marker = "function Write-CredentialAcl($path) {";
-      const originalSpawn = childProcess.spawn;
-      mock.module("node:child_process", () => ({
-        ...childProcess,
-        spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
-          const [command, args, options] = spawnArgs;
-          if (
-            options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
-            !Array.isArray(args)
-          )
-            return originalSpawn(...spawnArgs);
-          const scriptIndex = args.indexOf("-Command") + 1;
-          const script = args[scriptIndex];
-          if (typeof script !== "string" || !script.includes(marker))
-            return originalSpawn(...spawnArgs);
-          const instrumented = [...args];
-          instrumented[scriptIndex] =
-            `${language === "ConstrainedLanguage" ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" : ""}` +
-            script.replace(
-              marker,
-              `${marker} Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${trace}' -Value ('input:' + @($path).Count);`,
-            ) +
-            `\nMicrosoft.PowerShell.Management\\Add-Content -LiteralPath '${trace}' -Value ('complete:' + $script:descriptorCount)`;
-          return originalSpawn(command, instrumented, options);
-        },
-      }));
+      const trace = join(root, "acl-queries.txt");
+      const append = `Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${trace.replaceAll("'", "''")}' -Value`;
+      const restore = instrumentCredentialAcl(home, (script) =>
+        [
+          language === "ConstrainedLanguage"
+            ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'"
+            : "",
+          script.replace(
+            credentialAclFunction,
+            `${credentialAclFunction} ${append} (@($path).Count);`,
+          ),
+          `${append} ('complete:' + $script:descriptorCount)`,
+        ].join("\n"),
+      );
       try {
         await requireSecureCredentialHome(home);
-        const rows = (await readFile(join(root, "acl-queries.txt"), "utf8"))
-          .trim()
-          .split(/\r?\n/u);
-        const queries = rows
-          .filter((row) => row.startsWith("input:"))
-          .map((row) => Number(row.slice(6)));
+        const rows = (await readFile(trace, "utf8")).trim().split(/\r?\n/u);
         const expected = credentialAncestors(home, "").length + 10;
-        expect(queries.some((count) => count === 8)).toBe(true);
+        expect(rows.pop()).toBe(`complete:${expected}`);
+        const queries = rows.map(Number);
+        expect(queries).toContain(8);
         expect(queries.reduce((total, count) => total + count, 0)).toBe(
           expected,
         );
-        expect(rows.filter((row) => row.startsWith("complete:"))).toEqual([
-          `complete:${expected}`,
-        ]);
       } finally {
-        restoreSpawn(originalSpawn);
+        restore();
       }
     });
   }

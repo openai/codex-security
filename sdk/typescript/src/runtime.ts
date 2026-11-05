@@ -1006,7 +1006,6 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     throw new Error("Unable to identify the current Windows user SID");
   }
 
-  const retryIncompleteAcl = `if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`;
   // Signed built-in cmdlets remain available under ConstrainedLanguage;
   // arbitrary .NET constructors, static methods, and SID translation do not.
   // Enumerate and count ACLs in the same process: parallel startup can create
@@ -1015,9 +1014,8 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "$ErrorActionPreference = 'Stop'",
     "$script:descriptorCount = 0",
     "function Write-CredentialAcl($path) {",
-    "  $paths = @($path)",
-    "  $descriptors = @(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $paths | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl)",
-    "  if ($descriptors.Count -ne $paths.Count) { throw 'Windows credential ACL could not be verified' }",
+    "  $descriptors = @(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl)",
+    "  if ($descriptors.Count -ne @($path).Count) { throw 'Windows credential ACL could not be verified' }",
     "  foreach ($descriptor in $descriptors) { if (-not $descriptor) { throw 'Windows credential ACL could not be verified' }; $script:descriptorCount += 1; $descriptor }",
     "}",
     "function Read-CredentialDescendants($path) {",
@@ -1034,17 +1032,14 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     // Keep the extended-length path when Windows PowerShell returns child names.
     '    "$path\\$($entry.Name)"',
     "  })",
-    "  if ($children.Count -gt 0) {",
-    "    try { Write-CredentialAcl $children } catch {",
-    // Only a vanished path can justify rechecking siblings individually.
-    `      ${retryIncompleteAcl}`,
-    "      if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw }",
-    "      for ($i = 0; $i -lt $children.Count; $i++) {",
-    "        try { Write-CredentialAcl $children[$i] } catch {",
-    `          ${retryIncompleteAcl}`,
-    "          if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { $children[$i] = $null; continue }",
-    "          throw",
-    "        }",
+    "  if ($children.Count -eq 0) { return }",
+    "  try { Write-CredentialAcl $children } catch {",
+    // A vanished path is the only reason to retry the batch one child at a time.
+    "    if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw }",
+    "    for ($i = 0; $i -lt $children.Count; $i++) {",
+    "      try { Write-CredentialAcl $children[$i] } catch {",
+    "        if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw }",
+    "        $children[$i] = $null",
     "      }",
     "    }",
     "  }",
@@ -1054,7 +1049,11 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "}",
     ancestorAclScript,
     "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_TREE_PATH",
+    "try { Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_TREE_PATH } catch {",
+    // Either a batch or a single-child Get-Acl may report an incomplete listing.
+    `  if ($_.FullyQualifiedErrorId -in @('System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand', 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand')) { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "  throw",
+    "}",
     `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
   ].join("\n");
   const resolvePrincipalScript = [
