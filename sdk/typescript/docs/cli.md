@@ -1159,7 +1159,14 @@ attempt. Post-scan prompts run after cost tracking and are outside this limit.
 Automatic history matching gets at most one extra call with a limit; if more
 work is needed, the scan is preserved and you can run `scans match --all`.
 
-When Deep discovery has finished at a cost stop, the scan returns a sealed
+A scan with a cost limit requires complete token usage for its recorded scan,
+worker, and custom validation sessions before the SDK returns a completed result.
+Verifying compressed `.jsonl.zst` sessions requires Python 3.14 or later, or
+`backports.zstd` installed in the selected Python environment.
+Missing or unreadable usage fails budget verification. Without a limit, usage
+reporting remains best effort.
+
+When Deep discovery has finished at a cost stop and usage is verified, the scan returns a sealed
 report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report returns `0` by default, or `1` if findings
 meet a configured failure threshold.
@@ -2803,10 +2810,11 @@ truncating any selected finding. The CLI prints verdicts in selection order
 after every request returns valid results. For these selections the CLI omits
 per-event progress and update notices so stderr cannot delay the verdicts.
 
-If one finding exceeds the input limit on its own, verification stops before
-the first request. The error reports its occurrence ID and required request
-size. To verify another open occurrence from that scan, run
-`codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID`.
+If a finding would exceed the input limit, `validate`, `patch`, and `verify-fix`
+automatically put the complete finding data in a temporary file and ask Codex
+to read it in bounded chunks. No manual splitting or truncation is needed.
+The file remains available until the task finishes and is then removed. The
+SDK's local `validate()` and `patch()` methods use the same fallback.
 
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.

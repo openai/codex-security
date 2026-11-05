@@ -148,7 +148,12 @@ const base = dependencies({
       );
       return 0;
     }
-    if (batchWorker === 2 && scenario !== "repeated-main") await nextControl();
+    if (
+      batchWorker === 2 &&
+      scenario !== "repeated-main" &&
+      scenario !== "pty-oversized"
+    )
+      await nextControl();
 
     const id = `occ_${batchWorker - 1}`;
     if (batchWorker === 2 && scenario === "progress-success") {
