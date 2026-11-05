@@ -18,6 +18,7 @@ import {
 import { isRecord } from "./record.js";
 import {
   executablePathForSpawn,
+  isDisconnectedChildStdin,
   PLUGIN_NAME,
   runCodexCommand,
   type CodexCommand,
@@ -484,12 +485,7 @@ function runEngine(
     processError = error;
   });
   child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-    if (
-      !["EPIPE", "ECONNRESET", "EOF", "ERR_STREAM_DESTROYED"].includes(
-        error.code ?? "",
-      )
-    )
-      processError = error;
+    if (!isDisconnectedChildStdin(error)) processError = error;
   });
   const result = new Promise<string>((resolve, reject) => {
     child.once("close", (code) => {

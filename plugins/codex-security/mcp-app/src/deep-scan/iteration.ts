@@ -677,7 +677,6 @@ export async function mergeBatch(
       }
       aggregate.scope = merged;
     }
-    aggregate.threatModel ??= worker.result.threatModel;
   }
   // A later worker can add a separately fixable path to a previously merged group.
   const lastChange = new Map<number, number>();

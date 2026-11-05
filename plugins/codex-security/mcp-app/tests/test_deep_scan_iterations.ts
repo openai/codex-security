@@ -334,7 +334,13 @@ test("overlapping lists of affected endpoints retain the additional fix", async 
 });
 
 test("a new instance extends the loop and an unfinished final batch respects the cap", async () => {
-  const other = { ...base, locations: [{ path: "fixture.py", startLine: 22 }] };
+  const other = {
+    ...base,
+    locations: [
+      { path: "fixture.py", startLine: 22, role: "entrypoint" },
+      { path: "fixture.py", startLine: 35, role: "root_control" },
+    ],
+  };
   const gate = Promise.withResolvers<void>();
   const { terminal, draft, started, previousByPass } = await scanLoop(
     [[base], [other], [base]],
@@ -353,7 +359,7 @@ test("a new instance extends the loop and an unfinished final batch respects the
   assert.deepEqual(previousByPass, [
     [],
     [],
-    [`fixture.py:1 ${base.title}`, `fixture.py:22 ${other.title}`],
+    [`fixture.py:1 ${base.title}`, `fixture.py:35 ${other.title}`],
   ]);
   assert.equal(terminal.terminalReason, "capped");
   assert.deepEqual(
