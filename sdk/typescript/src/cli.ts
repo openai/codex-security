@@ -9858,8 +9858,8 @@ export function skillCommandFailure(
     );
   // Keep a neutral token so a quoted provider/model remains a named model in the message.
   const withoutPaths = detail
-    .replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "")
-    .replace(/[^\s"'()<>,]+/gu, (token) =>
+    .replace(/\bhttps?:\/\/[^\s"'`<>]+/giu, "")
+    .replace(/[^\s"'`()<>,]+/gu, (token) =>
       /[/\\]/u.test(token) && !/^HTTP\/\d+(?:\.\d+)?$/iu.test(token)
         ? "[path]"
         : token,
