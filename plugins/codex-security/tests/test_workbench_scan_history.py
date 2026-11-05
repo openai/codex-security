@@ -696,9 +696,16 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
                 json.dumps(
                     {
                         "usage": {
-                            "status": "complete",
+                            "source": "codex_runtime",
+                            "coverage": "complete",
+                            "threadCount": 1,
+                            "missingThreadCount": 0,
                             "inputTokens": 5_000,
+                            "cachedInputTokens": 0,
+                            "cacheWriteInputTokens": 0,
                             "outputTokens": 120,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 5_120,
                         }
                     }
                 ),
@@ -1940,3 +1947,16 @@ def test_cli_diff_launch_accepts_equal_refs_and_distinct_working_tree_base(tmp_p
                 base_revision,
                 head,
             )
+
+
+def test_scan_list_honors_advertised_page_size(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    for index in range(21):
+        output = tmp_path / f"scan-{index}"
+        output.mkdir(mode=0o700)
+        create_cli_scan(state_dir, output, repository, complete=False)
+    page = run_workbench(state_dir, "list-scans", "--limit", "50")
+    assert len(page["scans"]) == 21
+    assert page["nextOffset"] is None

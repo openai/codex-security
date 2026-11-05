@@ -48,7 +48,8 @@
     "docs/classify-severity-records.md",
     "docs/hosted-scans.md",
     "docs/validate-records.md",
-    "docs/hosted-remediation.md"
+    "docs/hosted-remediation.md",
+    "docs/telemetry.md"
   ],
   "publishConfig": {
     "access": "public",
