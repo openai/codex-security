@@ -15,9 +15,10 @@ pages for your selection. Preserve each page's HAL links and pagination fields.
 report=/private/path/policy-findings.json
 ```
 
-**Export from Veracode.** With read access to the application and Results API,
-save and configure the [export script](#export-findings-api-pages). Capture
-the path it prints when the export succeeds.
+**Export from Veracode.** You need Bash, `jq`, HTTPie with the Veracode HMAC
+plugin, and Veracode credentials with read access to the application and
+Results API. Configure the [export script](#export-findings-api-pages), then
+capture the path it prints when the export succeeds.
 
 ```sh
 report=$(bash "/private/path/export-veracode.sh")
