@@ -12,8 +12,15 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
+import { runMultiscan } from "../src/multiscan.js";
 import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  client as multiscanClient,
+  completedScan,
+  options as multiscanOptions,
+  repository as createRepository,
+} from "./support/multiscan.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -62,6 +69,28 @@ async function accessRules(path: string): Promise<string> {
     path,
     "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; entries = @($acl.Access | Select-Object FileSystemRights, AccessControlType, IdentityReference, IsInherited, InheritanceFlags, PropagationFlags) } | ConvertTo-Json -Depth 4 -Compress",
   );
+}
+
+async function createMultiscanCampaign(
+  root: string,
+  output = join(root, "campaign"),
+): Promise<string> {
+  const source = await createRepository(root, "campaign-source");
+  const input = join(root, "campaign.csv");
+  await writeFile(
+    input,
+    `id,repository,revision\ncampaign,${source.path},${source.revision}\n`,
+  );
+  await runMultiscan(
+    multiscanOptions(
+      { input, output },
+      multiscanClient(async (_checkout, scanOptions = {}) =>
+        completedScan(scanOptions.outputDir!),
+      ),
+      { maxAttempts: 1 },
+    ),
+  );
+  return await realpath(output);
 }
 
 async function archiveWorkbenchOutput(
@@ -116,7 +145,15 @@ windowsTest(
       "fixture",
       root,
     );
-    for (const output of [join(root, "new parent"), explicit, generated]) {
+    const campaign = await createMultiscanCampaign(root);
+    for (const output of [
+      join(root, "new parent"),
+      explicit,
+      generated,
+      campaign,
+      join(campaign, "artifacts"),
+      join(campaign, "checkouts"),
+    ]) {
       const acl = await descriptor(output);
       expect(acl).toContain("D:P");
       expect(acl).not.toContain(";;;WD)");
@@ -280,6 +317,21 @@ windowsTest("existing Windows scan ACLs are preserved", async () => {
 });
 
 windowsTest(
+  "existing Windows multiscan campaign ACLs are preserved",
+  async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "campaign");
+    await mkdir(output);
+    await icacls(output, "/grant", "*S-1-5-32-545:(OI)(CI)M");
+    const permissions = await accessRules(output);
+    expect(await createMultiscanCampaign(root, output)).toBe(
+      await realpath(output),
+    );
+    expect(await accessRules(output)).toBe(permissions);
+  },
+);
+
+windowsTest(
   "archiving Windows output preserves old ACLs and privately creates the replacement",
   async () => {
     const root = await temporaryDirectory();
@@ -358,9 +410,13 @@ test.skipIf(
     }
     const archive = await archiveWorkbenchOutput(generated, root);
     await writeFile(join(generated, "probe.txt"), "synthetic private data");
+    const campaign = await createMultiscanCampaign(root);
+    await writeFile(join(campaign, "probe.txt"), "synthetic private data");
     const paths = [
       shared,
-      ...[explicit, generated, archive].map((path) => join(path, "probe.txt")),
+      ...[explicit, generated, archive, campaign].map((path) =>
+        join(path, "probe.txt"),
+      ),
     ];
     const script = await readFile(
       join(import.meta.dir, "support", "windows-other-user-access.ps1"),
@@ -386,6 +442,7 @@ test.skipIf(
     );
     expect(JSON.parse(result.stdout)).toEqual([
       { read: true, write: true },
+      { read: false, write: false },
       { read: false, write: false },
       { read: false, write: false },
       { read: false, write: false },

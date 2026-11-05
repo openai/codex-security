@@ -38,6 +38,7 @@ import {
 } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
+  createWindowsOutputDirectory,
   requireSecureOutputAncestry,
   resolvePluginPath,
   validateOutputDir,
@@ -717,7 +718,11 @@ async function ensureOutputDirectory(path: string): Promise<string> {
       process.platform === "win32"
         ? await canonicalWindowsCreationPath(path)
         : path;
-    await mkdir(prepared, { recursive: true, mode: 0o700 });
+    if (process.platform === "win32") {
+      await createWindowsOutputDirectory(prepared, true);
+    } else {
+      await mkdir(prepared, { recursive: true, mode: 0o700 });
+    }
   }
   const canonical = await realpath(prepared);
   const directory = await lstat(canonical, { bigint: true });
