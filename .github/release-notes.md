@@ -97,6 +97,7 @@
 - preserve differing threat models and use primary repair sites ([#2306](https://github.com/openai/codex-security/pull/2306))
 - preserve independently fixable findings across batches and resumes ([#2311](https://github.com/openai/codex-security/pull/2311))
 - read oversized findings from temporary files ([#2342](https://github.com/openai/codex-security/pull/2342))
+- preserve disputed comparisons across context retries ([#2321](https://github.com/openai/codex-security/pull/2321))
 
 <!-- release-section: highlights:end -->
 
