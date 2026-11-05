@@ -4,14 +4,49 @@ import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout, stage = "pair-review"] =
   process.argv.slice(2);
+const transportStatus = /^transport-(?:request|turn)-(\d+)$/.exec(
+  scenario,
+)?.[1];
+const transportFailure = transportStatus
+  ? {
+      message: `Safety policy: request refused by upstream with ${transportStatus}`,
+      codexErrorInfo: {
+        httpConnectionFailed: { httpStatusCode: Number(transportStatus) },
+      },
+    }
+  : scenario === "transport-wording-request"
+    ? {
+        message: "Request flagged for possible cybersecurity risk.",
+        codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+      }
+    : undefined;
 const turnFailures = {
+  ...(scenario.startsWith("transport-turn-")
+    ? { [scenario]: transportFailure }
+    : {}),
+  "transport-null-turn": {
+    message: "Request flagged for possible cybersecurity risk.",
+    codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+  },
+  "transport-timeout-turn": {
+    message: "Safety policy: request refused because the service timed out",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 504 } },
+  },
   "policy-turn-code": {
     message: "Request blocked.",
     codexErrorInfo: "cyberPolicy",
   },
   "policy-turn": {
     message: "Request flagged for possible cybersecurity risk.",
-    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+    codexErrorInfo: "other",
+  },
+  "policy-accordance-turn": {
+    message: "This request was refused in accordance with the safety policy.",
+    codexErrorInfo: "other",
+  },
+  "policy-terse-turn": {
+    message: "Refused due to the safety policy",
+    codexErrorInfo: "other",
   },
   "failed-turn": {
     message: "Rate limit exceeded",
@@ -78,6 +113,17 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(message.params.apiKey, "synthetic-review-key");
     send({ id: message.id, result: { type: "apiKey" } });
   } else if (message.method === "thread/start") {
+    if (transportFailure && !scenario.startsWith("transport-turn-")) {
+      send({
+        id: message.id,
+        error: {
+          code: -32000,
+          message: transportFailure.message,
+          data: { codexErrorInfo: transportFailure.codexErrorInfo },
+        },
+      });
+      continue;
+    }
     if (
       [
         "request-error",
@@ -231,7 +277,21 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (
       scenario === "text-only" ||
+      scenario === "service-timeout-text" ||
       scenario === "refusal-text" ||
+      scenario === "policy-causal-refusal-text" ||
+      scenario === "policy-refusal-text" ||
+      scenario === "policy-first-refusal-text" ||
+      scenario === "policy-colon-refusal-text" ||
+      scenario === "policy-review-text" ||
+      scenario === "policy-suffix-explanation-text" ||
+      scenario === "policy-colon-explanation-text" ||
+      scenario === "policy-harmful-content-text" ||
+      scenario === "policy-bare-harmful-content-text" ||
+      scenario === "policy-restrictions-text" ||
+      scenario === "policy-bare-restrictions-text" ||
+      scenario === "policy-service-impact-text" ||
+      scenario === "policy-multiline-explanation-text" ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -247,9 +307,38 @@ for await (const line of createInterface({ input: process.stdin })) {
           item: {
             type: "agentMessage",
             text:
-              scenario === "refusal-text"
-                ? "I'm sorry, but I can't assist with that request."
-                : '{"decision":"SAME"}',
+              scenario === "service-timeout-text"
+                ? "Safety policy: request refused because the service timed out"
+                : scenario === "policy-multiline-explanation-text"
+                  ? "Safety policy: this request is refused.\nI can offer a defensive alternative."
+                  : scenario === "policy-restrictions-text"
+                    ? "Safety policy: this request is refused due to policy restrictions."
+                    : scenario === "policy-bare-restrictions-text"
+                      ? "Safety policy: request refused due to policy restrictions."
+                      : scenario === "policy-service-impact-text"
+                        ? "Safety policy: this request is refused because it would make the service unavailable."
+                        : scenario === "policy-harmful-content-text"
+                          ? "Safety policy: this request is refused due to harmful content."
+                          : scenario === "policy-bare-harmful-content-text"
+                            ? "Safety policy: request refused due to harmful content."
+                            : scenario === "policy-review-text"
+                              ? "Review refused: safety policy."
+                              : scenario === "policy-suffix-explanation-text"
+                                ? "Request refused: safety policy. I can offer a defensive alternative."
+                                : scenario === "policy-colon-refusal-text"
+                                  ? "Request refused: safety policy."
+                                  : scenario === "policy-colon-explanation-text"
+                                    ? "Safety policy: request refused due to disallowed content."
+                                    : scenario === "refusal-text"
+                                      ? "I'm sorry, but I can't assist with that request."
+                                      : scenario === "policy-first-refusal-text"
+                                        ? "Cybersecurity policy: this request is refused."
+                                        : scenario ===
+                                            "policy-causal-refusal-text"
+                                          ? "This request was refused because it violates the safety policy."
+                                          : scenario === "policy-refusal-text"
+                                            ? "This request was refused because of the safety policy."
+                                            : '{"decision":"SAME"}',
           },
         },
       });
@@ -279,8 +368,25 @@ for await (const line of createInterface({ input: process.stdin })) {
         {
           reason:
             scenario === "policy-reported-error"
-              ? "Request refused due to cybersecurity policy violation."
-              : "Required source revision could not be read.",
+              ? "Request refusal due to the safety policy."
+              : scenario === "required-source-error-policy-file"
+                ? "Connection refused while fetching content-policy.ts"
+                : scenario === "required-source-error-upload-policy"
+                  ? "Artifact upload was blocked by the content policy."
+                  : scenario === "required-source-error-publication-policy"
+                    ? "Artifact publication was refused due to the content policy."
+                    : scenario === "required-source-error-publication-refusal"
+                      ? "Artifact publication refusal due to the content policy."
+                      : scenario ===
+                          "required-source-error-policy-requires-refusal"
+                        ? "Artifact upload failed because the content policy requires refusal of unsupported media"
+                        : scenario ===
+                            "required-source-error-upload-content-policy-violation"
+                          ? "Artifact upload failed due to content policy violation"
+                          : scenario ===
+                              "required-source-error-upload-safety-policy-violation"
+                            ? "Artifact upload failed due to safety policy violation"
+                            : "Required source revision could not be read.",
         },
         { tool: "submit_error" },
       );
