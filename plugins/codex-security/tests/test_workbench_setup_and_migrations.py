@@ -107,8 +107,9 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "save scan target Git positions"),
-    (64, "save scan Git repository identities"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "save scan target Git positions"),
+    (65, "save scan Git repository identities"),
 ]
 
 
@@ -1886,7 +1887,7 @@ def test_workbench_repairs_shadowed_capability_preflight_migration(
         ).fetchone() == (1,)
 
 
-@pytest.mark.parametrize("prefix_version", [54, 58, 61])
+@pytest.mark.parametrize("prefix_version", [54, 58, 61, 63])
 @pytest.mark.parametrize("main_reader", [False, True])
 def test_upgrade_preserves_pre_release_scan_git_identity(
     tmp_path: Path, prefix_version: int, main_reader: bool
@@ -1901,8 +1902,8 @@ def test_upgrade_preserves_pre_release_scan_git_identity(
             connection,
             (
                 *migrations[: prefix_version - 1],
-                (prefix_version, *migrations[62][1:]),
-                (prefix_version + 1, *migrations[63][1:]),
+                (prefix_version, *migrations[63][1:]),
+                (prefix_version + 1, *migrations[64][1:]),
             ),
             timestamp,
         )
@@ -1913,7 +1914,7 @@ def test_upgrade_preserves_pre_release_scan_git_identity(
         if main_reader:
             # Released readers repair their additive columns under the preview version numbers.
             for version, _, sql in migrations[prefix_version - 1 : prefix_version + 1]:
-                if version != 62:  # The lifecycle view is not an additive repair.
+                if version in (54, 55, 58, 59, 61):  # Released additive repairs.
                     for statement in SCHEMA.sql_statements(sql):
                         connection.execute(statement)
 
@@ -1931,7 +1932,7 @@ def test_upgrade_preserves_pre_release_scan_git_identity(
             "SELECT target_git_prefix, target_git_identity_json FROM scans WHERE id = 'legacy-scan'"
         ).fetchone() == ("component", identity)
         assert connection.execute(
-            "SELECT applied_at FROM schema_migrations WHERE version IN (63, 64) ORDER BY version"
+            "SELECT applied_at FROM schema_migrations WHERE version IN (64, 65) ORDER BY version"
         ).fetchall() == [(timestamp,), (timestamp,)]
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
