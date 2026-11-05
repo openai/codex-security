@@ -62,7 +62,6 @@ const distModules = [
   "private-finding-import",
   "external-import-contract",
   "external-import-models",
-  "external-imports-feature",
   "endor-findings",
   "blackduck-findings",
   "wiz-csv",

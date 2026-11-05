@@ -1,4 +1,3 @@
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
@@ -1450,6 +1449,59 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   }
   await rm(quarantine, { recursive: true, force: true });
   return true;
+}
+
+function sameInode(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/** Distinguish two hard links from two paths to the same directory entry. */
+async function hasSeparateAmbientLink(
+  localPath: string,
+  ambientHome: string,
+): Promise<boolean> {
+  try {
+    const local = await lstat(localPath, { bigint: true });
+    if (!local.isFile() || local.nlink < 2n || local.ino === 0n) return false;
+    const ambient = await lstat(join(ambientHome, "auth.json"), {
+      bigint: true,
+    });
+    if (!ambient.isFile() || !sameInode(local, ambient)) return false;
+    const [localDir, ambientDir] = await Promise.all([
+      stat(dirname(localPath), { bigint: true }),
+      stat(ambientHome, { bigint: true }),
+    ]);
+    return (
+      localDir.ino !== 0n &&
+      ambientDir.ino !== 0n &&
+      !sameInode(localDir, ambientDir)
+    );
+  } catch {
+    // Without a verified second link, leave logout to the configured native store.
+    return false;
+  }
+}
+
+/** Run under the credential-home lock so status cannot reimport the sign-in during logout. */
+export async function logoutCredentialHome<T extends number | void>(
+  home: string,
+  ambientHome: string,
+  nativeLogout: () => Promise<T>,
+  onLoggedOut?: () => void,
+): Promise<T> {
+  const localPath = join(home, "auth.json");
+  const shared = await hasSeparateAmbientLink(localPath, ambientHome);
+  const recordLogout = async () => {
+    await setCodexSecurityCredentialLogout(home, true);
+    if (shared) await rm(localPath);
+    onLoggedOut?.();
+  };
+
+  // Detach before native logout can revoke a shared token, even if native cleanup fails.
+  if (shared) await recordLogout();
+  const status = await nativeLogout();
+  if (!shared && (status === undefined || status === 0)) await recordLogout();
+  return status;
 }
 
 export async function setCodexSecurityCredentialLogout(
@@ -3219,14 +3271,12 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  const child = {
+  return {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
     CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
 
 export function environmentWithGit(
@@ -3622,9 +3672,7 @@ export function sameFile(left: string, right: string): Promise<boolean> {
     stat(left, { bigint: true }),
     stat(right, { bigint: true }),
   ]).then(
-    ([leftMetadata, rightMetadata]) =>
-      leftMetadata.dev === rightMetadata.dev &&
-      leftMetadata.ino === rightMetadata.ino,
+    ([leftMetadata, rightMetadata]) => sameInode(leftMetadata, rightMetadata),
     () => false,
   );
 }

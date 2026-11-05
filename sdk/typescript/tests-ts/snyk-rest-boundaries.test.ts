@@ -112,7 +112,7 @@ test("an empty normalized Snyk report stops before Cloud credentials", async () 
       normalized,
       { provider: "snyk", repository: "repo-example", sourceKey: "example" },
       {
-        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        environment: {},
         credentials,
       },
     ),
@@ -608,7 +608,7 @@ test("a serialized Snyk report keeps its monitored asset when a reader supplies 
       projected,
       { provider: "wiz", sourceKey: "project", repository: "repo-example" },
       {
-        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        environment: {},
         credentials,
       },
     ),
@@ -619,7 +619,7 @@ test("a serialized Snyk report keeps its monitored asset when a reader supplies 
       malformed,
       { provider: "snyk", sourceKey: "project", repository: "repo-example" },
       {
-        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        environment: {},
         credentials,
       },
     ),
