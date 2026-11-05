@@ -16,6 +16,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     path_within_scope,
 )
+from windows_paths import portable_relative_path
 from workbench.saved_coverage import _project_worker_coverage_row, _saved_coverage_id
 
 
@@ -115,7 +116,7 @@ def resolve_coverage_receipts(
     directory = Path(relative).parent
     if directory.name == "checkpoints":
         directory = directory.parent
-    output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+    output = portable_relative_path(Path(worker["artifact_dir"]), scan_dir)
     worker_prefix = (output.parent if output.name == "output" else output).as_posix() + "/"
     active_prefix = output.as_posix() + "/"
     if directory != output:

@@ -21,6 +21,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from review_state import review_state, uses_legacy_review
+from windows_paths import portable_relative_path
 from workbench_coverage_receipts import capture_receipt_checkpoints
 
 
@@ -691,7 +692,7 @@ def _latest_iteration(workers: Iterable[Any]) -> Any | None:
 
 
 def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
-    output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+    output = portable_relative_path(Path(worker["artifact_dir"]), scan_dir)
     attempts = (output.parent if output.name == "output" else output) / "attempts"
     archived = [
         ((attempts / name).as_posix(), int(name.split("-")[1]))
@@ -733,7 +734,9 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
         ):
             try:
                 yield (
-                    Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix(),
+                    portable_relative_path(
+                        Path(worker["result_manifest_path"]), scan_dir
+                    ).as_posix(),
                     worker["kind"],
                 )
             except ValueError:

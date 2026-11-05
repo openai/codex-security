@@ -209,3 +209,32 @@ def test_git_discovery_rejects_a_tool_under_a_verbatim_only_directory(tmp_path, 
     finally:
         candidate.unlink(missing_ok=True)
         literal.rmdir()
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("extended_worker", [False, True])
+def test_saved_worker_results_accept_mixed_scan_root_spellings(tmp_path, extended_worker):
+    paths = load_script("windows_paths")
+    sources = load_script("workbench/saved_sources")
+    ordinary = paths.portable_path(tmp_path)
+    extended = paths.extended_path(ordinary)
+    root, stored = (ordinary, extended) if extended_worker else (extended, ordinary)
+    worker = {
+        "kind": "discovery",
+        "artifact_dir": str(stored / "worker" / "output"),
+        "result_manifest_path": str(stored / "worker" / "last-result.json"),
+        "attempt": 2,
+    }
+    receipts = load_script("workbench_coverage_receipts")
+    assert (
+        receipts.resolve_coverage_receipts(
+            root, {"receiptRefs": []}, worker, "worker/output/result.json"
+        )
+        == []
+    )
+    assert sources._worker_outputs(root, worker) == [("worker/output", 2)]
+    assert ("worker/last-result.json", "discovery") in list(
+        sources._saved_result_paths(root, [worker])
+    )
+    with pytest.raises(ValueError):
+        sources._worker_outputs(root, {**worker, "artifact_dir": str(stored.parent / "sibling")})
