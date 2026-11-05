@@ -1427,6 +1427,10 @@ For completed scans exported in the Codex Security JSON or CSV format, use
 For Checkmarx One CLI JSON or CxSAST XML, use `--provider checkmarx` and pass the
 verified Git URL with `--source-repository-url`. See the [Checkmarx SAST guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md).
 
+## Import Trivy dependency findings
+
+Use `--provider trivy` to read a schema-v2 repository or filesystem report (JSON or gzip). Pass `--trivy-scan-root .` for a whole checkout or a checkout-relative path for a subtree. A corroborated remote repository scan can infer the root. See the [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md) for a preview command, repository matching, and how to save or publish the results.
+
 ## Import Endor Labs findings
 
 Use `--provider endor` for one Endor project and context. The

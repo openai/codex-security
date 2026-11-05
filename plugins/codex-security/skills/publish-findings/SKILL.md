@@ -31,6 +31,10 @@ Read the stored evidence with `codex-security findings imported /path/to/project
 
 Local records remain unassessed source evidence, separate from `findings list` and completed scans. Repeated imports use the same repository/provider/source-key/source-ID identity; omitted records remain stored. When a source repository URL and local Git remotes are available, the URL must match a remote. Local import does not publish to Cloud or automatically investigate or patch findings.
 
+## Trivy dependency vulnerabilities
+
+Use `--provider trivy` with a saved schema-v2 repository or filesystem report (JSON or gzip). Preview with a stable project/branch source key and `--trivy-scan-root` relative to the checkout (`.` for the whole checkout). Omit the root only when the report's Git metadata corroborates a remote repository scan. Check the source, package paths and exclusions before importing. Trivy's `fixed` status identifies an available upstream fix. [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md)
+
 ## Amazon Inspector repository findings
 
 Use `--provider inspector` and `--source-repository-url` with a complete Inspector2 ListFindings export for one Code Security repository. If it contains only a project ARN and name, pass the full `--inspector-project-arn ARN` verified for that Git URL in the SCM integration. Supply the same ARN when resuming a pending Cloud submission. Self-managed GitLab is supported locally.
