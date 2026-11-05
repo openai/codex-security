@@ -1,10 +1,11 @@
 # Amazon Bedrock setup and verification
 
-Codex Security uses Codex's native `amazon-bedrock` provider. Install
-`@openai/codex-security` normally; it includes the Codex executable and security
-plugin. No customer connector or API adapter is needed. Use the current release;
-version `0.1.27` and later includes the Bedrock reasoning-summary default and its
-propagation to Deep Scan workers.
+Codex Security's bundled Codex executable uses the `amazon-bedrock` provider.
+Choose an AWS identity, region, and Bedrock model ID the identity can invoke.
+For CI with short-lived credentials, use the
+[GitHub Action](../github-action/README.md#scan-with-amazon-bedrock),
+[direct CLI workflow for GitHub Actions](../examples/github-actions/README.md), or
+[Azure Pipeline](../examples/azure-pipelines/README.md).
 
 ## Select AWS credentials and a model
 
@@ -14,13 +15,16 @@ an existing AWS profile:
 ```bash
 export AWS_PROFILE="security-scan"
 export AWS_REGION="us-east-2"
+model="<your-bedrock-model-id>"
 npx @openai/codex-security scan /path/to/repository \
-  --provider amazon-bedrock --model openai.gpt-5.6-luna
+  --provider amazon-bedrock --model "$model"
 ```
 
-Choose the region and exact Bedrock model ID your AWS identity can invoke. The
-example region and model do not grant access. Do not reuse an OpenAI API model
-name unless it is also the Bedrock model ID.
+Replace the profile, region, model ID, and repository path with your own. This
+scan makes billable model requests. To inspect the local scan configuration
+first, add `--dry-run`. Only an inference call verifies that the AWS identity
+can invoke the model. For an access-denied response, check the identity,
+region, and permission to invoke that exact model.
 
 Alternatively, use `AWS_BEARER_TOKEN_BEDROCK`, or export the credentials supplied
 by your AWS credential workflow:
@@ -32,31 +36,19 @@ export AWS_SESSION_TOKEN="<temporary-session-token>"
 export AWS_REGION="us-east-2"
 ```
 
-Temporary AWS credentials need the session token as well as the access key pair.
-Web identity, container credentials, and the default AWS credential chain are
-also supported. Avoid competing credential environment variables when selecting
-a profile. Exporting credentials in another terminal or child process does not
-configure an already-running shell. No AWS CLI installation is required by
-Codex Security itself.
+When using temporary credentials, include the session token. Other options
+include web identity, container credentials, and the default AWS credential
+chain. When using a named profile, clear environment credentials for other
+identities from the scan process.
 
-Once model access is provisioned, native Bedrock scanning uses AWS credentials
-without a separate `codex-security login` or OpenAI API key. Restricted models
-still require their approval and provisioning steps; see Daybreak Blue and Red below.
-Local Markdown/JSON reports, `scans show`, and `export` also
-need no cloud login. [Publishing to Cloud](../sdk/typescript/README.md#publish-findings-to-cloud)
-requires separate ChatGPT credentials and access to that destination.
+Bedrock uses AWS credentials for inference. [Daybreak Blue and Red](#daybreak-blue-and-red)
+require separate approval and provisioning. Saved reports, `scans show`, and
+`export` are local. [Publishing to Cloud](../sdk/typescript/README.md#publish-findings-to-cloud)
+requires ChatGPT credentials and access to the destination.
 
-`info` and `scan --dry-run` check local state, not AWS authentication or model
-availability. A successful preflight is not a successful Bedrock invocation.
-Model-metadata and OpenAI access advisories are distinct from AWS authorization:
-check the actual inference response before concluding that access works or fails.
-For authentication or access-denied responses, check the chosen AWS identity,
-region, and permissions for that exact model.
-
-Model metadata comes from the bundled Codex executable. If it reports missing
-metadata, record that Codex version from `info --json`. An upstream metadata fix
-reaches installed users when a Codex Security release bundles the corrected
-Codex dependency; a successful inference alone does not verify all model metadata.
+If Codex reports missing model metadata, record the bundled Codex version from
+`info --json`. The metadata comes from the executable shipped with the package.
+An AWS inference request can succeed even when the bundled metadata is incomplete.
 
 Bedrock defaults `model_reasoning_summary` to `none` because some models reject
 `reasoning.summary`. This setting reaches Deep Scan discovery workers,
@@ -65,6 +57,32 @@ including resumes. To request summaries from a model that supports them, add
 override takes precedence over the default and does not change reasoning effort.
 See [native configuration overrides](../sdk/typescript/docs/cli.md#runtime-configuration-and-worker-limits)
 for the `--codex KEY=VALUE` syntax.
+
+## Check the sandbox on an Ubuntu CI runner
+
+The direct CLI workflows for GitHub and Azure need Bubblewrap and permission
+to create user namespaces. On Ubuntu 24.04, check the runner before assuming
+the AWS role. Run this command as the same user that will run the scan:
+
+```bash
+bwrap --unshare-user --unshare-net --ro-bind / / --dev /dev --proc /proc -- /usr/bin/true
+```
+
+A successful check exits with status 0. If `bwrap` is missing or creating a
+namespace fails on a hosted Ubuntu VM, add these commands to a trusted setup
+step before checkout, then rerun the check:
+
+```bash
+sudo apt-get update
+sudo apt-get install --yes bubblewrap apparmor-profiles
+sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+```
+
+On a self-hosted agent, have its administrator configure the sandbox in the
+runner image. A sandbox startup error points to the runner. A Bedrock
+access-denied response points to the AWS identity or its model permissions.
+The [GitHub Action](../github-action/README.md#ubuntu-sandbox-setup) includes its
+own Codex sandbox check and conditional setup on supported GitHub-hosted VMs.
 
 ## Daybreak Blue and Red
 
@@ -99,21 +117,20 @@ npx @openai/codex-security scan /path/to/repository \
   --provider amazon-bedrock --model openai.gpt-5.6-cyber --effort high
 ```
 
-Neither command needs an additional OpenAI CLI sign-in after AWS model access
-is provisioned. The Bedrock reasoning-summary default remains `none` for both.
-
 Cost estimates and `--max-cost` recognize both exact Bedrock IDs using their
 AWS model cards' Standard commercial in-region rates, including the AWS fee.
 Blue reports a short/long-context range because aggregate usage does not identify
 each request's context tier. Red's card lists a 272K context window and only
 short-context pricing, so its upper estimate remains unavailable. Spending limits
-use the short-context baseline; they do not guarantee the final AWS bill. Pricing
-for other Bedrock model IDs is unchanged.
+use the short-context baseline. AWS bills the actual usage.
 
-## Repeatable live smoke test
+<a id="repeatable-live-smoke-test"></a>
 
-This optional maintainer check makes real, billable Bedrock requests against a
-small synthetic repository. Use an installed, pinned package version or a built
+## Maintainers: verify a Bedrock release
+
+Run this check to verify Standard and Deep scans, worker settings, and local
+export for a release. It makes billable Bedrock requests against a synthetic
+repository. Use an installed, pinned package version or a built
 package under test, with its bundled executable and plugin. Record `--version`
 and `info --json`; avoid a `CODEX_CLI_PATH` or `--plugin-path` override when testing
 the published package.
@@ -122,8 +139,7 @@ The following POSIX-shell recipe uses an existing profile. Keep these variables
 in the same shell for all steps. Replace the executable path and profile with
 your test installation and authorized identity. The model below tests Daybreak
 Blue after access is granted. Set `model="openai.gpt-5.6-cyber"` for an approved
-Red test, or use `openai.gpt-5.6-luna` for a general Bedrock test if that is the
-model your account can invoke:
+Red test, or use the model ID your account can invoke for a general Bedrock test:
 
 ```bash
 cli="/absolute/path/to/node_modules/.bin/codex-security"
