@@ -53,6 +53,10 @@ Cloud private inbox imports came after [version 0.8.2](https://github.com/openai
 | [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |
 | [Wiz](wiz.md)                                               | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV |
 
+**Experimental local import.** This checkout can import selected Tenable One
+inventory findings for a single Code Repository asset.
+[Tenable One pilot](tenable.md)
+
 If you selected specific findings, compare the preview with your selection.
 Check for missing, duplicate, or unexpected occurrences and resolve any
 exclusions before importing.

@@ -18,6 +18,10 @@ Examples and templates for using Codex Security:
   See [Publish findings to Cloud](../sdk/typescript/README.md#publish-findings-to-cloud)
   for the required columns and input rules.
 
+- Download selected Tenable One findings or capture an existing inventory CSV
+  export, then preview and save them against the matching Git checkout.
+  [Tenable One import guide](../docs/scanner-imports/tenable.md)
+
 - [Custom validation demo](custom-validation/README.md): run a scan with a custom
   validation script against a deliberately vulnerable API using synthetic data.
   Follow the demo's setup instructions, and do not deploy the example app.

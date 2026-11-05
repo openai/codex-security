@@ -1,6 +1,7 @@
 import { isNativeError, isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
+import type { ExternalFindingsReader } from "./external-findings-read.js";
 import {
   checkEmittedJsonNumber,
   checkReportNumber,
@@ -216,15 +217,13 @@ export interface ExternalPublicationInput {
 }
 
 /** Capture the caller's import settings before reading an export or resolving its destination. */
-export function snapshotImportOptions<
-  P extends ExternalPublicationOptions["provider"],
->({
+export function snapshotImportOptions<P extends ExternalFindingsReader>({
   repository,
   provider,
   sourceKey,
   sourceRepositoryUrl,
   inspectorProjectMap,
-}: ExternalPublicationOptions & { provider: P }) {
+}: Omit<ExternalPublicationOptions, "provider"> & { provider: P }) {
   if (inspectorProjectMap !== undefined && provider !== "inspector")
     throw new CodexSecurityError(
       "An Inspector project map requires the inspector provider.",

@@ -328,7 +328,11 @@ export type {
   ValidationReviewRequest,
 } from "./validation-records.js";
 
-export { prepareLocalExternalImport } from "./external-findings-import.js";
+export {
+  prepareLocalExternalImport,
+  type LocalExternalImportOptions,
+} from "./external-findings-import.js";
+export { readTenableFindings } from "./tenable-findings.js";
 export {
   normalizeOpenGrepFindings,
   readOpenGrepFindings,

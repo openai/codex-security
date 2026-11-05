@@ -5,6 +5,7 @@ import {
 } from "./external-import-contract.js";
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
+  type ExternalFindingsReaderOptions,
   readExternalFindings,
 } from "./external-findings-read.js";
 import {
@@ -19,10 +20,16 @@ import {
 import { abortable } from "./targets.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 
+export type LocalExternalImportOptions = Omit<
+  ExternalPublicationOptions,
+  "provider"
+> &
+  ExternalFindingsReaderOptions;
+
 /** Read an installed vendor format and prepare it for the local workbench. */
 export async function prepareLocalExternalImport(
   path: string,
-  options: ExternalPublicationOptions,
+  options: LocalExternalImportOptions,
   dependencies: LocalExternalImportDependencies = {},
 ) {
   dependencies.signal?.throwIfAborted();

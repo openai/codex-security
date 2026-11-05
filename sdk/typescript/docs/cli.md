@@ -1406,6 +1406,12 @@ takes a checkout path. The reader detects the file format, and `--format json`
 selects the output format. A local preview writes no findings and needs no Cloud
 login, network connection, or model call.
 
+The experimental Tenable reader accepts a selection tied to one Tenable One
+Code Repository asset. Use `--provider tenable --to local` and set
+`--source-repository-url` to the verified HTTPS repository URL. The checkout
+must have a matching Git fetch remote.
+See the [Tenable One export and import walkthrough](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md).
+
 Local readback uses `findings imported [PATH]`. The path defaults to the current
 directory. Each imported record starts as `not_assessed`. Unknown revisions and
 locations stay unknown. Repository-scoped sources are checked against comparable
