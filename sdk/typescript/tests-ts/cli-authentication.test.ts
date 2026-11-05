@@ -9,6 +9,7 @@ import {
   mkdir,
   realpath,
   readFile,
+  readdir,
   rm,
   stat,
   symlink,
@@ -1256,7 +1257,7 @@ describe("CLI authentication", () => {
   );
 
   test.each([false, true])(
-    "recognizes existing ambient Codex authentication on a fresh state directory during login status (home-relative: %p)",
+    "checks ambient login status without persisting credentials on a fresh state directory (home-relative: %p)",
     async (homeRelative) => {
       const root = await realpath(
         await temporaryDirectory("codex-security-cli-ambient-auth-"),
@@ -1264,10 +1265,16 @@ describe("CLI authentication", () => {
       try {
         const ambientHome = join(root, "ambient-codex");
         await mkdir(ambientHome, { mode: 0o700 });
-        await writeFile(
-          join(ambientHome, "auth.json"),
-          '{"auth_mode":"chatgpt"}\n',
-        );
+        const auth = {
+          ...(homeRelative ? {} : { auth_mode: "chatgpt" }),
+          tokens: {
+            id_token: "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.c2ln",
+            access_token: "synthetic-access",
+            refresh_token: "synthetic-refresh",
+          },
+        };
+        await writeFile(join(ambientHome, "auth.json"), JSON.stringify(auth));
+        await writeFile(join(ambientHome, "config.toml"), "not valid TOML");
 
         const stdout = capture();
         const stderr = capture();
@@ -1282,19 +1289,79 @@ describe("CLI authentication", () => {
         });
         deps.runCodex = async (_args, _output, authEnvironment) => {
           forwardedHome = authEnvironment?.["CODEX_HOME"];
+          const probe = JSON.parse(
+            await readFile(join(forwardedHome!, "auth.json"), "utf8"),
+          );
+          expect(probe).toEqual({
+            ...auth,
+            tokens: { ...auth.tokens, access_token: "", refresh_token: "" },
+          });
+          expect(existsSync(join(forwardedHome!, "config.toml"))).toBe(false);
           return 0;
         };
 
         expect(
           await main(["login", "status"], stdout.stream, stderr.stream, deps),
         ).toBe(0);
-        expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
+        expect(forwardedHome).toBeDefined();
+        expect(existsSync(forwardedHome!)).toBe(false);
         expect(
           existsSync(join(stateDirectory, "codex-home", "auth.json")),
-        ).toBe(true);
+        ).toBe(false);
+        expect(
+          JSON.parse(await readFile(join(ambientHome, "auth.json"), "utf8")),
+        ).toEqual(auth);
+        deps.runCodex = async () => {
+          throw new Error("synthetic status error");
+        };
+        expect(
+          await main(["login", "status"], stdout.stream, stderr.stream, deps),
+        ).toBe(2);
+        expect(
+          (await readdir(join(stateDirectory, "codex-home"))).filter((name) =>
+            name.startsWith("openai-codex-security-home-"),
+          ),
+        ).toEqual([]);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    },
+  );
+
+  test.each(["static API key", "configured ChatGPT"] as const)(
+    "keeps a %s available after the ambient credential file is removed",
+    async (kind) => {
+      const ambientHome = join(stateDirectory, "ambient");
+      const credentialHome = await createCredentialHome();
+      await mkdir(ambientHome, { mode: 0o700 });
+      const auth =
+        kind === "static API key"
+          ? { OPENAI_API_KEY: "synthetic-key" }
+          : {
+              auth_mode: "chatgpt",
+              tokens: { refresh_token: "synthetic-refresh" },
+            };
+      if (kind === "configured ChatGPT") {
+        await writeFile(
+          join(credentialHome, "config.toml"),
+          'cli_auth_credentials_store="file"',
+        );
+      }
+      const contents = JSON.stringify(auth);
+      const source = join(ambientHome, "auth.json");
+      await writeFile(source, contents);
+      const deps = dependencies();
+      deps.runCodex = async (_args, _output, env) => {
+        expect(env?.["CODEX_HOME"]).toBe(credentialHome);
+        expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
+          contents,
+        );
+        return 0;
+      };
+      const { runCli } = createCliTest(main);
+      expect(await runCli(["login", "status"], deps)).toBe(0);
+      await rm(source);
+      expect(await runCli(["login", "status"], deps)).toBe(0);
     },
   );
 

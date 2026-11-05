@@ -10,14 +10,16 @@ import { nodeCommand, runCommand } from "./support/shell.js";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml, stringify } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { restoreProviderProfile } from "../src/provider-profile.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
-import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
+import {
+  resolveCodexCommand,
+  setCodexSecurityCredentialLogout,
+} from "../src/runtime.js";
 import {
   copyCompletedScan,
   copyCredentialTestPlugin,
@@ -712,7 +714,16 @@ describe("CodexSecurity orchestration", () => {
       const observed = join(root, "native-arguments.jsonl");
       await mkdir(home, { mode: 0o700 });
       await mkdir(state, { mode: 0o700 });
-      await writeFile(join(home, "auth.json"), '{"auth_mode":"chatgpt"}\n');
+      await writeFile(
+        join(home, "auth.json"),
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            access_token: "synthetic-access",
+            refresh_token: "synthetic-refresh",
+          },
+        }),
+      );
       const provider = {
         name: "Synthetic",
         wire_api: "responses",
@@ -756,7 +767,14 @@ console.log("Logged in using ChatGPT");
       );
       try {
         if (operation === "account") {
+          // The native store already has a login despite the absence of a file.
           expect((await client.account()).authenticated).toBe(true);
+          expect(
+            (await readFile(observed, "utf8")).trim().split("\n"),
+          ).toHaveLength(1);
+          expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(
+            false,
+          );
         } else if (operation === "api-key login") {
           await client.loginApiKey("synthetic-login-token");
         } else {
@@ -875,50 +893,35 @@ console.log("Logged in using ChatGPT");
   );
 
   test.each([false, true])(
-    "recognizes ambient credentials during account() on a fresh instance (home-relative: %p)",
+    "checks ambient account status without persisting credentials on a fresh instance (home-relative: %p)",
     async (homeRelative) => {
       const root = await temporaryDirectory();
       const ambientHome = join(root, "ambient-home");
       const stateDir = join(root, "state");
-      const script = join(root, "codex.mjs");
       await mkdir(ambientHome);
       await mkdir(stateDir, { mode: 0o700 });
       await writeFile(
         join(ambientHome, "auth.json"),
-        '{"auth_mode":"chatgpt"}\n',
-      );
-      await writeFile(
-        script,
-        `
-import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
-
-const args = [basename(process.argv[1]), ...process.argv.slice(2)];
-if (args.join(" ") === "login status") {
-  const codexHome = process.env.CODEX_HOME;
-  if (codexHome && existsSync(join(codexHome, "auth.json"))) {
-    console.log("Logged in using ChatGPT");
-    process.exitCode = 0;
-  } else {
-    console.log("Not logged in");
-    process.exitCode = 1;
-  }
-}
-process.exit(process.exitCode ?? 0);
-`,
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            id_token: "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.c2ln",
+            access_token: "synthetic-access",
+            refresh_token: "synthetic-refresh",
+          },
+        }),
       );
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
         {
           environment: {
             PATH: process.env["PATH"],
-            NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
             HOME: root,
             USERPROFILE: root,
             CODEX_HOME: homeRelative ? "~/ambient-home" : ambientHome,
             CODEX_SECURITY_STATE_DIR: stateDir,
           },
-          resolveCodexCommand: nodeCommand,
+          resolveCodexCommand: () => resolveCodexCommand({}),
         },
       );
       try {
@@ -926,7 +929,7 @@ process.exit(process.exitCode ?? 0);
         expect(status.authenticated).toBe(true);
         expect(status.details).toContain("Logged in using ChatGPT");
         expect(existsSync(join(stateDir, "codex-home", "auth.json"))).toBe(
-          true,
+          false,
         );
       } finally {
         await client.close();

@@ -88,6 +88,8 @@ import {
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
+  withStatusCredentialHome,
+  withoutCodexHome,
   scanCodexHome,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
@@ -491,7 +493,7 @@ const SKILL_AUTH_OPTION = z
   .enum(SCAN_AUTH_MODES)
   .default("auto")
   .describe(
-    "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication. ChatGPT requires a separate codex-security login.",
+    "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
   );
 const VERIFICATION_MODE_OPTION = VerificationModeSchema.optional().describe(
   "Use static source review or standard verification (default: standard).",
@@ -5051,7 +5053,7 @@ export async function main(
             ),
           cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto). ChatGPT requires a separate codex-security login.",
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
           verbose: z
             .boolean()
@@ -5774,7 +5776,7 @@ export async function main(
           config: PROJECT_CONFIG_OPTION,
           cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto). ChatGPT requires a separate codex-security login.",
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
           component: z
             .array(optionValue("--component"))
@@ -7168,31 +7170,39 @@ export async function main(
           dependencies.environment,
         );
         const authentication = scanAuthentication(dependencies.environment);
-        if (args.action === "status" && authentication.method !== "api_key") {
-          const ambientHome = scanCodexHome(dependencies.environment);
-          await withCredentialHomeLock(credentialHome, () =>
-            initialCredentialsAvailable(
-              dependencies.environment,
-              ambientHome,
-              credentialHome,
-            ),
+        const loginEnvironment = withoutCodexHome(dependencies.environment);
+        const runLogin = (home: string) =>
+          dependencies.runCodex(
+            [
+              "login",
+              ...(args.action === undefined ? [] : [args.action]),
+              ...(options.deviceAuth ? ["--device-auth"] : []),
+              ...(options.withApiKey ? ["--with-api-key"] : []),
+              ...(options.withAccessToken ? ["--with-access-token"] : []),
+            ],
+            undefined,
+            { ...loginEnvironment, CODEX_HOME: home },
           );
-        }
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await dependencies.runCodex(
-          [
-            "login",
-            ...(args.action === undefined ? [] : [args.action]),
-            ...(options.deviceAuth ? ["--device-auth"] : []),
-            ...(options.withApiKey ? ["--with-api-key"] : []),
-            ...(options.withAccessToken ? ["--with-access-token"] : []),
-          ],
-          undefined,
-          authenticationEnvironment,
-        );
+        exitCode =
+          args.action === "status" && authentication.method !== "api_key"
+            ? await withStatusCredentialHome(
+                scanCodexHome(dependencies.environment),
+                credentialHome,
+                async () => {
+                  const command = resolveCodexCommand(dependencies.environment);
+                  const current = await accountStatus(
+                    command,
+                    { ...loginEnvironment, CODEX_HOME: credentialHome },
+                    undefined,
+                    parse(process.execPath).root,
+                  );
+                  return current.authenticated
+                    ? await runLogin(credentialHome)
+                    : undefined;
+                },
+                runLogin,
+              )
+            : await runLogin(credentialHome);
         if (args.action === undefined && exitCode === 0) {
           await setCodexSecurityCredentialLogout(credentialHome, false);
         }

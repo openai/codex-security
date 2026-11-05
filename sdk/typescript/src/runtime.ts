@@ -3,7 +3,7 @@ import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
-import { isNonEmptyString, notify, parseJson } from "./value.js";
+import { isNonEmptyString, notify } from "./value.js";
 import {
   execFile as execFileCallback,
   spawn,
@@ -2355,16 +2355,13 @@ export async function createIsolatedHome(
   }
 }
 
-export async function importAmbientAuth(
-  ambientHome: string,
-  isolatedHome: string,
-): Promise<boolean> {
+async function ambientAuthFile(ambientHome: string): Promise<string | null> {
   const source = join(expandHome(ambientHome), "auth.json");
   let metadata;
   try {
     metadata = await stat(source);
   } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") return false;
+    if (nodeErrorCode(error) === "ENOENT") return null;
     throw new PluginBootstrapError(
       `Unable to inspect ambient Codex authentication: ${source}`,
       {
@@ -2372,9 +2369,74 @@ export async function importAmbientAuth(
       },
     );
   }
-  if (!metadata.isFile()) {
-    return false;
+  return metadata.isFile() ? source : null;
+}
+
+export async function importAmbientAuth(
+  ambientHome: string,
+  isolatedHome: string,
+): Promise<boolean> {
+  const source = await ambientAuthFile(ambientHome);
+  if (source === null) return false;
+  return await installAmbientAuth(isolatedHome, (temporary) =>
+    copyFile(source, temporary, constants.COPYFILE_EXCL),
+  );
+}
+
+// Read the source once so a concurrent Codex login cannot change a static
+// credential into a renewable one between classification and installation.
+export async function prepareStatusCredentials(
+  ambientHome: string,
+  credentialHome: string,
+): Promise<string | null> {
+  const source = await ambientAuthFile(ambientHome);
+  if (source === null) return null;
+  if (
+    (await lstat(join(credentialHome, "config.toml")).catch(
+      nullIfMissingFileError,
+    )) !== null
+  ) {
+    // The configured native backend may be bound to this particular home.
+    await importAmbientAuth(ambientHome, credentialHome);
+    return null;
   }
+  const contents = await readFile(source).catch((cause: unknown) => {
+    throw new PluginBootstrapError(
+      "Unable to copy ambient Codex authentication.",
+      { cause },
+    );
+  });
+  let record: unknown;
+  try {
+    record = JSON.parse(contents.toString("utf8"));
+  } catch {
+    // Preserve native diagnostics and import behavior for unrecognized files.
+  }
+  if (
+    isRecord(record) &&
+    (record["auth_mode"] === "chatgpt" ||
+      (record["auth_mode"] == null && record["OPENAI_API_KEY"] == null)) &&
+    isRecord(record["tokens"]) &&
+    typeof record["tokens"]["refresh_token"] === "string" &&
+    record["tokens"]["refresh_token"] !== ""
+  ) {
+    // Native login status validates the record and ID-token claims without
+    // calling the model or refreshing. Never give the probe a renewable token.
+    record["tokens"]["refresh_token"] = "";
+    if (typeof record["tokens"]["access_token"] === "string")
+      record["tokens"]["access_token"] = "";
+    return JSON.stringify(record);
+  }
+  await installAmbientAuth(credentialHome, (temporary) =>
+    writeFile(temporary, contents, { mode: 0o600, flag: "wx" }),
+  );
+  return null;
+}
+
+async function installAmbientAuth(
+  isolatedHome: string,
+  writeTemporary: (temporary: string) => Promise<void>,
+): Promise<boolean> {
   await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
     await chmod(isolatedHome, 0o700);
@@ -2383,18 +2445,8 @@ export async function importAmbientAuth(
   const destination = join(isolatedHome, "auth.json");
   const temporary = join(isolatedHome, `.auth-${randomUUID()}.tmp`);
   try {
-    await copyFile(source, temporary, constants.COPYFILE_EXCL);
+    await writeTemporary(temporary);
     await chmod(temporary, 0o600);
-    const contents = await readFile(temporary, "utf8");
-    const auth = parseJson(() => contents);
-    // Independent homes must not clone a single-use refresh token.
-    if (
-      isRecord(auth) &&
-      isRecord(auth["tokens"]) &&
-      isNonEmptyString(auth["tokens"]["refresh_token"])
-    ) {
-      return false;
-    }
     try {
       try {
         await link(temporary, destination);
@@ -3315,6 +3367,7 @@ export async function runCodexCommand(
   signal?: AbortSignal,
   archiveHandshake = false,
   stdinPrefix?: string,
+  cwd?: string,
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
@@ -3325,6 +3378,7 @@ export async function runCodexCommand(
     [...(command.args ?? []), ...args],
     {
       env: environment,
+      cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,

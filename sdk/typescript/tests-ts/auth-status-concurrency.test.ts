@@ -27,13 +27,13 @@ for (const surface of ["CLI", "SDK"] as const) {
       let reachedPause = false;
       mock.module("node:fs/promises", () => ({
         ...originalFs,
-        copyFile: async (...args: Parameters<typeof fs.copyFile>) => {
+        readFile: async (...args: Parameters<typeof fs.readFile>) => {
           if (first === "status" && String(args[0]) === source) {
             reachedPause = true;
             paused.resolve();
             await resume.promise;
           }
-          return await originalFs.copyFile(...args);
+          return await originalFs.readFile(...args);
         },
       }));
       const runtime = { ...(await import("../src/runtime.js")) };

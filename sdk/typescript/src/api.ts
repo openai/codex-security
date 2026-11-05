@@ -254,6 +254,7 @@ import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
+  prepareStatusCredentials,
   withCredentialHomeLock,
   bootstrapPlugin,
   bundledPluginRoot,
@@ -278,6 +279,7 @@ import {
   prepareScanRegistrationOutput,
   preparePersistentOutputRoot,
   probeCodexSandbox,
+  requireSecureCredentialHome,
   requireModelSafeOutputDir,
   requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
@@ -4196,20 +4198,20 @@ export class CodexSecurity {
       }
       const authentication = await this.#authentication();
       this.#requireOpen();
-      const ambientHome = scanCodexHome(this.#dependencies.environment);
-      await withCredentialHomeLock(
+      const status = async (home: string) =>
+        await accountStatus(
+          await this.#providerPreflightCommand(),
+          { ...authentication.environment, CODEX_HOME: home },
+          this.#abortController.signal,
+        );
+      return await withStatusCredentialHome(
+        scanCodexHome(this.#dependencies.environment),
         authentication.codexHome,
-        () =>
-          initialCredentialsAvailable(
-            this.#dependencies.environment,
-            ambientHome,
-            authentication.codexHome,
-          ),
-        this.#abortController.signal,
-      );
-      return await accountStatus(
-        await this.#providerPreflightCommand(),
-        authentication.environment,
+        async () => {
+          const current = await status(authentication.codexHome);
+          return current.authenticated ? current : undefined;
+        },
+        status,
         this.#abortController.signal,
       );
     });
@@ -5627,6 +5629,43 @@ export function scanCodexHome(environment: ProcessEnvironment): string {
     ...environment,
     CODEX_HOME: environmentValue(environment, "CODEX_HOME"),
   });
+}
+
+/** @internal Choose credentials for native login status without seeding a fresh scan home. */
+export async function withStatusCredentialHome<T>(
+  ambientHome: string,
+  credentialHome: string,
+  nativeLoginStatus: () => Promise<T | undefined>,
+  status: (home: string) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const probe = await withCredentialHomeLock(
+    credentialHome,
+    async () => {
+      if (
+        !(await codexSecurityCredentialAllowsAmbientImport(credentialHome)) ||
+        (await codexSecurityHasStoredFileCredentials(credentialHome))
+      )
+        return null;
+      return await prepareStatusCredentials(ambientHome, credentialHome);
+    },
+    signal,
+  );
+  if (probe === null) return await status(credentialHome);
+  // Device policy can select a keyring even without a local config file.
+  const current = await nativeLoginStatus();
+  if (current !== undefined) return current;
+  const temporary = await createIsolatedHome(credentialHome);
+  try {
+    await requireSecureCredentialHome(temporary);
+    await writeFile(join(temporary, "auth.json"), probe, {
+      mode: 0o600,
+      flag: "wx",
+    });
+    return await status(temporary);
+  } finally {
+    await cleanupSdkDirectory(temporary);
+  }
 }
 
 export async function initialCredentialsAvailable(
@@ -7325,7 +7364,8 @@ export function definedEnvironment(
   return child;
 }
 
-function withoutCodexHome(
+/** @internal */
+export function withoutCodexHome(
   environment: ProcessEnvironment,
 ): Record<string, string> {
   return Object.fromEntries(
