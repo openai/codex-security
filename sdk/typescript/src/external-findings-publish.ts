@@ -23,6 +23,8 @@ import {
   selectPrivateReport,
   type PrivateImportFormat,
   readPrivateCheckpoint,
+  parsePrivateCheckpoint,
+  type PrivateImportContext,
   unsuccessfulJob,
   type PrivateImportJob,
 } from "./private-finding-import.js";
@@ -676,6 +678,7 @@ export async function prepareExternalPublication(
     input =
       parsed.publication ??
       normalizedPublicationInput(parsed.findings, provider);
+    input.previousAws = parsed.previousFindings;
   }
   return preparePublicationInput(
     input,
@@ -897,6 +900,7 @@ function hostedRepositoryMatcher(
 }
 
 interface PublicationSelection extends ExternalPublicationInput {
+  previousAws?: () => ExternalFindings;
   original?: {
     parsed: ExternalFindings;
     identity: unknown;
@@ -1423,7 +1427,32 @@ async function preparePublicationInput(
   const catalogKey = trivyReportUrls
     ? (url: string) => cloudSourceKey(url, "github")
     : cloudRepositoryUrlKey;
-  function checkSelection(input: PublicationSelection) {
+  const state = externalPublicationStateDirectory(environment);
+  let previousAws: ExternalFindings | undefined;
+  async function previousAwsIfSaved(
+    input: PublicationSelection,
+    currentKey?: string,
+  ) {
+    if (!input.previousAws || previousAws) return previousAws;
+    // An empty state directory (or just this current receipt) needs only the
+    // current reader for its preview.
+    const entries = await readdir(state).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      },
+    );
+    if (
+      entries.some(
+        (name) =>
+          /^[a-f0-9]{64}\.(?:pending|private-import)\.json$/u.test(name) &&
+          name.split(".", 1)[0] !== currentKey,
+      )
+    )
+      previousAws = input.previousAws();
+    return previousAws;
+  }
+  async function checkSelection(input: PublicationSelection) {
     const parsed = input.current;
     checkTrivyReportProvider(options.provider, parsed.report);
     for (const finding of parsed.findings)
@@ -1435,11 +1464,12 @@ async function preparePublicationInput(
       !input.potentialIds?.length &&
       !input.uncertainFindingIds?.length &&
       !input.unprovenOccurrenceCount &&
-      !input.unprovenIdPrefixes?.length
+      !input.unprovenIdPrefixes?.length &&
+      !(await previousAwsIfSaved(input))?.findings.length
     )
       throw new NoPublishableFindingsError(parsed);
   }
-  if (typeof supplied !== "function") checkSelection(supplied);
+  if (typeof supplied !== "function") await checkSelection(supplied);
   progress({ phase: "discovering", completed: 0 });
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
@@ -1449,6 +1479,10 @@ async function preparePublicationInput(
     dependencies.credentials ?? (() => readCloudCredentials(environment))
   )();
   let privateProviders: Set<string> | undefined;
+  const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
+  let jobApiVersion: 2 | undefined;
+  const aws =
+    options.provider === "inspector" || options.provider === "continuum";
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -1456,6 +1490,7 @@ async function preparePublicationInput(
     dependencies.signal?.throwIfAborted();
     // Allow upload and response transport around the server's publication budget.
     const timeout = AbortSignal.timeout(body ? 60_000 : 30_000);
+    const repositoryCatalog = endpoint.startsWith("/repositories?");
     const response = await (dependencies.fetch ?? globalThis.fetch)(
       `${cloudApiUrl}${endpoint}`,
       {
@@ -1464,6 +1499,7 @@ async function preparePublicationInput(
           Authorization: `Bearer ${credentials.access_token}`,
           "ChatGPT-Account-ID": credentials.account_id,
           Accept: "application/json",
+          ...(repositoryCatalog ? { [jobVersionHeader]: "2" } : {}),
           ...(body ? { "Content-Type": "application/json" } : {}),
         },
         ...(body ? { body: JSON.stringify(body) } : {}),
@@ -1483,7 +1519,9 @@ async function preparePublicationInput(
         `Cloud import failed (HTTP ${response.status}). ${payload?.error?.message ?? response.statusText}${retryAfter ? ` Retry-After: ${retryAfter}.` : ""}`,
       );
     }
-    if (endpoint.startsWith("/repositories?")) {
+    if (repositoryCatalog) {
+      jobApiVersion =
+        aws && response.headers.get(jobVersionHeader) === "2" ? 2 : undefined;
       const advertised = response.headers.get(
         "Codex-Security-Private-Import-Providers",
       );
@@ -1534,13 +1572,12 @@ async function preparePublicationInput(
   const destination = await discoverDestination();
   const deferred = typeof supplied === "function";
   const resolved = deferred ? await supplied(destination) : supplied;
-  if (deferred) checkSelection(resolved);
+  if (deferred) await checkSelection(resolved);
   const report: ExternalFindings & Partial<SnykIssuesFindings> =
     resolved.current;
   const source = { provider: options.provider, source_key: options.sourceKey };
   const importPrefix = source.provider === "sonar" ? "/v2" : "";
   const sourceReportsPath = importPrefix + sourcePath(destination);
-  const state = externalPublicationStateDirectory(environment);
   const checkpointIdentity = [
     // Keep existing production checkpoints readable; other deployments must
     // never share a saved request or receipt with the production default.
@@ -1589,6 +1626,84 @@ async function preparePublicationInput(
         projection = candidate;
       projectionKeys.add(candidateKey);
       if (capturedPending !== undefined) break;
+    }
+  }
+  // Changed AWS projections get new keys, but both transports must replay the
+  // exact bytes already approved by the earlier reader when a checkpoint exists.
+  const privateClient = privateImportClient(
+    apiBaseUrl,
+    credentials,
+    dependencies.fetch ?? globalThis.fetch,
+    dependencies.signal,
+  );
+  let previewContext: PrivateImportContext | undefined;
+  const currentAwsKey = resolved.previousAws
+    ? scopeKey(resolved.currentIdentity)
+    : undefined;
+  let previousAwsKey: string | undefined;
+  let alternateKey: string | undefined;
+  let resumingPreviousAws = false;
+  function previousCandidateKey(previous: ExternalFindings | undefined) {
+    if (!previous?.findings.length) return;
+    // The file reader already validated plain JSON evidence for Cloud. Only a
+    // matching checkpoint needs the full normalized publication snapshot.
+    previousAwsKey ??= scopeKey(publicationIdentity(previous));
+    return previousAwsKey !== currentAwsKey ? previousAwsKey : undefined;
+  }
+  async function hasPrivateCheckpoint(
+    key: string,
+    context: () => Promise<PrivateImportContext>,
+  ) {
+    const saved = await readOptionalFile(
+      join(state, key + ".private-import.json"),
+    );
+    if (saved === undefined) return false;
+    const checkpoint = parsePrivateCheckpoint(saved);
+    // A completed import cannot acknowledge findings newly admitted by the
+    // current reader. Pending uploads and jobs always retain their original bytes.
+    if (
+      key === previousAwsKey &&
+      previousAws &&
+      checkpoint.receipt?.status === "completed" &&
+      !sameFindingSelection(previousAws.findings, resolved.current.findings)
+    )
+      return false;
+    return checkpoint.contextVersion === (await context()).context_version;
+  }
+  async function assertNoAlternateCheckpoint(
+    context = () => privateClient.context(),
+  ) {
+    const otherKey = alternateKey;
+    if (!otherKey) return;
+    if (
+      (await readOptionalFile(join(state, otherKey + ".pending.json"))) !==
+        undefined ||
+      (await hasPrivateCheckpoint(otherKey, context))
+    )
+      throw new CodexSecurityError(
+        resumingPreviousAws
+          ? "Both AWS reader versions have saved publications for this report. Resume either one using its original normalized findings."
+          : "Another publication prepared this input. Run the command again to review and resume the saved request.",
+      );
+  }
+  if (currentAwsKey)
+    alternateKey = previousCandidateKey(
+      await previousAwsIfSaved(resolved, currentAwsKey),
+    );
+  if (alternateKey && previousAws) {
+    capturedPending = await readOptionalFile(
+      join(state, alternateKey + ".pending.json"),
+    );
+    const context = async () =>
+      (previewContext ??= await privateClient.context());
+    if (
+      capturedPending !== undefined ||
+      (await hasPrivateCheckpoint(alternateKey, context))
+    ) {
+      projection = normalizedPublicationInput(previousAws, options.provider);
+      resumingPreviousAws = true;
+      alternateKey = currentAwsKey;
+      await assertNoAlternateCheckpoint(context);
     }
   }
   const input = projection;
@@ -2590,6 +2705,17 @@ async function preparePublicationInput(
   }
 
   const lockKeys = [key, fileKey, stagingKey];
+  if (alternateKey) lockKeys.push(alternateKey);
+  async function underPublishLocks<T>(operation: () => Promise<T>) {
+    // An older publisher may already hold its lock before its checkpoint exists.
+    // Derive that key for actual writes, even after a checkpoint-free preview.
+    if (resolved.previousAws && !previousAws) {
+      previousAws = resolved.previousAws();
+      alternateKey = previousCandidateKey(previousAws);
+      if (alternateKey) lockKeys.push(alternateKey);
+    }
+    return underLocks(lockKeys, operation);
+  }
   if (selected?.historical) {
     const observed = selected;
     selected = await underLocks(lockKeys, async () => {
@@ -2905,6 +3031,10 @@ async function preparePublicationInput(
   // Existing repository submissions keep their original request bodies and receipts.
   const privatePath = join(state, `${key}.private-import.json`);
   const privateSaved = await readOptionalFile(privatePath);
+  if (resumingPreviousAws && !saved && privateSaved === undefined)
+    throw new CodexSecurityError(
+      "The saved publication changed. Run the command again to preview this report.",
+    );
   const usePrivateImport =
     !saved &&
     (privateProviders?.has(source.provider) || privateSaved !== undefined);
@@ -2953,13 +3083,8 @@ async function preparePublicationInput(
   }
 
   if (usePrivateImport) {
-    const client = privateImportClient(
-      apiBaseUrl,
-      credentials,
-      dependencies.fetch ?? globalThis.fetch,
-      dependencies.signal,
-    );
-    const context = await client.context();
+    const client = privateClient;
+    const context = previewContext ?? (await client.context());
     if (source.source_key.trim() !== source.source_key)
       throw new CodexSecurityError(
         "A private source key cannot have leading or trailing whitespace.",
@@ -2989,15 +3114,13 @@ async function preparePublicationInput(
         : readPrivateCheckpoint(data, binding);
     }
     const previous = checkpointForContext(privateSaved);
-    function requireAccess(
-      value: typeof context,
-      savedFile: boolean,
-      savedJob: boolean,
-    ) {
+    const canStartJob = !aws || privateProviders?.has(source.provider) === true;
+    function requireAccess(value: typeof context, saved: typeof previous) {
       if (
         !value.can_read ||
-        (!savedJob &&
-          ((!savedFile && !value.can_upload) ||
+        (!saved && !canStartJob) ||
+        (!saved?.jobId &&
+          ((!saved?.fileId && !value.can_upload) ||
             !value.can_create_import_jobs ||
             !value.formats.includes(report.format)))
       )
@@ -3005,9 +3128,10 @@ async function preparePublicationInput(
           "Private findings import is unavailable for this account or report format.",
         );
     }
-    requireAccess(context, !!previous?.fileId, !!previous?.jobId);
+    requireAccess(context, previous);
     const retryOfJobId =
       unsuccessfulJob(previous?.receipt) &&
+      canStartJob &&
       context.can_upload &&
       context.can_create_import_jobs &&
       context.formats.includes(report.format)
@@ -3035,33 +3159,43 @@ async function preparePublicationInput(
     return {
       preview: structuredClone(preview),
       publish: () =>
-        underLocks(lockKeys, async () => {
+        underPublishLocks(async () => {
           const current = await client.context();
           if (current.context_version !== binding.contextVersion)
             throw new CodexSecurityError(
               "The private inbox changed. Run the command again to review the new destination.",
             );
+          await assertNoAlternateCheckpoint(async () => current);
           const stored = checkpointForContext(
             await readOptionalFile(privatePath),
           );
+          if (resumingPreviousAws && !stored)
+            throw new CodexSecurityError(
+              "The saved private import changed. Run the command again to preview this report.",
+            );
           // Only a preview of this terminal job can start a new attempt.
           const retrying =
             retryOfJobId !== undefined && stored?.receipt?.id === retryOfJobId;
           const active = retrying ? undefined : stored;
           if (resumed && !active) checkRepositories(parsed);
-          requireAccess(current, !!active?.fileId, !!active?.jobId);
+          requireAccess(current, active);
           if (await selectedCheckpoint())
             throw new CodexSecurityError(
               "A repository submission is pending. Review its saved request before continuing.",
             );
-          const checkpoint = active ?? {
-            ...binding,
-            uploadRequestId: randomUUID(),
-            jobRequestId: randomUUID(),
-            fileId: undefined,
-            jobId: undefined,
-            receipt: undefined,
-            previousReceipt: retrying ? stored?.receipt : undefined,
+          // Both routes share request IDs. A server upgrade can promote an
+          // existing AWS job, and its saved route also survives gate rollback.
+          const checkpoint = {
+            ...(active ?? {
+              ...binding,
+              uploadRequestId: randomUUID(),
+              jobRequestId: randomUUID(),
+              fileId: undefined,
+              jobId: undefined,
+              receipt: undefined,
+              previousReceipt: retrying ? stored?.receipt : undefined,
+            }),
+            jobApiVersion: stored?.jobApiVersion ?? jobApiVersion,
           };
           const result: ExternalPublicationResult = {
             cloudApiUrl: preview.cloudApiUrl,
@@ -3103,7 +3237,8 @@ async function preparePublicationInput(
             const savedReceipt =
               checkpoint.receipt ?? checkpoint.previousReceipt;
             if (savedReceipt) acknowledge(savedReceipt);
-            if (!active) await writeAtomicJson(privatePath, checkpoint);
+            if (!active || active.jobApiVersion !== checkpoint.jobApiVersion)
+              await writeAtomicJson(privatePath, checkpoint);
             if (!checkpoint.fileId) {
               progress({ phase: "uploading", completed: 0 });
               checkpoint.fileId = await client.upload({
@@ -3124,6 +3259,7 @@ async function preparePublicationInput(
                 source,
                 repository: binding.repository,
                 jobId: checkpoint.jobId,
+                jobApiVersion: checkpoint.jobApiVersion,
               },
               async (id) => {
                 checkpoint.jobId = id;
@@ -3360,8 +3496,9 @@ async function preparePublicationInput(
         );
       }
       let acquired = false;
-      return await underLocks(lockKeys, async () => {
+      return await underPublishLocks(async () => {
         acquired = true;
+        await assertNoAlternateCheckpoint();
         // Re-read under the lock to keep checkpoints from another publisher.
         const selected = await selectedCheckpoint(
           saved ? fileKey : undefined,
