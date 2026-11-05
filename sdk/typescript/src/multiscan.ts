@@ -753,15 +753,14 @@ async function ensureOutputDirectory(path: string): Promise<string> {
   let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
-  let prepared = path;
   if (metadata === undefined) {
     if (process.platform === "win32") {
-      prepared = await canonicalWindowsCreationPath(path);
-      await createWindowsOutputDirectory(prepared, true);
+      path = await canonicalWindowsCreationPath(path);
+      await createWindowsOutputDirectory(path, true);
     } else {
-      await mkdir(prepared, { recursive: true, mode: 0o700 });
+      await mkdir(path, { recursive: true, mode: 0o700 });
     }
-    metadata = await lstat(prepared, { bigint: true });
+    metadata = await lstat(path, { bigint: true });
   }
   if (metadata.isSymbolicLink()) {
     throw new Error("Multiscan output directories must not be symbolic links.");
@@ -769,7 +768,7 @@ async function ensureOutputDirectory(path: string): Promise<string> {
   if (!metadata.isDirectory()) {
     throw new Error("Multiscan output paths must be directories.");
   }
-  const canonical = await realpath(prepared);
+  const canonical = await realpath(path);
   const directory = await lstat(canonical, { bigint: true });
   if (directory.dev !== metadata.dev || directory.ino !== metadata.ino) {
     throw new Error("Multiscan output directories changed during preparation.");

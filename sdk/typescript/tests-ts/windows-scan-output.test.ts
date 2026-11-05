@@ -16,16 +16,14 @@ import { runMultiscan } from "../src/multiscan.js";
 import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
-  client as multiscanClient,
-  completedScan,
-  options as multiscanOptions,
-  repository as createRepository,
+  client,
+  completeRun,
+  createMultiscanFixtures,
+  options,
 } from "./support/multiscan.js";
-import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const { temporaryDirectory, cleanup } = createApiTestFixtures(
-  "codex-security-output-acl-",
-);
+const { temporaryDirectory, repositoryFixture, cleanup } =
+  createMultiscanFixtures();
 afterEach(cleanup);
 const exec = promisify(execFile);
 const windowsTest = test.skipIf(process.platform !== "win32");
@@ -71,26 +69,12 @@ async function accessRules(path: string): Promise<string> {
   );
 }
 
-async function createMultiscanCampaign(
-  root: string,
-  output = join(root, "campaign"),
-): Promise<string> {
-  const source = await createRepository(root, "campaign-source");
-  const input = join(root, "campaign.csv");
-  await writeFile(
-    input,
-    `id,repository,revision\ncampaign,${source.path},${source.revision}\n`,
+async function createMultiscanCampaign(output: string): Promise<void> {
+  const { paths } = await repositoryFixture("campaign-source");
+  const result = await runMultiscan(
+    options({ ...paths, output }, client(completeRun), { maxAttempts: 1 }),
   );
-  await runMultiscan(
-    multiscanOptions(
-      { input, output },
-      multiscanClient(async (_checkout, scanOptions = {}) =>
-        completedScan(scanOptions.outputDir!),
-      ),
-      { maxAttempts: 1 },
-    ),
-  );
-  return await realpath(output);
+  expect(result).toMatchObject({ completed: 1, failed: 0 });
 }
 
 async function archiveWorkbenchOutput(
@@ -145,7 +129,8 @@ windowsTest(
       "fixture",
       root,
     );
-    const campaign = await createMultiscanCampaign(root);
+    const campaign = join(root, "campaign");
+    await createMultiscanCampaign(campaign);
     for (const output of [
       join(root, "new parent"),
       explicit,
@@ -324,9 +309,7 @@ windowsTest(
     await mkdir(output);
     await icacls(output, "/grant", "*S-1-5-32-545:(OI)(CI)M");
     const permissions = await accessRules(output);
-    expect(await createMultiscanCampaign(root, output)).toBe(
-      await realpath(output),
-    );
+    await createMultiscanCampaign(output);
     expect(await accessRules(output)).toBe(permissions);
   },
 );
@@ -407,22 +390,16 @@ test.skipIf(
       "fixture",
       root,
     );
-    for (const output of [explicit, generated]) {
+    const campaign = join(writableParent, "campaign");
+    await createMultiscanCampaign(campaign);
+    for (const output of [explicit, generated, campaign]) {
       await writeFile(join(output, "probe.txt"), "synthetic private data");
     }
     const archive = await archiveWorkbenchOutput(generated, root);
     await writeFile(join(generated, "probe.txt"), "synthetic private data");
-    const campaign = await createMultiscanCampaign(
-      root,
-      join(writableParent, "campaign"),
+    const privateProbes = [explicit, generated, archive, campaign].map((path) =>
+      join(path, "probe.txt"),
     );
-    await writeFile(join(campaign, "probe.txt"), "synthetic private data");
-    const paths = [
-      shared,
-      ...[explicit, generated, archive, campaign].map((path) =>
-        join(path, "probe.txt"),
-      ),
-    ];
     const script = await readFile(
       join(import.meta.dir, "support", "windows-other-user-access.ps1"),
       "utf8",
@@ -440,19 +417,19 @@ test.skipIf(
       {
         env: {
           ...process.env,
-          CODEX_SECURITY_TEST_ACCESS_PATHS: JSON.stringify(paths),
+          CODEX_SECURITY_TEST_ACCESS_PATHS: JSON.stringify([
+            shared,
+            ...privateProbes,
+          ]),
           PSModulePath: join(system, "WindowsPowerShell", "v1.0", "Modules"),
         },
       },
     );
     expect(JSON.parse(result.stdout)).toEqual([
       { read: true, write: true },
-      { read: false, write: false },
-      { read: false, write: false },
-      { read: false, write: false },
-      { read: false, write: false },
+      ...privateProbes.map(() => ({ read: false, write: false })),
     ]);
-    for (const path of paths.slice(1)) {
+    for (const path of privateProbes) {
       expect(await readFile(path, "utf8")).toBe("synthetic private data");
     }
   },
