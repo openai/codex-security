@@ -1,9 +1,19 @@
 [
   [
-    "WITH input AS (SELECT :history AS history)",
-    "SELECT 'sql' AS operation,",
-    "    'UPDATE schema_migrations SET version = 63 WHERE version = ' || version AS value",
-    "FROM schema_migrations WHERE version IN (59, 61) AND name = 'record scan and worker instruction digests';"
+    "WITH history AS (SELECT json_extract(value, '$.version') AS version,",
+    "    json_extract(value, '$.name') AS name FROM json_each(:history))",
+    "SELECT 'sql' AS operation, 'UPDATE schema_migrations SET version = ' || history.version ||",
+    "    ' WHERE version = ' || recorded.version AS value",
+    "FROM schema_migrations AS recorded JOIN history USING (name)",
+    "WHERE recorded.version IN (59, 61, 63) AND recorded.version != history.version",
+    "    AND recorded.name = 'record scan and worker instruction digests';"
+  ],
+  [
+    "WITH history AS (SELECT json_extract(value, '$.version') AS version,",
+    "    json_extract(value, '$.name') AS name FROM json_each(:history))",
+    "SELECT 'error' AS operation, 'The database has an unsupported instruction digest migration history.' AS value",
+    "FROM schema_migrations AS recorded JOIN history USING (version)",
+    "WHERE recorded.version IN (63, 64) AND recorded.name != history.name;"
   ],
   [
     "-- A released reader can add its columns while an instruction digest preview still owns the version.",

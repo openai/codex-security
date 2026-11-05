@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -105,7 +107,8 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "record scan and worker instruction digests"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "record scan and worker instruction digests"),
 ]
 
 
@@ -901,12 +904,12 @@ def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) 
         ).fetchone() == (1,)
 
 
-@pytest.mark.parametrize("preview", [59, 61])
+@pytest.mark.parametrize("preview", [59, 61, 63])
 def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
     workbench_api,
     preview: int,
 ) -> None:
-    digest_migration = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 63)
+    digest_migration = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 64)
     connection, migrate = create_historical_database(preview, ((preview, *digest_migration[1:]),))
     digest = "sha256:" + "a" * 64
     try:
@@ -914,14 +917,29 @@ def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
             connection.execute("ALTER TABLE scans ADD COLUMN launch_surface TEXT")
         insert_legacy_scan(connection, "timestamp", instruction_digest=digest)
         migrate(connection)
+        migrate(connection)
         assert (
             migration_name_row(connection, 59)["name"]
             == "retain the launching Deep Scan service tier"
         )
-        assert migration_name_row(connection, 63)["name"] == digest_migration[1]
+        assert (
+            migration_name_row(connection, 63)["name"]
+            == "retain unverified Deep Scan worker attempts"
+        )
+        assert migration_name_row(connection, 64)["name"] == digest_migration[1]
         assert connection.execute("SELECT instruction_digest FROM scans").fetchone()[0] == digest
     finally:
         connection.close()
+
+
+def test_instruction_digest_migration_rejects_unknown_receipt() -> None:
+    connection, migrate = create_historical_database(64)
+    with closing(connection):
+        rename_migration(connection, 63, "unrecognized preview")
+        with pytest.raises(SystemExit, match="unsupported instruction digest migration history"):
+            migrate(connection)
+        assert migration_name_row(connection, 63)["name"] == "unrecognized preview"
+        assert migration_name_row(connection, 64) is None
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])

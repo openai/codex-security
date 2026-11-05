@@ -1,3 +1,5 @@
+"""Exercise output archiving when registrations race, fail, or encounter aliases to active state."""
+
 from __future__ import annotations
 
 import argparse

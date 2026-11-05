@@ -1,3 +1,5 @@
+"""Exercise sealing and recovery of scan bundles, including inputs that change during finalization."""
+
 from __future__ import annotations
 
 import copy
