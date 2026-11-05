@@ -1466,25 +1466,22 @@ function sameInode(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-async function sharedAuthPath(
-  localPath: string,
-  ambientHome: string,
-): Promise<string | null> {
-  const local = await lstat(localPath, { bigint: true });
-  if (!local.isFile() || local.nlink < 2n) return null;
-  const source = await realpath(join(ambientHome, "auth.json"));
-  return sameInode(local, await stat(source, { bigint: true })) ? source : null;
-}
-
 /** A shared inode can have two hard links, or two paths to one directory entry. */
 async function hasSeparateAmbientLink(
   localPath: string,
   ambientHome: string,
 ): Promise<boolean> {
-  const source = await sharedAuthPath(localPath, ambientHome).catch(
-    nullIfMissingFileError,
-  );
-  if (source === null) return false;
+  let source: string;
+  try {
+    const local = await lstat(localPath, { bigint: true });
+    if (!local.isFile() || local.nlink < 2n) return false;
+    source = await realpath(join(ambientHome, "auth.json"));
+    if (!sameInode(local, await stat(source, { bigint: true }))) return false;
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+
   const name = basename(source);
   if (name.toLowerCase() !== "auth.json") return true;
   const localHome = dirname(localPath);

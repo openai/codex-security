@@ -144,33 +144,57 @@ describe("CLI authentication", () => {
     }
   });
 
-  test.each(["shared", "unrelated"] as const)(
-    "preserves logout intent after native failure with %s hard links",
-    async (kind) => {
-      const credentialHome = await createCredentialHome();
-      const localAuth = join(credentialHome, "auth.json");
-      const ambientHome = join(stateDirectory, "ambient");
-      const ambientAuth = join(ambientHome, "auth.json");
-      await mkdir(ambientHome);
-      await writeFile(ambientAuth, "ambient", { mode: 0o600 });
-      const backup = join(credentialHome, "backup");
-      await writeFile(backup, "private", { mode: 0o600 });
-      await link(kind === "shared" ? ambientAuth : backup, localAuth);
+  test("logout detaches only a separate ambient hard link before native failure", async () => {
+    const home = await createCredentialHome();
+    const auth = join(home, "auth.json");
+    const ambient = join(stateDirectory, "ambient");
+    await mkdir(ambient);
+    const source = join(ambient, "auth.json");
+    const backing = join(ambient, "backing.json");
+    await writeFile(auth, "session", { mode: 0o600 });
+    await link(auth, backing);
 
-      const deps = dependencies();
-      deps.runCodex = async (args, _output, environment) => {
-        expect(args).toEqual(["logout"]);
-        expect(environment?.["CODEX_HOME"]).toBe(credentialHome);
-        expect(existsSync(localAuth)).toBe(kind === "unrelated");
+    const logout = async (sourceHome: string, expectDetached: boolean) => {
+      const deps = dependencies({ environment: { CODEX_HOME: sourceHome } });
+      deps.runCodex = async () => {
+        expect(existsSync(auth)).toBe(!expectDetached);
         return 19;
       };
       expect(await createCliTest(main).runCli(["logout"], deps)).toBe(19);
-      expect(
-        await codexSecurityCredentialAllowsAmbientImport(credentialHome),
-      ).toBe(kind === "unrelated");
-      expect(await readFile(ambientAuth, "utf8")).toBe("ambient");
-    },
-  );
+      expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(
+        !expectDetached,
+      );
+    };
+
+    // A backup link in another directory does not make an independent sign-in shared.
+    await writeFile(source, "independent", { mode: 0o600 });
+    await logout(ambient, false);
+    expect(await readFile(source, "utf8")).toBe("independent");
+    await rm(source);
+
+    const alias = join(ambient, "home-alias");
+    await symlink(
+      home,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await logout(alias, false);
+
+    if (process.platform === "win32") {
+      await link(backing, source);
+    } else {
+      await symlink(auth, source);
+      await logout(ambient, false);
+      await rm(source);
+      // Case-sensitive volumes can hold two entries with case-only differences.
+      const alternate = join(home, "AUTH.JSON");
+      const target = existsSync(alternate) ? backing : alternate;
+      if (target === alternate) await link(auth, target);
+      await symlink(target, source);
+    }
+    await logout(ambient, true);
+    expect(await readFile(source, "utf8")).toBe("session");
+  });
 
   test.skipIf(process.platform === "win32")(
     "validates and canonicalizes the credential home for status and logout",
