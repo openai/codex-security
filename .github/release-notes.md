@@ -100,6 +100,7 @@
 - preserve disputed comparisons across context retries ([#2321](https://github.com/openai/codex-security/pull/2321))
 - import Trivy findings locally and to Cloud ([#2276](https://github.com/openai/codex-security/pull/2276))
 - preserve usage coverage and operation outcomes ([#1841](https://github.com/openai/codex-security/pull/1841))
+- preserve saved-scan errors and recovery advice ([#1266](https://github.com/openai/codex-security/pull/1266))
 
 <!-- release-section: highlights:end -->
 
