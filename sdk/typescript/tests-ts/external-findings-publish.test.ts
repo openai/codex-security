@@ -11331,6 +11331,10 @@ test.each([
     let unavailable = false;
     let terminal: "completed" | "failed" | "cancelled" = "completed";
     let advertised = false;
+    const v1Jobs = "/finding-imports/jobs";
+    const v2Jobs = "/v2" + v1Jobs;
+    let supportsJobV2 = provider !== "inspector";
+    let expectedJobsPath = provider === "continuum" ? v2Jobs : v1Jobs;
     let canCreate = true;
     let fileRequest: string | undefined;
     let fileHash: string | undefined;
@@ -11339,6 +11343,8 @@ test.each([
     let unorderedUpdates = 0;
     const uploadedReports: { id: string; bytes: string }[] = [];
     let jobRequest: string | undefined;
+    let loseNextJobResponse = true;
+    const jobBodies: string[] = [];
     const fileId = "aifile_" + "a".repeat(32);
     let jobId = "import_" + "b".repeat(32);
     const calls: string[] = [];
@@ -11389,14 +11395,16 @@ test.each([
         calls.push(`${init.method} ${path}`);
         if (path === "/external/repositories") {
           const response = await f.deps.fetch(url, init);
-          return new Response(response.body, {
-            headers: advertised
-              ? {
-                  "Codex-Security-Private-Import-Providers":
-                    "snyk,github,endor,wiz,inspector,continuum",
-                }
-              : {},
-          });
+          const headers = new Headers();
+          if (advertised)
+            headers.set(
+              "Codex-Security-Private-Import-Providers",
+              "snyk,github,endor,wiz,inspector,continuum",
+            );
+          const version = "Codex-Security-Private-Import-Job-Version";
+          expect(new Headers(init.headers).get(version)).toBe("2");
+          if (supportsJobV2) headers.set(version, "2");
+          return new Response(response.body, { headers });
         }
         if (path.startsWith("/external/")) return f.deps.fetch(url, init);
         if (path === "/finding-imports/context")
@@ -11451,7 +11459,8 @@ test.each([
             return new Response(null, { status: 404 });
           return Response.json(fileMetadata());
         }
-        if (path === "/finding-imports/jobs") {
+        if (path === expectedJobsPath) {
+          jobBodies.push(String(init.body));
           const body = JSON.parse(String(init.body));
           expect(body.request_id).not.toBe(fileRequest);
           expect(body.source).toEqual({
@@ -11479,16 +11488,17 @@ test.each([
                 : "import_" + "c".repeat(32);
             return Response.json(job(terminal));
           }
-          if (!jobRequest) {
-            jobRequest = body.request_id;
+          if (jobRequest) expect(body.request_id).toBe(jobRequest);
+          jobRequest = body.request_id;
+          if (loseNextJobResponse) {
+            loseNextJobResponse = false;
             throw new Error("lost job response");
           }
-          expect(body.request_id).toBe(jobRequest);
           return Response.json(job("queued"), {
             headers: { "Retry-After": "0" },
           });
         }
-        if (path === `/finding-imports/jobs/${jobId}`)
+        if (path === `${expectedJobsPath}/${jobId}`)
           return unavailable
             ? new Response(null, { status: 503 })
             : Response.json(job(terminal));
@@ -11543,6 +11553,7 @@ test.each([
     const saved = JSON.parse(
       await readFile(interrupted.result.savedSubmission!, "utf8"),
     );
+    expect(saved.jobApiVersion).toBe(provider === "continuum" ? 2 : undefined);
     expect(fileHash).toBe(saved.sha256);
     expect(fileRequest).toBe(saved.uploadRequestId);
     if ("previousSha256" in scenario) {
@@ -11561,8 +11572,34 @@ test.each([
     expect(resumed.preview.privateImport?.sha256).toBe(saved.sha256);
     await expect(resumed.publish()).rejects.toThrow("lost job response");
     expect(jobRequest).toBe(saved.jobRequestId);
+    expect(calls.at(-1)).toBe(`POST ${expectedJobsPath}`);
+    if (provider === "inspector") {
+      // The upgraded server accepts the same job request only on v2.
+      supportsJobV2 = true;
+      expectedJobsPath = v2Jobs;
+      loseNextJobResponse = true;
+      await expect((await prepare()).publish()).rejects.toThrow(
+        "lost job response",
+      );
+      expect(calls.at(-1)).toBe(`POST ${v2Jobs}`);
+      expect(jobBodies).toHaveLength(2);
+      expect(jobBodies[1]).toBe(jobBodies[0]);
+      const promoted = JSON.parse(
+        await readFile(interrupted.result.savedSubmission!, "utf8"),
+      );
+      expect(promoted).toMatchObject({
+        jobApiVersion: 2,
+        jobRequestId: saved.jobRequestId,
+        uploadRequestId: saved.uploadRequestId,
+        sha256: saved.sha256,
+        fileId,
+      });
+    }
+    // A saved v2 job can still be retrieved if the catalogue acknowledgement disappears.
+    supportsJobV2 = false;
     const completed = await (await prepare()).publish();
     expect(completed.privateJob?.counts.created).toBe(1);
+    expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${jobId}`);
     expect(completed.receipts).toEqual([]);
     expect(completed.verified).toBe(0);
     if ("previousSha256" in scenario) {
@@ -11574,6 +11611,7 @@ test.each([
     if (provider === "inspector") {
       // A completed old job cannot account for the newly admitted package finding.
       advertised = true;
+      supportsJobV2 = true;
       loseResponses = false;
       const next = await prepare();
       expect(next.preview.resumed).toBe(false);
@@ -11591,8 +11629,10 @@ test.each([
       });
     }
     canCreate = false;
+    advertised = false;
+    supportsJobV2 = true;
     expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
-    expect(calls.at(-1)).toBe(`GET /finding-imports/jobs/${jobId}`);
+    expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${jobId}`);
     unavailable = true;
     const acknowledged = {
       result: {
@@ -11611,12 +11651,15 @@ test.each([
     formats = ["security.findings.v1"];
     expect((await prepare()).preview.privateImport?.format).toBe(format);
     contextVersion = "generation-c";
+    expectedJobsPath =
+      provider === "inspector" || provider === "continuum" ? v2Jobs : v1Jobs;
     unorderedUpdates = 0;
     advertised = true;
     canCreate = true;
     loseResponses = false;
     expectedFormat = "security.findings.v1";
-    terminal = provider === "wiz" ? "cancelled" : "failed";
+    terminal =
+      provider === "wiz" || provider === "continuum" ? "cancelled" : "failed";
     const fresh = await prepare();
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.privateImport?.format).toBe(expectedFormat);
@@ -11627,6 +11670,23 @@ test.each([
     expect((await fresh.publish()).privateJob?.status).toBe(terminal);
     expect(fileHash).toBe(fresh.preview.privateImport?.sha256);
     const failedJob = jobId;
+    if (expectedJobsPath === v2Jobs) {
+      // Losing AWS write access still allows the failed or cancelled job to be read.
+      advertised = false;
+      const before = calls.length;
+      const readOnly = await prepare();
+      expect(readOnly.preview.privateImport?.retryOfJobId).toBeUndefined();
+      expect((await readOnly.publish()).privateJob).toMatchObject({
+        id: failedJob,
+        status: terminal,
+      });
+      expect(calls.at(-1)).toBe(`GET ${v2Jobs}/${failedJob}`);
+      expect(
+        calls.slice(before).filter((call) => call.startsWith("POST")),
+      ).toEqual([]);
+      advertised = true;
+      supportsJobV2 = false; // The saved version also applies to its replacement attempt.
+    }
     const retry = await prepare();
     const secondPreview = await prepare();
     expect(retry.preview.resumed).toBe(false);

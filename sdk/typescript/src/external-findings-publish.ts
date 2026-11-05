@@ -1479,6 +1479,10 @@ async function preparePublicationInput(
     dependencies.credentials ?? (() => readCloudCredentials(environment))
   )();
   let privateProviders: Set<string> | undefined;
+  const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
+  let jobApiVersion: 2 | undefined;
+  const aws =
+    options.provider === "inspector" || options.provider === "continuum";
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -1486,6 +1490,7 @@ async function preparePublicationInput(
     dependencies.signal?.throwIfAborted();
     // Allow upload and response transport around the server's publication budget.
     const timeout = AbortSignal.timeout(body ? 60_000 : 30_000);
+    const repositoryCatalog = endpoint.startsWith("/repositories?");
     const response = await (dependencies.fetch ?? globalThis.fetch)(
       `${cloudApiUrl}${endpoint}`,
       {
@@ -1494,6 +1499,7 @@ async function preparePublicationInput(
           Authorization: `Bearer ${credentials.access_token}`,
           "ChatGPT-Account-ID": credentials.account_id,
           Accept: "application/json",
+          ...(repositoryCatalog ? { [jobVersionHeader]: "2" } : {}),
           ...(body ? { "Content-Type": "application/json" } : {}),
         },
         ...(body ? { body: JSON.stringify(body) } : {}),
@@ -1513,7 +1519,9 @@ async function preparePublicationInput(
         `Cloud import failed (HTTP ${response.status}). ${payload?.error?.message ?? response.statusText}${retryAfter ? ` Retry-After: ${retryAfter}.` : ""}`,
       );
     }
-    if (endpoint.startsWith("/repositories?")) {
+    if (repositoryCatalog) {
+      jobApiVersion =
+        aws && response.headers.get(jobVersionHeader) === "2" ? 2 : undefined;
       const advertised = response.headers.get(
         "Codex-Security-Private-Import-Providers",
       );
@@ -3106,15 +3114,13 @@ async function preparePublicationInput(
         : readPrivateCheckpoint(data, binding);
     }
     const previous = checkpointForContext(privateSaved);
-    function requireAccess(
-      value: typeof context,
-      savedFile: boolean,
-      savedJob: boolean,
-    ) {
+    const canStartJob = !aws || privateProviders?.has(source.provider) === true;
+    function requireAccess(value: typeof context, saved: typeof previous) {
       if (
         !value.can_read ||
-        (!savedJob &&
-          ((!savedFile && !value.can_upload) ||
+        (!saved && !canStartJob) ||
+        (!saved?.jobId &&
+          ((!saved?.fileId && !value.can_upload) ||
             !value.can_create_import_jobs ||
             !value.formats.includes(report.format)))
       )
@@ -3122,9 +3128,10 @@ async function preparePublicationInput(
           "Private findings import is unavailable for this account or report format.",
         );
     }
-    requireAccess(context, !!previous?.fileId, !!previous?.jobId);
+    requireAccess(context, previous);
     const retryOfJobId =
       unsuccessfulJob(previous?.receipt) &&
+      canStartJob &&
       context.can_upload &&
       context.can_create_import_jobs &&
       context.formats.includes(report.format)
@@ -3171,19 +3178,24 @@ async function preparePublicationInput(
             retryOfJobId !== undefined && stored?.receipt?.id === retryOfJobId;
           const active = retrying ? undefined : stored;
           if (resumed && !active) checkRepositories(parsed);
-          requireAccess(current, !!active?.fileId, !!active?.jobId);
+          requireAccess(current, active);
           if (await selectedCheckpoint())
             throw new CodexSecurityError(
               "A repository submission is pending. Review its saved request before continuing.",
             );
-          const checkpoint = active ?? {
-            ...binding,
-            uploadRequestId: randomUUID(),
-            jobRequestId: randomUUID(),
-            fileId: undefined,
-            jobId: undefined,
-            receipt: undefined,
-            previousReceipt: retrying ? stored?.receipt : undefined,
+          // Both routes share request IDs. A server upgrade can promote an
+          // existing AWS job, and its saved route also survives gate rollback.
+          const checkpoint = {
+            ...(active ?? {
+              ...binding,
+              uploadRequestId: randomUUID(),
+              jobRequestId: randomUUID(),
+              fileId: undefined,
+              jobId: undefined,
+              receipt: undefined,
+              previousReceipt: retrying ? stored?.receipt : undefined,
+            }),
+            jobApiVersion: stored?.jobApiVersion ?? jobApiVersion,
           };
           const result: ExternalPublicationResult = {
             cloudApiUrl: preview.cloudApiUrl,
@@ -3225,7 +3237,8 @@ async function preparePublicationInput(
             const savedReceipt =
               checkpoint.receipt ?? checkpoint.previousReceipt;
             if (savedReceipt) acknowledge(savedReceipt);
-            if (!active) await writeAtomicJson(privatePath, checkpoint);
+            if (!active || active.jobApiVersion !== checkpoint.jobApiVersion)
+              await writeAtomicJson(privatePath, checkpoint);
             if (!checkpoint.fileId) {
               progress({ phase: "uploading", completed: 0 });
               checkpoint.fileId = await client.upload({
@@ -3246,6 +3259,7 @@ async function preparePublicationInput(
                 source,
                 repository: binding.repository,
                 jobId: checkpoint.jobId,
+                jobApiVersion: checkpoint.jobApiVersion,
               },
               async (id) => {
                 checkpoint.jobId = id;

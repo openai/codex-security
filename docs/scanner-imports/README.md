@@ -35,6 +35,8 @@ Ask it to preview the report with your configured model.
 Check your version with `codex-security --version`. Support for AWS Continuum,
 Black Duck, SonarQube Cloud, Veracode, the Semgrep Platform SDK example, and
 Cloud private inbox imports came after [version 0.8.2](https://github.com/openai/codex-security/blob/npm-v0.8.2/sdk/typescript/docs/cli.md#import-vendor-findings-locally).
+For AWS inbox imports, use a CLI and workspace that support v2 finding import
+jobs. The dry-run preview shows `privateImport` when that route is available.
 
 | Guide                                                       | Supported input                                                                 |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
