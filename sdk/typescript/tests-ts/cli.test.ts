@@ -2196,7 +2196,7 @@ describe("CLI", () => {
 
     expect(
       await runCli(
-        ["info", "--json", "--filter-output", "model,reasoningEffort,nextStep"],
+        ["info", "--json", "--filter-output=model,reasoningEffort,nextStep"],
         deps,
       ),
     ).toBe(0);
@@ -3205,6 +3205,7 @@ describe("CLI", () => {
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
       ],
       [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [["--codex", 'model = "gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
       [
         ["--codex", 'model_reasoning_effort="high"'],
         { model_reasoning_effort: "high" },
@@ -5165,6 +5166,7 @@ describe("CLI", () => {
       ["--token-limit", "4"],
       ["--token-offset", "1"],
       ["--token-offset", "1", "--token-limit", "4"],
+      ["--token-offset=1", "--token-limit=4"],
     ] as const) {
       const stdout = captureCli(main, "stdout");
       expect(await stdout.run(["scan", ...arguments_], dependencies())).toBe(0);

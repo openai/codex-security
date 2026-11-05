@@ -3168,7 +3168,15 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
     if args.command == "finding-issues":
-        result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
+        try:
+            result = publication.finding_issues(
+                _WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin)
+            )
+        except sqlite3.OperationalError as exc:
+            if not getattr(exc, "_codex_security_state_unavailable", False):
+                raise
+            print(f"sqlite3.OperationalError: {exc}", file=sys.stderr)
+            raise SystemExit(73) from None
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
@@ -3337,4 +3345,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from None
