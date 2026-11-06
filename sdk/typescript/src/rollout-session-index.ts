@@ -18,10 +18,7 @@ import {
   validatePreparedOutputDir,
   withCredentialHomeLock,
 } from "./runtime.js";
-import {
-  MAX_SCAN_ROLLOUT_SESSIONS,
-  type ScanRolloutSession,
-} from "./scan-logs.js";
+import type { ScanRolloutSession } from "./scan-logs.js";
 import { nullIfMissingFile } from "./targets.js";
 import { compareTimestamps } from "./timestamps.js";
 import { notify } from "./value.js";
@@ -29,8 +26,8 @@ import { notify } from "./value.js";
 export const ROLLOUT_SESSION_INDEX_RELATIVE_PATH =
   "artifacts/rollout-sessions/index.json";
 
-const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u);
-const timestamp = z.iso.datetime().max(35);
+const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+const timestamp = z.iso.datetime();
 const segment = z.strictObject({
   startedAt: timestamp,
   path: z
@@ -42,12 +39,11 @@ const sessionEntry = z.strictObject({
   parentThreadId: id.nullable(),
   eventSegments: z.array(segment).optional(),
 });
-const MAX_INDEX_BYTES = 8 * 1024 * 1024;
 const indexSchema = z.strictObject({
   schemaVersion: z.literal(1),
   scanId: id,
-  rootThreadIds: z.array(id).max(MAX_SCAN_ROLLOUT_SESSIONS),
-  sessions: z.array(sessionEntry).max(MAX_SCAN_ROLLOUT_SESSIONS),
+  rootThreadIds: z.array(id),
+  sessions: z.array(sessionEntry),
 });
 export type RolloutSessionIndex = z.infer<typeof indexSchema>;
 
@@ -112,11 +108,7 @@ async function readIndex(
   let index: RolloutSessionIndex;
   try {
     const metadata = await file.stat();
-    if (
-      !metadata.isFile() ||
-      metadata.nlink > 1 ||
-      metadata.size > MAX_INDEX_BYTES
-    ) {
+    if (!metadata.isFile() || metadata.nlink > 1) {
       throw new CodexSecurityError("Invalid rollout session index file.");
     }
     if (!constants.O_NOFOLLOW) {
@@ -198,10 +190,7 @@ async function writeSegment(
 }
 
 function serialize(index: RolloutSessionIndex): string {
-  const contents = JSON.stringify(index) + "\n";
-  if (Buffer.byteLength(contents) > MAX_INDEX_BYTES)
-    throw new CodexSecurityError("The rollout session index is too large.");
-  return contents;
+  return JSON.stringify(index) + "\n";
 }
 
 async function publish(directory: string, contents: string): Promise<void> {

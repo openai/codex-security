@@ -79,6 +79,24 @@ test("indexes lineage without reading rollout contents by default", async () => 
   expect(await readdir(dirname(path))).toEqual(["index.json"]);
 });
 
+test("round-trips large session metadata without retaining events", async () => {
+  const scanDir = await temporaryDirectory();
+  const threads = Array.from({ length: 16_384 }, (_, i) =>
+    `worker-${i}`.padEnd(256, "x"),
+  );
+  const path = await writeRolloutSessionIndex({
+    scanDir,
+    scanId,
+    startedAt,
+    rootThreadIds: threads,
+    sessions: threads.map((thread) => session(thread, null)),
+  });
+  expect((await stat(path)).size).toBeGreaterThan(8 * 1024 * 1024);
+  const index = await readRolloutSessionIndex(scanDir, scanId);
+  expect(index!.rootThreadIds).toEqual(threads);
+  expect(index!.sessions.map((entry) => entry.threadId)).toEqual(threads);
+});
+
 test("publishes only metadata when the first event export fails partway", async () => {
   const scanDir = await temporaryDirectory();
   const warnings: string[] = [];

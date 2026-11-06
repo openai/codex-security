@@ -373,8 +373,6 @@ async function* retainedTurnEvents(
   }
 }
 
-export const MAX_SCAN_ROLLOUT_SESSIONS = 4096;
-
 export interface ScanRolloutSession {
   threadId: string;
   parentThreadId: string | null;
@@ -403,11 +401,6 @@ export async function scanRolloutSessions(
     },
     options,
   );
-  if (sessions.length > MAX_SCAN_ROLLOUT_SESSIONS) {
-    throw new CodexSecurityError(
-      `Scan rollout index exceeds ${MAX_SCAN_ROLLOUT_SESSIONS} sessions.`,
-    );
-  }
   const byId = new Map(sessions.map((copies) => [copies[0].threadId, copies]));
   const registered = new Set(execution);
   type Capture = {

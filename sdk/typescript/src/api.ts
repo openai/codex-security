@@ -902,6 +902,7 @@ export class CodexSecurity {
           signal: undefined,
           auth: undefined,
           archiveExisting: undefined,
+          retainRolloutSessions: undefined,
         },
       }),
     });
