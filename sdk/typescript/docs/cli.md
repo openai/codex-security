@@ -254,8 +254,8 @@ codex-security scan . --provider cheaperinference --model gpt-5.4
 
 ### Hugging Face compatibility
 
-The bundled Codex 0.166.0 scanner sends its scan-completion tool inside a
-`namespace` and can request `web_search`. Hugging Face's published Responses
+In compatibility testing, Codex 0.166.0 sent its scan-completion tool inside a
+`namespace` and could request `web_search`. Hugging Face's published Responses
 implementation accepts `function` and remote `mcp` tool declarations. A named
 Hugging Face scan provider is deferred until the scanner and router can exchange
 the tools a complete scan requires. [Hugging Face's implementation notes](https://huggingface.co/docs/inference-providers/en/guides/gpt-oss#responses-api)

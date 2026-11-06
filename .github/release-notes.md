@@ -142,6 +142,7 @@
 - bump napi from 3.15.0 to 3.16.0 in /plugins/codex-security/native ([#2395](https://github.com/openai/codex-security/pull/2395))
 - explain unreadable plugin installation receipts ([#2403](https://github.com/openai/codex-security/pull/2403))
 - open long state paths in JavaScript SQLite connections ([#2380](https://github.com/openai/codex-security/pull/2380))
+- update Codex SDK and CLI to 0.167.0 ([#2398](https://github.com/openai/codex-security/pull/2398))
 
 </details>
 
