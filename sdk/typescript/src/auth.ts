@@ -17,10 +17,10 @@ import {
   type CodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
-
 import { environmentEntry } from "./value.js";
 
-export { environmentEntry };
+/** @internal */
+export { environmentEntry } from "./value.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 
