@@ -29,14 +29,14 @@ const finished = (...next: TraceScope[]): ScopeResult => ({
   next,
 });
 
-function reference(source: string, name: string) {
+function declaration(source: string, name: string) {
   return {
     source,
     line: 1,
     step: {
       from: { kind: "file", name: source },
-      relation: "references",
-      to: { kind: "spelling", name },
+      relation: "depends_on",
+      to: { kind: "package", name, scope: source },
     },
   };
 }
@@ -111,7 +111,7 @@ test("zero hops returns unresolved candidate scopes and deadline retains complet
       if (path === "a")
         return {
           ...finished(),
-          evidence: [reference("observed", "dependency")],
+          evidence: [declaration("observed", "dependency")],
         };
       await new Promise<void>((resolve) =>
         stop.addEventListener(
@@ -131,6 +131,28 @@ test("zero hops returns unresolved candidate scopes and deadline retains complet
   assert.deepEqual(result.limits, ["time budget"]);
   assert.equal(result.scopes[0].evidence.length, 1);
   assert.equal(result.scopes[1].complete, false);
+});
+
+test("a full text sample leaves room for structural evidence", async () => {
+  const textMatches = Array.from({ length: 200 }, (_, index) => ({
+    source: "registry.ts",
+    text: "dependency",
+    line: index + 1,
+  }));
+  const dependency = declaration("package.json", "dependency");
+  const result = await processTrace(
+    { ...request, paths: ["."] },
+    async ({ kind }) =>
+      kind === "search"
+        ? { ...finished(file("package.json")), textMatches }
+        : { ...finished(), evidence: [dependency] },
+    1,
+  );
+  assert.deepEqual(result.limits, ["text match limit"]);
+  assert.equal(result.scopes[0].textMatches?.length, 128);
+  assert.equal(result.scopes[0].complete, false);
+  assert.deepEqual(result.scopes[1].evidence, [dependency]);
+  assert.equal(result.scopes[1].complete, true);
 });
 
 test("a cycle reaching the hop boundary does not hide completed coverage", async () => {
@@ -158,14 +180,14 @@ test("only unchanged file evidence is reused, and only within a single check", a
       return {
         ...finished(),
         fingerprint: revision,
-        evidence: [reference("manifest", revision)],
+        evidence: [declaration("manifest", revision)],
       };
     },
   };
   async function check(tracer: ReturnType<typeof createDependencyTracer>) {
     const result = await tracer.trace({ ...request, paths: ["."] });
     assert.deepEqual(result.scopes[1].evidence, [
-      reference("manifest", revision),
+      declaration("manifest", revision),
     ]);
     assert.ok(result.complete);
   }

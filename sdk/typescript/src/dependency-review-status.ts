@@ -98,6 +98,7 @@ export function summarizeDependencyReviewStatus(
         id: candidate.id,
         path: candidate.path,
         line: candidate.line,
+        ...(candidate.package && { package: candidate.package }),
         sourceBytes: candidate.sourceBytes,
         assessmentIds: bindings.get(candidate.id) ?? [],
       })),

@@ -19,14 +19,23 @@ function entryBytes(key: string, result: ScopeResult): number {
     for (const value of Object.values(scope)) bytes += stringBytes(value);
   }
   for (const { step, source } of result.evidence) {
-    bytes += 256 + stringBytes(source) + stringBytes(step.relation);
+    bytes +=
+      256 +
+      stringBytes(source) +
+      stringBytes(step.relation) +
+      stringBytes(step.calleeText) +
+      stringBytes(step.sourceText);
     for (const endpoint of [step.from, step.to]) {
+      if (!endpoint) continue;
       bytes +=
         128 +
         stringBytes(endpoint.kind) +
         stringBytes(endpoint.name) +
         stringBytes(endpoint.scope);
     }
+  }
+  for (const { source, text } of result.textMatches ?? []) {
+    bytes += 128 + stringBytes(source) + stringBytes(text);
   }
   return bytes;
 }

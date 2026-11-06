@@ -13,8 +13,8 @@ function result(name: string): ScopeResult {
         line: 3,
         step: {
           from: { kind: "file", name: "file.ts" },
-          relation: "references",
-          to: { kind: "spelling", name },
+          relation: "candidate_call",
+          calleeText: name,
         },
       },
     ],
@@ -44,6 +44,10 @@ test("oversized and incomplete results do not displace other entries", () => {
   cache.store("a", small);
   const huge = "x".repeat(8192);
   cache.store("oversized-evidence", result(huge));
+  cache.store("oversized-text", {
+    ...small,
+    textMatches: [{ source: "registry.ts", text: huge }],
+  });
   cache.store("oversized-scope", {
     ...small,
     next: [{ kind: "file", package: "pkg", path: huge }],
@@ -52,6 +56,7 @@ test("oversized and incomplete results do not displace other entries", () => {
   cache.store("incomplete", { ...small, complete: false });
   for (const key of [
     "oversized-evidence",
+    "oversized-text",
     "oversized-scope",
     huge,
     "incomplete",

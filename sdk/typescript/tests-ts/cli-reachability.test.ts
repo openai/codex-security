@@ -1,6 +1,6 @@
 import { expect, mock, test } from "bun:test";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { join, sep } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import { bundledPluginRoot } from "../src/runtime.js";
@@ -53,6 +53,36 @@ function reviewDecision(
     })),
   });
 }
+
+test("requires a working OpenGrep before advisory lookup or model startup", async () => {
+  await using temp = await scopedTemporaryDirectory("cve-opengrep-");
+  const repo = temp.path;
+  git(repo, "init", "--quiet");
+  const nested = join(repo, "app");
+  await mkdir(nested);
+  const onCodex = mock<OnCodex>().mockReturnValue(0);
+  const diagnostic = "scanner runtime unavailable";
+  const deps = dependencies({
+    currentDirectory: nested,
+    onCodex,
+    onRepositoryCommand: async (command, argv, repository, options) => {
+      expect(command).toBe("opengrep");
+      expect(argv).toEqual(["--version"]);
+      expect(repository).toBe(repo);
+      expect(options?.signal).toBeInstanceOf(AbortSignal);
+      const cwd = await realpath(options!.cwd!);
+      expect(cwd).not.toBe(repo);
+      expect(cwd.startsWith(repo + sep)).toBe(false);
+      throw new Error(diagnostic);
+    },
+  });
+  deps.lookupDependencyAdvisory = mock(async () => advisory);
+  const { runCli, stderr } = createCliTest(main);
+  expect(await runCli(args, deps), stderr.text()).toBe(2);
+  expect(stderr.text()).toContain(diagnostic);
+  expect(deps.lookupDependencyAdvisory).not.toHaveBeenCalled();
+  expect(onCodex).not.toHaveBeenCalled();
+});
 
 test("returns only the report accepted after the investigator corrects a rejected submission", async () => {
   await using temp = await scopedTemporaryDirectory("cve-skill-");

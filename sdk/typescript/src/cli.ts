@@ -1236,7 +1236,6 @@ type DependencyReportTool = Pick<
       >
     ) => void;
     observeGraph?: DependencyCandidates["observeGraph"];
-    observeCommand?: DependencyCandidates["observeCommand"];
     bindReviewer?: (
       environment: Record<string, string>,
       providerConfig: JsonObject,
@@ -1405,13 +1404,15 @@ interface CliDependencies {
     input?: string,
   ): Promise<number>;
   runRepositoryCommand(
-    command: "git" | "gh" | "glab",
+    command: "git" | "gh" | "glab" | "opengrep",
     args: readonly string[],
     repository: string,
     options?: {
       trim?: boolean;
       environment?: NodeJS.ProcessEnv;
       input?: string;
+      cwd?: string;
+      signal?: AbortSignal;
     },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
@@ -1449,8 +1450,9 @@ export const runRepositoryCommand: CliDependencies["runRepositoryCommand"] =
       );
     }
     const result = execFile(executable.executable, [...args], {
-      cwd: repository,
+      cwd: options?.cwd ?? repository,
       env: { ...executable.environment, ...options?.environment },
+      signal: options?.signal,
       windowsHide: true,
       maxBuffer: Infinity,
     });
@@ -2902,7 +2904,8 @@ export async function main(
   const exploitability = Cli.create("exploitability", {
     description: "Assess dependency advisories against the current checkout.",
   }).command("check", {
-    description: "Check whether a dependency CVE affects this checkout.",
+    description:
+      "Check whether a dependency CVE affects this checkout. Requires OpenGrep on PATH.",
     alias: { config: "c" },
     destructive: false,
     mcp: false,
@@ -2929,9 +2932,6 @@ export async function main(
           dependencies,
         );
         const serviceCatalogServers = exploitabilityMcpServers(project?.input);
-        const advisory = await (
-          dependencies.lookupDependencyAdvisory ?? lookupDependencyAdvisory
-        )(args.cve, controller.signal);
         const directory = await normalizeRepository(
           dependencies.currentDirectory(),
           controller.signal,
@@ -2944,6 +2944,31 @@ export async function main(
           join(tmpdir(), "codex-security-exploitability-"),
         );
         const reviewDirectory = temporary;
+        try {
+          await dependencies.runRepositoryCommand(
+            "opengrep",
+            ["--version"],
+            repository,
+            {
+              cwd: reviewDirectory,
+              signal: controller.signal,
+              environment: {
+                OPENGREP_ENABLE_VERSION_CHECK: "0",
+                SEMGREP_ENABLE_VERSION_CHECK: "0",
+                SEMGREP_SEND_METRICS: "off",
+              },
+            },
+          );
+        } catch (error) {
+          controller.signal.throwIfAborted();
+          throw new CodexSecurityError(
+            `Dependency checks require a working OpenGrep on PATH outside the checkout. ${errorMessage(error)}`,
+            { cause: error },
+          );
+        }
+        const advisory = await (
+          dependencies.lookupDependencyAdvisory ?? lookupDependencyAdvisory
+        )(args.cve, controller.signal);
         let investigatorUsage: ScanTokenUsage | null = null;
         let helperUsage: ScanTokenUsage | null = null;
         function recordHelperUsage(observed: unknown) {
@@ -3068,7 +3093,6 @@ export async function main(
               continuationPrompt: submission.continuationPrompt,
               recordGraphEvent: submission.recordGraphEvent,
               observeGraph: candidates.observeGraph,
-              observeCommand: candidates.observeCommand,
               recordInventory: (server, result, metadata) => {
                 if (Object.hasOwn(serviceCatalogServers, server))
                   return submission.recordInventory(server, result, metadata);
@@ -9919,7 +9943,7 @@ async function runSkill(
         ...(dependencyCheck
           ? [
               "Assess the checkout read-only. Do not run application code, builds, tests, or reproductions.",
-              "Use structured graph results or line-numbered source searches (for example rg -n --with-filename or rg --json) so discovered source locations are retained as candidates. Request candidates:{} from codex_security_reports.get_codex_security_review_status to read unassigned candidate pages; follow nextCursor. Account for each candidate rather than silently dropping it. Use file-reading commands for inspection, not match-every-line searches.",
+              "Use text matches and shell searches as leads. Inspect promising matches and cite verified source in assessed uses even when they have no candidate IDs. Graph call, flow, and build dependency evidence creates review candidates. Request candidates:{} from codex_security_reports.get_codex_security_review_status and follow nextCursor to account for every unassigned candidate.",
               "Queue each assessed use, supported dismissal, or documented unresolved candidate group through codex_security_reports.queue_codex_security_dependency_assessments as soon as its evidence is ready. Reuse its item id when revising it. Review runs in batches while you continue investigating; check feedback at natural stopping points rather than polling in a loop.",
               "Bind each queued item to its exact catalog evidence using receiptIds or receiptSelections from authenticated catalog mappings, or request inventoryReceipts:true from get_codex_security_review_status. Prefer the provided record selections for bulk results. If a receipt refresh makes the binding stale, reassess the latest record and revise the affected item.",
               "Keep operations with different applicability or evidence separate: preserve a proven exclusion for a local operation even when another delegated operation remains unresolved. Group candidate IDs only when the same scoped conclusion applies to them. Cite the import/export, call, or routing bindings for claimed handoffs between files or services.",
@@ -10747,8 +10771,6 @@ export async function readSkillCommandOutput(
       } else if (value["method"] === "item/completed" && currentTurn) {
         const item = params["item"];
         if (!isJsonObject(item)) continue;
-        if (item["type"] === "commandExecution")
-          await appServer.dependencyReport?.observeCommand?.(item);
         const result = item["result"];
         if (
           appServer.dependencyReport &&

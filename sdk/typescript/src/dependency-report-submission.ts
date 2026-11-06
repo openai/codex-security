@@ -70,7 +70,7 @@ export const dependencyReviewQueueSchema = z.strictObject({
     .array(reviewItemSchema)
     .min(1)
     .describe(
-      "Upsert complete assessed items by stable id. Group related candidateIds into a use or an evidence-backed dismissal/unresolved disposition. Replace a withdrawn use with a disposition under that same id; it cannot silently disappear from final selection. Raw search hits are candidates, not assessed findings.",
+      "Upsert complete assessed items by stable id. Group related candidateIds into a use or an evidence-backed dismissal or unresolved disposition. To withdraw a use, replace it with a disposition under the same id and include it in the final selection. Search matches are leads. An assessed use discovered through search can cite verified source with an empty candidateIds array when no graph candidate applies.",
     ),
 });
 export const dependencyReportInputSchema = dependencyAssessmentSchema.extend({
@@ -110,20 +110,18 @@ type Decision = Omit<
   "id" | "revision" | "evidenceIds"
 > & { evidenceKeys: string[] };
 type ItemStatus = "queued" | "reviewing" | "accepted" | "rejected" | "error";
+type BoundCandidate = Pick<
+  DependencyCandidate,
+  "path" | "line" | "package" | "sourceSha256" | "sourceBytes"
+>;
 interface PreparedItem {
   input: ReviewItem;
   excerpts: DependencyExcerpt[];
   receipts: BoundDependencyInventoryReceipt[];
-  candidates: Pick<
-    DependencyCandidate,
-    "path" | "line" | "sourceSha256" | "sourceBytes"
-  >[];
+  candidates: BoundCandidate[];
   previousUse?: {
     use: DependencyUse;
-    candidates: Pick<
-      DependencyCandidate,
-      "path" | "line" | "sourceSha256" | "sourceBytes"
-    >[];
+    candidates: BoundCandidate[];
   };
   fingerprint: string;
 }
@@ -150,7 +148,7 @@ const batchInstructions = [
   "When an explanation relies on a handoff across files, modules or services, require cited import/export, call or routing evidence that connects those specific components. Matching names alone do not establish the connection.",
   "For a use, check material claims: the dependency copy/version, applicable operation and advisory prerequisites, and any claimed deployment or caller access. Do not infer a running revision or actual access from inventory identity or desired configuration. Read citedVersion from this item's evidence; return null if it is unresolved. A proven fixed version or another decisive exclusion suffices for ruled_out.",
   "Match named inventory observations to their original records and this use, including observations with supports: []. Empty supports provides context without claiming running or access. Reject contradictions and missing facts that materially change a confident verdict; accept unknown when the item accurately describes the deciding uncertainty and evidence checked.",
-  "Check that each bound candidate location is actually covered by the use or disposition. A dismissed item needs a cited reason why those candidates are not applicable; unresolved needs a concrete remaining uncertainty. If previousUse is supplied, this disposition must also account for that previously reported use; its original evidence is included in this item's bindings. A location's mere presence in candidateIds does not establish that the assessment covers it. For non-use items return citedVersion null.",
+  "Check that the use or disposition covers each bound candidate, including its package and scope when supplied. A dismissed item needs a cited reason why those candidates are not applicable; unresolved needs a concrete remaining uncertainty. If previousUse is supplied, this disposition must also account for that previously reported use; its original evidence is included in this item's bindings. A location's mere presence in candidateIds does not establish that the assessment covers it. For non-use items return citedVersion null.",
   "Return exactly one decision for every supplied id and revision, no extras. Give deciding evidenceIds from that item’s own excerptIds/receiptIds; an accepted decision must cite at least one. Also name the actual source path or inventory record in the brief reason so feedback remains understandable outside this packet. Do not judge discovery completeness beyond these bound candidates; the host separately checks candidate accounting and aggregate consistency.",
 ].join("\n");
 
@@ -296,6 +294,7 @@ export function createDependencyReportSubmission(options: {
         return {
           path: candidate.path,
           line: candidate.line,
+          ...(candidate.package && { package: candidate.package }),
           sourceSha256: candidate.sourceSha256,
           sourceBytes: candidate.sourceBytes,
         };

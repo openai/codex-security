@@ -7,13 +7,19 @@ import type {
 } from "../src/dependency-trace/types.ts";
 
 const file = { kind: "file", name: "src/preview.ts" };
-const caller = { kind: "symbol", name: "makePreview", scope: file.name };
-const target = { kind: "spelling", name: "decode" };
-const call: TraceEvidence = {
-  source: file.name,
-  line: 12,
-  step: { from: caller, relation: "candidate_call", to: target },
-};
+function callIn(source: string): TraceEvidence {
+  return {
+    source,
+    line: 12,
+    step: {
+      from: { kind: "symbol", name: "makePreview", scope: source },
+      relation: "candidate_call",
+      calleeText: "decode",
+    },
+  };
+}
+const call = callIn(file.name);
+
 function trace(...evidence: TraceEvidence[]): TraceResult {
   return {
     complete: true,
@@ -50,29 +56,46 @@ function matchesFor(graph: EvidenceGraph, node: string) {
   return result.matches;
 }
 
-test("counts distinct candidate calls and flows, including different source lines", () => {
+test("counts distinct call sites and flows without linking unresolved names to a bound target", () => {
   const graph = new EvidenceGraph();
+  const target = { kind: "symbol", name: "decode", scope: "lib/codec.ts" };
   const result = trace(
     call,
     { ...call, line: 22 },
-    { ...call, step: { ...call.step, relation: "candidate_flow" } },
-    { ...call, step: { from: file, relation: "references", to: target } },
+    {
+      ...call,
+      step: { ...call.step, relation: "candidate_flow", sourceText: "request" },
+    },
+    { ...call, line: 34, step: { ...call.step, to: target } },
   );
   graph.addTrace(result);
   graph.addTrace(result);
   assert.deepEqual(summaryFor(graph), {
-    code_paths_found: 3,
+    code_paths_found: 4,
     services_found: 0,
     services: [],
   });
   const detail = detailFor(graph, file.name);
   assert.deepEqual(
-    detail.paths.map(({ line }) => line),
-    [12, 22, 12],
+    detail.paths.map(({ line, relation, calleeText, sourceText, to }) => [
+      line,
+      relation,
+      calleeText,
+      sourceText,
+      to?.scope,
+    ]),
+    [
+      [12, "candidate_call", "decode", undefined, undefined],
+      [22, "candidate_call", "decode", undefined, undefined],
+      [12, "candidate_flow", "decode", "request", undefined],
+      [34, "candidate_call", "decode", undefined, target.scope],
+    ],
   );
-  assert.equal(detail.evidence[0]?.relation, "references");
-  assert.equal(detail.paths[0]?.relation, "candidate_call");
-  assert.equal(detail.paths[0]?.source, file.name);
+  assert.deepEqual(detail.evidence, []);
+  assert.deepEqual(
+    detailFor(graph, "decode").paths.map(({ line }) => line),
+    [34],
+  );
   assert.deepEqual(new EvidenceGraph().query(), {
     code_paths_found: 0,
     services_found: 0,
@@ -83,7 +106,7 @@ test("counts distinct candidate calls and flows, including different source line
 test("a service exposes only its directly linked code and cited relationships", () => {
   const graph = new EvidenceGraph();
   const uploadPath = "src/upload.ts";
-  graph.addTrace(trace(call, { ...call, source: uploadPath }));
+  graph.addTrace(trace(call, callIn(uploadPath)));
   const answers = [
     {
       path: file.name,
@@ -133,22 +156,14 @@ test("a service exposes only its directly linked code and cited relationships", 
 test("file links include local candidates without merging unrelated names or catalog neighbors", () => {
   const graph = new EvidenceGraph();
   graph.addTrace(
-    trace(
-      call,
-      {
-        ...call,
-        source: "tools/preview.ts",
-        step: { ...call.step, from: { ...caller, scope: "tools/preview.ts" } },
+    trace(call, callIn("tools/preview.ts"), {
+      source: "src/catalog-info.yaml",
+      step: {
+        from: { kind: "component", name: "media/library" },
+        relation: "part_of",
+        to: { kind: "system", name: "media" },
       },
-      {
-        source: "src/catalog-info.yaml",
-        step: {
-          from: { kind: "component", name: "media/library" },
-          relation: "part_of",
-          to: { kind: "system", name: "media" },
-        },
-      },
-    ),
+    }),
   );
   assert.equal(summaryFor(graph).services_found, 0);
   graph.resolveServices([
@@ -167,10 +182,17 @@ test("file links include local candidates without merging unrelated names or cat
     candidates.map(({ scope }) => scope),
     [file.name, "tools/preview.ts"],
   );
-  assert.equal(
-    detailFor(graph, candidates[1]!.id).paths[0]?.source,
-    "tools/preview.ts",
-  );
+  for (const { id, scope } of candidates) {
+    assert.deepEqual(
+      detailFor(graph, id).paths.map(({ source, calleeText, to }) => [
+        source,
+        calleeText,
+        to,
+      ]),
+      [[scope, "decode", undefined]],
+    );
+  }
+  assert.deepEqual(graph.query("decode"), { matches: [] });
   assert.deepEqual(detailFor(graph, "media").paths, []);
   assert.deepEqual(graph.query("missing"), { matches: [] });
 });
@@ -240,14 +262,49 @@ test("a candidate's cited file can be queried without a separate file reference"
   );
 });
 
+test("the file, build, package and confirmed service expose a cited build dependency as evidence", () => {
+  const graph = new EvidenceGraph();
+  const source = "deploy/Dockerfile";
+  const stage = `${source}#FROM line 1 AS worker`;
+  const build = { kind: "build", name: "stage worker", scope: stage };
+  const pkg = { kind: "package", name: "decoder", scope: stage };
+  graph.addTrace(
+    trace({
+      source,
+      line: 4,
+      step: { from: build, relation: "depends_on", to: pkg },
+    }),
+  );
+  assert.deepEqual(graph.serviceResolution().paths, [source]);
+  graph.resolveServices([
+    { path: source, services: [{ name: "preview-job" }], source: "catalog" },
+  ]);
+  assert.equal(summaryFor(graph).code_paths_found, 0);
+  const fact = {
+    from: detailFor(graph, build.name).node,
+    relation: "depends_on",
+    to: detailFor(graph, pkg.name).node,
+    source,
+    line: 4,
+  };
+  for (const subject of [source, build.name, pkg.name, "preview-job"]) {
+    const detail = detailFor(graph, subject);
+    assert.deepEqual(detail.paths, []);
+    assert.deepEqual(
+      detail.evidence.filter((f) => f.relation === "depends_on"),
+      [fact],
+    );
+  }
+});
+
 test("static trace endpoints cannot create named services", () => {
   const graph = new EvidenceGraph();
   graph.addTrace(
-    trace({
-      ...call,
+    trace(call, {
+      source: "catalog-info.yaml",
       step: {
-        ...call.step,
         from: { kind: "service", name: "runner" },
+        relation: "part_of",
         to: { kind: "service", name: "decoder" },
       },
     }),
@@ -270,31 +327,29 @@ test("static trace endpoints cannot create named services", () => {
   );
 });
 
-test("repeated traces share file questions and retain what was checked on a miss", () => {
+test("literal matches queue no service lookups and explicit questions retain unresolved answers", () => {
   const graph = new EvidenceGraph();
-  const reference = (path: string): TraceEvidence => ({
-    step: {
-      from: { kind: "file", name: path },
-      relation: "references",
-      to: target,
-    },
-    source: path,
-  });
-  const result = trace(
-    call,
-    reference(file.name),
-    reference("README.md"),
-    reference("package.json"),
-    reference("src/parse.js"),
-  );
+  const literalFile = "src/parse.js";
+  const result = trace(call);
+  result.scopes[0]!.textMatches = [
+    { source: file.name, text: "decode", line: 12 },
+    { source: "package.json", text: "decoder" },
+    { source: literalFile, text: "decode", line: 6 },
+  ];
   graph.addTrace(result);
   graph.addTrace(result);
-  graph.requestServices([file.name, "src/parse.js"]);
+  assert.equal(summaryFor(graph).code_paths_found, 1);
+  assert.deepEqual(graph.serviceResolution().paths, [file.name]);
+  assert.deepEqual(graph.query(literalFile), { matches: [] });
+  graph.requestServices([file.name, literalFile]);
+  assert.equal(detailFor(graph, literalFile).service_lookup, "pending");
   assert.deepEqual(graph.serviceResolution(), {
     revision: 2,
     pending: 2,
     checked: 0,
-    paths: [file.name, "src/parse.js"],
+    unresolved: 0,
+    paths: [file.name, literalFile],
+    unresolved_paths: [],
   });
   const miss = { path: file.name, services: [], source: "registry/query-3" };
   graph.resolveServices([miss]);
@@ -303,18 +358,33 @@ test("repeated traces share file questions and retain what was checked on a miss
     revision: 3,
     pending: 1,
     checked: 1,
-    paths: ["src/parse.js"],
+    unresolved: 0,
+    paths: [literalFile],
+    unresolved_paths: [],
   });
   const record = detailFor(graph, file.name).evidence.find(
     (f) => f.relation === "no_service_found",
   );
   assert.equal(record?.source, miss.source);
+  const unresolved = {
+    path: literalFile,
+    reason: "Catalog unavailable",
+    source: "registry/query-4",
+  };
+  graph.resolveServices([{ ...unresolved, status: "unresolved" }]);
+  assert.equal(graph.serviceResolution().unresolved, 1);
+  assert.deepEqual(graph.serviceResolution().unresolved_paths, [unresolved]);
+  const literal = detailFor(graph, literalFile);
+  assert.equal(literal.service_lookup, "unresolved");
+  assert.deepEqual(literal.paths, []);
+  assert.deepEqual(literal.evidence, []);
+  assert.equal(summaryFor(graph).services_found, 0);
 });
 
 test("cited directory answers cover past and future files while retaining overlapping applications", () => {
   const graph = new EvidenceGraph();
   const paths = ["src/a.js", "src/nested/b.js", "src2/c.js"];
-  graph.addTrace(trace(...paths.map((source) => ({ ...call, source }))));
+  graph.addTrace(trace(...paths.map(callIn)));
   const first = {
     path: paths[0],
     directory: "src",

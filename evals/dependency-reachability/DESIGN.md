@@ -20,11 +20,16 @@ outside Git, it uses the current directory. It does not execute project code,
 reproduce vulnerabilities, or probe deployed services.
 
 `trace_codex_security_code` performs bounded local discovery with an explicit
-time budget and hop limit. The local provider uses source searches, package and
-build manifests, and optional OpenGrep matches to identify candidate references,
-calls, and same-file flows. The investigator reads the deciding source and
-follows application configuration or delegation when those facts affect a use.
-Empty or incomplete traces do not establish that no relevant caller exists.
+time budget and hop limit. The CLI requires an executable `opengrep` on `PATH`
+outside the scanned checkout. Ripgrep finds files to inspect. The provider
+records explicit dependency declarations and uses OpenGrep to identify
+candidate calls and same-file flows. An unresolved call carries the matched
+name as `calleeText` on the call site. The investigator reads the imports and
+build configuration to establish which dependency copy it calls. The trace
+returns a bounded sample of matches in supported source and dependency
+manifests separately. Automatic traces skip prose. Source scans and parsed
+manifests have their own file budgets. Coverage reports truncated samples. The investigator follows up where a gap could affect
+the assessment.
 
 A check owns an in-memory evidence graph and a bounded cache of completed
 lookups. Repeated traces can reuse unchanged inputs. Graph queries expose
@@ -53,10 +58,10 @@ desired configuration do not establish a running build or access to it.
 
 ## Candidate accounting and review
 
-The host records verified checkout locations observed in graph results and
-recognizable command output. Recognized source inspection commands do not automatically
-turn every displayed line into a candidate. Candidates describe discovered
-locations, not established vulnerabilities or complete repository coverage.
+The host records checkout locations for structured dependency declarations,
+candidate calls, and same-file flows. Literal graph searches and shell output
+supply leads. The investigator can cite any verified source when assessing a
+use. Candidate IDs connect the structured observations to their assessments.
 
 The investigator queues items through
 `queue_codex_security_dependency_assessments`. Each stable item ID represents
@@ -66,8 +71,8 @@ remain selected or be replaced by a reviewed disposition under the same ID.
 
 Review runs in batches of up to 100 items, after one minute or when a batch fills,
 with at most two batches in flight. Finalization flushes pending work immediately.
-Each review packet contains only the source excerpts and inventory receipts
-bound to its items. Receipt selections preserve the original response identity,
+Each review packet includes the candidates, source excerpts, and inventory
+receipts bound to its items. Receipt selections preserve the original response identity,
 payload hash, and exact record path. Refreshed evidence can invalidate a binding;
 unrelated lookups do not invalidate unchanged approvals.
 

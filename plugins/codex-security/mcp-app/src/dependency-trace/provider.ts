@@ -28,8 +28,12 @@ import {
   type TrustedExecutable,
 } from "../trusted-executable.ts";
 import { catalogEvidence, catalogNames, maxCatalogBytes } from "./catalog.ts";
+import {
+  dependencyEvidence,
+  dependencyManifestGlob,
+  isDependencyManifest,
+} from "./dependencies.ts";
 import type {
-  TraceEntity,
   TraceEvidence,
   TraceProvider,
   TraceScope,
@@ -42,7 +46,7 @@ const MAX_RECORDS = 64;
 const PROJECT_CONFIG_GLOB =
   "{*.yaml,*.yml,*.json,*.toml,*.tf,*.hcl,BUILD,BUILD.bazel,*.bzl,Dockerfile,Dockerfile.*,*.Dockerfile,Containerfile,Containerfile.*}";
 const MANIFEST_GLOB =
-  "{package.json,package-lock.json,npm-shrinkwrap.json,pnpm-lock.yaml,yarn.lock,bun.lock,Cargo.toml,Cargo.lock,go.mod,go.sum,pyproject.toml,uv.lock,poetry.lock,Pipfile,Pipfile.lock,requirements*.txt,setup.cfg,setup.py,BUILD,BUILD.bazel,MODULE.bazel,MODULE.bazel.lock,WORKSPACE,WORKSPACE.bazel,*.bzl,Gemfile,Gemfile.lock,pom.xml,build.gradle,build.gradle.kts,gradle.lockfile}";
+  "{package.json,package-lock.json,npm-shrinkwrap.json,pnpm-lock.yaml,yarn.lock,bun.lock,Cargo.toml,Cargo.lock,go.mod,go.sum,pyproject.toml,uv.lock,poetry.lock,Pipfile,Pipfile.lock,requirements*.txt,setup.cfg,setup.py,Dockerfile,*.Dockerfile,Containerfile,*.Containerfile,BUILD,BUILD.bazel,MODULE.bazel,MODULE.bazel.lock,WORKSPACE,WORKSPACE.bazel,*.bzl,Gemfile,Gemfile.lock,pom.xml,build.gradle,build.gradle.kts,gradle.lockfile}";
 const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const languages: Record<string, string> = {
   ".py": "python",
@@ -52,7 +56,13 @@ const languages: Record<string, string> = {
   ".cjs": "javascript",
   ".ts": "typescript",
   ".tsx": "typescript",
+  ".mts": "typescript",
+  ".cts": "typescript",
 };
+
+const sourceGlob = `{${Object.keys(languages)
+  .map((ext) => "*" + ext)
+  .join(",")}}`;
 
 export function isTraceSourceFile(path: string): boolean {
   return Object.hasOwn(languages, extname(path));
@@ -149,6 +159,12 @@ async function invoke(
 
 function leaf(scope: TraceScope) {
   return scope.symbol?.split(/::|\./u).at(-1) || scope.package;
+}
+
+function fileAnalyzer(scope: TraceScope, path: string) {
+  if (isDependencyManifest(path)) return "manifest";
+  if (scope.symbol && isTraceSourceFile(path) && identifier.test(leaf(scope)))
+    return "opengrep";
 }
 
 async function checkoutTarget(root: string, requested: string) {
@@ -303,23 +319,6 @@ function rules(scope: TraceScope, language: string) {
     });
   }
   const match = { "pattern-either": calls };
-  if (scope.source_symbol) {
-    return {
-      rules: [
-        {
-          id: "flow",
-          mode: "taint",
-          languages: [language],
-          severity: "INFO",
-          message: "Candidate same-file flow",
-          "pattern-sources": [
-            { pattern: `${scope.source_symbol}(...)`, exact: true },
-          ],
-          "pattern-sinks": [match],
-        },
-      ],
-    };
-  }
   const context =
     language === "python"
       ? ["def $CALLER(...):\n  ..."]
@@ -333,21 +332,48 @@ function rules(scope: TraceScope, language: string) {
     severity: "INFO",
     message: "Candidate call",
   };
+  const withCaller = {
+    patterns: [
+      match,
+      {
+        "pattern-either": context.map((pattern) => ({
+          "pattern-inside": pattern,
+        })),
+      },
+    ],
+  };
+  if (scope.source_symbol) {
+    return {
+      rules: [
+        {
+          ...base,
+          id: "flow",
+          mode: "taint",
+          message: "Candidate same-file flow",
+          "pattern-sources": [
+            { pattern: `${scope.source_symbol}(...)`, exact: true },
+          ],
+          // Disjoint sinks keep the enclosing caller when it is known, without
+          // emitting a caller finding for every untainted call in the file.
+          "pattern-sinks": [
+            withCaller,
+            {
+              patterns: [
+                match,
+                ...context.map((pattern) => ({
+                  "pattern-not-inside": pattern,
+                })),
+              ],
+            },
+          ],
+        },
+      ],
+    };
+  }
   return {
     rules: [
       { ...base, id: "call", ...match },
-      {
-        ...base,
-        id: "caller",
-        patterns: [
-          match,
-          {
-            "pattern-either": context.map((pattern) => ({
-              "pattern-inside": pattern,
-            })),
-          },
-        ],
-      },
+      { ...base, id: "caller", ...withCaller },
     ],
   };
 }
@@ -480,17 +506,14 @@ export function localProvider(root: string): TraceProvider {
     return paths.filter((file) => visible.has(file)).map(toRelative);
   }
 
-  async function findTrackedIgnored(
+  function trackedIgnoredFiles(
     git: TrustedExecutable,
     dir: string,
     checkout: string,
-    scope: TraceScope,
-    needle: string,
-    files: Set<string>,
     signal: AbortSignal,
   ) {
     // Read only index metadata for the scope. Contents come from the worktree.
-    const list = await invoke(
+    return invoke(
       git,
       [
         "--no-pager",
@@ -511,16 +534,24 @@ export function localProvider(root: string): TraceProvider {
       signal,
       "list",
     );
-    const paths = list.stdout
+  }
+
+  async function findTrackedIgnored(
+    list: Promise<{ stdout: string; truncated: boolean }>,
+    dir: string,
+    checkout: string,
+    include: (filename: string) => boolean,
+    needle: string,
+    files: Set<string>,
+    signal: AbortSignal,
+  ) {
+    const { stdout, truncated } = await list;
+    const paths = stdout
       .split("\0")
       .slice(0, -1)
-      .filter(
-        (name) =>
-          scope.kind !== "manifests" ||
-          matchesGlob(basename(name), MANIFEST_GLOB),
-      );
+      .filter((name) => include(basename(name)));
     let reason =
-      list.truncated || paths.length > MAX_RECORDS
+      truncated || paths.length > MAX_RECORDS
         ? "Tracked ignored file limit reached; narrow the directory."
         : undefined;
     for (const name of paths.slice(0, MAX_RECORDS)) {
@@ -560,22 +591,14 @@ export function localProvider(root: string): TraceProvider {
     return reason;
   }
 
-  const versions = new Map<string, string>();
-  const perTrace = new WeakMap<
-    AbortSignal,
-    Map<string, Promise<string | undefined>>
-  >();
-  async function version(name: string, signal: AbortSignal) {
-    if (versions.has(name)) return versions.get(name);
-    let probes = perTrace.get(signal);
-    if (!probes) {
-      probes = new Map();
-      perTrace.set(signal, probes);
-    }
-    let probe = probes.get(name);
+  let nativeVersion: string | undefined;
+  const versionProbes = new WeakMap<AbortSignal, Promise<string | undefined>>();
+  async function opengrepVersion(signal: AbortSignal) {
+    if (nativeVersion) return nativeVersion;
+    let probe = versionProbes.get(signal);
     if (!probe) {
       probe = (async () => {
-        const executable = await tool(name);
+        const executable = await tool("opengrep");
         if (!executable) return undefined;
         const { stdout } = await invoke(
           executable,
@@ -583,29 +606,30 @@ export function localProvider(root: string): TraceProvider {
           tmpdir(),
           signal,
         );
-        const value = JSON.stringify([executable.executable, stdout.trim()]);
-        versions.set(name, value);
-        return value;
+        nativeVersion = JSON.stringify([executable.executable, stdout.trim()]);
+        return nativeVersion;
       })();
-      probes.set(name, probe);
+      versionProbes.set(signal, probe);
     }
     return probe;
   }
 
   async function snapshotFingerprint(
-    command: string,
+    analyzer: "manifest" | "opengrep",
     contents: Uint8Array<ArrayBuffer>,
     signal: AbortSignal,
   ) {
-    // Version discovery is optional. A missing or old tool can still provide evidence.
-    const v = await version(command, signal).catch(() => undefined);
+    const versionKey =
+      analyzer === "manifest"
+        ? "manifest-declarations-v1"
+        : await opengrepVersion(signal).catch(() => undefined);
     signal.throwIfAborted();
-    if (!v) return undefined;
+    if (!versionKey) return undefined;
     const digest = await webcrypto.subtle.digest("SHA-256", contents);
     // The scope key already contains the package, symbol, version and path.
     return JSON.stringify([
-      "intrafile-rules-v2",
-      v,
+      "intrafile-rules-v3",
+      versionKey,
       Buffer.from(digest).toString("hex"),
     ]);
   }
@@ -614,15 +638,9 @@ export function localProvider(root: string): TraceProvider {
     async fingerprint(scope, signal) {
       if (scope.kind !== "file") return undefined;
       const { path } = await target(scope);
-      const native =
-        scope.symbol &&
-        languages[extname(path)] &&
-        identifier.test(leaf(scope));
-      return snapshotFingerprint(
-        native ? "opengrep" : "rg",
-        await snapshot(path),
-        signal,
-      );
+      const analyzer = fileAnalyzer(scope, path);
+      if (!analyzer) return undefined;
+      return snapshotFingerprint(analyzer, await snapshot(path), signal);
     },
     async run(scope, signal): Promise<ScopeResult> {
       try {
@@ -686,68 +704,121 @@ export function localProvider(root: string): TraceProvider {
             });
             ignoredRoot = Boolean(ignored?.stdout);
           }
-          const { stdout, truncated } = ignoredRoot
-            ? { stdout: "", truncated: false }
-            : await grep(
-                [
-                  "--files-with-matches",
-                  "--null",
-                  "--hidden",
-                  ...(git ? ["--no-ignore-dot"] : []),
-                  ...(scope.kind === "manifests"
-                    ? [
-                        "--type-add",
-                        `depmeta:${MANIFEST_GLOB}`,
-                        "--type",
-                        "depmeta",
-                      ]
-                    : []),
-                  "--glob",
-                  "!.git",
-                  "-e",
-                  needle,
-                  "--",
-                  path,
-                ],
-                tmpdir(),
-                signal,
+          // A symbol search only scans supported source. Dependency discovery
+          // reads known manifests and can point to imports in source files.
+          const manifests = scope.kind === "manifests";
+          const symbolSearch = !manifests && !!scope.symbol;
+          const supported = !symbolSearch || identifier.test(needle);
+          const structuralGlob = symbolSearch
+            ? sourceGlob
+            : dependencyManifestGlob;
+          const isStructural = symbolSearch
+            ? isTraceSourceFile
+            : isDependencyManifest;
+          const leadGlobs = manifests
+            ? [MANIFEST_GLOB]
+            : [MANIFEST_GLOB, sourceGlob];
+          let ignoredFiles: ReturnType<typeof trackedIgnoredFiles> | undefined;
+          async function matchingFiles(structural: boolean) {
+            if (!structural && symbolSearch)
+              return { files: new Set<string>() };
+            const globs = structural ? [structuralGlob] : leadGlobs;
+            const types = globs.flatMap((glob) => [
+              "--type-add",
+              `included:${glob}`,
+            ]);
+            types.push("--type", "included");
+            if (!structural)
+              types.push(
+                "--type-add",
+                `parsed:${structuralGlob}`,
+                "--type-not",
+                "parsed",
               );
-          const files = new Set(stdout.split("\0").slice(0, -1));
-          let reason = "Candidate file limit reached; narrow the directory.";
-          if (!truncated && files.size <= MAX_RECORDS) {
-            const gap =
-              git &&
-              (await findTrackedIgnored(
+            const { stdout, truncated } = ignoredRoot
+              ? { stdout: "", truncated: false }
+              : await grep(
+                  [
+                    "--files-with-matches",
+                    "--null",
+                    "--hidden",
+                    ...(git ? ["--no-ignore-dot"] : []),
+                    ...types,
+                    "--glob",
+                    "!.git",
+                    "-e",
+                    needle,
+                    "--",
+                    path,
+                  ],
+                  tmpdir(),
+                  signal,
+                );
+            const matched = new Set(stdout.split("\0").slice(0, -1));
+            const limit = structural
+              ? "Candidate file limit reached; narrow the directory."
+              : "Text match sample truncated.";
+            let reason =
+              truncated || matched.size > MAX_RECORDS ? limit : gitGap;
+            if (git && !reason) {
+              ignoredFiles ??= trackedIgnoredFiles(
                 git,
                 path,
                 canonicalRoot,
-                scope,
-                needle,
-                files,
                 signal,
-              ).catch((error) => {
+              );
+              reason = await findTrackedIgnored(
+                ignoredFiles,
+                path,
+                canonicalRoot,
+                (name) =>
+                  isStructural(name) === structural &&
+                  (structural ||
+                    matchesGlob(name, MANIFEST_GLOB) ||
+                    (!manifests && isTraceSourceFile(name))),
+                needle,
+                matched,
+                signal,
+              ).catch((error: Error) => {
                 signal.throwIfAborted();
                 return (
                   "Tracked ignored file lookup failed: " +
-                  (error instanceof Error
-                    ? error.message
-                    : String(error)
-                  ).slice(0, 500)
+                  error.message.slice(0, 500)
                 );
-              }));
-            reason = gap ?? gitGap ?? "";
+              });
+            }
+            return {
+              files: new Set([...matched].slice(0, MAX_RECORDS)),
+              reason,
+            };
           }
-          const next = [...files]
-            .slice(0, MAX_RECORDS)
-            .map((file): TraceScope => ({
+          const [scan, leads] = await Promise.all([
+            matchingFiles(true),
+            matchingFiles(false),
+          ]);
+          const files = scan.files;
+          let reason = [
+            ...(!supported
+              ? ["OpenGrep call matching requires a supported identifier."]
+              : []),
+            scan.reason,
+            leads.reason,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          const checkoutPath = (file: string) =>
+            relative(canonicalRoot, file).split(sep).join("/");
+          const next = (supported ? [...files] : []).map(
+            (file): TraceScope => ({
               ...scope,
               kind: "file",
               ...(scope.kind === "manifests"
                 ? { symbol: undefined, source_symbol: undefined }
                 : {}),
-              path: relative(canonicalRoot, file).split(sep).join("/"),
-            }));
-          if (files.size && next.length < MAX_RECORDS && !gitGap) {
+              path: checkoutPath(file),
+            }),
+          );
+          if (next.length && next.length < MAX_RECORDS && !gitGap) {
             const catalogs = await adjacentCatalogs(
               files,
               canonicalRoot,
@@ -773,6 +844,10 @@ export function localProvider(root: string): TraceProvider {
           const complete = !reason;
           return {
             evidence: [],
+            textMatches: [...leads.files, ...files].map((file) => ({
+              source: checkoutPath(file),
+              text: needle,
+            })),
             next,
             complete,
             ...(complete
@@ -782,76 +857,50 @@ export function localProvider(root: string): TraceProvider {
                 }),
           };
         }
+        const analyzer = fileAnalyzer(scope, path);
+        if (!analyzer)
+          return empty(
+            "Call and flow matching requires a supported source file and sink symbol.",
+          );
         const contents = await snapshot(path);
+        const file = relative(canonicalRoot, path).split(sep).join("/");
+        if (analyzer === "manifest") {
+          const evidence = dependencyEvidence(
+            contents.toString("utf8"),
+            file,
+            scope.package,
+          );
+          const complete = evidence.length <= MAX_RECORDS;
+          return {
+            evidence: evidence.slice(0, MAX_RECORDS),
+            next: [],
+            complete,
+            ...(complete
+              ? {
+                  fingerprint: await snapshotFingerprint(
+                    analyzer,
+                    contents,
+                    signal,
+                  ),
+                }
+              : { reason: "Dependency declaration limit reached." }),
+          };
+        }
+        const opengrep = await tool("opengrep");
+        if (!opengrep)
+          return empty("OpenGrep is required for call and flow matching.");
         const directory = await mkdtemp(
           join(tmpdir(), "codex-security-trace-"),
         );
         try {
           const extension = extname(path);
           const language = languages[extension];
-          const filename = `input${extension}`;
+          const filename =
+            extension === ".mts" || extension === ".cts"
+              ? "input.ts"
+              : `input${extension}`;
           await writeFile(join(directory, filename), contents);
-          const opengrep =
-            scope.symbol && language && identifier.test(needle)
-              ? await tool("opengrep")
-              : null;
-          const file = relative(canonicalRoot, path).split(sep).join("/");
           const fileEntity = { kind: "file", name: file };
-          // Matching a spelling in this file does not resolve its package binding.
-          const to = { kind: "spelling", name: needle };
-          if (!opengrep && scope.source_symbol)
-            return empty(
-              "Same-file flow requires OpenGrep and a supported source file and sink symbol.",
-            );
-          if (!opengrep) {
-            const { stdout, truncated } = await grep(
-              [
-                "--only-matching",
-                "--line-number",
-                "--no-heading",
-                "--color",
-                "never",
-                "-e",
-                needle,
-                "--",
-                filename,
-              ],
-              directory,
-              signal,
-            );
-            const lines = new Set(
-              stdout
-                .split("\n")
-                .slice(0, -1)
-                .map((record) => Number(record.split(":", 1)[0]))
-                .filter((n) => Number.isSafeInteger(n) && n > 0),
-            );
-            const evidence = [...lines].slice(0, MAX_RECORDS).map((line) => ({
-              source: file,
-              line,
-              step: { from: fileEntity, relation: "references", to },
-            }));
-            const reason = scope.symbol
-              ? "Literal references only; native call matching is unavailable for this symbol or file."
-              : truncated || lines.size > MAX_RECORDS
-                ? "Reference limit reached."
-                : undefined;
-            return {
-              evidence,
-              next: [],
-              complete: !reason,
-              ...(reason
-                ? { reason }
-                : {
-                    fingerprint: await snapshotFingerprint(
-                      "rg",
-                      contents,
-                      signal,
-                    ),
-                  }),
-            };
-          }
-
           await writeFile(
             join(directory, "rules.json"),
             JSON.stringify(rules(scope, language)),
@@ -900,18 +949,24 @@ export function localProvider(root: string): TraceProvider {
           );
           const evidence: TraceEvidence[] = [];
           const callerNames = new Set<string>();
-          for (const { start } of matches.slice(0, MAX_RECORDS)) {
+          for (const { start, extra } of matches.slice(0, MAX_RECORDS)) {
             const caller = callers.get(start.offset);
-            let from: TraceEntity = fileEntity;
-            if (scope.source_symbol) {
-              from = {
-                kind: "spelling",
-                name: scope.source_symbol,
-                scope: file,
-              };
-            } else if (caller) {
-              from = { kind: "symbol", name: caller, scope: file };
-              if (caller !== needle) callerNames.add(caller);
+            const from = caller
+              ? { kind: "symbol", name: caller, scope: file }
+              : fileEntity;
+            if (!scope.source_symbol && caller && caller !== needle)
+              callerNames.add(caller);
+            let calleeText = extra.metavars?.["$ALIAS"]?.abstract_content;
+            if (calleeText === undefined && !extra.metavars?.["$RECEIVER"]) {
+              // OpenGrep can match a bare Python import alias by its original
+              // name. Read the identifier at the native match's byte offset.
+              const paren = contents.indexOf("(", start.offset);
+              if (paren !== -1) {
+                const name = contents
+                  .toString("utf8", start.offset, paren)
+                  .trim();
+                if (identifier.test(name)) calleeText = name;
+              }
             }
             evidence.push({
               source: file,
@@ -921,7 +976,8 @@ export function localProvider(root: string): TraceProvider {
                 relation: scope.source_symbol
                   ? "candidate_flow"
                   : "candidate_call",
-                to,
+                calleeText: calleeText ?? needle,
+                ...(scope.source_symbol && { sourceText: scope.source_symbol }),
               },
             });
           }

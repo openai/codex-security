@@ -14,7 +14,7 @@ import { createDependencyTracer } from "./trace.js";
 export const dependencyGraphTools = {
   trace_codex_security_code: {
     description:
-      "Search this checkout for uses of a dependency and add cited evidence to the graph. Local call and flow matches are candidates.",
+      "Search supported source files and dependency manifests in this checkout. Text matches locate files to inspect. The graph retains cited dependency declarations, candidate calls, and same-file flows.",
     schema: traceInputSchema,
   },
   resolve_codex_security_services: {
