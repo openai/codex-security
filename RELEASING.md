@@ -321,13 +321,21 @@ for that exact commit:
    distribution commit SHA. It is never marked Latest. A final status job
    reports publication, installation smoke, Action, and container results.
 
-Before the first signed release, configure the `codesigning` GitHub
-environment for protected `npm-v*` tags and authorize its GitHub OIDC
-identity to use the Developer ID Application key for the desktop runtime's
-Apple Developer team. Supply the signing action's `AKV_CODESIGN_*` inputs in
-that environment. The signing job needs read access to the pinned signing
-tools and certificate and permission to sign with the key. Recovery of an
-already published version uses the original npm archive.
+Before the first signed release, restrict the `codesigning` GitHub environment
+to `npm-v*` tags and configure its secrets for both steps:
+
+- **Download tools.** The `AKV_CODESIGN_*` inputs in `node-release.yml` select
+  a blob-reader identity and pin the downloads of `rcodesign` and a PKCS#11
+  provider that supports Signer Service. The identity needs read access to
+  those blobs only.
+- **Sign addons.** Authorize the tagged release workflow's GitHub OIDC
+  identity in Signer Service to read the public key and sign with the
+  Developer ID Application key for the desktop runtime's Apple Developer team.
+  Set `SIGNER_SERVICE_ENDPOINT`, `SIGNER_SERVICE_PURPOSE`, and
+  `SIGNER_SERVICE_KEY_ID` for that key. Set `SIGNING_CERTIFICATE_PEM` to the
+  matching public leaf certificate in PEM format.
+
+Recovery of an already published version uses the original npm archive.
 
 The Action tag points to a generated distribution commit whose parent is the
 CLI release commit. That additional commit contains the runnable Action bundle

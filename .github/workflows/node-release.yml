@@ -210,8 +210,10 @@ jobs:
           echo "Protected npm release tag matches the verified commit."
 
       - name: Set up Developer ID signing
+        id: signing-tools
         uses: openai/codex/.github/actions/setup-akv-pkcs11-codesigning@9ff072db8ae43d413c8d205ebf22b54b83c72cef
         with:
+          setup-mode: tools-only
           rcodesign-blob-uri: ${{ secrets.AKV_CODESIGN_RCODESIGN_BLOB_URI }}
           rcodesign-sha256: ${{ secrets.AKV_CODESIGN_RCODESIGN_SHA256 }}
           akv-pkcs11-library-blob-uri: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_BLOB_URI }}
@@ -219,21 +221,31 @@ jobs:
           azure-client-id: ${{ secrets.AKV_CODESIGN_AZURE_CLIENT_ID }}
           azure-tenant-id: ${{ secrets.AKV_CODESIGN_TENANT }}
           azure-subscription-id: ${{ secrets.AKV_CODESIGN_SUBSCRIPTION }}
-          key-vault-name: ${{ secrets.AKV_CODESIGN_KEY_VAULT_NAME }}
-          key-name: ${{ secrets.AKV_CODESIGN_KEY_NAME }}
-          key-version: ${{ secrets.AKV_CODESIGN_KEY_VERSION }}
-          certificate-sha256: ${{ secrets.AKV_CODESIGN_CERTIFICATE_SHA256 }}
+          # Required action inputs, unused in tools-only mode.
+          key-vault-name: ""
+          key-name: ""
       - name: Sign Darwin addons
         shell: bash
+        env:
+          RCODESIGN: ${{ steps.signing-tools.outputs.rcodesign }}
+          PKCS11_LIBRARY: ${{ steps.signing-tools.outputs.pkcs11-library }}
+          AKV_PKCS11_BACKEND: signer-service
+          SIGNER_SERVICE_ENDPOINT: ${{ secrets.SIGNER_SERVICE_ENDPOINT }}
+          SIGNER_SERVICE_PURPOSE: ${{ secrets.SIGNER_SERVICE_PURPOSE }}
+          SIGNER_SERVICE_KEY_ID: ${{ secrets.SIGNER_SERVICE_KEY_ID }}
+          SIGNER_SERVICE_KEY_LABEL: Developer ID Application
+          SIGNER_SERVICE_CERTIFICATE_FILE: ${{ runner.temp }}/developer-id.pem
+          SIGNING_CERTIFICATE_PEM: ${{ secrets.SIGNING_CERTIFICATE_PEM }}
         run: |
           set -euo pipefail
+          printf '%s\n' "$SIGNING_CERTIFICATE_PEM" > "$SIGNER_SERVICE_CERTIFICATE_FILE"
           for target in darwin-arm64 darwin-x64; do
             mkdir -p "signed/$target"
             cp "plugins/codex-security/native/prebuilt/$target/unix.node" "signed/$target/unix.node"
-            rcodesign sign --config-file /dev/null --shallow --for-notarization \
-              --pkcs11-library "$OAI_AKV_PKCS11_LIBRARY" \
-              --pkcs11-certificate-file "$OAI_AKV_SIGNING_CERTIFICATE_PEM" \
-              --pkcs11-key-label "$OAI_AKV_KEY_LABEL" \
+            "$RCODESIGN" sign --config-file /dev/null --shallow --for-notarization \
+              --pkcs11-library "$PKCS11_LIBRARY" \
+              --pkcs11-certificate-file "$SIGNER_SERVICE_CERTIFICATE_FILE" \
+              --pkcs11-key-label "$SIGNER_SERVICE_KEY_LABEL" \
               --code-signature-flags runtime --binary-identifier com.openai.codex-security.unix \
               "signed/$target/unix.node"
           done

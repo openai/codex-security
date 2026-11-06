@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { publishGitHubRelease } from "../scripts/publish-github-release.mjs";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
-import { bashCommand, runCommand } from "./support/shell.js";
+import { bashCommand, runCommand, writeSource } from "./support/shell.js";
 
 import {
   type ReleaseMetadata,
@@ -2612,6 +2612,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     const setup = signer.findIndex(
       (step) => step.name === "Set up Developer ID signing",
     );
+    expect(signer[setup]?.with?.["setup-mode"]).toBe("tools-only");
     expect(signer[setup - 1]).toMatchObject({
       name: "Revalidate tag before Developer ID signing",
       run: check,
@@ -2625,6 +2626,69 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       if: "needs.verify.outputs.mode == 'publish'",
       run: check,
     });
+  });
+
+  test("signs both Darwin addons with the configured provider and certificate", async () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const step = jobs["sign-darwin"]!.steps!.find(
+      (step) => step.name === "Sign Darwin addons",
+    )!;
+    expect(step.env).toMatchObject({
+      RCODESIGN: "${{ steps.signing-tools.outputs.rcodesign }}",
+      PKCS11_LIBRARY: "${{ steps.signing-tools.outputs.pkcs11-library }}",
+      AKV_PKCS11_BACKEND: "signer-service",
+      SIGNER_SERVICE_ENDPOINT: "${{ secrets.SIGNER_SERVICE_ENDPOINT }}",
+      SIGNER_SERVICE_PURPOSE: "${{ secrets.SIGNER_SERVICE_PURPOSE }}",
+      SIGNER_SERVICE_KEY_ID: "${{ secrets.SIGNER_SERVICE_KEY_ID }}",
+      SIGNER_SERVICE_KEY_LABEL: expect.stringMatching(/\S/),
+      SIGNING_CERTIFICATE_PEM: "${{ secrets.SIGNING_CERTIFICATE_PEM }}",
+    });
+
+    const cwd = directories.create("release signer ");
+    const targets = ["darwin-arm64", "darwin-x64"];
+    for (const target of targets) {
+      writeSource(
+        cwd,
+        `plugins/codex-security/native/prebuilt/${target}/unix.node`,
+        target,
+      );
+    }
+    const env = {
+      ...step.env,
+      RCODESIGN: "./fixture signer",
+      PKCS11_LIBRARY: "fixture provider.so",
+      SIGNER_SERVICE_CERTIFICATE_FILE: "fixture certificate.pem",
+      SIGNING_CERTIFICATE_PEM:
+        "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
+    };
+    writeFileSync(
+      join(cwd, env.RCODESIGN),
+      '#!/usr/bin/env bash\nprintf "<%s>" "$@" >> "${!#}"\n',
+      { mode: 0o755 },
+    );
+    const result = await runShell(step.run!, env, { cwd });
+    expect(result.status).toBe(0);
+    const pem = readFileSync(
+      join(cwd, env.SIGNER_SERVICE_CERTIFICATE_FILE),
+      "utf8",
+    );
+    expect(pem.trimEnd()).toBe(env.SIGNING_CERTIFICATE_PEM);
+    for (const target of targets) {
+      const signed = readFileSync(
+        join(cwd, "signed", target, "unix.node"),
+        "utf8",
+      );
+      expect(signed).toStartWith(`${target}<sign>`);
+      expect(signed).toContain(`<--pkcs11-library><${env.PKCS11_LIBRARY}>`);
+      expect(signed).toContain(
+        `<--pkcs11-certificate-file><${env.SIGNER_SERVICE_CERTIFICATE_FILE}>`,
+      );
+      expect(signed).toContain(
+        `<--pkcs11-key-label><${step.env!["SIGNER_SERVICE_KEY_LABEL"]}>`,
+      );
+    }
   });
 
   test("rejects manually publishing a tag older than npm latest", async () => {
