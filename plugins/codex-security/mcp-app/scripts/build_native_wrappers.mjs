@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rename, rm, writeFile } from "node:fs/promises";
+import fs from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { build } from "esbuild";
@@ -9,7 +9,7 @@ const windowsRenameDelays = [10, 25, 50, 100, 200, 400];
 async function replaceWrapper(temporary, destination) {
   for (let attempt = 0; ; attempt++) {
     try {
-      await rename(temporary, destination);
+      await fs.rename(temporary, destination);
       return;
     } catch (error) {
       // A concurrent reader can temporarily deny delete sharing on Windows.
@@ -25,8 +25,9 @@ async function replaceWrapper(temporary, destination) {
   }
 }
 
-export async function buildNativeWrappers() {
-  const root = resolve(import.meta.dirname, "../../native");
+export async function buildNativeWrappers(
+  root = resolve(import.meta.dirname, "../../native"),
+) {
   const result = await build({
     absWorkingDir: root,
     entryPoints: ["*.mts"],
@@ -42,10 +43,10 @@ export async function buildNativeWrappers() {
     result.outputFiles.map(async (file) => {
       const temporary = `${file.path}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temporary, file.contents);
+        await fs.writeFile(temporary, file.contents);
         await replaceWrapper(temporary, file.path);
       } finally {
-        await rm(temporary, { force: true });
+        await fs.rm(temporary, { force: true });
       }
     }),
   );

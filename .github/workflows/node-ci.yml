@@ -359,6 +359,9 @@ jobs:
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Build and test the standalone host runtime
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
+      - name: Test concurrent native wrapper publication on Windows
+        if: runner.os == 'Windows'
+        run: node --experimental-strip-types --test plugins/codex-security/mcp-app/tests/test_build_native_wrappers.ts
 
   plugin-source:
     if: needs.classify-changes.outputs.plugin-tests-required == 'true'
