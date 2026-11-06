@@ -148,7 +148,12 @@ const base = dependencies({
       );
       return 0;
     }
-    if (batchWorker === 2 && scenario !== "repeated-main") await nextControl();
+    if (
+      batchWorker === 2 &&
+      scenario !== "repeated-main" &&
+      scenario !== "pty-oversized"
+    )
+      await nextControl();
 
     const id = `occ_${batchWorker - 1}`;
     if (batchWorker === 2 && scenario === "progress-success") {
@@ -230,10 +235,13 @@ ${publishWorkerPid}
 setInterval(() => {}, 1_000);
 `;
         return runCodexSkillCommand(
-          ["-e", source],
+          ["-e", source, "--"],
           { ...output!, auth: undefined },
           { command: process.execPath },
-          { VERIFY_FIX_WORKER_STATE: state },
+          {
+            VERIFY_FIX_WORKER_STATE: state,
+            CODEX_SECURITY_STATE_DIR: `${state}.state`,
+          },
         );
       }
     }

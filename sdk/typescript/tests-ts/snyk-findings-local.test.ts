@@ -107,6 +107,25 @@ test.each(["plugin", "JSON", "SARIF"] as const)(
   },
 );
 
+test("Snyk checks clean projects alongside vulnerable projects against the local checkout", async () => {
+  const remote = "https://github.com/example/project";
+  await using fixture = await localReportFixture(
+    "snyk.json",
+    { provider: "snyk", sourceKey: "snyk-sca" },
+    { remote },
+  );
+  const project = { ...snykJson(), path: remote };
+  const clean = { ...project, ok: true, vulnerabilities: [] };
+  await fixture.writeJson([
+    project,
+    { ...clean, path: "https://github.com/example/other" },
+  ]);
+  await expect(fixture.prepare()).rejects.toThrow(/does not match.*remote/iu);
+  expect(await fixture.read()).toEqual([]);
+  await fixture.writeJson([project, clean]);
+  expect((await (await fixture.prepare()).import()).counts.created).toBe(1);
+});
+
 test.each([2222, 2223])(
   "Snyk plugin repository matching preserves the SSH port (checkout port %i)",
   async (port) => {

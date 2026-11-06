@@ -858,6 +858,59 @@ for (const mode of ["revisions", "local-patch"]) {
   });
 }
 
+test("local diff retains the historical text when a rename destination cannot be reviewed", () => {
+  const f = fixture();
+  f.write("moved.py", "still selectable\n");
+  f.write("removed.py", "destination missing\n");
+  f.write("excluded.py", "destination excluded\n");
+  f.write("linked.py", "destination replaced by link\n");
+  f.write("binary", Buffer.from("\0historical binary"));
+  const base = f.commit();
+  git(f.repo, "config", "diff.renames", "true");
+  mkdirSync(join(f.repo, ".svn"));
+  for (const [source, destination] of [
+    ["moved.py", "live.py"],
+    ["removed.py", "missing.py"],
+    ["excluded.py", ".svn/file.py"],
+    ["linked.py", "link"],
+    ["binary", "missing.bin"],
+  ] as const) {
+    git(f.repo, "mv", source, destination);
+  }
+  git(f.repo, "update-index", "--skip-worktree", "missing.py", "missing.bin");
+  rmSync(join(f.repo, "missing.py"));
+  rmSync(join(f.repo, "missing.bin"));
+  rmSync(join(f.repo, "link"));
+  const outside = join(f.root, "outside");
+  mkdirSync(outside);
+  symlinkSync(outside, join(f.repo, "link"), "junction");
+
+  const expected = ["excluded.py", "linked.py", "live.py", "removed.py"];
+  const ranked = f.rows("make-diff-rank-input", [
+    "--base",
+    base,
+    "--mode",
+    "local-patch",
+  ]);
+  expect(ranked.map(({ path }) => path)).toEqual(expected);
+  expect(ranked.map(({ preview }) => preview)).toEqual([
+    "",
+    "",
+    "still selectable",
+    "",
+  ]);
+  expect(
+    f.success("generate-in-scope-files", [
+      "--scope",
+      ".",
+      "--diff-base",
+      base,
+      "--diff-mode",
+      "local-patch",
+    ]),
+  ).toBe(expected.join("\n") + "\n");
+});
+
 for (const [mode, undoStagedChange] of [
   ["revisions", false],
   ["local-patch", false],
@@ -1173,6 +1226,18 @@ require("node:module").syncBuiltinESMExports();
   },
 );
 
+test("diff ranking retains Git diagnostics and escapes terminal controls", () => {
+  const f = fixture();
+  f.write("source");
+  f.commit();
+  const revision = "missing-café-\u009b\u2028\u2029";
+  const result = f.run("make-diff-rank-input", ["--base", revision]);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Git diff failed with exit code");
+  expect(result.stderr).toContain("missing-café-\\u009b\\u2028\\u2029");
+  expect(result.stderr).not.toContain(revision);
+});
+
 test("failed inventory generation preserves the existing file", () => {
   const f = fixture();
   f.write("source");
@@ -1181,6 +1246,14 @@ test("failed inventory generation preserves the existing file", () => {
     ["--scope", "missing"],
     ["--scope", ".."],
     ["--scope", ".", "--diff-base", "missing-revision"],
+    [
+      "--scope",
+      ".",
+      "--diff-base",
+      "missing-revision",
+      "--diff-mode",
+      "local-patch",
+    ],
   ]) {
     expect(f.run("generate-in-scope-files", args).status).toBe(2);
     expect(readFileSync(f.out, "utf8")).toBe("previous\n");

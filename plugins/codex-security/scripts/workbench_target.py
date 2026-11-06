@@ -377,7 +377,7 @@ def git_command(
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
-def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[str, str, str | None]]:
     """Return changed regular files from the selected side of each change."""
     result = git_command(
         repo,
@@ -396,25 +396,29 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     if fields and not fields[-1]:
         fields.pop()
 
-    changed: list[tuple[Path, str]] = []
+    changed: list[tuple[str, str, str | None]] = []
     index = 0
     while index < len(fields):
         metadata = fields[index].split()
         status = chr(metadata[-1][0])
         index += 1
+        rename_source = os.fsdecode(fields[index]) if status == "R" else None
         if status in {"C", "R"}:
             index += 1
-        path = repo / os.fsdecode(fields[index])
+        path = os.fsdecode(fields[index])
         index += 1
         selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
         if selected_mode.startswith(b"100"):
-            changed.append((path, status))
+            changed.append((path, status, rename_source))
     return changed
 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        return run_git_changed_paths(repo, [f"{base}..{head}"])
+        return [
+            (repo / name, status)
+            for name, status, _ in run_git_changed_paths(repo, [f"{base}..{head}"])
+        ]
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
@@ -428,26 +432,37 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             offline=True,
         )
         untracked.check_returncode()
-        combined = dict(staged)
-        combined.update(unstaged)
-        combined.update(
-            (repo / os.fsdecode(relative), "A")
-            for relative in untracked.stdout.split(b"\0")
-            if relative and not relative.endswith(b"/")
-        )
-        selected = []
+        combined = {name: (status, source) for name, status, source in [*staged, *unstaged]}
+        selected: dict[str, str] = {}
         linked_prefixes: dict[str, bool] = {}
-        for path, status in combined.items():
-            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts):
-                continue
+
+        def local_status(name: str, status: str) -> str | None:
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(PurePosixPath(name).parts):
+                return None
+            if status == "D":
+                return status
+            path = repo / name
             try:
-                if status == "M" and _directory_link_boundary(repo, path, linked_prefixes) != path:
-                    selected.append((path, "D"))
-                elif status == "D" or (not path.is_symlink() and path.is_file()):
-                    selected.append((path, status))
+                if (
+                    status in {"M", "R"}
+                    and _directory_link_boundary(repo, path, linked_prefixes) != path
+                ):
+                    return "D" if status == "M" else None
+                return status if stat.S_ISREG(path.lstat().st_mode) else None
             except (FileNotFoundError, NotADirectoryError):
-                continue
-        return sorted(selected)
+                return None
+
+        for name, (status, source) in combined.items():
+            if chosen := local_status(name, status):
+                selected[name] = chosen
+            elif source is not None and local_status(source, "D"):
+                selected.setdefault(source, "D")
+        for relative in untracked.stdout.split(b"\0"):
+            if relative and not relative.endswith(b"/"):
+                name = os.fsdecode(relative)
+                if local_status(name, "A"):
+                    selected[name] = "A"
+        return sorted((repo / name, status) for name, status in selected.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
