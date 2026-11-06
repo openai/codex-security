@@ -11,6 +11,7 @@ import {
   modelProviderConfigOverride,
   resolveCodexProfile,
   resolveCommandAuthConfig,
+  scanPricingContext,
   scanModelConfiguration,
   scanModelProvider,
 } from "../src/config.js";
@@ -636,6 +637,74 @@ describe("Codex configuration", () => {
       expect(scanModelProvider(config)).toBe(expected);
     }
   });
+
+  test.each(["amazon-bedrock", "amazon-bedrock-runtime"])(
+    "uses the selected %s provider's AWS region before the environment",
+    (provider) => {
+      const config = {
+        profile: "gov",
+        model_provider: "openai",
+        model_providers: { [provider]: { aws: { region: "us-east-2" } } },
+        profiles: {
+          gov: {
+            model_provider: provider,
+            model_providers: {
+              [provider]: { aws: { region: " us-gov-east-1 " } },
+            },
+          },
+        },
+      };
+      expect(scanPricingContext(config, { AWS_REGION: "us-west-1" })).toEqual({
+        provider: "amazon-bedrock",
+        region: "us-gov-east-1",
+      });
+    },
+  );
+
+  test("resolves Bedrock environment regions and preserves an unknown region", () => {
+    const config = { model_provider: "amazon-bedrock" };
+    const environment = {
+      AWS_REGION: "us-gov-west-1",
+      AWS_DEFAULT_REGION: "us-east-1",
+    };
+    expect(scanPricingContext(config, environment)).toEqual({
+      provider: "amazon-bedrock",
+      region: "us-gov-west-1",
+    });
+    expect(
+      scanPricingContext(config, { ...environment, AWS_REGION: " " }),
+    ).toEqual({ provider: "amazon-bedrock", region: "us-east-1" });
+    expect(scanPricingContext(config, { AWS_PROFILE: "synthetic" })).toEqual({
+      provider: "amazon-bedrock",
+      region: null,
+    });
+    expect(
+      scanPricingContext({ model_provider: "openai" }, environment),
+    ).toBeUndefined();
+  });
+
+  test.each([
+    ["https://bedrock-mantle.us-gov-east-1.api.aws/openai/v1", "us-gov-east-1"],
+    [
+      "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+      "us-gov-west-1",
+    ],
+    ["https://gateway.example.test", null],
+  ])(
+    "uses the billing region from a Bedrock endpoint override %s",
+    (baseUrl, region) => {
+      const config = {
+        model_provider: "amazon-bedrock",
+        model_providers: {
+          "amazon-bedrock": { base_url: baseUrl, aws: { region: "us-east-1" } },
+        },
+      };
+      expect(scanPricingContext(config, { AWS_REGION: "us-west-2" })).toEqual({
+        provider: "amazon-bedrock",
+        region,
+      });
+    },
+  );
 
   test("rejects invalid model settings from the selected Codex profile", async () => {
     for (const [profile, message] of [
