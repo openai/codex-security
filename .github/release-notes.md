@@ -126,6 +126,18 @@
 - use published Vertex AI prices for managed OpenAI models ([#2363](https://github.com/openai/codex-security/pull/2363))
 - clarify archived scan output names ([#2365](https://github.com/openai/codex-security/pull/2365))
 - bump napi-derive from 3.6.13 to 3.7.0 in /plugins/codex-security/native ([#2394](https://github.com/openai/codex-security/pull/2394))
+- preserve repaired Deep Scan coverage on Windows ([#2366](https://github.com/openai/codex-security/pull/2366))
+- normalize missing artifact errors on Windows ([#2368](https://github.com/openai/codex-security/pull/2368))
+- retry Windows plugin bundle renames ([#2370](https://github.com/openai/codex-security/pull/2370))
+- retry Windows artifact replacement while readers close ([#2373](https://github.com/openai/codex-security/pull/2373))
+- allow bundled helpers to start on Windows UNC shares ([#2376](https://github.com/openai/codex-security/pull/2376))
+- recognize OWNER RIGHTS on trusted Windows credential ancestors ([#2379](https://github.com/openai/codex-security/pull/2379))
+- retry Windows native wrapper publication ([#2381](https://github.com/openai/codex-security/pull/2381))
+- preserve large SQLite row IDs during migration ([#2382](https://github.com/openai/codex-security/pull/2382))
+- preserve unrelated credential deny rules on local volumes ([#2388](https://github.com/openai/codex-security/pull/2388))
+- create private Windows scan output directories ([#2390](https://github.com/openai/codex-security/pull/2390))
+- preserve Windows directory symlinks in snapshot copies ([#2391](https://github.com/openai/codex-security/pull/2391))
+- quote Codex overrides across Windows shells ([#2400](https://github.com/openai/codex-security/pull/2400))
 
 </details>
 
