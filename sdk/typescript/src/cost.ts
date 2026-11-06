@@ -3242,11 +3242,26 @@ export class ScanCostTracker {
   }
 }
 
-// The host places these receipts outside the model-writable artifact directory.
-export async function visitWorkerReceipts(
-  store: { directory: string; scanId: string },
-  visit: (attemptId: string, receipt: Record<string, unknown>) => void,
-): Promise<unknown[]> {
+/** @internal */
+export async function readWorkerReceipts(
+  store: ScanCostTrackerOptions["workerReceipts"],
+  retained: Map<string, WorkerReceipt>,
+  select?: (receipt: Record<string, unknown>) => boolean,
+): Promise<{
+  usages: Map<string, ScanTokenUsage | null>;
+  unknownAttempts: number;
+  attemptIds: Set<string>;
+  errors: unknown[];
+}> {
+  const usages = new Map<string, ScanTokenUsage | null>();
+  const attempts = new Set<string>();
+  const result = {
+    usages,
+    unknownAttempts: 0,
+    attemptIds: attempts,
+    errors: [] as unknown[],
+  };
+  if (store === undefined) return result;
   const { directory, scanId } = store;
   try {
     const directoryInfo = await lstat(directory);
@@ -3275,44 +3290,21 @@ export async function visitWorkerReceipts(
         receipt["usageScope"] !== "thread_cumulative" ||
         receipt["scanId"] !== scanId ||
         typeof receipt["attemptId"] !== "string" ||
-        entry.name !== `${receipt["attemptId"]}.json`
+        entry.name !== `${receipt["attemptId"]}.json` ||
+        attempts.has(receipt["attemptId"]) ||
+        select?.(receipt) === false
       )
         continue;
-      visit(receipt["attemptId"], receipt);
+      attempts.add(receipt["attemptId"]);
+      retained.set(receipt["attemptId"], {
+        threadId:
+          typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,
+        usage: tokenUsage(receipt["usage"]),
+      });
     }
   } catch (error) {
-    if (!isMissingFile(error)) return [error];
+    if (!isMissingFile(error)) result.errors.push(error);
   }
-  return [];
-}
-
-async function readWorkerReceipts(
-  store: ScanCostTrackerOptions["workerReceipts"],
-  retained: Map<string, WorkerReceipt>,
-): Promise<{
-  usages: Map<string, ScanTokenUsage | null>;
-  unknownAttempts: number;
-  attemptIds: Set<string>;
-  errors: unknown[];
-}> {
-  const usages = new Map<string, ScanTokenUsage | null>();
-  const attempts = new Set<string>();
-  const result = {
-    usages,
-    unknownAttempts: 0,
-    attemptIds: attempts,
-    errors: [] as unknown[],
-  };
-  if (store === undefined) return result;
-  result.errors = await visitWorkerReceipts(store, (attemptId, receipt) => {
-    if (attempts.has(attemptId)) return;
-    attempts.add(attemptId);
-    retained.set(attemptId, {
-      threadId:
-        typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,
-      usage: tokenUsage(receipt["usage"]),
-    });
-  });
   // As with native sessions, a later read failure cannot erase observed usage.
   // Keep attempts separate so a worker's initial unknown identity can resolve.
   for (const [attemptId, { threadId, usage }] of retained) {
