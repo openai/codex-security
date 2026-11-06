@@ -97,6 +97,25 @@ function testDistinctThreatModels() {
     { workerId: "worker-1", attempt: 1 },
     { workerId: "worker-2", attempt: 1, threatModel: other },
   ]);
+
+  const next = {
+    id: "retried",
+    attempt: 2,
+    resultPath: "worker/output/result.json",
+    result: draft([], { threatModel: other }),
+  };
+  const cached = scanCoverage(next, ".");
+  const reviews = [
+    { workerId: next.id, attempt: 2 },
+    { workerId: next.id, attempt: 1 },
+  ];
+  cached.reviews = structuredClone(reviews);
+  addScanCoverage(aggregate, { ...next, coverage: cached }, ".");
+  assert.deepEqual(aggregate.sourceCoverage?.reviews?.slice(-2), [
+    { ...reviews[0], threatModel: other },
+    reviews[1],
+  ]);
+  assert.deepEqual(cached.reviews, reviews);
 }
 
 function testResolvedDeferredPublication() {

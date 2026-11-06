@@ -21,7 +21,7 @@ import {
   addScanCoverage,
   parseStoredScanDraft,
   scanUnionToDraft,
-  validateDiscoveryArtifacts,
+  readAcceptedDiscovery,
   type ScanUnion,
 } from "./artifact-validation.js";
 import {
@@ -1084,19 +1084,19 @@ export class DeepScanCoordinator {
           `Accepted discovery ${worker.id} has incomplete persisted evidence.`,
         );
       }
-      const result = await validateDiscoveryArtifacts(
-        this.artifacts,
-        worker.resultManifestPath,
-        this.state.scanId,
-        this.state,
-        "previously-accepted",
+      recovered.push(
+        await readAcceptedDiscovery(
+          this.artifacts,
+          {
+            id: worker.id,
+            resultPath: worker.resultManifestPath,
+            attempt: worker.attempt,
+          },
+          this.state.scanId,
+          this.state,
+          "previously-accepted",
+        ),
       );
-      recovered.push({
-        id: worker.id,
-        resultPath: worker.resultManifestPath,
-        result,
-        attempt: worker.attempt,
-      });
     }
     return recovered.sort((a, b) =>
       Number(
