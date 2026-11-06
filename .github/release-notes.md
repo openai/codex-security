@@ -143,6 +143,8 @@
 - explain unreadable plugin installation receipts ([#2403](https://github.com/openai/codex-security/pull/2403))
 - open long state paths in JavaScript SQLite connections ([#2380](https://github.com/openai/codex-security/pull/2380))
 - update Codex SDK and CLI to 0.167.0 ([#2398](https://github.com/openai/codex-security/pull/2398))
+- bump taiki-e/install-action from 2.88.0 to 2.88.1 ([#2396](https://github.com/openai/codex-security/pull/2396))
+- bump taiki-e/install-action from 2.88.0 to 2.88.1 in /.github/actions/audit-pnpm-lockfiles ([#2397](https://github.com/openai/codex-security/pull/2397))
 
 </details>
 
