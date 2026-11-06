@@ -520,6 +520,7 @@ describe("multiscan", () => {
     ["zero attempt", { attempt: 0 }, false],
     ["fractional attempt", { attempt: 1.5 }, true],
     ["blank ID", { id: " " }, false],
+    ["padded ID", { id: " receipt " }, false],
     ["unknown status", { status: "pending" }, true],
     ["missing output directory", { outputDir: undefined }, false],
     ["non-boolean knowledge failure", { knowledgeBaseFailure: "false" }, false],
