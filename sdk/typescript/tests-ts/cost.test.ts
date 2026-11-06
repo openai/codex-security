@@ -1029,7 +1029,18 @@ describe("inventory source ordering", () => {
         return handle;
       },
     );
-    tracker.start("scan-thread");
+    // These cases stage writes and close hooks around explicit refreshes.
+    // A periodic poll must not consume the rows before those hooks are ready.
+    const originalSetInterval = globalThis.setInterval;
+    const polling = spyOn(globalThis, "setInterval").mockImplementationOnce(((
+      _: unknown,
+      delay?: number,
+    ) => originalSetInterval(() => {}, delay)) as typeof originalSetInterval);
+    try {
+      tracker.start("scan-thread");
+    } finally {
+      polling.mockRestore();
+    }
     await tracker.refresh();
     tracker.beginParentTurn();
     return {
