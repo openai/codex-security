@@ -1029,7 +1029,9 @@ describe("custom validation", () => {
                         "The validation environment did not start.";
                     }
                     if (scenario === "standard") {
-                      const timestamp = new Date().toISOString();
+                      // Keep synthetic events before the exclusive completion cutoff
+                      // even if the validator returns in the same millisecond.
+                      const timestamp = new Date(Date.now() - 1).toISOString();
                       for (const [id, cwd] of [
                         ["thread-1", scanDir],
                         ["validation-thread", join(scanDir, "artifacts")],
