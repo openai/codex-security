@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { promises as fs } from "node:fs";
 import { mkdir, rm, symlink } from "node:fs/promises";
 import { join, toNamespacedPath, win32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -31,6 +32,66 @@ const { sqliteFilename } = (await importSource(
 )) as typeof import("../src/windows-path.ts");
 const directories = createTemporaryDirectories(true);
 after(() => directories.cleanup());
+
+const { replaceArtifactText } = (await importSource(
+  join(import.meta.dirname, "../src/artifact-io.ts"),
+)) as typeof import("../src/artifact-io.js");
+
+test(
+  "Windows publishes the staged artifact after a reader releases the old file",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    const directory = await directories.create("held-artifact-");
+    const destination = join(directory, "result.jsonl");
+    await fs.writeFile(destination, "old");
+    const reader = await fs.open(destination, "r");
+    t.after(() => reader.close());
+    const rename = fs.rename.bind(fs);
+    let conflicts = 0;
+    t.mock.method(
+      fs,
+      "rename",
+      async (...args: Parameters<typeof fs.rename>) => {
+        try {
+          return await rename(...args);
+        } catch (error) {
+          if (args[1] === destination && conflicts === 0) {
+            conflicts++;
+            assert.equal(await fs.readFile(destination, "utf8"), "old");
+            await reader.close();
+          }
+          throw error;
+        }
+      },
+    );
+    await replaceArtifactText(destination, "new");
+    assert.equal(conflicts, 1);
+    assert.equal(await fs.readFile(destination, "utf8"), "new");
+    assert.deepEqual(await fs.readdir(directory), ["result.jsonl"]);
+  },
+);
+
+test(
+  "Windows retains the old artifact and cleans the temporary file when a reader stays open",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const directory = await directories.create("locked-artifact-");
+    const destination = join(directory, "result.jsonl");
+    await fs.writeFile(destination, "old");
+    const reader = await fs.open(destination, "r");
+    try {
+      await assert.rejects(
+        replaceArtifactText(destination, "new"),
+        (error: NodeJS.ErrnoException) =>
+          ["EPERM", "EBUSY", "EACCES"].includes(error.code ?? ""),
+      );
+      assert.equal(await fs.readFile(destination, "utf8"), "old");
+      assert.deepEqual(await fs.readdir(directory), ["result.jsonl"]);
+    } finally {
+      await reader.close();
+    }
+  },
+);
 
 test(
   "preserves ordinary Windows SQLite spellings for short paths and verbatim-sensitive components",
