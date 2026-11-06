@@ -22,6 +22,17 @@ bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
 
 For an MCP change, follow the [MCP test guide](../../plugins/codex-security/mcp-app/TESTING.md). To see which suites this repository requires for a PR, see [How this repository tests pull requests](../../docs/ci.md).
 
+### Native Windows sandbox tests
+
+Two tests in `tests-ts/config.test.ts` start the real Codex sandbox to check
+workspace writes and policy-source reads. Sandbox setup can change machine-wide
+Windows state. These tests run by default on GitHub-hosted Windows Actions
+runners. To include them in a local or self-hosted PowerShell run, set
+`$env:CODEX_SECURITY_TEST_WINDOWS_SANDBOX = '1'` before running Bun. The value
+`true` also enables them. Set the variable to `0` or `false` to skip both, even
+on a hosted runner. The PowerShell machine-policy test has its own
+`CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST` setting.
+
 ## Check the package
 
 Run static checks, the MCP suite and the SDK suite after installing the dependencies and native payload:
