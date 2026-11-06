@@ -8,7 +8,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
@@ -108,6 +108,47 @@ async function createMultiscanCampaign(output: string): Promise<void> {
   expect(result).toMatchObject({ completed: 1, failed: 0 });
 }
 
+async function createDirectPluginOutput(scanRoot: string): Promise<{
+  scanDir: string;
+  targetRoot: string;
+  targetRootAcl: string;
+  stateDir: string;
+}> {
+  const { source } = await repositoryFixture("direct-plugin-source");
+  const stateDir = join(await temporaryDirectory(), "state");
+  const targetRoot = join(scanRoot, basename(source.path));
+  await mkdir(targetRoot);
+  const targetRootAcl = await descriptor(targetRoot);
+  const result = await runtime.runWorkbench(
+    {
+      python: await runtime.resolvePluginPython(),
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_SECURITY_STATE_DIR: stateDir,
+      },
+    },
+    [
+      "start-headless-standard-scan",
+      "--thread-id",
+      "windows-acl-test-thread",
+      "--target-path",
+      source.path,
+      "--scope",
+      ".",
+      "--scan-root",
+      scanRoot,
+    ],
+  );
+  const scan = result["scan"] as { scanDir?: unknown } | undefined;
+  const scanDir = scan?.scanDir;
+  expect(typeof scanDir).toBe("string");
+  const resolvedScanDir = await realpath(scanDir as string);
+  expect(dirname(resolvedScanDir)).toBe(await realpath(targetRoot));
+  return { scanDir: resolvedScanDir, targetRoot, targetRootAcl, stateDir };
+}
+
 async function archiveSdkOutput(output: string, root: string): Promise<string> {
   let archive: string | undefined;
   await runtime.prepareOutputDir(
@@ -177,6 +218,13 @@ windowsTest(
     );
     const campaign = join(root, "campaign");
     await createMultiscanCampaign(campaign);
+    const direct = await createDirectPluginOutput(root);
+    const home = await runtime.prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: direct.stateDir,
+    });
+    expect(home).toBe(await realpath(join(direct.stateDir, "codex-home")));
+    expect(direct.targetRootAcl).toContain(";;;WD)");
+    expect(await descriptor(direct.targetRoot)).toBe(direct.targetRootAcl);
     for (const output of [
       join(root, "new parent"),
       explicit,
@@ -184,6 +232,7 @@ windowsTest(
       campaign,
       join(campaign, "artifacts"),
       join(campaign, "checkouts"),
+      direct.scanDir,
     ]) {
       const acl = await descriptor(output);
       expect(acl).toContain("D:P");
@@ -397,7 +446,9 @@ test.skipIf(
     const writableParent = join(root, "writable parent");
     await mkdir(writableParent);
     await icacls(writableParent, "/grant", "*S-1-1-0:(OI)(CI)M");
-    const shared = join(writableParent, "shared.txt");
+    const direct = await createDirectPluginOutput(writableParent);
+    expect(await descriptor(direct.targetRoot)).toBe(direct.targetRootAcl);
+    const shared = join(direct.targetRoot, "shared.txt");
     await writeFile(shared, "synthetic shared data");
     const explicit = await runtime.prepareOutputDir(
       join(root, "explicit"),
@@ -410,14 +461,18 @@ test.skipIf(
     );
     const campaign = join(writableParent, "campaign");
     await createMultiscanCampaign(campaign);
-    for (const output of [explicit, generated, campaign]) {
+    for (const output of [explicit, generated, campaign, direct.scanDir]) {
       await writeFile(join(output, "probe.txt"), "synthetic private data");
     }
     const archive = await archiveWorkbenchOutput(generated, root);
     await writeFile(join(generated, "probe.txt"), "synthetic private data");
-    const privateProbes = [explicit, generated, archive, campaign].map((path) =>
-      join(path, "probe.txt"),
-    );
+    const privateProbes = [
+      explicit,
+      generated,
+      archive,
+      campaign,
+      direct.scanDir,
+    ].map((path) => join(path, "probe.txt"));
     const script = await readFile(
       join(import.meta.dir, "support", "windows-other-user-access.ps1"),
       "utf8",
