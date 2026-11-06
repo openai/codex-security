@@ -1541,6 +1541,7 @@ def test_git_context_preserves_trailing_root_whitespace(
         "localized",
         "scoped",
         "failed-retry",
+        "check-ignore-unmatched",
         "different-pointer",
         "case-marker",
         "relative-pointer",
@@ -1577,6 +1578,18 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
     native = workbench_target.git_command
     args = ("ls-files", "--cached", "-z", "--", ".")
     expected = b"README.md\0"
+    expected_status = 0
+    input_data = None
+    overrides = {"GIT_TRACE_SETUP": "1"}
+    if case == "check-ignore-unmatched":
+        for name in ("visible one", "visible two"):
+            (worktree / name).mkdir()
+        (worktree / ".gitignore").write_text("!visible one/\n!visible two/\n", encoding="utf-8")
+        args = ("--no-literal-pathspecs", "check-ignore", "-z", "--stdin")
+        input_data = b"visible one\0visible two\0"
+        overrides["GIT_NOGLOB_PATHSPECS"] = "0"
+        expected_status = 1
+        expected = b""
     if case == "conditional":
         excludes = tmp_path / "ignore"
         excludes.write_text("visible.fixture\n", encoding="utf-8")
@@ -1609,7 +1622,8 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
                 english if (kwargs["environment_overrides"] or {}).get("LC_ALL") == "C" else first
             )
         assert directory == Path(".git")
-        assert kwargs["environment_overrides"] == {"GIT_TRACE_SETUP": "1"}
+        assert kwargs["environment_overrides"] == overrides
+        assert kwargs["input_data"] == input_data
         with pytest.raises(PermissionError):
             metadata.rename(source / "moved")
         if worktree != source:
@@ -1625,7 +1639,8 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
         *args,
         git_dir=metadata,
         work_tree=worktree,
-        environment_overrides={"GIT_TRACE_SETUP": "1"},
+        input_data=input_data,
+        environment_overrides=overrides.copy(),
     )
     if case in {"scoped", "different-pointer", "relative-pointer", "case-marker"}:
         assert result is first and calls == [metadata]
@@ -1635,7 +1650,7 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
         if case == "failed-retry":
             assert result is first
         else:
-            assert result.returncode == 0 and result.stdout == expected
+            assert result.returncode == expected_status and result.stdout == expected
             assert b"trace" in result.stderr
 
 
