@@ -6282,7 +6282,11 @@ async function prepareScanOutputDir(
 }
 
 function turnPricingMetadata(context?: ScanPricingContext) {
-  return context === undefined ? {} : { bedrockRegion: context.region };
+  if (context === undefined) return {};
+  // Preserve the region field written on Bedrock scan results.
+  return context.provider === "amazon-bedrock"
+    ? { bedrockRegion: context.region }
+    : { pricingContext: context };
 }
 
 function validateScanCostLimit(
@@ -6298,8 +6302,16 @@ function validateScanCostLimit(
       pricingContext,
     ) === null
   ) {
-    const region = pricingContext?.region;
-    const location = region ? ` in ${region}` : "";
+    const region =
+      pricingContext?.provider === "amazon-bedrock"
+        ? pricingContext.region
+        : undefined;
+    const location =
+      pricingContext?.provider === "gcp"
+        ? " on Google Cloud"
+        : region
+          ? ` in ${region}`
+          : "";
     const detail =
       region === null
         ? " Set the Bedrock billing region to check its regional price."

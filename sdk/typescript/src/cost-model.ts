@@ -1,11 +1,11 @@
+import { vertexModelPricing } from "./vertex-pricing.js";
 import { bedrockModelPricing } from "./bedrock-pricing.js";
 import { isRecord } from "./record.js";
 import { isSafeNonNegativeInteger } from "./value.js";
 
-export interface ScanPricingContext {
-  provider: "amazon-bedrock";
-  region: string | null;
-}
+export type ScanPricingContext =
+  | { provider: "amazon-bedrock"; region: string | null }
+  | { provider: "gcp"; managedEndpoint?: boolean };
 
 export interface ScanCost {
   model: string;
@@ -143,6 +143,22 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   };
 }
 
+function providerModelPricing(
+  model: string,
+  context?: ScanPricingContext | string | null,
+) {
+  if (context == null || typeof context === "string") {
+    return bedrockModelPricing(model, context);
+  }
+  if (context.provider === "amazon-bedrock") {
+    return bedrockModelPricing(model, context.region);
+  }
+  if (context.provider === "gcp" && context.managedEndpoint !== false) {
+    return vertexModelPricing(model);
+  }
+  return undefined;
+}
+
 /**
  * Estimates Standard token costs using the selected provider's published rates.
  * A string (or null for an unknown region) selects Bedrock for compatibility.
@@ -154,9 +170,7 @@ export function estimateScanCost(
   context?: ScanPricingContext | string | null,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const region =
-    typeof context === "object" && context !== null ? context.region : context;
-  const providerPricing = bedrockModelPricing(model, region);
+  const providerPricing = providerModelPricing(model, context);
   const unitsPerUsd = providerPricing?.unitsPerUsd ?? 1_000_000_000;
   const pricing =
     providerPricing?.short ??
