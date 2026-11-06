@@ -37,7 +37,11 @@ function encodeNumbers(data: object): Resource | undefined {
         values[key] = Number(token);
       }
     } else if (value !== null && typeof value === "object") {
-      const nested = encodeNumbers(value);
+      // restoreLegacyHostedNumbers shares branches that had no sidecar.
+      // Keep the captured input reusable for another repository projection.
+      const child = Array.isArray(value) ? [...value] : { ...value };
+      values[key] = child;
+      const nested = encodeNumbers(child);
       if (nested) fields[key] = nested;
     }
   }
@@ -46,7 +50,7 @@ function encodeNumbers(data: object): Resource | undefined {
 
 /** Recover the exact v1 wire representation whether numbers were native or witnessed strings. */
 export function encodeSnykV1File(document: Resource): Resource {
-  const source = restoreLegacyHostedNumbers(document);
+  const source = { ...restoreLegacyHostedNumbers(document) };
   delete source["numericFields"];
   const fields = encodeNumbers(source);
   if (fields) source["numericFields"] = fields;

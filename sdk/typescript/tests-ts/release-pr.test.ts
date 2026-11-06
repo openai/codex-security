@@ -1209,7 +1209,7 @@ describe("pre-1.0 release policy", () => {
     expect(plan.generated.highlights).not.toContain("extend coverage");
     expect(plan.generated.highlights).toContain("update dependencies");
     expect(plan.generated.highlights).toContain("explain publishing");
-    expect(plan.generated.highlights).toContain("require migration");
+    expect(plan.generated.highlights).not.toContain("require migration");
     expect(plan.generated.upgrades).toContain("require migration");
   });
 

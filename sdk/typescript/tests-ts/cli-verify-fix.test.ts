@@ -432,17 +432,16 @@ describe("read-only finding verification", () => {
     expect(onCodex).not.toHaveBeenCalled();
   });
 
-  test.each(["worker", "planner"])(
-    "retains a saved verification %s failure on stderr with token-limited stdout",
-    async (failure) => {
+  test.each([530_000, 1 << 20])(
+    "retains a saved verification worker failure with %i-character findings and token-limited stdout",
+    async (size) => {
       const result = fakeResult(["high", "high"]);
       for (const [index, finding] of result.findings.findings.entries()) {
         finding.occurrenceId = `occ_${index}`;
-        finding.title = "x".repeat(failure === "worker" ? 530_000 : 1 << 20);
+        finding.title = "x".repeat(size);
       }
       const workerMessage = "Synthetic verification worker failed.";
-      const message =
-        failure === "worker" ? workerMessage : "Finding occ_0 cannot fit";
+      const message = workerMessage;
       const deps = dependencies({
         result,
         onWorkbench: () => ({
@@ -494,7 +493,7 @@ describe("read-only finding verification", () => {
     ["SIGTERM", 143],
     ["repeated signal", 130],
     ["interrupted worker", 143],
-    ["oversized finding", 2],
+    ["oversized finding", 1],
   ] as const)(
     "handles %s across saved verification batches",
     async (scenario, expectedExit) => {
@@ -532,12 +531,21 @@ describe("read-only finding verification", () => {
             findings: result.findings.findings as unknown as JsonObject[],
           },
         }),
-        onCodex: (_args, output) => {
+        onCodex: async (_args, output) => {
           const prompt = output!.appServer!.prompt;
           expect([...prompt].length).toBeLessThanOrEqual(1 << 20);
-          const batch = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
+          const file = prompt.match(/^".*finding\.json"$/m)?.[0];
+          const batch = JSON.parse(
+            file === undefined
+              ? prompt.split("\n").at(-1)!
+              : await readFile(JSON.parse(file), "utf8"),
+          ) as Finding[];
           expect(batch).toHaveLength(1);
-          expect(batch[0]!.codeEvidence![0]!.code).toBe(evidence);
+          expect(batch[0]!.codeEvidence![0]!.code).toBe(
+            scenario === "oversized finding" && seen.length === 1
+              ? evidence.repeat(2)
+              : evidence,
+          );
           const id = batch[0]!.occurrenceId;
           seen.push(id);
           expect(output!.appServer!.onEvent).toBeUndefined();
@@ -575,9 +583,9 @@ describe("read-only finding verification", () => {
             seen.length === 1 &&
             (scenario === "SIGINT" || scenario === "SIGTERM")
           )
-            setImmediate(() => signals.emit(scenario));
+            queueMicrotask(() => signals.emit(scenario));
           if (seen.length === 1 && scenario === "repeated signal")
-            setImmediate(() => {
+            queueMicrotask(() => {
               signals.emit("SIGINT");
               signals.emit("SIGTERM");
             });
@@ -623,7 +631,11 @@ describe("read-only finding verification", () => {
       ).toBe(true);
       if (scenario === "closed stderr")
         expect((errorOutput as Writable).listenerCount("error")).toBe(0);
-      if (scenario === "complete" || scenario === "redirected output") {
+      if (
+        scenario === "complete" ||
+        scenario === "redirected output" ||
+        scenario === "oversized finding"
+      ) {
         expect(seen).toEqual(["occ_0", "occ_1", "occ_2"]);
         expect(stderr.text()).toBe("");
         expect(
@@ -641,16 +653,8 @@ describe("read-only finding verification", () => {
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toBe("");
       } else {
-        expect(seen).toEqual(
-          scenario === "oversized finding" ? [] : ["occ_0", "occ_1"],
-        );
+        expect(seen).toEqual(["occ_0", "occ_1"]);
         const failure = JSON.parse(stdout.text());
-        if (scenario === "oversized finding") {
-          expect(failure.message).toContain("Finding occ_1 cannot fit");
-          expect(failure.message).toContain(
-            "codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID",
-          );
-        }
         expect(failure.code).toBe("VERIFICATION_FAILED");
         expect(failure.results).toBeUndefined();
         if (scenario === "transport failure")
@@ -708,7 +712,7 @@ describe("read-only finding verification", () => {
     });
   });
 
-  test("batches at the exact decoded prompt limit and rejects an oversized finding", async () => {
+  test("batches at the exact decoded prompt limit and isolates an oversized finding", async () => {
     const findings = fakeResult(["high", "high"]).findings.findings.map(
       (finding, i) => ({
         ...finding,
@@ -729,9 +733,7 @@ describe("read-only finding verification", () => {
     findings[1]!.title += "x";
     expect((await batches()).map((batch) => batch.length)).toEqual([1, 1]);
     findings[1]!.title += "x".repeat(1024);
-    await expect(batches()).rejects.toThrow(
-      "Finding occ_1 cannot fit in one complete Codex verification request",
-    );
+    expect(await batches()).toEqual([[findings[0]!], [findings[1]!]]);
   });
 
   test("reports inconclusive findings without treating them as fixed", async () => {

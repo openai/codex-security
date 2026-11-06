@@ -44,6 +44,11 @@ def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision:
 
 
 def diff_snapshot_digest(scan: sqlite3.Row, manifest: dict[str, Any] | None) -> str | None:
+    """Return the content identity used for a stored diff, or None when unavailable.
+
+    Working-tree scans use their recorded content digest. Commit and range scans
+    reuse the sealed manifest value during recovery or derive a digest from both revisions.
+    """
     if scan["diff_target_kind"] == "working_tree":
         return scan["diff_content_digest"]
     if scan["diff_target_kind"] in {"commit", "range"}:
@@ -67,6 +72,7 @@ def git_output(
     work_tree: Path | None = None,
     offline: bool = False,
 ) -> str | None:
+    """Return decoded Git stdout with one trailing newline removed, or None on failure or empty output."""
     completed = git_command(
         target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
     )
@@ -275,6 +281,12 @@ def git_command(
     environment_overrides: dict[str, str] | None = None,
     offline: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    """Run Git against target and return the completed process with its exit status.
+
+    Pass git_dir and work_tree together to select an explicit checkout. Set
+    offline to disable transports and lazy fetches. The text flag selects
+    decoded or binary output, and stdout_file can redirect it to a file.
+    """
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
     environment = os.environ.copy()
@@ -326,7 +338,7 @@ def git_command(
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
-def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[str, str, str | None]]:
     """Return changed regular files from the selected side of each change."""
     result = git_command(
         repo,
@@ -345,25 +357,29 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     if fields and not fields[-1]:
         fields.pop()
 
-    changed: list[tuple[Path, str]] = []
+    changed: list[tuple[str, str, str | None]] = []
     index = 0
     while index < len(fields):
         metadata = fields[index].split()
         status = chr(metadata[-1][0])
         index += 1
+        rename_source = os.fsdecode(fields[index]) if status == "R" else None
         if status in {"C", "R"}:
             index += 1
-        path = repo / os.fsdecode(fields[index])
+        path = os.fsdecode(fields[index])
         index += 1
         selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
         if selected_mode.startswith(b"100"):
-            changed.append((path, status))
+            changed.append((path, status, rename_source))
     return changed
 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        return run_git_changed_paths(repo, [f"{base}..{head}"])
+        return [
+            (repo / name, status)
+            for name, status, _ in run_git_changed_paths(repo, [f"{base}..{head}"])
+        ]
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
@@ -377,26 +393,37 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             offline=True,
         )
         untracked.check_returncode()
-        combined = dict(staged)
-        combined.update(unstaged)
-        combined.update(
-            (repo / os.fsdecode(relative), "A")
-            for relative in untracked.stdout.split(b"\0")
-            if relative and not relative.endswith(b"/")
-        )
-        selected = []
+        combined = {name: (status, source) for name, status, source in [*staged, *unstaged]}
+        selected: dict[str, str] = {}
         linked_prefixes: dict[str, bool] = {}
-        for path, status in combined.items():
-            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts):
-                continue
+
+        def local_status(name: str, status: str) -> str | None:
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(PurePosixPath(name).parts):
+                return None
+            if status == "D":
+                return status
+            path = repo / name
             try:
-                if status == "M" and _directory_link_boundary(repo, path, linked_prefixes) != path:
-                    selected.append((path, "D"))
-                elif status == "D" or (not path.is_symlink() and path.is_file()):
-                    selected.append((path, status))
+                if (
+                    status in {"M", "R"}
+                    and _directory_link_boundary(repo, path, linked_prefixes) != path
+                ):
+                    return "D" if status == "M" else None
+                return status if stat.S_ISREG(path.lstat().st_mode) else None
             except (FileNotFoundError, NotADirectoryError):
-                continue
-        return sorted(selected)
+                return None
+
+        for name, (status, source) in combined.items():
+            if chosen := local_status(name, status):
+                selected[name] = chosen
+            elif source is not None and local_status(source, "D"):
+                selected.setdefault(source, "D")
+        for relative in untracked.stdout.split(b"\0"):
+            if relative and not relative.endswith(b"/"):
+                name = os.fsdecode(relative)
+                if local_status(name, "A"):
+                    selected[name] = "A"
+        return sorted((repo / name, status) for name, status in selected.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
@@ -527,6 +554,19 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def _update_regular_file_digest(digest: Any, path: Path, prefix: bytes = b"") -> None:
+    """Record the file kind, byte count, and SHA-256 in the snapshot digest."""
+    content = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            content.update(chunk)
+            size += len(chunk)
+    update_digest_field(digest, prefix + b"kind", b"file")
+    update_digest_field(digest, prefix + b"size", str(size).encode())
+    update_digest_field(digest, prefix + b"content-sha256", content.digest())
+
+
 def _visible_git_character(char: str) -> str:
     if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}:
         return char
@@ -569,6 +609,7 @@ def _update_digest_field_from_git(
 
 
 def worktree_content_digest(target: Path) -> str:
+    """Return the worktree digest for the selected path after checking the state of its submodules."""
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
     return worktree_content_digest_for_context(repository, pathspec)
@@ -582,6 +623,7 @@ def remediation_checkout_snapshot(
         "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
     ),
 ) -> tuple[str, str | None]:
+    """Return the current revision and content digest after verifying the recorded checkout identity and required revision."""
     target = require_scan_target_identity(scan)
     revision = git_revision(target)
     required_revision = expected_revision or scan["target_revision"]
@@ -706,26 +748,10 @@ def worktree_content_digest_for_context(
                 directory_content_digest(path.resolve()).encode(),
             )
         elif stat.S_ISREG(metadata.st_mode):
-            content_digest = hashlib.sha256()
-            content_size = 0
             try:
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        content_digest.update(chunk)
-                        content_size += len(chunk)
+                _update_regular_file_digest(digest, path, prefix=b"untracked-")
             except OSError as exc:
                 raise SystemExit(f"Could not read untracked file: {relative_path}") from exc
-            update_digest_field(digest, b"untracked-kind", b"file")
-            update_digest_field(
-                digest,
-                b"untracked-size",
-                str(content_size).encode(),
-            )
-            update_digest_field(
-                digest,
-                b"untracked-content-sha256",
-                content_digest.digest(),
-            )
         else:
             raise SystemExit(f"Unsupported untracked file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
@@ -1084,18 +1110,10 @@ def directory_content_digest(
         elif stat.S_ISDIR(mode):
             update_digest_field(digest, b"kind", b"directory")
         elif stat.S_ISREG(mode):
-            content_digest = hashlib.sha256()
-            content_size = 0
             try:
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        content_digest.update(chunk)
-                        content_size += len(chunk)
+                _update_regular_file_digest(digest, path)
             except OSError as exc:
                 raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
-            update_digest_field(digest, b"kind", b"file")
-            update_digest_field(digest, b"size", str(content_size).encode())
-            update_digest_field(digest, b"content-sha256", content_digest.digest())
         else:
             raise UnsupportedLocalFileType(f"Unsupported local file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
@@ -1311,6 +1329,7 @@ def require_remediation_target(value: str) -> Path:
 
 
 def require_scan_target_identity(scan: sqlite3.Row) -> Path:
+    """Return the recorded checkout path or raise SystemExit if it no longer identifies the original directory."""
     target = require_remediation_target(scan["target_path"])
     expected_inode = scan["target_inode"]
     if expected_inode is None:
