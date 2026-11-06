@@ -15,6 +15,8 @@ pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir evals/triage-finding run setup
 ```
 
+The eval lockfile omits unused provider SDKs, document and image readers, and packages for SQL and natural-language assertions. If a new case needs one, update `ignoredOptionalDependencies` in `pnpm-workspace.yaml` and run `pnpm install` in this directory.
+
 ## Check the harness
 
 From the repository root, run the same deterministic checks as CI. They use fixtures to exercise intake assertions, calibration, SastBench, and the Promptfoo provider without model calls.

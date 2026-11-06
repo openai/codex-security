@@ -212,8 +212,11 @@ describe("TypeScript package skeleton", () => {
     expect(testStep).not.toHaveProperty("if");
     expect(testStep).not.toHaveProperty("continue-on-error");
     expect(
-      job.steps!.find(({ name }) => name === "Install plugin dependencies")?.if,
-    ).toBe("matrix.os == 'ubuntu-latest' && matrix.python == '3.12'");
+      job.steps!.find(({ uses }) => uses === "./.github/actions/setup-tools"),
+    ).toMatchObject({
+      if: "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
+      with: { compile: true },
+    });
   });
 
   test("requires a nonempty native Python report without skips", () => {
