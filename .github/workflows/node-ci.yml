@@ -577,3 +577,18 @@ jobs:
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
         run: bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts
+      - name: Set up Node 26 for the Windows UNC helper test
+        if: matrix.shard == 3
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          package-manager-cache: false
+      - name: Run the PowerShell scope helper over UNC on Node 26
+        if: matrix.shard == 3
+        working-directory: sdk/typescript
+        env: *windows-shard-env
+        shell: pwsh
+        run: |
+          bun -e "import { hasWindowsLoopbackShare } from './tests-ts/windows-helper-location.ts'; if (!hasWindowsLoopbackShare) throw new Error('The UNC fixture requires the loopback share')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun test tests-ts/bind-repo-scopes.test.ts -t 'preserve unc literal paths'
