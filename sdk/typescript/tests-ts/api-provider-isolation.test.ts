@@ -1,11 +1,7 @@
 import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import {
-  OPENROUTER_CODEX_PROVIDER,
-  resolveCodexProfile,
-  type JsonObject,
-} from "../src/config.js";
+import { resolveCodexProfile, type JsonObject } from "../src/config.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -1284,13 +1280,15 @@ test("standard scans do not require Deep Scan plugin capabilities", async () => 
 });
 
 test.each([
-  ["root", "openai"],
-  ["profile", "openai"],
-  ["root", "openrouter"],
-  ["profile", "openrouter"],
+  ["root", "openai", false],
+  ["profile", "openai", false],
+  ["root", "openrouter", false],
+  ["profile", "openrouter", false],
+  ["root", "openrouter", true],
+  ["profile", "openrouter", true],
 ] as const)(
-  "Deep workers, rerun and resume inherit the %s %s endpoint",
-  async (selection, provider) => {
+  "Deep workers, rerun and resume inherit the %s %s endpoint (command auth: %p)",
+  async (selection, provider, commandAuth) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -1307,7 +1305,11 @@ test.each([
             model_provider: provider,
             model_providers: {
               [provider]: {
-                ...OPENROUTER_CODEX_PROVIDER,
+                name: "OpenRouter",
+                wire_api: "responses",
+                ...(commandAuth
+                  ? { auth: { command: "synthetic-auth" } }
+                  : { env_key: "OPENROUTER_API_KEY" }),
                 base_url: endpoint,
                 query_params: { version: "preview" },
               },
@@ -1380,9 +1382,12 @@ test.each([
             environment,
             onWorkbench: () => ({ scanId: "saved", scanDir: scan, recipe }),
             onConfig: ({ codexOverrides }) => {
-              expect(resolveCodexProfile(codexOverrides!)).toMatchObject(
-                routing,
-              );
+              const restored = resolveCodexProfile(codexOverrides!);
+              expect(restored).toMatchObject(routing);
+              if (commandAuth)
+                expect(restored).not.toHaveProperty(
+                  "model_providers.openrouter.env_key",
+                );
             },
           }),
         );

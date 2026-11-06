@@ -221,6 +221,7 @@ test.each([false, true])(
     const restore = (index: number) =>
       restoreProviderProfile(
         {
+          profile: "from-file",
           model_provider: "openrouter",
           model_providers: { openrouter: { name: "Saved provider" } },
         },
@@ -230,6 +231,7 @@ test.each([false, true])(
     const restored = await Promise.all([restore(0), restore(1)]);
     for (const [index, profile] of profiles.entries()) {
       expect(restored[index]).toEqual({
+        profile: "from-file",
         model_provider: "openrouter",
         model_providers: {
           openrouter: {

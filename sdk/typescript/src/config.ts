@@ -422,6 +422,14 @@ function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+/** @internal A named profile reloads from disk unless an inline table supplies it. */
+export function codexFileProfileName(config: JsonObject): string | undefined {
+  const name = config["profile"];
+  return typeof name === "string" && selectedScanProfile(config) === undefined
+    ? name
+    : undefined;
+}
+
 export function resolveCodexProfile(config: JsonObject): JsonObject {
   const normalized = parse(stringify(config)) as JsonObject;
   const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
@@ -454,15 +462,14 @@ export async function readCodexFileProfile(
   profileHome?: string,
 ): Promise<JsonObject> {
   let nativeProfile: JsonObject = {};
-  const profileName = overrides["profile"];
-  if (profileName != null && typeof profileName !== "string") {
+  if (
+    overrides["profile"] != null &&
+    typeof overrides["profile"] !== "string"
+  ) {
     throw new ConfigurationError("Codex profile must be a name.");
   }
-  if (
-    profileHome !== undefined &&
-    typeof profileName === "string" &&
-    selectedScanProfile(overrides) === undefined
-  ) {
+  const profileName = codexFileProfileName(overrides);
+  if (profileHome !== undefined && profileName !== undefined) {
     if (!/^[A-Za-z0-9_-]+$/u.test(profileName)) {
       throw new ConfigurationError("Codex profile must be a plain name.");
     }

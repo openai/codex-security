@@ -85,6 +85,7 @@ import {
   AZURE_CODEX_PROVIDER,
   azureBaseUrl,
   azureProviderEnvironment,
+  codexFileProfileName,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -2659,13 +2660,10 @@ export class CodexSecurity {
       };
       // Saved launches reload the native file; preflight uses resolved values.
       const profileName = effectiveConfig["profile"];
-      const inlineProfiles = effectiveConfig["profiles"];
-      const fileProfile =
-        typeof profileName === "string" &&
-        !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]));
+      const fileProfileName = codexFileProfileName(effectiveConfig);
       const overrides = this.config.codexOverrides ?? {};
       const recipeConfig: JsonObject = {
-        ...(fileProfile
+        ...(fileProfileName !== undefined
           ? scanPreflightCodexConfig(overrides)
           : preflightConfig),
         approval_policy: approvalPolicy,
@@ -2675,7 +2673,7 @@ export class CodexSecurity {
         const value = workerRuntimeConfig[key];
         if (
           typeof value !== "string" ||
-          (fileProfile && !(key in recipeConfig))
+          (fileProfileName !== undefined && !(key in recipeConfig))
         )
           continue;
         recipeConfig[key] = value;
@@ -2693,8 +2691,8 @@ export class CodexSecurity {
         }
       }
       let replayOverrides: JsonObject = {};
-      if (fileProfile) {
-        recipeConfig["profile"] = profileName;
+      if (fileProfileName !== undefined) {
+        recipeConfig["profile"] = fileProfileName;
         delete recipeConfig["skills"];
         // Reload inherited file settings, retaining explicit refinements omitted
         // from the readable recipe in the existing private replay snapshot.

@@ -7,6 +7,7 @@ import { parse } from "smol-toml";
 import { configuredCodexHome } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
+  codexFileProfileName,
   resolveCodexProfile,
   deepMerge,
   modelProviderConfigOverride,
@@ -177,8 +178,10 @@ export async function restoreProviderProfile(
     providers === null ||
     (isRecord(providers) && Object.keys(providers).length > 0)
   ) {
-    // JSON stores only omitted settings. Older TOML profiles hold complete tables.
-    if (legacyProfile) delete restored["model_providers"];
+    // Only file-profile JSON holds partial overrides. Other snapshots
+    // replace the recipe table, including any preset authentication fields.
+    if (legacyProfile || codexFileProfileName(config) === undefined)
+      delete restored["model_providers"];
     deepMerge(restored, { model_providers: providers as JsonObject | null });
   }
   return restored;
