@@ -319,7 +319,7 @@ export function renderScanHistory(
               Object.keys(SEVERITY_COLORS).indexOf(right.toUpperCase()),
           )
           .map(([severity, count]) => {
-            const label = severity.toUpperCase();
+            const label = clean(severity).toUpperCase();
             return paint(
               `${clean(count)} ${label}`,
               SEVERITY_COLORS[label] ?? 37,
