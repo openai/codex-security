@@ -5,6 +5,7 @@ import type { JsonObject } from "./types.js";
 import { isRecord as isJsonObject } from "./record.js";
 import {
   missingPythonHelperMessage,
+  pythonHelperEnvironment,
   resolvePythonCommand,
 } from "./python_command.js";
 import { WORKBENCH_PYTHON } from "./server/workbench-process.js";
@@ -98,7 +99,7 @@ async function executeWorkbench(
       cwd: PLUGIN_ROOT,
       windowsHide: true,
       env: {
-        ...process.env,
+        ...pythonHelperEnvironment(),
         CODEX_MCP_NODE_PATH:
           process.env.CODEX_MCP_NODE_PATH || process.execPath,
       },

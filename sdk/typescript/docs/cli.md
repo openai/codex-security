@@ -261,6 +261,16 @@ Hugging Face scan provider is deferred until the scanner and router can exchange
 the tools a complete scan requires. [Hugging Face's implementation notes](https://huggingface.co/docs/inference-providers/en/guides/gpt-oss#responses-api)
 and [request schema](https://github.com/huggingface/responses.js/blob/0e3e84c469a9f59ad16e2eb3a0d6f1c4de637a7b/src/schemas.ts#L219-L232).
 
+### MiniMax compatibility
+
+The default plugin-backed scan on Codex 0.166.0 sends namespaced tools even
+with web search disabled. MiniMax's optional `code_mode_only` setup also sends
+a custom tool. MiniMax's global Responses schema lists only function tools.
+A named scan preset is deferred until plugin-backed scans are verified on both
+regional services. [MiniMax Codex setup guide](https://platform.minimax.io/docs/m-plan/codex),
+[global Responses reference](https://platform.minimax.io/docs/api-reference/responses-create),
+and [China Responses reference](https://platform.minimax.cn/docs/api-reference/responses-create).
+
 ### Amazon Bedrock
 
 Use AWS credentials and a region with access to the exact Bedrock model ID:

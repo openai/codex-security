@@ -107,6 +107,14 @@ export function missingPythonHelperMessage(
   return `${error instanceof Error ? error.message : String(error)}\n${MISSING_PYTHON_HELPER_MESSAGE}`;
 }
 
+export function pythonHelperEnvironment(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => name.toUpperCase() !== "MINIMAX_API_KEY",
+    ),
+  );
+}
+
 /** Run an existing Python helper with in-memory input and preserve its output. */
 export function runPythonWithInput(
   python: string,
@@ -117,6 +125,7 @@ export function runPythonWithInput(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(python, ["-B", ...args], {
+      env: pythonHelperEnvironment(),
       signal,
       killSignal: "SIGKILL",
       stdio: ["pipe", "pipe", "pipe"],
