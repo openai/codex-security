@@ -2,7 +2,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { sessionLines } from "./session-lines.js";
 import { isRecord } from "./record.js";
-import { sessionFiles } from "./cost.js";
+import { sessionFiles, visitWorkerReceipts } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import { compareTimestamps } from "./timestamps.js";
 import type { JsonObject } from "./config.js";
@@ -386,12 +386,25 @@ export async function scanRolloutSessions(
     rootThreadId: string;
     rootPrompt?: string;
     executionThreadIds?: readonly string[];
+    workerReceipts?: { directory: string; scanId: string };
   },
 ): Promise<ScanRolloutSession[]> {
   const execution = [
     options.rootThreadId,
     ...(options.executionThreadIds ?? []),
   ];
+  if (options.workerReceipts) {
+    // Comparisons start independent SDK threads. A matching cwd alone cannot
+    // establish that a standalone thread in a shared home belongs to the scan.
+    await visitWorkerReceipts(options.workerReceipts, (_, receipt) => {
+      if (
+        receipt["kind"] === "compare" &&
+        typeof receipt["threadId"] === "string" &&
+        inRolloutWindow(receipt["startedAt"], options)
+      )
+        execution.push(receipt["threadId"]);
+    });
+  }
   const sessions = await selectSessionCopies(
     {
       scanId: options.rootThreadId,

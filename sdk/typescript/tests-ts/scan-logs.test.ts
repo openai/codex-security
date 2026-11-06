@@ -268,6 +268,69 @@ describe("saved scan logs", () => {
     }
   });
 
+  test("retains standalone Deep comparisons only for receipts belonging to this invocation", async () => {
+    const home = await temporaryHome();
+    const directory = join(home, "worker-usage", "scan");
+    await mkdir(directory, { recursive: true });
+    for (const [id, scanId, startedAt] of [
+      ["comparison", "scan", at("002")],
+      ["wrong-scan", "other", at("002")],
+      ["previous", "scan", at("000")],
+      ["post-scan", "scan", at("009")],
+    ] as const) {
+      await writeFile(
+        join(directory, id + ".json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          source: "codex_sdk",
+          usageScope: "thread_cumulative",
+          kind: "compare",
+          scanId,
+          attemptId: id,
+          threadId: id,
+          startedAt,
+        }),
+      );
+    }
+    for (const id of [
+      "comparison",
+      "wrong-scan",
+      "previous",
+      "post-scan",
+      "unrelated",
+    ]) {
+      await writeSession(
+        home,
+        id,
+        [
+          task("003", "task_started"),
+          commandEvent("native result", id, at("004")),
+          task("005", "task_complete"),
+          task("009", "task_started"),
+          commandEvent("later work", "later", at("010")),
+        ],
+        undefined,
+        at("002"),
+        join(home, "scan", "artifacts", "deep_discovery"),
+      );
+    }
+    const sessions = await scanRolloutSessions({
+      codexHome: home,
+      rootThreadId: "coordinator",
+      workerReceipts: { directory, scanId: "scan" },
+      startedAt: at("001"),
+      completedAt: at("009"),
+    });
+    expect(sessions.map(({ threadId }) => threadId)).toEqual(["comparison"]);
+    const calls = [];
+    for await (const event of sessions[0]!.events()) {
+      if (event["type"] === "response_item") calls.push(event["payload"]);
+    }
+    expect(calls).toEqual([
+      commandEvent("native result", "comparison")["payload"],
+    ]);
+  });
+
   test("keeps registered worker lineages when the execution root rollout is missing", async () => {
     const home = await temporaryHome();
     const startedAt = "2026-08-11T12:00:00Z",
