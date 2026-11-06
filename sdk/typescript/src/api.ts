@@ -4157,7 +4157,11 @@ export class CodexSecurity {
           const progress = isRecord(completedScan)
             ? completedScan["progress"]
             : undefined;
-          if (isTerminalScanProgress(progress)) {
+          // An ended attachment can have its own cutoff while the scan remains resumable.
+          if (
+            isTerminalScanProgress(progress) ||
+            options.resumeScanId !== undefined
+          ) {
             await saveRollouts?.(completedScan);
           }
           if (isRecord(progress) && progress["status"] === "complete") {
