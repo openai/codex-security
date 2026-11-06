@@ -33,11 +33,32 @@ export interface ScanExecutionRequest {
   };
 }
 
+/** One discovery turn or comparison in a hosted Deep scan. */
+export interface DeepScanExecutionRequest extends Omit<
+  ScanExecutionRequest,
+  "version"
+> {
+  version: 3;
+  workerId: string;
+  kind: "discovery" | "comparison";
+  subagents: number;
+  resumeSessionId?: string;
+  artifactContext?: {
+    root: string;
+    layout: "worker";
+    discoveryBoard?: { root: string; author: string };
+  };
+  outputSchema?: Record<string, unknown>;
+}
+
+export type StandardScanExecutionRequest = ScanExecutionRequest;
+
 export const ScanExecutionResultSchema = z
   .strictObject({
     requestId: z.string().min(1),
     status: z.enum(["completed", "failed", "canceled", "acceptance_unknown"]),
     sessionId: z.string().min(1).optional(),
+    turnId: z.string().min(1).optional(),
     finalResponse: z.string().optional(),
     /** Host usage is opaque; absence means unknown, not zero. */
     usage: z.unknown().optional(),
@@ -58,10 +79,15 @@ export const ScanExecutionResultSchema = z
   );
 export type ScanExecutionResult = z.infer<typeof ScanExecutionResultSchema>;
 export type ScanExecutionEvent =
+  | { type: "session.started"; sessionId: string }
   | { type: "progress"; progress: ScanProgress }
   | { type: "activity"; activity: ScanActivity };
 
 export const ScanExecutionEventSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("session.started"),
+    sessionId: z.string().min(1),
+  }),
   z.strictObject({
     type: z.literal("progress"),
     progress: z.strictObject({
@@ -90,16 +116,26 @@ export const ScanExecutionEventSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-export interface ScanExecutor {
+export interface ScanExecutor<
+  Request extends ScanExecutionRequest | DeepScanExecutionRequest =
+    ScanExecutionRequest,
+> {
   /** Submit once. On abort, settle with the host's recorded outcome and usage. */
   run(
-    request: ScanExecutionRequest,
+    request: Request,
     options: {
       signal: AbortSignal;
       onEvent?: (event: ScanExecutionEvent) => void;
     },
   ): Promise<ScanExecutionResult>;
+  /** Deep scan sessions outlive individual turns until explicitly released. */
+  release?(sessionId: string): Promise<void>;
 }
+
+/** An executor opting into both versions of the hosted scan protocol. */
+export type HostedScanExecutor = ScanExecutor<
+  ScanExecutionRequest | DeepScanExecutionRequest
+>;
 
 /** Carries the exact execution outcome even when finalization cannot complete. */
 export class ScanExecutionError extends CodexSecurityError {

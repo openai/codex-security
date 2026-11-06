@@ -1,8 +1,10 @@
-# Hosted Standard scans (protocol v2)
+# Hosted scans
 
 `codex-security scan --host` runs one scan using newline-delimited JSON-RPC on
 stdin/stdout. Use the flag alone. It performs no login, update check, local
 inference, or model fallback.
+Protocol v2 runs Standard scans. Protocol v3 runs Deep scans through the same
+entrypoint with host-owned discovery and comparison sessions.
 
 For hosted patch generation and verification, use the separate
 [hosted remediation API](hosted-remediation.md).
@@ -10,7 +12,7 @@ For hosted patch generation and verification, use the separate
 ## Public executor API
 
 Use the standalone `runHostedScan(input, { executor, signal, onEvent })`
-function to run one hosted Standard scan. `CodexSecurity.run()` retains its local
+function to run one hosted scan. `CodexSecurity.run()` retains its local
 scan behavior; it does not accept a hosted executor. The CLI command is a thin
 JSON-RPC adapter around the same standalone function.
 
@@ -73,7 +75,7 @@ if (result.status === "completed") {
 ```
 
 The function creates and closes its scan client internally, reusing the ordinary
-Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
+scan lifecycle for the selected mode. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
@@ -110,7 +112,7 @@ are reported separately through `onEvent` as a failed message activity with
 ID `runtime.cleanup` (a `scan.progress` notification over JSON-RPC). A cleanup
 failure does not change the scan status or require another execution attempt.
 
-## Wire contract
+## Standard wire contract (v2)
 
 Send `{"jsonrpc":"2.0","id":"run","method":"run","params":...}` with the
 parameters below. IDs are strings or safe integers from -9007199254740991 through
@@ -291,7 +293,8 @@ After dispatch the CLI aborts its executor signal, emits
 `execution.cancel` with `{requestId}`, and waits for the host's outcome/usage
 before returning a canceled result. For a registered scan, the durable lifecycle
 and final scan receipt record cancellation even if the executor reports failure.
-The `execution` field retains that failure, its diagnostics, and any usage.
+The v2 `execution` field retains that failure, its diagnostics, and any usage;
+v3 retains each dispatched request's outcome in `executions`.
 A caller deadline expiring after registration records a failed scan, including
 when the executor acknowledges the deadline with a canceled execution.
 If the executor reports `acceptance_unknown`, the local scan records `failed`
@@ -308,7 +311,7 @@ Preparation failures include typed `error.data.reason` for missing, escaping,
 aliased or syntactically invalid paths and revision mismatch. Other failures
 must not be presented as missing paths.
 
-The terminal run result includes `version: 2`, `status`, frozen
+The Standard terminal run result includes `version: 2`, `status`, frozen
 identity/revision/normalized scope, output directory, scan ID when registered,
 plugin version when known, `provenance` (CLI/plugin/build identity), optional `execution`,
 and `artifacts`. Each artifact is `{path, sha256, bytes}` over its exact bytes.
@@ -320,3 +323,129 @@ and canceled results are not accepted completed scans.
 
 The host verifies receipt paths, hashes, sizes, scope, revision and seals before
 accepting output.
+
+## Deep scans (v3)
+
+Send the same `run` envelope and frozen repository, scope, model, identity,
+runtime paths and optional rubric as v2, with `version: 3` and `mode: "deep"`.
+Omit `scope` for the whole repository or supply the same canonical path list.
+The optional `deepScan` object uses the ordinary CLI defaults:
+
+```json
+{
+  "version": 3,
+  "mode": "deep",
+  "repository": "/workspace/repository",
+  "revision": "0123456789012345678901234567890123456789",
+  "outputDirectory": "/scan/output",
+  "stateDirectory": "/scan/state",
+  "model": "gpt-5.6-sol",
+  "reasoningEffort": "high",
+  "identity": {
+    "runId": "example-run",
+    "attemptId": "example-attempt",
+    "buildId": "runtime-build"
+  },
+  "deepScan": {
+    "workers": 4,
+    "subagents": 3,
+    "stopAfterNoNew": 4,
+    "stopAfterConsecutiveErrors": 3,
+    "maxDiscoveryRuns": 40,
+    "maxTimeHours": 96
+  }
+}
+```
+
+The CLI runs the Deep coordinator locally without local model inference. The
+coordinator owns discovery scheduling, comparison, stopping and finalization;
+the host owns each remote execution session. A v3 executor must implement both
+`run(request, options)` and `release(sessionId)`. These calls can overlap: keep
+reading the protocol while work runs, correlate every response by request ID,
+and preserve shared state and path bindings across all sessions.
+Use `HostedScanExecutor` for an SDK executor that handles both protocol versions;
+the existing `ScanExecutor` and `ScanExecutionRequest` types retain their v2 defaults.
+
+### Execution requests and session lifetime
+
+Each `execution.run` has its own `requestId` and retains the v2 frozen context,
+prompt, model and runtime fields. V3 adds:
+
+| Field             | Host behavior                                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------------ |
+| `workerId`        | Correlate the logical worker across turns.                                                             |
+| `kind`            | Distinguish `discovery` from `comparison`.                                                             |
+| `subagents`       | Apply the requested subagent allowance, including zero.                                                |
+| `resumeSessionId` | Continue the indicated existing session instead of starting a new one.                                 |
+| `artifactContext` | Make the supplied worker artifact root and optional discovery board available at their supplied paths. |
+| `outputSchema`    | Apply the supplied output schema when present.                                                         |
+
+As soon as a session starts, send an `execution.progress` notification before
+waiting for the turn to finish:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "execution.progress",
+  "params": {
+    "requestId": "request-1",
+    "event": { "type": "session.started", "sessionId": "session-1" }
+  }
+}
+```
+
+In the SDK, call `options.onEvent` with the same `session.started` event. The
+coordinator needs that identity while the turn is active; returning it only in
+the final receipt is too late for session control. Continue sending ordinary
+progress/activity events with the originating request ID. Responses retain the
+same execution receipt shape as v2, with optional `turnId` for a particular turn.
+Each continuation returns a separate receipt and its recorded usage.
+
+Keep a completed session available for continuation until the CLI requests
+release. A release can overlap another worker's execution or cleanup:
+
+```json
+{"jsonrpc":"2.0","id":"release-1","method":"execution.release","params":{"version":3,"sessionId":"session-1"}}
+{"jsonrpc":"2.0","id":"release-1","result":{"status":"completed","sessionId":"session-1"}}
+```
+
+Release acknowledges cleanup of that session, without another model turn.
+Session continuation belongs to the current invocation; it does not add a
+resume or replay operation for a completed or disconnected hosted scan.
+
+### Cancellation, receipts and acceptance
+
+The coordinator may send `execution.cancel` for one active request when its
+discovery budget or stopping condition is reached. Cancel that request and
+return its recorded outcome and usage; keep serving other requests, including
+comparison and release. In the SDK, this is the individual `run` call's
+AbortSignal. Run-level `cancel` aborts every active execution. The transport
+retains their receipts and allows session release after cancellation, while
+rejecting new execution work.
+
+V3 terminal results include `version: 3`, `mode: "deep"`, the resolved
+`deepScan` settings, `coordinatorStatus` when known, and `executions` in dispatch
+order. A response that arrives earlier does not move its receipt ahead of an
+earlier dispatch. Each `execution.run`, including a continuation or comparison,
+has a separate entry; release acknowledgments are not execution receipts. V2
+continues to return its single `execution` field.
+
+Usage is an opaque host observation and may lack model attribution. Preserve
+that uncertainty: absence is not zero, and the requested model is not evidence
+that unattributed usage belongs to that model. Host accounting remains
+authoritative.
+
+An `acceptance_unknown` outcome, lost connection, or mismatched receipt does not
+authorize replay. Retain the dispatch identities and known session identities,
+reconcile remote work, and collect usage before cleanup. The CLI does not
+resubmit the uncertain request or fall back to local inference. Deep results
+use the same sealed artifact validation and acceptance rules as Standard scans;
+coordinator success alone does not establish a completed scan.
+
+The package exports
+`@openai/codex-security/schemas/hosted-scan-v3.fixture.json` with synthetic
+parallel discovery requests, a continuation, comparison, early session
+progress, release, cancellation, and a final receipt. Its responses deliberately
+arrive out of order while terminal receipts remain in dispatch order. The
+cancellation message is an independent example, and artifact hashes and sizes
+are illustrative rather than receipts for real files.

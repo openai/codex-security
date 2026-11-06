@@ -80,7 +80,7 @@ try {
   );
   const identity = {
     version: 1,
-    hostProtocolVersion: 2,
+    hostProtocolVersion: 3,
     buildId: sha(`${packageSha256}\0${nodeSha256}\0${pluginSha256}`),
     sourceRevision: execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: packageRoot,

@@ -29,7 +29,8 @@
       "default": "./dist/index.js"
     },
     "./schemas/project-config.schema.json": "./schemas/project-config.schema.json",
-    "./schemas/hosted-scan-v2.fixture.json": "./schemas/hosted-scan-v2.fixture.json"
+    "./schemas/hosted-scan-v2.fixture.json": "./schemas/hosted-scan-v2.fixture.json",
+    "./schemas/hosted-scan-v3.fixture.json": "./schemas/hosted-scan-v3.fixture.json"
   },
   "bin": {
     "codex-security": "./bin/codex-security.mjs",

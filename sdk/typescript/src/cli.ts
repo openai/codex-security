@@ -5000,7 +5000,7 @@ export async function main(
             .boolean()
             .default(false)
             .describe(
-              "Run one hosted Standard scan over JSON-RPC stdin/stdout; use alone.",
+              "Run one hosted Standard (v2) or Deep (v3) scan over JSON-RPC stdin/stdout; use alone.",
             ),
           workflowId: optionValue("--workflow-id")
             .optional()
