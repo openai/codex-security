@@ -4,6 +4,7 @@ import { join, win32 } from "node:path";
 import { after, test } from "node:test";
 import { importModule, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
+import { registerWorkerExecutableFirstLaunchTests } from "./windows_executable_first_launch_cases.ts";
 
 const { resolvedPathText, isMissingPathError } = (await importSource(
   "src/helpers/helper-files.ts",
@@ -134,3 +135,6 @@ test(
     }
   },
 );
+
+// The Windows CI job runs this entry point directly and retains native TAP results.
+registerWorkerExecutableFirstLaunchTests();
