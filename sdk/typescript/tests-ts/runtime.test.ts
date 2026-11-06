@@ -4584,6 +4584,69 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("allows OWNER RIGHTS on a Windows ancestor only after verifying its owner", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const stranger = "S-1-5-21-111-222-333-1002";
+    for (const trustee of ["OW", "S-1-3-4"]) {
+      for (const owner of [user, "SY", "BA"]) {
+        const descriptor = `O:${owner}G:SYD:P(A;OICI;FA;;;${trustee})(A;;FA;;;${stranger})`;
+        expect(
+          inspectWindowsCredentialAcl(descriptor, user, { scope: "ancestor" })
+            .untrustedPrincipals,
+        ).toEqual([stranger]);
+      }
+      for (const owner of [stranger, "OW"]) {
+        expect(() =>
+          inspectWindowsCredentialAcl(
+            `O:${owner}G:SYD:P(A;;FA;;;${trustee})`,
+            user,
+            { scope: "ancestor" },
+          ),
+        ).toThrow(/owner/u);
+      }
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "prepares a Windows credential home beneath a protected OWNER RIGHTS ancestor",
+    async () => {
+      const parent = join(await temporaryDirectory(), "private-parent");
+      await mkdir(parent);
+      const environment = { ...process.env, QA_OWNER_RIGHTS_PARENT: parent };
+      const grant = windowsTestCommand("icacls.exe", [
+        parent,
+        "/inheritance:r",
+        "/grant:r",
+        `*${windowsUserSid()}:(OI)(CI)F`,
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+        "*S-1-3-4:(OI)(CI)F",
+      ]);
+      expect(grant.status, grant.stderr).toBe(0);
+      const readParent = () =>
+        inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:QA_OWNER_RIGHTS_PARENT).Sddl",
+          ],
+          environment,
+        );
+      const before = readParent();
+      expect(before.status, before.stderr).toBe(0);
+      expect(before.stdout).toMatch(/;;;(?:OW|S-1-3-4)\)/u);
+      const state = join(parent, "state");
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }),
+      ).toBe(join(state, "codex-home"));
+      const after = readParent();
+      expect(after.status, after.stderr).toBe(0);
+      expect(after.stdout).toBe(before.stdout);
+    },
+  );
+
   test("identifies broad, foreign, and inherited Windows ACL grants", () => {
     const user = "S-1-5-21-111-222-333-1001";
     const stranger = "S-1-5-21-111-222-333-1002";

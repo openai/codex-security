@@ -617,7 +617,10 @@ export function inspectWindowsCredentialAcl(
       if (!trustedPrincipal(principal)) {
         if (
           options.scope !== "ancestor" ||
-          windowsAceAllowsAncestorReplacement(rights!, inheritanceFlags)
+          // OWNER RIGHTS applies to the owner already verified above. Every
+          // descendant is inspected with its own security descriptor.
+          (principal !== WINDOWS_OWNER_RIGHTS_SID &&
+            windowsAceAllowsAncestorReplacement(rights!, inheritanceFlags))
         ) {
           untrustedPrincipals.add(principal);
         }
