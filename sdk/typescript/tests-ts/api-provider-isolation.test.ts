@@ -976,7 +976,13 @@ for (const mode of ["standard", "deep"] as const) {
         },
       );
       try {
-        const preflight = await client.preflight(repository, { mode });
+        const runOptions = {
+          mode,
+          ...(_selection === "managed Azure"
+            ? { auth: "chatgpt" as const }
+            : {}),
+        };
+        const preflight = await client.preflight(repository, runOptions);
         expect(preflight.authentication).toEqual({
           method: "api_key",
           source: providerKey,
@@ -1008,7 +1014,7 @@ for (const mode of ["standard", "deep"] as const) {
           expect(launched).toBe(false);
           return;
         }
-        await expect(client.run(repository, { mode })).rejects.toThrow(
+        await expect(client.run(repository, runOptions)).rejects.toThrow(
           "synthetic file provider child checked",
         );
         expect(launched).toBe(true);
