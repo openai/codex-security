@@ -4658,6 +4658,7 @@ export class CodexSecurity {
               modelProvider,
               providerEnvKey,
               session.effectiveConfig,
+              "selected",
             ),
           ),
         ),
