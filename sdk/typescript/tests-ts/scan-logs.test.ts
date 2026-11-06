@@ -331,6 +331,96 @@ describe("saved scan logs", () => {
     ]);
   });
 
+  test.each([
+    ["both", ["failed-attempt", "first-child", "retry", "retry-child"]],
+    ["retry only", ["retry", "retry-child"]],
+    ["neither", []],
+    ["neither with only the manual turn retained", []],
+  ] as const)(
+    "exports only proven turns in a retried discovery session (receipt IDs for %s)",
+    async (receiptIds, expected) => {
+      const home = await temporaryHome();
+      const directory = join(home, "worker-usage", "scan");
+      await mkdir(directory, { recursive: true });
+      for (const [turnId, startedAt, scanId] of [
+        ["failed-attempt", at("001"), "scan"],
+        ["retry", at("005"), "scan"],
+        ["manual", at("003"), "other-scan"],
+      ] as const) {
+        await writeFile(
+          join(directory, turnId + ".json"),
+          JSON.stringify({
+            schemaVersion: 1,
+            source: "codex_sdk",
+            usageScope: "thread_cumulative",
+            kind: "discovery",
+            scanId,
+            attemptId: turnId,
+            threadId: "worker",
+            ...((receiptIds === "both" ||
+              (receiptIds === "retry only" && turnId === "retry")) && {
+              turnId,
+            }),
+            outcome: turnId === "failed-attempt" ? "failed" : "succeeded",
+            startedAt,
+          }),
+        );
+      }
+      const events = [];
+      for (const [turnId, start, end] of [
+        ["failed-attempt", "001", "003"],
+        ["manual", "003", "005"],
+        ["retry", "005", "009"],
+      ] as const) {
+        if (
+          receiptIds === "neither with only the manual turn retained" &&
+          turnId !== "manual"
+        )
+          continue;
+        const started = task(start, "task_started");
+        events.push(
+          { ...started, payload: { ...started.payload, turn_id: turnId } },
+          commandEvent("result", turnId, at(start)),
+          task(
+            end,
+            turnId === "failed-attempt" ? "turn_aborted" : "task_complete",
+          ),
+        );
+      }
+      await writeSession(home, "worker", events, undefined, at("001"));
+      for (const [id, start] of [
+        ["first-child", "002"],
+        ["manual-child", "004"],
+        ["retry-child", "006"],
+      ] as const) {
+        await writeSession(
+          home,
+          id,
+          [task(start, "task_started"), commandEvent("result", id, at(start))],
+          "worker",
+          at(start),
+        );
+      }
+      const sessions = await scanRolloutSessions({
+        codexHome: home,
+        rootThreadId: "coordinator",
+        executionThreadIds: ["worker"],
+        workerReceipts: { directory, scanId: "scan" },
+        startedAt: at("001"),
+        completedAt: at("010"),
+      });
+      expect(sessions.map(({ threadId }) => threadId)).toContain("worker");
+      const ids = [];
+      for (const session of sessions) {
+        for await (const event of session.events()) {
+          if (event["type"] === "response_item")
+            ids.push((event["payload"] as Record<string, unknown>)["call_id"]);
+        }
+      }
+      expect(ids.sort()).toEqual([...expected]);
+    },
+  );
+
   test("keeps registered worker lineages when the execution root rollout is missing", async () => {
     const home = await temporaryHome();
     const startedAt = "2026-08-11T12:00:00Z",

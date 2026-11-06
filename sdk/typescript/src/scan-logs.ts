@@ -277,37 +277,43 @@ function rolloutInput(
 
 interface TurnMatch {
   count: number;
-  window?: RolloutWindow;
+  windows: Map<string | undefined, RolloutWindow | undefined>;
 }
 
 // A root thread can be reused. Only its exact submitted input opens a retained
-// turn. Workers need a fresh session and a unique in-window turn.
+// turn. Workers without receipted turns need a fresh session and one in-window turn.
 async function* retainedTurnEvents(
   session: SessionLog,
   window: RolloutWindow,
   prompt: string | undefined,
   match: TurnMatch,
+  turnIds?: ReadonlySet<string>,
 ) {
   let eligible = false;
   let active = false;
   let sawStart = false;
   let workerResponded = false;
   let turnStart: string | undefined;
+  let turnId: string | undefined;
   const begin = (timestamp: string) => {
     match.count++;
-    match.window = { startedAt: timestamp, completedAt: window.completedAt };
+    match.windows.set(turnId, {
+      startedAt: timestamp,
+      completedAt: window.completedAt,
+    });
     active = true;
   };
   const finish = (timestamp: unknown) => {
-    if (active && match.window) {
+    const childWindow = active && match.windows.get(turnId);
+    if (childWindow) {
       // An undated boundary cannot tell us when a child was spawned.
       if (
         typeof timestamp !== "string" ||
         !Number.isFinite(Date.parse(timestamp))
       )
-        delete match.window;
-      else if (compareTimestamps(timestamp, match.window.completedAt) < 0)
-        match.window.completedAt = timestamp;
+        match.windows.set(turnId, undefined);
+      else if (compareTimestamps(timestamp, childWindow.completedAt) < 0)
+        childWindow.completedAt = timestamp;
     }
     eligible = active = false;
   };
@@ -326,8 +332,14 @@ async function* retainedTurnEvents(
       sawStart = true;
       workerResponded = false;
       turnStart = typeof timestamp === "string" ? timestamp : undefined;
+      turnId =
+        turnIds && typeof payload["turn_id"] === "string"
+          ? payload["turn_id"]
+          : undefined;
       eligible =
-        typeof turnStart === "string" && inRolloutWindow(turnStart, window);
+        typeof turnStart === "string" &&
+        inRolloutWindow(turnStart, window) &&
+        (!turnIds || (turnId !== undefined && turnIds.has(turnId)));
       if (eligible && prompt === undefined) begin(turnStart!);
     }
     const input = rolloutInput(type, payload);
@@ -354,6 +366,7 @@ async function* retainedTurnEvents(
         ) {
           // Direct Deep Scan injects one known user item without starting a model turn.
           match.count++;
+          match.windows.set(undefined, undefined);
           yield event;
         }
       }
@@ -393,17 +406,29 @@ export async function scanRolloutSessions(
     options.rootThreadId,
     ...(options.executionThreadIds ?? []),
   ];
+  const workerTurns = new Map<string, { ids: Set<string>; reused: boolean }>();
   if (options.workerReceipts) {
-    // Comparisons start independent SDK threads. A matching cwd alone cannot
-    // establish that a standalone thread in a shared home belongs to the scan.
-    const { usages } = await readWorkerReceipts(
-      options.workerReceipts,
-      new Map(),
-      (receipt) =>
-        receipt["kind"] === "compare" &&
-        inRolloutWindow(receipt["startedAt"], options),
-    );
-    for (const id of usages.keys()) execution.push(id);
+    await readWorkerReceipts(options.workerReceipts, new Map(), (receipt) => {
+      const threadId = receipt["threadId"];
+      if (
+        typeof threadId !== "string" ||
+        !inRolloutWindow(receipt["startedAt"], options)
+      )
+        return;
+      // Comparisons start standalone SDK threads, while discovery retries can
+      // resume one registered thread for several scan-owned turns.
+      if (receipt["kind"] === "compare") execution.push(threadId);
+      if (receipt["kind"] === "discovery") {
+        const previous = workerTurns.get(threadId);
+        const ids = previous?.ids ?? new Set<string>();
+        if (typeof receipt["turnId"] === "string" && receipt["turnId"])
+          ids.add(receipt["turnId"]);
+        workerTurns.set(threadId, {
+          ids,
+          reused: previous !== undefined || receipt["resumed"] === true,
+        });
+      }
+    });
   }
   const sessions = await selectSessionCopies(
     {
@@ -420,7 +445,8 @@ export async function scanRolloutSessions(
     session: SessionLog;
     prompt?: string;
     window: RolloutWindow;
-    children?: RolloutWindow;
+    turnIds?: ReadonlySet<string>;
+    match: TurnMatch;
   };
   const captures = new Map<string, Promise<Capture | null>>();
   function capture(id: string): Promise<Capture | null> {
@@ -432,20 +458,34 @@ export async function scanRolloutSessions(
       const session = await completeSession(copies);
       const prompt =
         id === options.rootThreadId ? options.rootPrompt : undefined;
-      if (prompt === undefined && !inRolloutWindow(session.timestamp, options))
+      const worker = prompt === undefined ? workerTurns.get(id) : undefined;
+      // A retry receipt prevents the single-turn fallback even if only one
+      // task survives in the rollout and no receipt has a native turn ID.
+      const turnIds =
+        worker && (worker.reused || worker.ids.size) ? worker.ids : undefined;
+      if (
+        prompt === undefined &&
+        !turnIds &&
+        !inRolloutWindow(session.timestamp, options)
+      )
         return null;
       if (!registered.has(id)) {
-        const parent =
-          session.parentThreadId && (await capture(session.parentThreadId));
+        const parent = session.parentThreadId
+          ? await capture(session.parentThreadId)
+          : null;
+        const { timestamp } = session;
         // Spawn metadata names a parent thread, not its turn. Creation at the
         // very same clock tick as either boundary cannot prove ownership.
         if (
-          !parent ||
-          !parent.children ||
-          !session.timestamp ||
-          compareTimestamps(session.timestamp, parent.children.startedAt) <=
-            0 ||
-          !inRolloutWindow(session.timestamp, parent.children)
+          !timestamp ||
+          !parent?.match.windows
+            .values()
+            .some(
+              (window) =>
+                window !== undefined &&
+                compareTimestamps(timestamp, window.startedAt) > 0 &&
+                inRolloutWindow(timestamp, window),
+            )
         )
           return null;
       }
@@ -454,18 +494,20 @@ export async function scanRolloutSessions(
         compareTimestamps(session.timestamp, options.startedAt) > 0
           ? { ...options, startedAt: session.timestamp }
           : options;
-      const match: TurnMatch = { count: 0 };
+      const match: TurnMatch = { count: 0, windows: new Map() };
       // Establish uniqueness without keeping whole rollouts in memory.
       for await (const _ of retainedTurnEvents(
         session,
         window,
         prompt,
         match,
+        turnIds,
       )) {
         /* drain */
       }
-      return match.count === 1
-        ? { session, prompt, window, children: match.window }
+      // Duplicate starts for one ID (including the legacy no-ID case) are ambiguous.
+      return match.count > 0 && match.count === match.windows.size
+        ? { session, prompt, window, match, turnIds }
         : null;
     })();
     captures.set(id, result);
@@ -482,17 +524,15 @@ export async function scanRolloutSessions(
     async *events() {
       const selected = await capture(session.threadId);
       if (!selected) return;
-      const match: TurnMatch = { count: 0 };
+      const match: TurnMatch = { count: 0, windows: new Map() };
       yield* retainedTurnEvents(
         selected.session,
         selected.window,
         selected.prompt,
         match,
+        selected.turnIds,
       );
-      if (
-        match.count !== 1 ||
-        !isDeepStrictEqual(match.window, selected.children)
-      )
+      if (!isDeepStrictEqual(match, selected.match))
         throw new CodexSecurityError(
           "The selected rollout turn changed before export.",
         );

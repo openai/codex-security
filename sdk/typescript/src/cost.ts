@@ -3246,7 +3246,7 @@ export class ScanCostTracker {
 export async function readWorkerReceipts(
   store: ScanCostTrackerOptions["workerReceipts"],
   retained: Map<string, WorkerReceipt>,
-  select?: (receipt: Record<string, unknown>) => boolean,
+  observe?: (receipt: Record<string, unknown>) => void,
 ): Promise<{
   usages: Map<string, ScanTokenUsage | null>;
   unknownAttempts: number;
@@ -3291,11 +3291,11 @@ export async function readWorkerReceipts(
         receipt["scanId"] !== scanId ||
         typeof receipt["attemptId"] !== "string" ||
         entry.name !== `${receipt["attemptId"]}.json` ||
-        attempts.has(receipt["attemptId"]) ||
-        select?.(receipt) === false
+        attempts.has(receipt["attemptId"])
       )
         continue;
       attempts.add(receipt["attemptId"]);
+      observe?.(receipt);
       retained.set(receipt["attemptId"], {
         threadId:
           typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,
