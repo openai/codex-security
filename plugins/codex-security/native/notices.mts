@@ -35,7 +35,7 @@ const packages = metadata.packages
   });
 // These archives omit LICENSE; their pinned upstream revisions share this text.
 const napiLicense = new Set([
-  "napi@3.15.0",
+  "napi@3.16.0",
   "napi-build@2.6.0",
   "napi-derive@3.7.0",
   "napi-derive-backend@7.0.0",
