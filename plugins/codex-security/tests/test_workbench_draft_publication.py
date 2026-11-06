@@ -41,6 +41,7 @@ def stage_model_draft(tmp_path, scan_dir, scan_id, target, model, *, complete=Tr
     return documents, staged
 
 
+@pytest.mark.native_windows
 @pytest.mark.parametrize("filename", ["findings.json", "coverage.json"])
 @pytest.mark.parametrize("previous", ["unfinished", "symlink"])
 def test_terminal_deep_draft_compares_previous_bytes_without_parsing_review_documents(
