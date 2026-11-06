@@ -706,6 +706,65 @@ describe("Codex configuration", () => {
     },
   );
 
+  test("distinguishes managed Vertex APIs from dedicated endpoints and other gateways", () => {
+    const base =
+      "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/example/locations/us-central1";
+    const fromUrl = (baseUrl: string) =>
+      scanPricingContext({ openai_base_url: baseUrl }, {});
+    expect(fromUrl(`${base}/endpoints/openapi`)).toEqual({
+      provider: "gcp",
+      managedEndpoint: true,
+    });
+    expect(fromUrl(`${base}/endpoints/1234`)).toEqual({
+      provider: "gcp",
+      managedEndpoint: false,
+    });
+    expect(
+      fromUrl("https://123.us-central1-example.prediction.vertexai.goog"),
+    ).toEqual({ provider: "gcp", managedEndpoint: false });
+    expect(
+      fromUrl(
+        "https://aiplatform.mtls.googleapis.com./v1/projects/example/locations/global/endpoints/openapi",
+      ),
+    ).toEqual({ provider: "gcp", managedEndpoint: true });
+    expect(fromUrl("https://gateway.example.test")).toBeUndefined();
+    expect(
+      scanPricingContext(
+        { model_providers: { openai: { base_url: base } } },
+        { OPENAI_BASE_URL: base },
+      ),
+    ).toBeUndefined();
+    const config = {
+      profile: "review",
+      profiles: {
+        review: {
+          model_provider: "vertex",
+          model_providers: {
+            vertex: {
+              base_url:
+                "https://aiplatform.googleapis.com/v1/projects/example/locations/global/publishers/openai/v1/",
+            },
+          },
+        },
+      },
+    };
+    expect(scanPricingContext(config, {})).toEqual({
+      provider: "gcp",
+      managedEndpoint: true,
+    });
+    expect(
+      scanPricingContext(
+        {
+          model_provider: "gcp",
+          model_providers: {
+            gcp: { base_url: "https://gateway.example.test" },
+          },
+        },
+        {},
+      ),
+    ).toEqual({ provider: "gcp", managedEndpoint: false });
+  });
+
   test("rejects invalid model settings from the selected Codex profile", async () => {
     for (const [profile, message] of [
       [{ model: " " }, "model must be a nonempty string"],

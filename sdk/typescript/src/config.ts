@@ -152,19 +152,47 @@ export function scanPricingContext(
   config: Readonly<JsonObject>,
   environment: Readonly<Record<string, string | undefined>>,
 ): ScanPricingContext | undefined {
-  const selected = scanModelProvider(config);
-  if (selected !== "amazon-bedrock" && selected !== "amazon-bedrock-runtime") {
-    return undefined;
-  }
+  const selected = scanModelProvider(config) ?? "openai";
+  if (typeof selected !== "string") return undefined;
   const resolved = selectedScanProfile(config)
     ? resolveCodexProfile(config)
     : config;
   const providers = resolved["model_providers"];
   const provider = isObject(providers) ? providers[selected] : undefined;
-  return {
-    provider: "amazon-bedrock",
-    region: bedrockPricingRegion(provider, environment),
-  };
+  if (selected === "amazon-bedrock" || selected === "amazon-bedrock-runtime") {
+    return {
+      provider: "amazon-bedrock",
+      region: bedrockPricingRegion(provider, environment),
+    };
+  }
+  // Native Codex only accepts inference routing for the built-in OpenAI
+  // provider through the top-level openai_base_url setting.
+  const baseUrl =
+    selected === "openai"
+      ? resolved["openai_base_url"]
+      : isObject(provider)
+        ? provider["base_url"]
+        : undefined;
+  if (baseUrl == null)
+    return selected === "gcp" ? { provider: "gcp" } : undefined;
+
+  const url = typeof baseUrl === "string" ? URL.parse(baseUrl) : null;
+  const host = url?.hostname.replace(/\.$/, "") ?? "";
+  if (host.endsWith(".prediction.vertexai.goog")) {
+    return { provider: "gcp", managedEndpoint: false };
+  }
+  const vertexHost =
+    url &&
+    /^(?:[a-z0-9-]+-)?aiplatform(?:\.mtls)?\.googleapis\.com$/.test(host);
+  if (selected !== "gcp" && !vertexHost) return undefined;
+  // A dedicated endpoint bills the serving infrastructure. Only publisher and
+  // shared OpenAPI endpoints identify the managed token-based service.
+  const managedEndpoint =
+    !!vertexHost &&
+    /^\/v1(?:beta1)?\/projects\/[^/]+\/locations\/[^/]+\/(?:publishers\/openai\/v1|endpoints\/openapi)\/?$/.test(
+      url.pathname,
+    );
+  return { provider: "gcp", managedEndpoint };
 }
 
 /** @internal Use the selected native provider's configured credential key. */
