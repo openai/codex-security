@@ -3047,8 +3047,19 @@ export async function bootstrapPlugin(
   const previous: unknown = await readFile(installRecord, "utf8")
     .then((value) => JSON.parse(value) as unknown)
     .catch((error: unknown) => {
-      if (nodeErrorCode(error) === "ENOENT" || error instanceof SyntaxError) {
+      const code = nodeErrorCode(error);
+      if (code === "ENOENT" || error instanceof SyntaxError) {
         return null;
+      }
+      if (
+        process.platform === "win32" &&
+        error instanceof Error &&
+        (code === "EACCES" || code === "EPERM")
+      ) {
+        // Keep the original system error, including its path, code and syscall.
+        error.message +=
+          " If the SDK created this plugin installation receipt but cannot reopen it, " +
+          "check its read permissions and the permissions new files inherit from the sdk-marketplace directory.";
       }
       throw error;
     });
