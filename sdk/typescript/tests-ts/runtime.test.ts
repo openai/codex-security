@@ -81,6 +81,7 @@ import {
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
+  isLocalWindowsCredentialVolume,
   parseWindowsTokenGroupSids,
   isPythonPathCandidate,
   planOutputArchive,
@@ -4500,6 +4501,27 @@ describe("runtime directories and plugin Python boundary", () => {
       untrustedPrincipals: [],
       deniedPrincipals: ["S-1-1-0"],
     });
+  });
+
+  test("uses local group membership only on local Windows volumes", async () => {
+    const readType = mock(async () => "4");
+    for (const path of [
+      String.raw`\\server\share\home`,
+      String.raw`\\?\UNC\server\share\home`,
+    ]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+    }
+    expect(readType).not.toHaveBeenCalled();
+    for (const path of [String.raw`X:\home`, String.raw`\\?\X:\home`]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+      expect(readType).toHaveBeenLastCalledWith("X:");
+      expect(
+        await isLocalWindowsCredentialVolume(path, async () => "3\r\n"),
+      ).toBe(true);
+      expect(await isLocalWindowsCredentialVolume(path, async () => "")).toBe(
+        false,
+      );
+    }
   });
 
   test("preserves account denies only after excluding current token membership", () => {

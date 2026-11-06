@@ -971,6 +971,19 @@ export async function inspectWindowsCredentialAclSnapshot(
   throw new Error("Windows credential descendants could not be verified");
 }
 
+/** A file server may add its own groups to the client's token. */
+export async function isLocalWindowsCredentialVolume(
+  path: string,
+  readDriveType: (drive: string) => Promise<string>,
+): Promise<boolean> {
+  const drive = /^\\\\[?.]\\([A-Z]:)\\/iu.exec(
+    win32.toNamespacedPath(path),
+  )?.[1];
+  if (!drive) return false;
+  // Win32_LogicalDisk reports removable, local disk, and RAM disk as 2, 3, 6.
+  return ["2", "3", "6"].includes((await readDriveType(drive)).trim());
+}
+
 /** Keep every token group, including groups used only for deny ACEs. */
 export function parseWindowsTokenGroupSids(output: string): Set<string> {
   const groups = new Set<string>();
@@ -1114,7 +1127,30 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     );
     resolvedAliases[principal] = requireNumericSid(resolved.stdout.trim());
   };
-  let currentGroupSids: Set<string> | undefined;
+  const loadLocalGroupSids = async (): Promise<Set<string> | null> => {
+    const local = await isLocalWindowsCredentialVolume(
+      treePath,
+      async (drive) => {
+        const volume = await execFile(
+          powershell,
+          [
+            ...powershellArgs,
+            `$ErrorActionPreference = 'Stop'; (CimCmdlets\\Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID = '${drive}'").DriveType`,
+          ],
+          processOptions,
+        );
+        return volume.stdout;
+      },
+    );
+    if (!local) return null;
+    const groups = await execFile(
+      join(systemDirectory, "whoami.exe"),
+      ["/groups", "/fo", "csv", "/nh"],
+      processOptions,
+    );
+    return parseWindowsTokenGroupSids(groups.stdout);
+  };
+  let currentGroupSids: Set<string> | null | undefined;
   const resolveDescriptorAliases = async (
     descriptor: string,
   ): Promise<void> => {
@@ -1135,12 +1171,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
           trustee !== sid &&
           WINDOWS_ACCOUNT_SID.test(trustee)
         ) {
-          const groups = await execFile(
-            join(systemDirectory, "whoami.exe"),
-            ["/groups", "/fo", "csv", "/nh"],
-            processOptions,
-          );
-          currentGroupSids = parseWindowsTokenGroupSids(groups.stdout);
+          currentGroupSids = await loadLocalGroupSids();
         }
       }
       remaining = rest;
@@ -1153,7 +1184,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       args: [...powershellArgs, script],
       environment: processOptions.env,
       get currentGroupSids() {
-        return currentGroupSids;
+        return currentGroupSids ?? undefined;
       },
       resolvedAliases,
       resolveDescriptorAliases,
