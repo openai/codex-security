@@ -3635,7 +3635,7 @@ async function usablePython(
         "import importlib.util,sys\nif sys.version_info < (3, 10): raise SystemExit(1)\nif sys.version_info < (3, 11) and importlib.util.find_spec('tomli') is None: raise SystemExit(1)\nprint('codex-security-python-ok')",
       ],
       {
-        env: command.environment,
+        env: pluginHelperEnvironment(command.environment),
         encoding: "utf8",
         // Cold Python startup can exceed five seconds on busy Windows hosts.
         timeout: 30_000,

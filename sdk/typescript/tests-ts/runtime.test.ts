@@ -6433,14 +6433,18 @@ describe("runtime directories and plugin Python boundary", () => {
     const configured = join(root, "configured-python");
     await writeFile(
       configured,
-      '#!/bin/sh\n[ "$1" = "-I" ] || exit 1\n[ "$2" = "-c" ] || exit 1\ncase "$3" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$3" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+      '#!/bin/sh\n[ -z "$AZURE_OPENAI_API_KEY" ] || exit 1\n[ "$1" = "-I" ] || exit 1\n[ "$2" = "-c" ] || exit 1\ncase "$3" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$3" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
     );
     await chmod(configured, 0o700);
     const canonicalConfigured = await realpath(configured);
     expect(
       await resolvePluginPython({
         configuredPath: relative(process.cwd(), configured),
-        environment: { PATH: "", PYTHONOPTIMIZE: "1" },
+        environment: {
+          PATH: "",
+          PYTHONOPTIMIZE: "1",
+          AZURE_OPENAI_API_KEY: "fixture-azure-key",
+        },
       }),
     ).toBe(canonicalConfigured);
     expect(
