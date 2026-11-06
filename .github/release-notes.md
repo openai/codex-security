@@ -141,6 +141,7 @@
 - recover long Windows root inventories with an exact Git marker ([#2404](https://github.com/openai/codex-security/pull/2404))
 - bump napi from 3.15.0 to 3.16.0 in /plugins/codex-security/native ([#2395](https://github.com/openai/codex-security/pull/2395))
 - explain unreadable plugin installation receipts ([#2403](https://github.com/openai/codex-security/pull/2403))
+- open long state paths in JavaScript SQLite connections ([#2380](https://github.com/openai/codex-security/pull/2380))
 
 </details>
 

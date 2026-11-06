@@ -82,6 +82,7 @@ import {
 } from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
+  sqliteFilename,
   windowsUnsafePathComponent,
 } from "./windows-path.js";
 
@@ -1331,7 +1332,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
   // Let SQLite create a missing guard so no separate descriptor can close after
   // another connection acquires its process-owned POSIX lock. Keep the guard
   // across releases so every contender locks the same inode.
-  const database = new Database(databasePath);
+  const database = new Database(sqliteFilename(databasePath));
   let databaseLocked = false;
 
   try {
