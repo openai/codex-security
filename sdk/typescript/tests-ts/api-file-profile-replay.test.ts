@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, onTestFinished, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
@@ -38,17 +38,35 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 afterEach(cleanup);
 
-test.each([
+async function withRegistrationFixture(
+  run: (
+    controller: AbortController,
+    newDirectory: typeof temporaryDirectory,
+  ) => Promise<void>,
+): Promise<void> {
+  const fixture = createApiTestFixtures("file-profile-registration-");
+  const controller = new AbortController();
+  let scenario: Promise<void> | undefined;
+  onTestFinished(async () => {
+    controller.abort();
+    // The test reports its own error. Wait for its finally block before removing files.
+    await scenario?.catch(() => undefined);
+    await fixture.cleanup();
+  });
+  scenario = run(controller, fixture.temporaryDirectory);
+  await scenario;
+}
+
+test.serial.each([
   "early",
   "precommit",
   "rejected",
   "postcommit",
   "unavailable-receipt",
   "success",
-] as const)(
-  "private replay ownership after %s registration",
-  async (boundary) => {
-    const root = await temporaryDirectory();
+] as const)("private replay ownership after %s registration", (boundary) =>
+  withRegistrationFixture(async (controller, newDirectory) => {
+    const root = await newDirectory();
     const repository = join(root, "repository");
     const home = join(root, "home");
     const runtimeHome = join(root, "runtime");
@@ -100,94 +118,94 @@ test.each([
         if (error.code !== "ECONNRESET") throw error;
       });
     });
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const address = server.address();
-    if (address === null || typeof address === "string")
-      throw new Error("Missing registration fixture port");
-    const pluginRoot = join(root, "controlled-plugin");
-    await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
-    const paused = ["precommit", "postcommit", "unavailable-receipt"].includes(
-      boundary,
-    );
-    await writeFile(
-      join(pluginRoot, "scripts", "workbench_db.py"),
-      [
-        "import runpy, socket, sys",
-        `workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})`,
-        "namespace = workbench['main'].__globals__",
-        ...(paused
-          ? [
-              `original = namespace[${JSON.stringify(boundary === "precommit" ? "insert_running_scan" : "register_cli_scan")}]`,
-              "def pause():",
-              `    with socket.create_connection(('127.0.0.1', ${address.port})) as connection:`,
-              "        connection.sendall(b'ready')",
-              "        connection.recv(1)",
-              "def controlled(*args, **kwargs):",
-              ...(boundary === "precommit" ? ["    pause()"] : []),
-              "    result = original(*args, **kwargs)",
-              ...(boundary === "precommit" ? [] : ["    pause()"]),
-              "    return result",
-              `namespace[${JSON.stringify(boundary === "precommit" ? "insert_running_scan" : "register_cli_scan")}] = controlled`,
-            ]
-          : []),
-        "if __name__ == '__main__': workbench['main']()",
-      ].join("\n"),
-    );
-    const python = pythonExecutable()!;
-    const workbenchOptions = { python, pluginRoot: PLUGIN_ROOT, environment };
-    const controller = new AbortController();
-    const deadline = new AbortController();
-    const timer = setTimeout(() => deadline.abort(), 10_000);
-    const ready = paused
-      ? once(server, "connection", { signal: deadline.signal }).then(
-          async ([socket]) => {
-            const [message] = await once(socket, "data", {
-              signal: deadline.signal,
-            });
-            expect(String(message)).toBe("ready");
-          },
-        )
-      : undefined;
-    let submitted: JsonObject | undefined;
-    const client = new TestClient(
-      { pluginPath: pluginRoot, codexOverrides: explicit },
-      {
-        environment,
-        resolvePluginPython: async () => python,
-        prepareRuntime: async () => {
-          const runtime = preparedRuntime(runtimeHome);
-          runtime.plugin.pluginRoot = pluginRoot;
-          return runtime;
-        },
-        prepareOutputDir: async () => scanDir,
-        runWorkbench: async (options, args, input) => {
-          if (args[0] === "register-cli-scan") {
-            submitted = JSON.parse(input!).recipe;
-            if (boundary === "rejected")
-              args = [
-                ...args,
-                "--parent-scan-id",
-                "00000000-0000-4000-8000-000000000001",
-              ];
-          }
-          if (boundary === "unavailable-receipt" && args[0] === "list-scans")
-            throw new Error("Synthetic unavailable registration receipt");
-          return runWorkbench({ ...options, python }, args, input);
-        },
-        createCodex: async () => ({
-          startThread: () => ({
-            id: null,
-            runStreamed: rejecting("synthetic stop after registration"),
-          }),
-        }),
-      },
-    );
-    if (boundary === "early") controller.abort();
-    const operation = client
-      .run(repository, { signal: controller.signal })
-      .catch((error: unknown) => error);
+    let client: TestClient | undefined;
+    let operation: Promise<unknown> | undefined;
     try {
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        throw new Error("Missing registration fixture port");
+      const pluginRoot = join(root, "controlled-plugin");
+      await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+      const paused = [
+        "precommit",
+        "postcommit",
+        "unavailable-receipt",
+      ].includes(boundary);
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import runpy, socket, sys",
+          `workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})`,
+          "namespace = workbench['main'].__globals__",
+          ...(paused
+            ? [
+                `original = namespace[${JSON.stringify(boundary === "precommit" ? "insert_running_scan" : "register_cli_scan")}]`,
+                "def pause():",
+                `    with socket.create_connection(('127.0.0.1', ${address.port})) as connection:`,
+                "        connection.sendall(b'ready')",
+                "        connection.recv(1)",
+                "def controlled(*args, **kwargs):",
+                ...(boundary === "precommit" ? ["    pause()"] : []),
+                "    result = original(*args, **kwargs)",
+                ...(boundary === "precommit" ? [] : ["    pause()"]),
+                "    return result",
+                `namespace[${JSON.stringify(boundary === "precommit" ? "insert_running_scan" : "register_cli_scan")}] = controlled`,
+              ]
+            : []),
+          "if __name__ == '__main__': workbench['main']()",
+        ].join("\n"),
+      );
+      const python = pythonExecutable()!;
+      const workbenchOptions = { python, pluginRoot: PLUGIN_ROOT, environment };
+      const readinessOptions = { signal: controller.signal };
+      const ready = paused
+        ? once(server, "connection", readinessOptions).then(
+            async ([socket]) => {
+              const [message] = await once(socket, "data", readinessOptions);
+              expect(String(message)).toBe("ready");
+            },
+          )
+        : undefined;
+      let submitted: JsonObject | undefined;
+      client = new TestClient(
+        { pluginPath: pluginRoot, codexOverrides: explicit },
+        {
+          environment,
+          resolvePluginPython: async () => python,
+          prepareRuntime: async () => {
+            const runtime = preparedRuntime(runtimeHome);
+            runtime.plugin.pluginRoot = pluginRoot;
+            return runtime;
+          },
+          prepareOutputDir: async () => scanDir,
+          runWorkbench: async (options, args, input) => {
+            if (args[0] === "register-cli-scan") {
+              submitted = JSON.parse(input!).recipe;
+              if (boundary === "rejected")
+                args = [
+                  ...args,
+                  "--parent-scan-id",
+                  "00000000-0000-4000-8000-000000000001",
+                ];
+            }
+            if (boundary === "unavailable-receipt" && args[0] === "list-scans")
+              throw new Error("Synthetic unavailable registration receipt");
+            return runWorkbench({ ...options, python }, args, input);
+          },
+          createCodex: async () => ({
+            startThread: () => ({
+              id: null,
+              runStreamed: rejecting("synthetic stop after registration"),
+            }),
+          }),
+        },
+      );
+      if (boundary === "early") controller.abort();
+      operation = client
+        .run(repository, { signal: controller.signal })
+        .catch((error: unknown) => error);
       if (ready !== undefined) {
         await Promise.race([
           ready,
@@ -286,16 +304,19 @@ test.each([
       if (process.platform !== "win32")
         expect((await stat(privatePath)).mode & 0o777).toBe(0o600);
     } finally {
-      clearTimeout(timer);
       controller.abort();
       for (const socket of sockets) socket.destroy();
-      await operation;
-      await client.close();
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
+      try {
+        await operation;
+        await client?.close();
+      } finally {
+        if (server.listening)
+          await new Promise<void>((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          );
+      }
     }
-  },
+  }),
 );
 
 test.each(
