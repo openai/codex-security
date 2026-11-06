@@ -137,6 +137,7 @@ def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
         return Path(tempfile.mkdtemp(prefix=prefix, dir=parent)).resolve()
 
     import secrets
+    from windows_scan_local_files import scan_root_identity
 
     for _ in range(100):
         path = parent / f"{prefix}{secrets.token_hex(4)}"
@@ -144,5 +145,9 @@ def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
             _create_private_windows_directory(path, exist_ok=False)
         except FileExistsError:
             continue
-        return path.resolve()
+        canonical, created_identity = scan_root_identity(path)
+        current = canonical.lstat()
+        if (current.st_dev, current.st_ino) != created_identity:
+            raise OSError("New scan directory changed after creation.")
+        return canonical
     raise FileExistsError(f"Could not create a unique directory beneath {parent}.")
