@@ -14,7 +14,6 @@ sys.path.insert(0, str(SCRIPTS))
 
 from workbench import storage  # noqa: E402
 
-
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="requires native Windows junctions")
 
 

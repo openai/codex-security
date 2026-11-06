@@ -86,9 +86,7 @@ def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> None:
     flags = ctypes.wintypes.DWORD()
     if not kernel.GetVolumePathNameW(str(path.parent.resolve()), volume, len(volume)):
         raise ctypes.WinError(ctypes.get_last_error())
-    if not kernel.GetVolumeInformationW(
-        volume, None, 0, None, None, ctypes.byref(flags), None, 0
-    ):
+    if not kernel.GetVolumeInformationW(volume, None, 0, None, None, ctypes.byref(flags), None, 0):
         raise ctypes.WinError(ctypes.get_last_error())
     if not flags.value & 0x8:  # FILE_PERSISTENT_ACLS
         raise ValueError("Select a directory on a Windows volume that supports ACLs.")
@@ -137,6 +135,7 @@ def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
         return Path(tempfile.mkdtemp(prefix=prefix, dir=parent)).resolve()
 
     import secrets
+
     from windows_scan_local_files import scan_root_identity
 
     for _ in range(100):
