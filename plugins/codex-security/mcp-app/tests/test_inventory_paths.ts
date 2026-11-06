@@ -4,7 +4,7 @@ import fs from "node:fs";
 import childProcess from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { constants, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { importSource } from "./import-module.ts";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
 
@@ -12,8 +12,37 @@ const helperUrl = new URL(
   "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
   import.meta.url,
 );
-const { git, runTool } = await importSource("src/helpers/inventory-git.ts", {
-  define: { "import.meta.url": JSON.stringify(helperUrl.href) },
+const { git, runTool, toolPathInRepository } = await importSource(
+  "src/helpers/inventory-git.ts",
+  {
+    define: { "import.meta.url": JSON.stringify(helperUrl.href) },
+  },
+);
+
+test("tool containment recognizes equivalent Windows repository paths", () => {
+  const contained = (root: string, path: string) =>
+    toolPathInRepository(root, path, win32);
+  for (const root of [String.raw`C:\repo`, String.raw`\\server\share\repo`]) {
+    const extended = win32.toNamespacedPath(root);
+    const child = win32.join(root, "tools", "placeholder");
+    assert.equal(contained(extended, child), true);
+    assert.equal(contained(root, win32.toNamespacedPath(child)), true);
+    assert.equal(contained(extended, root), true);
+    assert.equal(contained(root, `${root}-other`), false);
+  }
+  assert.equal(contained("C:\\repo", "D:\\repo\\tools"), false);
+  assert.equal(
+    contained(String.raw`\\server\share\repo`, String.raw`\\server\other\repo`),
+    false,
+  );
+  const volume = String.raw`\\?\Volume{00000000-0000-0000-0000-000000000001}\repo`;
+  assert.equal(contained(volume, win32.join(volume, "tools")), true);
+  assert.equal(contained(volume, "C:\\repo\\tools"), false);
+  assert.equal(toolPathInRepository("/repo", "/repo/..notes", posix), true);
+  assert.equal(
+    toolPathInRepository("/repo", "/repo-other/tools", posix),
+    false,
+  );
 });
 
 for (const [name, details] of [

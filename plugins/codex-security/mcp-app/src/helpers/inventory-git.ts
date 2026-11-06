@@ -10,7 +10,7 @@ import {
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
-import {
+import pathSyntax, {
   basename,
   dirname,
   delimiter,
@@ -84,6 +84,23 @@ function selectedBundledRipgrep(candidate: string): boolean {
   }
 }
 
+// Filesystem resolution can return different Win32 spellings for the same root.
+export function toolPathInRepository(
+  root: string,
+  candidate: string,
+  paths = pathSyntax,
+): boolean {
+  const name = paths.relative(
+    paths.toNamespacedPath(root),
+    paths.toNamespacedPath(candidate),
+  );
+  return (
+    !paths.isAbsolute(name) &&
+    name !== ".." &&
+    !name.startsWith(`..${paths.sep}`)
+  );
+}
+
 function trustedTool(
   name: "git" | "rg",
   target: string,
@@ -150,14 +167,7 @@ function trustedTool(
     )
       continue;
     const inRepository = [resolve(candidate), invocation, resolved].some(
-      (path) => {
-        try {
-          inside(protectedRoot, path);
-          return true;
-        } catch {
-          return false;
-        }
-      },
+      (path) => toolPathInRepository(protectedRoot, path),
     );
     if (inRepository && !(name === "rg" && selectedBundledRipgrep(resolved))) {
       if (configured !== undefined)
