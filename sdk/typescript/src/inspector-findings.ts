@@ -23,6 +23,7 @@ import {
   record,
   repositoryFilePath,
   requiredText,
+  scannerSeverity,
   strings,
   text,
 } from "./scanner-import.js";
@@ -586,11 +587,7 @@ function evidence(
       code?.detectorName ??
       id,
     description: requiredText(description, "Inspector description"),
-    severity: ["critical", "high", "medium", "low", "informational"].includes(
-      level,
-    )
-      ? level
-      : "unknown",
+    severity: scannerSeverity(level),
     url: text(pkg?.sourceUrl),
     advisory_ids:
       previousProjection && pkg?.relatedVulnerabilities

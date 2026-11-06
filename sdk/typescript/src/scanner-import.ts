@@ -6,7 +6,7 @@ import { gunzip } from "node:zlib";
 import validSemver from "semver/functions/valid.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
-import { SCAN_SEVERITIES } from "./scan-settings.js";
+import { REPORTABLE_SEVERITIES, SCAN_SEVERITIES } from "./scan-settings.js";
 import { asRecord, isRecord } from "./record.js";
 import { previousAdmission } from "./external-import-contract.js";
 import { rememberPreviousSelection } from "./reader-selection.js";
@@ -224,6 +224,14 @@ export function sarifRunRepositories(
       },
     ];
   });
+}
+
+/** Normalize scanners whose reported severities range from low to critical. */
+export function reportableScannerSeverity(value: unknown) {
+  const level = text(value)?.toLowerCase();
+  return (
+    REPORTABLE_SEVERITIES.find((severity) => severity === level) ?? "unknown"
+  );
 }
 
 export function scannerSeverity(value: string | null | undefined) {

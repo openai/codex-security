@@ -12,6 +12,7 @@ import {
   readScannerJson,
   record,
   relativePath,
+  reportableScannerSeverity,
   requiredText,
   sarifRunRepositories,
   sarifRunResults,
@@ -209,13 +210,6 @@ function normalizeReport(
         ...strings([asRecord(malware?.["meta"])?.["name"]]),
         ...strings(asRecord(malware?.["spec"])?.["aliases"]),
       ]);
-      const level = text(spec["level"])
-        ?.replace(/^FINDING_LEVEL_/u, "")
-        .toLowerCase();
-      const severity =
-        level && ["critical", "high", "medium", "low"].includes(level)
-          ? level
-          : "unknown";
       // A recommended version can refer to an introducing dependency; retain it in source_data.
       const packages = name
         ? (paths.length ? paths : [null]).map((path) => ({
@@ -247,7 +241,9 @@ function normalizeReport(
             ]
               .filter(Boolean)
               .join("\n\n") || text(meta["description"]),
-          severity,
+          severity: reportableScannerSeverity(
+            text(spec["level"])?.replace(/^FINDING_LEVEL_/u, ""),
+          ),
           branch:
             context["type"] === "CONTEXT_TYPE_REF" ? text(context["id"]) : null,
           code_revision: text(

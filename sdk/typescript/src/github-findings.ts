@@ -25,7 +25,12 @@ import {
   canSnapshotWithoutGetters,
   cloneWithoutGetters,
 } from "./record.js";
-import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
+import {
+  parseJsonOrJsonl,
+  readScannerText,
+  scannerSeverity,
+  text,
+} from "./scanner-import.js";
 
 import {
   rememberPreviousSelection,
@@ -57,14 +62,6 @@ function sourceTimestamp(value: unknown): number | null {
   if (!Number.isFinite(seconds) || seconds < 0)
     throw new Error("GitHub updated_at is not a valid timestamp.");
   return Math.floor(seconds);
-}
-
-function severity(value: unknown): string {
-  // SARIF error/warning/note are not vulnerability severity ratings.
-  return typeof value === "string" &&
-    ["critical", "high", "medium", "low", "informational"].includes(value)
-    ? value
-    : "unknown";
 }
 
 function codeScanningPrefix(
@@ -143,7 +140,8 @@ function codeScanningFinding(record: Record<string, unknown>): {
         text(rule?.["name"]) ??
         text(rule?.["description"]) ??
         `GitHub code-scanning alert #${number}`,
-      severity: severity(rule?.["security_severity_level"]),
+      // SARIF error, warning and note describe diagnostics. Use the security rating.
+      severity: scannerSeverity(text(rule?.["security_severity_level"])),
       description:
         [...new Set([message, description].filter(Boolean))].join("\n\n") ||
         null,
@@ -264,7 +262,7 @@ function advisoryFinding(record: Record<string, unknown>): {
     source_finding_id: advisorySourceId(host, selection, repository.name, id),
     evidence: {
       title: text(advisory["summary"]) ?? id,
-      severity: severity(advisory["severity"]),
+      severity: scannerSeverity(text(advisory["severity"])),
       description: text(advisory["description"]),
       url,
       advisory_ids: [...new Set(advisoryIds)],

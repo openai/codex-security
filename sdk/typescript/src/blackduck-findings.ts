@@ -11,11 +11,11 @@ import {
   normalizeRecords,
   readScannerJson,
   record,
+  reportableScannerSeverity,
   requiredText,
   stableId,
   text,
 } from "./scanner-import.js";
-import { FailureSeveritySchema } from "./scan-settings.js";
 import {
   declaredScannerRepositoryUrl,
   repositoryScopeValidator,
@@ -417,14 +417,13 @@ function normalizeReport(
         row["componentName"],
         "Black Duck component name",
       );
-      const severity = text(vulnerability["severity"])?.toLowerCase();
       const related = text(vulnerability["relatedVulnerability"]);
       const { packages, enrichment } = blackDuckPackages(row);
       return validateEnrichedExternalEvidence(
         {
           title: `${advisory} in ${name}`,
           description: text(vulnerability["description"]),
-          severity: FailureSeveritySchema.safeParse(severity).data ?? "unknown",
+          severity: reportableScannerSeverity(vulnerability["severity"]),
           advisory_ids:
             related && related !== advisory ? [advisory, related] : [advisory],
           packages,

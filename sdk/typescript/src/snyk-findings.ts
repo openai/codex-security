@@ -20,6 +20,7 @@ import {
   optionalArray,
   readScannerJson,
   record,
+  reportableScannerSeverity,
   requiredText,
   sarifRunRepositories,
   sarifRunContextSelector,
@@ -118,9 +119,6 @@ export function normalizeSnykFindingsExport(
         finding["remediation"] ?? {},
         "Snyk remediation",
       );
-      const severity = text(
-        record(finding["severity"], "Snyk severity")["value"],
-      )?.toLowerCase();
       const revision = text(sourceTarget["revision"]);
       return validateExternalEvidence(
         {
@@ -128,11 +126,9 @@ export function normalizeSnykFindingsExport(
           description: text(
             record(finding["description"] ?? {}, "Snyk description")["text"],
           ),
-          severity: ["critical", "high", "medium", "low"].includes(
-            severity ?? "",
-          )
-            ? severity
-            : "unknown",
+          severity: reportableScannerSeverity(
+            record(finding["severity"], "Snyk severity")["value"],
+          ),
           advisory_ids: [
             ...new Set([
               requiredText(rule["id"], "Snyk advisory ID"),
@@ -485,7 +481,6 @@ export function normalizeSnykJson(
         vulnerability["identifiers"] ?? {},
         "Snyk identifiers",
       );
-      const severity = text(vulnerability["severity"])?.toLowerCase();
       return validateExternalEvidence(
         {
           title: requiredText(
@@ -493,11 +488,7 @@ export function normalizeSnykJson(
             "Snyk vulnerability title",
           ),
           description: text(vulnerability["description"]),
-          severity: ["critical", "high", "medium", "low"].includes(
-            severity ?? "",
-          )
-            ? severity
-            : "unknown",
+          severity: reportableScannerSeverity(vulnerability["severity"]),
           advisory_ids: [
             ...new Set([
               requiredText(vulnerability["id"], "Snyk advisory ID"),

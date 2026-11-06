@@ -8,13 +8,13 @@ import {
   normalizeHostedGitRepositoryUrl,
 } from "./hosted-git-repository.js";
 import { isRecord } from "./record.js";
-import { REPORTABLE_SEVERITIES } from "./scan-settings.js";
 import {
   array,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
+  reportableScannerSeverity,
   requiredText,
   stableId,
   strings,
@@ -517,13 +517,10 @@ function normalizeReport(
         if (!lines.size) locations.push({ path: declaration, line: null });
         for (const line of lines) locations.push({ path: declaration, line });
       }
-      const severity = text(vulnerability["Severity"])?.toLowerCase();
       return validateExternalEvidence(
         {
           title: text(vulnerability["Title"]) ?? `${advisory} in ${name}`,
-          severity:
-            REPORTABLE_SEVERITIES.find((level) => level === severity) ??
-            "unknown",
+          severity: reportableScannerSeverity(vulnerability["Severity"]),
           description: text(vulnerability["Description"]),
           url: text(vulnerability["PrimaryURL"]),
           advisory_ids: [
