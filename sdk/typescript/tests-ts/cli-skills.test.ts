@@ -1315,12 +1315,17 @@ describe("CLI skill commands", () => {
     const largeInput = "x".repeat(1024 * 1024 + 1);
     await writeFile(join(directory, "large.txt"), largeInput);
 
-    for (const inputs of [
-      ["large.txt"],
-      [largeInput],
-      Array.from({ length: 65 }, () => "issue"),
-    ]) {
-      let received: string[] = [];
+    const manyInputs = Array.from({ length: 65 }, () => "issue");
+    for (const [inputs, expected] of [
+      [["large.txt"], largeInput],
+      [[largeInput], JSON.stringify([largeInput])],
+      [
+        ["large.txt", "another finding"],
+        JSON.stringify([largeInput, "another finding"]),
+      ],
+      [manyInputs, JSON.stringify(manyInputs)],
+    ] as const) {
+      let received = "";
       expect(
         await runCapturedCli(
           main,
@@ -1330,19 +1335,16 @@ describe("CLI skill commands", () => {
             onCodex: async (args, _output, _environment, input) => {
               expect(args.at(-1)).toBe("-");
               const file = input!.match(/^".*finding\.json"$/m);
-              received = JSON.parse(
+              received =
                 file === null
                   ? input!.split("\n").at(-1)!
-                  : await filesystem.readFile(JSON.parse(file[0]), "utf8"),
-              );
+                  : await filesystem.readFile(JSON.parse(file[0]), "utf8");
               return 0;
             },
           }),
         ),
       ).toBe(0);
-      expect(received).toEqual(
-        inputs[0] === "large.txt" ? [largeInput] : inputs,
-      );
+      expect(received).toBe(expected);
     }
   });
 

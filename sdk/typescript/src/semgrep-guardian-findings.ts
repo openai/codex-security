@@ -4,7 +4,6 @@ import type {
   ExternalFinding,
   ExternalSourceRepository,
 } from "./external-findings.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -161,7 +160,6 @@ export async function collectSelectedSemgrepGuardianFindings(
     environment?: NodeJS.ProcessEnv;
   },
 ) {
-  requireExternalImports(dependencies.environment);
   const query = structuredClone(selection.request);
   const scope = selectionScope(query, selection.findingIds);
   const sourceRepositoryUrl = declaredScannerRepositoryUrl(

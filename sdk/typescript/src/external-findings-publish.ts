@@ -42,7 +42,6 @@ import {
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 import {
   codexSecurityStateDirectory,
   createWindowsOutputDirectory,
@@ -717,7 +716,6 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
-  requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   requireCloudReader(settings);
   const readerSources = snapshotSourceRepositories(
@@ -823,7 +821,6 @@ export async function prepareNormalizedExternalPublication(
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
-  requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   requireCloudReader(settings);
   return preparePublicationInput(
@@ -1547,7 +1544,6 @@ async function preparePublicationInput(
   }
   const environment = dependencies.environment ?? process.env;
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(environment);
   progress({ phase: "reading", completed: 0 });
   const trivyReportUrls =
     options.provider === "trivy" && typeof supplied !== "function"

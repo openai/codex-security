@@ -14,9 +14,8 @@ Both routes support local and Cloud imports.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the checkout root,
-set the destination and choose a key for the repository, branch, original scan
-target and format. Replace `root` with your target if you scanned a
+From the checkout root, set the destination and choose a source key for the
+repository, branch, original scan target and format. Replace `root` with your target if you scanned a
 subdirectory such as `services/api`.
 
 ```sh
@@ -108,7 +107,7 @@ manifest locations are unsupported.
 
 ## Existing issues from Snyk
 
-[Enable external imports](README.md#preview-a-report) and set
+Set
 `SNYK_TOKEN` to a read-authorized token for the selected region. See the
 [Snyk API access requirements](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api)
 and [Issues API permissions](https://docs.snyk.io/developer-tools/snyk-api/reference/issues).
