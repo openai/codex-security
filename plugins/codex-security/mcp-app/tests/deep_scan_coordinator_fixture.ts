@@ -326,6 +326,7 @@ interface ExecutorOptions {
   invalidDiscoveryAttempts?: number;
   malformedDiscoveryAttempts?: number;
   discoveryCandidateId?: string;
+  discoveryDeferred?: ScanDraftInput["reviewState"]["deferred"];
   discoveryFailureMessage?: string;
   nonRetryableDiscoveryMessage?: string;
   failDiscoveryWorkersAfterGate?: string[];
@@ -428,6 +429,10 @@ export class FakeExecutor {
           candidateId,
           context.workerLabel,
         );
+        if (this.options.discoveryDeferred?.length)
+          draft.reviewState.deferred = structuredClone(
+            this.options.discoveryDeferred,
+          );
         await writeJson(path.join(artifactContext.root, "result.json"), draft);
       }
       if (malformedResult) {

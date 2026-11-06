@@ -5,10 +5,8 @@ from __future__ import annotations
 
 import argparse
 import copy
-import csv
 import errno
 import hashlib
-import io
 import ipaddress
 import json
 import math
@@ -29,6 +27,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
 import servicenow_avit
 import threat_model_projection
+from candidate_identity import (
+    candidate_receipt_sections,
+    coverage_candidate_key,
+    recover_candidate_receipt_rows,
+    retain_recovered_candidate_gaps,
+    unresolved_candidate_rows,
+)
+from candidate_identity import finding_candidate_id as finding_candidate_id
 from legacy_findings import (
     _legacy_sealed_findings_for_validation,
     _normalize_legacy_string_list_fields,
@@ -37,6 +43,16 @@ from posix_scan_local_files import (
     descriptor_relative_writes_available as _descriptor_relative_writes_available,
 )
 from posix_scan_local_files import managed_fd, stage_write
+from report_projection import (
+    _sarif_finding_message,
+    _sarif_primary_location,
+    _sarif_rule,
+    build_csv_projection,
+    csv_cell,
+)
+from report_projection import (
+    finding_csv_columns as finding_csv_columns,
+)
 from review_state import checkpoint_review_state, review_state, review_summary
 
 SCHEMA_VERSION = "1.0"
@@ -65,13 +81,6 @@ SARIF_LEVELS = {
     "medium": "warning",
     "low": "note",
     "informational": "note",
-}
-SARIF_SECURITY_SCORES = {
-    "critical": 9.5,
-    "high": 8.0,
-    "medium": 5.0,
-    "low": 2.0,
-    "informational": 0.0,
 }
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 RFC3339_RE = re.compile(
@@ -1368,6 +1377,126 @@ def _recover_unsealed_findings(
     return discarded
 
 
+def resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
+    if draft.get("complete") is False:
+        return []
+    coverage = draft["reviewState"]
+    rows = coverage.get("resolvedDeferred", [])
+    deferred = coverage.get("deferred", [])
+    try:
+        # Invalid closure metadata cannot discard the evidence it names.
+        _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
+        _validate_resolved_deferred(
+            {**coverage, "deferred": deferred if isinstance(deferred, list) else []}
+        )
+    except ContractError:
+        return []
+    return rows
+
+
+def _recover_candidate_receipts(
+    parent: dict[str, Any],
+    scan_dir: Path,
+    warnings: list[str],
+    source: str | None = None,
+    *,
+    owner: str | None = None,
+    reopened: set[tuple[str | None, str]],
+    sections: tuple[str, ...] = ("surfaces", "explicitExclusions"),
+    receipt_resolver: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any] | None:
+    surfaces = parent["reviewState"].get("surfaces")
+    fields = candidate_receipt_sections(parent["reviewState"], sections, owner)
+    if not fields:
+        return parent
+    # Receipt recovery must precede resolution of the candidate's saved proof gaps.
+    directory = Path(".")
+    if source is not None and receipt_resolver is None:
+        directory = Path(source).parent
+        if directory.name == "checkpoints":
+            directory = directory.parent
+        scan_dir = scan_dir / directory
+    parent = copy.deepcopy(parent)
+    if source is not None or "explicitExclusions" in fields:
+        coverage = parent["reviewState"]
+        closures = []
+        if coverage.get("resolvedDeferred"):
+            schema = _read_json(
+                Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
+            )["properties"]["resolvedDeferred"]
+            closures = resolved_deferred_rows(parent, schema)
+
+        receipt_paths: dict[str, str] = {}
+        if source is None and isinstance(surfaces, list):
+            # Parent surfaces are published before exclusions in the artifact inventory.
+            for surface in surfaces:
+                refs = surface.get("receiptRefs") if isinstance(surface, dict) else None
+                for ref in refs if isinstance(refs, list) else []:
+                    try:
+                        _coverage_receipt_ref(scan_dir, ref, "coverage surface", receipt_paths)
+                    except ContractError:
+                        # Surface validation handles the original row independently.
+                        continue
+
+        def validate_receipt(ref: Any, context: str) -> str:
+            return (
+                directory / _coverage_receipt_ref(scan_dir, ref, context, receipt_paths)
+            ).as_posix()
+
+        recover_candidate_receipt_rows(
+            coverage,
+            fields,
+            closures,
+            warnings,
+            reopened,
+            owner=owner,
+            worker=source is not None,
+            validate_receipt=validate_receipt,
+            receipt_refs=receipt_resolver or (lambda row: row.get("receiptRefs", [])),
+        )
+        if source is not None:
+            return parent
+    if "surfaces" not in fields:
+        return parent
+    terminal = {
+        coverage_candidate_key(row)
+        for row in surfaces
+        if isinstance(row, dict) and row.get("disposition") in ("rejected", "not_applicable")
+    }
+    _recover_unsealed_coverage(
+        parent["reviewState"],
+        Path(__file__).resolve().parent.parent / "schemas",
+        scan_dir,
+        warnings,
+        [],
+    )
+    reopened.update(
+        key
+        for row in parent["reviewState"]["surfaces"]
+        if row.get("disposition") == "needs_follow_up"
+        and (key := coverage_candidate_key(row)) is not None
+        and key in terminal
+    )
+    return parent
+
+
+def _coverage_receipt_ref(
+    scan_dir: Path, ref: Any, context: str, receipt_paths: dict[str, str] | None = None
+) -> str:
+    if not isinstance(ref, str):
+        raise ContractError(f"{context}: expected a string")
+    normalized = _require_portable_relative_path(ref, context)
+    if not normalized.startswith("artifacts/"):
+        raise ContractError(f"{context}: expected a file under artifacts/")
+    _require_scan_local_file(scan_dir, normalized, context)
+    if (
+        receipt_paths is not None
+        and receipt_paths.setdefault(normalized.lower(), normalized) != normalized
+    ):
+        raise ContractError(f"{context}: duplicate artifact path")
+    return normalized
+
+
 def _recover_unsealed_coverage(
     coverage: dict[str, Any],
     schema_dir: Path,
@@ -1388,6 +1517,7 @@ def _recover_unsealed_coverage(
         warnings.append("Recovered malformed Deep Scan inventory strategy.")
 
     surface_ids: set[str] = set()
+    recovered_candidates: list[tuple[dict[str, Any], str]] = []
     receipt_paths: dict[str, str] = {}
     fields = [
         ("surfaces", "coverage surface"),
@@ -1424,6 +1554,7 @@ def _recover_unsealed_coverage(
                     if surface_id in surface_ids and not worker_draft:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
+                    warning_start = len(warnings)
                     surface_recovered = False
                     if not isinstance(disposition, str) or disposition not in DISPOSITIONS:
                         warnings.append(
@@ -1446,19 +1577,9 @@ def _recover_unsealed_coverage(
                     for ref_index, ref in enumerate(receipt_refs):
                         ref_context = f"{context}.receiptRefs[{ref_index}]"
                         try:
-                            if not isinstance(ref, str):
-                                raise ContractError(f"{ref_context}: expected a string")
-                            normalized_ref = _require_portable_relative_path(ref, ref_context)
-                            if not normalized_ref.startswith("artifacts/"):
-                                raise ContractError(
-                                    f"{ref_context}: expected a file under artifacts/"
-                                )
-                            _require_scan_local_file(scan_dir, normalized_ref, ref_context)
-                            key = normalized_ref.lower()
-                            previous = surface_receipt_paths.get(key)
-                            if previous is not None and previous != normalized_ref:
-                                raise ContractError(f"{ref_context}: duplicate artifact path")
-                            surface_receipt_paths[key] = normalized_ref
+                            normalized_ref = _coverage_receipt_ref(
+                                scan_dir, ref, ref_context, surface_receipt_paths
+                            )
                         except ContractError as exc:
                             warnings.append(
                                 f"Skipped malformed coverage receipt "
@@ -1487,10 +1608,18 @@ def _recover_unsealed_coverage(
 
             if field == "surfaces":
                 surface_ids.add(surface_id)
+                if (
+                    surface_recovered
+                    and disposition not in ("reported", "no_issue_found", "needs_follow_up")
+                    and isinstance(item.get("candidateId"), str)
+                ):
+                    recovered_candidates.append((item, "\n".join(warnings[warning_start:])))
                 receipt_paths = surface_receipt_paths
             recovered.append(item)
 
         coverage[field] = recovered
+
+    retain_recovered_candidate_gaps(coverage, recovered_candidates)
 
     if discarded_findings:
         for surface in coverage["surfaces"]:
@@ -1867,11 +1996,9 @@ def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
     if "resolvedDeferred" not in coverage:
         return
     active = {
-        identity
+        row["id"]
         for row in coverage.get("deferred", [])
-        if isinstance(row, dict)
-        for identity in (row.get("id"), row.get("candidateId"))
-        if isinstance(identity, str)
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     resolved: set[str] = set()
     for index, closure in enumerate(_require_list(coverage, "resolvedDeferred", "coverage")):
@@ -1921,26 +2048,28 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         disposition = _require_str(surface, "disposition", context)
         if disposition not in DISPOSITIONS:
             raise ContractError(f"{context}.disposition: unsupported disposition: {disposition}")
-        receipt_refs = surface.get("receiptRefs", [])
-        if not isinstance(receipt_refs, list):
-            raise ContractError(f"{context}.receiptRefs: expected an array")
-        for ref_index, ref in enumerate(receipt_refs):
-            if not isinstance(ref, str):
-                raise ContractError(f"{context}.receiptRefs[{ref_index}]: expected a string")
-            normalized_ref = _require_portable_relative_path(
-                ref, f"{context}.receiptRefs[{ref_index}]"
-            )
-            if not normalized_ref.startswith("artifacts/"):
-                raise ContractError(
-                    f"{context}.receiptRefs[{ref_index}]: expected a file under artifacts/"
-                )
-            receipt_refs[ref_index] = normalized_ref
-            _require_scan_local_file(
-                scan_dir, normalized_ref, f"{context}.receiptRefs[{ref_index}]"
-            )
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    receipt_fields = (
+        ("surfaces", "explicitExclusions")
+        if coverage.get("receiptSealVersion") == 1
+        else ("surfaces",)
+    )
+    for field in receipt_fields:
+        for index, item in enumerate(coverage.get(field, [])):
+            if not isinstance(item, dict):
+                continue
+            if field == "explicitExclusions" and coverage_candidate_key(item) is None:
+                continue
+            context = f"coverage.{field}[{index}]"
+            receipt_refs = item.get("receiptRefs", [])
+            if not isinstance(receipt_refs, list):
+                raise ContractError(f"{context}.receiptRefs: expected an array")
+            for ref_index, ref in enumerate(receipt_refs):
+                receipt_refs[ref_index] = _coverage_receipt_ref(
+                    scan_dir, ref, f"{context}.receiptRefs[{ref_index}]"
+                )
     for index, deferred in enumerate(coverage.get("deferred", [])):
         if isinstance(deferred, dict):
             _validate_deferred_paths(deferred, f"coverage.deferred[{index}]")
@@ -2268,6 +2397,7 @@ def _validate_canonical_schemas_before_projection(
     coverage: dict[str, Any],
     schema_dir: Path,
 ) -> None:
+    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     provisional_manifest = copy.deepcopy(manifest)
     provisional_scan = _require_dict(provisional_manifest, "scan", "manifest")
     provisional_scan["artifacts"] = [
@@ -2279,7 +2409,6 @@ def _validate_canonical_schemas_before_projection(
         provisional_scan["review"] = review_summary(coverage)
     validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
-    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
 
 
 def _validate_contract_refs(scan: dict[str, Any]) -> None:
@@ -2292,67 +2421,6 @@ def _validate_contract_refs(scan: dict[str, Any]) -> None:
         actual = _require_str(scan, field, "manifest.scan")
         if actual != expected:
             raise ContractError(f"manifest.scan.{field}: expected {expected!r}")
-
-
-def _sarif_label(value: str) -> str:
-    words = re.sub(r"[-_./]+", " ", value).split()
-    acronyms = {"api", "csrf", "html", "http", "id", "rce", "sql", "ssrf", "url", "xml", "xss"}
-    label = " ".join(word.upper() if word.lower() in acronyms else word for word in words)
-    return label[:1].upper() + label[1:]
-
-
-def _sarif_rule(rule_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
-    name = ": ".join(_sarif_label(part) for part in rule_id.split("."))
-    categories = sorted({finding["taxonomy"]["category"] for finding in findings})
-    cwes = sorted({cwe for finding in findings for cwe in finding["taxonomy"]["cwe"]})
-    tags = {"security", *categories}
-    for cwe in cwes:
-        match = re.fullmatch(r"CWE-([0-9]+)", cwe, re.IGNORECASE)
-        if match and (digits := match[1].lstrip("0")):
-            tags.add(f"external/cwe/cwe-{digits.zfill(3)}")
-    description = f"{name}. Categories: {', '.join(map(_sarif_label, categories))}."
-    if cwes:
-        description += f" Weaknesses: {', '.join(cwes)}."
-    remediation = "\n\n".join(sorted({finding["remediation"] for finding in findings}))
-    properties: dict[str, Any] = {"tags": sorted(tags)}
-    # GitHub assigns security severity to the shared rule, not each result.
-    score = max(
-        finding["severity"].get("score", SARIF_SECURITY_SCORES[finding["severity"]["level"]])
-        for finding in findings
-    )
-    if score > 0:
-        properties["security-severity"] = str(score)
-    return {
-        "id": rule_id,
-        "name": name,
-        "shortDescription": {"text": name},
-        "fullDescription": {"text": description},
-        "help": {
-            "text": f"{description}\n\nRemediation:\n\n{remediation}",
-            "markdown": f"{description}\n\n## Remediation\n\n{remediation}",
-        },
-        "properties": properties,
-    }
-
-
-def _sarif_finding_message(finding: dict[str, Any]) -> str:
-    taxonomy = finding["taxonomy"]
-    details = [
-        finding["title"],
-        finding["summary"],
-        f"Severity: {finding['severity']['level']}",
-        f"Category: {_sarif_label(taxonomy['category'])}",
-    ]
-    if taxonomy["cwe"]:
-        details.append(f"Weaknesses: {', '.join(taxonomy['cwe'])}")
-    details.append(f"Remediation:\n{finding['remediation']}")
-    for key, label in (
-        ("remediationTests", "Remediation tests"),
-        ("preventiveControls", "Preventive controls"),
-    ):
-        if finding.get(key):
-            details.append(f"{label}:\n" + "\n".join(f"- {item}" for item in finding[key]))
-    return "\n\n".join(details)
 
 
 def _github_line_hashes(
@@ -2446,13 +2514,6 @@ def _github_line_hashes_for_source(
             return _github_line_hashes(handle, requested_lines)
     except OSError:
         return None
-
-
-def _sarif_primary_location(finding: dict[str, Any]) -> dict[str, Any]:
-    return next(
-        (location for location in finding["locations"] if location.get("role") == "root_control"),
-        finding["locations"][0],
-    )
 
 
 def _merged_code_evidence(finding: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2692,8 +2753,14 @@ def _artifact_record(
 def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any]) -> dict[str, str]:
     refs = {
         ref: "coverage receipt"
-        for surface in coverage["surfaces"]
-        for ref in surface.get("receiptRefs", [])
+        for field in (
+            ("surfaces", "explicitExclusions")
+            if coverage.get("receiptSealVersion") == 1
+            else ("surfaces",)
+        )
+        for row in coverage.get(field, [])
+        if field != "explicitExclusions" or coverage_candidate_key(row) is not None
+        for ref in row.get("receiptRefs", [])
     }
     extensions = scan.get("extensions")
     imported = extensions.get("import") if isinstance(extensions, dict) else None
@@ -2828,108 +2895,6 @@ def write_sarif_projection(
     write_export_output(
         scan_dir, scan_dir / relative_path, "sarif", _contract_json_bytes(relative_path, sarif)
     )
-
-
-def csv_cell(value: Any) -> Any:
-    if isinstance(value, str) and (
-        value.startswith(("'", "\t", "\r", "\n"))
-        or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
-    ):
-        return f"'{value}"
-    return value
-
-
-def _has_identity_text(value: Any) -> bool:
-    # Match JavaScript String.trim when selecting optional identity metadata.
-    return isinstance(value, str) and bool(
-        value.strip(
-            "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
-            "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-            "\u2028\u2029\u202f\u205f\u3000\ufeff"
-        )
-    )
-
-
-def finding_candidate_id(finding: dict[str, Any]) -> str | None:
-    provenance = finding.get("provenance")
-    if isinstance(provenance, dict) and _has_identity_text(value := provenance.get("candidateId")):
-        return value
-    extensions = finding.get("extensions")
-    if not isinstance(extensions, dict):
-        return None
-    return next(
-        (
-            value
-            for field in ("candidateId", "reportId", "ledgerRowId")
-            if _has_identity_text(value := extensions.get(field))
-        ),
-        None,
-    )
-
-
-def _csv_candidate_id(finding: dict[str, Any]) -> str | None:
-    candidate_id = finding_candidate_id(finding)
-    if candidate_id is not None:
-        return candidate_id
-    # Preserve literal CSV metadata, such as FEFF, that is not a canonical identity.
-    for metadata, fields in (
-        (finding.get("provenance"), ("candidateId",)),
-        (finding.get("extensions"), ("candidateId", "reportId", "ledgerRowId")),
-    ):
-        if isinstance(metadata, dict):
-            for field in fields:
-                value = metadata.get(field)
-                if isinstance(value, str) and value.strip():
-                    return value
-    return None
-
-
-def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
-    return (
-        "occurrence_id",
-        "finding_id",
-        *(("candidate_id",) if deep_scan else ()),
-        "title",
-        "summary",
-        "severity",
-        "confidence",
-        "status",
-        "close_reason",
-        "note",
-        "remediation",
-        "path",
-        "start_line",
-        "end_line",
-    )
-
-
-def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
-    """Encode findings in input order as UTF-8 CSV using the columns selected by coverage and findings."""
-    output = io.StringIO(newline="")
-    writer = csv.writer(output)
-    deep_scan = report_projection.uses_deep_presentation(coverage, findings["findings"])
-    writer.writerow(finding_csv_columns(deep_scan))
-    for finding in findings["findings"]:
-        location = _sarif_primary_location(finding)
-        writer.writerow(
-            (
-                csv_cell(finding["occurrenceId"]),
-                csv_cell(finding["findingId"]),
-                *((csv_cell(_csv_candidate_id(finding)),) if deep_scan else ()),
-                csv_cell(finding["title"]),
-                csv_cell(finding["summary"]),
-                csv_cell(finding["severity"]["level"]),
-                csv_cell(finding["confidence"]["level"]),
-                "open",
-                "",
-                "",
-                csv_cell(finding["remediation"]),
-                csv_cell(location["path"]),
-                location["startLine"],
-                location.get("endLine", location["startLine"]),
-            )
-        )
-    return output.getvalue().encode("utf-8")
 
 
 def _avit_fields(finding: dict[str, Any]) -> dict[str, str]:
@@ -3200,6 +3165,20 @@ def _prepare_scan_finalization(
     if not was_sealed and recover_unsealed:
         _recover_unsealed_coverage(coverage, schema_dir, scan_dir, warnings, discarded_findings)
         _recover_unsealed_hardening(manifest, scan_dir, warnings)
+    if not was_sealed:
+        # Standalone finalization shares exclusion proof recovery with the workbench;
+        # its existing strict surface and finding validation remains unchanged.
+        recovered = _recover_candidate_receipts(
+            {"reviewState": coverage},
+            scan_dir,
+            warnings,
+            reopened=set(),
+            sections=("explicitExclusions",),
+        )
+        assert recovered is not None
+        coverage = recovered["reviewState"]
+        # Coverage is hash-bound; older seals treated exclusion receipts as opaque metadata.
+        coverage["receiptSealVersion"] = 1
     if was_sealed or scan["status"] != "completed":
         _validate_findings(manifest, findings_for_validation)
     if was_sealed:
@@ -3256,6 +3235,9 @@ def _prepare_scan_finalization(
         if "coverageRef" not in scan:
             scan["mode"] = coverage["mode"]
             scan["review"] = review_summary(coverage)
+            candidates = unresolved_candidate_rows(coverage, findings["findings"], sealed=True)
+            if candidates:
+                scan["review"]["unresolvedCandidates"] = candidates
             scan.pop("reviewState", None)
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")

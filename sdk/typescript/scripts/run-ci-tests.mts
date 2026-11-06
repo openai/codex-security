@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { bunTestTimeout } from "./bun-test-timeout.mts";
 import { partitionTests, type TestTimings } from "./test-shards.mts";
 
@@ -45,16 +47,72 @@ const testArguments = [
   ...process.argv.slice(3),
   ...selected.map((file) => `./tests-ts/${file}`),
 ];
-const child = spawn("bun", testArguments, {
-  cwd: new URL("../", import.meta.url),
-  env: {
-    ...process.env,
-    CODEX_SECURITY_TEST_TIMEOUT_MS: bunTestTimeout(testArguments),
-  },
-  stdio: "inherit",
-  windowsHide: true,
+// Bun's text coverage writer can abort on a backpressured stderr pipe before
+// writing JUnit/LCOV reports. Preserve its diagnostics in a regular file, then
+// relay them live with Node's stream backpressure while keeping the test exit status.
+const outputDirectory = await mkdtemp(
+  join(tmpdir(), "codex-security-ci-output-"),
+);
+const outputPath = join(outputDirectory, "stderr.log");
+const output = await open(outputPath, "w");
+const reader = await open(outputPath, "r");
+const buffer = Buffer.allocUnsafe(64 * 1024);
+let offset = 0;
+let flushing: Promise<void> | undefined;
+let relayFailed = false;
+// A disconnected diagnostic consumer must not replace the test process result.
+process.stderr.on("error", () => {
+  relayFailed = true;
 });
-child.once("error", console.error);
-child.once("close", (code) => {
-  process.exitCode = code ?? 1;
-});
+const flush = (): Promise<void> => {
+  flushing ??= (async () => {
+    while (!relayFailed) {
+      const { bytesRead } = await reader.read(buffer, 0, buffer.length, offset);
+      if (bytesRead === 0) return;
+      offset += bytesRead;
+      await new Promise<void>((resolve) => {
+        process.stderr.write(buffer.subarray(0, bytesRead), (error) => {
+          if (error) relayFailed = true;
+          resolve();
+        });
+      });
+    }
+  })()
+    .catch(() => {
+      relayFailed = true;
+    })
+    .finally(() => {
+      flushing = undefined;
+    });
+  return flushing;
+};
+// Keep diagnostics visible before an interrupted or timed-out child exits.
+const relay = setInterval(() => {
+  void flush();
+}, 100);
+relay.unref();
+try {
+  const child = spawn("bun", testArguments, {
+    cwd: new URL("../", import.meta.url),
+    env: {
+      ...process.env,
+      CODEX_SECURITY_TEST_TIMEOUT_MS: bunTestTimeout(testArguments),
+    },
+    stdio: ["inherit", "inherit", output.fd],
+    windowsHide: true,
+  });
+  process.exitCode = await new Promise<number>((resolve) => {
+    child.once("error", (error) => {
+      console.error(error);
+      resolve(1);
+    });
+    child.once("close", (code) => resolve(code ?? 1));
+  });
+} finally {
+  clearInterval(relay);
+  await flushing;
+  await flush();
+  await Promise.allSettled([reader.close(), output.close()]);
+  // A lingering Windows file lock only affects these temporary diagnostics.
+  await rm(outputDirectory, { recursive: true, force: true }).catch(() => {});
+}

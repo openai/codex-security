@@ -58,7 +58,12 @@ def test_rename_persists_without_changing_scan_results(
     assert renamed == {"scanId": scan["scanId"], "name": "Release audit"}
     after = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert get_scan(state_dir, scan["scanId"][:8], "--progress-only") == {
-        "scan": {"progress": after["progress"]}
+        "scan": {
+            "progress": {
+                **after["progress"],
+                "candidates": {"reportable": after["progress"]["candidates"]["reportable"]},
+            }
+        }
     }
     assert after == {**before, "name": "Release audit"}
     listed = run_workbench(state_dir, "list-scans", "--query", "release audit")["scans"]

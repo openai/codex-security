@@ -16,21 +16,48 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_identity import unresolved_candidates
 from finalize_scan_contract import (
     ContractError,
     _prepare_scan_finalization,
+    _read_scan_local_json,
     _read_scan_local_json_bytes,
     _read_sealed_scan,
     manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
-from review_state import review_state
+from review_state import review_state, uses_legacy_review
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
 from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import timestamp_key
+
+
+def saved_unresolved_candidate_count(scan: sqlite3.Row) -> int:
+    """Read candidate counts from saved artifacts without requiring a completed scan."""
+    scan_dir = Path(scan["scan_dir"])
+    try:
+        manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved manifest")
+        manifest_scan = manifest.get("scan")
+    except (ContractError, OSError, ValueError):
+        manifest_scan = None
+    try:
+        sealed = isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None
+        if isinstance(manifest_scan, dict) and not uses_legacy_review(manifest_scan):
+            if sealed:
+                return len(unresolved_candidates(review_state(manifest_scan), sealed=True))
+            coverage = review_state(manifest_scan)
+        else:
+            coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved coverage")
+        if not unresolved_candidates(coverage, sealed=sealed):
+            return 0
+        findings = _read_scan_local_json(scan_dir, "findings.json", "Saved findings")
+    except (ContractError, OSError, ValueError):
+        # Running and removed scans may have no readable canonical artifacts yet.
+        return 0
+    return len(unresolved_candidates(coverage, findings.get("findings", []), sealed=sealed))
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:

@@ -9,6 +9,7 @@ import type {
   ScanManifest,
 } from "./models.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
+import { unresolvedCandidates } from "./candidates.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { safeScopePath as sharedSafeScopePath } from "./contract-values.js";
 export {
@@ -100,6 +101,7 @@ export async function loadContractWithScanDirectory(
       signal: options.signal,
     })) as {
       contract: LoadedContract;
+      legacyCoverage?: CoverageDocument;
       scanDirectory: string;
       fileDigests: ReadonlyMap<string, string>;
     };
@@ -110,6 +112,15 @@ export async function loadContractWithScanDirectory(
         options.expectation,
         options.workbenchValidated === true,
       );
+    if (result.legacyCoverage !== undefined) {
+      const pending = unresolvedCandidates(
+        result.legacyCoverage,
+        result.contract.findings.findings,
+        true,
+      );
+      if (pending.length > 0)
+        result.contract.review.unresolvedCandidates = pending;
+    }
     validatedFileDigests.set(result.contract.manifest, result.fileDigests);
     return {
       contract: result.contract,

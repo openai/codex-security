@@ -1054,7 +1054,14 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
     def independent_reviews() -> dict[str, int | bool]:
         context = get_scan(deep.state_dir, deep.id)
         assert get_scan(deep.state_dir, deep.id, "--progress-only") == {
-            "scan": {"progress": context["scan"]["progress"]}
+            "scan": {
+                "progress": {
+                    **context["scan"]["progress"],
+                    "candidates": {
+                        "reportable": context["scan"]["progress"]["candidates"]["reportable"]
+                    },
+                }
+            }
         }
         return context["scan"]["progress"]["independentReviews"]
 

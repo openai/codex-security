@@ -702,14 +702,14 @@ def test_rejected_retry_preserves_original_finding_history(
     assert recovered["resultsRecoveryNeeded"] is False
     assert recovered["findingCount"] == 0
     coverage = read_review_state(workbench_db, scan.scan_dir)
+    history = []
     for item in coverage["surfaces"]:
-        provenance = item.get("provenance")
-        if provenance is None or (
-            provenance["workerId"] == worker_id and provenance["attempt"] == 2
-        ):
-            assert item["previousFindings"] == [finding]
+        provenance = item.get("provenance", {})
+        if provenance.get("workerId") == worker_id and provenance.get("attempt") == 2:
+            history.extend(item["previousFindings"])
         else:
             assert "previousFindings" not in item
+    assert history == [finding]
     assert all(path.read_bytes() == original for path, original in originals.items())
     published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     scan.recover()

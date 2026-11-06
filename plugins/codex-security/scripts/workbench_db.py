@@ -1135,12 +1135,13 @@ def complete_budget_exhausted_scan(
                 f"Deep Scan reached its cost limit after an estimated "
                 f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
             )
-        budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        receipt_warnings = budget_exhausted_draft(scan, scan_dir, candidates, warning)
         warnings = json.loads(scan["completion_warnings_json"])
-        if warning not in warnings:
+        additions = [message for message in [warning, *receipt_warnings] if message not in warnings]
+        if additions:
             connection.execute(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
-                (json.dumps([*warnings, warning]), scan_id),
+                (json.dumps([*warnings, *additions]), scan_id),
             )
             connection.commit()
         return complete_scan_locked(connection, scan_id, None, cost_json)
@@ -1220,8 +1221,10 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
 
 def budget_exhausted_draft(
     scan: sqlite3.Row, scan_dir: Path, candidates: list[dict[str, Any]], warning: str
-) -> None:
-    saved_results.budget_exhausted_draft(sys.modules[__name__], scan, scan_dir, candidates, warning)
+) -> list[str]:
+    return saved_results.budget_exhausted_draft(
+        sys.modules[__name__], scan, scan_dir, candidates, warning
+    )
 
 
 def complete_scan_locked(
@@ -2683,6 +2686,10 @@ def scan_result(
     finding_count = sum(severity_counts.values())
     remediation_available, remediation_unavailable_reason = remediation_availability(scan)
     progress_result, review_updated_at = scan_progress_result(connection, scan)
+    # Saved candidate decisions require artifact I/O. Keep frequent progress polls DB-only.
+    progress_result["candidates"]["unresolved"] = scan_history.saved_unresolved_candidate_count(
+        scan
+    )
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )

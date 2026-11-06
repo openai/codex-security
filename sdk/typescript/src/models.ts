@@ -80,6 +80,10 @@ export interface ScanManifest {
       | "deep_repository";
     review?: {
       excludedPaths: string[];
+      /**
+       * Saved candidate proof gaps. Multiple rows may describe the same candidate.
+       */
+      unresolvedCandidates?: CoverageDocument["deferred"];
       [k: string]: unknown;
     };
     reviewState?: {
@@ -332,6 +336,10 @@ export interface CoverageDocument {
     receiptRefs: string[];
     riskArea?: string;
     notes?: string;
+    /**
+     * A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.
+     */
+    candidateId?: unknown;
     [k: string]: unknown;
   }[];
   explicitExclusions: {
@@ -344,6 +352,14 @@ export interface CoverageDocument {
     reason: string;
     paths?: string[];
     surfaceIds?: string[];
+    /**
+     * A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.
+     */
+    candidateId?: unknown;
+    /**
+     * Saved candidate details and evidence awaiting a final decision.
+     */
+    candidate?: unknown;
     [k: string]: unknown;
   }[];
   /**
@@ -353,6 +369,10 @@ export interface CoverageDocument {
     id: string;
     reason: string;
   }[];
+  /**
+   * Sealed receipt contract, including exclusion proof. Absent on legacy coverage, whose exclusion receipt metadata remains opaque.
+   */
+  receiptSealVersion?: 1;
   openQuestions?: {
     question: string;
     followUpPrompt?: string;

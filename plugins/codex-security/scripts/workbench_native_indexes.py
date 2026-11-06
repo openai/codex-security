@@ -218,18 +218,17 @@ def list_repositories(
         ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC, targets.id
         """
     ).fetchall():
-        scan = scan_history.scan_summary(row) if row["id"] is not None else None
         target_id = row["repository_id"]
         if target_id not in by_target:
             by_target[target_id] = {
                 "displayName": row["display_name"],
-                "latestScan": scan,
+                "latestScan": scan_history.scan_summary(row) if row["id"] is not None else None,
                 "openFindingsCount": 0,
                 "scanCount": 0,
                 "targetId": target_id,
                 "targetPath": row["current_path"],
             }
-        if scan is not None:
+        if row["id"] is not None:
             by_target[target_id]["scanCount"] += 1
 
     # A writer can publish a target or its first scan after the repository query.
