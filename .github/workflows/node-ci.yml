@@ -359,6 +359,9 @@ jobs:
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Build and test the standalone host runtime
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
+      - name: Test concurrent native wrapper publication on Windows
+        if: runner.os == 'Windows'
+        run: node --experimental-strip-types --test plugins/codex-security/mcp-app/tests/test_build_native_wrappers.ts
 
   plugin-source:
     if: needs.classify-changes.outputs.plugin-tests-required == 'true'
@@ -544,11 +547,19 @@ jobs:
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
         run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}
+      - name: Test Deep Scan worker cleanup and discovery deadlines on Windows
+        if: matrix.shard == 2
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        run: >-
+          node --experimental-strip-types --test --test-reporter=tap
+          --test-name-pattern="^(testAbortKillsPreflightChild|testDiscoveryDeadlineReducesSingleBufferedFinding)$"
+          tests/test_deep_scan_permission_profile_preflight.ts tests/test_deep_scan_coordinator.ts
       - name: Test MCP helper paths on Windows
         if: matrix.shard == 1
         working-directory: plugins/codex-security/mcp-app
         env: *windows-shard-env
-        run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts
+        run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts tests/test_normalize_candidates.ts
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true
@@ -569,3 +580,18 @@ jobs:
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
         run: bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts
+      - name: Set up Node 26 for the Windows UNC helper test
+        if: matrix.shard == 3
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          package-manager-cache: false
+      - name: Run the PowerShell scope helper over UNC on Node 26
+        if: matrix.shard == 3
+        working-directory: sdk/typescript
+        env: *windows-shard-env
+        shell: pwsh
+        run: |
+          bun -e "import { hasWindowsLoopbackShare } from './tests-ts/windows-helper-location.ts'; if (!hasWindowsLoopbackShare) throw new Error('The UNC fixture requires the loopback share')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun test tests-ts/bind-repo-scopes.test.ts -t 'preserve unc literal paths'
