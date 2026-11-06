@@ -19,6 +19,7 @@ import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanSessionEvent } from "../src/cost.js";
 import { progressMarker, writeSession } from "./support/usage-rollout.js";
+import { readRolloutSessionIndex } from "../src/rollout-session-index.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
@@ -990,6 +991,32 @@ describe("custom validation", () => {
                       expect(progress.at(-1)?.phase).toBe("validation");
                     }
                     expect(prompt).toContain(workflow);
+                    if (scenario === "standard") {
+                      const timestamp = new Date().toISOString();
+                      const session = await writeSession(
+                        codexHome,
+                        "validation-thread",
+                        {},
+                        { timestamp },
+                      );
+                      const later = new Date(Date.now() + 60_000).toISOString();
+                      const events = [
+                        [timestamp, "task_started"],
+                        [
+                          timestamp,
+                          "agent_message",
+                          "retained validator diagnostic",
+                        ],
+                        [timestamp, "task_complete"],
+                        [later, "task_started"],
+                        [later, "agent_message", "later manual validation"],
+                      ].map(([timestamp, type, message]) => ({
+                        type: "event_msg",
+                        timestamp,
+                        payload: { type, message },
+                      }));
+                      await appendFile(session, jsonLines(events) + "\n");
+                    }
                     expect(prompt).not.toContain("2026-01-01T00:05:00.000Z");
                     const pendingManifest = await json<ScanManifest>(
                       join(scanDir, "scan-manifest.json"),
@@ -1128,7 +1155,10 @@ describe("custom validation", () => {
           cyberAccessProgram: "daybreak_blue",
           maxTimeMinutes,
           ...(scenario === "standard"
-            ? { validationPromptFile: workflowFile }
+            ? {
+                validationPromptFile: workflowFile,
+                retainRolloutSessions: true,
+              }
             : { validationPrompt: workflow }),
           onActivity: (activity) => activities.push(activity),
           ...(progressScenario
@@ -1215,6 +1245,17 @@ describe("custom validation", () => {
             ).toBe(true);
         }
         if (scenario === "standard") {
+          const index = await readRolloutSessionIndex(scanDir, scanId);
+          const segment = index?.sessions.find(
+            (entry) => entry.threadId === "validation-thread",
+          )?.eventSegments?.[0];
+          expect(segment).toBeDefined();
+          const events = await readFile(
+            join(scanDir, "artifacts/rollout-sessions", segment!.path),
+            "utf8",
+          );
+          expect(events).toContain("retained validator diagnostic");
+          expect(events).not.toContain("later manual validation");
           const report = await readFile(join(scanDir, "report.md"), "utf8");
           expect(report).toContain(
             "Synthetic counterevidence from validation.",

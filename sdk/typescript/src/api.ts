@@ -2951,24 +2951,24 @@ export class CodexSecurity {
         );
       }
       const scanId = registeredScanId;
+      const workerReceipts =
+        mode === "deep"
+          ? {
+              directory: join(
+                await canonicalConfigPath(join(stateDirectory, "codex-home")),
+                "worker-usage",
+                scanId,
+              ),
+              scanId,
+            }
+          : undefined;
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
         pricingContext,
         repository: repo,
         scanDirectory: scanDir,
-        ...(mode === "deep"
-          ? {
-              workerReceipts: {
-                directory: join(
-                  await canonicalConfigPath(join(stateDirectory, "codex-home")),
-                  "worker-usage",
-                  scanId,
-                ),
-                scanId,
-              },
-            }
-          : {}),
+        ...(workerReceipts && { workerReceipts }),
         onObservationError: warnTrackingError,
         readBudgetUsage:
           options.maxCostUsd === undefined
@@ -3489,12 +3489,15 @@ export class CodexSecurity {
                 (id): id is string => typeof id === "string" && id.length > 0,
               )
             : [];
+          if (validationThreadId !== undefined)
+            executionThreadIds.push(validationThreadId);
           const rootThreadId = scanThreadId ?? executionThreadIds[0];
           if (!rootThreadId) return;
           const onWarning = notifyObserver(options, "onWarning");
           try {
             const sessions = await scanRolloutSessions({
               codexHome: runtimeHome,
+              ...(workerReceipts && { workerReceipts }),
               rootThreadId,
               executionThreadIds,
               ...(scanThreadId
@@ -3517,6 +3520,7 @@ export class CodexSecurity {
                 ],
                 sessions,
                 retainEvents: options.retainRolloutSessions === true,
+                signal,
                 onWarning,
               });
             }
@@ -3680,6 +3684,9 @@ export class CodexSecurity {
                       ...attempts,
                       reconnectDetails(message),
                     ),
+                }).finally(() => {
+                  // Custom validation is the last scan-owned turn, even if it fails.
+                  turnEndedAt = new Date().toISOString();
                 });
                 checkOpen();
                 if (turn.status !== "completed")
