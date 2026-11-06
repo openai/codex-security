@@ -111,6 +111,31 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
+  test("decodes non-ASCII Git worktree paths independently of the locale", async () => {
+    const repository = join(await temporaryDirectory(), "репозиторий");
+
+    expect(
+      runPythonProbe(
+        [
+          "import json, subprocess, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "subprocess.run(['git', 'init', '-q', sys.argv[2]], check=True, capture_output=True)",
+          "original_run = target.subprocess.run",
+          "def locale_run(*args, **kwargs):",
+          "    if kwargs.get('text') and kwargs.get('encoding') is None:",
+          "        kwargs['encoding'] = 'cp1252'",
+          "    return original_run(*args, **kwargs)",
+          "target.subprocess.run = locale_run",
+          "repository, pathspec = target.git_worktree_context(Path(sys.argv[2]))",
+          "print(json.dumps({'repository': str(repository), 'pathspec': pathspec}))",
+        ].join("\n"),
+        repository,
+      ),
+    ).toEqual({ repository: await realpath(repository), pathspec: "." });
+  });
+
   const nativeCaseAliases =
     runPythonProbe(
       [
