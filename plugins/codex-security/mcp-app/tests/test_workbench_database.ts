@@ -381,23 +381,50 @@ function insertRunningWorker(database: DatabaseSync) {
   `);
 }
 
+function legacyRetry(t: TestContext, attempt: number, thread: string | null) {
+  const database = memory(t, 62);
+  insertRunningWorker(database);
+  database
+    .prepare(
+      "UPDATE deep_scan_workers SET attempt = ?, started_at = 'started', sdk_thread_id = ?",
+    )
+    .run(attempt, thread);
+  if (thread === null) database.exec("DELETE FROM deep_scan_worker_threads");
+  return database;
+}
+
 test("legacy retries can reuse a recorded thread and still verify usage", (t) => {
   for (const thread of ["first-thread", "retry-thread", null]) {
-    const database = memory(t, 62);
-    insertRunningWorker(database);
-    database
-      .prepare(
-        "UPDATE deep_scan_workers SET attempt = 3, started_at = 'started', sdk_thread_id = ?",
-      )
-      .run(thread);
-    if (thread === null) database.exec("DELETE FROM deep_scan_worker_threads");
+    const database = legacyRetry(t, 3, thread);
     applyMigrations(database);
     assert.equal(
-      database.prepare("SELECT worker_usage_gap FROM deep_scan_runs").get()
-        ?.worker_usage_gap,
+      storedValue(database, "deep_scan_runs", "worker_usage_gap"),
       thread === null ? 1 : 0,
     );
   }
+});
+
+test("the allowance preview keeps its data and receives canonical usage accounting", (t) => {
+  const database = legacyRetry(t, 2, null);
+  database.exec(`
+    ALTER TABLE scans ADD COLUMN investigation_policy TEXT;
+    UPDATE scans SET investigation_policy = 'saved policy';
+    INSERT INTO schema_migrations (version, name, applied_at)
+      VALUES (63, 'retain native investigation time allowances', 'preview');
+  `);
+  applyMigrations(database);
+  assertMigrationNames(database, 63);
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
+  database.exec("UPDATE deep_scan_runs SET worker_usage_gap = 0");
+  database.exec("UPDATE deep_scan_workers SET attempt = 3");
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
+  const history = migrationHistory(database);
+  applyMigrations(database);
+  assert.deepEqual(migrationHistory(database), history);
+  assert.equal(
+    storedValue(database, "scans", "investigation_policy"),
+    "saved policy",
+  );
 });
 
 test("worker thread history survives retry, replay, and worker retirement", (t) => {

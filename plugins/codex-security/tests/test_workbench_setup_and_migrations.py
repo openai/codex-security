@@ -1302,6 +1302,25 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
     assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
 
 
+@pytest.mark.cross_platform
+def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
+    db, migrate = create_historical_database(63)
+    with closing(db):
+        timestamp = "2026-01-01T00:00:00Z"
+        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
+        record_migration(db, 63, "retain native investigation time allowances", timestamp)
+        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
+        migrate(db)
+        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
+        receipt = db.execute(query).fetchone()
+        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
+        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
+        migrate(db)
+        assert db.execute(query).fetchone() == receipt
+        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
+
+
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
     connection, apply_migrations = create_historical_database(29)
 

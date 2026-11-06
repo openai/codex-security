@@ -6,8 +6,7 @@ lists the packages and version ranges it affects.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the destination
-checkout, set the repository and source key. For GitHub Enterprise, export
+In the destination checkout, set the repository and source key. For GitHub Enterprise, export
 `GH_HOST` with your hostname first. For a repeat import, use the exact
 advisories key from your previous preview, including case.
 
@@ -90,4 +89,6 @@ pass `normalizeGitHubAdvisories(advisories, "cloud")` to
 `importGitHubAdvisories()` defaults to `{ source: "repository", state: "published" }`; use
 `{ source: "global", advisoryIds: ["GHSA-2345-6789-cfgh"] }` for selected database
 records. Both forms require `repository: "OWNER/REPO"` as source or target context.
+When normalized evidence retains a collector record in `source_data`, imports
+check a repository disclosure's original repository against the destination.
 Supply `githubHost` and `githubToken` to override the GitHub CLI login and host.

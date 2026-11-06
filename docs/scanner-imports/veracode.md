@@ -5,8 +5,7 @@ application. Use the application context and `scan_type=STATIC`.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). Verify that the
-application maps to a single Git repository and open its checkout.
+Verify that the application maps to a single Git repository and open its checkout.
 
 **Saved report.** Set `report` to the complete Findings API page or array of
 pages for your selection. Preserve each page's HAL links and pagination fields.
@@ -45,9 +44,14 @@ from the same application and context.
 The API origin, application, context and native `issue_id` identify a policy
 flaw. Build number, source line, CWE and Pipeline flaw ID are separate fields.
 The original row keeps the numeric severity, CWE, description, status,
-mitigation and resolution. Veracode reports the static analysis path, line
-and module. Check the path against the checkout yourself. The import supplies
-no column or Git commit.
+mitigation and resolution. The reader accepts the numeric CWE and category name
+defined in the Findings API schema, as well as expanded CWE and category objects
+in HAL exports. [Findings API schema](https://api.swaggerhub.com/apis/Veracode/veracode-findings_api_specification/2.1)
+
+If you export with a numeric category filter, the rows must include category
+IDs so the reader can verify the selection. Veracode reports the static analysis
+path, line and module. Check the path against the checkout yourself. The import
+supplies no column or Git commit.
 
 A Veracode resolution records upstream status. Assess the fix separately.
 The workbench keeps flaws omitted from later exports.

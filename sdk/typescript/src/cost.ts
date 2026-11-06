@@ -21,6 +21,7 @@ import {
   estimateScanCost,
   tokenUsage,
   type ScanCost,
+  type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
 import {
@@ -332,6 +333,7 @@ function sessionObservation<T>(
 
 interface ScanCostTrackerOptions {
   codexHome: string;
+  pricingContext?: ScanPricingContext;
   model: string;
   repository?: string;
   scanDirectory?: string;
@@ -2445,7 +2447,11 @@ export class ScanCostTracker {
       this.#snapshot.measurement.missingThreadCount > 0
     )
       return this.#snapshot;
-    const cost = estimateScanCost(this.#options.model, fallbackUsage);
+    const cost = estimateScanCost(
+      this.#options.model,
+      fallbackUsage,
+      this.#options.pricingContext,
+    );
     const usage = tokenUsage(fallbackUsage);
     this.#setSnapshot(usage, cost, usage !== null, usage === null ? 0 : 1, 0);
     this.#reportUsage(usage);
@@ -2835,7 +2841,11 @@ export class ScanCostTracker {
     details?: Pick<ScanUsageMeasurement, "coverageScope" | "warnings">,
     reportCost = true,
   ): void {
-    const cost = estimateScanCost(this.#options.model, usage);
+    const cost = estimateScanCost(
+      this.#options.model,
+      usage,
+      this.#options.pricingContext,
+    );
     this.#setSnapshot(
       usage,
       cost,

@@ -1,7 +1,7 @@
 # Import Semgrep findings
 
-[Enable external imports](README.md#preview-a-report), then choose the report or
-account you have. Each route has a different source of finding IDs.
+Choose the route that matches your report or account. Each route uses a different
+source of finding IDs.
 
 | Starting point                                                   | What to collect                                                                                                                                                                                | Destination    |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
@@ -64,9 +64,12 @@ creates a new record. [Imported evidence and identity](schema-guide.md)
 For CLI/CI JSON and SARIF, use SAST-only rules. The reader excludes results
 it recognizes as Supply Chain or Secrets, but SARIF can omit product metadata.
 Scan errors or an unsuccessful SARIF invocation stop the import. Direct artifact URIs and native
-`%SRCROOT%` paths can supply locations. Indexed artifacts and unresolved bases
+`%SRCROOT%` paths can supply locations. The reader preserves the scanner's path
+spelling, including backslashes in POSIX filenames and Windows paths.
+Indexed artifacts and unresolved bases
 stay in the raw evidence and need a fingerprint for identity. Keep the original
-report for run-wide inventories and timing.
+report for run-wide inventories, matching explanations and timing. Individual
+findings keep their own match data.
 
 If you call the JSON or SARIF normalizer from the SDK, pass `sourceRepositoryUrl`.
 When calling `prepareNormalizedLocalImport` directly, pass the original SARIF
@@ -230,7 +233,7 @@ repository fields on each selected finding.
   without a URL also needs the matching ID and a `repository.name` equal to
   the decoded, namespace-qualified URL path, such as `example/project`.
 
-**Preview the selection.** [Enable external imports](README.md#preview-a-report).
+**Preview the selection.**
 In a Node.js project you control outside the scanned checkout, install
 `@openai/codex-security` and save this script as `preview-semgrep.mjs`.
 Set the deployment, ref, repository URL, source key and finding IDs. Use
@@ -286,6 +289,7 @@ The SDK preserves large positive IDs exactly. Key order and equivalent numeric
 spellings (such as `2` and `2.0`) leave the stored record unchanged.
 
 The preview excludes findings that lack both a native rule name and a message.
+It verifies the selected project's repository even when every finding is excluded.
 Only repository-relative files become locations. URI-like and directory-only
 paths stay in the native evidence.
 
@@ -305,7 +309,6 @@ checkout. Each collection gets a new owner-only file. A failed collection
 leaves earlier exports available for replay.
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 report=$(mktemp ./semgrep-backlog.XXXXXX) &&
   codex-security import semgrep example/project --semgrep-deployment example \
     --semgrep-ref refs/heads/topic --semgrep-product sast --format json > "$report" &&
