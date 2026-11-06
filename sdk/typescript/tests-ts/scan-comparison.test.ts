@@ -32,6 +32,7 @@ import {
   runCodexCommand,
 } from "../src/runtime.js";
 import { resolveCommandAuthConfig, type JsonObject } from "../src/config.js";
+import { ConfigurationError } from "../src/errors.js";
 import * as providerProfiles from "../src/provider-profile.js";
 import {
   comparisonForScan,
@@ -895,7 +896,7 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test.each(["allowed", "disallowed", "fallback", "empty"])(
+  test.each(["allowed", "disallowed", "fallback", "empty", "unavailable"])(
     "checks the actual helper permission child before starting a turn when %s",
     async (mode) => {
       const home = await temporaryDirectory();
@@ -927,6 +928,10 @@ describe("semantic scan comparison", () => {
             lockHeld: existsSync(join(process.env.CODEX_HOME, ".codex-security-preflight", ".codex-security-scan.lock", "owner.json")),
           }) + "\\n");
           if (request.id === undefined) continue;
+          if (mode === "unavailable" && request.method === "permissionProfile/list") {
+            console.log(JSON.stringify({ id: request.id, error: { code: -32000, message: "Temporarily unavailable" } }));
+            continue;
+          }
           const result = request.method === "config/read"
             ? { config: { default_permissions: mode === "fallback" ? ":workspace" : id, permissions: { [id]: profile } } }
             : request.method === "permissionProfile/list"
@@ -1012,7 +1017,14 @@ describe("semantic scan comparison", () => {
             uncertain: [],
           });
           expect(startThread).toHaveBeenCalledTimes(1);
+        } else if (mode === "unavailable") {
+          await expect(matching).rejects.toMatchObject({
+            constructor: Error,
+            message: expect.stringContaining("Temporarily unavailable"),
+          });
+          expect(startThread).not.toHaveBeenCalled();
         } else {
+          await expect(matching).rejects.toBeInstanceOf(ConfigurationError);
           await expect(matching).rejects.toThrow(
             mode === "disallowed"
               ? "organization policy does not allow"
