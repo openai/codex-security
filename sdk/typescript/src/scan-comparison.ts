@@ -30,6 +30,7 @@ import {
 } from "./auth.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  AZURE_CODEX_PROVIDER,
   azureProviderEnvironment,
   deepMerge,
   hasCommandAuth,
@@ -652,9 +653,10 @@ async function startReadOnlyCodexThread(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
   const modelProvider = scanModelProvider(providerConfig);
+  const providerKey = scanProviderEnvKey(providerConfig);
   const nativeKey =
     !commandAuth && !isExternalModelProvider(modelProvider)
-      ? scanProviderEnvKey(providerConfig)
+      ? providerKey
       : undefined;
   const environment = await comparisonEnvironment(
     source,
@@ -665,6 +667,11 @@ async function startReadOnlyCodexThread(
     nativeKey,
     options.auth,
   );
+  // Startup reads provider metadata. Restore credentials for header-only use at exec.
+  const startupEnvironment =
+    !commandAuth && providerKey?.toUpperCase() === AZURE_CODEX_PROVIDER.env_key
+      ? environment
+      : definedEnvironment(azureProviderEnvironment(environment, {}));
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
     configOverrides: [requestContext.configOverride],
@@ -683,7 +690,7 @@ async function startReadOnlyCodexThread(
       mcp_servers: await disabledMcpServers(
         await providerPreflightCommand(command, providerSettings),
         config,
-        environment,
+        startupEnvironment,
         options,
       ),
       allow_login_shell: false,
@@ -726,7 +733,7 @@ async function startReadOnlyCodexThread(
     if (profile !== undefined) {
       delete threadOptions.sandboxMode;
       const permissions = await preflightReadOnlyProfileCodex(
-        codexOptions,
+        { ...codexOptions, env: startupEnvironment },
         {
           extends: ":read-only",
           filesystem: {
