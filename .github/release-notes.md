@@ -125,6 +125,7 @@
 - preserve line breaks in oversized finding files ([#2361](https://github.com/openai/codex-security/pull/2361))
 - use published Vertex AI prices for managed OpenAI models ([#2363](https://github.com/openai/codex-security/pull/2363))
 - clarify archived scan output names ([#2365](https://github.com/openai/codex-security/pull/2365))
+- bump napi-derive from 3.6.13 to 3.7.0 in /plugins/codex-security/native ([#2394](https://github.com/openai/codex-security/pull/2394))
 
 </details>
 
