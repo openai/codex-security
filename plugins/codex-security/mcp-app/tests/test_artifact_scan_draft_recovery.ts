@@ -531,8 +531,13 @@ for (const observation of ["checkpoint head", "worker result"]) {
     let replaced = false;
     const replaceOnce = async (destination: string) => {
       if (replaced) return;
-      replaced = true;
+      // Windows can move the open result aside, but cannot overwrite its name.
+      // Keep its original handle open while the pathname acquires the new mtime.
+      if (process.platform === "win32" && destination === resultPath) {
+        await rename(resultPath, path.join(f.root, "previous-result.json"));
+      }
       await rename(replacementPath, destination);
+      replaced = true;
     };
     const originalLstat = fsPromises.lstat;
     const originalReadFile = fsPromises.readFile;
