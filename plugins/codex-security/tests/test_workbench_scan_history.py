@@ -1184,16 +1184,17 @@ def test_matching_plan_keeps_cross_mode_context_with_each_scan_pair(tmp_path: Pa
     )
     plan = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
     first, second = plan["batches"]
+    findings = plan["findingsByScanId"]
     old = first["beforeScans"][0]
     assert old["crossModeOccurrenceIds"] == [
-        old["findings"][0]["occurrenceId"],
-        first["afterFindings"][0]["occurrenceId"],
+        findings[before["scanId"]][0]["occurrenceId"],
+        findings[after["scanId"]][0]["occurrenceId"],
     ]
     assert second["afterScanId"] == later["scanId"]
     prior, same_mode = second["beforeScans"]
     assert prior["crossModeOccurrenceIds"] == [
-        old["findings"][0]["occurrenceId"],
-        second["afterFindings"][0]["occurrenceId"],
+        findings[before["scanId"]][0]["occurrenceId"],
+        findings[later["scanId"]][0]["occurrenceId"],
     ]
     assert "crossModeOccurrenceIds" not in same_mode
     compared = save_scan_matches(state_dir, before, after)
@@ -1253,7 +1254,7 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
     assert [[scan["scanId"] for scan in batch["beforeScans"]] for batch in pending["batches"]] == [
         [first["scanId"], second["scanId"]],
     ]
-    assert pending["batches"][0]["beforeScans"][0]["findings"][0]["rootCause"]["summary"]
+    assert pending["findingsByScanId"][first["scanId"]][0]["rootCause"]["summary"]
 
     forced = run_workbench(
         state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"

@@ -98,12 +98,47 @@ interface SavedComparisonContext {
 
 export interface ScanMatchingBatch {
   afterScanId: string;
-  afterFindings: readonly Finding[];
+  afterFindings?: readonly Finding[];
   beforeScans: ({
     scanId: string;
-    findings: readonly Finding[];
+    findings?: readonly Finding[];
   } & SavedComparisonContext)[];
   knownFindingGroups?: readonly (readonly string[])[];
+}
+
+export type ScanMatchingPlan = JsonObject & {
+  repository: string;
+  scanCount: number;
+  unavailableScans: number;
+  skippedPairs: number;
+  batches: ScanMatchingBatch[];
+  findingsByScanId?: Record<string, readonly Finding[]>;
+};
+
+export function resolveMatchingBatch(
+  batch: ScanMatchingBatch,
+  findingsByScanId: ScanMatchingPlan["findingsByScanId"],
+) {
+  function findings(
+    scanId: string,
+    inline?: readonly Finding[],
+  ): readonly Finding[] {
+    const rows =
+      findingsByScanId === undefined ? inline : findingsByScanId?.[scanId];
+    if (!Array.isArray(rows))
+      throw new CodexSecurityError(
+        `Matching plan is missing findings for scan ${scanId}.`,
+      );
+    return rows;
+  }
+  return {
+    ...batch,
+    afterFindings: findings(batch.afterScanId, batch.afterFindings),
+    beforeScans: batch.beforeScans.map((scan) => ({
+      ...scan,
+      findings: findings(scan.scanId, scan.findings),
+    })),
+  };
 }
 
 export function selectedComparisonContext(
@@ -848,17 +883,16 @@ export async function matchCompletedScan(
     ),
   );
 
-  const { batches } = (await options.workbench([
+  const plan = (await options.workbench([
     "list-unmatched-scan-pairs",
     "--repository",
     options.repository,
-  ])) as {
-    batches?: ScanMatchingBatch[];
-  };
-  const batch = batches?.find(
+  ])) as ScanMatchingPlan;
+  const selected = plan.batches?.find(
     ({ afterScanId }) => afterScanId === options.scanId,
   );
-  if (batch === undefined) return;
+  if (selected === undefined) return;
+  const batch = resolveMatchingBatch(selected, plan.findingsByScanId);
 
   // A saved comparison covers the whole pair. Let the catalogue group repeated
   // occurrences instead of dropping findings from the selected scans.

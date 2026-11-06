@@ -806,9 +806,10 @@ execution capabilities.
 Use the current shell or Windows launcher for runtime-root routing. The SDK does
 not adapt the older `node ./mcp/server.mjs` MCP entrypoint.
 
-Custom plugins must support the current workbench protocol for scan comparison
-and archival. The SDK does not adapt older payloads or archive scan directories
-on behalf of older workbench implementations.
+Bulk matching reads both earlier workbench plans with inline findings and compact
+plans that store each scan's findings once in `findingsByScanId`. Upgrade the SDK
+before switching a custom `pluginPath` to a workbench that returns compact plans.
+Custom plugins handle scan archival through the current workbench protocol.
 
 ### Older progress integrations
 

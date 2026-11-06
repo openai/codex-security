@@ -579,12 +579,10 @@ def list_unmatched_scan_pairs(
         )
         batches.append(
             {
-                "afterFindings": matching_findings[after["id"]],
                 "afterScanId": after["id"],
                 "beforeScans": [
                     {
                         **_cross_mode_context(before, after, matching_findings, sites),
-                        "findings": matching_findings[before["id"]],
                         "scanId": before["id"],
                     }
                     for before in previous
@@ -594,6 +592,7 @@ def list_unmatched_scan_pairs(
         )
     return {
         "batches": batches,
+        "findingsByScanId": matching_findings,
         "repository": str(repository),
         "scanCount": len(selected),
         "skippedPairs": skipped,

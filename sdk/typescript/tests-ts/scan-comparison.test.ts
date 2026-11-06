@@ -2255,21 +2255,31 @@ describe("semantic scan comparison", () => {
       async workbench(args, commandInput) {
         if (args[0] === "list-unmatched-scan-pairs") {
           return {
+            findingsByScanId: {
+              current: [after],
+              unselected: [unselected],
+              first: [firstShared, firstOther],
+              latest: [latestShared],
+            },
             batches: [
               {
                 afterScanId: "current",
-                afterFindings: [after],
                 beforeScans: [
                   {
                     scanId: "unselected",
-                    findings: [unselected],
                     crossModeOccurrenceIds: [
                       unselected.occurrenceId,
                       after.occurrenceId,
                     ],
                   },
-                  { scanId: "first", findings: [firstShared, firstOther] },
-                  { scanId: "latest", findings: [latestShared] },
+                  { scanId: "first" },
+                  {
+                    scanId: "latest",
+                    crossModeOccurrenceIds: [
+                      latestShared.occurrenceId,
+                      after.occurrenceId,
+                    ],
+                  },
                 ],
               },
             ],
@@ -2281,9 +2291,10 @@ describe("semantic scan comparison", () => {
       matchFindings,
     });
 
-    expect(matchFindings.mock.lastCall?.[0]).toEqual({
+    expect(matchFindings.mock.lastCall?.[0]).toMatchObject({
       before: [firstShared, firstOther, latestShared],
       after: [after],
+      crossModeOccurrenceIds: [latestShared.occurrenceId, after.occurrenceId],
     });
     expect(model.calls.turnOptions?.cyberAccessProgram).toBe("daybreak_red");
     expect([...saved.keys()]).toEqual(["first", "latest"]);
