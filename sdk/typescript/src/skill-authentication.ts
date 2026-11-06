@@ -131,6 +131,7 @@ export function resolveSkillAuthentication(
     configOverrides = modelProviderConfigOverride(overrides);
   }
   return {
+    config,
     authentication,
     provider,
     providerConfiguration,

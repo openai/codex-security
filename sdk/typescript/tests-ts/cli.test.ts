@@ -2194,7 +2194,7 @@ describe("CLI", () => {
 
     expect(
       await runCli(
-        ["info", "--json", "--filter-output", "model,reasoningEffort,nextStep"],
+        ["info", "--json", "--filter-output=model,reasoningEffort,nextStep"],
         deps,
       ),
     ).toBe(0);
@@ -3203,6 +3203,7 @@ describe("CLI", () => {
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
       ],
       [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [["--codex", 'model = "gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
       [
         ["--codex", 'model_reasoning_effort="high"'],
         { model_reasoning_effort: "high" },
@@ -3909,6 +3910,44 @@ describe("CLI", () => {
     );
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_SECRET");
   });
+
+  test.each([true, false])(
+    "routes direct Deep Scan coordinator diagnostics in verbose mode (%p)",
+    async (verbose) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies();
+      deps.createSecurity = (_config, observe) =>
+        fakeSecurity(async () => {
+          expect(typeof observe).toBe(verbose ? "function" : "undefined");
+          observe?.({
+            event: "finding_comparison_failed",
+            reason: "first\nsecond",
+          });
+          return fakeResult();
+        });
+      expect(
+        await runCli(
+          [
+            "scan",
+            ".",
+            "--mode",
+            "deep",
+            "--json",
+            ...(verbose ? ["--verbose"] : []),
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const diagnostics = stderr
+        .text()
+        .split("\n")
+        .filter((line) => line.includes("deep_scan.coordinator"));
+      expect(diagnostics).toHaveLength(verbose ? 1 : 0);
+      if (verbose)
+        expect(diagnostics[0]).toContain('event="finding_comparison_failed"');
+    },
+  );
 
   test("reports the effective default model and reasoning effort in verbose scan diagnostics", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -5136,6 +5175,7 @@ describe("CLI", () => {
       ["--token-limit", "4"],
       ["--token-offset", "1"],
       ["--token-offset", "1", "--token-limit", "4"],
+      ["--token-offset=1", "--token-limit=4"],
     ] as const) {
       const stdout = captureCli(main, "stdout");
       expect(await stdout.run(["scan", ...arguments_], dependencies())).toBe(0);

@@ -1,3 +1,4 @@
+import type { ScanPricingContext } from "./cost-model.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { isIP } from "node:net";
@@ -5,10 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
-import {
-  forwardExternalImportSetting,
-  importEnvironmentSetting,
-} from "./external-imports-feature.js";
+import { environmentEntry } from "./value.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
@@ -67,14 +65,6 @@ export const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
   Object.values(EXTERNAL_CODEX_PROVIDERS).map(({ env_key }) => env_key),
 );
 
-// Azure model names are deployment aliases, even when they match names in the OpenAI price table.
-export function scanPricingModel(
-  model: string | undefined,
-  provider: unknown,
-): string | undefined {
-  return provider === "azure" ? undefined : model;
-}
-
 type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
 
 /** Keep the Azure key only for a model configuration that names it. */
@@ -102,11 +92,9 @@ export function azureProviderEnvironment(
       Object.values(native["env_http_headers"]).some(isAzureKey))
   )
     return environment;
-  const filtered = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(environment).filter(([name]) => !isAzureKey(name)),
   );
-  forwardExternalImportSetting(environment, filtered);
-  return filtered;
 }
 
 export function azureBaseUrl(
@@ -115,14 +103,8 @@ export function azureBaseUrl(
 ): string {
   const configured =
     baseUrl === undefined
-      ? importEnvironmentSetting(
-          environment,
-          "AZURE_OPENAI_BASE_URL",
-        )?.value?.trim() ||
-        importEnvironmentSetting(
-          environment,
-          "AZURE_OPENAI_ENDPOINT",
-        )?.value?.trim()
+      ? environmentEntry(environment, "AZURE_OPENAI_BASE_URL")?.trim() ||
+        environmentEntry(environment, "AZURE_OPENAI_ENDPOINT")?.trim()
       : baseUrl;
   if (configured === undefined || configured === "") {
     throw new ConfigurationError(
@@ -251,17 +233,96 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
 }
 
+function bedrockPricingRegion(
+  provider: JsonValue | undefined,
+  environment: Readonly<Record<string, string | undefined>>,
+): string | null {
+  const baseUrl = isObject(provider) ? provider["base_url"] : undefined;
+  if (typeof baseUrl === "string") {
+    // Codex sends inference to an explicit endpoint even when aws.region differs.
+    const host = URL.parse(baseUrl)?.hostname ?? "";
+    return (
+      /^bedrock-(?:mantle|runtime)(?:-fips)?\.([a-z0-9-]+)\.(?:api\.aws|amazonaws\.com(?:\.cn)?)$/.exec(
+        host,
+      )?.[1] ?? null
+    );
+  }
+  const aws = isObject(provider) ? provider["aws"] : undefined;
+  const region = isObject(aws) ? aws["region"] : undefined;
+  return (
+    (typeof region === "string" && region.trim()) ||
+    environment["AWS_REGION"]?.trim() ||
+    environment["AWS_DEFAULT_REGION"]?.trim() ||
+    null
+  );
+}
+
+/** @internal Keep billing selection separate from model names shared by providers. */
+export function scanPricingContext(
+  config: Readonly<JsonObject>,
+  environment: Readonly<Record<string, string | undefined>>,
+): ScanPricingContext | undefined {
+  const selected = scanModelProvider(config) ?? "openai";
+  if (selected === "azure") return { provider: "azure" };
+  if (typeof selected !== "string") return undefined;
+  const resolved = selectedScanProfile(config)
+    ? resolveCodexProfile(config)
+    : config;
+  const providers = resolved["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  if (selected === "amazon-bedrock" || selected === "amazon-bedrock-runtime") {
+    return {
+      provider: "amazon-bedrock",
+      region: bedrockPricingRegion(provider, environment),
+    };
+  }
+  // Native Codex only accepts inference routing for the built-in OpenAI
+  // provider through the top-level openai_base_url setting.
+  const baseUrl =
+    selected === "openai"
+      ? resolved["openai_base_url"]
+      : isObject(provider)
+        ? provider["base_url"]
+        : undefined;
+  if (baseUrl == null)
+    return selected === "gcp" ? { provider: "gcp" } : undefined;
+
+  const url = typeof baseUrl === "string" ? URL.parse(baseUrl) : null;
+  const host = url?.hostname.replace(/\.$/, "") ?? "";
+  if (host.endsWith(".prediction.vertexai.goog")) {
+    return { provider: "gcp", managedEndpoint: false };
+  }
+  const vertexHost =
+    url &&
+    /^(?:[a-z0-9-]+-)?aiplatform(?:\.mtls)?\.googleapis\.com$/.test(host);
+  if (selected !== "gcp" && !vertexHost) return undefined;
+  // A dedicated endpoint bills the serving infrastructure. Only publisher and
+  // shared OpenAPI endpoints identify the managed token-based service.
+  const managedEndpoint =
+    !!vertexHost &&
+    /^\/v1(?:beta1)?\/projects\/[^/]+\/locations\/[^/]+\/(?:publishers\/openai\/v1|endpoints\/openapi)\/?$/.test(
+      url.pathname,
+    );
+  return { provider: "gcp", managedEndpoint };
+}
+
 /** @internal Use the selected native provider's configured credential key. */
 export function scanProviderEnvKey(
   config: Readonly<JsonObject>,
 ): string | undefined {
   const selected = scanModelProvider(config);
-  if (!isExternalModelProvider(selected)) return undefined;
+  if (
+    typeof selected !== "string" ||
+    ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
+  )
+    return undefined;
   const providers = resolveCodexProfile(config)["model_providers"];
   const provider = isObject(providers) ? providers[selected] : undefined;
   return isObject(provider) && typeof provider["env_key"] === "string"
     ? provider["env_key"]
-    : EXTERNAL_CODEX_PROVIDERS[selected].env_key;
+    : isExternalModelProvider(selected)
+      ? EXTERNAL_CODEX_PROVIDERS[selected].env_key
+      : undefined;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */

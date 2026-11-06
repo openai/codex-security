@@ -205,7 +205,7 @@ describe("ScanResult", () => {
 
   test("retains Azure deployment and usage without inferring its price", () => {
     const turnResult = {
-      modelProvider: "azure",
+      pricingContext: { provider: "azure" as const },
       model: "gpt-5.6-sol",
       usage: { input_tokens: 1250, output_tokens: 30 },
     };

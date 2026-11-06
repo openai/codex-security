@@ -14,10 +14,10 @@ import {
 import { z } from "zod";
 import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import {
-  definedEnvironment,
-  scanAuthentication,
   scanCodexHome,
+  scanAuthentication,
   selectedScanEnvironment,
+  definedEnvironment,
   type CodexSecuritySurface,
   type ScanAuthMode,
 } from "./api.js";
@@ -33,6 +33,8 @@ import {
   azureProviderEnvironment,
   deepMerge,
   hasCommandAuth,
+  isExternalModelProvider,
+  scanProviderEnvKey,
   mergedCodexConfig,
   readCodexFileProfile,
   normalizeLegacyWindowsSandboxOverride,
@@ -41,7 +43,6 @@ import {
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
-  scanProviderEnvKey,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -92,11 +93,25 @@ export interface ScanComparisonInput {
   knownFindingGroups?: readonly (readonly string[])[];
 }
 
+interface SavedComparisonContext {
+  crossModeOccurrenceIds?: readonly string[];
+}
+
 export interface ScanMatchingBatch {
   afterScanId: string;
   afterFindings: readonly Finding[];
-  beforeScans: { scanId: string; findings: readonly Finding[] }[];
+  beforeScans: ({
+    scanId: string;
+    findings: readonly Finding[];
+  } & SavedComparisonContext)[];
   knownFindingGroups?: readonly (readonly string[])[];
+}
+
+export function selectedComparisonContext(
+  scans: ScanMatchingBatch["beforeScans"],
+): SavedComparisonContext {
+  const ids = scans.flatMap((scan) => scan.crossModeOccurrenceIds ?? []);
+  return ids.length ? { crossModeOccurrenceIds: ids } : {};
 }
 
 export interface ScanComparisonProgress {
@@ -258,9 +273,13 @@ export async function matchScanFindings(
 }
 
 export async function matchScanFindingsInternal(
-  input: ScanComparisonInput,
+  input: ScanComparisonInput & SavedComparisonContext,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface; singleTurn?: boolean },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    singleTurn?: boolean;
+    nativeProviderEnvironment?: Record<string, string>;
+  },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
   validateComparisonInput(input);
@@ -281,6 +300,18 @@ export async function matchScanFindingsInternal(
     before: [...catalogue.values()].map(({ card }) => card),
     after: input.after.map(compactFinding),
   };
+  const crossModeSites =
+    !runtimeOptions.singleTurn && Boolean(input.crossModeOccurrenceIds?.length);
+  if (crossModeSites) {
+    const candidates = new Set(input.crossModeOccurrenceIds);
+    for (const { card, occurrences } of catalogue.values()) {
+      if (occurrences.some((finding) => candidates.has(finding.occurrenceId)))
+        card["crossModeSite"] = true;
+    }
+    for (const card of initialCatalogue.after) {
+      if (candidates.has(card.occurrenceId)) card["crossModeSite"] = true;
+    }
+  }
   // Cost-limited scans retain the existing one-call post-scan allowance.
   if (
     runtimeOptions.singleTurn &&
@@ -291,7 +322,7 @@ export async function matchScanFindingsInternal(
   }
   const pages = runtimeOptions.singleTurn
     ? [initialCatalogue]
-    : cataloguePages(initialCatalogue);
+    : cataloguePages(initialCatalogue, crossModeSites);
   const omittedEvidence = {
     before: new Set<string>(),
     after: new Set<string>(),
@@ -335,7 +366,7 @@ export async function matchScanFindingsInternal(
     cyberAccessProgram: options.cyberAccessProgram,
     signal: options.signal,
   };
-  let prompt = comparisonPrompt(pages[0]!, 0, pages.length);
+  let prompt = comparisonPrompt(pages[0]!, 0, pages.length, crossModeSites);
   progress("catalogue", 1);
   try {
     for (;;) {
@@ -399,7 +430,12 @@ export async function matchScanFindingsInternal(
               "Scan comparison repeated a request without making progress.",
             );
           }
-          prompt = comparisonPrompt(page, request.page, pages.length);
+          prompt = comparisonPrompt(
+            page,
+            request.page,
+            pages.length,
+            crossModeSites,
+          );
           progress("catalogue", request.page + 1);
         } else {
           request.beforeOccurrenceIds = [
@@ -517,7 +553,9 @@ export async function matchScanFindingsInternal(
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
+    nativeProviderEnvironment?: Record<string, string>;
+  },
 ): Promise<{
   thread: ReturnType<ReadOnlyCodex["startThread"]>;
   cleanup?: () => Promise<void>;
@@ -613,12 +651,19 @@ async function startReadOnlyCodexThread(
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
+  const modelProvider = scanModelProvider(providerConfig);
+  const nativeKey =
+    !commandAuth && !isExternalModelProvider(modelProvider)
+      ? scanProviderEnvKey(providerConfig)
+      : undefined;
   const environment = await comparisonEnvironment(
     source,
     accountStatus,
     options.signal,
     undefined,
     providerConfig,
+    nativeKey,
+    options.auth,
   );
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
@@ -627,7 +672,7 @@ async function startReadOnlyCodexThread(
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      scanModelProvider(providerConfig) === "azure"
+      nativeKey !== undefined || scanModelProvider(providerConfig) === "azure"
         ? undefined
         : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
           environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
@@ -696,6 +741,15 @@ async function startReadOnlyCodexThread(
       );
       codexOptions.configOverrides = permissions.configOverrides;
       requestedPermissionProfile = permissions.permissionProfileId;
+    }
+    if (
+      nativeKey !== undefined &&
+      runtimeOptions.nativeProviderEnvironment !== undefined
+    ) {
+      codexOptions.env = {
+        ...runtimeOptions.nativeProviderEnvironment,
+        ...environment,
+      };
     }
     const codex =
       profile === undefined
@@ -825,6 +879,7 @@ export async function matchCompletedScan(
   const input: ScanComparisonInput = {
     before: beforeScans.flatMap(({ findings }) => findings),
     after: batch.afterFindings,
+    ...selectedComparisonContext(beforeScans),
     ...(batch.knownFindingGroups === undefined
       ? {}
       : { knownFindingGroups: batch.knownFindingGroups }),
@@ -1004,6 +1059,7 @@ function comparisonPrompt(
   input: CataloguePage,
   page: number,
   pages: number,
+  crossModeSites = false,
 ): string {
   return [
     "Compare every finding from one or more earlier scans against a later scan of the same repository.",
@@ -1011,6 +1067,11 @@ function comparisonPrompt(
     "Different routes reaching the same vulnerable helper share one root cause. Group findings when either scan split or combined that issue.",
     "When several earlier scans contain the same issue, include every earlier occurrence in one group with the matching later occurrences.",
     "Keep distinct independently vulnerable controls or instances separate.",
+    ...(crossModeSites
+      ? [
+          "Cards marked crossModeSite include an occurrence with a cross-mode candidate sharing its rule and site despite different anchors. Request full evidence if the control or fix is unclear.",
+        ]
+      : []),
     "The earlier findings form a catalogue of known issues. Each top-level before occurrenceId represents that issue. Its earlierDescriptions contain fields that differ from the current card. Return the top-level IDs; the host expands the saved historical occurrences.",
     "Judge the defective control, failed security invariant, trust boundary, and smallest root-cause correction. Similar titles, CWE labels, or broad hardening advice do not establish a duplicate.",
     "Return only high-confidence matches; put plausible uncertain pairs in uncertain. Use related for findings that are meaningfully related but have distinct root causes. Each occurrenceId may appear in only one confirmed group.",
@@ -1021,16 +1082,20 @@ function comparisonPrompt(
   ].join("\n");
 }
 
-function cataloguePages(input: CataloguePage): CataloguePage[] {
+function cataloguePages(
+  input: CataloguePage,
+  crossModeSites: boolean,
+): CataloguePage[] {
   if (
-    characterCount(comparisonPrompt(input, 0, 1)) <= MAX_CODEX_INPUT_CHARACTERS
+    characterCount(comparisonPrompt(input, 0, 1, crossModeSites)) <=
+    MAX_CODEX_INPUT_CHARACTERS
   ) {
     return [input];
   }
   const maximumPages = input.before.length + input.after.length;
   const empty = (): CataloguePage => ({ before: [], after: [] });
   const overhead = characterCount(
-    comparisonPrompt(empty(), maximumPages, maximumPages),
+    comparisonPrompt(empty(), maximumPages, maximumPages, crossModeSites),
   );
   const pages: CataloguePage[] = [];
   let page = empty();
@@ -1040,7 +1105,11 @@ function cataloguePages(input: CataloguePage): CataloguePage[] {
       let card = original;
       let length = characterCount(JSON.stringify(card));
       if (overhead + length > MAX_CODEX_INPUT_CHARACTERS) {
-        card = { occurrenceId: original.occurrenceId, detailsOmitted: true };
+        card = {
+          occurrenceId: original.occurrenceId,
+          detailsOmitted: true,
+          ...(original["crossModeSite"] === true && { crossModeSite: true }),
+        };
         length = characterCount(JSON.stringify(card));
         if (overhead + length > MAX_CODEX_INPUT_CHARACTERS) {
           throw new CodexSecurityError(
@@ -1186,6 +1255,8 @@ export async function comparisonEnvironment(
   signal?: AbortSignal,
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
   config?: JsonObject,
+  nativeKey?: string,
+  auth: ScanAuthMode = "api-key",
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const configuration = config ?? (await readCodexHomeConfig(source, signal));
@@ -1198,6 +1269,13 @@ export async function comparisonEnvironment(
     if (name === "CODEX_HOME" && environment[key]) {
       environment[key] = home;
     }
+  }
+  if (nativeKey !== undefined && config !== undefined) {
+    const provider = scanModelProvider(config);
+    scanAuthentication(environment, auth, provider, false, false, nativeKey);
+    return definedEnvironment(
+      selectedScanEnvironment(environment, auth, provider, nativeKey, config),
+    );
   }
   if (hasCommandAuth(configuration)) {
     return withoutOpenAiApiKeys(environment);

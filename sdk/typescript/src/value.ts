@@ -1,4 +1,17 @@
 /** @internal */
+export function environmentEntry(
+  environment: Readonly<Record<string, string | undefined>>,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested];
+  if (exact !== undefined || process.platform !== "win32") return exact;
+  const upper = requested.toUpperCase();
+  return Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === upper,
+  )?.[1];
+}
+
+/** @internal */
 export function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
