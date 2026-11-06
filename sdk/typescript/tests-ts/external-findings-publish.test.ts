@@ -1797,7 +1797,28 @@ test.each(["sast", "sca"])(
     const prepared = await prepare();
     expect(prepared.preview.findings).toEqual(local.findings);
     await f.loseResponse(prepared);
+    const renamed = "https://github.com/example/renamed";
+    f.state.repositoryUrl = renamed;
     expect((await (await prepare()).publish()).verified).toBe(1);
+    const normalizedInput = { ...local, report: undefined };
+    const normalizedFixture = await fixture(undefined, url);
+    const prepareNormalized = () =>
+      prepareNormalizedExternalPublication(
+        normalizedInput,
+        binding,
+        normalizedFixture.deps,
+      );
+    const normalizedPrepared = await prepareNormalized();
+    await normalizedFixture.loseResponse(normalizedPrepared);
+    normalizedFixture.state.repositoryUrl = renamed;
+    const normalizedRetry = await prepareNormalized();
+    expect(normalizedRetry.preview.resumed).toBe(true);
+    expect((await normalizedRetry.publish()).verified).toBe(1);
+    const freshRename = await fixture(report, renamed);
+    await expect(
+      prepareExternalPublication(freshRename.file, binding, freshRename.deps),
+    ).rejects.toThrow(/repository/iu);
+    expect(freshRename.posts).toHaveLength(0);
     const unscored = structuredClone(report);
     unscored.structuredContent.findings[0]!.severity = "UNSPECIFIED";
     const inbox = await privateUploadFixture(unscored, "semgrep", url);
