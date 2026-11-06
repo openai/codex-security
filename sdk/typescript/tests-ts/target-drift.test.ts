@@ -8,32 +8,6 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures("target-drift-");
 afterEach(cleanup);
 
 describe("head drift monitor", () => {
-  test("polls again after registration until HEAD changes", async () => {
-    jest.useFakeTimers();
-    let reads = 0;
-    let warnings = 0;
-    const monitor = startHeadDriftMonitor({
-      expectedRevision: "before",
-      readRevision: async () => (++reads === 1 ? "before" : "after"),
-      signal: new AbortController().signal,
-      onDrift: () => {
-        warnings++;
-      },
-    });
-    try {
-      await monitor.ready;
-      expect(warnings).toBe(0);
-      jest.advanceTimersByTime(1_000);
-      await Promise.resolve();
-      expect(warnings).toBe(1);
-      jest.advanceTimersByTime(5_000);
-      expect(reads).toBe(2);
-    } finally {
-      monitor.stop();
-      jest.useRealTimers();
-    }
-  });
-
   test.each(["stop", "abort"] as const)(
     "%s cancels an in-flight revision read",
     async (operation) => {
@@ -41,7 +15,7 @@ describe("head drift monitor", () => {
       const started = Promise.withResolvers<AbortSignal>();
       const cancelled = Promise.withResolvers<unknown>();
       let warnings = 0;
-      const monitor = startHeadDriftMonitor({
+      const stop = startHeadDriftMonitor({
         expectedRevision: "before",
         signal: parent.signal,
         readRevision: (signal) => {
@@ -64,57 +38,58 @@ describe("head drift monitor", () => {
       try {
         const signal = await started.promise;
         const reason = new Error("Synthetic scan cancellation");
-        if (operation === "stop") monitor.stop();
+        if (operation === "stop") stop();
         else parent.abort(reason);
         const actualReason = await cancelled.promise;
-        await monitor.ready;
         expect(signal.aborted).toBe(true);
         if (operation === "abort") expect(actualReason).toBe(reason);
         else expect(parent.signal.aborted).toBe(false);
-        await monitor.check();
         expect(warnings).toBe(0);
       } finally {
-        monitor.stop();
+        stop();
       }
     },
   );
 
   test("retries failed reads without overlapping them and ignores observer failure", async () => {
     const parent = new AbortController();
+    jest.useFakeTimers();
     const first = Promise.withResolvers<string | null>();
+    const revisions = [first.promise, null, "before", "after"];
     let reads = 0;
     let warnings = 0;
-    const monitor = startHeadDriftMonitor({
+    const stop = startHeadDriftMonitor({
       expectedRevision: "before",
       signal: parent.signal,
-      intervalMs: 60_000,
-      readRevision: async () => {
-        reads++;
-        if (reads === 1) return first.promise;
-        return reads === 2 ? null : "after";
-      },
+      readRevision: () => Promise.resolve(revisions[reads++]!),
       onDrift: () => {
         warnings++;
         throw new Error("Synthetic observer failure");
       },
     });
     try {
-      await monitor.check();
+      jest.advanceTimersByTime(5_000);
       expect(reads).toBe(1);
       first.reject(new Error("Synthetic transient Git failure"));
-      await monitor.ready;
-      await monitor.check();
+      await Promise.resolve();
+      const nextPoll = async () => {
+        jest.advanceTimersByTime(1_000);
+        await Promise.resolve();
+      };
+      await nextPoll(); // Missing revision.
+      await nextPoll(); // Unchanged revision.
       expect(warnings).toBe(0);
-      await monitor.check();
-      await monitor.check();
-      expect(reads).toBe(3);
+      await nextPoll(); // Changed revision.
+      jest.advanceTimersByTime(5_000);
+      expect(reads).toBe(4);
       expect(warnings).toBe(1);
     } finally {
-      monitor.stop();
+      stop();
+      jest.useRealTimers();
     }
   });
 
-  test("warns once after a real Git HEAD change", async () => {
+  test("warns after a real Git HEAD change", async () => {
     const repository = await temporaryDirectory();
     gitText(["init", "-q"], { cwd: repository });
     const commit = () =>
@@ -134,25 +109,18 @@ describe("head drift monitor", () => {
     commit();
     const expectedRevision = await repositoryRevision(repository);
     expect(expectedRevision).not.toBeNull();
-    let warnings = 0;
-    const monitor = startHeadDriftMonitor({
+    const warned = Promise.withResolvers<void>();
+    const stop = startHeadDriftMonitor({
       expectedRevision: expectedRevision!,
       readRevision: (signal) => repositoryRevision(repository, signal),
       signal: new AbortController().signal,
-      intervalMs: 60_000,
-      onDrift: () => {
-        warnings++;
-      },
+      onDrift: () => warned.resolve(),
     });
     try {
-      await monitor.ready;
-      expect(warnings).toBe(0);
       commit();
-      await monitor.check();
-      await monitor.check();
-      expect(warnings).toBe(1);
+      await warned.promise;
     } finally {
-      monitor.stop();
+      stop();
     }
   });
 });

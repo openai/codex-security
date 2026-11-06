@@ -3,27 +3,18 @@ interface HeadDriftMonitorOptions {
   readRevision: (signal: AbortSignal) => Promise<string | null>;
   signal: AbortSignal;
   onDrift: () => void;
-  intervalMs?: number;
 }
-
-export interface HeadDriftMonitor {
-  readonly ready: Promise<void>;
-  check(): Promise<void>;
-  stop(): void;
-}
-
-const DEFAULT_HEAD_DRIFT_INTERVAL_MS = 1_000;
 
 export function startHeadDriftMonitor(
   options: HeadDriftMonitorOptions,
-): HeadDriftMonitor {
+): () => void {
   const controller = new AbortController();
   const signal = AbortSignal.any([options.signal, controller.signal]);
-  let checking = false;
+  let timer: NodeJS.Timeout | undefined;
+  signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
 
-  const check = async (): Promise<void> => {
-    if (signal.aborted || checking) return;
-    checking = true;
+  async function check(): Promise<void> {
+    if (signal.aborted) return;
     try {
       const revision = await options.readRevision(signal);
       if (
@@ -31,25 +22,15 @@ export function startHeadDriftMonitor(
         revision !== null &&
         revision !== options.expectedRevision
       ) {
-        stop();
+        controller.abort();
         options.onDrift();
       }
     } catch {
-      // A transient inability to read HEAD should not interrupt a scan. The
-      // final target validation remains authoritative if the repository is
-      // unavailable or changes before completion.
-    } finally {
-      checking = false;
+      // Failed reads and warning observers must not interrupt the scan.
     }
-  };
+    if (!signal.aborted) timer = setTimeout(check, 1_000).unref();
+  }
 
-  const timer = setInterval(() => {
-    void check();
-  }, options.intervalMs ?? DEFAULT_HEAD_DRIFT_INTERVAL_MS);
-  timer.unref();
-  const stop = () => controller.abort();
-  signal.addEventListener("abort", () => clearInterval(timer), { once: true });
-  if (signal.aborted) clearInterval(timer);
-
-  return { ready: check(), check, stop };
+  void check();
+  return () => controller.abort();
 }

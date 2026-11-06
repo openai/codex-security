@@ -309,10 +309,7 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
-import {
-  startHeadDriftMonitor,
-  type HeadDriftMonitor,
-} from "./target-drift.js";
+import { startHeadDriftMonitor } from "./target-drift.js";
 import {
   inspectTrustedExecutable,
   isWithin,
@@ -2220,7 +2217,7 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
-    let headDriftMonitor: HeadDriftMonitor | null = null;
+    let stopHeadDriftMonitor: (() => void) | undefined;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
@@ -3155,14 +3152,14 @@ export class CodexSecurity {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       throwIfAborted(signal, scanDir);
-      const monitorsHeadDrift =
+      if (
         options.onWarning !== undefined &&
-        registeredRevision !== "unversioned" &&
+        targetRevision !== null &&
         (targetKind === "git_revision" ||
           targetKind === "git_worktree" ||
-          (targetKind === "git_diff" && normalized.kind === "working_tree"));
-      if (monitorsHeadDrift) {
-        headDriftMonitor = startHeadDriftMonitor({
+          (targetKind === "git_diff" && normalized.kind === "working_tree"))
+      ) {
+        stopHeadDriftMonitor = startHeadDriftMonitor({
           expectedRevision: registeredRevision,
           readRevision: (revisionSignal) =>
             readRepositoryRevision(repo, revisionSignal),
@@ -3721,7 +3718,7 @@ export class CodexSecurity {
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
-      headDriftMonitor?.stop();
+      stopHeadDriftMonitor?.();
       activeScan = null;
       const completedScan = completion["scan"];
       notifyScanLifecycle(options, completedScan);
@@ -4140,7 +4137,7 @@ export class CodexSecurity {
           activeScan = null;
         } catch {}
       }
-      headDriftMonitor?.stop();
+      stopHeadDriftMonitor?.();
       if (runPostScan !== null && !signal.aborted) {
         scanProgressTracker?.stop();
         try {
@@ -4168,7 +4165,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
-      headDriftMonitor?.stop();
+      stopHeadDriftMonitor?.();
       budgetAbortController.abort();
       scanProgressTracker?.stop();
       // Temporary-input cleanup must not replace the scan's outcome.
