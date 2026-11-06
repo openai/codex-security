@@ -103,16 +103,16 @@ def test_inspection_legacy_windows_filename_boundary(
     assert result["storeExists"] is True
 
 
-@pytest.mark.cross_platform
 @pytest.mark.parametrize(
     "state_name",
     [
-        "state %23 # équipe",
+        pytest.param("state %23 # équipe", marks=pytest.mark.cross_platform),
         pytest.param(
             "state ?mode=rw",
-            marks=pytest.mark.skipif(
-                os.name == "nt", reason="? is not a Windows filename character"
-            ),
+            marks=[
+                pytest.mark.native_macos,
+                pytest.mark.skipif(os.name == "nt", reason="? is not a Windows filename character"),
+            ],
         ),
     ],
 )
