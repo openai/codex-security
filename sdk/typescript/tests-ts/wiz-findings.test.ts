@@ -415,6 +415,23 @@ test("workload secrets and cloud configuration remain visible exclusions in a mi
   ]);
 });
 
+test("an empty Wiz export cannot report a positive finding count", async () => {
+  const page = { nodes: [], totalCount: 20, pageInfo: { hasNextPage: false } };
+  await expect(parse({ data: { sastFindings: page } })).rejects.toThrow(
+    "sastFindings.totalCount",
+  );
+  expect(
+    (await parse({ data: { sastFindings: { ...page, totalCount: 0 } } })).read,
+  ).toBe(0);
+  expect(
+    (
+      await parse({
+        data: { sastFindings: page, iacFindings: { nodes: [iac] } },
+      })
+    ).read,
+  ).toBe(1);
+});
+
 test("GraphQL errors, unfinished finding pages, and unfinished inventory stop parsing", async () => {
   await expect(
     parse({
@@ -552,7 +569,6 @@ async function cloudFixture(payload: unknown) {
   const f = await fixture(payload);
   const environment = {
     ...process.env,
-    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_HOME: join(f.root, "login"),
     CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
   };
@@ -1849,7 +1865,6 @@ test("Node resumes the same uncertain publication across locales and Unicode key
     const prepared = await prepareExternalPublication(
       ${JSON.stringify(f.file)}, ${JSON.stringify(f.options)}, {
         environment: ${JSON.stringify({
-          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
           CODEX_HOME: f.environment.CODEX_HOME,
           CODEX_SECURITY_STATE_DIR: f.environment.CODEX_SECURITY_STATE_DIR,
         })},

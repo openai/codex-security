@@ -31,10 +31,7 @@ const organization = "example";
 const project = "example:service";
 const repositoryUrl = "https://example.invalid/team/service";
 const auth = { status: "connected", org: organization, server };
-const environment = {
-  ...sonarGitTestEnvironment(),
-  CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-};
+const environment = sonarGitTestEnvironment();
 
 function git(...args: string[]) {
   return execFileSync("git", args, { env: environment });
@@ -663,32 +660,6 @@ test("guides disconnected users to sign in and honors cancellation before openin
       throw new Error("unexpected CLI call");
     }),
   ).rejects.toThrow("cancel collection");
-});
-
-test("honors the SDK caller's inherited opt-in and explicit non-enumerable opt-out before invoking Sonar", async () => {
-  const cwd = await checkout();
-  const allowed = sonarSession({ pages: [page("A")] });
-  const capture = await collectSonarIssues(
-    { cwd, environment: Object.create(environment) },
-    allowed.run,
-  );
-  expect(capture.repositoryUrl).toBe(repositoryUrl);
-  const session = sonarSession({ pages: [] });
-  const denied = Object.defineProperty(
-    { codex_security_enable_external_imports: "1" },
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
-    { value: "0" },
-  );
-  await expect(
-    collectSonarIssues(
-      {
-        cwd: ".",
-        environment: denied,
-      },
-      session.run,
-    ),
-  ).rejects.toThrow("imports are disabled");
-  expect(session.commands).toEqual([]);
 });
 
 test("canonical Cloud endpoints are accepted and connection changes during issue search discard the capture", async () => {

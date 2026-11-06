@@ -19,7 +19,6 @@ import {
 } from "./support/snyk-rest-fixtures.js";
 
 const environment = {
-  CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
   SNYK_TOKEN: "test-token",
 };
 
@@ -69,7 +68,14 @@ test.each(["open-source", "code"] as const)(
     if (code) {
       const { representations } = record.attributes.coordinates[0]!;
       const location = representations[0]!.sourceLocation!;
-      for (const file of [".", "src/", "src/.", "src\\app.ts"])
+      for (const file of [
+        ".",
+        "src/",
+        "src/.",
+        "src\\app.ts",
+        "file:/tmp/app.ts",
+        "git@example.invalid:app.ts",
+      ])
         representations.push({ sourceLocation: { ...location, file } });
     }
     const path = `/rest/orgs/${options.organizationId}/issues`;
@@ -177,7 +183,7 @@ test.each([
       collectSnykIssues(
         { ...options, apiOrigin, token },
         {
-          environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+          environment: {},
           fetch: async (url, init) => {
             seen.push(url.origin);
             expect(new Headers(init.headers).get("authorization")).toBe(
