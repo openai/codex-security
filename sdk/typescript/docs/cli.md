@@ -1358,8 +1358,9 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
-Each nonempty committed line in `results.jsonl` must be valid JSON with a string
-task ID and a positive safe integer attempt number. If a line fails these checks,
+Each nonempty committed line in `results.jsonl` must be a JSON object with a valid
+task ID, a nonempty output directory, a supported status, and a positive safe integer attempt
+number. Optional failure flags must be booleans. If a line fails these checks,
 the command reports its line number and preserves the ledger. Restore a complete
 ledger backup that includes every committed attempt, or start a separate campaign
 in a new `--output-dir`. If a repository exhausts its attempt numbers, starting

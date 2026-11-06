@@ -70,6 +70,7 @@ const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = ["scan-manifest.json", "findings.json", "report.md"];
 const LOCK_LEASE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = 5_000;
+const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
@@ -1106,18 +1107,26 @@ async function readReceipts(
     let saved;
     try {
       saved = JSON.parse(line);
-      if (typeof saved?.id !== "string")
-        throw new Error("Expected a receipt with a string id");
+      if (typeof saved?.id !== "string" || !TASK_ID_PATTERN.test(saved.id))
+        throw new Error("Expected a receipt with a valid task id");
       if (!Number.isSafeInteger(saved.attempt) || saved.attempt < 1)
         throw new Error("Expected a positive integer receipt attempt");
+      if (saved.status === "completed_with_incomplete_coverage")
+        saved.status = "completed";
+      if (saved.status !== "completed" && saved.status !== "failed")
+        throw new Error("Expected a completed or failed receipt status");
+      if (typeof saved.outputDir !== "string" || !saved.outputDir.trim())
+        throw new Error("Expected a nonempty string outputDir");
+      for (const flag of ["knowledgeBaseFailure", "policyFailed"]) {
+        if (saved[flag] !== undefined && typeof saved[flag] !== "boolean")
+          throw new Error(`Expected a boolean ${flag}`);
+      }
     } catch (cause) {
       throw new Error(
         `${path}:${index + 1}: ${errorMessage(cause)}. Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.`,
         { cause },
       );
     }
-    if (saved.status === "completed_with_incomplete_coverage")
-      saved.status = "completed";
     const receipt = saved as MultiscanReceipt;
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
@@ -1201,7 +1210,7 @@ function parseInventory(
       fields[headers.indexOf(name)]?.trim() ?? "";
     const id = get("id");
     if (
-      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) ||
+      !TASK_ID_PATTERN.test(id) ||
       id.endsWith(".") ||
       WINDOWS_DEVICE_PATH_NAME.test(id)
     ) {
