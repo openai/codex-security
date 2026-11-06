@@ -514,7 +514,11 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
           const executable = Bun.which("rg", { PATH: env[pathKey] });
           expect(executable).not.toBeNull();
           const quoted = lookup !== "extension precedence";
-          const tools = join(f.root, quoted ? "tools;version" : "tools");
+          const quotedName =
+            lookup === "double-quoted semicolon"
+              ? "worker's tools;version"
+              : "tools;version";
+          const tools = join(f.root, quoted ? quotedName : "tools");
           mkdirSync(tools);
           // Ordinary Node lookup prefers COM; the existing raw bridge prefers EXE.
           const extension = !quoted && !bridge ? "com" : "exe";
@@ -525,7 +529,12 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
               join(tools, `rg.${extension === "com" ? "exe" : "com"}`),
             );
           const quote = lookup === "single-quoted semicolon" ? "'" : '"';
-          env[pathKey] = quoted ? `${quote}${tools}${quote}` : tools;
+          // A single-quoted absolute path can contain a quote from the host profile.
+          const entry =
+            lookup === "single-quoted semicolon"
+              ? relative(f.repo, tools)
+              : tools;
+          env[pathKey] = quoted ? `${quote}${entry}${quote}` : entry;
           if (bridge) {
             env["HOME"] = `${f.root}${sep}home-\ud800`;
             expect(env["HOME"].isWellFormed()).toBe(false);

@@ -200,7 +200,7 @@ export async function processProof(
       ],
       [
         "process-probe",
-        `'${quotedTools}'`,
+        "'quoted;tools'",
         join(quotedTools, "process-probe.com"),
       ],
       [
