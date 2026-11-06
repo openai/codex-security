@@ -90,7 +90,7 @@ export function resolveSkillAuthentication(
     commandAuth ? withoutOpenAiApiKeys(processEnvironment) : processEnvironment,
     commandAuth ? "auto" : options.auth,
     provider,
-    providerEnvKey,
+    explicitChatgpt ? undefined : providerEnvKey,
     typeof provider === "string"
       ? {
           model_provider: provider,
