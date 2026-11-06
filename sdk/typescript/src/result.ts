@@ -15,6 +15,8 @@ export interface TurnResultMetadata {
   id?: string;
   status?: string;
   model?: string;
+  /** Source region recorded for Bedrock scans. */
+  bedrockRegion?: string | null;
   durationMs?: number;
   finalResponse?: string;
   usage?: unknown;
@@ -88,7 +90,11 @@ export class ScanResult {
     this.threatModelPath = options.threatModelPath ?? null;
     this.cost =
       options.recordedCost ??
-      estimateScanCost(options.turnResult.model, options.turnResult.usage);
+      estimateScanCost(
+        options.turnResult.model,
+        options.turnResult.usage,
+        options.turnResult.bedrockRegion,
+      );
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
     } else {

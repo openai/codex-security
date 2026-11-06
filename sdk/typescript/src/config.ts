@@ -1,3 +1,4 @@
+import type { ScanPricingContext } from "./cost-model.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -120,6 +121,50 @@ export function scanModel(config: Readonly<JsonObject>): unknown {
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
+}
+
+function bedrockPricingRegion(
+  provider: JsonValue | undefined,
+  environment: Readonly<Record<string, string | undefined>>,
+): string | null {
+  const baseUrl = isObject(provider) ? provider["base_url"] : undefined;
+  if (typeof baseUrl === "string") {
+    // Codex sends inference to an explicit endpoint even when aws.region differs.
+    const host = URL.parse(baseUrl)?.hostname ?? "";
+    return (
+      /^bedrock-(?:mantle|runtime)(?:-fips)?\.([a-z0-9-]+)\.(?:api\.aws|amazonaws\.com(?:\.cn)?)$/.exec(
+        host,
+      )?.[1] ?? null
+    );
+  }
+  const aws = isObject(provider) ? provider["aws"] : undefined;
+  const region = isObject(aws) ? aws["region"] : undefined;
+  return (
+    (typeof region === "string" && region.trim()) ||
+    environment["AWS_REGION"]?.trim() ||
+    environment["AWS_DEFAULT_REGION"]?.trim() ||
+    null
+  );
+}
+
+/** @internal Keep billing selection separate from model names shared by providers. */
+export function scanPricingContext(
+  config: Readonly<JsonObject>,
+  environment: Readonly<Record<string, string | undefined>>,
+): ScanPricingContext | undefined {
+  const selected = scanModelProvider(config);
+  if (selected !== "amazon-bedrock" && selected !== "amazon-bedrock-runtime") {
+    return undefined;
+  }
+  const resolved = selectedScanProfile(config)
+    ? resolveCodexProfile(config)
+    : config;
+  const providers = resolved["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  return {
+    provider: "amazon-bedrock",
+    region: bedrockPricingRegion(provider, environment),
+  };
 }
 
 /** @internal Use the selected native provider's configured credential key. */

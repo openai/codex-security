@@ -77,6 +77,8 @@ const distModules = [
   "contract",
   "cost",
   "cost-model",
+  "bedrock-pricing",
+  "bedrock-oss-pricing",
   "coverage-presentation",
   "custom-validation",
   "custom-validation-prompt",
