@@ -102,12 +102,12 @@ from workbench_saved_results import merge_saved_results
 from finalize_scan_contract import _prepare_scan_finalization
 normal,recovered=map(Path,sys.argv[2:4])
 scan_id=sys.argv[4]
-manifest=json.loads((normal/'scan-manifest.json').read_text())
-coverage=json.loads((normal/'coverage.json').read_text())
+manifest=json.loads((normal/'scan-manifest.json').read_text(encoding='utf-8'))
+coverage=json.loads((normal/'coverage.json').read_text(encoding='utf-8'))
 binding={'status':'failed','allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
 binding.update(scanId=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
 warnings=[]
-recovery=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),warnings,stopped=True,reason='Synthetic interruption',scan_mode=sys.argv[10]) if sys.argv[9]=='saved' else tuple(json.loads((recovered/name).read_text()) for name in ['scan-manifest.json','findings.json','coverage.json'])
+recovery=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),warnings,stopped=True,reason='Synthetic interruption',scan_mode=sys.argv[10]) if sys.argv[9]=='saved' else tuple(json.loads((recovered/name).read_text(encoding='utf-8')) for name in ['scan-manifest.json','findings.json','coverage.json'])
 if json.loads(sys.argv[7]):
  frozen=recovery[0]['scan']
  replayed=merge_saved_results(
@@ -116,7 +116,7 @@ if json.loads(sys.argv[7]):
   scan_mode=sys.argv[10],
  )
  assert replayed == recovery, 'Frozen recovery changed the retained documents'
-ordinary=(manifest,json.loads((normal/'findings.json').read_text()),coverage)
+ordinary=(manifest,json.loads((normal/'findings.json').read_text(encoding='utf-8')),coverage)
 results=[]
 preserved_identities=[]
 for root,documents in [(normal,ordinary),(recovered,recovery)]:
