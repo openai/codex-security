@@ -1307,13 +1307,14 @@ describe("CLI workbench", () => {
       );
     });
 
-    test.each(["malformed", "unreadable"])(
+    test.each(["malformed", "unreadable", "rejected"])(
       "stops on %s native config after saving an empty pair",
       async (problem) => {
         await using home = await scopedTemporaryDirectory("match-all-config-");
         const file = join(home.path, "config.toml");
         if (problem === "malformed") await writeFile(file, "[broken\n");
-        else await mkdir(file);
+        else if (problem === "unreadable") await mkdir(file);
+        else await writeFile(file, "model = []\n");
         const { batches, saved, onWorkbench } = batchWorkbench([
           "empty",
           "match",
@@ -1325,7 +1326,11 @@ describe("CLI workbench", () => {
         const code = await runCli(
           argv,
           dependencies({
-            environment: { CODEX_HOME: home.path },
+            currentDirectory: home.path,
+            environment: {
+              CODEX_HOME: home.path,
+              OPENAI_API_KEY: "synthetic-key",
+            },
             onWorkbench,
             onMatch: matchScanFindings,
           }),
@@ -1334,8 +1339,11 @@ describe("CLI workbench", () => {
         expect(saved).toEqual([["source", "empty"]]);
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toContain(
-          "Could not read the configured Codex provider",
+          problem === "rejected"
+            ? "Could not read MCP configuration for a read-only helper"
+            : "Could not read the configured Codex provider",
         );
+        if (problem === "rejected") expect(stderr.text()).toContain("model");
       },
     );
 

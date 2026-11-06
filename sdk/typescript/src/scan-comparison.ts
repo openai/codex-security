@@ -829,7 +829,7 @@ export async function disabledMcpServers(
     options.signal,
   );
   if (!success)
-    throw new CodexSecurityError(
+    throw new ConfigurationError(
       `Could not read MCP configuration for a read-only helper: ${stderr.trim()}`,
     );
   const inherited = JSON.parse(stdout) as { name: string }[];
