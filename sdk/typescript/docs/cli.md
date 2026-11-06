@@ -1325,7 +1325,7 @@ Use `-c FILE` for shared settings; CSV mode/scope override file values.
 cancellation or a cost stop.
 
 Concurrency defaults to four repositories. `--max-attempts` defaults to one
-attempt per pending repository per invocation. Repeating the command continues
+attempt per pending inventory entry per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
 Completed results are skipped only when their saved contract and seal are valid
