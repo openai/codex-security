@@ -1,3 +1,5 @@
+"""Reconstruct coverage from results that contain review state but have no separate coverage file."""
+
 from __future__ import annotations
 
 import json

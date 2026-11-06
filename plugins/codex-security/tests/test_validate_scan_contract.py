@@ -1,3 +1,5 @@
+"""Exercise read-only validation of sealed bundles, including legacy evidence and unsealed inputs."""
+
 from __future__ import annotations
 
 import json
