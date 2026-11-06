@@ -23,7 +23,7 @@ test("concurrent runtime builds preserve complete native wrapper exports", async
       assert.equal(platform.nativeTarget, ${JSON.stringify(nativeTarget)});
     }
   `;
-  await Promise.all(
+  const results = await Promise.all(
     Array.from({ length: 3 }, async () => {
       const child = spawn(
         process.execPath,
@@ -38,7 +38,8 @@ test("concurrent runtime builds preserve complete native wrapper exports", async
           output += chunk;
         });
       const [code] = await once(child, "close");
-      assert.equal(code, 0, output);
+      return { code, output };
     }),
   );
+  for (const { code, output } of results) assert.equal(code, 0, output);
 });
