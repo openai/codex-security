@@ -376,11 +376,9 @@ def seed_legacy_reducer(
     worker_id: str,
     prompt_path: str,
     artifact_dir: str,
-    *args: str,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
+    *input_worker_ids: str,
+) -> None:
     """Recreate a pre-loop database row for tests of archived scan recovery."""
-    ids = [args[i + 1] for i, value in enumerate(args) if value == "--input-worker-id"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
         db.execute(
             """INSERT INTO deep_scan_workers
@@ -388,7 +386,7 @@ def seed_legacy_reducer(
                VALUES (?, ?, 'dedup', 'queued', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
             (worker_id, scan_id, prompt_path, artifact_dir),
         )
-        for i, source in enumerate(ids):
+        for i, source in enumerate(input_worker_ids):
             db.execute(
                 "INSERT INTO deep_scan_dedup_inputs VALUES (?, ?, ?, ?)",
                 (scan_id, worker_id, source, i),
@@ -396,7 +394,6 @@ def seed_legacy_reducer(
             db.execute(
                 "UPDATE deep_scan_workers SET merge_state = 'merging' WHERE id = ?", (source,)
             )
-    return read_fixture_deep_scan(state_dir, scan_id, environment)
 
 
 def seal_legacy_reducer(
@@ -404,8 +401,8 @@ def seal_legacy_reducer(
     scan_id: str,
     worker_id: str,
     result: str,
-    new_count: str,
-    *args: str,
+    new_count: int,
+    *,
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
@@ -422,7 +419,7 @@ def seal_legacy_reducer(
         db.execute(
             """UPDATE deep_scan_runs SET consecutive_no_new =
                CASE WHEN ? > 0 THEN 0 ELSE consecutive_no_new + ? END, phase = 'discovery' WHERE scan_id = ?""",
-            (int(new_count), inputs, scan_id),
+            (new_count, inputs, scan_id),
         )
     return read_fixture_deep_scan(state_dir, scan_id, environment)
 

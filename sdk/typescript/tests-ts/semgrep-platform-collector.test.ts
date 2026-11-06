@@ -27,7 +27,6 @@ const options = {
   ref: "refs/heads/topic",
 };
 const environment = {
-  CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
   SEMGREP_APP_TOKEN: "synthetic",
 };
 const fullPage = Array.from({ length: 3000 }, (_, index) => ({
@@ -780,7 +779,6 @@ test("an explicit SDK token respects the configured Semgrep origin", async () =>
         { ...options, token: "synthetic-explicit" },
         {
           environment: {
-            CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
             [setting]: "https://private.example.test",
           },
           fetch,
@@ -1710,12 +1708,12 @@ test("CLI preserves native Semgrep error details in structured output and escape
   expect(JSON.parse(cli.stdout.text()).error.message).toContain(detail);
 });
 
-test("CLI checks opt-in and token origin before fetching", async () => {
+test("CLI checks the token and its origin before fetching", async () => {
   const fetch = mock(() => {
     throw new Error("Unexpected HTTP call");
   });
   for (const [env, diagnostic] of [
-    [{}, "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"],
+    [{}, "SEMGREP_APP_TOKEN"],
     [
       { ...environment, SEMGREP_URL: "https://other.example.test" },
       "SEMGREP_URL",
