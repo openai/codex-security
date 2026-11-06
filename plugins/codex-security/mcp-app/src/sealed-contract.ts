@@ -807,7 +807,7 @@ function openHeldFile(
       error instanceof Error
     )
       throw new ContractValidationError(
-        `${context}: unable to open the checked regular file.`,
+        `${context}: unable to open the checked regular file. ${filesystemErrorMessage(error)}`,
         {
           cause: Object.assign(error, { path: join(root.path, normalized) }),
         },

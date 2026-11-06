@@ -2,11 +2,11 @@
 
 ## Summary
 
-<!-- Describe the technical problem and outcome without identifying customers or private systems. -->
+<!-- What problem does this solve, and what can users or maintainers do after this change? Use public, synthetic examples. -->
 
 ## Changes
 
-<!-- Summarize the changes reviewers should understand. If maintainers need to update
+<!-- Identify implementation decisions or affected interfaces that need reviewer attention. If maintainers need to update
 https://learn.chatgpt.com/docs/security, you can name the affected page or workflow and suggest an edit. -->
 
 ## Testing

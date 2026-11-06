@@ -1481,14 +1481,12 @@ def finish_deep_scan_locked(
                 (scan_id,),
             )
         }
-        # Historical succeeded runs retain their exact omitted-worker replay contract.
-        omissions_match = omitted_worker_ids == buffered_worker_ids
         if run["status"] == "succeeded":
             if (
                 run["terminal_reason"] != args.terminal_reason
                 or archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
                 not in {None, manifest_path}
-                or not omissions_match
+                or omitted_worker_ids != buffered_worker_ids
             ):
                 raise SystemExit(
                     "Deep Scan terminal state is immutable; finish must exactly replay its "
@@ -1564,7 +1562,7 @@ def finish_deep_scan_locked(
             args.terminal_reason,
             has_omitted_workers=bool(omitted_worker_ids),
         )
-        if args.terminal_reason == "saturated" and not omissions_match:
+        if args.terminal_reason == "saturated" and omitted_worker_ids != buffered_worker_ids:
             raise SystemExit(
                 f"Deep Scan {args.terminal_reason} completion must exactly identify all buffered discovery "
                 "workers with --omitted-worker-id."
@@ -1595,7 +1593,6 @@ def finish_deep_scan_locked(
             """,
             (args.terminal_reason, manifest_path, timestamp, timestamp, scan_id),
         )
-        cancel_active_workers(connection, scan_id, timestamp)
         connection.commit()
     except BaseException:
         connection.rollback()

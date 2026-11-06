@@ -18,7 +18,6 @@ import {
   readSnykRestDocument,
 } from "./snyk-rest-v1.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import {
   gitPathToHttpPath,
@@ -721,7 +720,6 @@ export async function collectSnykIssues(
   } = {},
 ): Promise<SnykIssuesExport> {
   const environment = dependencies.environment ?? process.env;
-  requireExternalImports(environment);
   const { getJson, signal } = hostedScannerHttp(dependencies, options.signal);
   const { product = "open-source" } = options;
   const selected = scope(options, options.apiOrigin ?? defaultOrigin, product);
@@ -1114,16 +1112,6 @@ function bindSnykFinding(
     });
   }
   return { ...repository, issueId };
-}
-
-/** Recognize a retained hosted report before verifying its selected issues. */
-export function isSnykRestReport(
-  input: ExternalFindings & Partial<SnykIssuesFindings>,
-): boolean {
-  return (
-    input.snykRestContext !== undefined ||
-    input.findings.some(isSnykRestFinding)
-  );
 }
 
 function readIssues(document: Resource, selected: Scope) {

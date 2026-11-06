@@ -38,6 +38,23 @@ export type ScanLogSource = JsonObject & {
   progress?: { status?: string; updatedAt?: string };
 };
 
+export function savedScanLogBoundaries(scan: ScanLogSource) {
+  const status = scan.progress?.status;
+  const terminal =
+    status === "complete" || status === "failed" || status === "canceled";
+  return {
+    // Legacy completion still bounds inferred workers, but cannot identify the
+    // final scan turn when sealed artifacts were completed before a resume.
+    completedAt:
+      status === "running"
+        ? null
+        : terminal
+          ? (scan.lifecycle?.finishedAt ?? scan.progress?.updatedAt ?? "")
+          : "",
+    logCompletedAt: terminal ? (scan.logCompletedAt ?? null) : null,
+  };
+}
+
 export function readSavedScanLogs(
   scan: ScanLogSource,
   codexHome: string | readonly string[],
@@ -49,10 +66,6 @@ export function readSavedScanLogs(
       `No session is associated with scan ${scan.scanId}.`,
     );
   }
-  const status = scan.progress?.status;
-  const terminal =
-    status === "complete" || status === "failed" || status === "canceled";
-  const logCompletedAt = terminal ? (scan.logCompletedAt ?? null) : null;
   return readScanLogs({
     scanId: scan.scanId,
     threadId: threadId ?? scan.threadIds?.[0],
@@ -62,15 +75,7 @@ export function readSavedScanLogs(
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
     startedAt: scan.lifecycle?.startedAt,
-    // Legacy completion still bounds inferred workers, but cannot identify the
-    // final scan turn when sealed artifacts were completed before a resume.
-    completedAt:
-      status === "running"
-        ? null
-        : terminal
-          ? (scan.lifecycle?.finishedAt ?? scan.progress?.updatedAt ?? "")
-          : "",
-    logCompletedAt,
+    ...savedScanLogBoundaries(scan),
   });
 }
 

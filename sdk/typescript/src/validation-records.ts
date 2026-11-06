@@ -15,7 +15,7 @@ const inputSchema = z.strictObject({
   knowledgeBasePath: z.string().min(1).optional(),
   outputSchema: z.record(z.string(), z.unknown()),
   model: z.string().min(1).optional(),
-  effort: z.string().min(1).optional(),
+  effort: z.string().optional(),
 });
 
 export interface ValidateRecordsInput extends z.infer<typeof inputSchema> {}
