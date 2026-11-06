@@ -4,7 +4,7 @@ import {
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
-import { asRecord } from "./record.js";
+import { asRecord, canonicalJson } from "./record.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { readWizCsv, wizCsvFinding, wizCsvRepositoryUrl } from "./wiz-csv.js";
@@ -27,6 +27,20 @@ function sourceFindingId(value: unknown, target: ExternalImportTarget): string {
         : "Source finding id must be nonempty and contain no NUL characters.",
     );
   return id;
+}
+
+/** Distinguish original Wiz package records from opaque SDK asset metadata. */
+export function isWizPackageFinding(
+  data: VendorFinding["evidence"]["source_data"],
+): boolean {
+  return Boolean(
+    data &&
+    data["detectionMethod"] !== "EXTERNAL_NETWORK_SCAN" &&
+    text(data["id"]) &&
+    text(data["name"]) &&
+    text(data["detailedName"]) &&
+    text(asRecord(data["vulnerableAsset"])?.["id"]),
+  );
 }
 
 /** Keep a Wiz vulnerability occurrence intact; advisory names are not identities. */
@@ -423,9 +437,12 @@ function records(payload: unknown): FindingInput {
   } as const;
   const selected: InputRecord[] = [];
   let found = false;
+  let countedCollection: string | undefined;
   for (const [root, kind] of Object.entries(collections)) {
+    if (!(root in data)) continue;
     const collection = asRecord(data[root]);
-    if (!collection) continue;
+    if (!collection)
+      throw new Error(`Wiz ${root} must be an object with a nodes array.`);
     found = true;
     if (!Array.isArray(collection["nodes"]))
       throw new Error(`Wiz ${root}.nodes must be an array.`);
@@ -433,8 +450,14 @@ function records(payload: unknown): FindingInput {
       throw new Error(
         "Wiz response has another page. Complete the requested pages or save the explicitly selected records in their named collection before publishing.",
       );
+    const total = collection["totalCount"];
+    if (typeof total === "number" && total > 0) countedCollection = root;
     for (const value of collection["nodes"]) selected.push({ value, kind });
   }
+  if (!selected.length && countedCollection)
+    throw new Error(
+      `Wiz ${countedCollection}.totalCount reports findings, but the export contains no finding nodes.`,
+    );
   if (found)
     return {
       records: selected,
@@ -459,7 +482,9 @@ export function wizFindingRepository(
   if (!url) return;
   const github =
     asset["nativeType"] === "github#repositoryBranch" ||
-    (asset["type"] === "REPOSITORY_BRANCH" && isGitHubCloudHost(url.hostname));
+    (asset["type"] === "REPOSITORY_BRANCH" &&
+      (text(asset["cloudPlatform"])?.toLowerCase() === "github" ||
+        isGitHubCloudHost(url.hostname)));
   if (!github)
     return asset["type"] === "REPOSITORY_BRANCH"
       ? { url: asset["cloudProviderURL"] }
@@ -587,6 +612,48 @@ async function readFindingInput(path: string): Promise<FindingInput> {
       { cause },
     );
   }
+}
+
+/** Apply Wiz's own reader to an occurrence that also retains another scanner's fields. */
+export function isWizOccurrence(
+  finding: VendorFinding,
+  target: ExternalImportTarget,
+): boolean {
+  const { source_data: data, details } = finding.evidence;
+  if (!data || typeof data["id"] !== "string") return false;
+  const kind = details?.kind;
+  const scoped = kind === "sast" || kind === "iac" || kind === "secret";
+  if (
+    finding.source_finding_id !==
+    (scoped ? `${kind}:${data["id"]}` : data["id"])
+  )
+    return false;
+  const input: FindingInput = {
+    records: [{ value: data, kind: scoped ? kind : "sca" }],
+    repositories: new Map(),
+  };
+  const repository = details?.repository;
+  if (scoped && repository?.id)
+    input.repositories.set(repository.id, {
+      id: repository.id,
+      name: repository.name ?? null,
+      url: repository.url,
+      platform: null,
+    });
+  // The raw record is the same. Check that Wiz produced the selected evidence,
+  // including its own repository binding, before treating upstream fields as opaque.
+  const selected = canonicalJson({
+    ...validateExternalEvidence(finding.evidence, target),
+    source_data: undefined,
+  });
+  const matches = (legacy: boolean) => {
+    const [row] = normalizeFindings(input, target, undefined, legacy).findings;
+    return (
+      row !== undefined &&
+      canonicalJson({ ...row.evidence, source_data: undefined }) === selected
+    );
+  };
+  return matches(false) || (scoped && matches(true));
 }
 
 function normalizeFindings(
