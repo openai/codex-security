@@ -54,14 +54,33 @@ async function runPowerShell(script: string, environment: NodeJS.ProcessEnv) {
     ],
     {
       env: {
-        ...process.env,
-        ...environment,
+        ...Object.fromEntries(
+          Object.entries({ ...process.env, ...environment }).filter(
+            ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+          ),
+        ),
         PSModulePath: join(powershell, "Modules"),
       },
     },
   );
   return stdout.trim();
 }
+
+windowsTest(
+  "pins the system PowerShell modules for case-variant environment keys",
+  async () => {
+    const alternate = await temporaryDirectory();
+    const result = await runPowerShell(
+      [
+        "$ErrorActionPreference = 'Stop'",
+        "$null = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_MODULES",
+        "($env:PSModulePath -split ';') -notcontains $env:CODEX_SECURITY_TEST_MODULES",
+      ].join("; "),
+      { PSMODULEPATH: alternate, CODEX_SECURITY_TEST_MODULES: alternate },
+    );
+    expect(result).toBe("True");
+  },
+);
 
 function inspectAcl(path: string, expression: string): Promise<string> {
   return runPowerShell(
