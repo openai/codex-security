@@ -235,10 +235,13 @@ ${publishWorkerPid}
 setInterval(() => {}, 1_000);
 `;
         return runCodexSkillCommand(
-          ["-e", source],
+          ["-e", source, "--"],
           { ...output!, auth: undefined },
           { command: process.execPath },
-          { VERIFY_FIX_WORKER_STATE: state },
+          {
+            VERIFY_FIX_WORKER_STATE: state,
+            CODEX_SECURITY_STATE_DIR: `${state}.state`,
+          },
         );
       }
     }

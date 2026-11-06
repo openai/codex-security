@@ -2,10 +2,17 @@
   "documentType": "codex-security.findings",
   "findings": [
     {
-      "attackPath": null,
+      "attackPath": {
+        "dataflow": {
+          "summary": "The archive supplies an entry name. The extractor uses that name to select the file it writes."
+        },
+        "reachability": {
+          "summary": "The caller must be able to supply an archive for extraction. The service account must have write access to the destination."
+        }
+      },
       "confidence": {
         "level": "high",
-        "rationale": "Direct source trace reaches the filesystem write without a containment check."
+        "rationale": "The destination passed to the file writer is visible in the reviewed code."
       },
       "extensions": {},
       "findingId": "csf_852f90d6e1177502ff113d4a",
@@ -37,11 +44,13 @@
       ],
       "ruleId": "path-traversal.archive-extraction",
       "severity": {
+        "changeConditions": "A filesystem policy that confines writes to a disposable import directory would limit the impact.",
         "level": "high",
+        "rationale": "The caller can alter files outside the import area with the permissions of the extraction service.",
         "score": 8.1,
         "scoringSystem": "CVSS:3.1"
       },
-      "summary": "An attacker-controlled path reaches a filesystem write without containment validation.",
+      "summary": "Archive extraction can overwrite files outside the directory chosen for the import.",
       "taxonomy": {
         "category": "path-traversal",
         "cwe": [
@@ -49,7 +58,10 @@
         ]
       },
       "title": "Unsafe archive extraction can escape the output directory",
-      "validation": null
+      "validation": {
+        "method": "Static source review",
+        "summary": "The extractor combines the output directory with the entry name and passes the resulting path to the writer. It never checks that the destination stays inside the output directory."
+      }
     }
   ],
   "scanId": "scan_example_001",

@@ -55,11 +55,10 @@ for (const surface of ["CLI", "SDK"] as const) {
         await runtime.prepareCodexSecurityCredentialHome(environment);
       const credentials = join(home, "auth.json");
       if (first === "logout") {
-        await fs.writeFile(credentials, '{"auth_mode":"chatgpt"}\n', {
-          mode: 0o600,
-        });
+        await fs.link(source, credentials);
       }
       const removeCredentials = async (): Promise<void> => {
+        if (first === "logout") expect(existsSync(credentials)).toBe(false);
         await fs.rm(credentials, { force: true });
         if (first === "logout") {
           reachedPause = true;
@@ -132,6 +131,9 @@ for (const surface of ["CLI", "SDK"] as const) {
         resume.resolve();
         await Promise.all([firstOperation, secondOperation]);
         expect(existsSync(credentials)).toBe(false);
+        expect(await fs.readFile(source, "utf8")).toBe(
+          '{"auth_mode":"chatgpt"}\n',
+        );
         expect(
           await runtime.codexSecurityCredentialAllowsAmbientImport(home),
         ).toBe(false);

@@ -9,10 +9,6 @@ import {
 } from "./external-findings-local.js";
 import { localGitProtectionRoots } from "./local-git-metadata.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
-import {
-  forwardExternalImportSetting,
-  requireExternalImports,
-} from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import { array, record, relativePath, requiredText } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -354,11 +350,9 @@ export async function collectSonarIssues(
   runSonar?: SonarCommand,
 ): Promise<SonarCapture> {
   const suppliedEnvironment = options.environment ?? process.env;
-  requireExternalImports(suppliedEnvironment);
   const environment: NodeJS.ProcessEnv = Object.create(null);
   for (const name in suppliedEnvironment)
     environment[name] = suppliedEnvironment[name];
-  forwardExternalImportSetting(suppliedEnvironment, environment);
   options = { ...options, cwd: resolve(options.cwd), environment };
   options.signal?.throwIfAborted();
   const { pullRequest } = options;
