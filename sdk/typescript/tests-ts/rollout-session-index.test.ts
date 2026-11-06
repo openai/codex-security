@@ -118,6 +118,49 @@ test("publishes only metadata when the first event export fails partway", async 
   expect(await readdir(dirname(path))).toEqual(["index.json"]);
 });
 
+test("a canceled exporter does not wait for a paused writer", async () => {
+  const scanDir = await temporaryDirectory();
+  const options = { scanDir, scanId, rootThreadIds, startedAt };
+  const writing = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const writer = writeRolloutSessionIndex({
+    ...options,
+    retainEvents: true,
+    sessions: [
+      {
+        ...session("parent", null),
+        async *events() {
+          writing.resolve();
+          await resume.promise;
+          yield* rows("parent");
+        },
+      },
+    ],
+  });
+  await writing.promise;
+  const controller = new AbortController();
+  const waiting = writeRolloutSessionIndex({
+    ...options,
+    sessions: [session("other", null)],
+    signal: controller.signal,
+  });
+  controller.abort();
+  // Release the first writer even if a regression ignores the abort.
+  const deadline = setTimeout(resume.resolve, 10_000);
+  try {
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+  } finally {
+    clearTimeout(deadline);
+    resume.resolve();
+    await writer;
+  }
+  expect(
+    (await readRolloutSessionIndex(scanDir, scanId))?.sessions.map(
+      (s) => s.threadId,
+    ),
+  ).toEqual(["parent"]);
+});
+
 test("metadata retries and failed refreshes preserve published events and unrelated files", async () => {
   const scanDir = await temporaryDirectory();
   const options = {

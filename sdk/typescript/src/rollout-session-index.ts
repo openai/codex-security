@@ -12,11 +12,11 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import {
+  acquireCodexSecurityCredentialHomeLock,
   createWindowsOutputDirectory,
   requirePrivateDirectory,
   requirePrivateOutputDirectory,
   validatePreparedOutputDir,
-  withCredentialHomeLock,
 } from "./runtime.js";
 import type { ScanRolloutSession } from "./scan-logs.js";
 import { nullIfMissingFile } from "./targets.js";
@@ -216,6 +216,7 @@ export async function writeRolloutSessionIndex(options: {
   rootThreadIds: readonly string[];
   sessions: readonly ScanRolloutSession[];
   retainEvents?: boolean;
+  signal?: AbortSignal;
   onWarning?: (message: string) => void;
 }): Promise<string> {
   const { scanDir, scanId, rootThreadIds, sessions } = options;
@@ -224,7 +225,13 @@ export async function writeRolloutSessionIndex(options: {
   // Resume and terminal callbacks can overlap across SDK processes.
   const writerState = join(dirname(directory), ".rollout-session-writer");
   await prepareDirectory(writerState, true);
-  return withCredentialHomeLock(writerState, async () => {
+  // A canceled scan can still publish diagnostics when the writer is available.
+  const release = await acquireCodexSecurityCredentialHomeLock(
+    writerState,
+    options.signal,
+    { allowImmediateAcquisitionOnAbort: true },
+  );
+  try {
     const previous = await readIndex(directory, scanId);
     requireUnique(sessions.map(({ threadId }) => threadId));
     const entries = new Map(
@@ -295,5 +302,7 @@ export async function writeRolloutSessionIndex(options: {
       await Promise.all(pending.map((path) => rm(path, { force: true })));
     }
     return path;
-  });
+  } finally {
+    await release();
+  }
 }
