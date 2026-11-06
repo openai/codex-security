@@ -60,6 +60,31 @@ function commandActivityCase(
 
 describe("scan activity", () => {
   test.each([
+    '/bin/sh -c "cat \\"/repo/src/O\'Brien.ts\\""',
+    '/bin/sh -c \'cat "$CODEX_SECURITY_REPOSITORY/src/O\'"\'Brien.ts\\""',
+  ])(
+    "extracts quoted filenames from native Codex launcher events: %s",
+    (command) => {
+      for (const type of ["item.started", "item.completed"] as const) {
+        expect(
+          scanActivityFromEvent(commandEvent(type, command), "/repo")?.paths,
+        ).toEqual(["src/O'Brien.ts"]);
+      }
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "function_call",
+            name: "exec_command",
+            call_id: "saved-launcher",
+            arguments: JSON.stringify({ cmd: command }),
+          }),
+          "/repo",
+        )?.paths,
+      ).toEqual(["src/O'Brien.ts"]);
+    },
+  );
+
+  test.each([
     ['cat "/repo/src/O\'Brien.ts"', "src/O'Brien.ts"],
     ["cat '/repo/src/say \"hello\".ts'", 'src/say "hello".ts'],
     ['cat "/repo/ leading.ts "', " leading.ts "],

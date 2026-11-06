@@ -6,6 +6,8 @@ const MAX_PROSE_CHARACTERS = 1_000;
 const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
 const POSIX_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|(?:\\[\\ \t]|[^\s|;&<>])+/gu;
 const POSIX_SHELL = /(?:^|\/)(?:sh|bash|zsh)$/u;
+const POSIX_LAUNCHER =
+  /^((?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh))\s+-[a-z]*c[a-z]*\s+(.*)$/su;
 
 export type ScanActivityStatus = "running" | "completed" | "failed";
 
@@ -132,17 +134,47 @@ function commandDetails(
 ) {
   const text =
     typeof value === "string" ? unwrapCommand(value) : value.join(" ");
+  const recorded =
+    typeof value === "string" ? recordedPosixScript(value) : undefined;
   return {
     description: text.replaceAll(/\s+/gu, " "),
     paths:
       typeof value === "string"
         ? commandRepositoryPaths(
-            text === value.trim() ? value : text,
+            recorded?.script ?? (text === value.trim() ? value : text),
             repository,
-            shell,
+            shell ?? recorded?.shell,
           )
         : literalRepositoryPaths(value, repository),
   };
+}
+
+/** Decode the single shell-quoted script argument rendered by native Codex. */
+function recordedPosixScript(command: string) {
+  const match = POSIX_LAUNCHER.exec(command.trim());
+  if (match === null || !/^["']/u.test(match[2]!)) return undefined;
+  const argument = match[2]!;
+  const parts = argument.match(
+    /'[^']*'|"(?:\\[\s\S]|[^"\\$\x60])*"|\\[\s\S]|[^\s'"\\$\x60|;&<>()*?\[\]{}~]+/gu,
+  );
+  if (parts?.join("") !== argument) return undefined;
+  const script = parts
+    .map((part) => {
+      if (part.startsWith("'")) return part.slice(1, -1);
+      if (part.startsWith('"'))
+        return part
+          .slice(1, -1)
+          .replace(/\\([$\x60"\\\n])/gu, (_, value: string) =>
+            value === "\n" ? "" : value,
+          );
+      return part.startsWith("\\")
+        ? part[1] === "\n"
+          ? ""
+          : part.slice(1)
+        : part;
+    })
+    .join("");
+  return { script, shell: match[1] };
 }
 
 function unwrapCommand(command: string): string {
@@ -161,13 +193,10 @@ function unwrapCommand(command: string): string {
   ) {
     return powershell[4]!;
   }
-  const match =
-    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/su.exec(
-      normalized,
-    );
-  if (match === null) return normalized;
-  const quote = match[1]!;
-  const script = match[2]!;
+  const match = POSIX_LAUNCHER.exec(normalized);
+  if (match === null || !/^["']/u.test(match[2]!)) return normalized;
+  const quote = match[2]![0]!;
+  const script = match[2]!.slice(1);
   return script.endsWith(quote) ? script.slice(0, -1) : script;
 }
 
