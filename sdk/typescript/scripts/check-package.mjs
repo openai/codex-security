@@ -109,6 +109,7 @@ function validatePackagePaths(entries) {
     "package/docs/hosted-remediation.md",
     "package/docs/telemetry.md",
     "package/schemas/hosted-scan-v2.fixture.json",
+    "package/schemas/hosted-scan-v3.fixture.json",
     "package/LICENSE",
     "package/bin/codex-security.mjs",
     "package/dist/index.js",
