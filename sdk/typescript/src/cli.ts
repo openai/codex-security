@@ -195,6 +195,7 @@ import {
   resolveCodexProfile,
   mergedCodexConfig,
   readCodexFileProfile,
+  scanPricingContext,
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
@@ -5863,14 +5864,17 @@ export async function main(
             dependencies.environment["CI"] === undefined &&
             dependencies.environment["TERM"] !== "dumb"
           ) {
+            const dashboardConfig = await mergedCodexConfig(
+              config,
+              scanCodexHome(dependencies.environment),
+            );
             const candidate = new ScanDashboard(errorOutput, {
               repository,
               presentation: "components",
-              model: scanModelConfiguration(
-                await mergedCodexConfig(
-                  config,
-                  scanCodexHome(dependencies.environment),
-                ),
+              model: scanModelConfiguration(dashboardConfig),
+              pricingContext: scanPricingContext(
+                dashboardConfig,
+                dependencies.environment,
               ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
@@ -9268,6 +9272,7 @@ async function runSkill(
           JSON.parse(await readRegularInputFile(schemaPath, directory)),
         );
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
+  let standaloneFileContents: string | undefined;
   for (const input of inputs) {
     if (typeof input !== "string") {
       contents.push(
@@ -9338,6 +9343,9 @@ async function runSkill(
           throw new CodexSecurityError(
             "Finding or issue inputs must not be empty.",
           );
+        }
+        if (inputs.length === 1 && contents.length === 0) {
+          standaloneFileContents = contentsOrLiteral;
         }
       }
     }
@@ -9415,6 +9423,7 @@ async function runSkill(
       }
       return prompt;
     },
+    standaloneFileContents,
   );
   try {
     const { prompt } = preparedPrompt;
@@ -10391,6 +10400,10 @@ async function executeScan(
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(effectiveConfiguration),
+        pricingContext: scanPricingContext(
+          effectiveConfiguration,
+          dependencies.environment,
+        ),
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),

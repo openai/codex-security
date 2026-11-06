@@ -280,6 +280,45 @@ See the [Bedrock guide](https://github.com/openai/codex-security/blob/main/docs/
 for credential alternatives, restricted-model access, cost estimates, and
 reasoning-summary configuration.
 
+### Google Cloud Vertex AI cost estimates
+
+The SDK estimates Standard online inference costs for OpenAI models served by
+Google Cloud's Model as a Service (MaaS). Rates are in USD per million tokens.
+[Google Cloud partner model pricing](https://cloud.google.com/model-garden/partner-models/pricing)
+and [OpenAI model locations](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/maas/openai).
+
+| Managed model ID           | Location                | Input | Cached input | Output |
+| -------------------------- | ----------------------- | ----: | -----------: | -----: |
+| `openai/gpt-oss-120b-maas` | `global`                | $0.09 |        $0.09 |  $0.36 |
+| `openai/gpt-oss-20b-maas`  | `us-central1` (retired) | $0.07 |       $0.007 |  $0.25 |
+
+Google publishes a cache-hit discount only for 20B, so the estimator uses the
+ordinary input rate for cached 120B tokens. Google retired the managed 20B
+endpoint on October 21, 2026. The SDK retains its rates for historical usage.
+[Google Cloud retirement schedule](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/deprecations/open-models).
+
+To estimate recorded usage locally, pass the managed model ID and the GCP
+provider to `estimateScanCost`.
+
+```ts
+import { estimateScanCost } from "@openai/codex-security";
+
+const cost = estimateScanCost(
+  "openai/gpt-oss-120b-maas",
+  { input_tokens: 1_000_000, output_tokens: 500_000 },
+  { provider: "gcp" },
+);
+// cost?.estimatedUsd is 0.27.
+```
+
+Google documents the managed GPT OSS IDs on its shared chat-completions API.
+The bundled Codex `gcp` provider uses Google's Responses API with a separate
+frontier model catalog. Google has published no Standard token rates for that
+catalog, including GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra, and GPT-6 Luna.
+Those scans record token usage and require a published price to use
+`--max-cost`. Self-deployed Model Garden endpoints incur infrastructure charges.
+[Google Cloud's preview announcement](https://cloud.google.com/blog/products/ai-machine-learning/google-cloud-brings-openai-models-to-customers).
+
 ## Generate a security policy
 
 Use `policy` to draft or update `SECURITY.md` before a scan. The policy describes
@@ -491,8 +530,9 @@ Use `--output-dir DIR` to choose where a scan saves its results. The directory
 must be empty and outside the scanned directory and enclosing Git worktree.
 Existing directories keep their permissions; newly created directories are
 private to you by default.
-`--archive-existing` moves earlier output to
-`<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
+`--archive-existing` moves earlier output to a sibling directory with a unique
+suffix, such as `results.previous-ab12cd34` for an output directory named
+`results`. Use `--dry-run` to preview the move.
 
 Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
 optional export fails, the scan can still complete. Use the
@@ -1140,10 +1180,13 @@ their own timestamps, window durations, and reset times. These are historical
 observations, not a live allowance check or scan-only consumption. Empty readings
 mean allowance was unavailable. There is no token-to-allowance conversion here.
 
-Cost displays use [standard API prices](https://developers.openai.com/api/docs/pricing)
-and show a short/long-context range. They estimate model usage, excluding other
-tiers, fees, surcharges, and account-specific pricing. They do not measure ChatGPT
-subscription allowance. Models without known prices have no estimate.
+Cost displays use Standard token rates for the model. OpenAI models use
+[OpenAI API pricing](https://developers.openai.com/api/docs/pricing). OpenAI
+models on Bedrock use [AWS pricing for the model, inference route, and region](https://github.com/openai/codex-security/blob/main/docs/bedrock.md#scan-cost-estimates).
+For managed OpenAI models on Vertex AI, see [Google Cloud Vertex AI cost estimates](#google-cloud-vertex-ai-cost-estimates).
+The short/long-context range estimates usage at published rates. Other service
+tiers, account discounts, and ChatGPT subscription allowance are outside that
+estimate. Models without known prices have no estimate.
 
 JSON, history, and bulk receipts include `cost.estimatedUsdRange` (`min`, `max`,
 and `context: "unknown"`). A null maximum means no upper estimate is available.
@@ -2550,8 +2593,8 @@ after every request returns valid results. For these selections the CLI omits
 per-event progress and update notices so stderr cannot delay the verdicts.
 
 If a finding would exceed the input limit, `validate`, `patch`, and `verify-fix`
-automatically put the complete finding data in a temporary file and ask Codex
-to read it in bounded chunks. No manual splitting or truncation is needed.
+put the complete finding data in a temporary file for Codex to search alongside
+the checkout. A single input file keeps its original text and line breaks.
 The file remains available until the task finishes and is then removed. The
 SDK's local `validate()` and `patch()` methods use the same fallback.
 
