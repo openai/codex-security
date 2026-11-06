@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createDependencyCandidates } from "../src/dependency-candidates.js";
 import type { DependencyAssessment } from "../src/dependency-reachability.js";
 import { createDependencyReportSubmission } from "../src/dependency-report-submission.js";
 import { runReadOnlyCodex } from "../src/scan-comparison.js";
@@ -222,6 +223,142 @@ test("returns scoped feedback to the investigator and publishes only the approve
   expect(packets).toHaveLength(2);
 });
 
+test("reviews an explicitly cited search lead and requires a disposition for a later graph candidate", async () => {
+  await using repo = await scopedTemporaryDirectory("review-search-lead-");
+  await writeFile(
+    join(repo.path, "worker.ts"),
+    'load("library@1.0");\nfor (const entry of entries) { check(entry); }\n',
+  );
+  const candidates = await createDependencyCandidates(repo.path);
+  const state = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    candidates,
+    review: async (prompt) => {
+      expect(prompt).toContain("check(entry);");
+      return reviewDecision(prompt, approved);
+    },
+  });
+  const report = draft();
+  const use = report.uses[0]!;
+  use.evidence[0]!.startLine = 1;
+  const item = { id: "worker", kind: "use", use };
+  const final = { ...report, reviewItemIds: [item.id] };
+  await candidates.observeGraph("trace_codex_security_code", {
+    textMatches: [{ source: "worker.ts", text: "check", lines: [2] }],
+  });
+  expect(
+    await state.queue({ items: [{ ...item, candidateIds: [] }] }),
+  ).toMatchObject({
+    queued: true,
+  });
+  expect((await state.submit(final)).accepted).toBe(true);
+
+  const [call] = await candidates.observeGraph("query_codex_security_graph", {
+    paths: [{ relation: "candidate_call", source: "worker.ts", line: 2 }],
+  });
+  expect(await state.submit(final)).toMatchObject({
+    accepted: false,
+    feedback: expect.stringContaining(call!.id),
+  });
+  expect(
+    await state.queue({ items: [{ ...item, candidateIds: [call!.id] }] }),
+  ).toMatchObject({ queued: true });
+  expect((await state.submit(final)).accepted).toBe(true);
+  expect(state.acceptedReport()).toEqual(report);
+});
+
+test("reviews each package declared on the same manifest line under its own identity", async () => {
+  await using repo = await scopedTemporaryDirectory(
+    "review-manifest-packages-",
+  );
+  const path = "package.json";
+  await writeFile(
+    join(repo.path, path),
+    '{"dependencies":{"decoder":"1","encoder":"2"}}\n',
+  );
+  const packages = [
+    { name: "decoder", scope: path },
+    { name: "encoder", scope: path },
+  ];
+  const candidates = await createDependencyCandidates(repo.path);
+  const traced = [];
+  for (const target of packages) {
+    traced.push(
+      ...(await candidates.observeGraph("trace_codex_security_code", {
+        trace: [
+          {
+            relation: "depends_on",
+            to: { kind: "package", ...target },
+            evidence: [{ source: path, lines: [1] }],
+          },
+        ],
+      })),
+    );
+  }
+  const identities = traced.map(({ id, package: target }) => ({
+    id,
+    package: target,
+  }));
+  expect(identities.map((entry) => entry.package)).toEqual(packages);
+  expect(new Set(traced.map(({ id }) => id)).size).toBe(2);
+
+  const queried = await candidates.observeGraph("query_codex_security_graph", {
+    evidence: packages.map((target, i) => ({
+      relation: "depends_on",
+      to: { kind: "package", ...target, id: `node_${i + 1}` },
+      source: path,
+      line: 1,
+    })),
+  });
+  expect(
+    queried.map(({ id, package: target }) => ({ id, package: target })),
+  ).toEqual(identities);
+
+  const reviewed: ReviewPacket["items"] = [];
+  const state = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    candidates,
+    review: async (prompt) => {
+      reviewed.push(...reviewPacket(prompt).items);
+      return reviewDecision(prompt, approved, null);
+    },
+  });
+  const page = state.readStatus({ candidates: {} }).candidatePage!;
+  expect(page.candidates).toMatchObject(identities);
+  const items = traced.map((candidate) => ({
+    id: candidate.package!.name,
+    kind: "unresolved",
+    candidateIds: [candidate.id],
+    reason: "The manifest does not establish a deployed version.",
+    evidence: [{ path, startLine: 1, endLine: 1, supports: [] }],
+    observations: [],
+  }));
+  expect(await state.queue({ items })).toMatchObject({ queued: true });
+  const report = { status: "unknown", uses: [], limitations: [] };
+  expect(
+    await state.submit({ ...report, reviewItemIds: [items[0]!.id] }),
+  ).toMatchObject({
+    accepted: false,
+    feedback: expect.stringContaining(traced[1]!.id),
+  });
+  expect(
+    (
+      await state.submit({
+        ...report,
+        reviewItemIds: items.map(({ id }) => id),
+      })
+    ).accepted,
+  ).toBe(true);
+  expect(reviewed).toMatchObject(
+    packages.map((target) => ({
+      id: target.name,
+      candidates: [{ path, line: 1, package: target }],
+    })),
+  );
+});
+
 test("compares the version with an independent reading of the same use's citations", async () => {
   await using repo = await scopedTemporaryDirectory("review-version-");
   const literal = "1:2.0-r2+vendor.3";
@@ -437,7 +574,13 @@ test("a turn without a submission costs one attempt and the final attempt can st
   await queueScopeGap(submission, report.limitations[0]!, 3);
   expect((await submission.submit(report)).accepted).toBe(true);
   expect(submission.continuationPrompt()).toBeUndefined();
-  expect(submission.acceptedReport()).toEqual(report);
+  expect(submission.acceptedReport()).toEqual({
+    ...report,
+    limitations: [
+      ...report.limitations,
+      expect.stringContaining("worker.ts:2-3"),
+    ],
+  });
   expect(reviews).toBe(2);
 });
 

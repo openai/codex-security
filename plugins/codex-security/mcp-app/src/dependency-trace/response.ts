@@ -9,9 +9,20 @@ export function traceResponse(result: TraceResult) {
     string,
     { step: TraceStep; sources: Map<string, Set<number>> }
   >();
+  const textMatches = new Map<
+    string,
+    { source: string; text: string; lines: Set<number> }
+  >();
   const searched = new Set<string>();
   const partial = [];
-  for (const { scope, evidence, complete, reason, hops } of result.scopes) {
+  for (const {
+    scope,
+    evidence,
+    textMatches: hits,
+    complete,
+    reason,
+    hops,
+  } of result.scopes) {
     if (
       complete &&
       (scope.kind === "search" || scope.kind === "manifests") &&
@@ -28,7 +39,9 @@ export function traceResponse(result: TraceResult) {
       const key = JSON.stringify([
         entityKey(step.from),
         step.relation,
-        entityKey(step.to),
+        step.to && entityKey(step.to),
+        step.calleeText,
+        step.sourceText,
       ]);
       let entry = steps.get(key);
       if (!entry) {
@@ -42,6 +55,15 @@ export function traceResponse(result: TraceResult) {
       }
       if (line !== undefined) lines.add(line);
     }
+    for (const { source, text, line } of hits ?? []) {
+      const key = JSON.stringify([source, text]);
+      let match = textMatches.get(key);
+      if (!match) {
+        match = { source, text, lines: new Set() };
+        textMatches.set(key, match);
+      }
+      if (line !== undefined) match.lines.add(line);
+    }
   }
   const trace = Array.from(steps.values(), ({ step, sources }) => ({
     ...step,
@@ -52,6 +74,14 @@ export function traceResponse(result: TraceResult) {
   }));
   return {
     trace,
+    textMatches: Array.from(
+      textMatches.values(),
+      ({ source, text, lines }) => ({
+        source,
+        text,
+        lines: [...lines].sort((a, b) => a - b),
+      }),
+    ),
     coverage: {
       complete: result.complete,
       limits: result.limits,

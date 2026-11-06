@@ -12,6 +12,7 @@ import type {
 // Bound both the scheduler's working set and the model-visible response.
 const MAX_SCOPES = 96;
 const MAX_EVIDENCE = 128;
+const MAX_TEXT_MATCHES = 128;
 const MAX_EXPANSIONS = 256;
 
 // A native scan runs one job with a 256 MiB rule limit, plus process overhead.
@@ -65,6 +66,7 @@ export async function processTrace(
   const limits = new Set<string>();
   const atHopLimit = new Set<number>();
   let evidenceCount = 0;
+  let textMatchCount = 0;
 
   function schedule(scope: TraceScope, hops: number) {
     const key = scopeKey(scope);
@@ -160,6 +162,19 @@ export async function processTrace(
       if (node.evidence.length < result.evidence.length) {
         limits.add("evidence limit");
         node.complete = false;
+        node.reason ??= "Evidence limit reached.";
+      }
+      if (result.textMatches?.length) {
+        node.textMatches = result.textMatches.slice(
+          0,
+          MAX_TEXT_MATCHES - textMatchCount,
+        );
+        textMatchCount += node.textMatches.length;
+        if (node.textMatches.length < result.textMatches.length) {
+          limits.add("text match limit");
+          node.complete = false;
+          node.reason ??= "Text match limit reached.";
+        }
       }
       results.set(id, result.next);
       expand(id);

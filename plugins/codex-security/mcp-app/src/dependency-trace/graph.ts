@@ -1,6 +1,5 @@
 import { posix } from "node:path";
-import { isTraceSourceFile } from "./provider.ts";
-import type { TraceEntity, TraceResult } from "./types.ts";
+import type { TraceEntity, TraceResult, TraceStep } from "./types.ts";
 
 export interface CatalogReceiptSelection {
   receiptId: string;
@@ -49,9 +48,8 @@ interface GraphNode extends TraceEntity {
   receiptSelections?: CatalogReceiptSelection[];
 }
 
-interface Fact {
+interface Fact extends Omit<TraceStep, "from" | "to"> {
   from: GraphNode;
-  relation?: string;
   to?: GraphNode;
   source: string;
   reason?: string;
@@ -123,12 +121,9 @@ export class EvidenceGraph {
   }
 
   private record(
-    from: TraceEntity,
-    relation: string | undefined,
-    to: TraceEntity | undefined,
+    { from, to, ...observation }: TraceStep,
     source: string,
     line: number | undefined,
-    path = false,
     reason?: string,
     receiptSelections?: CatalogReceiptSelection[],
   ) {
@@ -136,25 +131,24 @@ export class EvidenceGraph {
     const b = to && entityKey(to);
     const key = JSON.stringify([
       a,
-      relation,
+      observation.relation,
       b,
+      observation.calleeText,
+      observation.sourceText,
       source,
       line,
       ...(reason === undefined ? [] : [reason]),
       ...(receiptSelections === undefined ? [] : [receiptSelections]),
     ]);
     const previous = this.facts.get(key);
-    if (previous) {
-      if (path && !this.paths.has(previous)) this.recordPath(previous);
-      return previous;
-    }
+    if (previous) return previous;
     // Estimate keys, retained strings, and record/Map overhead. Keep evidence
     // already cited during this check if a later trace exceeds the budget.
     const bytes = 640 + 8 * key.length;
     if (!this.reserve(bytes)) return;
     const fact: Fact = {
       from: this.node(a, from),
-      ...(relation && { relation }),
+      ...observation,
       ...(b && to && { to: this.node(b, to) }),
       source,
       ...(reason === undefined ? {} : { reason }),
@@ -171,38 +165,32 @@ export class EvidenceGraph {
       ];
     }
     this.facts.set(key, fact);
-    if (path) this.recordPath(fact);
     return fact;
-  }
-
-  private recordPath(fact: Fact) {
-    this.paths.add(fact);
-    // A candidate's file is queryable even when its two endpoints are symbols.
-    const file = { kind: "file", name: fact.source };
-    this.node(entityKey(file), file);
   }
 
   addTrace(result: TraceResult, queueServices = true) {
     for (const { evidence } of result.scopes) {
       for (const { step, source, line } of evidence) {
+        const fact = this.record(
+          {
+            ...step,
+            from: staticEntity(step.from),
+            to: step.to && staticEntity(step.to),
+          },
+          source,
+          line,
+        );
+        if (!fact) continue;
         const candidate =
           step.relation === "candidate_call" ||
           step.relation === "candidate_flow";
-        if (
-          queueServices &&
-          (candidate ||
-            (step.relation === "references" && isTraceSourceFile(source)))
-        ) {
-          this.requestServices([source]);
+        if (candidate) this.paths.add(fact);
+        if (candidate || step.relation === "depends_on") {
+          // A caller or build may be the subject instead of the cited file.
+          const file = { kind: "file", name: source };
+          this.node(entityKey(file), file);
+          if (queueServices) this.requestServices([source]);
         }
-        this.record(
-          staticEntity(step.from),
-          step.relation,
-          staticEntity(step.to),
-          source,
-          line,
-          candidate,
-        );
       }
     }
   }
@@ -310,12 +298,9 @@ export class EvidenceGraph {
       if (services.length === 0) {
         if (
           !this.record(
-            target,
-            "no_service_found",
-            undefined,
+            { from: target, relation: "no_service_found" },
             source,
             line,
-            false,
             reason,
             answer.receiptSelections,
           )
@@ -325,12 +310,13 @@ export class EvidenceGraph {
         const retained = services.map(
           ({ source: citation, receiptSelections, ...service }) =>
             this.record(
-              { kind: "service", ...service },
-              "uses",
-              target,
+              {
+                from: { kind: "service", ...service },
+                relation: "uses",
+                to: target,
+              },
               citation ?? source,
               line,
-              false,
               reason,
               receiptSelections,
             ),
@@ -448,7 +434,7 @@ export class EvidenceGraph {
     if (matches.length !== 1)
       return { matches: matches.slice(0, MAX_ITEMS), ...limit(matches.length) };
     const subject = matches[0]!;
-    const evidence: Fact[] = [];
+    const evidence = new Set<Fact>();
     const paths: Fact[] = [];
     const files = new Set<string>();
     const directories = new Set<string>();
@@ -468,21 +454,24 @@ export class EvidenceGraph {
         )
       )
         continue;
-      if (!this.paths.has(fact)) evidence.push(fact);
+      if (!this.paths.has(fact)) evidence.add(fact);
       if (subject.kind !== "service") continue;
       const other = fact.from === subject ? fact.to : fact.from;
       if (other?.kind === "file") files.add(other.name);
       if (other && this.directoryMappings.has(fact))
         directories.add(other.name);
     }
-    for (const path of this.paths) {
-      if (
-        path.from === subject ||
-        path.to === subject ||
-        files.has(path.source) ||
-        hasDirectory(path.source, directories)
-      )
-        paths.push(path);
+    for (const fact of this.facts.values()) {
+      const candidate = this.paths.has(fact);
+      if (!candidate && fact.relation !== "depends_on") continue;
+      const fromFile =
+        files.has(fact.source) || hasDirectory(fact.source, directories);
+      if (candidate) {
+        if (fromFile || fact.from === subject || fact.to === subject)
+          paths.push(fact);
+      } else if (fromFile) {
+        evidence.add(fact);
+      }
     }
     return {
       node: subject,
@@ -498,8 +487,8 @@ export class EvidenceGraph {
           }
         : {}),
       paths: paths.slice(0, MAX_ITEMS),
-      evidence: evidence.slice(0, MAX_ITEMS),
-      ...limit(Math.max(evidence.length, paths.length)),
+      evidence: [...evidence].slice(0, MAX_ITEMS),
+      ...limit(Math.max(evidence.size, paths.length)),
     };
   }
 }

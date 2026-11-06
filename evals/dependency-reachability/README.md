@@ -43,6 +43,8 @@ are evidence for the selected packages, not a runnable dependency installation.
 ## Run the CLI eval
 
 Use Node.js 22.22+, Git, and the same model credentials you use with the CLI.
+Install OpenGrep and ensure `PATH` resolves `opengrep` to an executable outside
+the scanned checkout.
 From the repository root, download the verified universal native artifact for
 the checkout's native sources. Replace `RUN_ID` and `native-universal-COMMIT`
 with the ID and artifact name from the successful GitHub Actions run.

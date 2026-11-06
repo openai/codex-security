@@ -21,7 +21,7 @@ test("standalone dependency tools preserve source evidence with no service catal
   const bundle = join(runtime, "server.cjs");
   await buildServer(bundle);
   await mkdir(join(checkout, "src"));
-  await writeFile(join(checkout, "src/uses.txt"), "example\nother\nexample\n");
+  await writeFile(join(checkout, "src/uses.js"), "example\nother\nexample\n");
   const client = new Client({ name: "dependency-test", version: "1" });
   await client.connect(
     new StdioClientTransport({
@@ -47,7 +47,9 @@ test("standalone dependency tools preserve source evidence with no service catal
       catalog_configured: false,
       pending: 0,
       checked: 0,
+      unresolved: 0,
       paths: [] as string[],
+      unresolved_paths: [],
       revision: 0,
     };
     const emptyGraph = {
@@ -72,29 +74,8 @@ test("standalone dependency tools preserve source evidence with no service catal
     assert.deepEqual(result, response.structuredContent);
     assert.deepEqual(result, {
       trace: [],
+      textMatches: [{ source: "src/uses.js", text: "example", lines: [] }],
       service_resolution: emptyQueue,
-      coverage: {
-        complete: false,
-        limits: ["hop limit"],
-        searched_paths: ["src"],
-        partial: [],
-        frontier: [{ kind: "file", path: "src/uses.txt", package: "example" }],
-      },
-    });
-    const followed = await client.callTool({
-      name,
-      arguments: { ...query, paths: ["src"], max_hops: 1 },
-    });
-    assert.deepEqual(followed.structuredContent, {
-      service_resolution: emptyQueue,
-      trace: [
-        {
-          from: { kind: "file", name: "src/uses.txt" },
-          relation: "references",
-          to: { kind: "spelling", name: "example" },
-          evidence: [{ source: "src/uses.txt", lines: [1, 3] }],
-        },
-      ],
       coverage: {
         complete: true,
         limits: [],
@@ -105,21 +86,12 @@ test("standalone dependency tools preserve source evidence with no service catal
     });
     const detail = await client.callTool({
       name: inspect,
-      arguments: { node: "src/uses.txt" },
+      arguments: { node: "src/uses.js" },
     });
-    assert.equal(detail.isError, undefined);
-    const file = detail.structuredContent as {
-      node: { name: string };
-      evidence: { source: string; line?: number }[];
-    };
-    assert.equal(file.node.name, "src/uses.txt");
-    assert.deepEqual(
-      file.evidence.map(({ source, line }) => [source, line]),
-      [
-        ["src/uses.txt", 1],
-        ["src/uses.txt", 3],
-      ],
-    );
+    assert.deepEqual(detail.structuredContent, {
+      matches: [],
+      service_resolution: emptyQueue,
+    });
     await writeFile(
       join(checkout, "src/main.js"),
       "import 'reader-package';\n",
@@ -275,6 +247,46 @@ test("only host catalog results settle requested service lookups", async (t) => 
   t.after(() => session.close());
   const resolve = "resolve_codex_security_services";
   const query = "query_codex_security_graph";
+  await writeFile(join(checkout, "README.md"), "A note about example.\n");
+  const search = {
+    package: "example",
+    time_budget_ms: 5000,
+    max_hops: 1,
+  };
+  const prose = await session.call("trace_codex_security_code", search);
+  assert.deepEqual(prose.textMatches, []);
+  assert.deepEqual(prose.trace, []);
+  await writeFile(join(checkout, "package.json"), '{"description":"example"}');
+  const raw = await session.call("trace_codex_security_code", search);
+  assert.deepEqual(raw.trace, []);
+  assert.deepEqual(raw.textMatches, [
+    { source: "package.json", text: "example", lines: [] },
+  ]);
+  assert.equal(raw.service_resolution.pending, 0);
+  assert.deepEqual(
+    (await session.call(query, { node: "example" })).matches,
+    [],
+  );
+  assert.deepEqual(
+    (await session.call(query, { node: "package.json" })).matches,
+    [],
+  );
+  await session.call(resolve, { paths: ["package.json"] });
+  assert.equal(
+    (await session.call(query, { node: "package.json" })).service_lookup,
+    "pending",
+  );
+  const reason = "No catalog record for this manifest.";
+  session.recordCatalogResolutions([
+    { path: "package.json", status: "unresolved", reason },
+  ]);
+  const unresolved = await session.call(query, { node: "package.json" });
+  assert.equal(unresolved.service_lookup, "unresolved");
+  assert.deepEqual(unresolved.evidence, []);
+  assert.deepEqual(unresolved.service_lookup_detail, {
+    reason,
+    source: "configured service catalog",
+  });
   const args = {
     paths: ["src/./main.js", "src/main.js", "lib/standalone.js"],
     project: ".",
@@ -349,7 +361,7 @@ test("trace groups citations and keeps linked and similarly named endpoints dist
     step: {
       from: { kind: "symbol", name: "run", scope: file },
       relation: "candidate_call",
-      to: { kind: "spelling", name: "sink" },
+      calleeText: "sink",
     },
   });
   const items: TraceEvidence[] = [
@@ -363,12 +375,24 @@ test("trace groups citations and keeps linked and similarly named endpoints dist
     frontier: [],
     expansions: [{ from: 0, to: 1 }],
     scopes: [
-      { scope, id: 0, hops: 0, complete: true, evidence: items },
+      {
+        scope,
+        id: 0,
+        hops: 0,
+        complete: true,
+        evidence: items,
+        textMatches: [{ source: "leads.js", text: "sink" }],
+      },
       {
         scope: { ...scope, path: "other.js" },
         id: 1,
         hops: 1,
         complete: true,
+        textMatches: [9, 3, 9].map((line) => ({
+          source: "leads.js",
+          text: "sink",
+          line,
+        })),
         evidence: [
           ...items,
           {
@@ -377,6 +401,10 @@ test("trace groups citations and keeps linked and similarly named endpoints dist
             line: 3,
           },
           call("other.js"),
+          {
+            ...call("app.js"),
+            step: { ...call("app.js").step, calleeText: "alias" },
+          },
         ],
       },
       {
@@ -394,20 +422,29 @@ test("trace groups citations and keeps linked and similarly named endpoints dist
   };
   const response = traceResponse(result);
   assert.deepEqual(response.coverage.searched_paths, []);
+  assert.deepEqual(response.textMatches, [
+    { source: "leads.js", text: "sink", lines: [3, 9] },
+  ]);
   assert.deepEqual(response.trace, [
     { ...first, evidence: [{ source: "catalog:jobs" }] },
     { ...second, evidence: [{ source: "build.yml", lines: [3, 8] }] },
     {
       from: { kind: "symbol", name: "run", scope: "app.js" },
       relation: "candidate_call",
-      to: { kind: "spelling", name: "sink" },
+      calleeText: "sink",
       evidence: [{ source: "app.js", lines: [2] }],
     },
     {
       from: { kind: "symbol", name: "run", scope: "other.js" },
       relation: "candidate_call",
-      to: { kind: "spelling", name: "sink" },
+      calleeText: "sink",
       evidence: [{ source: "other.js", lines: [2] }],
+    },
+    {
+      from: { kind: "symbol", name: "run", scope: "app.js" },
+      relation: "candidate_call",
+      calleeText: "alias",
+      evidence: [{ source: "app.js", lines: [2] }],
     },
   ]);
 });

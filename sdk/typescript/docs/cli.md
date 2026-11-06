@@ -2317,8 +2317,9 @@ The installer uses host Git for the selected repository and respects
 
 ## Check a dependency CVE
 
-The only required argument is a public CVE ID. Run the check from anywhere in
-the Git checkout. Outside Git it uses the current directory.
+The only required argument is a public CVE ID. Install OpenGrep on `PATH`
+outside the scanned checkout. Run the check from anywhere in the Git checkout.
+Outside Git it uses the current directory.
 
 ```bash
 codex-security exploitability --help
@@ -2330,16 +2331,21 @@ The command looks up the advisory in the Open Source Vulnerabilities (OSV)
 database and runs the bundled `dependency-exploitability` skill. The skill
 checks the resolved dependency, applicable patches and the prerequisites for
 each use. It can request a local dependency trace with a time budget and hop
-limit. The tracer uses ripgrep to discover local references and looks for package
-and build manifests. With OpenGrep installed on PATH, it can identify candidate
-calls in Python, JavaScript and TypeScript. When both endpoints are known, it
-can also check for a value flowing between two calls in the same file. The
+limit. The tracer uses ripgrep to find files and reads package and build
+manifests for dependency declarations. The built-in parser recognizes npm
+dependency maps and literal system package installs in standard Dockerfiles
+and Containerfiles. Matches in other recognized dependency manifests are
+search leads. Automatic traces skip documentation. For a known symbol in
+Python, JavaScript, or TypeScript the tracer uses OpenGrep to identify
+candidate calls. When both endpoints are known, it can also check for a
+value flowing between two calls in the same file. The
 trace adds cited relationships to an in-memory graph and reports unfinished
 searches separately. Within the same check the skill can ask how many candidate
 code paths and which services it has found, or look up the evidence for one
 node by name or ID. The count includes distinct call and same-file flow
-observations. Repeating a trace preserves the count. Each candidate still
-needs to be checked against the source.
+observations. Repeating a trace preserves the count. Unresolved calls carry
+the matched name as `calleeText` on the call site. Use the cited source to
+identify the implementation.
 
 When a service catalog is configured, the graph keeps one service lookup per
 relevant file. The skill requests batches of paths and can supply their shared
@@ -2393,19 +2399,20 @@ and inventory records. It independently reads the dependency version from those
 records. Changes trigger review of the affected items; unchanged approvals are
 reused.
 
-Discovered source locations remain in a candidate list until assessed, dismissed
-with evidence, or explicitly unresolved. This prevents a known candidate from
-silently disappearing from the report. It does not imply that every possible
-use in a large checkout was discovered. Code checks the report's structure and
-evidence references, accounts for known candidates, and derives its overall
-verdict. A positive report requires a positive finding. Neutral inventory
+The report tracks candidate IDs for dependency declarations, candidate calls,
+and same-file flows observed by the tracer. Each needs an assessment, an
+evidence-backed dismissal, or a specific unresolved question. Plain text
+matches and shell searches provide leads and can supply citations. The
+investigator can group candidates when the same build, dependency copy, and
+controls apply. The host checks the report's structure and evidence, accounts
+for known candidates, and derives its overall verdict. A positive report requires a positive finding. Neutral inventory
 observations can use `supports: []` without asserting deployment or access.
 
 Queue acknowledgments and review status return concise progress and actionable
 feedback. Candidate locations are available on request in pages, defaulting to
 500 unassigned locations; cursors remain stable while those locations are
 assigned, and new discovery invalidates old cursors. Receipt metadata is fetched
-only when requested. Recognized file-display commands do not create candidates.
+only when requested.
 Unresolved report entries retain their bound source paths and line ranges so
 uncertainty remains attributable to the affected project.
 

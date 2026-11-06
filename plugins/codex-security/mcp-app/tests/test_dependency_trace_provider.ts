@@ -113,7 +113,7 @@ test("literal discovery recurses in scope and observes dirty and added files", a
   const provider = localProvider(root);
   await mkdir(join(root, "sub", "deep"), { recursive: true });
   await writeFile(join(root, "excluded"), "image_lib\n");
-  await writeFile(join(root, "sub", "deep", "config.txt"), "use image_lib\n");
+  await writeFile(join(root, "sub", "deep", "uses.ts"), "use image_lib\n");
   const scope: TraceScope = {
     kind: "search",
     package: "image_lib",
@@ -122,39 +122,71 @@ test("literal discovery recurses in scope and observes dirty and added files", a
   assert.equal(await provider.fingerprint!(scope, signal), undefined);
   const result = await provider.run(scope, signal);
   assert.equal(result.complete, true, result.reason ?? "incomplete scope");
-  assert.deepEqual(
-    result.next.map((scope) => scope.path),
-    ["sub/deep/config.txt"],
-  );
+  assert.deepEqual(result.next, []);
+  assert.deepEqual(result.textMatches, [
+    { source: "sub/deep/uses.ts", text: "image_lib" },
+  ]);
   await writeFile(join(root, "sub", "BUILD.bazel"), 'deps = ["image_lib"]');
   const manifests = await provider.run(
     { ...scope, kind: "manifests", symbol: "decode" },
     signal,
   );
-  assert.deepEqual(
-    manifests.next.map(({ path, symbol }) => [path, symbol]),
-    [["sub/BUILD.bazel", undefined]],
-  );
+  assert.deepEqual(manifests.next, []);
+  assert.deepEqual(manifests.textMatches, [
+    { source: "sub/BUILD.bazel", text: "image_lib" },
+  ]);
+  // A subsequent lookup sees the current worktree, including untracked files.
   await writeFile(join(root, "sub", "BUILD.bazel"), "");
-  const hit = result.next[0]!;
-  const initial = await provider.fingerprint!(hit, signal);
-  assert.ok(initial);
-  assert.equal(
-    (await provider.run(hit, signal)).evidence[0]?.step.relation,
-    "references",
+  await writeFile(join(root, "sub", "deep", "uses.ts"), "different\n");
+  await writeFile(join(root, "sub", "new.ts"), "image_lib\n");
+  assert.deepEqual((await provider.run(scope, signal)).textMatches, [
+    { source: "sub/new.ts", text: "image_lib" },
+  ]);
+});
+
+test("manifest fingerprints and declarations need no external tool", async (t) => {
+  const dirs = createTemporaryDirectories(true);
+  t.after(() => dirs.cleanup());
+  const root = await dirs.create("trace-manifest-");
+  const provider = localProvider(root);
+  const originalPath = process.env.PATH;
+  process.env.PATH = "";
+  t.after(() => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  });
+  const manifest = { ...file, path: "package.json", symbol: undefined };
+  await writeFile(
+    join(root, manifest.path),
+    '{"dependencies":{"image_lib":"1.0.0"}}',
   );
-  assert.equal((await provider.run(hit, signal)).fingerprint, initial);
+  const fingerprint = await provider.fingerprint!(manifest, signal);
+  assert.ok(fingerprint);
+  const result = await provider.run(manifest, signal);
+  assert.equal(result.complete, true);
+  assert.equal(result.fingerprint, fingerprint);
   assert.deepEqual(
-    (await provider.run(hit, signal)).evidence.map((e) => e.line),
-    [1],
+    result.evidence.map(({ step }) => step.relation),
+    ["depends_on"],
   );
-  await writeFile(join(root, "sub", "deep", "config.txt"), "different\n");
-  assert.notEqual(await provider.fingerprint!(hit, signal), initial);
-  await writeFile(join(root, "sub", "new.txt"), "image_lib\n");
-  assert.deepEqual(
-    (await provider.run(scope, signal)).next.map((scope) => scope.path),
-    ["sub/new.txt"],
-  );
+  assert.equal(result.textMatches, undefined);
+  await writeFile(join(root, manifest.path), '{"description":"image_lib"}');
+  const edited = await provider.run(manifest, signal);
+  assert.equal(edited.complete, true);
+  assert.notEqual(edited.fingerprint, fingerprint);
+  assert.deepEqual(edited.evidence, []);
+  for (const [path, symbol] of [
+    ["README.md", "decode"],
+    ["example.py", undefined],
+  ] as const) {
+    await writeFile(join(root, path), "image_lib\n");
+    const scope = { ...file, path, symbol };
+    assert.equal(await provider.fingerprint!(scope, signal), undefined);
+    const skipped = await provider.run(scope, signal);
+    assert.deepEqual(skipped.evidence, []);
+    assert.equal(skipped.textMatches, undefined);
+    assert.match(skipped.reason ?? "", /supported source file and sink symbol/);
+  }
 });
 
 test("OpenGrep follows a same-file caller and records an imported alias as a candidate", async (t) => {
@@ -163,17 +195,16 @@ test("OpenGrep follows a same-file caller and records an imported alias as a can
   t.after(() => dirs.cleanup());
   const root = await dirs.create("trace-native-");
   const provider = localProvider(root);
+  const typescript =
+    'import {decode as render} from "image_lib";\nfunction wrapper(x: string) {return render(x);}\nfunction outer(x: string) {return wrapper(x);}\n';
   for (const [path, contents, callerLine] of [
     [
       "example.py",
       "from image_lib import decode as render\n\ndef wrapper(x):\n    return render(x)\n\ndef outer(x):\n    return wrapper(x)\n",
       4,
     ],
-    [
-      "example.ts",
-      'import {decode as render} from "image_lib";\nfunction wrapper(x) {return render(x);}\nfunction outer(x) {return wrapper(x);}\n',
-      2,
-    ],
+    ["example.ts", typescript, 2],
+    ["example.mts", typescript, 2],
   ] as const) {
     await writeFile(join(root, path), contents);
     const result = await provider.run({ ...file, path }, signal);
@@ -185,7 +216,7 @@ test("OpenGrep follows a same-file caller and records an imported alias as a can
         step: {
           from: { kind: "symbol", name: "wrapper", scope: path },
           relation: "candidate_call",
-          to: { kind: "spelling", name: "decode" },
+          calleeText: "render",
         },
       },
     ]);
@@ -207,27 +238,92 @@ test("optional intrafile taint follows a helper argument and excludes a constant
     source_symbol: "read_input",
   };
   const py =
-    "def format_value(x):\n    log_item(x)\n\ndef process():\n    format_value(read_input())\n    log_item('constant')\n";
+    "def format_value(x):\n    log_item(x)\n\ndef process():\n    format_value(read_input())\n    log_item('constant')\n" +
+    "log_item(read_input())\ndef constants_only():\n" +
+    "    log_item('constant')\n".repeat(500);
   await writeFile(join(root, "example.py"), py);
   const flow = await provider.run(query, signal);
   assert.equal(flow.complete, true, flow.reason ?? "incomplete scope");
   assert.deepEqual(
     flow.evidence.map((hit) => hit.line),
-    [2],
+    [2, 7],
   );
   assert.deepEqual(flow.evidence[0]?.step, {
-    from: { kind: "spelling", name: "read_input", scope: "example.py" },
+    from: { kind: "symbol", name: "format_value", scope: "example.py" },
     relation: "candidate_flow",
-    to: { kind: "spelling", name: "log_item" },
+    calleeText: "log_item",
+    sourceText: "read_input",
+  });
+  assert.deepEqual(flow.evidence[1]?.step, {
+    from: { kind: "file", name: "example.py" },
+    relation: "candidate_flow",
+    calleeText: "log_item",
+    sourceText: "read_input",
   });
   assert.deepEqual(flow.next, []);
   await writeFile(
     join(root, "example.py"),
-    py.replace("log_item(x)", "log_item('constant')"),
+    py
+      .replace("log_item(x)", "log_item('constant')")
+      .replace("log_item(read_input())", "log_item('constant')"),
   );
   const control = await provider.run(query, signal);
   assert.equal(control.complete, true, control.reason ?? "incomplete scope");
   assert.deepEqual(control.evidence, []);
+});
+
+test("documentation cannot consume source or manifest scan slots", async (t) => {
+  if (!(await available("rg"))) return t.skip("rg required");
+  const dirs = createTemporaryDirectories(true);
+  t.after(() => dirs.cleanup());
+  const root = await dirs.create("trace-file-budget-");
+  await mkdir(join(root, "docs"));
+  await Promise.all(
+    Array.from({ length: 160 }, (_, i) =>
+      writeFile(join(root, "docs", `guide-${i}.md`), "image_lib decode\n"),
+    ),
+  );
+  for (const app of ["batch", "preview"]) {
+    await mkdir(join(root, app));
+    await writeFile(join(root, app, "consumer.js"), "decoder.decode(input);\n");
+    await writeFile(
+      join(root, app, "package.json"),
+      '{"dependencies":{"image_lib":"1"}}\n',
+    );
+  }
+  const provider = localProvider(root);
+  for (const [scope, filename] of [
+    [search, "consumer.js"],
+    [{ ...search, symbol: undefined }, "package.json"],
+  ] as const) {
+    const result = await provider.run(scope, signal);
+    assert.deepEqual(result.next.map(({ path }) => path).sort(), [
+      `batch/${filename}`,
+      `preview/${filename}`,
+    ]);
+    assert.equal(result.complete, true, result.reason ?? "incomplete search");
+    assert.ok(
+      result.textMatches?.every(({ source }) => !source.endsWith(".md")),
+    );
+  }
+});
+
+test("an unsupported symbol returns source leads and incomplete call coverage", async (t) => {
+  if (!(await available("rg"))) return t.skip("rg required");
+  const dirs = createTemporaryDirectories(true);
+  t.after(() => dirs.cleanup());
+  const root = await dirs.create("trace-symbol-");
+  await writeFile(join(root, "consumer.js"), "fs$rename();\n");
+  const result = await localProvider(root).run(
+    { ...search, symbol: "fs$rename" },
+    signal,
+  );
+  assert.equal(result.complete, false);
+  assert.match(result.reason ?? "", /identifier/);
+  assert.deepEqual(result.next, []);
+  assert.deepEqual(result.textMatches, [
+    { source: "consumer.js", text: "fs$rename" },
+  ]);
 });
 
 test("Git discovery includes the worktree copy of force-tracked ignored files", async (t) => {
@@ -277,10 +373,14 @@ test("Git discovery includes the worktree copy of force-tracked ignored files", 
       signal,
     );
     assert.equal(result.complete, true, result.reason ?? "incomplete");
-    return result.next.map((scope) => scope.path).sort();
+    return [
+      ...new Set([
+        ...result.next.map((scope) => scope.path),
+        ...(result.textMatches ?? []).map((match) => match.source),
+      ]),
+    ].sort();
   };
   assert.deepEqual(await lookup(".", "search"), [
-    "new.txt",
     "vendor/lib.py",
     "vendor/package.json",
   ]);
@@ -405,7 +505,7 @@ test("scoped traces return a nearby declared Backstage component and system", as
     observations.some(({ source }) => source === "apps/mail/package.json"),
   );
   assert.ok(
-    observations.some(({ source }) => source === "apps/mail/catalog-info.yml"),
+    !observations.some(({ source }) => source === "apps/mail/catalog-info.yml"),
   );
   assert.ok(!observations.some(({ step }) => step.relation === "part_of"));
 });

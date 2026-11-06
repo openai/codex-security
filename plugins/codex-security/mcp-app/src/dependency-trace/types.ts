@@ -19,7 +19,11 @@ export interface TraceEntity {
 export interface TraceStep {
   from: TraceEntity;
   relation: string;
-  to: TraceEntity;
+  /** Only present when the provider identifies a target entity. */
+  to?: TraceEntity;
+  /** Local names observed at an unresolved call or flow site. */
+  calleeText?: string;
+  sourceText?: string;
 }
 
 export interface TraceEvidence {
@@ -28,10 +32,18 @@ export interface TraceEvidence {
   line?: number;
 }
 
+/** A literal search hit. Directory discovery may only know its path. */
+export interface TextMatch {
+  source: string;
+  text: string;
+  line?: number;
+}
+
 export interface ScopeResult {
   /** Identity of the exact input analyzed, for reuse within this check. */
   fingerprint?: string;
   evidence: TraceEvidence[];
+  textMatches?: TextMatch[];
   next: TraceScope[];
   complete: boolean;
   reason?: string;
@@ -62,6 +74,7 @@ export interface TraceResult {
     complete: boolean;
     reason?: string;
     evidence: TraceEvidence[];
+    textMatches?: TextMatch[];
   }[];
   /** Sample of the next lookups that did not fit the hop budget. */
   frontier: TraceScope[];

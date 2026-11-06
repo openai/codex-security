@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { readSkillCommandOutput } from "../src/cli.js";
+import { createDependencyCandidates } from "../src/dependency-candidates.js";
 import type { DependencyGraphTools } from "../src/dependency-graph-tools.js";
 import { createDependencyReportSubmission } from "../src/dependency-report-submission.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
@@ -142,16 +143,24 @@ test("starts a fresh persistent Daybreak dependency thread and binds its reviewe
 });
 
 test("dispatches graph tools in their own namespace and records the coverage they return", async () => {
+  await using repo = await scopedTemporaryDirectory("report-tool-search-");
+  const file = "project.yml";
+  await writeFile(join(repo.path, file), "project: example\n");
+  const candidates = await createDependencyCandidates(repo.path);
   const namespace = "codex_security_dependency";
   const tool = {
     name: "resolve_codex_security_services",
     description: "Resolve a path through the configured service catalogs.",
     inputSchema: { type: "object" },
   };
-  const snapshot = { service_resolution: { revision: 1, pending: 0 } };
+  const snapshot = {
+    project: "example",
+    references: [{ path: file, line: 1 }],
+    service_resolution: { revision: 1, pending: 0 },
+  };
   const call = mock<DependencyGraphTools["call"]>(async () => snapshot);
   const recordGraphEvent = mock(() => {});
-  const paths = { paths: ["src/main.ts"] };
+  const args = { project: "example" };
   const replies: Record<string, unknown>[] = [];
   const responded = Promise.withResolvers<void>();
   async function* events() {
@@ -170,7 +179,20 @@ test("dispatches graph tools in their own namespace and records the coverage the
           },
         },
       },
-      submission("lookup", paths, { namespace, tool: tool.name }),
+      {
+        method: "item/completed",
+        params: {
+          ...thread,
+          item: {
+            id: "search",
+            type: "commandExecution",
+            cwd: repo.path,
+            command: "rg -n example",
+            aggregatedOutput: `${file}:1:project: example`,
+          },
+        },
+      },
+      submission("lookup", args, { namespace, tool: tool.name }),
     ]) {
       yield JSON.stringify(event) + "\n";
     }
@@ -186,7 +208,7 @@ test("dispatches graph tools in their own namespace and records the coverage the
         callback();
       },
     }),
-    directory: "/synthetic-check",
+    directory: repo.path,
     prompt: "Review dependency",
     sandbox: "read-only",
     permissionProfile: "restricted",
@@ -194,6 +216,7 @@ test("dispatches graph tools in their own namespace and records the coverage the
     threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
     dependencyGraph: { tools: [tool], call, close: async () => {} },
     dependencyReport: {
+      ...candidates,
       submit: async () => ({ accepted: true, feedback: "Accepted" }),
       recordInventory() {},
       recordGraphEvent,
@@ -210,7 +233,8 @@ test("dispatches graph tools in their own namespace and records the coverage the
       tools: [{ ...tool, type: "function" }],
     }),
   );
-  expect(call.mock.calls).toEqual([[tool.name, paths]]);
+  expect(call.mock.calls).toEqual([[tool.name, args]]);
+  expect(candidates.snapshot().candidates).toEqual([]);
   expect(replies.find((reply) => reply["id"] === "lookup")).toMatchObject({
     result: {
       success: true,
@@ -345,7 +369,13 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
     -32601,
   );
   expect(reviews).toBe(10);
-  expect(submissionState.acceptedReport()).toEqual(draft);
+  expect(submissionState.acceptedReport()).toEqual({
+    ...draft,
+    limitations: [
+      ...draft.limitations,
+      expect.stringContaining("scope.txt:1-10"),
+    ],
+  });
 });
 
 test("ends after ten completed turns without a report submission", async () => {
