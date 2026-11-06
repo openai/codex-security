@@ -3120,6 +3120,8 @@ async function preparePublicationInput(
       : sameCatalog
         ? approved
         : (privateUrl ?? destination.url);
+    const guardianComparisonUrl =
+      historical && approved !== undefined ? approved : comparisonUrl;
     const key = sameCatalog
       ? (url: string) =>
           cloudSourceKey(
@@ -3129,13 +3131,17 @@ async function preparePublicationInput(
               : "github",
           )
       : catalogKey;
-    function requireDestination(id: string, url: string | null | undefined) {
+    function requireDestination(
+      id: string,
+      url: string | null | undefined,
+      expectedUrl = comparisonUrl,
+    ) {
       if (
         url &&
         (matchesHostedRepository
           ? !matchesHostedRepository(url) ||
-            !matchesHostedRepository(comparisonUrl)
-          : key(url) !== key(comparisonUrl))
+            !matchesHostedRepository(expectedUrl)
+          : key(url) !== key(expectedUrl))
       )
         throw new CodexSecurityError(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
@@ -3145,6 +3151,7 @@ async function preparePublicationInput(
       requireDestination(
         "Guardian source",
         declaredScannerRepositoryUrl(report["repositoryUrl"], "Guardian"),
+        guardianComparisonUrl,
       );
     // An immutable retry may refer to an earlier repository name. Additional
     // file declarations outside its saved findings authorize no new writes.
@@ -3212,8 +3219,12 @@ async function preparePublicationInput(
       const { source_finding_id: id, evidence } = finding;
       const guardian = guardianFindingRepository(finding, "cloud");
       if (guardian) {
-        requireDestination(id, guardian);
-        requireDestination(id, evidence.details?.repository?.url);
+        requireDestination(id, guardian, guardianComparisonUrl);
+        requireDestination(
+          id,
+          evidence.details?.repository?.url,
+          guardianComparisonUrl,
+        );
       }
       checkRetainedTrivyProvider(provider, finding);
       if (trivyReportUrls) {
