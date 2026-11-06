@@ -25,6 +25,7 @@ type NativeRecord = Record<string, unknown>;
 
 const urlScheme = /^[a-z][a-z\d+.-]*:\/\//iu;
 const javaArchiveAncestor = /\.(?:jar|war|ear|par)\//iu;
+const cloudLocationLimit = 100;
 
 const curlUrlPrefix = /^(?:(?:https?|ftps?)::)?(?:https?|ftps?):\/{1,3}/iu;
 const unsafeRepositoryUrl =
@@ -379,6 +380,32 @@ export function normalizeTrivyFindings(
   target: ExternalImportTarget = "cloud",
   scanRoot?: string,
 ): ExternalFindings {
+  const locationLimit = target === "cloud" ? cloudLocationLimit : Infinity;
+  return normalizeReport(input, target, scanRoot, locationLimit);
+}
+
+/** @internal Only a finding at the Cloud location limit can have a different prior selection. */
+export function needsPreviousTrivyProjection({ findings }: ExternalFindings) {
+  return findings.some(
+    ({ evidence }) => evidence.locations?.length === cloudLocationLimit,
+  );
+}
+
+/** @internal Reconstruct the original selection for an interrupted Cloud request. */
+export function normalizePreviousTrivyFindings(
+  input: unknown,
+  target: ExternalImportTarget = "cloud",
+  scanRoot?: string,
+): ExternalFindings {
+  return normalizeReport(input, target, scanRoot, Infinity);
+}
+
+function normalizeReport(
+  input: unknown,
+  target: ExternalImportTarget,
+  scanRoot: string | undefined,
+  locationLimit: number,
+): ExternalFindings {
   const document = record(input, "Trivy report");
   if (document["SchemaVersion"] !== 2)
     throw new Error(
@@ -471,6 +498,8 @@ export function normalizeTrivyFindings(
       if (targetPath && targetPath !== declaration)
         locations.push({ path: targetPath, line: null });
       if (declaration) {
+        // The scan target already consumes a slot when it differs from this declaration.
+        const lineLimit = locationLimit - locations.length;
         const lines = new Set<number>();
         for (const range of array(
           pkg?.["Locations"] ?? [],
@@ -480,7 +509,8 @@ export function normalizeTrivyFindings(
           if (
             typeof start === "number" &&
             Number.isSafeInteger(start) &&
-            start > 0
+            start > 0 &&
+            lines.size < lineLimit
           )
             lines.add(start);
         }

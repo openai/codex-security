@@ -10,8 +10,7 @@ mean and how to interpret the result.
 Keep the same provider and source key for later exports of the same vendor
 project and finding family. For example, use
 `github.com/OWNER/REPO/dependabot` for Dependabot alerts. An updated local import
-under that key replaces evidence for its existing record. A key containing
-today's date would create another record for the same alert.
+under that key replaces evidence for its existing record. A source key that changes with each export creates another record for the same alert.
 
 | Destination                | What identifies the record                                                                                                                                                                             |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -26,6 +25,7 @@ which changes can give an occurrence a different ID.
 | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md) | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
 | [AWS Continuum](continuum.md)                                                         | Continuum finding ARN. A list summary and a detailed response for that ARN identify the same finding.                                                                                    |
+| [Tenable One](tenable.md)                                                             | Exact Tenable `finding_id` within the local checkout and a stable tenant/asset source key. Use the Code Repository asset UUID in the key.                                                |
 | [Checkmarx SAST](checkmarx.md)                                                        | Checkmarx One uses the similarity ID and result hash. CxSAST scopes the similarity ID and ordered flow to the project and query.                                                         |
 | [Wiz](wiz.md)                                                                         | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
 | [GitHub Dependabot](github-dependabot.md), [code scanning](github-code-scanning.md)   | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
@@ -80,10 +80,19 @@ repository path from the preview. Each record includes
 unprocessed findings. Open a finding in the inbox to assess it and publish
 the assessment when you're ready to share it.
 
+Reimporting identical evidence for the same occurrence leaves the saved
+observation in place. If the job reports `source_order_unknown`, Cloud
+received different evidence for an existing finding and needs its current
+observation version before replacing it. Check the previous observation and
+the new evidence before retrying. A newer scanner timestamp alone cannot
+authorize that update.
+
 **Cloud repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
 Check the per-item result for conflicts. The receipt's source-report,
 observation and canonical-finding IDs identify Cloud records. Read the source
-report for the imported evidence.
+report for the imported evidence. If this destination requires a known
+severity, findings whose scanner reported no severity appear in the preview's
+exclusions. The private inbox also accepts unknown severity.
 
 The repository publisher allows up to 256 KiB and 20 levels of nesting per finding. The publisher
 batches up to 100 items and 5 MiB per request. Local file imports do not apply
@@ -108,12 +117,12 @@ request before the response was lost.
 1. If the interrupted result includes `savedSubmission`, keep that checkpoint.
    Preview the original export with `--dry-run --format json` using the same
    build, state directory, Cloud account, endpoint and import settings.
-2. Check `accountId`, `destination` and `resumed` in the preview. When `resumed`
-   is true, confirm the command to continue the saved submission. The
-   repository publisher also preserves the original expected versions. When it is false, review the fresh submission before
-   confirming. If a repository reset retires the old submission and preparation
-   returns an error, run `--dry-run` again and review the new destination and
-   environment before confirming.
+2. Check `accountId`, `destination` and `resumed` in the preview. If `resumed`
+   is true, confirmation continues the saved submission. The repository
+   publisher also preserves the original expected versions. If `resumed` is
+   false, review the new submission before confirming. If a repository reset
+   retired the submission, run another dry run to review the new repository
+   and environment.
 
 For a failed or cancelled private job, a fresh preview identifies the previous
 job and confirmation starts a new attempt. A lost response from an active job
@@ -126,32 +135,24 @@ export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
 Use the same SDK version throughout a submission when possible.
 
-Older SDK checkpoints saved the destination repository ID without the catalog
-URL. After a repository rename, retry those requests with the original
-normalized findings and report metadata, omitting supplemental source
-repository declarations. A new declaration needs a matching current catalog
-entry or a URL recorded when the request was approved.
+For hosted Semgrep or Snyk imports, finish any pending request before sending
+updated evidence for the same finding IDs. Selections with distinct
+scanner-issued IDs can proceed independently. If the checkpoint records
+only the source, finish that request before starting another for the same
+source and destination.
 
-If a hosted Semgrep or Snyk request is pending, rerun the original input to
-finish it before submitting updated evidence for any of the same findings.
-Selections with distinct scanner-issued IDs can proceed independently on the
-same deployment, account, repository, connector, provider and source key.
-When an older checkpoint establishes only the source, finish that request
-before submitting another selection for that source. Use the SDK build that
-created the request and include the original report context and caller-added
-fields. Older SDKs included some fields in the checkpoint filename without
-retaining them in the saved request. If the publisher cannot identify the
-deployment of an older request, rerun it on its original deployment. An
-identified repository reset retires the request and requires fresh approval.
+**Resuming across SDK versions.** Keep the SDK input that produced the
+checkpoint, including report context and caller-added fields. Serializing it
+as JSON can change the values used to identify the approved request. Retry on
+the original deployment. If the SDK can verify the saved selection, it reuses
+the request IDs and skips batches with receipts. Otherwise it preserves the
+checkpoint and stops before uploading. If it cannot identify the approved
+findings, a new submission for the same source and destination can also be blocked.
 
-After an SDK upgrade, retry with the original input. An older SDK could approve
-different bytes from those its JSON export contained. When the SDK verifies
-the old selection and request bytes, it resumes with the original request IDs
-and skips batches that already have receipts. If it cannot verify the original
-request, it preserves the checkpoint and stops before uploading. A saved JSON
-export can lose information from the original SDK input. If a getter makes it
-impossible to identify which findings were approved, the SDK can also stop a
-new submission for the same source and destination.
+After a repository rename, a checkpoint that records only the repository ID
+can still be retried with the original normalized findings and report metadata.
+Omit supplemental repository declarations for that retry. A new declaration
+requires a matching catalog entry or a URL recorded in the approval.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.
