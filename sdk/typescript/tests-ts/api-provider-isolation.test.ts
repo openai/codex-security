@@ -94,6 +94,9 @@ async function nativeRequest(
   } finally {
     clearTimeout(timer);
     lines.close();
+    // Bun on Windows can keep these pipes open after the app-server process exits.
+    child.stdout.destroy();
+    child.stderr.destroy();
     child.kill();
     await closed;
   }
