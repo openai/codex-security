@@ -15,6 +15,19 @@ from pathlib import Path
 
 
 def convert(archive, verification, destination):
+    """Verify each image blob before publishing a new OCI layout.
+
+    Args:
+        archive (Path): Uncompressed, single-platform apko image tar.
+        verification (Path): Matching verification.json from the verified release.
+        destination (Path): New layout directory under an existing parent.
+
+    Returns:
+        str: OCI manifest digest, including the sha256 prefix.
+
+    Raises:
+        ValueError: The destination exists or an archive verification check fails.
+    """
     if destination.exists() or destination.is_symlink():
         raise ValueError(f"Destination already exists: {destination}")
     expected = json.loads(verification.read_bytes())
@@ -34,6 +47,7 @@ def convert(archive, verification, destination):
             return m
 
         def copy_blob(name, desc):
+            """Write a blob into the layout, verify its size and SHA-256, and return its staged path."""
             digest = desc["digest"]
             if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
                 raise ValueError(f"Invalid blob digest: {digest}")

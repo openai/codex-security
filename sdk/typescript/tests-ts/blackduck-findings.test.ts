@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   blackDuckReportRepositories,
+  needsPreviousBlackDuckProjection,
   normalizeBlackDuckFindings,
+  normalizePreviousBlackDuckFindings,
   readBlackDuckFindings,
 } from "../src/blackduck-findings.js";
 import {
@@ -136,6 +138,43 @@ test("replay keeps native occurrence identity when package coordinates and advis
   expect(finding.source_finding_id).toBe(original.source_finding_id);
   expect(finding.evidence.packages).toEqual([]);
   expect(finding.evidence.source_data?.["row"]).toEqual(opaque);
+});
+
+test("keeps GitHub package coordinates separate from the repository that was scanned", () => {
+  const row = {
+    ...blackDuckBomRow(),
+    componentVersionOriginName: "github",
+    componentVersionOriginId: "LibraryOrg/Library/v1.0",
+    packageUrl: "pkg:github/LibraryOrg/Library@release%2Fv1.0",
+  };
+  const previous = normalizePreviousBlackDuckFindings([row], repository)
+    .findings[0]!;
+  expect(previous.evidence.packages).toEqual([]);
+  for (const target of ["local", "cloud"] as const) {
+    const current = normalizeBlackDuckFindings([row], repository, target);
+    expect(needsPreviousBlackDuckProjection(current)).toBe(true);
+    expect(current.excluded).toEqual([]);
+    expect(current.findings[0]).toMatchObject({
+      source_finding_id: previous.source_finding_id,
+      evidence: {
+        packages: [
+          {
+            ecosystem: "github",
+            name: "libraryorg/library",
+            installed_version: "release/v1.0",
+          },
+        ],
+        source_data: { sourceRepositoryUrl: repository, row },
+      },
+    });
+  }
+  row.packageUrl = "pkg:github/LibraryOrg/Library@" + "v".repeat(513);
+  const bounded = normalizeBlackDuckFindings([row], repository);
+  expect(needsPreviousBlackDuckProjection(bounded)).toBe(false);
+  expect(bounded).toEqual(
+    normalizePreviousBlackDuckFindings([row], repository),
+  );
+  expect(bounded.findings[0]!.evidence.source_data?.["row"]).toEqual(row);
 });
 
 test("uses the full generic package path and keeps the origin fallback for an invalid namespace", () => {

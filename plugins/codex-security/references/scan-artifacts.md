@@ -91,16 +91,25 @@ Standard scans and Deep Standard scan workers include attack-path analysis direc
 
 ## Final Report Paths
 
-- Workbench-owned Standard or workbench-backed diff draft: `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`
-- Bound Deep Standard worker result: `record_codex_security_scan_draft({ scanId, scope?, threatModel?, findings, reviewState })`; the Deep coordinator writes the aggregated parent draft
-- SDK-owned Standard draft: unsealed `scan-manifest.json` and `findings.json` under the SDK-provided scan directory
-- Deep, workbench-backed diff, or explicitly requested Standard completed results: `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`
-- Final scan report: `<scan_dir>/report.md`
-- Detailed vulnerability write-up: `<scan_dir>/findings/<slug>/<slug>.md`
-- Per-finding PoC and supporting files: `<scan_dir>/findings/<slug>/poc/...`
-- Structural hardening portfolio: `<scan_dir>/hardening/hardening.md`
-- Hardening analysis, proposals, and diagrams: `<scan_dir>/hardening/...`
-- Final report validation notes, when validation fails: `<scan_dir>/report_validation.md`
+All paths below are relative to the scan directory.
+
+| Output | Path |
+| --- | --- |
+| Canonical scan receipt and findings | `scan-manifest.json` and `findings.json` |
+| Readable report | `report.md` |
+| Threat model, when recorded | `threatmodel.md` |
+| Optional detailed finding write-up and supporting files | `findings/<slug>/<slug>.md` and `findings/<slug>/poc/` |
+| Optional structural hardening portfolio | `hardening/hardening.md` and supporting files under `hardening/` |
+| Report validation notes when validation fails | `report_validation.md` |
+| Legacy coverage document | `coverage.json` only when referenced by the manifest's `scan.coverageRef` |
+
+The current manifest stores additional excluded paths in `scan.review.excludedPaths`. See the [sealed scan contract](scan-contract.md#canonical-documents) for examples.
+
+### Draft submission and retrieval
+
+Workbench-owned Standard scans and workbench-backed diff scans submit drafts through `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`. Bound Deep workers submit their findings and review state through the same tool. The Deep coordinator writes the aggregated parent draft. SDK-owned Standard scans write unsealed manifest and findings files in the SDK-provided scan directory.
+
+For Deep, workbench-backed diff, or explicitly requested Standard completed results, call `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`.
 
 ## Fix Finding Paths
 

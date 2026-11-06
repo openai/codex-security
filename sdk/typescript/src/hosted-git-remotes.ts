@@ -88,12 +88,39 @@ async function emptyLegacyRemotes(
   return true;
 }
 
+/** A source directory can be outside Git. Preserve all other command failures. */
+export async function readGitRemoteNames(
+  readGit: (args: readonly string[]) => Promise<string>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    return await readGit(["remote"]);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === 128 &&
+      "stderr" in error &&
+      typeof error.stderr === "string" &&
+      (error.stderr.trimEnd() ===
+        "fatal: not a git repository (or any of the parent directories): .git" ||
+        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
+          error.stderr.trimEnd(),
+        ))
+    )
+      return;
+    throw error;
+  }
+}
+
 /** Read effective external Git URLs without invoking a transport. An empty result means none could be verified. */
 export async function readHostedGitRemotes(
   repository: string,
   protectedRoots: string[],
   environment?: NodeJS.ProcessEnv,
   signal?: AbortSignal,
+  literalTrivySources?: ReadonlySet<string>,
 ): Promise<string[] | undefined> {
   const readGit = (args: readonly string[]) => {
     const overrides: NodeJS.ProcessEnv = { LC_ALL: "C" };
@@ -135,27 +162,8 @@ export async function readHostedGitRemotes(
     const bytes = Buffer.from(raw, "latin1");
     return isUtf8(bytes) ? bytes.toString("utf8") : undefined;
   };
-  let remoteNames: string;
-  try {
-    remoteNames = await readGit(["remote"]);
-  } catch (error) {
-    signal?.throwIfAborted();
-    // A local source directory need not be a Git checkout.
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === 128 &&
-      "stderr" in error &&
-      typeof error.stderr === "string" &&
-      (error.stderr.trimEnd() ===
-        "fatal: not a git repository (or any of the parent directories): .git" ||
-        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
-          error.stderr.trimEnd(),
-        ))
-    )
-      return;
-    throw error;
-  }
+  const remoteNames = await readGitRemoteNames(readGit, signal);
+  if (remoteNames === undefined) return;
   const config = await readGit([
     "config",
     "--null",
@@ -268,6 +276,22 @@ export async function readHostedGitRemotes(
     const curl = curlHelper.test(transport.toLowerCase());
     // Git uses the scheme spelling in the implicit git-remote-<scheme> executable name.
     const effectiveHelper = helper ?? transport;
+    // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
+    if (curl && /[\x00-\x20\x7f]/u.test(url)) {
+      hasUnverifiedRemote = true;
+      continue;
+    }
+    // A mixed-case scheme may invoke a custom Git helper. The native Trivy
+    // report can still match the checkout by its exact transport spelling.
+    if (
+      curl &&
+      helper === undefined &&
+      transport !== transport.toLowerCase() &&
+      literalTrivySources?.has(url)
+    ) {
+      remotes.push(url);
+      continue;
+    }
     const recognized = curl
       ? await recognizedCurlHelper(
           effectiveHelper,
@@ -287,8 +311,7 @@ export async function readHostedGitRemotes(
       : helper === undefined &&
         (!url.includes("://") ||
           /^(?:ssh|git\+ssh|ssh\+git|git)$/u.test(transport));
-    // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
-    if (!recognized || (curl && /[\x00-\x20\x7f]/u.test(url))) {
+    if (!recognized) {
       hasUnverifiedRemote = true;
       continue;
     }
@@ -313,7 +336,11 @@ export async function readHostedGitRemotes(
           throw error;
       }
     }
-    remotes.push(url);
+    remotes.push(
+      literalTrivySources && helper !== undefined && curl
+        ? transport.toLowerCase() + url.slice(transport.length)
+        : url,
+    );
   }
   return hasUnverifiedRemote || remotes.length ? remotes : undefined;
 }
