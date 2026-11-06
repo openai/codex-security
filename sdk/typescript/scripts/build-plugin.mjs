@@ -12,11 +12,31 @@ import {
   rm,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { isMain } from "./is-main.mjs";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const packageRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(packageRoot, "../..");
+
+async function retryWindowsRename(operation, rollback) {
+  // Windows can temporarily deny a directory rename while a file inside is open.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      await rollback?.();
+      if (
+        process.platform !== "win32" ||
+        !["EPERM", "EACCES", "EBUSY"].includes(error.code) ||
+        attempt === 5
+      ) {
+        throw error;
+      }
+      await delay(100 * (attempt + 1));
+    }
+  }
+}
 
 function validatePath(path) {
   const parts = path.split("/");
@@ -119,21 +139,24 @@ export async function buildBundledPlugin({
     ) {
       throw new Error("Bundled plugin generated files outside its contract.");
     }
-    try {
-      await rename(destination, previous);
-      preservePrevious = true;
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-    try {
-      await rename(staged, destination);
-    } catch (error) {
-      if (preservePrevious) {
-        await rename(previous, destination);
-        preservePrevious = false;
-      }
-      throw error;
-    }
+    await retryWindowsRename(
+      async () => {
+        try {
+          await rename(destination, previous);
+          preservePrevious = true;
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        await rename(staged, destination);
+      },
+      async () => {
+        // Keep the previous bundle available to readers during publication backoff.
+        if (preservePrevious) {
+          await retryWindowsRename(() => rename(previous, destination));
+          preservePrevious = false;
+        }
+      },
+    );
     preservePrevious = false;
   } finally {
     // Leave the previous bundle available if restoring it fails.
