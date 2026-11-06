@@ -530,8 +530,9 @@ Use `--output-dir DIR` to choose where a scan saves its results. The directory
 must be empty and outside the scanned directory and enclosing Git worktree.
 Existing directories keep their permissions; newly created directories are
 private to you by default.
-`--archive-existing` moves earlier output to
-`<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
+`--archive-existing` moves earlier output to a sibling directory with a unique
+suffix, such as `results.previous-ab12cd34` for an output directory named
+`results`. Use `--dry-run` to preview the move.
 
 Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
 optional export fails, the scan can still complete. Use the

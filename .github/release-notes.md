@@ -124,6 +124,7 @@
 - price OpenAI models by Bedrock region and inference route ([#2362](https://github.com/openai/codex-security/pull/2362))
 - preserve line breaks in oversized finding files ([#2361](https://github.com/openai/codex-security/pull/2361))
 - use published Vertex AI prices for managed OpenAI models ([#2363](https://github.com/openai/codex-security/pull/2363))
+- clarify archived scan output names ([#2365](https://github.com/openai/codex-security/pull/2365))
 
 </details>
 
