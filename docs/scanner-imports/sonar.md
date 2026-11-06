@@ -71,7 +71,7 @@ and destination.
 Omit `--sonar-project` only when the checkout's Git origin maps to exactly
 one project in the active organization. For a monorepo, supply the project
 key. If a search exceeds 10,000 results, select issue keys.
-[SonarQube plugin](https://www.sonarsource.com/blog/now-available-sonarqube-plugin-for-codex/) · [Codex Security import workflow](../../plugins/codex-security/skills/publish-findings/SKILL.md#sonarqube-cloud-issues)
+[SonarQube plugin](https://www.sonarsource.com/blog/now-available-sonarqube-plugin-for-codex/) · [Codex Security import workflow](../../plugins/codex-security/skills/publish-findings/references/sonar.md)
 
 If Sonar lacks a repository binding, Git uses an SSH host alias or Cloud
 finds no usable remote, verify the project's Git URL in Sonar. Pass it as
