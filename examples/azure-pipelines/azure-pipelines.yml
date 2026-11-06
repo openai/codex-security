@@ -29,6 +29,7 @@ resources:
       trigger: none
 
 variables:
+  # Review and test upgrades against a full scan, a committed diff, and SARIF export.
   codexSecurityVersion: "0.1.27"
   awsServiceConnection: codex-security-bedrock
   awsRegion: us-east-1
@@ -57,6 +58,8 @@ jobs:
         inputs:
           versionSpec: "3.14.7"
 
+      # Check Bubblewrap on this Ubuntu agent before assuming the AWS role.
+      # Runner setup: https://github.com/openai/codex-security/blob/main/docs/bedrock.md#check-the-sandbox-on-an-ubuntu-ci-runner
       # Install before checkout so repository npm configuration is not consulted.
       - task: Bash@3
         name: installCli

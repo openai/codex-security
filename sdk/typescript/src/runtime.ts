@@ -1,4 +1,3 @@
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
@@ -967,12 +966,18 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   const treePath = win32.toNamespacedPath(path);
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
-  const powershell = join(
+  const powershellDirectory = join(
     systemDirectory,
     "WindowsPowerShell",
     "v1.0",
-    "powershell.exe",
   );
+  const powershell = join(powershellDirectory, "powershell.exe");
+  const powershellArgs = [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+  ];
   const inheritedEnvironment = Object.fromEntries(
     Object.entries(process.env).filter(
       ([name]) => name.toUpperCase() !== "PSMODULEPATH",
@@ -983,12 +988,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       ...inheritedEnvironment,
       CODEX_SECURITY_CREDENTIAL_ACL_PATH: path,
       CODEX_SECURITY_CREDENTIAL_TREE_PATH: treePath,
-      PSModulePath: join(
-        systemDirectory,
-        "WindowsPowerShell",
-        "v1.0",
-        "Modules",
-      ),
+      PSModulePath: join(powershellDirectory, "Modules"),
     },
     encoding: "utf8" as const,
     windowsHide: true,
@@ -1013,7 +1013,11 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "$script:descriptorCount = 0",
-    "function Write-CredentialAcl($path) { $descriptor = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; if (-not $descriptor) { throw 'Windows credential ACL could not be verified' }; $script:descriptorCount += 1; $descriptor }",
+    "function Write-CredentialAcl($path) {",
+    "  $descriptors = @(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl)",
+    "  if ($descriptors.Count -ne @($path).Count) { throw 'Windows credential ACL could not be verified' }",
+    "  foreach ($descriptor in $descriptors) { if (-not $descriptor) { throw 'Windows credential ACL could not be verified' }; $script:descriptorCount += 1; $descriptor }",
+    "}",
     "function Read-CredentialDescendants($path) {",
     "  try { $entries = @(Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $path -Force) } catch {",
     // A child can disappear while an existing directory is being enumerated.
@@ -1022,23 +1026,34 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "    if ($path -ne $env:CODEX_SECURITY_CREDENTIAL_TREE_PATH -and $_.CategoryInfo.Category -eq 'ObjectNotFound') { return }",
     "    throw",
     "  }",
-    "  foreach ($entry in $entries) {",
+    "  $children = @(foreach ($entry in $entries) {",
     "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
     "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
     // Keep the extended-length path when Windows PowerShell returns child names.
-    '    $child = "$path\\$($entry.Name)"',
-    "    try { Write-CredentialAcl $child } catch {",
-    // A descendant can disappear inside Get-Acl after it was enumerated.
-    `      if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
-    "      if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }",
-    "      throw",
+    '    "$path\\$($entry.Name)"',
+    "  })",
+    "  if ($children.Count -eq 0) { return }",
+    "  try { Write-CredentialAcl $children } catch {",
+    // A vanished path is the only reason to retry the batch one child at a time.
+    "    if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw }",
+    "    for ($i = 0; $i -lt $children.Count; $i++) {",
+    "      try { Write-CredentialAcl $children[$i] } catch {",
+    "        if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw }",
+    "        $children[$i] = $null",
+    "      }",
     "    }",
-    "    if ($entry.PSIsContainer) { Read-CredentialDescendants $child }",
+    "  }",
+    "  for ($i = 0; $i -lt $children.Count; $i++) {",
+    "    if ($children[$i] -and $entries[$i].PSIsContainer) { Read-CredentialDescendants $children[$i] }",
     "  }",
     "}",
     ancestorAclScript,
     "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_TREE_PATH",
+    "try { Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_TREE_PATH } catch {",
+    // Either a batch or a single-child Get-Acl may report an incomplete listing.
+    `  if ($_.FullyQualifiedErrorId -in @('System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand', 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand')) { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "  throw",
+    "}",
     `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
   ].join("\n");
   const resolvePrincipalScript = [
@@ -1047,6 +1062,13 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl $descriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
   ].join("; ");
   const resolvedAliases: Record<string, string> = {};
+  function requireNumericSid(value: string): string {
+    if (!WINDOWS_SID.test(value))
+      throw new Error(
+        "Windows credential ACL contains an unresolvable identity",
+      );
+    return value;
+  }
   const resolvePrincipal = async (principal: string): Promise<void> => {
     if (
       !/^[A-Z]{2}$/u.test(principal) ||
@@ -1057,13 +1079,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     }
     const resolved = await execFile(
       powershell,
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        resolvePrincipalScript,
-      ],
+      [...powershellArgs, resolvePrincipalScript],
       {
         ...processOptions,
         env: {
@@ -1072,13 +1088,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
         },
       },
     );
-    const numeric = resolved.stdout.trim();
-    if (!WINDOWS_SID.test(numeric)) {
-      throw new Error(
-        "Windows credential ACL contains an unresolvable identity",
-      );
-    }
-    resolvedAliases[principal] = numeric;
+    resolvedAliases[principal] = requireNumericSid(resolved.stdout.trim());
   };
   const resolveDescriptorAliases = async (
     descriptor: string,
@@ -1098,7 +1108,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   const readAcl = async (): Promise<WindowsCredentialAcl> => {
     const snapshot = await inspectWindowsCredentialAclSnapshot(path, sid, {
       command: powershell,
-      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      args: [...powershellArgs, script],
       environment: processOptions.env,
       resolvedAliases,
       resolveDescriptorAliases,
@@ -1107,28 +1117,28 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     return snapshot.home;
   };
 
-  const icacls = join(systemDirectory, "icacls.exe");
-  const installTrustedAcl = async (target = path): Promise<void> => {
-    await execFile(
-      icacls,
-      [
-        target,
-        "/inheritance:r",
-        "/grant:r",
-        `*${sid}:(OI)(CI)F`,
-        `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
-        `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
-      ],
+  const icacls = (target: string, ...args: string[]) =>
+    execFile(
+      join(systemDirectory, "icacls.exe"),
+      [target, ...args],
       processOptions,
     );
-  };
+  const installTrustedAcl = () =>
+    icacls(
+      path,
+      "/inheritance:r",
+      "/grant:r",
+      `*${sid}:(OI)(CI)F`,
+      `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
+      `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
+    );
   let existing: WindowsCredentialAcl | undefined;
   for (let attempt = 0; existing === undefined && attempt < 3; attempt += 1) {
     try {
       existing = await readAcl();
     } catch (error) {
       if (error instanceof RepairableWindowsCredentialOwnerError) {
-        await execFile(icacls, [path, "/setowner", `*${sid}`], processOptions);
+        await icacls(path, "/setowner", `*${sid}`);
       } else if (error instanceof RepairableWindowsCredentialAclError) {
         await installTrustedAcl();
       } else {
@@ -1144,7 +1154,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     existing.untrustedPrincipals.length === 0 &&
     !existing.protected
   ) {
-    await execFile(icacls, [path, "/inheritance:d"], processOptions);
+    await icacls(path, "/inheritance:d");
     existing = await readAcl();
   }
 
@@ -1156,29 +1166,12 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   ) {
     await installTrustedAcl();
     verified = await readAcl();
-    for (const principal of verified.untrustedPrincipals) {
-      if (!WINDOWS_SID.test(principal)) {
-        throw new Error(
-          "Windows credential ACL contains an unresolvable identity",
-        );
-      }
-      await execFile(
-        icacls,
-        [path, "/remove:g", `*${principal}`],
-        processOptions,
-      );
-    }
-    for (const principal of verified.deniedPrincipals) {
-      if (!WINDOWS_SID.test(principal)) {
-        throw new Error(
-          "Windows credential ACL contains an unresolvable identity",
-        );
-      }
-      await execFile(
-        icacls,
-        [path, "/remove:d", `*${principal}`],
-        processOptions,
-      );
+    for (const [remove, principals] of [
+      ["/remove:g", verified.untrustedPrincipals],
+      ["/remove:d", verified.deniedPrincipals],
+    ] as const) {
+      for (const principal of principals)
+        await icacls(path, remove, `*${requireNumericSid(principal)}`);
     }
     if (
       verified.untrustedPrincipals.length !== 0 ||
@@ -1199,11 +1192,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     throw new Error("Windows credential ACL grants access to another identity");
   }
   if (!descendantsArePrivate) {
-    await execFile(
-      icacls,
-      [join(treePath, "*"), "/reset", "/t", "/q"],
-      processOptions,
-    );
+    await icacls(join(treePath, "*"), "/reset", "/t", "/q");
     await readAcl();
     if (!descendantsArePrivate) {
       throw new Error("Windows credential descendants remain accessible");
@@ -1460,6 +1449,59 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   }
   await rm(quarantine, { recursive: true, force: true });
   return true;
+}
+
+function sameInode(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/** Distinguish two hard links from two paths to the same directory entry. */
+async function hasSeparateAmbientLink(
+  localPath: string,
+  ambientHome: string,
+): Promise<boolean> {
+  try {
+    const local = await lstat(localPath, { bigint: true });
+    if (!local.isFile() || local.nlink < 2n || local.ino === 0n) return false;
+    const ambient = await lstat(join(ambientHome, "auth.json"), {
+      bigint: true,
+    });
+    if (!ambient.isFile() || !sameInode(local, ambient)) return false;
+    const [localDir, ambientDir] = await Promise.all([
+      stat(dirname(localPath), { bigint: true }),
+      stat(ambientHome, { bigint: true }),
+    ]);
+    return (
+      localDir.ino !== 0n &&
+      ambientDir.ino !== 0n &&
+      !sameInode(localDir, ambientDir)
+    );
+  } catch {
+    // Without a verified second link, leave logout to the configured native store.
+    return false;
+  }
+}
+
+/** Run under the credential-home lock so status cannot reimport the sign-in during logout. */
+export async function logoutCredentialHome<T extends number | void>(
+  home: string,
+  ambientHome: string,
+  nativeLogout: () => Promise<T>,
+  onLoggedOut?: () => void,
+): Promise<T> {
+  const localPath = join(home, "auth.json");
+  const shared = await hasSeparateAmbientLink(localPath, ambientHome);
+  const recordLogout = async () => {
+    await setCodexSecurityCredentialLogout(home, true);
+    if (shared) await rm(localPath);
+    onLoggedOut?.();
+  };
+
+  // Detach before native logout can revoke a shared token, even if native cleanup fails.
+  if (shared) await recordLogout();
+  const status = await nativeLogout();
+  if (!shared && (status === undefined || status === 0)) await recordLogout();
+  return status;
 }
 
 export async function setCodexSecurityCredentialLogout(
@@ -3230,14 +3272,12 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  const child = {
+  return {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
     CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
 
 export function environmentWithGit(
@@ -3633,9 +3673,7 @@ export function sameFile(left: string, right: string): Promise<boolean> {
     stat(left, { bigint: true }),
     stat(right, { bigint: true }),
   ]).then(
-    ([leftMetadata, rightMetadata]) =>
-      leftMetadata.dev === rightMetadata.dev &&
-      leftMetadata.ino === rightMetadata.ino,
+    ([leftMetadata, rightMetadata]) => sameInode(leftMetadata, rightMetadata),
     () => false,
   );
 }
