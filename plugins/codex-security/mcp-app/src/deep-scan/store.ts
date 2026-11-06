@@ -290,6 +290,7 @@ export class WorkbenchDeepScanStore {
         sdkThreadId: update.threadId || undefined,
       }),
       ...(update.error ? [`--error-message=${update.error}`] : []),
+      ...(update.terminalFailure ? ["--terminal-failure"] : []),
       ...(update.replaceableFailureKind
         ? ["--replaceable-failure-kind", update.replaceableFailureKind]
         : []),
@@ -404,7 +405,7 @@ export class WorkbenchDeepScanStore {
     );
   }
 
-  private coordinatorGeneration(scanId: string): number | undefined {
+  coordinatorGeneration(scanId: string): number | undefined {
     return this.coordinatorLeases.get(scanId)?.run.coordinatorGeneration;
   }
 
@@ -417,13 +418,6 @@ export class WorkbenchDeepScanStore {
    * other workbench processes. Reads remain concurrent and observe a committed
    * state before or after each mutation.
    */
-  coordinatorLeaseArgs(scanId: string): string[] {
-    const generation = this.coordinatorGeneration(scanId);
-    return generation === undefined
-      ? []
-      : ["--coordinator-generation", String(generation)];
-  }
-
   private enqueueWrite(args: string[], input?: string): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
