@@ -15,6 +15,19 @@ const privateFormat = z.enum([
   "wiz.vulnerability_json.v1",
 ]);
 export type PrivateImportFormat = z.infer<typeof privateFormat>;
+const jobVersion = z.union([z.literal(2), z.literal(3)]);
+export type PrivateJobVersion = z.infer<typeof jobVersion>;
+export const privateJobVersions: Partial<
+  Record<ImportSource["provider"], PrivateJobVersion>
+> = {
+  inspector: 2,
+  continuum: 2,
+  blackduck: 3,
+  checkmarx: 3,
+  sonar: 3,
+  trivy: 3,
+  veracode: 3,
+};
 const fileId = z.string().regex(/^aifile_[0-9a-f]{32}$/u);
 const contextSchema = z.object({
   object: z.literal("security.finding_import_context"),
@@ -173,6 +186,7 @@ export async function selectPrivateReport(
   path: string | undefined,
   context: PrivateImportContext,
   saved: string | undefined,
+  requiresStructuredReport = false,
 ): Promise<ReturnType<typeof privateReport>> {
   const checkpoint =
     saved === undefined ? undefined : checkpointSchema.parse(JSON.parse(saved));
@@ -180,6 +194,13 @@ export async function selectPrivateReport(
     checkpoint?.contextVersion === context.context_version
       ? checkpoint.format
       : undefined;
+  if (requiresStructuredReport && !originalFormat) {
+    if (!context.formats.includes(structuredFormat))
+      throw new CodexSecurityError(
+        `This Cloud service must support ${structuredFormat} to publish the reviewed Endor fields.`,
+      );
+    return privateReport(selection.findings, context.limits);
+  }
   const format =
     provider === "endor"
       ? "endor.findings_json.v1"
@@ -278,6 +299,10 @@ const checkpointSchema = z.object({
   repository: z.object({ id: z.string(), repo_connector_id: z.string() }),
   uploadRequestId: z.uuid(),
   jobRequestId: z.uuid(),
+  // Earlier checkpoints used the unversioned job route.
+  jobApiVersion: jobVersion.optional(),
+  approvedRepositoryUrl: z.string().optional(),
+  approvedRepositoryPlatform: z.literal("other").optional(),
   fileId: fileId.optional(),
   jobId: jobSchema.shape.id.optional(),
   receipt: jobSchema
@@ -290,8 +315,12 @@ export function unsuccessfulJob(job: PrivateImportJob | undefined) {
   return job?.status === "failed" || job?.status === "cancelled";
 }
 
+export function parsePrivateCheckpoint(serialized: string) {
+  return checkpointSchema.parse(JSON.parse(serialized));
+}
+
 export function readPrivateCheckpoint(
-  serialized: string,
+  serialized: string | undefined,
   expected: {
     format: PrivateImportFormat;
     apiBaseUrl: string;
@@ -302,10 +331,14 @@ export function readPrivateCheckpoint(
     repository: { id: string; repo_connector_id: string };
   },
 ) {
-  const checkpoint = checkpointSchema.parse(JSON.parse(serialized));
+  if (serialized === undefined) return;
+  const checkpoint = parsePrivateCheckpoint(serialized);
   const {
     uploadRequestId,
     jobRequestId,
+    jobApiVersion,
+    approvedRepositoryUrl,
+    approvedRepositoryPlatform,
     fileId,
     jobId,
     receipt,
@@ -366,7 +399,7 @@ export function privateImportClient(
 ) {
   async function request(path: string, body?: FormData | string) {
     const timeout = AbortSignal.timeout(body === undefined ? 30_000 : 60_000);
-    const response = await fetch(`${base}/finding-imports/${path}`, {
+    const response = await fetch(`${base}${path}`, {
       method: body === undefined ? "GET" : "POST",
       body,
       redirect: "error",
@@ -398,7 +431,9 @@ export function privateImportClient(
   }
   return {
     async context() {
-      return contextSchema.parse(await (await request("context")).json());
+      return contextSchema.parse(
+        await (await request("/finding-imports/context")).json(),
+      );
     },
     async upload(input: {
       requestId: string;
@@ -410,7 +445,9 @@ export function privateImportClient(
       let response: Response | undefined;
       if (input.recovering) {
         try {
-          response = await request(`file-requests/${input.requestId}`);
+          response = await request(
+            `/finding-imports/file-requests/${input.requestId}`,
+          );
         } catch (error) {
           if (
             !(error instanceof PrivateImportRequestError) ||
@@ -430,7 +467,7 @@ export function privateImportClient(
           new Blob([input.bytes], { type: "application/json" }),
           "findings.json",
         );
-        response = await request("files", form);
+        response = await request("/finding-imports/files", form);
       }
       const file = fileSchema.parse(await response.json());
       if (
@@ -451,14 +488,17 @@ export function privateImportClient(
         source: ImportSource;
         repository: { id: string; repo_connector_id: string };
         jobId?: string;
+        jobApiVersion?: PrivateJobVersion;
       },
       accepted: (id: string) => Promise<void>,
     ) {
+      const prefix = input.jobApiVersion ? `/v${input.jobApiVersion}` : "";
+      const jobs = prefix + "/finding-imports/jobs";
       let id = input.jobId;
       let response = id
-        ? await request(`jobs/${id}`)
+        ? await request(`${jobs}/${id}`)
         : await request(
-            "jobs",
+            jobs,
             JSON.stringify({
               request_id: input.requestId,
               context_version: input.contextVersion,
@@ -514,7 +554,7 @@ export function privateImportClient(
           undefined,
           { signal },
         );
-        response = await request(`jobs/${id}`);
+        response = await request(`${jobs}/${id}`);
       }
     },
   };

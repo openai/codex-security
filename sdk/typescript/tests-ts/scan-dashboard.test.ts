@@ -732,21 +732,37 @@ describe("live scan dashboard", () => {
   });
 
   test.each([
-    ["unknown-model", false],
-    ["gpt-5.6-cyber", true],
-  ] as const)("shows a cost row only when %s has pricing", (model, priced) => {
-    const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, {
-      model: { model, reasoningEffort: "xhigh" },
-      showCost: true,
-    });
-    dashboard.start();
-    const frame = lastFrame(stderr);
-    expect(/^\s*COST\b/m.test(frame)).toBe(priced);
-    if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
-    expect(frame).not.toContain("model pricing missing");
-    dashboard.stop();
-  });
+    ["unknown-model", undefined, false],
+    ["gpt-5.6-cyber", undefined, true],
+    [
+      "openai.gpt-5.6-cyber",
+      { provider: "amazon-bedrock", region: "us-gov-east-1" },
+      true,
+    ],
+    [
+      "openai.gpt-5.6-cyber",
+      { provider: "amazon-bedrock", region: "us-gov-west-1" },
+      false,
+    ],
+    ["gpt-6-astra", { provider: "gcp" }, false],
+    ["openai/gpt-oss-120b-maas", { provider: "gcp" }, true],
+  ] as const)(
+    "shows a cost row only when %s has pricing in %j",
+    (model, pricingContext, priced) => {
+      const stderr = capture(true);
+      const dashboard = createDashboard(stderr.stream, {
+        model: { model, reasoningEffort: "xhigh" },
+        pricingContext,
+        showCost: true,
+      });
+      dashboard.start();
+      const frame = lastFrame(stderr);
+      expect(/^\s*COST\b/m.test(frame)).toBe(priced);
+      if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
+      expect(frame).not.toContain("model pricing missing");
+      dashboard.stop();
+    },
+  );
 
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
