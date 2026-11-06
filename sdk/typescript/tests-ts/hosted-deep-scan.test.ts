@@ -14,9 +14,7 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-deep-");
 afterEach(cleanup);
 
-async function fixture(
-  scoped = false,
-): Promise<
+async function fixture(scoped = false): Promise<
   Extract<HostedScanInput, { version: 3 }> & {
     deepScan: Required<DeepScanOptions>;
   }
