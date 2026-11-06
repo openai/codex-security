@@ -36,7 +36,6 @@ const row = {
   filePath: "src/main.ts",
   line: 3,
 };
-const environment = { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" };
 const capture = {
   format: "semgrep-guardian-selection/v1",
   ...selection,
@@ -49,7 +48,6 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   }));
   const selected = await collectSelectedSemgrepGuardianFindings(selection, {
     callTool,
-    environment,
   });
   expect(callTool.mock.calls).toEqual([[selection.request]]);
   expect(selected).toEqual(capture);
@@ -79,7 +77,7 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   const web = await collectSemgrepPlatformFindings(
     { deployment, project, ref },
     {
-      environment: { ...environment, SEMGREP_APP_TOKEN: "synthetic" },
+      environment: { SEMGREP_APP_TOKEN: "synthetic" },
       fetch: async (url) =>
         Response.json(
           url.pathname.endsWith("/findings")
@@ -169,7 +167,6 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
       },
       { repository: project, provider: "semgrep", sourceKey: "example/topic" },
       {
-        environment,
         credentials: async () => {
           throw new Error("Unexpected credential lookup");
         },
@@ -242,6 +239,12 @@ test("normalized Guardian imports verify the original finding against the select
   );
   const normalized = normalizeSemgrepFindings(capture, {}, "local");
   const original = normalized.findings[0]!;
+  await expect(
+    fixture.prepareNormalized({
+      ...normalized,
+      findings: [{ ...original, source_finding_id: "another-source-id" }],
+    }),
+  ).rejects.toThrow(/original Guardian finding/);
   for (const changed of [
     { ...row, repository: { name: "other/service" } },
     { ...row, ref: "refs/heads/other" },
@@ -325,14 +328,14 @@ test("SDK exports containing Guardian findings fail before Cloud credential look
           provider: "semgrep",
           sourceKey: "example/topic",
         },
-        { environment, credentials },
+        { credentials },
       ),
     ).rejects.toThrow(/local import/);
   }
   expect(credentials).not.toHaveBeenCalled();
 });
 
-test("empty selections and disabled imports do not call Guardian; tool errors retain their message", async () => {
+test("Guardian validates the selection before calling the tool and preserves tool errors", async () => {
   const callTool = mock(async () => ({
     isError: true,
     content: [{ type: "text", text: "Guardian login expired" }],
@@ -340,20 +343,13 @@ test("empty selections and disabled imports do not call Guardian; tool errors re
   await expect(
     collectSelectedSemgrepGuardianFindings(
       { ...selection, findingIds: [] },
-      { callTool, environment },
+      { callTool },
     ),
   ).rejects.toThrow(/at least one/);
-  await expect(
-    collectSelectedSemgrepGuardianFindings(selection, {
-      callTool,
-      environment: {},
-    }),
-  ).rejects.toThrow(/disabled/);
   expect(callTool).not.toHaveBeenCalled();
   await expect(
     collectSelectedSemgrepGuardianFindings(selection, {
       callTool,
-      environment,
     }),
   ).rejects.toThrow("Guardian login expired");
 });
@@ -364,7 +360,6 @@ test("Guardian binds the collection, saved selection and normalized replay to th
     { ...selection, sourceRepositoryUrl: url },
     {
       callTool: async () => ({ structuredContent: { findings: [row] } }),
-      environment,
     },
   );
   const other = url + ".git";

@@ -4,7 +4,6 @@ import type {
   ExternalFinding,
   ExternalSourceRepository,
 } from "./external-findings.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -43,14 +42,12 @@ export function guardianFindingSourceData({
   const data = evidence.source_data ?? {};
   const generated = guardianFindingId.test(source_finding_id);
   if (data["format"] !== guardianSelectionFormat && !generated) return;
-  if (generated) {
-    const row = record(data["finding"], "Original Guardian finding");
-    requireGuardianRowScope(data, row);
-    if (source_finding_id !== guardianId(data, row["id"]))
-      throw new CodexSecurityError(
-        "The normalized finding ID does not match the original Guardian finding.",
-      );
-  }
+  const row = record(data["finding"], "Original Guardian finding");
+  requireGuardianRowScope(data, row);
+  if (source_finding_id !== guardianId(data, row["id"]))
+    throw new CodexSecurityError(
+      "The normalized finding ID does not match the original Guardian finding.",
+    );
   return data;
 }
 
@@ -163,7 +160,6 @@ export async function collectSelectedSemgrepGuardianFindings(
     environment?: NodeJS.ProcessEnv;
   },
 ) {
-  requireExternalImports(dependencies.environment);
   const query = structuredClone(selection.request);
   const scope = selectionScope(query, selection.findingIds);
   const sourceRepositoryUrl = declaredScannerRepositoryUrl(

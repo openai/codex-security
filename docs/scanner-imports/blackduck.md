@@ -1,14 +1,13 @@
 # Import Black Duck SCA findings
 
-Use a BOM-6 export of vulnerable components from one Black Duck SCA project
-version. In the scan configuration, verify which Git repository that version
-represents. A project name or component download URL alone can't establish
-that link.
+Export the vulnerable components from the bill of materials for one Black Duck
+SCA project version. Request the BOM-6 JSON format. In the scan configuration,
+verify which Git repository the version represents. A project name or component
+download URL alone can't establish that link. [Export the collection](#export-the-bom-6-collection).
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report), then open the matching
-checkout. Choose a saved report or export one.
+From the matching checkout, choose a saved report or export one.
 
 **Saved report.** Set `report` to the complete BOM-6 collection. For a selection,
 use an array of native rows that each identify the same project version.
@@ -42,7 +41,10 @@ later exports of the same project version.
 
 The project version, component version, origin, advisory source and advisory
 name identify each occurrence. Package URLs and origin coordinates identify
-the package. `advisory_ids` keeps `vulnerabilityName` and any distinct
+the package. For a GitHub dependency, a `pkg:github/owner/repo@tag` package URL
+supplies the dependency's owner, repository name and installed tag or commit.
+`--source-repository-url` identifies the repository Black Duck scanned.
+`advisory_ids` keeps `vulnerabilityName` and any distinct
 `relatedVulnerability` verbatim, including Black Duck resource URLs.
 
 Look in the original row for CWE, matched-files links and remediation

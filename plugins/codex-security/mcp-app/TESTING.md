@@ -1,12 +1,23 @@
 # MCP tests
 
-From `sdk/typescript`, install both packages' dependencies, prepare the [universal native payload](../native/README.md#package-inputs), and run `pnpm run test:mcp`. That command builds the bundled plugin before testing it. To rerun only the tests after a build, run `pnpm run test:mcp` from this directory.
+[Install the SDK and MCP app dependencies](../../../sdk/typescript/TESTING.md#install-dependencies) and [download the universal native payload](../native/README.md#package-inputs). Run the following from the **repository root**.
 
-`pnpm run typecheck` checks the TypeScript tests and tooling. `pnpm run test:mcp` runs the sources directly with Node's `--experimental-strip-types` flag, including on Node 22.13.
+To rebuild the bundled plugin and run the MCP tests:
 
-Node's test runner discovers `tests/test_*.ts` and runs at most two files at once, each in a separate process. Assertions within a file remain sequential. Write new tests in TypeScript and keep shared helpers outside that filename pattern. A failing script fails the command. The reporter streams Node's TAP output and then tries to write Node's JUnit report to `reports/junit.xml`; an unavailable report path warns without changing the test result. CI uploads that file with the Node 22 reports.
+```sh
+pnpm --dir sdk/typescript run test:mcp
+```
 
-For a serial comparison, run:
+To rerun the MCP tests against that build or type-check the MCP sources and tooling:
+
+```sh
+pnpm --dir plugins/codex-security/mcp-app run test:mcp
+pnpm --dir plugins/codex-security/mcp-app run typecheck
+```
+
+The runner streams TAP to the terminal. Read the failing test and assertion there. It also writes `plugins/codex-security/mcp-app/reports/junit.xml` when the output path is available. A report-writing warning leaves the test exit status intact.
+
+Node runs up to two files at a time in separate processes. Tests inside each file run sequentially. Add tests as `tests/test_*.ts` and keep shared helpers outside that pattern. To compare a failure with serial execution, run this command **from `plugins/codex-security/mcp-app`**:
 
 ```sh
 node --experimental-strip-types --test --test-concurrency=1 "tests/test_*.ts"

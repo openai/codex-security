@@ -5,8 +5,8 @@ parse errors or timeouts. The preview shows both.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the scanned checkout
-root, choose a saved report or run OpenGrep in the same shell.
+Run these commands from the root of the scanned checkout. Use a saved report or
+generate one with OpenGrep.
 
 **Saved report.** Set the path to your OpenGrep JSON file.
 
@@ -36,8 +36,11 @@ codex-security publish findings "$opengrep_report" --to local --repository . \
 ```
 
 Check the findings, exclusions and `report.errors`, even if the findings list
-is empty. A zero-result report with scanner errors fails the import. Keep `--provider opengrep`
-when you [save locally or publish to Cloud](README.md#save-or-publish-and-verify).
+is empty. A zero-result report with scanner errors fails the import. In the
+Cloud preview, check `excluded` again. If the traces grouped at one occurrence
+exceed the 256 KiB evidence limit, Cloud excludes that entire occurrence.
+Keep `--provider opengrep` for both destinations.
+[Save or publish and verify](README.md#save-or-publish-and-verify).
 
 ## Provider identity and evidence
 
@@ -48,9 +51,7 @@ record. [Imported evidence](schema-guide.md)
 
 The reader groups traces at the same occurrence. It keeps the rule level,
 snippets, ignored state and fingerprints when present. Severity is `unknown`
-because OpenGrep levels such as `ERROR` describe rule matches. Cloud excludes
-the whole occurrence if individually valid traces together exceed its 256 KiB
-evidence limit.
+because OpenGrep levels such as `ERROR` describe rule matches.
 
 ## Diagnostics and coverage
 
