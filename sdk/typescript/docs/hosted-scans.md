@@ -222,8 +222,9 @@ The execution response `result` has:
 
 A transport failure or mismatched receipt is not proof of non-acceptance. The
 CLI stops without resubmitting and leaves reconciliation to the host. The terminal
-result retains `execution` even when scanning fails or is canceled. The runtime's
-`hostProtocolVersion` identifies this protocol as version 2.
+result retains `execution` even when scanning fails or is canceled. Standard
+requests and receipts use version 2. The runtime's `hostProtocolVersion` is 3,
+advertising support for both Standard v2 and Deep v3.
 A package-exported example is available at
 `@openai/codex-security/schemas/hosted-scan-v2.fixture.json`. Its `response` is
 the executor's reply; `terminal` is the separate final scan receipt. The example
