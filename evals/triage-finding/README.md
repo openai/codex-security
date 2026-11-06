@@ -15,7 +15,12 @@ pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir evals/triage-finding run setup
 ```
 
-The eval lockfile omits unused provider SDKs, document and image readers, and packages for SQL and natural-language assertions. If a new case needs one, update `ignoredOptionalDependencies` in `pnpm-workspace.yaml` and run `pnpm install` in this directory.
+The eval lockfile omits unused provider SDKs, document and image readers, and packages for SQL and natural-language assertions. To enable one for a new case, check how Promptfoo declares the package.
+
+- For an excluded optional dependency such as `sharp`, remove its matching exclusion from `ignoredOptionalDependencies` in `pnpm-workspace.yaml`.
+- For an optional peer dependency such as `playwright`, add a pinned version to `dependencies` in this eval workspace’s `package.json`.
+
+After either change, run `pnpm install` in this directory to update the lockfile.
 
 ## Check the harness
 
