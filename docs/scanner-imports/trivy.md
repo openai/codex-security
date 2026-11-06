@@ -4,7 +4,7 @@ Use a saved Trivy schema-v2 JSON or gzip report from a repository or filesystem 
 
 ## Preview the report
 
-[Enable external imports](README.md#preview-a-report). If you need a report,
+If you need a report,
 run `trivy fs --scanners vuln --format json --output /private/path/trivy.json .`
 from the checkout root. Use a private output directory outside the checkout.
 
@@ -22,7 +22,7 @@ Check the repository, manifest paths, versions and exclusions in the preview. Ke
 
 A repository scan can omit `--trivy-scan-root` when its remote target and Git metadata corroborate a whole-checkout scan. A filesystem scan always needs the scan root. A filesystem artifact name is a display label. Trivy's Git metadata is the source of its repository claim. When the report or local checkout has no comparable remote, verify the source independently.
 
-Use credential-free repository URLs. If the importer reports ambiguous or conflicting repository claims, check the remote that supplied `Metadata.RepoURL` (Trivy v0.76.1 prefers `upstream` to `origin`). Regenerate the report with a verified HTTPS URL or an unambiguous SSH remote, preserving its account, host, port and path. An artifact label cannot restore an SSH account that Trivy omitted. Unknown Git hosts may require the same remote spelling. For older Windows reports, regenerate with Trivy v0.36.0 or later so path separators are recorded as `/`.
+Use credential-free repository URLs. If the importer reports ambiguous or conflicting repository claims, compare `Metadata.RepoURL` with the checkout's Git remotes. Regenerate the report with a verified HTTPS URL or an unambiguous SSH remote, preserving its account, host, port and path. An artifact label cannot restore an SSH account that Trivy omitted. Unknown Git hosts may require the same remote spelling. If a Windows report uses backslashes as directory separators, regenerate it with Trivy v0.36.0 or later to get repository paths that use `/`.
 
 ## Read the evidence and repeat an import
 

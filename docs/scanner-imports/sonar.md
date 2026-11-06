@@ -7,8 +7,7 @@ Replay it without signing in to Sonar. If you already have issue-search JSON,
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the matching
-checkout, run `sonar auth login` with browse access to the project's Sonar
+From the matching checkout, run `sonar auth login` with browse access to the project's Sonar
 organization. [Sonar CLI authentication](https://docs.sonarsource.com/sonarqube-cli/quickstart-guide#step-2-authenticate)
 
 **Preview live issues.** Copy the project and issue keys from Sonar's Issues
