@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import {
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
@@ -77,7 +78,7 @@ export async function testDeepScanContextSnapshots() {
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
           const command = async (args: string[], input?: string) => {
             const execution = promisify(execFile)(
-              process.env.PYTHON?.trim() || "python3",
+              fixturePython,
               [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
               {
                 env: {

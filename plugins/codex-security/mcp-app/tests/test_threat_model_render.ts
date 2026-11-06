@@ -1,3 +1,4 @@
+import { fixturePython as python } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -9,7 +10,6 @@ const pluginRoot = join(import.meta.dirname, "../..");
 const { renderThreatModel } = await importSource(
   join(pluginRoot, "mcp-app/src/threat-model-render.ts"),
 );
-const python = process.env.PYTHON?.trim() || "python3";
 function pythonRender(input: Input): string {
   return execFileSync(
     python,

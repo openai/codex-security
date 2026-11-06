@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { after, test } from "node:test";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
@@ -98,7 +99,7 @@ test(async function testPrepareUsesTheExistingStandardGenerator() {
   const result = await inventory.prepareCodexSecurityReviewItems({
     ...fixture.scan,
     pluginRoot,
-    pythonCommand: process.env.PYTHON ?? "python3",
+    pythonCommand: fixturePython,
   });
   const scripts = await readdir(path.join(pluginRoot, "scripts"), {
     recursive: true,

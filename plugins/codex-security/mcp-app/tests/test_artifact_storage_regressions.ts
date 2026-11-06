@@ -1,3 +1,4 @@
+import { fixturePython as python } from "./support/python.ts";
 interface ArtifactToolResults {
   save_codex_security_artifact: {
     directory: string;
@@ -26,7 +27,6 @@ import { importModule } from "./import-module.ts";
 import { applicationRoot, buildServer } from "./build-server.ts";
 
 const pluginRoot = path.dirname(applicationRoot);
-const python = process.env.PYTHON || "python3";
 const exec = promisify(execFile);
 const fixture = await fs.realpath(
   await fs.mkdtemp(path.join(tmpdir(), "codex-security-storage-regressions-")),

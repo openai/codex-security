@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { execFile } from "node:child_process";
 import { readdir, utimes } from "node:fs/promises";
 import path from "node:path";
@@ -92,11 +93,9 @@ export async function recoverAndFinalize(
   normalCoverage: Record<string, unknown>;
   recoveredCoverage: Record<string, unknown>;
 }> {
-  const { stdout } = await execFileAsync(
-    process.env.PYTHON?.trim() || "python3",
-    [
-      "-c",
-      `import json,sys
+  const { stdout } = await execFileAsync(fixturePython, [
+    "-c",
+    `import json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -128,18 +127,17 @@ for root,documents in [(normal,ordinary),(recovered,recovery)]:
  preserved_identities.append([row.get('provenance',{}).get('preservedIdentity') for row in prepared.findings['findings']])
  results.append([{'title':row['title'],'identity':row['identity'],'fingerprints':row['fingerprints'],'findingId':row['findingId'],'occurrenceId':row['occurrenceId'],'workerMetadata':row.get('provenance',{}).get('workerId'),**({'evidenceProvenance':{key:row.get('provenance',{}).get(key,[]) for key in ['sourceFindingIds','sourceFindings','previousFindings','originalCandidates']}} if json.loads(sys.argv[8]) else {}),**({'summary':row['summary'],'locations':row['locations'],'severity':row['severity'],'candidateMetadata':{'provenance':row.get('provenance',{}).get('candidateId'),'extensions':row.get('extensions')}} if json.loads(sys.argv[6]) else {})} for row in prepared.findings['findings']])
 print(json.dumps({'normal':results[0],'recovered':results[1],'warnings':warnings,'normalCoverage':ordinary[2],'recoveredCoverage':recovery[2],'preservedIdentities':preserved_identities,'historySummaries':[previous.get('summary') for row in recovery[1]['findings'] for previous in row.get('provenance',{}).get('previousFindings',[]) if isinstance(previous,dict)]}))`,
-      fileURLToPath(new URL("../../scripts", import.meta.url)),
-      normal.root,
-      recovered.root,
-      normal.context.scanId!,
-      JSON.stringify(workers),
-      JSON.stringify(details),
-      JSON.stringify(replay),
-      JSON.stringify(provenanceDetails),
-      source,
-      normal.context.mode!,
-    ],
-  );
+    fileURLToPath(new URL("../../scripts", import.meta.url)),
+    normal.root,
+    recovered.root,
+    normal.context.scanId!,
+    JSON.stringify(workers),
+    JSON.stringify(details),
+    JSON.stringify(replay),
+    JSON.stringify(provenanceDetails),
+    source,
+    normal.context.mode!,
+  ]);
   return JSON.parse(stdout);
 }
 
