@@ -10,7 +10,6 @@ import { dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
-import { decodePosixBytes, encodePosixPath } from "./posix-path";
 import { compareCodePoints, stringifyJson } from "./json";
 import { print, reportCommandError, ArgumentError } from "./rank-worklists";
 import { decodeUtf8 } from "./utf8";
@@ -33,6 +32,7 @@ import {
   blobSamples,
   changedPaths,
   directoryPaths,
+  decodeGitPath,
   encodeGitPath,
   ignoredTrackedPaths,
   runRipgrep,
@@ -128,12 +128,12 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         "!**/{.git,.svn}",
         "--glob",
         "!**/{.git,.svn}/**",
-        "--",
-        relative(repo, scope) || ".",
       ],
       repo,
+      relative(repo, scope) || ".",
     );
-  } catch {
+  } catch (error) {
+    if (windows && environmentValue("RIPGREP_CONFIG_PATH")) throw error;
     const ignoreNames = [".gitignore", ".ignore", ".rgignore"];
     const isIgnoreFile = (path: string) => {
       try {
@@ -175,7 +175,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     throw new Error(
       `Could not enumerate scoped repository files${result.signal ? ` (${result.signal})` : ""}: ${result.stderr.trim()}`,
     );
-  return decodePosixBytes(result.stdout)
+  return decodeGitPath(result.stdout)
     .split("\0")
     .filter(Boolean)
     .map((path) => append(repo, path));
@@ -281,10 +281,9 @@ export async function generateInventory(
         "!**/{.git,.svn}",
         "--glob",
         "!**/{.git,.svn}/**",
-        "--",
-        requested,
       ],
       repo,
+      requested,
     ).catch((error: unknown) => {
       throw new Error(
         `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
@@ -316,13 +315,13 @@ export async function generateInventory(
         encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
       ]);
     }
-    for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
+    for (const path of decodeGitPath(bytes).split("\0").filter(Boolean)) {
       if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
       if (/[\r\n]/u.test(path))
         throw new Error(
           "Repository contains a path that cannot fit in the file inventory",
         );
-      inventoryRows.push(encodePosixPath(path + "\n"));
+      inventoryRows.push(encodeGitPath(path + "\n"));
     }
   } else if (diff) {
     if (

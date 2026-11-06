@@ -28,6 +28,7 @@ from finalize_scan_contract import (
     write_sarif_projection,
 )
 from validate_scan_contract import validate_contract
+from windows_paths import portable_path
 
 
 def destination_key(destination: Any) -> str:
@@ -364,7 +365,7 @@ def export_findings(
     if path is None:
         raise SystemExit(f"Could not export Codex Security findings as {args.format.upper()}.")
     return {
-        "export": {"format": args.format, "path": str(path)},
+        "export": {"format": args.format, "path": str(portable_path(path))},
         "scan": db.scan_result(connection, scan),
         "workspace": db.workspace_state(connection, scan["workspace_id"]),
     }

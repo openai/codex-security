@@ -19,6 +19,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
+from windows_paths import (
+    extended_path,
+    portable_is_relative_to,
+    portable_path,
+    portable_relative_path,
+)
 from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
@@ -121,6 +127,8 @@ def archive_scan(
     before_archive: Callable[[], None] | None = None,
 ) -> Iterator[Path | None]:
     """Yield the archive directory while preparing the original scan path for reuse."""
+    portable_scan_dir = portable_path(scan_dir)
+    scan_dir_spellings = (str(portable_scan_dir), str(extended_path(portable_scan_dir)))
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
         if args.archived_scan_dir is not None
@@ -128,14 +136,17 @@ def archive_scan(
     )
     if archived_scan_dir is not None and (
         not args.archive_existing
-        or archived_scan_dir.parent != scan_dir.parent
+        or portable_path(archived_scan_dir).parent != portable_scan_dir.parent
         or not archived_scan_dir.name.startswith(f"{scan_dir.name}.previous-")
     ):
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
-    previous_scan = connection.execute(
-        "SELECT id, status FROM scans WHERE scan_dir = ?", (str(scan_dir),)
-    ).fetchone()
+    owners = connection.execute(
+        "SELECT id, status FROM scans WHERE scan_dir IN (?, ?)", scan_dir_spellings
+    ).fetchall()
+    if len(owners) > 1:
+        raise SystemExit("Cannot archive an output directory claimed by multiple scans.")
+    previous_scan = owners[0] if owners else None
     if previous_scan is not None:
         if not args.archive_existing:
             raise SystemExit(
@@ -169,7 +180,9 @@ def archive_scan(
                     if row[2]
                 ),
             ]
-            if any(path == scan_dir or scan_dir in path.parents for path in protected_directories):
+            if any(
+                portable_is_relative_to(path, portable_scan_dir) for path in protected_directories
+            ):
                 raise SystemExit(
                     "Cannot archive output containing the workbench state or active database."
                 )
@@ -180,7 +193,9 @@ def archive_scan(
             if before_archive is not None:
                 before_archive()
             archived_scan_dir = Path(
-                tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
+                tempfile.mkdtemp(
+                    prefix=f"{scan_dir.name}.previous-", dir=extended_path(scan_dir.parent)
+                )
             ).resolve()
             archived_scan_dir.rmdir()
             scan_dir.rename(archived_scan_dir)
@@ -193,28 +208,31 @@ def archive_scan(
                 scan_dir.mkdir(mode=0o700)
                 scan_dir.chmod(0o700)
         if previous_scan is not None:
+            archive_dir = portable_path(archived_scan_dir)
+            old_sarif = portable_scan_dir / "exports" / "results.sarif"
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-                (str(archived_scan_dir), timestamp, previous_scan["id"]),
+                (str(archive_dir), timestamp, previous_scan["id"]),
             )
             connection.execute(
                 """UPDATE finding_workflows SET scan_dir = ?,
-                    results_json = CASE WHEN json_extract(results_json, '$.scan.sarifPath') = ?
+                    results_json = CASE WHEN json_extract(results_json, '$.scan.sarifPath') IN (?, ?)
                         THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
-                    WHERE scan_id = ? AND scan_dir = ?""",
+                    WHERE scan_id = ? AND scan_dir IN (?, ?)""",
                 (
-                    str(archived_scan_dir),
-                    str(scan_dir / "exports" / "results.sarif"),
-                    str(archived_scan_dir / "exports" / "results.sarif"),
+                    str(archive_dir),
+                    str(old_sarif),
+                    str(extended_path(old_sarif)),
+                    str(archive_dir / "exports" / "results.sarif"),
                     previous_scan["id"],
-                    str(scan_dir),
+                    *scan_dir_spellings,
                 ),
             )
 
             def archive_path(value: str | None) -> str | None:
-                if value is None or not Path(value).is_relative_to(scan_dir):
+                if value is None or not portable_is_relative_to(Path(value), portable_scan_dir):
                     return value
-                return str(archived_scan_dir / Path(value).relative_to(scan_dir))
+                return str(archive_dir / portable_relative_path(Path(value), scan_dir))
 
             connection.create_function("archive_path", 1, archive_path)
             try:
@@ -253,7 +271,7 @@ def archive_scan(
         if moved:
             if not connection.in_transaction:
                 current_owner = connection.execute(
-                    "SELECT id FROM scans WHERE scan_dir = ?", (str(scan_dir),)
+                    "SELECT id FROM scans WHERE scan_dir IN (?, ?)", scan_dir_spellings
                 ).fetchone()
                 if current_owner is not None and (
                     previous_scan is None or current_owner["id"] != previous_scan["id"]
@@ -303,7 +321,7 @@ def insert_running_scan(
         scan_dir = Path(
             tempfile.mkdtemp(
                 prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
+                dir=extended_path(target_root),
             )
         ).resolve()
     connection.execute(
@@ -322,7 +340,7 @@ def insert_running_scan(
             scan_id,
             workspace["id"],
             workspace["target_id"],
-            str(target),
+            workspace["target_path"],
             *target_identity,
             json.dumps(source_scopes, allow_nan=False, separators=(",", ":"), sort_keys=True),
             scope,
@@ -331,7 +349,7 @@ def insert_running_scan(
             workspace["thread_id"] if workspace["default_mode"] == "deep" else None,
             *scan_diff_identity(diff_target or None),
             target_summary,
-            str(scan_dir),
+            str(portable_path(scan_dir)),
             optional_text(model, maximum=200),
             optional_text(reasoning_effort, maximum=32),
             handoff_status,

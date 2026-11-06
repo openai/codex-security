@@ -21,6 +21,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from review_state import uses_legacy_review
+from windows_paths import portable_relative_path
 from workbench.retained_records import (
     _append_previous_finding,
     _competing_rejection_receipts,
@@ -266,7 +267,9 @@ def merge_saved_results(
     latest_reducer: str | None = None
     if reducer is not None:
         try:
-            latest_reducer = Path(reducer["result_manifest_path"]).relative_to(scan_dir).as_posix()
+            latest_reducer = portable_relative_path(
+                Path(reducer["result_manifest_path"]), scan_dir
+            ).as_posix()
             paths[latest_reducer] = None
             reducer_paths.add(latest_reducer)
         except ValueError:
@@ -312,7 +315,9 @@ def merge_saved_results(
         checkpoints(f"{output}/checkpoints", worker["id"], attempt)
         if worker["result_manifest_path"]:
             try:
-                current_path = Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix()
+                current_path = portable_relative_path(
+                    Path(worker["result_manifest_path"]), scan_dir
+                ).as_posix()
                 paths[current_path] = worker["id"]
                 current_results.add(current_path)
             except ValueError:

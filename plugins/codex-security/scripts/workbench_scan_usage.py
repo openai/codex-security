@@ -20,6 +20,7 @@ from typing import Any, Mapping
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_paths import extended_path, filesystem_path, portable_path
 from workbench.storage import worker_usage_directory
 
 TOKEN_FIELDS = {
@@ -460,9 +461,9 @@ def _worker_usage_receipts(
 ) -> tuple[dict[str, RolloutUsage], set[str], set[str]]:
     if scan["mode"] != "deep":
         return {}, set(), set()
-    directory = worker_usage_directory(scan["id"])
+    directory = filesystem_path(worker_usage_directory(scan["id"]))
     try:
-        if directory.resolve(strict=True) != directory:
+        if portable_path(directory.resolve(strict=True)) != portable_path(directory):
             raise ValueError("Worker usage directory is not a canonical protected directory.")
     except FileNotFoundError:
         return {}, set(), set()
@@ -473,7 +474,7 @@ def _worker_usage_receipts(
     missing: set[str] = set()
     attempts: set[str] = set()
     scope: set[str] = set()
-    for path in sorted(directory.glob("*.json")):
+    for path in sorted(extended_path(directory).glob("*.json")):
         try:
             if _rollout_path(str(path)) is None:
                 raise ValueError("Worker usage receipt path is unavailable.")
@@ -838,17 +839,17 @@ def _rollout_path(value: object) -> Path | None:
         return None
     try:
         try:
-            candidate.lstat()
+            filesystem_path(candidate).lstat()
         except FileNotFoundError:
             # Native cold storage may compress an indexed JSONL file in place.
             if candidate.suffix != ".jsonl":
                 return None
             candidate = candidate.with_suffix(".jsonl.zst")
-        resolved = candidate.resolve(strict=True)
+        resolved = filesystem_path(candidate).resolve(strict=True)
         if not resolved.is_file():
             return None
 
-        if resolved == candidate:
+        if portable_path(resolved) == portable_path(candidate.absolute()):
             return resolved
 
         if sys.platform == "darwin" and candidate.parts[1] in {"var", "tmp"}:

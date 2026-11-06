@@ -38,6 +38,7 @@ from posix_scan_local_files import (
 )
 from posix_scan_local_files import managed_fd, stage_write
 from review_state import checkpoint_review_state, review_state, review_summary
+from windows_paths import filesystem_path, portable_path, portable_relative_path
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -135,7 +136,7 @@ def _loads_json(value: str | bytes) -> Any:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        payload = _loads_json(path.read_text(encoding="utf-8"))
+        payload = _loads_json(filesystem_path(path).read_text(encoding="utf-8"))
         _require_safe_json_value(payload, str(path))
     except FileNotFoundError as exc:
         raise ContractError(f"missing required contract artifact: {path}") from exc
@@ -471,7 +472,7 @@ def _scan_local_directory_error(message: str, error: OSError) -> ContractError:
 
 
 def _require_scan_directory(scan_dir: Path, context: str = "scan directory") -> Path:
-    scan_dir = scan_dir.absolute()
+    scan_dir = filesystem_path(scan_dir.absolute())
     try:
         metadata = scan_dir.lstat()
     except OSError as exc:
@@ -486,7 +487,7 @@ def _require_scan_directory(scan_dir: Path, context: str = "scan directory") -> 
         raise _scan_local_directory_error(
             f"{context} {scan_dir}: expected an existing non-symlink directory: {exc}", exc
         ) from exc
-    if os.path.normcase(resolved) != os.path.normcase(scan_dir):
+    if os.path.normcase(portable_path(resolved)) != os.path.normcase(portable_path(scan_dir)):
         raise ContractError(f"{context}: expected a canonical non-symlink directory")
     return resolved
 
@@ -494,10 +495,14 @@ def _require_scan_directory(scan_dir: Path, context: str = "scan directory") -> 
 def _validate_scan_local_output_path(scan_dir: Path, path: Path, relative_path: str) -> None:
     try:
         resolved_parent = path.parent.resolve(strict=True)
-        resolved_parent.relative_to(scan_dir)
+        portable_relative_path(resolved_parent, scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise ContractError(f"{relative_path}: expected a path inside the scan directory") from exc
-    if os.path.normcase(resolved_parent) != os.path.normcase(path.parent) or path.is_symlink():
+    if (
+        os.path.normcase(portable_path(resolved_parent))
+        != os.path.normcase(portable_path(path.parent))
+        or path.is_symlink()
+    ):
         raise ContractError(
             f"{relative_path}: expected a non-symlink path inside the scan directory"
         )
@@ -2552,7 +2557,7 @@ def _github_line_hash_cache(
     if source_root is None:
         return {}
     try:
-        source_root = source_root.resolve(strict=True)
+        source_root = filesystem_path(source_root).resolve(strict=True)
     except (OSError, RuntimeError):
         return {}
     requested_lines_by_path: dict[str, set[int]] = {}
@@ -2792,7 +2797,7 @@ def build_sarif_projection(
     """Build SARIF for a sealed scan, using the optional source directory to resolve locations."""
     if source_root is not None:
         try:
-            source_root = source_root.resolve(strict=True)
+            source_root = filesystem_path(source_root).resolve(strict=True)
             source_root_is_directory = source_root.is_dir()
         except (OSError, RuntimeError):
             source_root_is_directory = False
@@ -3001,9 +3006,9 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
     if export_format not in output_paths:
         raise ContractError(f"unsupported export format: {export_format}")
     scan_dir = _require_scan_directory(scan_dir)
-    output = Path(os.path.abspath(output))
+    output = filesystem_path(Path(os.path.abspath(output)))
     try:
-        relative_output = output.relative_to(scan_dir).as_posix()
+        relative_output = portable_relative_path(output, scan_dir).as_posix()
     except ValueError:
         for ancestor in output.parents:
             try:

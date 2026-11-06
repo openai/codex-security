@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
+
+# SDK hosts also load this file directly with runpy, outside the workbench package.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from windows_paths import filesystem_path, portable_path
 
 
 def state_dir(*, canonical: bool = True) -> Path:
@@ -18,12 +24,16 @@ def state_dir(*, canonical: bool = True) -> Path:
             os.environ["CODEX_HOME"] if os.environ.get("CODEX_HOME", "").strip() else "~/.codex"
         ).expanduser()
         path = codex_home / "state" / "plugins" / "codex-security"
-    return path.resolve() if canonical else path.absolute()
+    return filesystem_path(path).resolve() if canonical else path.absolute()
 
 
 def resolve_scan_root(scan_root: str | None) -> Path:
     """Resolve an explicit scan output root, defaulting to the scans directory under workbench state."""
-    return Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
+    return (
+        filesystem_path(Path(scan_root).expanduser()).resolve()
+        if scan_root
+        else filesystem_path(state_dir() / "scans")
+    )
 
 
 def worker_usage_directory(scan_id: str) -> Path:
@@ -35,7 +45,8 @@ def archived_deep_path(scan_dir: Path, value: str | None) -> str | None:
     """Resolve old archive rows that still name the original sibling output."""
     if value is None or ".previous-" not in scan_dir.name:
         return value
-    path = Path(value)
+    path = portable_path(Path(value))
+    scan_dir = portable_path(scan_dir)
     if not path.is_relative_to(scan_dir.parent):
         return value
     parts = path.relative_to(scan_dir.parent).parts

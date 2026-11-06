@@ -39,6 +39,7 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
+from windows_paths import portable_relative_path
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
 from workbench.saved_coverage import (
     _saved_coverage_id as _saved_coverage_id,
@@ -170,7 +171,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
             return has_saved_source()
         manifest = _read_scan_local_json(
             scan_dir,
-            manifest_path.relative_to(scan_dir).as_posix(),
+            portable_relative_path(manifest_path, scan_dir).as_posix(),
             "Saved scan manifest",
         )
         manifest_scan = manifest.get("scan")
@@ -259,7 +260,7 @@ def _recovery_source_digests(
     if manifest_path is not None:
         manifest = _read_scan_local_json(
             scan_dir,
-            manifest_path.relative_to(scan_dir).as_posix(),
+            portable_relative_path(manifest_path, scan_dir).as_posix(),
             "Saved scan manifest",
         )
         manifest_scan = manifest.get("scan")
@@ -1026,7 +1027,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         try:
-            relative = Path(args.draft_path).relative_to(scan_dir).as_posix()
+            relative = portable_relative_path(Path(args.draft_path), scan_dir).as_posix()
         except ValueError as exc:
             raise SystemExit(
                 "Scan draft must be inside the registered scan drafts directory."
@@ -1056,7 +1057,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
-                checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
+                checkpoint_relative = portable_relative_path(
+                    Path(args.checkpoint_path), scan_dir
+                ).as_posix()
             except ValueError as exc:
                 raise SystemExit(
                     "Scan checkpoint must be inside the registered scan drafts directory."

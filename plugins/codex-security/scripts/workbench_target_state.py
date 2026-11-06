@@ -5,8 +5,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_paths import extended_path, portable_path
 
 
 def stable_target_id(target: Path) -> str:
@@ -37,15 +42,40 @@ def backfill_security_targets(connection: sqlite3.Connection) -> None:
         )
 
 
-def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> str:
+def ensure_security_target(
+    connection: sqlite3.Connection, target_path: str, *, preferred_target_id: str | None = None
+) -> str:
     """Return the ID already associated with the path or insert a deterministic ID for it."""
+    target = portable_path(Path(target_path))
+    target_path = str(target)
+    extended_target_path = str(extended_path(target))
     existing = connection.execute(
-        "SELECT id FROM security_targets WHERE current_path = ?",
-        (target_path,),
-    ).fetchone()
-    if existing is not None:
-        return str(existing["id"])
-    target_id = stable_target_id(Path(target_path))
+        "SELECT id, current_path FROM security_targets WHERE current_path IN (?, ?)",
+        (target_path, extended_target_path),
+    ).fetchall()
+    if existing:
+        current = next((row for row in existing if row["current_path"] == target_path), existing[0])
+        target_id = str(current["id"])
+        if len(existing) > 1:
+            # Keep sealed IDs. A rerun can reuse its parent's matching legacy record.
+            return next(
+                (str(row["id"]) for row in existing if row["id"] == preferred_target_id),
+                target_id,
+            )
+        if current["current_path"] != target_path:
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            connection.execute(
+                "UPDATE security_targets SET current_path = ?, display_name = ?, updated_at = ? "
+                "WHERE id = ?",
+                (target_path, target.name, timestamp, target_id),
+            )
+            for table, condition in (("workspaces", ""), ("scans", " AND status = 'running'")):
+                connection.execute(
+                    f"UPDATE {table} SET target_path = ? WHERE target_id = ? AND target_path = ?{condition}",
+                    (target_path, target_id, extended_target_path),
+                )
+        return target_id
+    target_id = stable_target_id(target)
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     connection.execute(
         """

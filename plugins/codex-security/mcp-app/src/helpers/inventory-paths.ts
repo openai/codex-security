@@ -20,8 +20,9 @@ import { isMissingPathError } from "./helper-files";
 export const windows = process.platform === "win32";
 export const fsPath = (path: string) =>
   windows ? toNamespacedPath(path) : encodePosixPath(path);
+// Git and ripgrep return POSIX separators. Win32 verbatim paths require backslashes.
 export const append = (parent: string, child: string) =>
-  `${parent || "."}${parent.endsWith(sep) ? "" : sep}${child}`;
+  `${parent || "."}${parent.endsWith(sep) ? "" : sep}${windows ? child.replaceAll("/", sep) : child}`;
 export const stat = (path: string) =>
   windows
     ? windowsFiles().stat(Buffer.from(path, "utf16le"))

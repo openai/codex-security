@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from deep_scan_config import resolve_deep_scan_setup
+from windows_paths import (
+    filesystem_path,
+    portable_path,
+    portable_relative_path,
+    uses_windows_namespace,
+)
 from workbench_cli import parse_args
 from workbench_constants import DIFF_TARGET_KINDS, EMPTY_GIT_TREE, EMPTY_GIT_TREES, optional_text
 from workbench_target import (
@@ -26,7 +32,11 @@ def require_target(value: str) -> Path:
     expanded = Path(value).expanduser()
     if not expanded.is_absolute():
         raise SystemExit("Scan target must be an absolute local directory path.")
-    target = expanded.resolve()
+    if uses_windows_namespace(expanded):
+        raise SystemExit("Scan target must have an ordinary Windows drive or UNC path.")
+    target = filesystem_path(expanded).resolve()
+    if uses_windows_namespace(target):
+        raise SystemExit("Scan target must have an ordinary Windows drive or UNC path.")
     if not target.is_dir():
         raise SystemExit(f"Scan target is not a readable local directory: {target}")
     return target
@@ -37,7 +47,7 @@ def inspect_target(target: Path) -> dict[str, Any]:
     return {
         "displayName": target.name,
         "targetMetadata": git_target_metadata(target),
-        "targetPath": str(target),
+        "targetPath": str(portable_path(target)),
     }
 
 
@@ -177,7 +187,7 @@ def require_review_changes_target(target: Path) -> str:
     """Return the checked-out revision or raise SystemExit if target is not the worktree root."""
     revision = require_git_worktree_head(target)
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None or not Path(repository_root).samefile(target):
+    if repository_root is None or not filesystem_path(Path(repository_root)).samefile(target):
         raise SystemExit(
             "Review changes requires the checked-out Git repository root as the target."
         )
@@ -204,10 +214,10 @@ def require_scope(scope: str, mode: str, target: Path) -> str:
     if ".." in requested_scope.parts:
         raise SystemExit("Scan scope must stay inside the scanned target.")
     try:
-        resolved_scope = (
+        resolved_scope = filesystem_path(
             requested_scope if requested_scope.is_absolute() else target / requested_scope
         ).resolve()
-        relative_scope = resolved_scope.relative_to(target)
+        relative_scope = portable_relative_path(resolved_scope, target)
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("Scan scope must stay inside the scanned target.") from exc
     normalized = relative_scope.as_posix() or "."

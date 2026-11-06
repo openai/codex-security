@@ -12,10 +12,22 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { delimiter, dirname, join, parse, relative, sep } from "node:path";
+import {
+  delimiter,
+  dirname,
+  join,
+  parse,
+  relative,
+  sep,
+  win32,
+} from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { nodeCommand } from "./support/shell.js";
 import { git } from "./git-fixture.js";
+import {
+  hasWindowsLoopbackShare,
+  windowsLoopbackPath,
+} from "./windows-helper-location.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import { bundledCodexSdkEnvironment } from "../src/codex-sdk-environment.js";
@@ -26,6 +38,88 @@ const node = nodeCommand().command;
 const pathNameBytes =
   process.platform === "darwin" ? Buffer.from("雪") : Buffer.from([0xff]);
 afterEach(temporary.cleanup);
+
+for (const spelling of ["ordinary", "extended", "unc"] as const) {
+  test.skipIf(
+    process.platform !== "win32" ||
+      (spelling === "unc" && !hasWindowsLoopbackShare),
+  )(
+    `long Windows ${spelling} inventory preserves ignores and scope-relative output`,
+    () => {
+      const f = fixture();
+      rmSync(join(f.repo, ".git"), { recursive: true, force: true });
+      let repo = f.repo;
+      while (repo.length < 270) repo = join(repo, "nested-🌲🌲🌲🌲🌲🌲");
+      mkdirSync(join(repo, "src"), { recursive: true });
+      writeFileSync(join(repo, ".ignore"), "/src/ignored.py\n");
+      writeFileSync(join(repo, "src", "visible.py"), "visible");
+      writeFileSync(join(repo, "src", "ignored.py"), "ignored");
+      const input =
+        spelling === "unc"
+          ? windowsLoopbackPath(repo)
+          : spelling === "extended"
+            ? win32.toNamespacedPath(repo)
+            : repo;
+      const scopes = join(f.root, "scopes.json");
+      writeFileSync(scopes, '["src"]');
+      for (const command of [
+        "generate-in-scope-files",
+        "make-repo-scope-input",
+      ]) {
+        const result = spawnSync(
+          node,
+          [
+            join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+            command,
+            "--repo",
+            input,
+            "--out",
+            f.out,
+            ...(command === "generate-in-scope-files"
+              ? ["--scope", "./src"]
+              : ["--scopes-file", scopes]),
+          ],
+          { env: f.toolEnvironment, encoding: "utf8" },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const output = readFileSync(f.out, "utf8").trim();
+        if (command === "generate-in-scope-files")
+          expect(output).toBe("./src/visible.py");
+        else expect(JSON.parse(output).path).toBe("src/visible.py");
+      }
+    },
+  );
+}
+
+test.skipIf(process.platform !== "win32")(
+  "an extended Windows repository keeps operator globs anchored to the checkout",
+  () => {
+    const f = fixture();
+    f.write("src/visible.py");
+    f.write("src/hidden.py");
+    const config = join(f.root, "rg.conf");
+    writeFileSync(config, "--glob\n!/src/hidden.py\n");
+    const result = spawnSync(
+      node,
+      [
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
+        "--repo",
+        win32.toNamespacedPath(f.repo),
+        "--scope",
+        "src",
+        "--out",
+        f.out,
+      ],
+      {
+        env: { ...f.toolEnvironment, RIPGREP_CONFIG_PATH: config },
+        encoding: "utf8",
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(f.out, "utf8").trim()).toBe("src/visible.py");
+  },
+);
 
 function fixture() {
   const root = temporary.create("codex-security-inventory-"),

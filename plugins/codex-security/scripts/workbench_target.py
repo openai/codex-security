@@ -21,6 +21,13 @@ from typing import Any, BinaryIO, Callable
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
+from windows_paths import (
+    extended_path,
+    filesystem_path,
+    portable_is_relative_to,
+    portable_path,
+    portable_relative_path,
+)
 from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
@@ -236,7 +243,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         candidates = iter((candidate,))
 
     try:
-        repository = _protected_repository_root(protected_root)
+        repository = portable_path(_protected_repository_root(protected_root))
     except (OSError, RuntimeError):
         return None
 
@@ -260,8 +267,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         ):
             continue
         if any(
-            path == repository or repository in path.parents
-            for path in (lexical, invocation, canonical)
+            portable_is_relative_to(path, repository) for path in (lexical, invocation, canonical)
         ):
             if configured is not None:
                 raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
@@ -307,10 +313,12 @@ def git_command(
         "-c",
         "i18n.logOutputEncoding=UTF-8",
         "-C",
-        str(target),
+        str(portable_path(target)),
     ]
     if git_dir is not None and work_tree is not None:
-        command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
+        command.extend(
+            ["--git-dir", str(portable_path(git_dir)), "--work-tree", str(portable_path(work_tree))]
+        )
     full_command = [*command, *args]
     if executable is None:
         empty_output = "" if text else b""
@@ -402,7 +410,7 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
                 return None
             if status == "D":
                 return status
-            path = repo / name
+            path = filesystem_path(repo / name)
             try:
                 if (
                     status in {"M", "R"}
@@ -438,13 +446,13 @@ def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int | No
         # A partial clone can lack a tree needed even to enumerate the changed paths.
         return None
     for path, status in changes:
-        name = path.relative_to(target).as_posix()
+        name = portable_relative_path(path, target).as_posix()
         if not local or status == "D":
             committed[name] = f"{base if status == 'D' else head}:{name}"
         else:
             try:
-                resolved = path.resolve(strict=True)
-                if not resolved.is_relative_to(target):
+                resolved = filesystem_path(path).resolve(strict=True)
+                if not portable_is_relative_to(resolved, target):
                     continue
                 with resolved.open("rb") as stream:
                     binary = _stream_is_binary(stream, os.fstat(stream.fileno()).st_size)
@@ -475,7 +483,7 @@ def candidate_source_lines(
     base, head = diff_target["baseRevision"], diff_target["headRevision"]
     local = diff_target["kind"] == "working_tree"
     changed = {
-        path.relative_to(target).as_posix(): status
+        portable_relative_path(path, target).as_posix(): status
         for path, status in git_changed_paths(
             target, base, head, "local-patch" if local else "revisions"
         )
@@ -722,7 +730,7 @@ def worktree_content_digest_for_context(
         raise SystemExit("Could not snapshot the selected working-tree changes.")
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
-        path = (work_tree or repository) / relative_path
+        path = filesystem_path((work_tree or repository) / relative_path)
         try:
             metadata = path.lstat()
         except OSError as exc:
@@ -761,14 +769,14 @@ def git_worktree_context(target: Path) -> tuple[Path, str]:
     root = git_output(target, "rev-parse", "--show-toplevel")
     if root is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
-    repository = Path(root).resolve()
+    repository = filesystem_path(Path(root)).resolve()
     prefix = git_bytes(target, "rev-parse", "--show-prefix")
     if prefix is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
     pathspec = os.fsdecode(prefix.removesuffix(b"\n")).removesuffix("/") or "."
-    scoped = (repository / pathspec).resolve()
+    scoped = filesystem_path(repository / pathspec).resolve()
     try:
-        if not scoped.is_relative_to(repository) or not scoped.samefile(target):
+        if not portable_is_relative_to(scoped, repository) or not scoped.samefile(target):
             raise ValueError("Git working tree does not contain the selected target")
     except (OSError, ValueError) as exc:
         raise SystemExit("Scan target must stay inside its Git working tree.") from exc
@@ -792,13 +800,13 @@ def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
         if mode != b"160000":
             continue
         relative_path = Path(os.fsdecode(raw_path)).relative_to(pathspec)
-        entries.append((target / relative_path, object_id.decode("ascii")))
+        entries.append((filesystem_path(target / relative_path), object_id.decode("ascii")))
     return tuple(entries)
 
 
 def require_clean_submodule_worktrees(target: Path) -> None:
     for submodule, expected_revision in git_submodule_entries(target):
-        relative_path = str(submodule.relative_to(target))
+        relative_path = str(portable_relative_path(submodule, target))
         if not submodule.exists():
             continue
         try:
@@ -847,8 +855,8 @@ def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str
     # The index can retain descendants of a directory replaced by a link.
     # Keep the link's identity in snapshots without following its contents.
     prefix = target
-    for component in path.relative_to(target).parts[:-1]:
-        prefix /= component
+    for component in portable_relative_path(path, target).parts[:-1]:
+        prefix = filesystem_path(prefix / component)
         key = str(prefix)
         if key not in linked_prefixes:
             metadata = prefix.lstat()
@@ -908,7 +916,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 continue
             # Git's index spelling can differ after a case-only directory rename.
             # Compare each scope-depth prefix once, without following symlink leaves.
-            prefix = repository.joinpath(*relative.parts[:scope_depth])
+            prefix = filesystem_path(repository.joinpath(*relative.parts[:scope_depth]))
             key = str(prefix)
             if key not in matching_prefixes:
                 try:
@@ -919,7 +927,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             # POSIX volumes; WindowsPath equality also folds distinct names.
             if not matching_prefixes[key]:
                 continue
-        path = target.joinpath(*relative.parts[scope_depth:])
+        path = filesystem_path(target.joinpath(*relative.parts[scope_depth:]))
         try:
             path = _directory_link_boundary(target, path, linked_prefixes)
             metadata = path.lstat()
@@ -940,7 +948,9 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         ):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
-        if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
+        if nested_repository_root is not None and filesystem_path(
+            Path(nested_repository_root)
+        ).samefile(path):
             nested_paths = git_directory_snapshot_paths(path)
             if nested_paths is not None:
                 nested_worktrees.add((metadata.st_dev, metadata.st_ino))
@@ -970,11 +980,15 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         )
         if directories is None:
             raise SystemExit("Could not inspect directories in the selected Git working tree.")
-        pending = [target / os.fsdecode(path) for path in directories.split(b"\0") if path]
+        pending = [
+            filesystem_path(target / os.fsdecode(path)) for path in directories.split(b"\0") if path
+        ]
         while pending:
             children: list[Path] = []
             for path in pending:
-                if not SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(target).parts):
+                if not SOURCE_METADATA_DIRECTORIES.isdisjoint(
+                    portable_relative_path(path, target).parts
+                ):
                     continue
                 try:
                     path = _directory_link_boundary(target, path, linked_prefixes)
@@ -990,7 +1004,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                         # Its own inventory already applied its repository exclusions.
                         continue
                     try:
-                        children.extend(path.iterdir())
+                        children.extend(filesystem_path(child) for child in path.iterdir())
                     except PermissionError:
                         # Match Git's treatment of unreadable descendants.
                         continue
@@ -1004,7 +1018,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                     continue
                 if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
                     continue
-                relative = (Path(pathspec) / path.relative_to(target)).as_posix()
+                relative = (Path(pathspec) / portable_relative_path(path, target)).as_posix()
                 candidates[os.fsencode(relative)] = path
             if not candidates:
                 break
@@ -1028,7 +1042,8 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             excluded = set(ignored.stdout.split(b"\0"))
             pending = [path for raw, path in candidates.items() if raw not in excluded]
     paths.extend(junctions.values())
-    return sorted({str(path): path for path in paths}.values(), key=str)
+    entries = {str(portable_relative_path(path, target)): path for path in paths}
+    return [entries[name] for name in sorted(entries)]
 
 
 def source_directory_snapshot_paths(
@@ -1039,15 +1054,16 @@ def source_directory_snapshot_paths(
     onerror: Callable[[OSError], None] | None = None,
 ) -> list[Path]:
     paths: list[Path] = []
+    excluded_portable = {portable_path(path) for path in excluded}
     for directory, directories, files in os.walk(
-        target, topdown=True, followlinks=False, onerror=onerror
+        extended_path(target), topdown=True, followlinks=False, onerror=onerror
     ):
         parent = Path(directory)
         for name in directories[:]:
             path = parent / name
-            if (
-                name in SOURCE_METADATA_DIRECTORIES and not include_git_metadata
-            ) or path in excluded:
+            if (name in SOURCE_METADATA_DIRECTORIES and not include_git_metadata) or portable_path(
+                path
+            ) in excluded_portable:
                 directories.remove(name)
                 continue
             paths.append(path)
@@ -1058,7 +1074,7 @@ def source_directory_snapshot_paths(
             parent / name
             for name in files
             if (name not in SOURCE_METADATA_DIRECTORIES or include_git_metadata)
-            and parent / name not in excluded
+            and portable_path(parent / name) not in excluded_portable
         )
     return sorted(paths)
 
@@ -1074,7 +1090,9 @@ def directory_content_digest(
         raise error
 
     excluded_relative = [
-        path.relative_to(target) for path in excluded if path.is_relative_to(target)
+        portable_relative_path(path, target)
+        for path in excluded
+        if portable_is_relative_to(path, target)
     ]
     paths = (
         source_directory_snapshot_paths(
@@ -1088,7 +1106,7 @@ def directory_content_digest(
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:
-        relative_path = path.relative_to(target)
+        relative_path = portable_relative_path(path, target)
         if any(relative_path.is_relative_to(path) for path in excluded_relative):
             continue
         try:
@@ -1128,7 +1146,9 @@ def directory_snapshot_regular_file_count(target: Path) -> int:
         try:
             metadata = path.lstat()
         except OSError as exc:
-            raise SystemExit(f"Could not inspect local file: {path.relative_to(target)}") from exc
+            raise SystemExit(
+                f"Could not inspect local file: {portable_relative_path(path, target)}"
+            ) from exc
         if stat.S_ISREG(metadata.st_mode):
             count += 1
     return count
@@ -1138,13 +1158,15 @@ def copy_directory_excluding(
     source: Path, destination: Path, excluded: tuple[Path, ...]
 ) -> list[Path]:
     excluded_relative = [
-        path.relative_to(source) for path in excluded if path.is_relative_to(source)
+        portable_relative_path(path, source)
+        for path in excluded
+        if portable_is_relative_to(path, source)
     ]
 
     junctions: list[Path] = []
 
     def ignored(directory: str, names: list[str]) -> list[str]:
-        relative = Path(directory).relative_to(source)
+        relative = portable_relative_path(Path(directory), source)
         skipped = [
             path.name
             for path in excluded_relative
@@ -1163,11 +1185,13 @@ def copy_directory_excluding(
                 skipped.append(name)
         return skipped
 
-    shutil.copytree(source, destination, symlinks=True, ignore=ignored)
+    shutil.copytree(
+        extended_path(source), extended_path(destination), symlinks=True, ignore=ignored
+    )
 
     # Empty placeholders retain parent directories while a patch is reversed.
     for path in junctions:
-        (destination / path).mkdir()
+        filesystem_path(destination / path).mkdir()
     return junctions
 
 
@@ -1176,8 +1200,9 @@ def restore_directory_junctions(source: Path, destination: Path, junctions: list
     destination = destination.resolve()
     for path in junctions:
         placeholder = require_remediation_target(str(destination / path))
-        os.chmod(placeholder, stat.S_IMODE((source / path).lstat().st_mode))
-        copy_directory_junction(source / path, placeholder)
+        source_junction = filesystem_path(source / path)
+        os.chmod(placeholder, stat.S_IMODE(source_junction.lstat().st_mode))
+        copy_directory_junction(source_junction, placeholder)
 
 
 def copy_git_worktree_files(
@@ -1199,10 +1224,10 @@ def copy_git_worktree_files(
     excluded_relative = []
     for path in excluded:
         try:
-            relative_path = path.relative_to(repository)
+            relative_path = portable_relative_path(path, repository)
         except ValueError:
             try:
-                relative_path = Path(pathspec) / path.relative_to(source)
+                relative_path = Path(pathspec) / portable_relative_path(path, source)
             except ValueError:
                 continue
         excluded_relative.append(relative_path)
@@ -1215,10 +1240,10 @@ def copy_git_worktree_files(
         relative = Path(os.fsdecode(raw_path))
         if any(relative.is_relative_to(path) for path in excluded_relative):
             continue
-        source_path = repository / relative
+        source_path = filesystem_path(repository / relative)
         try:
             source_path = _directory_link_boundary(repository, source_path, linked_prefixes)
-            relative = source_path.relative_to(repository)
+            relative = portable_relative_path(source_path, repository)
             metadata = source_path.lstat()
         except (FileNotFoundError, NotADirectoryError):
             continue
@@ -1228,8 +1253,8 @@ def copy_git_worktree_files(
         if stat.S_ISDIR(metadata.st_mode) and getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
             junctions.add(relative)
             continue
-        destination_path = destination / relative
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        destination_path = filesystem_path(destination / relative)
+        filesystem_path(destination_path.parent).mkdir(parents=True, exist_ok=True)
         if stat.S_ISLNK(metadata.st_mode):
             destination_path.symlink_to(os.readlink(source_path))
         elif stat.S_ISREG(metadata.st_mode):
@@ -1246,7 +1271,7 @@ def copy_git_worktree_files(
             raise SystemExit(f"Unsupported Git working-tree file type: {relative}")
     if _WINDOWS:
         for path in git_directory_snapshot_paths(source) or []:
-            relative = Path(pathspec) / path.relative_to(source)
+            relative = Path(pathspec) / portable_relative_path(path, source)
             if any(
                 relative.is_relative_to(root) for root in [*excluded_relative, *nested_worktrees]
             ):
@@ -1258,8 +1283,8 @@ def copy_git_worktree_files(
             ):
                 junctions.add(relative)
     for path in junctions:
-        (destination / path).mkdir(parents=True, exist_ok=True)
-    copied_target = destination if pathspec == "." else destination / pathspec
+        filesystem_path(destination / path).mkdir(parents=True, exist_ok=True)
+    copied_target = filesystem_path(destination if pathspec == "." else destination / pathspec)
     copied_target.mkdir(parents=True, exist_ok=True)
     return copied_target, sorted(junctions)
 
@@ -1316,16 +1341,17 @@ def require_remediation_target(value: str) -> Path:
     if not stored.is_absolute():
         raise SystemExit("Remediation target must be an absolute local directory path.")
     try:
-        resolved = stored.resolve(strict=True)
+        filesystem_target = filesystem_path(stored)
+        resolved = filesystem_target.resolve(strict=True)
     except (FileNotFoundError, OSError) as exc:
         raise SystemExit(
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc
-    if resolved != stored or not stored.is_dir():
+    if portable_path(resolved) != portable_path(filesystem_target) or not resolved.is_dir():
         raise SystemExit(
             "Remediation is unavailable because the selected checkout path was replaced. Start a new scan."
         )
-    return stored
+    return resolved
 
 
 def require_scan_target_identity(scan: sqlite3.Row) -> Path:
