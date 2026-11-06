@@ -131,7 +131,7 @@ test.each([false, true])(
 
 async function fixture(
   additionalFiles: readonly string[] = [],
-): Promise<HostedScanInput> {
+): Promise<Extract<HostedScanInput, { version: 2 }>> {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   for (const name of [
@@ -163,7 +163,7 @@ async function fixture(
 }
 
 async function writeDraft(
-  request: ScanExecutionRequest,
+  request: Pick<ScanExecutionRequest, "runtime" | "scope">,
   receiptRefs: string[] = [],
 ) {
   const directory = request.runtime.outputDirectory;

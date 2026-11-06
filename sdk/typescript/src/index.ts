@@ -32,9 +32,13 @@ export type {
 } from "./hosted-scan.js";
 export type {
   ScanExecutor,
+  HostedScanExecutor,
   ScanExecutionRequest,
+  StandardScanExecutionRequest,
+  DeepScanExecutionRequest,
   ScanExecutionResult,
   ScanExecutionEvent,
+  HostedScanExecutionEvent,
 } from "./scan-executor.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {

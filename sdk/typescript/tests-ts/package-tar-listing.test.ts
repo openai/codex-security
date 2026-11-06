@@ -87,6 +87,7 @@ function packageTar({
     "package/docs/hosted-remediation.md",
     "package/docs/telemetry.md",
     "package/schemas/hosted-scan-v2.fixture.json",
+    "package/schemas/hosted-scan-v3.fixture.json",
     "package/schemas/project-config.schema.json",
     "package/schemas/external-findings.schema.json",
     "package/LICENSE",

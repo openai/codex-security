@@ -7,10 +7,13 @@ import {
 } from "./contract.js";
 import { isRecord } from "./record.js";
 import { VERSION } from "./version.js";
+import { DeepScanSettingsSchema } from "./scan-settings.js";
+import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import {
   hostedScanFailureStatus,
   ScanExecutionError,
-  type ScanExecutor,
+  ScanExecutionResultSchema,
+  type HostedScanExecutor,
   type ScanExecutionResult,
   type ScanExecutionEvent,
   type ScanExecutionRequest,
@@ -29,8 +32,8 @@ import {
 } from "./targets.js";
 import { isWithin } from "./trusted-executable.js";
 
-/** Hosted v2 mirrors repository/paths targets; only Standard scans are supported. */
-export const HostedScanInputSchema = z.strictObject({
+/** Hosted v2 preserves Standard; v3 delegates Deep workers to the host. */
+const StandardHostedScanInputSchema = z.strictObject({
   version: z.literal(2),
   repository: z.string().min(1),
   revision: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
@@ -55,7 +58,16 @@ export const HostedScanInputSchema = z.strictObject({
   }),
 });
 
-export type HostedScanInput = z.infer<typeof HostedScanInputSchema>;
+export const HostedScanInputSchema = z.discriminatedUnion("version", [
+  StandardHostedScanInputSchema,
+  StandardHostedScanInputSchema.extend({
+    version: z.literal(3),
+    mode: z.literal("deep"),
+    deepScan: DeepScanSettingsSchema.default({}),
+  }),
+]);
+
+export type HostedScanInput = z.input<typeof HostedScanInputSchema>;
 export class HostedScanPreparationError extends Error {
   constructor(
     readonly reason:
@@ -185,7 +197,7 @@ function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
 }
 
 export interface HostedScanOptions {
-  executor: ScanExecutor;
+  executor: HostedScanExecutor;
   /** @deprecated Automatic owner reports validate scan hints without additional inference. */
   ownerCodex?: {
     startThread(options: { model?: string; modelReasoningEffort?: string }): {
@@ -214,6 +226,14 @@ export async function runHostedScanInternal(
   options: HostedScanOptions,
 ) {
   const input = HostedScanInputSchema.parse(value);
+  if (input.version === 3 && options.executor.release === undefined)
+    throw new Error(
+      "Hosted Deep scans require an executor with session release support.",
+    );
+  const deepScan =
+    input.version === 3
+      ? { ...DEFAULT_DEEP_SCAN_SETTINGS, ...input.deepScan }
+      : undefined;
   const context = {
     repository: input.repository,
     revision: input.revision,
@@ -224,12 +244,31 @@ export async function runHostedScanInternal(
       : { severityRubric: input.severityRubric }),
   };
   let execution: ScanExecutionResult | undefined;
-  let request: ScanExecutionRequest | undefined;
+  const executions: ScanExecutionResult[] = [];
+  let coordinatorStatus: "succeeded" | "failed" | "canceled" | undefined;
+  const executionFields = (): {
+    execution?: ScanExecutionResult;
+    executions?: ScanExecutionResult[];
+    mode?: "deep";
+    deepScan?: typeof deepScan;
+    coordinatorStatus?: typeof coordinatorStatus;
+  } =>
+    input.version === 3
+      ? {
+          mode: "deep",
+          deepScan,
+          executions,
+          ...(coordinatorStatus === undefined ? {} : { coordinatorStatus }),
+        }
+      : execution === undefined
+        ? {}
+        : { execution };
+  let request: Parameters<HostedScanExecutor["run"]>[0] | undefined;
   let scanId: string | undefined;
   let stoppedStatus: "canceled" | "failed" | undefined;
   let outputDirectory = resolve(input.outputDirectory);
   const base = () => ({
-    version: 2 as const,
+    version: input.version,
     ...context,
     outputDirectory,
     ...(scanId === undefined ? {} : { scanId }),
@@ -245,7 +284,7 @@ export async function runHostedScanInternal(
         ? {}
         : { pluginVersion: request.runtime.pluginVersion }),
     },
-    ...(execution === undefined ? {} : { execution }),
+    ...executionFields(),
   });
   try {
     context.repository = await prepareHostedRepository(context, options.signal);
@@ -279,12 +318,50 @@ export async function runHostedScanInternal(
       environment: hostedScanEnvironment(input.stateDirectory),
       hostedScan: {
         context,
+        ...(input.version === 3
+          ? {
+              deep: {
+                onCoordinatorStatus(
+                  status: "succeeded" | "failed" | "canceled",
+                ) {
+                  coordinatorStatus = status;
+                },
+              },
+            }
+          : {}),
         executor: {
           async run(value, runOptions) {
             request = value;
-            execution = await options.executor.run(value, runOptions);
-            return execution;
+            const index = executions.length;
+            // Reserve dispatch order before concurrent calls settle.
+            const pending: ScanExecutionResult = {
+              requestId: value.requestId,
+              status: "acceptance_unknown",
+            };
+            executions.push(pending);
+            try {
+              let result = await options.executor.run(value, runOptions);
+              if (value.version === 3) {
+                result = ScanExecutionResultSchema.parse(result);
+                if (result.requestId !== value.requestId)
+                  throw new Error(
+                    "Execution response does not match the active request.",
+                  );
+              }
+              executions[index] = result;
+              if (value.version === 2) execution = result;
+              return result;
+            } catch (error) {
+              pending.message = errorMessage(error);
+              throw error;
+            }
           },
+          ...(options.executor.release === undefined
+            ? {}
+            : {
+                release: (sessionId: string) =>
+                  options.executor.release!(sessionId),
+              }),
         },
         onEvent,
       },
@@ -300,7 +377,8 @@ export async function runHostedScanInternal(
         context.scope.paths[0] === "."
           ? "repository"
           : context.scope.paths.map((path) => `./${path}`),
-      mode: "standard",
+      mode: input.version === 3 ? "deep" : "standard",
+      ...deepScan,
       outputDir: outputDirectory,
       signal: options.signal,
       ownerSuggestions: input.ownerSuggestions,
@@ -377,8 +455,13 @@ export async function runHostedScanInternal(
       artifacts,
     };
   } catch (error) {
-    if (error instanceof ScanExecutionError) execution = error.result;
-    const status = hostedScanFailureStatus(error, options.signal, execution);
+    if (error instanceof ScanExecutionError && input.version === 2)
+      execution = error.result;
+    const status = executions.some(
+      (receipt) => receipt.status === "acceptance_unknown",
+    )
+      ? "acceptance_unknown"
+      : hostedScanFailureStatus(error, options.signal, execution);
     return {
       ...base(),
       // A late abort during cleanup cannot change an already committed failure.

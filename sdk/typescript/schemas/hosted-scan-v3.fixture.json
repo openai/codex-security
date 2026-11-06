@@ -1,0 +1,430 @@
+{
+  "run": {
+    "jsonrpc": "2.0",
+    "id": "run",
+    "method": "run",
+    "params": {
+      "version": 3,
+      "mode": "deep",
+      "repository": "/workspace/repository",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": {
+        "paths": ["service-a", "service-b"]
+      },
+      "identity": {
+        "runId": "run-1",
+        "attemptId": "attempt-1",
+        "buildId": "fixture-build"
+      },
+      "model": "fixture-model",
+      "reasoningEffort": "medium",
+      "outputDirectory": "/scan/output",
+      "stateDirectory": "/scan/state",
+      "deepScan": {
+        "workers": 4,
+        "subagents": 3,
+        "stopAfterNoNew": 4,
+        "stopAfterConsecutiveErrors": 3,
+        "maxDiscoveryRuns": 40,
+        "maxTimeHours": 96
+      }
+    }
+  },
+  "executions": [
+    {
+      "jsonrpc": "2.0",
+      "id": "request-1",
+      "method": "execution.run",
+      "params": {
+        "version": 3,
+        "repository": "/workspace/repository",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scope": {
+          "paths": ["service-a", "service-b"]
+        },
+        "identity": {
+          "runId": "run-1",
+          "attemptId": "attempt-1",
+          "buildId": "fixture-build"
+        },
+        "model": "fixture-model",
+        "reasoningEffort": "medium",
+        "requestId": "request-1",
+        "scanId": "scan-1",
+        "workerId": "worker-1",
+        "kind": "discovery",
+        "subagents": 3,
+        "prompt": "Inspect the selected paths and record findings in the supplied worker context.",
+        "runtime": {
+          "pluginRoot": "/opt/runtime/cli/_bundled_plugin",
+          "pluginVersion": "0.1.95",
+          "stateDirectory": "/scan/state",
+          "outputDirectory": "/scan/output",
+          "environment": {
+            "CODEX_SECURITY_STATE_DIR": "/scan/state",
+            "CODEX_SECURITY_CONFIG_PATH": "/scan/tmp/config-preflight.toml",
+            "CODEX_SECURITY_TARGET_PATHS_FILE": "/scan/tmp/target-paths.json"
+          }
+        },
+        "artifactContext": {
+          "root": "/scan/output/workers/worker-1",
+          "layout": "worker",
+          "discoveryBoard": {
+            "root": "/scan/state/discovery-board",
+            "author": "worker-1"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "request-2",
+      "method": "execution.run",
+      "params": {
+        "version": 3,
+        "repository": "/workspace/repository",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scope": {
+          "paths": ["service-a", "service-b"]
+        },
+        "identity": {
+          "runId": "run-1",
+          "attemptId": "attempt-1",
+          "buildId": "fixture-build"
+        },
+        "model": "fixture-model",
+        "reasoningEffort": "medium",
+        "requestId": "request-2",
+        "scanId": "scan-1",
+        "workerId": "worker-2",
+        "kind": "discovery",
+        "subagents": 3,
+        "prompt": "Inspect the selected paths and record findings in the supplied worker context.",
+        "runtime": {
+          "pluginRoot": "/opt/runtime/cli/_bundled_plugin",
+          "pluginVersion": "0.1.95",
+          "stateDirectory": "/scan/state",
+          "outputDirectory": "/scan/output",
+          "environment": {
+            "CODEX_SECURITY_STATE_DIR": "/scan/state",
+            "CODEX_SECURITY_CONFIG_PATH": "/scan/tmp/config-preflight.toml",
+            "CODEX_SECURITY_TARGET_PATHS_FILE": "/scan/tmp/target-paths.json"
+          }
+        },
+        "artifactContext": {
+          "root": "/scan/output/workers/worker-2",
+          "layout": "worker",
+          "discoveryBoard": {
+            "root": "/scan/state/discovery-board",
+            "author": "worker-2"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "request-3",
+      "method": "execution.run",
+      "params": {
+        "version": 3,
+        "repository": "/workspace/repository",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scope": {
+          "paths": ["service-a", "service-b"]
+        },
+        "identity": {
+          "runId": "run-1",
+          "attemptId": "attempt-1",
+          "buildId": "fixture-build"
+        },
+        "model": "fixture-model",
+        "reasoningEffort": "medium",
+        "requestId": "request-3",
+        "scanId": "scan-1",
+        "workerId": "worker-1",
+        "kind": "discovery",
+        "subagents": 3,
+        "prompt": "Continue discovery in the existing session.",
+        "runtime": {
+          "pluginRoot": "/opt/runtime/cli/_bundled_plugin",
+          "pluginVersion": "0.1.95",
+          "stateDirectory": "/scan/state",
+          "outputDirectory": "/scan/output",
+          "environment": {
+            "CODEX_SECURITY_STATE_DIR": "/scan/state",
+            "CODEX_SECURITY_CONFIG_PATH": "/scan/tmp/config-preflight.toml",
+            "CODEX_SECURITY_TARGET_PATHS_FILE": "/scan/tmp/target-paths.json"
+          }
+        },
+        "artifactContext": {
+          "root": "/scan/output/workers/worker-1",
+          "layout": "worker",
+          "discoveryBoard": {
+            "root": "/scan/state/discovery-board",
+            "author": "worker-1"
+          }
+        },
+        "resumeSessionId": "session-1"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "request-4",
+      "method": "execution.run",
+      "params": {
+        "version": 3,
+        "repository": "/workspace/repository",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scope": {
+          "paths": ["service-a", "service-b"]
+        },
+        "identity": {
+          "runId": "run-1",
+          "attemptId": "attempt-1",
+          "buildId": "fixture-build"
+        },
+        "model": "fixture-model",
+        "reasoningEffort": "medium",
+        "requestId": "request-4",
+        "scanId": "scan-1",
+        "workerId": "comparison-1",
+        "kind": "comparison",
+        "subagents": 0,
+        "prompt": "Compare the two supplied candidate findings.",
+        "runtime": {
+          "pluginRoot": "/opt/runtime/cli/_bundled_plugin",
+          "pluginVersion": "0.1.95",
+          "stateDirectory": "/scan/state",
+          "outputDirectory": "/scan/output",
+          "environment": {
+            "CODEX_SECURITY_STATE_DIR": "/scan/state",
+            "CODEX_SECURITY_CONFIG_PATH": "/scan/tmp/config-preflight.toml",
+            "CODEX_SECURITY_TARGET_PATHS_FILE": "/scan/tmp/target-paths.json"
+          }
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "duplicate": {
+              "type": "boolean"
+            }
+          },
+          "required": ["duplicate"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "sessionStarted": {
+    "jsonrpc": "2.0",
+    "method": "execution.progress",
+    "params": {
+      "requestId": "request-1",
+      "event": {
+        "type": "session.started",
+        "sessionId": "session-1"
+      }
+    }
+  },
+  "progress": {
+    "jsonrpc": "2.0",
+    "method": "execution.progress",
+    "params": {
+      "requestId": "request-2",
+      "event": {
+        "type": "progress",
+        "progress": {
+          "phase": "discovery",
+          "filesCompleted": 1,
+          "filesTotal": 2
+        }
+      }
+    }
+  },
+  "responses": [
+    {
+      "jsonrpc": "2.0",
+      "id": "request-2",
+      "result": {
+        "requestId": "request-2",
+        "status": "completed",
+        "sessionId": "session-2",
+        "turnId": "turn-2",
+        "usage": {
+          "input_tokens": 18,
+          "output_tokens": 9
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "request-1",
+      "result": {
+        "requestId": "request-1",
+        "status": "completed",
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 6,
+          "cached_input_tokens": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "request-3",
+      "result": {
+        "requestId": "request-3",
+        "status": "completed",
+        "sessionId": "session-1",
+        "turnId": "turn-3",
+        "usage": {
+          "input_tokens": 8,
+          "output_tokens": 4
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "request-4",
+      "result": {
+        "requestId": "request-4",
+        "status": "completed",
+        "sessionId": "session-3",
+        "turnId": "turn-4",
+        "finalResponse": "{\"duplicate\":false}",
+        "usage": {
+          "input_tokens": 4,
+          "output_tokens": 2
+        }
+      }
+    }
+  ],
+  "release": {
+    "jsonrpc": "2.0",
+    "id": "release-1",
+    "method": "execution.release",
+    "params": {
+      "version": 3,
+      "sessionId": "session-1"
+    }
+  },
+  "releaseResponse": {
+    "jsonrpc": "2.0",
+    "id": "release-1",
+    "result": {
+      "status": "completed",
+      "sessionId": "session-1"
+    }
+  },
+  "cancel": {
+    "jsonrpc": "2.0",
+    "method": "execution.cancel",
+    "params": {
+      "requestId": "request-2"
+    }
+  },
+  "terminal": {
+    "jsonrpc": "2.0",
+    "id": "run",
+    "result": {
+      "version": 3,
+      "mode": "deep",
+      "repository": "/workspace/repository",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": {
+        "paths": ["service-a", "service-b"]
+      },
+      "identity": {
+        "runId": "run-1",
+        "attemptId": "attempt-1",
+        "buildId": "fixture-build"
+      },
+      "outputDirectory": "/scan/output",
+      "status": "completed",
+      "scanId": "scan-1",
+      "pluginVersion": "0.1.95",
+      "provenance": {
+        "cliVersion": "0.8.3",
+        "pluginVersion": "0.1.95",
+        "buildId": "fixture-build"
+      },
+      "deepScan": {
+        "workers": 4,
+        "subagents": 3,
+        "stopAfterNoNew": 4,
+        "stopAfterConsecutiveErrors": 3,
+        "maxDiscoveryRuns": 40,
+        "maxTimeHours": 96
+      },
+      "coordinatorStatus": "succeeded",
+      "executions": [
+        {
+          "requestId": "request-1",
+          "status": "completed",
+          "sessionId": "session-1",
+          "turnId": "turn-1",
+          "usage": {
+            "input_tokens": 12,
+            "output_tokens": 6,
+            "cached_input_tokens": 0
+          }
+        },
+        {
+          "requestId": "request-2",
+          "status": "completed",
+          "sessionId": "session-2",
+          "turnId": "turn-2",
+          "usage": {
+            "input_tokens": 18,
+            "output_tokens": 9
+          }
+        },
+        {
+          "requestId": "request-3",
+          "status": "completed",
+          "sessionId": "session-1",
+          "turnId": "turn-3",
+          "usage": {
+            "input_tokens": 8,
+            "output_tokens": 4
+          }
+        },
+        {
+          "requestId": "request-4",
+          "status": "completed",
+          "sessionId": "session-3",
+          "turnId": "turn-4",
+          "finalResponse": "{\"duplicate\":false}",
+          "usage": {
+            "input_tokens": 4,
+            "output_tokens": 2
+          }
+        }
+      ],
+      "artifacts": [
+        {
+          "path": "scan-manifest.json",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "bytes": 1024
+        },
+        {
+          "path": "findings.json",
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "bytes": 256
+        },
+        {
+          "path": "coverage.json",
+          "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "bytes": 512
+        },
+        {
+          "path": "report.md",
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "bytes": 768
+        }
+      ]
+    }
+  }
+}

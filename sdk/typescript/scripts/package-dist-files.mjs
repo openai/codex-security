@@ -2,6 +2,7 @@ const distModules = [
   "api",
   "scan-executor",
   "host-protocol",
+  "hosted-deep-scan",
   "hosted-remediation",
   "hosted-remediation-protocol",
   "hosted-scan",
