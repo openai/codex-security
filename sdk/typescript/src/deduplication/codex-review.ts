@@ -105,7 +105,9 @@ function transientCodexError(info: unknown): boolean {
   if (
     info === "usageLimitExceeded" ||
     info === "rateLimitExceeded" ||
+    info === "flexUnavailable" ||
     info === "serverOverloaded" ||
+    info === "policyCapacityUnavailable" ||
     info === "internalServerError"
   )
     return true;
