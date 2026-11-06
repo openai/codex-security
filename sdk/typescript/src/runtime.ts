@@ -494,6 +494,7 @@ const WINDOWS_PRINCIPAL_ALIASES: Readonly<Record<string, string>> = {
   HA: "S-1-5-32-578",
   AA: "S-1-5-32-579",
 };
+const WINDOWS_ACCOUNT_SID = /^S-1-5-21-(?:\d+-){3}\d+$/u;
 const WINDOWS_SID = /^S-1-(?:\d+-)*\d+$/u;
 const WINDOWS_GUID =
   /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu;
@@ -537,6 +538,7 @@ export function inspectWindowsCredentialAcl(
   currentUserSid: string,
   options: {
     resolvedAliases?: Readonly<Record<string, string>>;
+    currentGroupSids?: ReadonlySet<string>;
     scope?: "directory" | "file" | "ancestor";
   } = {},
 ): WindowsCredentialAcl {
@@ -636,7 +638,11 @@ export function inspectWindowsCredentialAcl(
           grantsCurrentContainerAccess = true;
         }
       }
-    } else {
+    } else if (
+      principal === currentUserSid ||
+      !WINDOWS_ACCOUNT_SID.test(principal) ||
+      (options.currentGroupSids?.has(principal) ?? true)
+    ) {
       deniedPrincipals.add(principal);
     }
     remaining = rest;
@@ -831,6 +837,7 @@ export async function inspectWindowsCredentialAclSnapshot(
     environment?: NodeJS.ProcessEnv;
     resolvedAliases?: Readonly<Record<string, string>>;
     resolveDescriptorAliases?: (descriptor: string) => Promise<void>;
+    currentGroupSids?: ReadonlySet<string>;
   },
 ): Promise<{
   home: WindowsCredentialAcl;
@@ -885,6 +892,7 @@ export async function inspectWindowsCredentialAclSnapshot(
                 descriptor,
                 currentUserSid,
                 {
+                  currentGroupSids: options.currentGroupSids,
                   resolvedAliases: options.resolvedAliases,
                   scope: "ancestor",
                 },
@@ -915,6 +923,7 @@ export async function inspectWindowsCredentialAclSnapshot(
           if (index === ancestors.length) {
             try {
               home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
+                currentGroupSids: options.currentGroupSids,
                 resolvedAliases: options.resolvedAliases,
               });
             } catch (error) {
@@ -930,6 +939,7 @@ export async function inspectWindowsCredentialAclSnapshot(
             descriptor,
             currentUserSid,
             {
+              currentGroupSids: options.currentGroupSids,
               resolvedAliases: options.resolvedAliases,
               scope: "file",
             },
@@ -959,6 +969,20 @@ export async function inspectWindowsCredentialAclSnapshot(
     return { home, descendantsArePrivate };
   }
   throw new Error("Windows credential descendants could not be verified");
+}
+
+/** Keep every token group, including groups used only for deny ACEs. */
+export function parseWindowsTokenGroupSids(output: string): Set<string> {
+  const groups = new Set<string>();
+  for (const row of output.trim().split(/\r?\n/u)) {
+    const sid =
+      /^"(?:[^"]|"")*","(?:[^"]|"")*","(S-1-(?:\d+-)*\d+)","(?:[^"]|"")*"$/u.exec(
+        row,
+      )?.[1];
+    if (!sid) throw new Error("Unable to identify Windows token group SIDs");
+    groups.add(sid);
+  }
+  return groups;
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
@@ -1090,6 +1114,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     );
     resolvedAliases[principal] = requireNumericSid(resolved.stdout.trim());
   };
+  let currentGroupSids: Set<string> | undefined;
   const resolveDescriptorAliases = async (
     descriptor: string,
   ): Promise<void> => {
@@ -1099,8 +1124,25 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     let remaining = header[3]!;
     while (remaining.startsWith("(")) {
       const { rule, rest } = windowsSecurityDescriptorRule(remaining);
-      const principal = rule.split(";")[5];
-      if (principal !== undefined) await resolvePrincipal(principal);
+      const fields = rule.split(";");
+      const principal = fields[5];
+      if (principal !== undefined) {
+        await resolvePrincipal(principal);
+        const trustee = resolvedAliases[principal] ?? principal;
+        if (
+          currentGroupSids === undefined &&
+          ["D", "OD", "XD"].includes(fields[0]!) &&
+          trustee !== sid &&
+          WINDOWS_ACCOUNT_SID.test(trustee)
+        ) {
+          const groups = await execFile(
+            join(systemDirectory, "whoami.exe"),
+            ["/groups", "/fo", "csv", "/nh"],
+            processOptions,
+          );
+          currentGroupSids = parseWindowsTokenGroupSids(groups.stdout);
+        }
+      }
       remaining = rest;
     }
   };
@@ -1110,6 +1152,9 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       command: powershell,
       args: [...powershellArgs, script],
       environment: processOptions.env,
+      get currentGroupSids() {
+        return currentGroupSids;
+      },
       resolvedAliases,
       resolveDescriptorAliases,
     });

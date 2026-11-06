@@ -81,6 +81,7 @@ import {
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
+  parseWindowsTokenGroupSids,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
@@ -4499,6 +4500,40 @@ describe("runtime directories and plugin Python boundary", () => {
       untrustedPrincipals: [],
       deniedPrincipals: ["S-1-1-0"],
     });
+  });
+
+  test("preserves account denies only after excluding current token membership", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const group = "S-1-5-21-111-222-333-512";
+    const other = "S-1-5-21-0-0-0-424242";
+    const currentGroupSids = parseWindowsTokenGroupSids(
+      `"Domain, Group","Group","${group}","Group used for deny only"\r\n`,
+    );
+    const descriptor = `O:${user}D:P(D;OICI;FR;;;${other})(A;OICI;FA;;;${user})`;
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user).grantsCurrentUserAccess,
+    ).toBe(false);
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user, { currentGroupSids }),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      deniedPrincipals: [],
+    });
+    for (const principal of [user, "DA", "WD", "OW"]) {
+      expect(
+        inspectWindowsCredentialAcl(
+          descriptor.replace(other, principal),
+          user,
+          {
+            currentGroupSids,
+            resolvedAliases: { DA: group },
+          },
+        ).grantsCurrentUserAccess,
+      ).toBe(false);
+    }
+    for (const invalid of ["", `"a","b","${group}","c"\r\ninvalid`]) {
+      expect(() => parseWindowsTokenGroupSids(invalid)).toThrow();
+    }
   });
 
   test("requires effective, inheritable Windows credential access", () => {
