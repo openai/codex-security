@@ -548,7 +548,7 @@ jobs:
         if: matrix.shard == 1
         working-directory: plugins/codex-security/mcp-app
         env: *windows-shard-env
-        run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts
+        run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts tests/test_normalize_candidates.ts
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true
