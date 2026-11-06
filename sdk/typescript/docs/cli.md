@@ -239,6 +239,26 @@ comparisons, and deduplication preserve that selection. Relative helper paths an
 `auth.cwd` resolve from `CODEX_HOME` (default `~/.codex`). Comparisons and reviews
 also honor the selected command provider in that home's `config.toml`.
 
+For OrcaRouter, save this profile in `$CODEX_HOME/orcarouter.config.toml`
+(default `~/.codex/orcarouter.config.toml`), then run
+`codex-security scan . --codex 'profile="orcarouter"'`. This example uses the
+signed-in 1Password CLI to read your router key. Substitute your own secret
+reference or credential command. Codex reads the key from the command's output.
+
+```toml
+model = "orcarouter/fusion"
+model_provider = "orcarouter"
+
+[model_providers.orcarouter]
+name = "OrcaRouter"
+base_url = "https://api.orcarouter.ai/v1"
+wire_api = "responses"
+
+[model_providers.orcarouter.auth]
+command = "op"
+args = ["read", "op://Private/OrcaRouter/credential"]
+```
+
 For other providers, set their key and select a model the provider supports:
 
 ```bash
