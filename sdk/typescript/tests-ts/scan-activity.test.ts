@@ -60,6 +60,57 @@ function commandActivityCase(
 
 describe("scan activity", () => {
   test.each([
+    ['cat "/repo/src/O\'Brien.ts"', "src/O'Brien.ts"],
+    ["cat '/repo/src/say \"hello\".ts'", 'src/say "hello".ts'],
+    ['cat "/repo/ leading.ts "', " leading.ts "],
+    ['cat "/repo/src/result:42"', "src/result:42"],
+    ["cat '/repo/src/result:42:7'", "src/result:42:7"],
+    ['cat "$CODEX_SECURITY_REPOSITORY/src/O\'Brien.ts"', "src/O'Brien.ts"],
+  ])("preserves quoted POSIX filename contents: %s", (cmd, path) => {
+    for (const shell of ["sh", "/bin/bash", "/bin/zsh"]) {
+      for (const activity of [
+        scanActivityFromEvent(
+          {
+            type: "item.started",
+            item: {
+              id: "live",
+              type: "command_execution",
+              command: cmd,
+              shell,
+            },
+          },
+          "/repo",
+        ),
+        scanActivityFromEvent(toolEvent("exec", { cmd, shell }), "/repo"),
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "function_call",
+            name: "exec_command",
+            call_id: "saved",
+            arguments: JSON.stringify({ cmd, shell }),
+          }),
+          "/repo",
+        ),
+      ])
+        expect(activity?.paths).toEqual([path]);
+    }
+  });
+
+  test.each([undefined, "unknown", "/usr/bin/pwsh", "/bin/sh"])(
+    "retains source-line hints outside quoted POSIX operands for shell %p",
+    (shell) => {
+      for (const cmd of [
+        "cat /repo/src/app.ts:42:7",
+        ...(shell === "/bin/sh" ? [] : ['cat "/repo/src/app.ts:42:7"']),
+      ])
+        expect(
+          scanActivityFromEvent(toolEvent("exec", { cmd, shell }), "/repo")
+            ?.paths,
+        ).toEqual(["src/app.ts"]);
+    },
+  );
+
+  test.each([
     [
       "cat $CODEX_SECURITY_REPOSITORY/src/my\\ file.ts",
       "/repo",

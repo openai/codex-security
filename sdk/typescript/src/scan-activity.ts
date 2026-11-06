@@ -461,10 +461,8 @@ function commandRepositoryPaths(
   repository: string,
   shell: unknown,
 ): string[] {
-  const escapedBlanks =
-    typeof shell === "string" &&
-    POSIX_SHELL.test(shell) &&
-    /\\[ \t]/u.test(command);
+  const posixShell = typeof shell === "string" && POSIX_SHELL.test(shell);
+  const escapedBlanks = posixShell && /\\[ \t]/u.test(command);
   const paths = new Set<string>();
   const roots = [
     "$CODEX_SECURITY_REPOSITORY",
@@ -499,13 +497,15 @@ function commandRepositoryPaths(
     for (const relativeTo of roots) {
       const relative = relativeTo(raw, value);
       if (relative === null) continue;
-      const path = escaped
-        ? relative
-        : relative
-            .replace(/["'\r\n].*$/u, "")
-            .trim()
-            .replace(/\/+$/u, "")
-            .replace(/:\d+(?::\d+)?$/u, "");
+      // Quotes, edge whitespace and colon-number suffixes can be filename data.
+      const path =
+        escaped || (posixShell && quoted)
+          ? relative
+          : relative
+              .replace(/["'\r\n].*$/u, "")
+              .trim()
+              .replace(/\/+$/u, "")
+              .replace(/:\d+(?::\d+)?$/u, "");
       if (
         path !== "" &&
         !path.startsWith("../") &&
