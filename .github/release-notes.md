@@ -138,6 +138,8 @@
 - create private Windows scan output directories ([#2390](https://github.com/openai/codex-security/pull/2390))
 - preserve Windows directory symlinks in snapshot copies ([#2391](https://github.com/openai/codex-security/pull/2391))
 - quote Codex overrides across Windows shells ([#2400](https://github.com/openai/codex-security/pull/2400))
+- recover long Windows root inventories with an exact Git marker ([#2404](https://github.com/openai/codex-security/pull/2404))
+- bump napi from 3.15.0 to 3.16.0 in /plugins/codex-security/native ([#2395](https://github.com/openai/codex-security/pull/2395))
 
 </details>
 
