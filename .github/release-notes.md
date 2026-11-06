@@ -122,6 +122,7 @@
 - enable external scanner imports by default ([#2360](https://github.com/openai/codex-security/pull/2360))
 - consolidate preview migration receipt lookups ([#2357](https://github.com/openai/codex-security/pull/2357))
 - price OpenAI models by Bedrock region and inference route ([#2362](https://github.com/openai/codex-security/pull/2362))
+- preserve line breaks in oversized finding files ([#2361](https://github.com/openai/codex-security/pull/2361))
 
 </details>
 

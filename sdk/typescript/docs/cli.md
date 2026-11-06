@@ -2552,8 +2552,8 @@ after every request returns valid results. For these selections the CLI omits
 per-event progress and update notices so stderr cannot delay the verdicts.
 
 If a finding would exceed the input limit, `validate`, `patch`, and `verify-fix`
-automatically put the complete finding data in a temporary file and ask Codex
-to read it in bounded chunks. No manual splitting or truncation is needed.
+put the complete finding data in a temporary file for Codex to search alongside
+the checkout. A single input file keeps its original text and line breaks.
 The file remains available until the task finishes and is then removed. The
 SDK's local `validate()` and `patch()` methods use the same fallback.
 
