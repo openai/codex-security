@@ -26,6 +26,13 @@ test.skipIf(process.platform !== "win32")(
     );
     try {
       const caller = join(root, "caller");
+      const launcherEnv = {
+        SystemRoot: process.env["SystemRoot"],
+        HOME: root,
+        USERPROFILE: root,
+        LOCALAPPDATA: root,
+        XDG_CACHE_HOME: root,
+      };
       const runtime = join(root, "Node runtime");
       const scripts = join(root, "plugin", "scripts");
       const server = join(root, "plugin", "mcp", "server.mjs");
@@ -67,7 +74,7 @@ test.skipIf(process.platform !== "win32")(
           {
             cwd: caller,
             env: {
-              SystemRoot: process.env["SystemRoot"],
+              ...launcherEnv,
               PATH: path,
               PATHEXT: ".CMD;.EXE;.BAT;.COM",
             },
@@ -95,7 +102,7 @@ test.skipIf(process.platform !== "win32")(
         {
           cwd: caller,
           env: {
-            SystemRoot: process.env["SystemRoot"],
+            ...launcherEnv,
             PATH: ";.;relative-bin;",
           },
           encoding: "utf8",
