@@ -81,6 +81,8 @@ import {
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
+  isLocalWindowsCredentialVolume,
+  parseWindowsTokenGroupSids,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
@@ -4564,6 +4566,61 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("uses local group membership only on local Windows volumes", async () => {
+    const readType = mock(async () => "4");
+    for (const path of [
+      String.raw`\\server\share\home`,
+      String.raw`\\?\UNC\server\share\home`,
+    ]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+    }
+    expect(readType).not.toHaveBeenCalled();
+    for (const path of [String.raw`X:\home`, String.raw`\\?\X:\home`]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+      expect(readType).toHaveBeenLastCalledWith("X:");
+      expect(
+        await isLocalWindowsCredentialVolume(path, async () => "3\r\n"),
+      ).toBe(true);
+      expect(await isLocalWindowsCredentialVolume(path, async () => "")).toBe(
+        false,
+      );
+    }
+  });
+
+  test("preserves account denies only after excluding current token membership", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const group = "S-1-5-21-111-222-333-512";
+    const other = "S-1-5-21-0-0-0-424242";
+    const currentGroupSids = parseWindowsTokenGroupSids(
+      `"Domain, Group","Group","${group}","Group used for deny only"\r\n`,
+    );
+    const descriptor = `O:${user}D:P(D;OICI;FR;;;${other})(A;OICI;FA;;;${user})`;
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user).grantsCurrentUserAccess,
+    ).toBe(false);
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user, { currentGroupSids }),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      deniedPrincipals: [],
+    });
+    for (const principal of [user, "DA", "WD", "OW"]) {
+      expect(
+        inspectWindowsCredentialAcl(
+          descriptor.replace(other, principal),
+          user,
+          {
+            currentGroupSids,
+            resolvedAliases: { DA: group },
+          },
+        ).grantsCurrentUserAccess,
+      ).toBe(false);
+    }
+    for (const invalid of ["", `"a","b","${group}","c"\r\ninvalid`]) {
+      expect(() => parseWindowsTokenGroupSids(invalid)).toThrow();
+    }
+  });
+
   test("requires effective, inheritable Windows credential access", () => {
     const user = "S-1-5-21-111-222-333-1001";
     for (const [flags, rights] of [
@@ -5157,6 +5214,119 @@ describe("runtime directories and plugin Python boundary", () => {
       expect([sid!, "S-1-5-18", "S-1-5-32-544"]).toContain(access.owner);
       expect(new Set(access.principals)).toEqual(
         new Set([sid!, "S-1-5-18", "S-1-5-32-544"]),
+      );
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "preserves an unmapped Windows deny SID on a private credential home and its children",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      const home = join(state, "codex-home");
+      await mkdir(home, { recursive: true });
+      const child = join(home, "sessions");
+      const file = join(child, "fixture.txt");
+      const unmappedSid = "S-1-5-21-0-0-0-424242";
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_TEST_ACL_PATH: win32.toNamespacedPath(home),
+        CODEX_SECURITY_TEST_CHILD: win32.toNamespacedPath(child),
+        CODEX_SECURITY_TEST_FILE: win32.toNamespacedPath(file),
+      };
+      const identity = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
+      expect(identity.status).toBe(0);
+      const userSid = identity.stdout.match(/"(S-1-[0-9-]+)"\s*$/iu)?.[1];
+      if (!userSid)
+        throw new Error("Could not identify the Windows fixture user SID");
+      const sddl = `D:P(D;OICI;FR;;;${unmappedSid})(A;OICI;FA;;;${userSid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`;
+      // Set the raw DACL without resolving the synthetic trustee or invoking PowerShell methods.
+      const python = await resolvePluginPython();
+      const setDacl = (path: string, descriptor: string) => {
+        const setup = runNodePython(python, [
+          "-c",
+          [
+            "import ctypes, sys",
+            "from ctypes import wintypes",
+            "adv = ctypes.WinDLL('advapi32', use_last_error=True)",
+            "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+            "sd = wintypes.LPVOID()",
+            "if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sys.argv[2], 1, ctypes.byref(sd), None): raise ctypes.WinError(ctypes.get_last_error())",
+            "try:",
+            "    if not adv.SetFileSecurityW(sys.argv[1], wintypes.DWORD(0x80000004), sd): raise ctypes.WinError(ctypes.get_last_error())",
+            "finally: kernel.LocalFree(sd)",
+          ].join("\n"),
+          win32.toNamespacedPath(path),
+          descriptor,
+        ]);
+        expect(setup.status).toBe(0);
+      };
+      setDacl(home, sddl);
+      await mkdir(child);
+      await writeFile(file, "synthetic credential fixture\n");
+      // A subtree reset would replace this distinct protected file ACL with the home ACL.
+      setDacl(file, `D:P(D;;FR;;;${unmappedSid})(A;;FA;;;${userSid})`);
+
+      const readDescriptors = () => {
+        const result = inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH).Sddl",
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_CHILD).Sddl",
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_FILE).Sddl",
+          ],
+          environment,
+        );
+        if (result.status !== 0)
+          throw new Error(
+            "Fixture ACL read failed: " +
+              (result.stderr.match(
+                /FullyQualifiedErrorId\s*:\s*([\w.,-]+)/u,
+              )?.[1] ?? "unknown"),
+          );
+        return result.stdout.trim().split(/\r?\n/u);
+      };
+      const before = readDescriptors();
+      expect(before.length).toBe(3);
+      expect(before[0]!.includes("D:P") && before[2]!.includes("D:P")).toBe(
+        true,
+      );
+      expect(before[2] !== before[1]).toBe(true);
+      expect(
+        before.every((descriptor) => descriptor.includes(`;;;${unmappedSid})`)),
+      ).toBe(true);
+      const expectedHome = await realpath(home);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const prepared = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }).catch((error: unknown) => {
+          const cause = error instanceof Error ? error.cause : undefined;
+          if (
+            cause instanceof Error &&
+            "cmd" in cause &&
+            typeof cause.cmd === "string" &&
+            /\bicacls\.exe\b/iu.test(cause.cmd) &&
+            cause.cmd.includes(" /remove:d ") &&
+            cause.cmd.includes(`*${unmappedSid}`)
+          ) {
+            throw new Error("icacls attempted to remove the synthetic DENY");
+          }
+          throw error;
+        });
+        expect(prepared === expectedHome).toBe(true);
+        const after = readDescriptors();
+        expect(
+          after.map((descriptor, index) => descriptor === before[index]),
+        ).toEqual([true, true, true]);
+      }
+      expect(await readFile(file, "utf8")).toBe(
+        "synthetic credential fixture\n",
       );
     },
   );
