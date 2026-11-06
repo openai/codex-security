@@ -1278,7 +1278,12 @@ def copy_git_worktree_files(
         destination_path = destination / relative
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         if stat.S_ISLNK(metadata.st_mode):
-            destination_path.symlink_to(os.readlink(source_path))
+            directory_link = bool(
+                getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY
+            )
+            destination_path.symlink_to(
+                os.readlink(source_path), target_is_directory=directory_link
+            )
         elif stat.S_ISREG(metadata.st_mode):
             shutil.copy2(source_path, destination_path, follow_symlinks=False)
         elif stat.S_ISDIR(metadata.st_mode):

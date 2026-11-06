@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -141,17 +142,13 @@ try {
   );
   const run = (args: string[]): WorkbenchScanRecord & { scanId: string } =>
     JSON.parse(
-      execFileSync(
-        process.env.PYTHON || "python3",
-        ["-I", "-B", workbenchPath, ...args],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: join(fixtureRoot!, "state"),
-          },
+      execFileSync(fixturePython, ["-I", "-B", workbenchPath, ...args], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(fixtureRoot!, "state"),
         },
-      ),
+      }),
     );
   const registered = run([
     "register-cli-scan",

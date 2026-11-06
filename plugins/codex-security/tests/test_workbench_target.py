@@ -1532,6 +1532,22 @@ def test_git_context_preserves_trailing_root_whitespace(
 
 
 @pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="Windows symlinks record the target type")
+def test_copy_git_worktree_preserves_dangling_windows_directory_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    initialize_unborn_git_repository(source)
+    link = source / "directory-link"
+    link.symlink_to("missing", target_is_directory=True)
+
+    destination = tmp_path / "copy"
+    WORKBENCH_TARGET["copy_git_worktree_files"](source, destination, ())
+
+    copied = destination / link.name
+    assert os.readlink(copied) == os.readlink(link)
+    assert copied.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_DIRECTORY
+
+
+@pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows directory sharing")
 @pytest.mark.parametrize(
     "case",
