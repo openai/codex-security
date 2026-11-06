@@ -121,7 +121,8 @@ async function createDirectPluginOutput(scanRoot: string): Promise<{
       scanRoot,
     ],
   );
-  const scanDir = result["scanDir"];
+  const scan = result["scan"] as { scanDir?: unknown } | undefined;
+  const scanDir = scan?.scanDir;
   expect(typeof scanDir).toBe("string");
   const resolvedScanDir = await realpath(scanDir as string);
   expect(dirname(resolvedScanDir)).toBe(await realpath(targetRoot));
