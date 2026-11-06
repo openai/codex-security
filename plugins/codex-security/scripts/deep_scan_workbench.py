@@ -16,7 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
 from workbench.handoff import require_current_continuation
-from workbench.storage import archived_deep_path, create_private_directory, saved_deep_workers
+from workbench.storage import (
+    archived_deep_path,
+    create_private_directory,
+    saved_deep_workers,
+    worker_usage_directory,
+)
 from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
@@ -346,6 +351,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
             else scan["user_context"]
         ),
         "scanDir": scan["scan_dir"],
+        "workerUsageDirectory": str(worker_usage_directory(run["scan_id"])),
         "schemaVersion": run["schema_version"],
         "workflowVersion": run["workflow_version"],
         "coordinatorGeneration": run["coordinator_generation"],
@@ -1327,11 +1333,14 @@ def upsert_deep_scan_worker(
         if error_message is None and args.status != "succeeded":
             error_message = existing["error_message"]
         started_at = existing["started_at"] or (timestamp if args.status == "running" else None)
+        thread_id = optional_text(args.sdk_thread_id, maximum=512)
+        if thread_id is None and attempt == existing["attempt"]:
+            thread_id = existing["sdk_thread_id"]
         connection.execute(
             """
             UPDATE deep_scan_workers
             SET status = ?, result_manifest_path = ?, attempt = ?,
-                sdk_thread_id = COALESCE(?, sdk_thread_id),
+                sdk_thread_id = ?,
                 completion_sequence = ?, merge_state = ?,
                 error_message = ?,
                 started_at = ?, completed_at = ?, updated_at = ?
@@ -1341,7 +1350,7 @@ def upsert_deep_scan_worker(
                 args.status,
                 result_manifest_path or existing["result_manifest_path"],
                 attempt,
-                optional_text(args.sdk_thread_id, maximum=512),
+                thread_id,
                 completion_sequence,
                 merge_state,
                 error_message,
@@ -1472,14 +1481,12 @@ def finish_deep_scan_locked(
                 (scan_id,),
             )
         }
-        # Historical succeeded runs retain their exact omitted-worker replay contract.
-        omissions_match = omitted_worker_ids == buffered_worker_ids
         if run["status"] == "succeeded":
             if (
                 run["terminal_reason"] != args.terminal_reason
                 or archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
                 not in {None, manifest_path}
-                or not omissions_match
+                or omitted_worker_ids != buffered_worker_ids
             ):
                 raise SystemExit(
                     "Deep Scan terminal state is immutable; finish must exactly replay its "
@@ -1555,7 +1562,7 @@ def finish_deep_scan_locked(
             args.terminal_reason,
             has_omitted_workers=bool(omitted_worker_ids),
         )
-        if args.terminal_reason == "saturated" and not omissions_match:
+        if args.terminal_reason == "saturated" and omitted_worker_ids != buffered_worker_ids:
             raise SystemExit(
                 f"Deep Scan {args.terminal_reason} completion must exactly identify all buffered discovery "
                 "workers with --omitted-worker-id."
@@ -1586,7 +1593,6 @@ def finish_deep_scan_locked(
             """,
             (args.terminal_reason, manifest_path, timestamp, timestamp, scan_id),
         )
-        cancel_active_workers(connection, scan_id, timestamp)
         connection.commit()
     except BaseException:
         connection.rollback()

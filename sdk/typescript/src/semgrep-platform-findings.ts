@@ -787,7 +787,7 @@ export function normalizeSelectedSemgrepPlatformFindings(
   options: SemgrepSelectionInput & {
     sourceRepositoryUrl: string;
   },
-): ExternalFindings {
+) {
   const url = hostedRepositoryUrl(options.sourceRepositoryUrl, "Semgrep");
   const { scope, rows } = selectedRows(
     options,
@@ -806,11 +806,14 @@ export function normalizeSelectedSemgrepPlatformFindings(
     },
     hostedRepositoryUrl,
   );
-  return normalizePlatformRows(
-    rows.map((finding) => ({ finding, selectable: true })),
-    scope,
-    "local",
-  );
+  return {
+    ...normalizePlatformRows(
+      rows.map((finding) => ({ finding, selectable: true })),
+      scope,
+      "local",
+    ),
+    sourceRepositoryUrl: scope.project.url,
+  };
 }
 
 function sourceId(
