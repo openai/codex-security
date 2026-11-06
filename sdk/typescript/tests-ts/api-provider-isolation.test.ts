@@ -1028,9 +1028,13 @@ for (const mode of ["standard", "deep"] as const) {
   );
 }
 
-test.each(["selected", "alternate"] as const)(
-  "Deep workers receive the %s provider's Azure header when command authentication wins over ChatGPT",
-  async (headerProvider) => {
+test.each([
+  ["gateway", "selected header", "command"],
+  ["gateway", "alternate header", "command"],
+  ["amazon-bedrock", "alternate key", "aws_credentials"],
+] as const)(
+  "Deep workers receive Azure credentials with parent %s, %s and resolved %s authentication",
+  async (parentProvider, azureCredential, authMethod) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -1051,16 +1055,19 @@ test.each(["selected", "alternate"] as const)(
       {
         pluginPath: plugin,
         codexOverrides: {
-          model_provider: "gateway",
+          model_provider: parentProvider,
           model_providers: {
             gateway: {
               ...provider,
               auth: { command: process.execPath, args: ["--version"] },
-              ...(headerProvider === "selected" ? header : {}),
+              ...(azureCredential === "selected header" ? header : {}),
             },
-            alternate: {
+            azure: {
               ...provider,
-              ...(headerProvider === "alternate" ? header : {}),
+              ...(azureCredential === "alternate header" ? header : {}),
+              ...(azureCredential === "alternate key"
+                ? { env_key: "AZURE_OPENAI_API_KEY" }
+                : {}),
             },
           },
         },
@@ -1080,7 +1087,7 @@ test.each(["selected", "alternate"] as const)(
             const environment = options.env!;
             expect(environment["OPENAI_API_KEY"]).toBeUndefined();
             expect(environment["AZURE_OPENAI_API_KEY"]).toBe(
-              headerProvider === "selected" ? headerValue : undefined,
+              azureCredential === "selected header" ? headerValue : undefined,
             );
             const status = await nativeRequest(
               environment,
@@ -1092,7 +1099,7 @@ test.each(["selected", "alternate"] as const)(
             expect(status.data[0].toolsError).toBeNull();
             const worker = JSON.parse(await readFile(report, "utf8"));
             expect(worker.inherited.AZURE_OPENAI_API_KEY).toBe(
-              headerProvider === "selected" ? headerValue : null,
+              azureCredential === "selected header" ? headerValue : null,
             );
             expect(worker.recovered).toEqual({
               AZURE_OPENAI_API_KEY: headerValue,
@@ -1104,7 +1111,7 @@ test.each(["selected", "alternate"] as const)(
     try {
       const options = { mode: "deep", auth: "chatgpt" } as const;
       const preflight = await client.preflight(repository, options);
-      expect(preflight.authentication.method).toBe("command");
+      expect(preflight.authentication.method).toBe(authMethod);
       await expect(client.run(repository, options)).rejects.toThrow(
         "synthetic worker credentials checked",
       );

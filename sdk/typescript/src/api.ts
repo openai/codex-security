@@ -2438,7 +2438,8 @@ export class CodexSecurity {
         mode === "deep" &&
         (options.auth !== "chatgpt" ||
           authentication.method === "command" ||
-          authentication.method === "api_key")
+          authentication.method === "api_key" ||
+          authentication.method === "aws_credentials")
       ) {
         // A managed worker can select another declared native provider. Its
         // private snapshot below retains only variables named by those tables.
