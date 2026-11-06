@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { notify } from "./value.js";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,6 +11,7 @@ import {
   selectedScanEnvironment,
   type CodexSecuritySurface,
   type ScanAuthentication,
+  type ScanLifecycle,
   type ScanOptions,
 } from "./api.js";
 import {
@@ -28,6 +30,7 @@ import {
 import type {
   ScanCost,
   ScanSessionEvent,
+  ScanUsageMeasurement,
   ScanUsageObservation,
 } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
@@ -36,6 +39,7 @@ import { errorMessage } from "./errors.js";
 import type { Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { DeepScanProgress } from "./scan-progress.js";
 import type { ScanSettings } from "./scan-settings.js";
 import type { ScanProgress, ScanWorkerStatus } from "./worker-progress.js";
 import {
@@ -55,7 +59,8 @@ export interface ComponentScanOptions {
   planOnly?: boolean;
   workers?: number;
   config?: CodexSecurityConfig;
-  scanOptions?: Omit<ScanSettings, "target" | "outputDir">;
+  scanOptions?: Omit<ScanSettings, "target" | "outputDir"> &
+    Pick<ScanOptions, "onMeasurement">;
   signal?: AbortSignal;
   createSecurity?: (
     config: CodexSecurityConfig,
@@ -81,19 +86,25 @@ export interface ComponentReceipt {
   status: "pending" | "started" | "completed" | "failed";
   outputDir: string;
   scanId?: string;
+  operationId?: string;
   threatModelPath?: string;
   findingCount?: number;
   cost?: Readonly<ScanCost>;
+  measurement?: Readonly<ScanUsageMeasurement>;
+  outcome?: "completed" | "failed" | "canceled";
   error?: string;
 }
 
 type ComponentScanUpdate =
   | { type: "authentication"; value: ScanAuthentication }
+  | { type: "lifecycle"; value: ScanLifecycle }
   | { type: "progress"; value: ScanProgress }
+  | { type: "deep-progress"; value: DeepScanProgress }
   | { type: "activity"; value: ScanActivity }
   | { type: "session"; value: ScanSessionEvent }
   | { type: "cost"; value: Readonly<ScanCost> }
   | { type: "usage"; value: Readonly<ScanTokenUsage> }
+  | { type: "measurement"; value: Readonly<ScanUsageMeasurement> }
   | { type: "usage-observation"; value: Readonly<ScanUsageObservation> }
   | { type: "workers"; value: ScanWorkerStatus }
   | { type: "warning"; value: string };
@@ -141,7 +152,7 @@ export async function runComponentScans(
   if (!Number.isSafeInteger(workers) || workers < 1)
     throw new Error("Component workers must be a positive integer.");
   if (Boolean(options.auto) === (options.components !== undefined))
-    throw new Error("Choose components or automatic planning, not both.");
+    throw new Error("Choose exactly one of components or automatic planning.");
   const auth = options.scanOptions?.auth;
   let environment = options.environment;
   if (auth !== undefined && auth !== "auto") {
@@ -165,6 +176,7 @@ export async function runComponentScans(
       auth,
       provider,
       providerEnvKey,
+      configuration,
     );
   }
   const repository = await normalizeRepository(
@@ -207,12 +219,14 @@ export async function runComponentScans(
     (component, index) => ({
       ...component,
       id: `component-${index + 1}`,
+      operationId: randomUUID(),
       status: "pending",
       outputDir: join(output, `component-${index + 1}`),
     }),
   );
   notify(() => options.onPlan?.(receipts.map(copyReceipt)));
   const results = new Map<string, ScanResult>();
+  const parentAttemptId = randomUUID();
   let next = 0;
   const settled = await Promise.allSettled(
     Array.from({ length: Math.min(workers, receipts.length) }, async () => {
@@ -244,7 +258,10 @@ export async function runComponentScans(
               : {
                   onAuthentication: (value) =>
                     emit({ type: "authentication", value }),
+                  onLifecycle: (value) => emit({ type: "lifecycle", value }),
                   onProgress: (value) => emit({ type: "progress", value }),
+                  onDeepProgress: (value) =>
+                    emit({ type: "deep-progress", value }),
                   onActivity: (value) => emit({ type: "activity", value }),
                   onSessionEvent: (value) => emit({ type: "session", value }),
                   onCost: (value) => emit({ type: "cost", value }),
@@ -258,10 +275,24 @@ export async function runComponentScans(
             const result = await security.run(repository, {
               ...options.scanOptions,
               ...observers,
+              onScanRegistered: ({ scanId }) => {
+                receipt.scanId = scanId;
+              },
               mode: options.scanOptions?.mode ?? "standard",
               target: receipt.paths.map((path) => resolve(repository, path)),
               outputDir: receipt.outputDir,
               signal: options.signal,
+              telemetryContext: {
+                operationId: receipt.operationId!,
+                parentAttemptId,
+              },
+              onMeasurement: (measurement) => {
+                receipt.measurement = measurement;
+                if (measurement.cost !== null) receipt.cost = measurement.cost;
+                else delete receipt.cost;
+                notify(() => options.scanOptions?.onMeasurement?.(measurement));
+                emit({ type: "measurement", value: measurement });
+              },
             });
             if (result.manifest.scan.status !== "completed")
               throw new Error(`Component scan ${result.manifest.scan.status}.`);
@@ -270,10 +301,12 @@ export async function runComponentScans(
             receipt.findingCount = result.findings.findings.length;
             if (result.cost !== null) receipt.cost = result.cost;
             receipt.status = "completed";
+            receipt.outcome = "completed";
             if (result.threatModelPath !== null)
               receipt.threatModelPath = result.threatModelPath;
           } catch (error) {
             receipt.status = "failed";
+            receipt.outcome = options.signal?.aborted ? "canceled" : "failed";
             receipt.error = errorMessage(error);
             if (!options.signal?.aborted) {
               const path = await readThreatModelPath(receipt.outputDir, {
@@ -295,6 +328,7 @@ export async function runComponentScans(
   for (const receipt of receipts) {
     if (receipt.status === "pending" || receipt.status === "started") {
       receipt.status = "failed";
+      receipt.outcome = options.signal?.aborted ? "canceled" : "failed";
       receipt.error = options.signal?.aborted
         ? "Scan canceled."
         : "Component scan did not finish.";
@@ -350,6 +384,7 @@ export async function runComponentScans(
   await writeJson(summary.summaryPath, {
     ...summary,
     repository,
+    attemptId: parentAttemptId,
     components: receipts,
   });
   await writeFile(

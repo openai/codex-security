@@ -1,3 +1,5 @@
+"""Distinguish a missing optional writeup from other read failures during scan recovery."""
+
 from __future__ import annotations
 
 import copy

@@ -17,6 +17,7 @@ jobs:
           persist-credentials: false
       - name: Scan the repository
         id: security
+        # Choose the distribution SHA as described at https://github.com/openai/codex-security/tree/main/github-action#quick-start
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: repository

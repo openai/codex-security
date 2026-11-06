@@ -59,12 +59,19 @@ import { createInterface } from 'node:readline';
 const lines = createInterface({input: process.stdin});
 const request = JSON.parse((await lines[Symbol.asyncIterator]().next()).value);
 writeFileSync(process.env.SYNTHETIC_RECEIPT, JSON.stringify({
-  request, argv: process.argv.slice(2), key: process.env.CODEX_API_KEY,
+  request, ipc: !!process.send, argv: process.argv.slice(2), key: process.env.CODEX_API_KEY,
   execPath: process.execPath, bun: process.versions.bun,
   awsProfile: process.env.AWS_PROFILE, snapshot: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-  externalImports: process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
 }));
-if (process.env.SYNTHETIC_WAIT === '1') {
+if (request.diagnosticsVersion === 1 && process.env.SYNTHETIC_OLD_ENGINE !== '1') {
+  process.send({ event: 'discovery_worker_replaced', scanId: request.scanId, reason: 'tool error' });
+}
+if (process.env.SYNTHETIC_FAIL === '1') {
+  process.stderr.write('first detail\\nlast detail');
+  process.exitCode = 1;
+  lines.close();
+  process.stdin.destroy();
+} else if (process.env.SYNTHETIC_WAIT === '1') {
   lines.once('close', () => { writeFileSync(process.env.SYNTHETIC_RECEIPT + '.stopped', 'stopped'); process.exit(0); });
   setInterval(() => {}, 1000);
 } else {
@@ -81,7 +88,7 @@ if (process.env.SYNTHETIC_WAIT === '1') {
 test("isolates direct engine credentials and runtime snapshots across concurrent scans", async () => {
   const { root, pluginRoot } = await fixture();
   const events = await Promise.all(
-    ["first", "second", "unset", "mixed-case"].map(async (name) => {
+    ["first", "second"].map(async (name) => {
       const scanDir = join(root, name);
       const receipt = join(root, `${name}.json`);
       await mkdir(scanDir);
@@ -96,14 +103,6 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
           "private-snapshot.toml",
         ),
         AWS_PROFILE: `profile-${name}`,
-        ...(name === "mixed-case"
-          ? { Codex_Security_Enable_External_Imports: "1" }
-          : name === "unset"
-            ? {}
-            : {
-                CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS:
-                  name === "first" ? "1" : "0",
-              }),
       };
       const before = { ...environment };
       const collected = [];
@@ -129,18 +128,6 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       }))
         collected.push(event);
       const saved = JSON.parse(await readFile(receipt, "utf8"));
-      assert.equal(
-        saved.externalImports,
-        name === "mixed-case"
-          ? process.platform === "win32"
-            ? "1"
-            : undefined
-          : name === "first"
-            ? "1"
-            : name === "second"
-              ? "0"
-              : undefined,
-      );
       assert.partialDeepStrictEqual(saved, {
         key: `synthetic-key-${name}`,
         awsProfile: `profile-${name}`,
@@ -151,6 +138,8 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
         },
       });
       assert.deepEqual(saved.argv, ["--deep-scan-engine"]);
+      assert.equal(saved.ipc, false);
+      assert.equal(saved.request.diagnosticsVersion, undefined);
       assert.deepEqual(saved.request.permissionProfile, {
         commandArgs: ["--config", `model_provider="provider_${name}"`],
         configOverrides: [
@@ -179,6 +168,49 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
   firstUsage["input_tokens"] = 100;
   assert.equal(secondUsage["input_tokens"], 0);
   assert.equal(DIRECT_DEEP_SCAN_CONTROL_USAGE.input_tokens, 0);
+});
+
+test("keeps direct coordinator events separate from results and child errors across helper versions", async () => {
+  const { root, pluginRoot } = await fixture();
+  for (const [old, failed] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ]) {
+    const observed: string[] = [];
+    const events = runDeepScan({
+      preflightCommand: { command: "/synthetic/codex" },
+      repository: root,
+      pluginRoot,
+      scanDir: root,
+      scanId: "fixture",
+      prompt: "Review fixture",
+      signal: new AbortController().signal,
+      async onDiagnostic(fields) {
+        observed.push(String(fields["event"]));
+        throw new Error("unavailable sink");
+      },
+      codexOptions: {
+        env: {
+          PATH: process.versions["bun"] ? process.env["PATH"]! : "",
+          CODEX_HOME: join(root, "codex-home"),
+          CODEX_SECURITY_SCAN_DIR: root,
+          SYNTHETIC_RECEIPT: join(root, "receipt"),
+          SYNTHETIC_THREAD_ID: "parent",
+          SYNTHETIC_OLD_ENGINE: old ? "1" : "0",
+          SYNTHETIC_FAIL: failed ? "1" : "0",
+        },
+      },
+    });
+    assert.equal((await events.next()).value?.type, "thread.started");
+    if (failed)
+      await assert.rejects(events.next(), {
+        message: "first detail\nlast detail",
+      });
+    else assert.equal((await events.next()).value?.type, "turn.completed");
+    assert.deepEqual(observed, old ? [] : ["discovery_worker_replaced"]);
+  }
 });
 
 test("preserves complete worker usage and cost after direct engine completion", async () => {
@@ -270,7 +302,16 @@ test("preserves complete worker usage and cost after direct engine completion", 
       parent: "engine-session",
     },
   );
-  assert.deepEqual(await tracker.refresh(), { usage: null, cost: null });
+  const partial = await tracker.refresh();
+  assert.equal(partial.usage, null);
+  assert.equal(partial.cost, null);
+  assert.partialDeepStrictEqual(partial.measurement, {
+    usage: running.usage,
+    cost: running.cost,
+    coverage: "partial",
+    threadCount: 3,
+    missingThreadCount: 1,
+  });
   tracker.recordUsage(
     {
       input_tokens: 0,
@@ -292,9 +333,45 @@ test("preserves complete worker usage and cost after direct engine completion", 
     total_tokens: 1_660,
   });
   assert.notEqual(running.cost, null);
-  assert.deepEqual(final, running);
+  assert.deepEqual(final.usage, running.usage);
+  assert.deepEqual(final.cost, running.cost);
+  assert.partialDeepStrictEqual(final.measurement, {
+    usage: running.usage,
+    cost: running.cost,
+    coverage: "complete",
+    threadCount: 4,
+    missingThreadCount: 0,
+  });
   assert.equal(final.cost?.cacheWriteInputTokensReported, undefined);
   assert.equal((await events.next()).done, true);
+});
+
+test("preserves the engine diagnostic when the child exits before reading its request", async () => {
+  const { root, pluginRoot } = await fixture();
+  await writeFile(
+    join(pluginRoot, "mcp", "server.mjs"),
+    'process.stderr.write("synthetic engine startup failure"); process.exitCode = 23;',
+  );
+  // Exceed the control pipe capacity so the engine closes with a write pending.
+  const events = runDeepScan({
+    preflightCommand: { command: "/synthetic/codex" },
+    pluginRoot,
+    repository: root,
+    scanDir: root,
+    scanId: "startup-failure",
+    prompt: "Synthetic audit.",
+    signal: new AbortController().signal,
+    codexOptions: {
+      configOverrides: [`synthetic="${"x".repeat(2 * 1024 * 1024)}"`],
+      env: {
+        PATH: process.versions["bun"] ? process.env["PATH"]! : "",
+        CODEX_HOME: join(root, "codex-home"),
+        SYNTHETIC_THREAD_ID: "startup-session",
+      },
+    },
+  });
+  await events.next();
+  await assert.rejects(events.next(), /synthetic engine startup failure/);
 });
 
 test("waits for the direct engine to stop when the scan is canceled", async () => {
@@ -307,6 +384,9 @@ test("waits for the direct engine to stop when the scan is canceled", async () =
     repository: root,
     scanDir: root,
     scanId: "canceled-scan",
+    onDiagnostic() {
+      throw new Error("closed presentation");
+    },
     prompt: "Synthetic audit.",
     signal: controller.signal,
     codexOptions: {

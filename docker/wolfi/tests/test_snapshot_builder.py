@@ -1,3 +1,5 @@
+"""Exercise snapshot publication against signed, unsigned, and corrupted APK byte streams."""
+
 import base64
 import gzip
 import hashlib
@@ -11,6 +13,7 @@ snapshot = runpy.run_path(str(Path(__file__).resolve().parents[1] / "snapshot-bu
 
 
 def fixture(name, signed):
+    """Return an apko lock record and the matching gzip members for one synthetic APK."""
     # APK v2 stores consecutive, independently compressed gzip members.
     url = f"https://packages.wolfi.dev/os/x86_64/{name}-1-r0.apk"
     pkg = {"name": name, "version": "1-r0", "url": url, "architecture": "x86_64"}
@@ -28,6 +31,8 @@ def fixture(name, signed):
 
 
 class SnapshotTest(unittest.TestCase):
+    """Stage packages in a temporary directory using an in-memory URL opener."""
+
     def setUp(self):
         self.first, self.a = fixture("first", signed=False)
         self.second, self.b = fixture("second", signed=True)
