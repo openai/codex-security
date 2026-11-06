@@ -4584,7 +4584,10 @@ export class CodexSecurity {
                   result = ScanExecutionResultSchema.parse(
                     await hosted.executor.run(request, {
                       signal: signal ?? new AbortController().signal,
-                      onEvent: hosted.onEvent,
+                      onEvent(event) {
+                        if (event.type !== "session.started")
+                          hosted.onEvent(event);
+                      },
                     }),
                   );
                 } catch (error) {

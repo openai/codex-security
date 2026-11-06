@@ -9,6 +9,7 @@ import {
 } from "./hosted-scan.js";
 import {
   ScanExecutionEventSchema,
+  HostedScanExecutionEventSchema,
   ScanExecutionResultSchema,
 } from "./scan-executor.js";
 
@@ -44,7 +45,11 @@ export async function runHostedScanProtocol(
                   request.requestId,
                   request,
                   (event) => {
-                    const parsed = ScanExecutionEventSchema.safeParse(event);
+                    const schema =
+                      request.version === 3
+                        ? HostedScanExecutionEventSchema
+                        : ScanExecutionEventSchema;
+                    const parsed = schema.safeParse(event);
                     if (parsed.success) options.onEvent?.(parsed.data);
                   },
                   undefined,

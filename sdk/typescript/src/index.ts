@@ -38,6 +38,7 @@ export type {
   DeepScanExecutionRequest,
   ScanExecutionResult,
   ScanExecutionEvent,
+  HostedScanExecutionEvent,
 } from "./scan-executor.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {

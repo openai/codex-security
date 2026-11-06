@@ -402,6 +402,10 @@ progress/activity events with the originating request ID. Responses retain the
 same execution receipt shape as v2, with optional `turnId` for a particular turn.
 Each continuation returns a separate receipt and its recorded usage.
 
+`HostedScanExecutor` accepts these session notifications through
+`HostedScanExecutionEvent`. The scan's public `onEvent` callback and the Standard
+`ScanExecutionEvent` type continue to expose only progress and activity.
+
 Keep a completed session available for continuation until the CLI requests
 release. A release can overlap another worker's execution or cleanup:
 

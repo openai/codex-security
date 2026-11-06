@@ -109,9 +109,13 @@ test.each([false, true])(
   async (scoped) => {
     const input = await fixture(scoped);
     const dispatched: DeepScanExecutionRequest[] = [];
+    const publicEvents: string[] = [];
     const active = new Set<string>();
     const ready = Promise.withResolvers<void>();
     const result = await runHostedScan(input, {
+      onEvent(event) {
+        publicEvents.push(event.type);
+      },
       executor: {
         async run(value, options) {
           const request = discovery(value);
@@ -135,6 +139,7 @@ test.each([false, true])(
       },
     });
     expect(result).toMatchObject({ status: "completed" });
+    expect(publicEvents).not.toContain("session.started");
     expect(result.coordinatorStatus).toBe("succeeded");
     expect(result.execution).toBeUndefined();
     expect(active.size).toBe(0);

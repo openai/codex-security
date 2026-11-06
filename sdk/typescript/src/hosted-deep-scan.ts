@@ -150,7 +150,7 @@ export async function* runHostedDeepScan(options: {
               method: "execution.progress",
               params: { requestId: message.id, event },
             });
-            options.onEvent(event);
+            if (event.type !== "session.started") options.onEvent(event);
           },
         }),
       );

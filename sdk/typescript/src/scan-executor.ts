@@ -79,15 +79,14 @@ export const ScanExecutionResultSchema = z
   );
 export type ScanExecutionResult = z.infer<typeof ScanExecutionResultSchema>;
 export type ScanExecutionEvent =
-  | { type: "session.started"; sessionId: string }
   | { type: "progress"; progress: ScanProgress }
   | { type: "activity"; activity: ScanActivity };
 
+/** Deep executors also identify their session before the turn finishes. */
+export type HostedScanExecutionEvent =
+  ScanExecutionEvent | { type: "session.started"; sessionId: string };
+
 export const ScanExecutionEventSchema = z.discriminatedUnion("type", [
-  z.strictObject({
-    type: z.literal("session.started"),
-    sessionId: z.string().min(1),
-  }),
   z.strictObject({
     type: z.literal("progress"),
     progress: z.strictObject({
@@ -116,16 +115,25 @@ export const ScanExecutionEventSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
+export const HostedScanExecutionEventSchema = z.discriminatedUnion("type", [
+  ...ScanExecutionEventSchema.options,
+  z.strictObject({
+    type: z.literal("session.started"),
+    sessionId: z.string().min(1),
+  }),
+]);
+
 export interface ScanExecutor<
   Request extends ScanExecutionRequest | DeepScanExecutionRequest =
     ScanExecutionRequest,
+  Event extends HostedScanExecutionEvent = ScanExecutionEvent,
 > {
   /** Submit once. On abort, settle with the host's recorded outcome and usage. */
   run(
     request: Request,
     options: {
       signal: AbortSignal;
-      onEvent?: (event: ScanExecutionEvent) => void;
+      onEvent?: (event: Event) => void;
     },
   ): Promise<ScanExecutionResult>;
   /** Deep scan sessions outlive individual turns until explicitly released. */
@@ -134,7 +142,8 @@ export interface ScanExecutor<
 
 /** An executor opting into both versions of the hosted scan protocol. */
 export type HostedScanExecutor = ScanExecutor<
-  ScanExecutionRequest | DeepScanExecutionRequest
+  ScanExecutionRequest | DeepScanExecutionRequest,
+  HostedScanExecutionEvent
 >;
 
 /** Carries the exact execution outcome even when finalization cannot complete. */
