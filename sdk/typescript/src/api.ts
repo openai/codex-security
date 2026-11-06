@@ -1067,7 +1067,6 @@ export class CodexSecurity {
             options.auth,
             session.modelProvider,
             session.providerEnvKey,
-            session.effectiveConfig,
           ),
           session.providerEnvKey,
         ),
@@ -2362,7 +2361,6 @@ export class CodexSecurity {
             options.auth,
             modelProvider,
             session.providerEnvKey,
-            effectiveConfig,
           ),
           session.providerEnvKey,
         ),
@@ -4851,6 +4849,7 @@ export class CodexSecurity {
         modelProvider,
         providerEnvKey,
         requestedConfig,
+        "selected",
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -5556,6 +5555,7 @@ export class CodexSecurity {
       modelProvider,
       providerEnvKey,
       requestedConfig,
+      "selected",
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -6606,6 +6606,7 @@ export function selectedScanEnvironment(
   modelProvider?: unknown,
   providerEnvKey?: string,
   config?: JsonObject,
+  providerKeys: "selected" | "declared" = "declared",
 ): ProcessEnvironment {
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
@@ -6652,6 +6653,7 @@ export function selectedScanEnvironment(
     }),
   );
   if (
+    providerKeys === "declared" &&
     config !== undefined &&
     providerEnvKey !== undefined &&
     standardProviderKey === null &&
