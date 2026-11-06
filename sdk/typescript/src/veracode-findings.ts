@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { markPreviousCloudProjection } from "./reader-selection.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import {
@@ -362,7 +363,29 @@ function readPage(input: unknown) {
   return { rows, scope, query, filter, number, size, total, pages };
 }
 
-function rowSelectionValidator(query: URLSearchParams) {
+function findingDetails(row: Record<string, unknown>) {
+  return record(row["finding_details"], "Veracode finding_details");
+}
+
+// The Findings API schema uses a numeric CWE and a category name. HAL exports
+// can expand either field to a descriptor containing its ID and name.
+function expandedDetails(
+  details: Record<string, unknown>,
+): Record<string, unknown> {
+  const { cwe, finding_category: category } = details;
+  if (typeof cwe !== "number" && typeof category !== "string") return details;
+  return {
+    ...details,
+    cwe: typeof cwe === "number" ? { id: cwe } : cwe,
+    finding_category:
+      typeof category === "string" ? { name: category } : category,
+  };
+}
+
+function rowSelectionValidator(
+  query: URLSearchParams,
+  expand: typeof expandedDetails,
+) {
   const staticOnly = query.has("scan_type");
   const violates = query.get("violates_policy");
   const newOnly = query.get("new") === "true";
@@ -385,6 +408,7 @@ function rowSelectionValidator(query: URLSearchParams) {
   });
 
   return (row: Record<string, unknown>) => {
+    let expandedFilter = false;
     if (
       newOnly &&
       record(row["finding_status"], "Veracode finding_status")["new"] !== true
@@ -399,14 +423,14 @@ function rowSelectionValidator(query: URLSearchParams) {
         "Veracode finding contradicts the include_annot selection.",
       );
     if (idFilters.length || scoreFilters.length) {
-      const details = record(
-        row["finding_details"],
-        "Veracode finding_details",
-      );
+      const native = findingDetails(row);
+      const details = expand(native);
       for (const { field, ids } of idFilters) {
         if (row["scan_type"] !== "STATIC") continue;
         const entry = record(details[field], `Veracode ${field}`);
         const id = integer(entry["id"], `${field} ID`);
+        // Older readers required HAL descriptors for filtered IDs.
+        expandedFilter ||= details !== native && native[field] !== entry;
         if (!ids.has(String(id)))
           throw new Error(
             `Veracode finding contradicts the ${field} selection.`,
@@ -435,10 +459,11 @@ function rowSelectionValidator(query: URLSearchParams) {
       throw new Error(
         "Veracode finding contradicts the violates_policy selection.",
       );
+    return expandedFilter;
   };
 }
 
-function readReport(input: unknown) {
+function readReport(input: unknown, expand: typeof expandedDetails) {
   const pages = (Array.isArray(input) ? input : [input])
     .map(readPage)
     .sort((left, right) => left.number - right.number);
@@ -459,14 +484,15 @@ function readReport(input: unknown) {
       "Supply every Veracode page exactly once with stable totals, selection, origin and application context.",
     );
   const { scope } = first;
-  const checkSelection = rowSelectionValidator(first.query);
+  const checkSelection = rowSelectionValidator(first.query, expand);
+  let usedExpandedFilter = false;
   const seen = new Set<string>();
   const rows: Record<string, unknown>[] = [];
   for (const page of pages) {
     for (const value of page.rows) {
       const row = record(value, "Veracode finding");
       requireApplication(row, scope);
-      checkSelection(row);
+      if (checkSelection(row)) usedExpandedFilter = true;
       const issue = row["issue_id"];
       if (
         typeof row["scan_type"] === "string" &&
@@ -482,27 +508,27 @@ function readReport(input: unknown) {
       rows.push(row);
     }
   }
-  return { scope, rows };
+  return { scope, rows, usedExpandedFilter };
 }
 
-export function normalizeVeracodeFindings(
+function normalizeReport(
   input: unknown,
   sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
+  target: ExternalImportTarget,
+  expand: typeof expandedDetails,
 ): ExternalFindings {
   const repository = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
     "Veracode",
     target,
   );
-  const { scope, rows } = readReport(input);
-  return normalizeRecords(
+  const { scope, rows, usedExpandedFilter } = readReport(input, expand);
+  let admittedScalar = false;
+  const findings = normalizeRecords(
     rows,
     (row) => {
-      const details = record(
-        row["finding_details"],
-        "Veracode finding_details",
-      );
+      const native = findingDetails(row);
+      const details = expand(native);
       const status = record(row["finding_status"], "Veracode finding_status");
       const cwe = record(details["cwe"], "Veracode CWE");
       const weakness = `CWE-${integer(cwe["id"], "CWE ID", 1)}`;
@@ -514,7 +540,7 @@ export function normalizeVeracodeFindings(
         severityByScore[integer(details["severity"], "severity")];
       if (!severity)
         throw new Error("Veracode severity must be on the native 0–5 scale.");
-      return validateExternalEvidence(
+      const evidence = validateExternalEvidence(
         {
           title: text(category?.["name"]) ?? text(cwe["name"]) ?? weakness,
           severity,
@@ -536,9 +562,36 @@ export function normalizeVeracodeFindings(
         },
         target,
       );
+      if (details !== native) admittedScalar = true;
+      return evidence;
     },
     (row) => occurrenceId(row, scope),
     target,
+  );
+  if (target === "cloud" && admittedScalar && !usedExpandedFilter)
+    markPreviousCloudProjection(findings);
+  return findings;
+}
+
+export function normalizeVeracodeFindings(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  return normalizeReport(input, sourceRepositoryUrl, target, expandedDetails);
+}
+
+/** Reconstruct a saved publication made when only HAL descriptors were admitted. */
+export function normalizePreviousVeracodeFindings(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  return normalizeReport(
+    input,
+    sourceRepositoryUrl,
+    target,
+    (details) => details,
   );
 }
 

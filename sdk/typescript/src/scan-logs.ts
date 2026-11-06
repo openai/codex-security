@@ -1,9 +1,6 @@
-import { createReadStream } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { createInterface } from "node:readline";
-import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
-import zlib from "node:zlib";
+import { sessionLines } from "./session-lines.js";
 import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
@@ -23,6 +20,7 @@ interface ScanLogOptions {
   executionThreadIds?: readonly string[];
   codexHome: string | readonly string[];
   scanDirectory?: string;
+  startedAt?: string;
   completedAt?: string | null;
   allowMissingRoot?: boolean;
 }
@@ -34,6 +32,7 @@ export type ScanLogSource = JsonObject & {
   executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
+  lifecycle?: { startedAt: string; finishedAt?: string | null };
   progress?: { status?: string; updatedAt?: string };
 };
 
@@ -56,20 +55,17 @@ export function readSavedScanLogs(
     codexHome,
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+    startedAt: scan.lifecycle?.startedAt,
     completedAt:
       scan.progress?.status === "running"
         ? null
         : scan.progress?.status === "complete" ||
             scan.progress?.status === "failed" ||
             scan.progress?.status === "canceled"
-          ? (scan.progress.updatedAt ?? "")
+          ? (scan.lifecycle?.finishedAt ?? scan.progress.updatedAt ?? "")
           : "",
   });
 }
-
-// Codex can compress cold rollouts to `.jsonl.zst`. Node 22.13 and 22.14 lack
-// zstd, so they still read plain rollouts only.
-const readsCompressedSessions = typeof zlib.createZstdDecompress === "function";
 
 type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
@@ -78,10 +74,7 @@ async function* scanSessions(
   directory = "sessions",
   workersOnly = false,
 ) {
-  for await (const path of sessionFiles(
-    join(codexHome, directory),
-    readsCompressedSessions,
-  )) {
+  for await (const path of sessionFiles(join(codexHome, directory), true)) {
     for await (const first of sessionEvents(path)) {
       if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
         break;
@@ -158,7 +151,6 @@ async function selectSessionCopies(
       `No saved session logs are available for scan ${options.scanId}.`,
     );
   }
-  let children: Map<string | undefined, SessionLog[]> | undefined;
 
   const included = new Set([
     ...(options.threadId ? [options.threadId] : []),
@@ -168,23 +160,54 @@ async function selectSessionCopies(
   // A Desktop owner can contain other work. Include its log without treating
   // the whole conversation tree as part of this scan.
   const traversed = new Set(options.executionThreadIds ?? included);
-  for (const parentId of traversed) {
-    const parent = logs.get(parentId)?.[0];
-    // Parentless workers can only belong to the root, in discovery order.
-    children ??= Map.groupBy(
-      logs.values().map(([session]) => session),
-      (session) => session.parentThreadId ?? root?.threadId,
-    );
-    for (const session of children.get(parentId) ?? []) {
+  const children = Map.groupBy(
+    logs.values().map(([session]) => session),
+    (session) => session.parentThreadId,
+  );
+  // Comparisons have no spawn edge. The saved scan window also works for a
+  // shared Desktop owner, whose unrelated child threads must stay excluded.
+  const startedAt =
+    options.startedAt === undefined
+      ? root && traversed.has(root.threadId)
+        ? root.startedAt
+        : null
+      : sessionStartedAt(options.startedAt);
+  if (options.scanDirectory && startedAt !== null) {
+    const directories = [options.scanDirectory];
+    const name = basename(options.scanDirectory);
+    for (const marker of name.matchAll(/\.previous-/g)) {
+      if (!marker.index) continue;
+      const original = join(
+        dirname(options.scanDirectory),
+        name.slice(0, marker.index),
+      );
+      // A Desktop owner can work outside the scan directory. Its registered
+      // workers provide the same binding after archiving the output.
       if (
-        !traversed.has(session.threadId) &&
-        (session.parentThreadId === parentId
-          ? !window || inRolloutWindow(session.timestamp, window)
-          : parent !== undefined && belongsToScan(session, parent, options))
+        (root?.workingDirectory != null &&
+          relative(original, root.workingDirectory) === "") ||
+        Array.from(traversed).some((threadId) => {
+          const cwd = logs.get(threadId)?.[0].workingDirectory;
+          return cwd != null && isScanArtifactDirectory(original, cwd);
+        })
+      )
+        directories.push(original);
+    }
+    for (const session of children.get(null) ?? []) {
+      if (
+        session !== root &&
+        belongsToScan(session, directories, startedAt, options.completedAt)
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
       }
+    }
+  }
+  for (const parentId of traversed) {
+    for (const session of children.get(parentId) ?? []) {
+      if (window && !inRolloutWindow(session.timestamp, window)) continue;
+      included.add(session.threadId);
+      traversed.add(session.threadId);
     }
   }
   return [...included].flatMap((id) => {
@@ -495,16 +518,14 @@ export async function readScanLogs(options: ScanLogOptions) {
 
 function belongsToScan(
   session: SessionLog,
-  root: SessionLog,
-  options: ScanLogOptions,
+  directories: string[],
+  startedAt: number,
+  completedAt: string | null | undefined,
 ): boolean {
-  const { scanDirectory, completedAt } = options;
   if (
-    scanDirectory === undefined ||
     session.workingDirectory === null ||
-    root.startedAt === null ||
     session.startedAt === null ||
-    session.startedAt < root.startedAt
+    session.startedAt < startedAt
   ) {
     return false;
   }
@@ -515,21 +536,7 @@ function belongsToScan(
     }
   }
 
-  const roots = [scanDirectory];
-  const name = basename(scanDirectory);
-  const marker = name.lastIndexOf(".previous-");
-  if (
-    marker > 0 &&
-    root.workingDirectory !== null &&
-    relative(
-      join(dirname(scanDirectory), name.slice(0, marker)),
-      root.workingDirectory,
-    ) === ""
-  ) {
-    roots.push(root.workingDirectory);
-  }
-
-  for (const directoryRoot of roots) {
+  for (const directoryRoot of directories) {
     if (isScanArtifactDirectory(directoryRoot, session.workingDirectory)) {
       return true;
     }
@@ -559,13 +566,8 @@ async function* sessionEvents(
   path: string,
   strict = false,
 ): AsyncGenerator<Record<string, unknown>> {
-  const file = createReadStream(path);
-  const stream = path.endsWith(".zst")
-    ? pipeline(file, zlib.createZstdDecompress(), () => {})
-    : file;
-  const lines = createInterface({ input: stream, crlfDelay: Infinity });
   try {
-    for await (const line of lines) {
+    for await (const line of sessionLines(path)) {
       if (line.trim() === "") continue;
       try {
         const event: unknown = JSON.parse(line);
@@ -581,8 +583,5 @@ async function* sessionEvents(
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  } finally {
-    lines.close();
-    stream.destroy();
   }
 }

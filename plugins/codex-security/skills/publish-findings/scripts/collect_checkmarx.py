@@ -389,8 +389,6 @@ def main() -> int:
         help="use the Checkmarx credentials selected for this profile's server",
     )
     args = parser.parse_args()
-    if os.environ.get("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS") != "1":
-        parser.error("Set CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1 to enable external imports.")
     if args.product == "one":
         if not re.fullmatch(
             r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.scan_id, re.I | re.ASCII

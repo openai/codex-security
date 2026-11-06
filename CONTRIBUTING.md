@@ -1,19 +1,37 @@
 # Contributing
 
-Thanks for helping improve Codex Security. We welcome bug reports, feature
-requests, documentation corrections, and feedback from open-source
-maintainers.
+Start with the [source map](#where-to-make-a-change) for a code or documentation change. For a bug or feature request, [search existing issues](https://github.com/openai/codex-security/issues) first. Report vulnerabilities through the [security policy](SECURITY.md).
+
+## Where to make a change
+
+Start with the owner of the behavior, then follow its callers when the change
+crosses a process, persistence, or package boundary.
+
+| Change                                          | Source to start with                                                                                                                                                                                                                   | Relevant checks                                                                                                                                                                                                                                         |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Documentation                                   | [User guides](docs/), [SDK and CLI guides](sdk/typescript/README.md), and [examples](examples/README.md)                                                                                                                               | Run `node sdk/typescript/scripts/check-markdown.mjs` after [installing the SDK dependencies](sdk/typescript/TESTING.md#install-dependencies). Check examples from their stated working directory.                                                       |
+| Plugin instructions                             | [Skills](plugins/codex-security/skills/) and shared [references](plugins/codex-security/references/)                                                                                                                                   | [Portable plugin source checks](AGENTS.md#keep-it-simple)                                                                                                                                                                                               |
+| Artifact contracts and generated SDK models     | [Contract definitions](plugins/codex-security/mcp-app/src/artifact-contracts.ts), [canonical exports](plugins/codex-security/mcp-app/scripts/canonical-schemas.mts), and [model generator](sdk/typescript/scripts/generate-models.cjs) | [Canonical contract tests](plugins/codex-security/mcp-app/tests/test_canonical_artifact_contracts.ts), [MCP wire tests](plugins/codex-security/mcp-app/tests/test_compact_artifact_wire.ts), and [schema generation checks](#how-this-repository-works) |
+| Deep Scan scheduling and workers                | Shared [engine, coordinator, and executor](plugins/codex-security/mcp-app/src/deep-scan/), used by the MCP server and SDK launcher                                                                                                     | [MCP tests](plugins/codex-security/mcp-app/tests/) and [direct SDK integration](sdk/typescript/tests-ts/direct-deep-scan.test.ts)                                                                                                                       |
+| Durable scan state, checkpoints, and completion | [Python workbench](plugins/codex-security/scripts/workbench_db.py) and [Deep Scan persistence](plugins/codex-security/scripts/deep_scan_workbench.py)                                                                                  | [Python tests](plugins/codex-security/tests/) and [SDK workbench integration](sdk/typescript/tests-ts/deep-scan-workbench.test.ts)                                                                                                                      |
+| Helper routing and stored-finding operations    | SDK [runtime routing](sdk/typescript/src/runtime.ts), plugin [helper entrypoint](plugins/codex-security/mcp-app/helpers-main.ts), and [Node workbench commands](plugins/codex-security/mcp-app/src/workbench/commands.ts)              | [SDK runtime tests](sdk/typescript/tests-ts/runtime.test.ts) and [MCP workbench tests](plugins/codex-security/mcp-app/tests/)                                                                                                                           |
+| Public CLI and SDK behavior                     | [CLI adapter](sdk/typescript/src/cli.ts), [SDK API](sdk/typescript/src/api.ts), and adjacent modules                                                                                                                                   | [SDK tests](sdk/typescript/tests-ts/) and the [installed-package checks](sdk/typescript/TESTING.md)                                                                                                                                                     |
+| Markdown report rendering                       | [Scan report projection](plugins/codex-security/scripts/report_projection.py) and [threat-model projection](plugins/codex-security/scripts/threat_model_projection.py)                                                                 | [Report tests](plugins/codex-security/tests/test_report_projection.py) and [threat-model tests](plugins/codex-security/tests/test_threat_model_projection.py)                                                                                           |
+| Native filesystem and process operations        | [Native bindings and adapters](plugins/codex-security/native/README.md)                                                                                                                                                                | The native guide's platform proofs and package checks                                                                                                                                                                                                   |
+| Packaged plugin contents                        | [Plugin manifest](plugins/codex-security/plugin-files.json) and [SDK plugin builder](sdk/typescript/scripts/build-plugin.mjs)                                                                                                          | [Package inspection and installed consumers](sdk/typescript/TESTING.md)                                                                                                                                                                                 |
+
+The SDK routes selected stored-finding and classification commands to the Node
+helper; scan lifecycle commands still use the Python workbench. Trace the
+specific command before changing either implementation. Shared Deep Scan
+behavior belongs in the plugin engine, with adapter changes in the MCP server
+or SDK only when their entrypoint behavior differs.
 
 ## How this repository works
 
 `plugins/codex-security/` is the canonical source for the Codex Security
 plugin. Make plugin changes there.
 
-The npm runtime under `sdk/typescript/_bundled_plugin/` is generated from the
-plugin source by `pnpm run build:plugin` and automatically during `prepack` for
-packages and releases. Do not edit or commit files in that directory. See the
-[SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
-commands.
+To inspect the bundled npm plugin, [download the native package inputs](plugins/codex-security/native/README.md#package-inputs), then run `pnpm --dir sdk/typescript run build:plugin` from the repository root. The build writes `sdk/typescript/_bundled_plugin/`. Packaging also generates this directory during `prepack`. Edit the plugin source and leave generated files out of commits.
 
 Compact artifact contracts are authored in `plugins/codex-security/mcp-app/src/artifact-contracts.ts`, with shared finding and threat-model definitions in `finding-detail-schemas.ts` and `threat-model-schema.ts`.
 Canonical findings, scan-manifest, and coverage exports are defined in `mcp-app/scripts/canonical-schemas.mts`; patch-risk exports and their static type are defined in `mcp-app/src/patch-risk-schema.ts`.
@@ -29,37 +47,11 @@ maintained in the SDK.
 `pnpm --dir sdk/typescript run types` checks freshness.
 
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
-source. Deterministic triage checks and the MCP reducer IPC regression remain
-part of normal CI.
+source. CI runs deterministic triage checks and the Deep Scan iteration and
+publication tests in the MCP suite.
 
 See the [CI guide](docs/ci.md) for check selection, platform/version coverage,
 required status checks, and test-runner qualification.
-
-## Where to make a change
-
-Start with the owner of the behavior, then follow its callers when the change
-crosses a process, persistence, or package boundary.
-
-| Change                                          | Source to start with                                                                                                                                                                                                                   | Relevant checks                                                                                                                                                                                                              |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Plugin instructions                             | [Skills](plugins/codex-security/skills/) and shared [references](plugins/codex-security/references/)                                                                                                                                   | [Portable plugin source checks](AGENTS.md#keep-it-simple)                                                                                                                                                                    |
-| Artifact contracts and generated SDK models     | [Contract definitions](plugins/codex-security/mcp-app/src/artifact-contracts.ts), [canonical exports](plugins/codex-security/mcp-app/scripts/canonical-schemas.mts), and [model generator](sdk/typescript/scripts/generate-models.cjs) | [Canonical contract tests](plugins/codex-security/mcp-app/tests/test_canonical_artifact_contracts.ts), [MCP wire tests](plugins/codex-security/mcp-app/tests/test_compact_artifact_wire.ts), and the generation checks above |
-| Deep Scan scheduling and workers                | Shared [engine, coordinator, and executor](plugins/codex-security/mcp-app/src/deep-scan/), used by the MCP server and SDK launcher                                                                                                     | [MCP tests](plugins/codex-security/mcp-app/tests/) and [direct SDK integration](sdk/typescript/tests-ts/direct-deep-scan.test.ts)                                                                                            |
-| Durable scan state, checkpoints, and completion | [Python workbench](plugins/codex-security/scripts/workbench_db.py) and [Deep Scan persistence](plugins/codex-security/scripts/deep_scan_workbench.py)                                                                                  | [Python tests](plugins/codex-security/tests/) and [SDK workbench integration](sdk/typescript/tests-ts/deep-scan-workbench.test.ts)                                                                                           |
-| Helper routing and stored-finding operations    | SDK [runtime routing](sdk/typescript/src/runtime.ts), plugin [helper entrypoint](plugins/codex-security/mcp-app/helpers-main.ts), and [Node workbench commands](plugins/codex-security/mcp-app/src/workbench/commands.ts)              | [SDK runtime tests](sdk/typescript/tests-ts/runtime.test.ts) and [MCP workbench tests](plugins/codex-security/mcp-app/tests/)                                                                                                |
-| Public CLI and SDK behavior                     | [CLI adapter](sdk/typescript/src/cli.ts), [SDK API](sdk/typescript/src/api.ts), and adjacent modules                                                                                                                                   | [SDK tests](sdk/typescript/tests-ts/) and the [installed-package checks](sdk/typescript/TESTING.md)                                                                                                                          |
-| Markdown report rendering                       | [Scan report projection](plugins/codex-security/scripts/report_projection.py) and [threat-model projection](plugins/codex-security/scripts/threat_model_projection.py)                                                                 | [Report tests](plugins/codex-security/tests/test_report_projection.py) and [threat-model tests](plugins/codex-security/tests/test_threat_model_projection.py)                                                                |
-| Native filesystem and process operations        | [Native bindings and adapters](plugins/codex-security/native/README.md)                                                                                                                                                                | The native guide's platform proofs and package checks                                                                                                                                                                        |
-| Packaged plugin contents                        | [Plugin manifest](plugins/codex-security/plugin-files.json) and [SDK plugin builder](sdk/typescript/scripts/build-plugin.mjs)                                                                                                          | [Package inspection and installed consumers](sdk/typescript/TESTING.md)                                                                                                                                                      |
-
-The SDK routes selected stored-finding and classification commands to the Node
-helper; scan lifecycle commands still use the Python workbench. Trace the
-specific command before changing either implementation. Shared Deep Scan
-behavior belongs in the plugin engine, with adapter changes in the MCP server
-or SDK only when their entrypoint behavior differs.
-
-Search [existing issues](https://github.com/openai/codex-security/issues)
-before opening a new one.
 
 ## Support for open-source projects
 
@@ -77,10 +69,7 @@ customer data, and security findings before posting.
 ## Suggest a feature or improve the documentation
 
 Open an issue describing the problem and the workflow you want to support.
-Documentation corrections and safe examples are welcome.
-Use synthetic examples when documenting expected behavior.
-Keep example values fictional and safe to share.
-Do not include credentials or private information in examples.
+Use synthetic examples that contributors can reproduce and share publicly.
 
 ## Report a security issue
 
@@ -107,6 +96,16 @@ manual `breaking-change` or `skip-release-notes` labels based only on the title.
 Use `platform:windows` only when Windows-specific behavior is material to the
 change. Dependabot uses `dependencies` across all package ecosystems. Labels
 are not required to open, test, review, or merge a pull request.
+
+## Testing plugin connectors
+
+For changes to [Jira intake or tracking](docs/plugin-connectors.md), use synthetic findings in a designated QA project.
+
+1. Verify the site, account and selected connection. Read a synthetic issue by key and through a project-scoped JQL search that spans more than one page.
+2. Track a finding through the Atlassian app. Create an issue, repeat the operation to verify reuse, then update the approved fields. Read the issue back after each write and check for duplicates.
+3. Try a missing connection and an account with insufficient access. Check that each failure explains how to recover and leaves the project without duplicate issues.
+
+Record live checks separately from static tests. Keep account and project details, issue keys and raw tool responses private. Report product vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Investigate a CI failure
 
