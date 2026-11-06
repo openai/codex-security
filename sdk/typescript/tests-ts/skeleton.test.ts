@@ -431,7 +431,7 @@ describe("TypeScript package skeleton", () => {
         job
           .steps!.filter((step) => step.uses?.startsWith("oven-sh/setup-bun@"))
           .map((step) => step.with?.["bun-version"]),
-      ).toEqual(["1.3.14"]);
+      ).toEqual(["1.4.4"]);
       for (const step of job.steps!) {
         expect(step.run ?? "").not.toMatch(
           /--(?:parallel|isolate)(?:[=\s]|$)/u,
