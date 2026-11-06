@@ -113,7 +113,6 @@ assert.deepEqual(
     "PYTHONUTF8",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -490,7 +489,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       CODEX_SECURITY_STATE_DIR: headlessStateDir,
     },
   });
-  const ownerThread = "fixture-headless-standard-thread";
+  // Option-like metadata must reach the workbench as the literal owner ID.
+  const ownerThread = "--help";
   const headlessContext =
     `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`.trim();
   assert.ok(headlessContext.length > 1_000_000);

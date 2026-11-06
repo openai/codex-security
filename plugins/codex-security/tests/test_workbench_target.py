@@ -29,6 +29,48 @@ update_digest_field = cast(
 CASE_ALIAS = pytest.param("case", marks=pytest.mark.native_macos)
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("destination", "missing", "binary", "selected", "count"),
+    [
+        ("new.py", False, False, ("new.py", "R"), 1),
+        ("new.py", True, False, ("old.py", "D"), 1),
+        ("new.py", True, True, ("old.py", "D"), 0),
+        (".svn/new.py", False, False, ("old.py", "D"), 1),
+    ],
+)
+def test_register_local_diff_with_renamed_source(
+    tmp_path: Path,
+    destination: str,
+    missing: bool,
+    binary: bool,
+    selected: tuple[str, str],
+    count: int,
+) -> None:
+    import workbench_db
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    (target / "old.py").write_bytes(b"\0binary" if binary else b"historical text\n")
+    subprocess.run(["git", "add", "old.py"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "add source"], cwd=target, check=True)
+    subprocess.run(["git", "config", "diff.renames", "true"], cwd=target, check=True)
+    (target / destination).parent.mkdir(exist_ok=True)
+    subprocess.run(["git", "mv", "old.py", destination], cwd=target, check=True)
+    if missing:
+        subprocess.run(
+            ["git", "update-index", "--skip-worktree", destination], cwd=target, check=True
+        )
+        (target / destination).unlink()
+
+    assert workbench_target.git_changed_paths(target, "HEAD", "HEAD", "local-patch") == [
+        (target / selected[0], selected[1])
+    ]
+    diff = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_db.scan_scope_file_count(target, ["."], diff) == count
+
+
 @pytest.fixture(
     params=[
         pytest.param(False, id="emulated"),
