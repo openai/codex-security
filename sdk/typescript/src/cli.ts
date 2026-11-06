@@ -9245,13 +9245,34 @@ async function runSkill(
       : (
           overrides["model_providers"] as Record<string, JsonObject> | undefined
         )?.[provider]);
-  const providerConfiguration =
-    provider === "azure"
-      ? externalProviderTable(provider, environment, configuredProvider)
-      : (configuredProvider ??
-        (isExternalModelProvider(provider)
-          ? EXTERNAL_CODEX_PROVIDERS[provider]
-          : undefined));
+  let providerConfiguration = configuredProvider;
+  if (provider === "azure") {
+    const ambientProviders =
+      skill !== "validation" && options.providerConfiguration === undefined
+        ? resolveCodexProfile(await readCodexHomeConfig(environment))[
+            "model_providers"
+          ]
+        : undefined;
+    const inherited =
+      isJsonObject(ambientProviders) && isJsonObject(ambientProviders["azure"])
+        ? ambientProviders["azure"]
+        : {};
+    const generated = externalProviderTable(
+      provider,
+      environment,
+      deepMerge({ ...inherited }, configuredProvider ?? {}),
+    );
+    // Native app-server reads inherited fields from disk. Forward explicit
+    // overrides, missing preset fields and the normalized endpoint only.
+    for (const key of Object.keys(inherited))
+      if (key !== "base_url") delete generated[key];
+    providerConfiguration = { ...configuredProvider, ...generated };
+  } else if (
+    providerConfiguration === undefined &&
+    isExternalModelProvider(provider)
+  ) {
+    providerConfiguration = EXTERNAL_CODEX_PROVIDERS[provider];
+  }
   const effectiveOverrides = resolveCommandAuthConfig(
     mergeCodexOverrides(
       overrides,

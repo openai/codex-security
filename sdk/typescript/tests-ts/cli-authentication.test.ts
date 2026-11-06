@@ -1433,6 +1433,71 @@ describe("CLI authentication", () => {
 
 describe("skill authentication", () => {
   test.each(["patch", "verify-fix"] as const)(
+    "%s preserves an ambient Azure endpoint and command authentication",
+    async (command) => {
+      const result = await runProviderSkill(stateDirectory, {
+        command,
+        overrides: [
+          'model_provider="azure"',
+          'model_providers.azure.name="Selected deployment"',
+        ],
+        ambientConfig: [
+          "[model_providers.azure]",
+          'name="Ambient deployment"',
+          'base_url="https://resource.example.test"',
+          'http_headers = { "X-Test" = "synthetic-private-header" }',
+          "[model_providers.azure.auth]",
+          'command="synthetic-private-command"',
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "synthetic-unrelated-key" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const providerArg = result.launch.args.find((arg: string) =>
+        arg.startsWith("model_providers="),
+      );
+      expect(parseToml(providerArg)).toMatchObject({
+        model_providers: {
+          azure: {
+            name: "Selected deployment",
+            base_url: "https://resource.example.test/openai/v1",
+          },
+        },
+      });
+      expect(providerArg).not.toContain("env_key");
+      expect(result.launch.args.join(" ")).not.toContain("synthetic-private");
+      expect(result.launch.environment).toEqual({});
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test("patch uses Azure endpoint and key defaults without an ambient table", async () => {
+    const result = await runProviderSkill(stateDirectory, {
+      overrides: ['model_provider="azure"'],
+      environment: {
+        AZURE_OPENAI_ENDPOINT: "https://env.example.test",
+        AZURE_OPENAI_API_KEY: "synthetic-resource-key",
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const providerArg = result.launch.args.find((arg: string) =>
+      arg.startsWith("model_providers="),
+    );
+    expect(parseToml(providerArg)).toMatchObject({
+      model_providers: {
+        azure: {
+          base_url: "https://env.example.test/openai/v1",
+          env_key: "AZURE_OPENAI_API_KEY",
+        },
+      },
+    });
+    expect(result.launch.environment).toEqual({
+      AZURE_OPENAI_API_KEY: "synthetic-resource-key",
+    });
+  });
+
+  test.each(["patch", "verify-fix"] as const)(
     "%s inherits ambient command authentication through a null optional override",
     async (command) => {
       const result = await runProviderSkill(stateDirectory, {
