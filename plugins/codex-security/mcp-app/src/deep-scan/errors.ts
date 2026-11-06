@@ -15,6 +15,7 @@ const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
   "This content was flagged for potentially high-risk cyber activity.",
   "This request has been flagged for possible cybersecurity risk.",
   "This request has been flagged for potentially high-risk cyber activity.",
+  "This request was blocked due to a misalignment policy violation.",
 ]);
 
 /** A confirmed terminal worker failure that stops the scan without retries. */
