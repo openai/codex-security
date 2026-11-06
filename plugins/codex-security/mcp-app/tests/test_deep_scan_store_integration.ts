@@ -22,8 +22,10 @@ import type {
   DeepScanPublication,
   ScanDraftInput,
 } from "../src/artifact-scan-draft.js";
+import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import {
   DeepScanCoordinator,
+  DeepScanCoordinatorRegistry,
   FakeExecutor,
 } from "./deep_scan_coordinator_fixture.ts";
 
@@ -33,19 +35,25 @@ const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const {
   WorkbenchDeepScanStore,
+  startDeepScanEngine,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
   saveScanDraftCheckpoint,
 } = await importModule({
   stdin: {
     contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
+export { startDeepScanEngine } from "./src/deep-scan/engine.ts";
 export { createScanArtifactContext } from "./src/artifact-context.ts";
 export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";`,
     resolveDir: mcpAppRoot,
   },
+  loader: { ".md": "text" },
 });
 
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
+await testJoiningCallerAdmission("fresh-empty");
+await testJoiningCallerAdmission("resumed-empty");
+await testJoiningCallerAdmission("resumed-with-source");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
@@ -66,6 +74,97 @@ await testReplacementFailureDuringCancellation();
 await testCoordinatorCommitResponseRecovery();
 await testCoordinatorCommitResponseRecovery("record-deep-scan-iteration");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
+
+async function testJoiningCallerAdmission(
+  scenario: "fresh-empty" | "resumed-empty" | "resumed-with-source",
+) {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-joining-caller-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  const owner = new WorkbenchDeepScanStore(runWorkbench);
+  const joiner = new WorkbenchDeepScanStore(runWorkbench);
+  const threadId = "admission-thread";
+  const scanRoot = path.join(fixtureRoot, "scans");
+  const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+  const registry = new DeepScanCoordinatorRegistry();
+  const start = registry.start.bind(registry);
+  registry.start = (options: CoordinatorOptions) =>
+    start({ ...options, executor });
+  try {
+    const created = await owner.begin({ targetPath, threadId, scanRoot });
+    const lease = { scanId: created.scanId, threadId };
+    // Admission uses the later claim, even if the owner entered discovery before it expired.
+    const discoveryProgress = {
+      scanId: created.scanId,
+      phase: "discovery",
+    } as const;
+    const joined = await joiner.begin({ ...lease, scanRoot });
+    assert.equal(joined.discoveryStarted, false);
+    if (scenario !== "fresh-empty") {
+      const claimed = await owner.claimCoordinator(lease);
+      assert.equal(claimed.acquired, true);
+      await owner.updateProgress(discoveryProgress);
+      const observer = await joiner.claimCoordinator(lease);
+      assert.equal(observer.acquired, false);
+      assert.equal(observer.run.discoveryStarted, true);
+      assert.equal(observer.run.dispatchedCount, 0);
+      await expireLease(environment, created.scanId);
+    }
+    if (scenario !== "resumed-with-source")
+      await rm(path.join(targetPath, "fixture.py"));
+    const { coordinator } = await startDeepScanEngine({
+      run: joined,
+      store: joiner,
+      registry,
+      runWorkbench,
+      pluginRoot,
+      pythonCommand: process.env.PYTHON?.trim() || "python3",
+      parentSandbox: { filesystemDenies: [] },
+      threadId,
+    });
+    try {
+      const terminal = await Promise.race([
+        executor.discoveryStarted.promise,
+        coordinator.wait(undefined, 30_000),
+      ]);
+      const persisted = await joiner.get(created.scanId, threadId);
+      if (scenario !== "fresh-empty")
+        assert.equal(persisted.coordinatorGeneration, 3);
+      if (scenario === "resumed-with-source") {
+        assert.ok(executor.discoveryCalls > 0, terminal?.error);
+        assert.ok(persisted.dispatchedCount > 0);
+        await assert.rejects(
+          owner.updateProgress(discoveryProgress),
+          /newer generation/,
+        );
+      } else {
+        assert.equal(terminal?.status, "failed");
+        assert.match(terminal.error, /target is empty.*no security audit/iu);
+        assert.equal(executor.discoveryCalls, 0);
+        assert.equal(persisted.status, "failed");
+        assert.deepEqual(persisted.persistedWorkers, []);
+        assert.equal(persisted.dispatchedCount, 0);
+      }
+    } finally {
+      coordinator.cancel("fixture cleanup");
+      await coordinator.wait(undefined, 30_000);
+    }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function expireLease(environment: NodeJS.ProcessEnv, scanId: string) {
+  await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+    "-c",
+    `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE deep_scan_runs SET updated_at = '2000-01-01T00:00:00Z' WHERE scan_id = ?", (sys.argv[2],))`,
+    path.join(environment.CODEX_SECURITY_STATE_DIR!, "workbench.sqlite3"),
+    scanId,
+  ]);
+}
 
 async function testCoordinatorCommitResponseRecovery(
   exhaustOperation?: "record-deep-scan-iteration" | "finish-deep-scan",
@@ -1944,15 +2043,7 @@ async function testReplacementFailureDuringCancellation() {
     assert.equal((await store.get(run.scanId, threadId)).status, "running");
 
     // Expire only the lease clock; claim and failure use the real workbench.
-    await execFileAsync(process.env.PYTHON?.trim() || "python3", [
-      "-c",
-      `import sqlite3, sys
-connection = sqlite3.connect(sys.argv[1])
-connection.execute("UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?", ("2000-01-01T00:00:00Z", sys.argv[2]))
-connection.commit()`,
-      path.join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-      run.scanId,
-    ]);
+    await expireLease(environment, run.scanId);
     await rm(
       path.join(
         run.scanDir,

@@ -6,8 +6,7 @@ lists the packages and version ranges it affects.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the destination
-checkout, set the repository and source key. For GitHub Enterprise, export
+In the destination checkout, set the repository and source key. For GitHub Enterprise, export
 `GH_HOST` with your hostname first. For a repeat import, use the exact
 advisories key from your previous preview, including case.
 
@@ -17,14 +16,20 @@ source_key="${GH_HOST:-github.com}/$repo/security-advisories"
 ```
 
 **Saved report.** Set `report=/private/path/advisories.json` if you already
-have the collector's complete JSON array.
+have the collector's complete JSON array. Continue with [Preview the report](#preview-the-report).
 
-**Export from GitHub.** Sign in to the selected host with `gh auth login`.
-Choose a repository or global export. Use a private temporary directory
-outside the checkout. Omit output filters, token limits and `--full-output`
-so the reader gets the complete array.
+### Export from GitHub
 
-For published repository advisories, run the command below. To list another
+Sign in to the selected host with `gh auth login`.
+Choose [repository disclosures](#repository-disclosures) for advisories issued
+by this repository or [global advisories](#global-advisories) to investigate
+specified GHSA IDs in the checkout. Use a private temporary directory outside
+the checkout. Omit output filters, token limits and `--full-output` to keep
+the collector's complete array.
+
+#### Repository disclosures
+
+The collector lists published advisories by default. To list another
 state, add `--github-state draft`, `triage` or `closed`. To select specific
 IDs, repeat `--github-advisory GHSA-xxxx-xxxx-xxxx` and omit `--github-state`.
 Private advisories require repository advisory read permission and access to
@@ -37,7 +42,9 @@ out=$(mktemp -d) &&
   report="$out/advisories.json"
 ```
 
-For global advisories, supply at least one GHSA ID. The repository argument
+#### Global advisories
+
+Supply at least one GHSA ID. The repository argument
 names the repository where you'll investigate the advisory.
 
 ```sh
@@ -48,12 +55,14 @@ out=$(mktemp -d) &&
   report="$out/advisories.json"
 ```
 
-**Preview the report.**
+### Preview the report
 
 ```sh
 codex-security publish findings "$report" --to local --repository . \
   --provider github --source-key "$source_key" --dry-run --format json
 ```
+
+### Save and verify
 
 Check the GHSA IDs and whether each advisory came from the repository or the
 global database. Repository disclosures must match a comparable local Git
@@ -67,5 +76,19 @@ share a GHSA ID and source key. A global advisory has no source repository.
 Compare the affected package ranges with the versions installed in your
 checkout to decide whether the advisory applies.
 
-To collect with the SDK instead of `gh`, pass `githubHost` and a `githubToken`
-for that host. [Advisory SDK examples](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)
+If you can access a draft repository advisory, selecting its exact GHSA ID
+can return it. A collection failure produces no partial selection.
+[GitHub repository advisory permissions](https://docs.github.com/en/rest/security-advisories/repository-advisories#list-repository-security-advisories).
+
+## Use the SDK
+
+Collect the advisories with `importGitHubAdvisories()`. For Cloud,
+pass `normalizeGitHubAdvisories(advisories, "cloud")` to
+`prepareNormalizedExternalPublication()`. For local storage, pass
+`normalizeGitHubAdvisories(advisories, "local")` to `prepareNormalizedLocalImport()`.
+`importGitHubAdvisories()` defaults to `{ source: "repository", state: "published" }`; use
+`{ source: "global", advisoryIds: ["GHSA-2345-6789-cfgh"] }` for selected database
+records. Both forms require `repository: "OWNER/REPO"` as source or target context.
+When normalized evidence retains a collector record in `source_data`, imports
+check a repository disclosure's original repository against the destination.
+Supply `githubHost` and `githubToken` to override the GitHub CLI login and host.
