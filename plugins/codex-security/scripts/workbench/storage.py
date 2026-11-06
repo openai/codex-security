@@ -92,8 +92,28 @@ def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> None:
         raise ValueError("Select a directory on a Windows volume that supports ACLs.")
 
     security = ctypes.WinDLL("advapi32", use_last_error=True)
+    # GetCurrentProcessToken() is a Windows pseudo-handle and does not need closing.
+    token = ctypes.wintypes.HANDLE(-4)
+    token_user = 1  # TOKEN_INFORMATION_CLASS.TokenUser
+    size = ctypes.wintypes.DWORD()
+    security.GetTokenInformation(token, token_user, None, 0, ctypes.byref(size))
+    if ctypes.get_last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
+        raise ctypes.WinError(ctypes.get_last_error())
+    user = ctypes.create_string_buffer(size.value)
+    if not security.GetTokenInformation(token, token_user, user, size, ctypes.byref(size)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    # TOKEN_USER starts with SID_AND_ATTRIBUTES.Sid.
+    sid = ctypes.wintypes.LPWSTR()
+    if not security.ConvertSidToStringSidW(
+        ctypes.wintypes.LPVOID.from_buffer(user), ctypes.byref(sid)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        dacl = f"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid.value})"
+    finally:
+        kernel.LocalFree(sid)
+
     descriptor = ctypes.wintypes.LPVOID()
-    dacl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
     if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         dacl, 1, ctypes.byref(descriptor), None
     ):

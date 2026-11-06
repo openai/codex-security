@@ -93,9 +93,10 @@ async function createDirectPluginOutput(scanRoot: string): Promise<{
   scanDir: string;
   targetRoot: string;
   targetRootAcl: string;
+  stateDir: string;
 }> {
   const { source } = await repositoryFixture("direct-plugin-source");
-  const stateRoot = await temporaryDirectory();
+  const stateDir = join(await temporaryDirectory(), "state");
   const targetRoot = join(scanRoot, basename(source.path));
   await mkdir(targetRoot);
   const targetRootAcl = await descriptor(targetRoot);
@@ -106,7 +107,7 @@ async function createDirectPluginOutput(scanRoot: string): Promise<{
       environment: {
         PATH: process.env["PATH"],
         SystemRoot: process.env["SystemRoot"],
-        CODEX_SECURITY_STATE_DIR: join(stateRoot, "state"),
+        CODEX_SECURITY_STATE_DIR: stateDir,
       },
     },
     [
@@ -126,7 +127,7 @@ async function createDirectPluginOutput(scanRoot: string): Promise<{
   expect(typeof scanDir).toBe("string");
   const resolvedScanDir = await realpath(scanDir as string);
   expect(dirname(resolvedScanDir)).toBe(await realpath(targetRoot));
-  return { scanDir: resolvedScanDir, targetRoot, targetRootAcl };
+  return { scanDir: resolvedScanDir, targetRoot, targetRootAcl, stateDir };
 }
 
 async function archiveSdkOutput(output: string, root: string): Promise<string> {
@@ -199,6 +200,10 @@ windowsTest(
     const campaign = join(root, "campaign");
     await createMultiscanCampaign(campaign);
     const direct = await createDirectPluginOutput(root);
+    const home = await runtime.prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: direct.stateDir,
+    });
+    expect(home).toBe(await realpath(join(direct.stateDir, "codex-home")));
     expect(direct.targetRootAcl).toContain(";;;WD)");
     expect(await descriptor(direct.targetRoot)).toBe(direct.targetRootAcl);
     for (const output of [
