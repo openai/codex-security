@@ -45,7 +45,9 @@ class WindowsScanLocalPathError(WindowsScanLocalFileError):
 
 
 # CreateFile access and sharing flags.
+_DRIVE_FIXED = 3
 _DELETE = 0x00010000
+_FILE_TRAVERSE = 0x00000020
 _FILE_READ_ATTRIBUTES = 0x00000080
 _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
@@ -179,6 +181,10 @@ if os.name == "nt":
         ctypes.POINTER(wintypes.DWORD),
     ]
     _GetFileSecurityW.restype = wintypes.BOOL
+
+    _GetDriveTypeW = _kernel32.GetDriveTypeW
+    _GetDriveTypeW.argtypes = [wintypes.LPCWSTR]
+    _GetDriveTypeW.restype = wintypes.UINT
 
     _CreateFileW = _kernel32.CreateFileW
     _CreateFileW.argtypes = [
@@ -462,11 +468,12 @@ def _open_directory(
     missing_ok: bool = False,
     missing_is_path_error: bool = True,
     movable: bool = False,
+    require_traverse: bool = False,
 ) -> _OwnedHandle | None:
     try:
         handle = _create_file(
             path,
-            access=_FILE_READ_ATTRIBUTES,
+            access=_FILE_READ_ATTRIBUTES | (_FILE_TRAVERSE if require_traverse else 0),
             share=_FILE_SHARE_READ | _FILE_SHARE_WRITE | (_FILE_SHARE_DELETE if movable else 0),
             disposition=_OPEN_EXISTING,
             flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
@@ -578,6 +585,50 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
     with _locked_parent(scan_dir, ".identity", create=False) as (root_path, _):
         metadata = root_path.lstat()
         return root_path, (metadata.st_dev, metadata.st_ino)
+
+
+@contextlib.contextmanager
+def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
+    """Bind a canonical worktree beneath a fixed-drive root to its exact .git marker."""
+    if (
+        not cwd.is_absolute()
+        or not metadata.is_absolute()
+        or len(cwd.drive) != 2
+        or cwd.drive != metadata.drive
+        or len(cwd.parts) < 2
+        or len(metadata.parts) < 2
+        or _GetDriveTypeW(cwd.anchor) != _DRIVE_FIXED
+    ):
+        yield None
+        return
+    marker = None
+    with contextlib.ExitStack() as pins:
+        try:
+            for path in (cwd, metadata):
+                _validated_parts(PurePosixPath(*path.parts[1:]).as_posix())
+                # Pin each literal ancestor before opening the next component. Never resolve
+                # a repository-controlled reparse point to find the directory to be pinned.
+                for directory in (*reversed(path.parents), path):
+                    handle = _open_directory(directory, require_traverse=True)
+                    assert handle is not None
+                    pins.enter_context(handle)
+                assert handle.value is not None
+                if _final_path(handle.value) != _extended_path(path):
+                    raise ValueError("the selected Git directory spelling is not canonical")
+            if str(cwd / ".git") != str(metadata):
+                # The literal canonical root is already pinned before opening its regular file.
+                fd, leaf = open_read_fd_with_path(cwd, ".git", "Git metadata pointer")
+                pointer = pins.enter_context(os.fdopen(fd, "rb"))
+                if leaf != ".git":
+                    raise ValueError("the root marker name does not match .git")
+                expected = f"gitdir: {metadata}".encode("utf-8")
+                value = pointer.read(len(expected) + 3).removesuffix(b"\n").removesuffix(b"\r")
+                if value.replace(b"/", b"\\") != expected:
+                    raise ValueError("the root marker does not name the selected Git directory")
+            marker = Path(".git")
+        except (OSError, ValueError):
+            pins.close()
+        yield marker
 
 
 def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
