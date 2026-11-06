@@ -92,7 +92,6 @@ generate().then((models) => {
     "workbench-arguments",
     "executable-path",
     "contract-values",
-    "finding-normalization",
     "windows-path",
   ].map((name) => [
     `src/${name}.ts`,

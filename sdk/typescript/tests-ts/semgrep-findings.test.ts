@@ -452,6 +452,38 @@ test("native SARIF keeps CE percent paths distinct after reordering", () => {
   }
 });
 
+test("native JSON and SARIF retain the scanner's path spelling on both platforms", () => {
+  const json = semgrepJson();
+  const sarif = semgrepSarif();
+  const paths = [
+    "src/example.ts",
+    "src\\example.ts",
+    ".\\C:\\outside.ts",
+  ] as const;
+  json.results = paths.map((path, index) => {
+    const result = structuredClone(json.results[0]!);
+    result.path = path;
+    result.extra.fingerprint += index;
+    return result;
+  });
+  const run = sarif.runs[0]!;
+  run.results = paths.map((path, index) => {
+    const result = structuredClone(run.results[0]!);
+    result.locations[0]!.physicalLocation.artifactLocation.uri = path;
+    result.fingerprints["matchBasedId/v1"] += index;
+    return result;
+  });
+  for (const input of [json, sarif]) {
+    const output = normalizeSemgrepFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings.map((row) => row.evidence.locations)).toEqual([
+      [{ path: paths[0], line: 3 }],
+      [{ path: paths[1], line: 3 }],
+      [],
+    ]);
+  }
+});
+
 test.each([
   "%2e%2e/outside.ts",
   "%2Foutside.ts",
@@ -851,6 +883,25 @@ test("large scan inventories and timing tables do not exclude a small finding", 
     JSON.stringify(output.findings[0]!.evidence.source_data),
   ).not.toContain("path-inventory-entry-");
   expect(input.paths.scanned).toHaveLength(10000);
+});
+
+test("native JSON keeps other files' matching explanations outside each finding", () => {
+  const report = semgrepJson();
+  const expected = normalizeSemgrepFindings(report);
+  const explanation = {
+    op: "And",
+    matches: [{ ...report.results[0], path: "src/other.ts" }],
+    children: [],
+  };
+  // Either run-wide inventory would include another file's match. The larger
+  // one would also exceed the per-finding Cloud budget.
+  for (const explanations of [[explanation], Array(1000).fill(explanation)]) {
+    const input = { ...report, explanations };
+    for (const target of ["cloud", "local"] as const) {
+      expect(normalizeJson(input, options, target)).toEqual(expected);
+    }
+    expect(input.explanations).toBe(explanations);
+  }
 });
 
 test.each([undefined, "sast"])(

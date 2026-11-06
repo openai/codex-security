@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   realpath,
   readFile,
@@ -18,7 +19,11 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { main, runCodexSkillCommand } from "../src/cli.js";
+import {
+  hasStoredChatGPTSignIn,
+  main,
+  runCodexSkillCommand,
+} from "../src/cli.js";
 import {
   CodexSecurityError,
   type JsonObject,
@@ -38,6 +43,7 @@ import {
   fakeSecurity,
   failingSecurity,
 } from "./cli-fixtures.js";
+import { chatGptTokens } from "./support/chatgpt-credentials.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
@@ -141,6 +147,56 @@ describe("CLI authentication", () => {
         await codexSecurityCredentialAllowsAmbientImport(expectedHome),
       ).toBe(argv[0] !== "logout");
     }
+  });
+
+  test("logout detaches only a separate ambient hard link before native failure", async () => {
+    const home = await createCredentialHome();
+    const auth = join(home, "auth.json");
+    const ambient = join(stateDirectory, "ambient");
+    await mkdir(ambient);
+    const source = join(ambient, "auth.json");
+    const backing = join(ambient, "backing.json");
+    await writeFile(auth, "session", { mode: 0o600 });
+    await link(auth, backing);
+
+    const logout = async (sourceHome: string, expectDetached: boolean) => {
+      const deps = dependencies({ environment: { CODEX_HOME: sourceHome } });
+      deps.runCodex = async () => {
+        expect(existsSync(auth)).toBe(!expectDetached);
+        return 19;
+      };
+      const { runCli, stderr } = createCliTest(main);
+      const status = await runCli(["logout"], deps);
+      expect(status, stderr.text()).toBe(19);
+      expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(
+        !expectDetached,
+      );
+    };
+
+    // A backup link in another directory does not make an independent sign-in shared.
+    await writeFile(source, "independent", { mode: 0o600 });
+    await logout(ambient, false);
+    expect(await readFile(source, "utf8")).toBe("independent");
+    await rm(source);
+    // ENOTDIR makes the ambient file uninspectable even when tests run as root.
+    await logout(backing, false);
+
+    const alias = join(ambient, "home-alias");
+    await symlink(
+      home,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await logout(alias, false);
+
+    if (process.platform !== "win32") {
+      await symlink(backing, source);
+      await logout(ambient, false);
+      await rm(source);
+    }
+    await link(auth, source);
+    await logout(ambient, true);
+    expect(await readFile(source, "utf8")).toBe("session");
   });
 
   test.skipIf(process.platform === "win32")(
@@ -626,6 +682,50 @@ describe("CLI authentication", () => {
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
+
+  test.each([
+    ["ambient ChatGPT", true],
+    ["dedicated API key", false],
+    ["truncated dedicated credential file", false],
+    ["explicit logout", false],
+    ["invalid logout marker", false],
+  ] as const)(
+    "offers an interactive ChatGPT choice with %s: %p",
+    async (source, offered) => {
+      const ambientHome = join(stateDirectory, "ambient");
+      const dedicatedHome = await createCredentialHome();
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        JSON.stringify({ auth_mode: "chatgpt", tokens: chatGptTokens }),
+        { mode: 0o600 },
+      );
+      if (source === "explicit logout") {
+        await setCodexSecurityCredentialLogout(dedicatedHome, true);
+      } else if (source === "invalid logout marker") {
+        await mkdir(join(dedicatedHome, ".codex-security-logged-out"));
+      } else if (source !== "ambient ChatGPT") {
+        await writeFile(
+          join(dedicatedHome, "auth.json"),
+          source === "dedicated API key"
+            ? '{"OPENAI_API_KEY":"synthetic-stored-key"}'
+            : "{",
+          { mode: 0o600 },
+        );
+      }
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-environment-key" },
+      });
+      deps.hasStoredChatGPTSignIn = (signal) =>
+        hasStoredChatGPTSignIn(deps.environment, signal);
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (_message, options) => options[0]!.value,
+      );
+      const stderr = captureCli(main, "stderr", true);
+      expect(await stderr.run(["scan"], deps), stderr.text()).toBe(0);
+      expect(stderr.text().includes("Both a ChatGPT sign-in")).toBe(offered);
+    },
+  );
 
   test("cancels sign-in discovery and authentication prompts before starting a scan", async () => {
     for (const stage of ["status", "prompt"] as const) {
