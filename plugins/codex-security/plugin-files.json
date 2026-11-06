@@ -29,6 +29,7 @@
     "mcp/native/linux-x64-musl/unix.node",
     "mcp/native/win32-arm64/windows.node",
     "mcp/native/win32-x64/windows.node",
+    "mcp/package.json",
     "mcp/permission-profile-preflight.mjs",
     "mcp/server.mjs",
     "mcp/server.mjs.br.part-000",

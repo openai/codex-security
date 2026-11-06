@@ -47,6 +47,9 @@ export async function buildMcpApp({ output, native = "universal" }) {
   });
   await rm(mcpDir, { recursive: true, force: true });
   await mkdir(mcpDir, { recursive: true });
+  // A standalone plugin can live on a UNC share. End Node's package lookup
+  // here before it probes for package.json above the share root.
+  await writeFile(join(mcpDir, "package.json"), '{"private":true}\n');
 
   await writeRuntime("server", "main.ts");
   for (const file of nativeFiles) {
