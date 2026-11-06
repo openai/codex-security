@@ -2,17 +2,19 @@ import { addTokenUsage, type ScanUsageMeasurement } from "./cost.js";
 import {
   estimateScanCost,
   tokenUsage,
+  type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
 
 export function measurementFromUsage(
   value: unknown,
   model: string,
+  pricingContext?: ScanPricingContext,
 ): ScanUsageMeasurement {
   const usage = tokenUsage(value);
   return {
     usage,
-    cost: estimateScanCost(model, usage),
+    cost: estimateScanCost(model, usage, pricingContext),
     coverage: usage === null ? "unavailable" : "complete",
     observedAt: new Date().toISOString(),
     threadCount: usage === null ? 0 : 1,
@@ -24,6 +26,7 @@ export function measurementFromUsage(
 export function combineMeasurements(
   values: readonly Readonly<ScanUsageMeasurement>[],
   model: string,
+  pricingContext?: ScanPricingContext,
 ): ScanUsageMeasurement {
   let usage: ScanTokenUsage | null = null;
   for (const value of values) {
@@ -33,7 +36,7 @@ export function combineMeasurements(
     ...new Set(values.flatMap((value) => value.warnings ?? [])),
   ].sort();
   return {
-    ...measurementFromUsage(usage, model),
+    ...measurementFromUsage(usage, model, pricingContext),
     ...(warnings.length ? { warnings } : {}),
     coverage:
       usage === null

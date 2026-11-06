@@ -2,13 +2,13 @@
 
 This Promptfoo lane measures how accurately the source version of `plugins/codex-security/skills/triage-finding/SKILL.md` triages supplied scanner findings from public SastBench v0.1. It does not measure repository-wide vulnerability discovery.
 
-SastBench contains 2,737 findings: 299 labeled true positive and 2,438 labeled false positive. The JavaScript test generator exposes the scanner claim and the exact affected checkout to Codex while keeping SastBench's label-bearing `finding_id` and ground-truth label out of the rendered prompt. The common eval runner stages the checkout skill and policy helper in a throwaway directory. Its permission profile also allows the hydrated target repositories, the label-free Git cache, and the Node runtime; the label-bearing eval harness remains outside those roots.
+SastBench contains 2,737 findings, including 299 labeled true positive and 2,438 labeled false positive. For how the runner keeps labels out of the model’s working directory, see the [evaluation design](DESIGN.md#label-boundary).
 
 Run commands from the repository root. The parent `evals/triage-finding/` directory owns the pinned Promptfoo and Codex SDK dependencies and the ignored `artifacts/` tree.
 
 ## Prepare the benchmark
 
-Follow the [parent setup instructions](../README.md) to install dependencies and build the checkout's policy helper before running model evals.
+Follow the [parent setup instructions](../README.md#set-up-the-runner) to install dependencies and build the checkout's policy helper before running model evals.
 
 Install the pinned SastBench checkout and hydrate all 275 repository revisions:
 
@@ -27,16 +27,17 @@ pnpm --dir evals/triage-finding run test:sastbench
 pnpm --dir evals/triage-finding run validate:sastbench
 ```
 
-## Run an evaluation
+## Run a one-case smoke test
+
+To check model execution and JSONL output, run a single case after preparation. This uses your configured model account:
 
 ```bash
-pnpm --dir evals/triage-finding run eval:sastbench \
+mkdir -p evals/triage-finding/artifacts/sastbench-results
+pnpm --dir evals/triage-finding run eval:sastbench -n 1 \
   --output ./artifacts/sastbench-results/canary.promptfoo.jsonl
 ```
 
-To start, it is recommended to use `--filter-range n:m` or `-n m` to constrain the number of test cases.
-
-Both full and representative runs pass `--no-cache --no-share` so results use the current skill and local Promptfoo settings cannot upload benchmark data.
+Use the representative sample below to compare quality. A one-case run only tests execution.
 
 ## Run the representative sample
 
@@ -52,7 +53,7 @@ pnpm --dir evals/triage-finding run eval:sastbench:sample \
   --output ./artifacts/sastbench-results/representative-sample.promptfoo.jsonl
 ```
 
-`eval:sastbench:sample` always passes `--no-cache --no-share` and defaults to 32 concurrent cases, matching the completed full benchmark's proven setting. The prior case latencies imply roughly a 35-minute run, although provider capacity and changes to the skill can change that duration. If capacity errors occur, use Promptfoo's `--retry-errors` mode at lower concurrency so successful rows stay in the same evaluation.
+`eval:sastbench:sample` always passes `--no-cache --no-share` and defaults to 32 concurrent cases, so check your provider’s capacity and budget before starting. If capacity errors occur, use Promptfoo's `--retry-errors` mode at lower concurrency so successful rows stay in the same evaluation.
 
 The `representative-100-v1` selection retains its established `en-US` collation for paired baseline comparisons. It allocates each class proportionally across scanner evidence-size buckets (`1`, `2-3`, `4-10`, and `11+` locations), then uses seeded systematic sampling ordered by repository, CWE, language, and original case index. It preserves the original opaque case IDs so baseline and candidate skill runs compare the same findings.
 
@@ -61,6 +62,17 @@ Because positives are deliberately oversampled, each test's metadata includes a 
 Use the same fixed case IDs for baseline and candidate skill runs. The paired case-level changes are the primary iteration signal; run the full benchmark before accepting a material skill change.
 
 Do not substitute `-n 100` for this config. The upstream dataset is ordered, so the first 100 rows are not a representative sample.
+
+## Run the full benchmark
+
+After reviewing sample results and approving a cost and runtime budget, run all 2,737 cases:
+
+```bash
+pnpm --dir evals/triage-finding run eval:sastbench \
+  --output ./artifacts/sastbench-results/full.promptfoo.jsonl
+```
+
+Both evaluation scripts pass `--no-cache --no-share`. Keep the checkout, skill, prompt, configuration, dataset and Promptfoo version fixed when resuming an evaluation. Interpret the results using the [verdict mapping](#verdict-mapping) and [aggregate metric definitions](#aggregate-metric-definitions).
 
 ## Inspect native metrics
 
@@ -129,8 +141,4 @@ Open the Promptfoo viewer to inspect the completed evaluation:
 pnpm --dir evals/triage-finding run pf:view
 ```
 
-Promptfoo also records cost, latency, and token use without SastBench-specific code.
-
-## Full-run safety
-
-Do not start all 2,737 cases until a representative pilot establishes an approved cost and runtime envelope. Keep the checkout, `SKILL.md`, prompt, configuration, dataset, and Promptfoo dependency versions unchanged throughout one resumable evaluation. See [DESIGN.md](./DESIGN.md) for metric definitions and benchmark limitations.
+Promptfoo also records cost, latency, and token use without SastBench-specific code. See the [benchmark limitations](DESIGN.md#limitations) when reporting results.

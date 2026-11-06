@@ -142,6 +142,34 @@ function credentialAncestors(home: string, directory: string): string[] {
   return ancestors;
 }
 
+const credentialAclFunction = "function Write-CredentialAcl($path) {";
+
+function instrumentCredentialAcl(
+  home: string,
+  transform: (script: string) => string,
+) {
+  const originalSpawn = childProcess.spawn;
+  mock.module("node:child_process", () => ({
+    ...childProcess,
+    spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+      const [command, args, options] = spawnArgs;
+      if (
+        options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+        !Array.isArray(args)
+      )
+        return originalSpawn(...spawnArgs);
+      const index = args.indexOf("-Command") + 1;
+      const script = args[index];
+      if (typeof script !== "string" || !script.includes(credentialAclFunction))
+        return originalSpawn(...spawnArgs);
+      const instrumented = [...args];
+      instrumented[index] = transform(script);
+      return originalSpawn(command, instrumented, options);
+    },
+  }));
+  return () => restoreSpawn(originalSpawn);
+}
+
 function windowsTestCommand(
   tool: string,
   args: readonly string[],
@@ -2893,7 +2921,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     };
     const parentEnvironment = pluginExecutionEnvironment(process.execPath, {
       PATH: "",
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
       ...(process.env["SystemRoot"] === undefined
         ? {}
         : { SystemRoot: process.env["SystemRoot"] }),
@@ -2912,9 +2939,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
       resolveCodexCommand().command,
     );
-    expect(workerEnvironment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"]).toBe(
-      "1",
-    );
     expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
     expect(workerEnvironment["CODEX_SECURITY_PYTHON_COMMAND"]).toBe(
       process.execPath,
@@ -2932,25 +2956,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     expect(nestedCodex.status).toBe(0);
     expect(nestedCodex.stdout).toMatch(/^codex-cli\s+\d/u);
-  });
-
-  test("forwards the external import setting to the plugin helper", () => {
-    const flag = "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS";
-    const node = Bun.which("node")!;
-    const environment: NodeJS.ProcessEnv = Object.assign(
-      Object.create({ [flag]: "1" }),
-      { CODEX_CLI_PATH: node, SystemRoot: process.env["SystemRoot"] },
-    );
-    const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
-    const run = () =>
-      spawnSync(node, [helper, "list-external-findings", "--help"], {
-        env: pluginExecutionEnvironment(node, environment),
-      }).status;
-
-    expect(run()).toBe(0);
-    environment[flag] = undefined;
-    environment["Codex_Security_Enable_External_Imports"] = "1";
-    expect(run()).toBe(2);
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
@@ -3671,6 +3676,7 @@ describe("runtime directories and plugin Python boundary", () => {
       "transient missing descendant",
       "persistent missing descendant",
       "access denied",
+      "batch access denied",
       "unexpected error",
       "missing home",
       "transient path-not-found descendant",
@@ -3689,66 +3695,41 @@ describe("runtime directories and plugin Python boundary", () => {
     await requireSecureCredentialHome(home);
     const descendant = join(home, ".auth-replay.tmp");
     await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
+    const batchOnly = kind === "batch access denied";
+    if (batchOnly) await writeFile(join(home, "sibling.tmp"), "fixture\n");
+    const accessDenied = kind.endsWith("access denied");
     const pathNotFound = kind.includes("path-not-found");
     const missing = pathNotFound || kind.includes("missing");
     const transient = kind.startsWith("transient ");
     const persistent = kind.startsWith("persistent ");
-    const exception = pathNotFound
-      ? "System.Management.Automation.ItemNotFoundException"
+    const [exception, category] = pathNotFound
+      ? ["System.Management.Automation.ItemNotFoundException", "ObjectNotFound"]
       : missing
-        ? "System.IO.FileNotFoundException"
-        : kind === "access denied"
-          ? "System.UnauthorizedAccessException"
-          : "System.InvalidOperationException";
-    const errorId = pathNotFound
-      ? "GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand"
-      : missing
-        ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
-        : kind === "access denied"
-          ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
-          : "SyntheticCredentialAclFailure";
-    const category =
-      kind === "access denied"
-        ? "PermissionDenied"
-        : missing && !pathNotFound
-          ? "NotSpecified"
-          : "ObjectNotFound";
+        ? ["System.IO.FileNotFoundException", "NotSpecified"]
+        : accessDenied
+          ? ["System.UnauthorizedAccessException", "PermissionDenied"]
+          : ["System.InvalidOperationException", "ObjectNotFound"];
+    const errorName = pathNotFound
+      ? "GetAcl_PathNotFound_Exception"
+      : exception;
+    const errorId =
+      missing || accessDenied
+        ? `${errorName},Microsoft.PowerShell.Commands.GetAclCommand`
+        : "SyntheticCredentialAclFailure";
     const failurePath = kind.endsWith("home")
       ? home
       : win32.toNamespacedPath(descendant);
     // Replay the native error without relying on racing a filesystem deletion.
-    const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
-    const marker = "function Write-CredentialAcl($path) {";
-    const originalSpawn = childProcess.spawn;
+    const injection = `if (@($path) -contains '${failurePath.replaceAll("'", "''")}'${batchOnly ? " -and @($path).Count -gt 1" : ""}) { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
     let attempts = 0;
-    mock.module("node:child_process", () => ({
-      ...childProcess,
-      spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
-        const [command, args, options] = spawnArgs;
-        if (
-          options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
-          !Array.isArray(args)
-        ) {
-          return originalSpawn(...spawnArgs);
-        }
-        const scriptIndex = args.indexOf("-Command") + 1;
-        const script = args[scriptIndex];
-        if (typeof script !== "string" || !script.includes(marker)) {
-          return originalSpawn(...spawnArgs);
-        }
-        attempts += 1;
-        if (transient && attempts > 1) {
-          return originalSpawn(...spawnArgs);
-        }
-        expect(script.split(marker)).toHaveLength(2);
-        const replayArgs = [...args];
-        replayArgs[scriptIndex] = script.replace(
-          marker,
-          `${marker} ${injection}`,
-        );
-        return originalSpawn(command, replayArgs, options);
-      },
-    }));
+    const restore = instrumentCredentialAcl(home, (script) => {
+      attempts += 1;
+      if (transient && attempts > 1) return script;
+      return script.replace(
+        credentialAclFunction,
+        `${credentialAclFunction} ${injection}`,
+      );
+    });
     try {
       if (transient) {
         await requireSecureCredentialHome(home);
@@ -3762,9 +3743,49 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(attempts).toBe(persistent ? 3 : 1);
       }
     } finally {
-      restoreSpawn(originalSpawn);
+      restore();
     }
   });
+
+  for (const language of ["FullLanguage", "ConstrainedLanguage"] as const) {
+    const name = `batches Windows credential ACL queries without dropping files in ${language}`;
+    test.skipIf(process.platform !== "win32")(name, async () => {
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const { root, home } = await credentialHome(false);
+      await requireSecureCredentialHome(home);
+      const cache = join(home, "cache");
+      await mkdir(cache);
+      for (let index = 0; index < 8; index++)
+        await writeFile(join(cache, `entry-${index}.txt`), "fixture\n");
+      const trace = join(root, "acl-queries.txt");
+      const append = `Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${trace.replaceAll("'", "''")}' -Value`;
+      const restore = instrumentCredentialAcl(home, (script) =>
+        [
+          language === "ConstrainedLanguage"
+            ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'"
+            : "",
+          script.replace(
+            credentialAclFunction,
+            `${credentialAclFunction} ${append} (@($path).Count);`,
+          ),
+          `${append} ('complete:' + $script:descriptorCount)`,
+        ].join("\n"),
+      );
+      try {
+        await requireSecureCredentialHome(home);
+        const rows = (await readFile(trace, "utf8")).trim().split(/\r?\n/u);
+        const expected = credentialAncestors(home, "").length + 10;
+        expect(rows.pop()).toBe(`complete:${expected}`);
+        const queries = rows.map(Number);
+        expect(queries).toContain(8);
+        expect(queries.reduce((total, count) => total + count, 0)).toBe(
+          expected,
+        );
+      } finally {
+        restore();
+      }
+    });
+  }
 
   test("retries interrupted Windows credential ACL enumeration", async () => {
     const root = await temporaryDirectory();
