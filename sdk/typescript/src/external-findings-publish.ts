@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { sqliteFilename } from "./windows-path.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   isBoxedPrimitive,
@@ -614,7 +615,7 @@ async function withImportLocks<T>(
         throw new CodexSecurityError(
           "The publication lock is not a regular file.",
         );
-      const guard = new Database(path);
+      const guard = new Database(sqliteFilename(path));
       guards.push(guard);
       if (process.platform !== "win32") chmodSync(path, 0o600);
       guard.exec("PRAGMA busy_timeout = 0");

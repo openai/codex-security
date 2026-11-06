@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { sqliteFilename } from "../windows-path";
 import { setTimeout } from "node:timers/promises";
 import { applyMigrations } from "./migrations";
 import { decodePosixBytes, encodePosixPath } from "../helpers/posix-path";
@@ -58,7 +59,7 @@ export async function openWorkbenchDatabase(
   try {
     createStateDirectory(dirname(databasePath));
     for (let attempt = 0; ; attempt++) {
-      const database = new DatabaseSync(databasePath);
+      const database = new DatabaseSync(sqliteFilename(databasePath));
       try {
         database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
         applyMigrations(database, undefined, !deferred || attempt > 0);
