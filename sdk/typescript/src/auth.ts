@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import type { JsonObject } from "./config.js";
 import {
-  CodexSecurityError,
+  ConfigurationError,
   PluginBootstrapError,
   errorMessage,
 } from "./errors.js";
@@ -72,7 +72,7 @@ export async function readCodexHomeConfig(
   } catch (error) {
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw new CodexSecurityError(
+    throw new ConfigurationError(
       `Could not read the configured Codex provider from ${path}: ${errorMessage(error)}`,
       { cause: error },
     );

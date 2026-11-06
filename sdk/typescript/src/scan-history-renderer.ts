@@ -529,6 +529,15 @@ export function renderScanHistory(
         `  ${paint(`${clean(result["unavailableScans"])} scans unavailable`, 33)}`,
       );
     }
+    const failed = result["unmatchedBatches"];
+    if (failed) {
+      lines.push(
+        `  ${paint(
+          `Failed to match ${clean(failed)} scan batch${failed === 1 ? "" : "es"}. Rerun the same command to retry.`,
+          33,
+        )}`,
+      );
+    }
   }
 
   return `${lines.join("\n")}\n\n`;

@@ -322,6 +322,7 @@ import {
   type matchScanFindings,
   type ScanComparisonInput,
   type ScanComparisonOptions,
+  type ScanComparisonResult,
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
@@ -2134,10 +2135,7 @@ async function skillStartupConfigOverrides(
   return overrides;
 }
 
-function writeOptionalVerificationDiagnostic(
-  stream: Writable,
-  message: string,
-): void {
+function writeOptionalDiagnostic(stream: Writable, message: string): void {
   try {
     if (!(stream instanceof NodeWritable)) {
       stream.write(message);
@@ -3125,7 +3123,12 @@ export async function main(
           return presentHistory(
             await runMatching(
               (matchingOptions) =>
-                matchAllScans(dependencies, options.force, matchingOptions),
+                matchAllScans(
+                  dependencies,
+                  options.force,
+                  matchingOptions,
+                  errorOutput,
+                ),
               options,
             ),
             "match-all",
@@ -7875,10 +7878,7 @@ export async function main(
           () => {},
         );
       } else {
-        writeOptionalVerificationDiagnostic(
-          errorOutput,
-          deferredVerificationDiagnostic,
-        );
+        writeOptionalDiagnostic(errorOutput, deferredVerificationDiagnostic);
       }
       writeUpdateNotice();
     }
@@ -8227,7 +8227,8 @@ function cliValueOptions(
 async function matchAllScans(
   dependencies: CliDependencies,
   force: boolean,
-  options: ScanComparisonOptions = {},
+  options: ScanComparisonOptions,
+  errorOutput: Writable,
 ): Promise<JsonObject> {
   const result = (await dependencies.runWorkbench(
     workbenchArgs("list-unmatched-scan-pairs", {
@@ -8244,6 +8245,8 @@ async function matchAllScans(
   let findingMatches = 0;
   let relatedPairs = 0;
   let uncertainPairs = 0;
+  let unmatchedBatches = 0;
+  let firstFailure: unknown;
   const newlyMatchedGroups: string[][] = [];
   for (const {
     afterScanId,
@@ -8263,17 +8266,35 @@ async function matchAllScans(
       ...selectedComparisonContext(beforeScans),
       ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
     };
-    const matching =
-      before.length === 0 || afterFindings.length === 0
-        ? { matches: [], uncertain: [] }
-        : await dependencies.matchFindings(input, {
-            ...options,
-            allowHistoricalUncertainty: true,
-          });
-    const comparisons = beforeScans.map(({ scanId, findings }) => ({
-      scanId,
-      comparison: comparisonForScan(matching, findings),
-    }));
+    let matching: ScanComparisonResult;
+    let comparisons: { scanId: string; comparison: ScanComparisonResult }[];
+    try {
+      matching =
+        before.length === 0 || afterFindings.length === 0
+          ? { matches: [], uncertain: [] }
+          : await dependencies.matchFindings(input, {
+              ...options,
+              allowHistoricalUncertainty: true,
+            });
+      comparisons = beforeScans.map(({ scanId, findings }) => ({
+        scanId,
+        comparison: comparisonForScan(matching, findings),
+      }));
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      if (
+        error instanceof ConfigurationError ||
+        error instanceof AuthenticationRequiredError
+      )
+        throw error;
+      if (unmatchedBatches === 0) firstFailure = error;
+      unmatchedBatches += 1;
+      writeOptionalDiagnostic(
+        errorOutput,
+        `codex-security: warning: Could not match findings against scan ${diagnosticValue(afterScanId)}: ${diagnosticValue(error)}\n`,
+      );
+      continue;
+    }
     for (const { scanId, comparison } of comparisons) {
       options.signal?.throwIfAborted();
       await dependencies.runWorkbench(
@@ -8296,6 +8317,7 @@ async function matchAllScans(
     }
     newlyMatchedGroups.push(...comparisonFindingGroups(input, matching));
   }
+  if (matchedPairs === 0 && unmatchedBatches > 0) throw firstFailure;
   return {
     repository,
     scanCount,
@@ -8305,6 +8327,7 @@ async function matchAllScans(
     findingMatches,
     relatedPairs,
     uncertainPairs,
+    ...(unmatchedBatches === 0 ? {} : { unmatchedBatches }),
   };
 }
 

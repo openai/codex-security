@@ -539,6 +539,7 @@ describe("scan history renderer", () => {
           findingMatches: 0,
           relatedPairs: 2,
           uncertainPairs: 1,
+          unmatchedBatches: 1,
         },
         "match-all",
       ),
@@ -552,6 +553,7 @@ describe("scan history renderer", () => {
       "2 related pairs recorded",
       "1 uncertain pair",
       "2 scans unavailable",
+      "Failed to match 1 scan batch. Rerun the same command to retry.",
     ]) {
       expect(output).toContain(expected);
     }

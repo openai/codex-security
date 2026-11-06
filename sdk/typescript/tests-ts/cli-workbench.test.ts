@@ -2,9 +2,13 @@ import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test, mock, spyOn } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
+import { createProfileCodex } from "../src/provider-profile.js";
+import { nodeCommand } from "./support/shell.js";
 import { main } from "../src/cli.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
@@ -23,6 +27,7 @@ import {
   temporaryDirectory,
 } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   createCliTest,
   captureCli,
@@ -1186,6 +1191,308 @@ describe("CLI workbench", () => {
       relatedPairs: 0,
       uncertainPairs: 1,
     });
+  });
+
+  describe("batch matching failures", () => {
+    const argv = ["scans", "match", "--all", "--json"];
+    function batchWorkbench(
+      ids: string[],
+      sources = ["source"],
+      onSave?: (after: string) => void,
+    ) {
+      const saved: string[][] = [];
+      const finding = (id: string) => ({ occurrenceId: id, findingId: id });
+      const batches = ids.map((id) => ({
+        afterScanId: id,
+        afterFindings: [finding(id)],
+        beforeScans: sources.map((scanId) => ({
+          scanId,
+          findings: [finding(scanId)],
+        })),
+      }));
+      return {
+        batches,
+        saved,
+        onWorkbench(args: readonly string[]): JsonObject {
+          if (args[0] === "list-unmatched-scan-pairs") return { batches };
+          expect(args[0]).toBe("save-scan-comparison");
+          onSave?.(args[4]!);
+          saved.push([args[2]!, args[4]!]);
+          return {};
+        },
+      };
+    }
+
+    test("skips conflicting and failed batches without losing saved groups", async () => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const { saved, onWorkbench } = batchWorkbench(
+        ["saved", "conflict", "unavailable", "later"],
+        ["first", "second"],
+      );
+      const matcher = mock<typeof matchScanFindings>(async (input) => {
+        const after = input.after[0]!.occurrenceId;
+        if (after === "unavailable")
+          throw new Error("Service temporarily\nunavailable");
+        const before = after === "conflict" ? "second" : "first";
+        return {
+          matches: [
+            {
+              beforeOccurrenceIds: [before],
+              afterOccurrenceIds: [after],
+              confidence: "high",
+              reason: "Same cause.",
+            },
+          ],
+          uncertain:
+            after === "conflict"
+              ? [
+                  {
+                    beforeOccurrenceId: before,
+                    afterOccurrenceId: after,
+                    reason: "Inconsistent uncertainty.",
+                  },
+                ]
+              : [],
+        };
+      });
+      const code = await runCli(
+        argv,
+        dependencies({ onWorkbench, onMatch: matcher }),
+      );
+      expect(code).toBe(0);
+      expect(saved).toEqual([
+        ["first", "saved"],
+        ["second", "saved"],
+        ["first", "later"],
+        ["second", "later"],
+      ]);
+      expect(matcher.mock.calls.at(-1)?.[0].knownFindingGroups).toEqual([
+        ["first", "saved"],
+      ]);
+      const warnings = stderr.text().trim().split("\n");
+      expect(warnings).toHaveLength(2);
+      expect(warnings[0]).toMatch(
+        /warning:.*conflict.*conflicting confirmed and uncertain findings/u,
+      );
+      expect(warnings[1]).toMatch(
+        /warning:.*unavailable.*Service temporarily unavailable/u,
+      );
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        matchedPairs: 4,
+        findingMatches: 2,
+        unmatchedBatches: 2,
+      });
+    });
+
+    test("returns the first matcher error if every batch fails", async () => {
+      const { saved, onWorkbench } = batchWorkbench(["first", "second"]);
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async (input) => {
+            throw new Error(
+              `Matcher failed on ${input.after[0]!.occurrenceId}`,
+            );
+          },
+        }),
+      );
+      expect(code).toBe(2);
+      expect(saved).toEqual([]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text().match(/codex-security: warning:/gu)).toHaveLength(2);
+      expect(stderr.text().trim().split("\n").at(-1)).toContain(
+        "Matcher failed on first",
+      );
+    });
+
+    test.each(["malformed", "unreadable", "rejected"])(
+      "stops on %s native config after saving an empty pair",
+      async (problem) => {
+        await using home = await scopedTemporaryDirectory("match-all-config-");
+        const file = join(home.path, "config.toml");
+        if (problem === "malformed") await writeFile(file, "[broken\n");
+        else if (problem === "unreadable") await mkdir(file);
+        else await writeFile(file, "model = []\n");
+        const { batches, saved, onWorkbench } = batchWorkbench([
+          "empty",
+          "match",
+          "later",
+        ]);
+        batches[0]!.afterFindings.length = 0;
+        batches[2]!.afterFindings.length = 0;
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const code = await runCli(
+          argv,
+          dependencies({
+            currentDirectory: home.path,
+            environment: {
+              CODEX_HOME: home.path,
+              OPENAI_API_KEY: "synthetic-key",
+            },
+            onWorkbench,
+            onMatch: matchScanFindings,
+          }),
+        );
+        expect(code).toBe(2);
+        expect(saved).toEqual([["source", "empty"]]);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          problem === "rejected"
+            ? "Could not read MCP configuration for a read-only helper"
+            : "Could not read the configured Codex provider",
+        );
+        if (problem === "rejected") expect(stderr.text()).toContain("model");
+      },
+    );
+
+    test("stops on a native matcher 401 after preserving earlier batches", async () => {
+      await using temp = await scopedTemporaryDirectory(
+        "match-all-native-turn-",
+      );
+      const preload = join(temp.path, "turn.mjs");
+      await writeFile(
+        preload,
+        [
+          "for await (const _ of process.stdin) {}",
+          'console.log(JSON.stringify({ type: "turn.failed", error: { message: process.env.TURN_ERROR } }));',
+          "process.exit(0);",
+        ].join("\n"),
+      );
+      const { batches, saved, onWorkbench } = batchWorkbench([
+        "empty",
+        "retry",
+        "auth",
+        "later",
+      ]);
+      batches[0]!.afterFindings.length = 0;
+      batches[3]!.afterFindings.length = 0;
+      const unauthorized =
+        "unexpected status 401 Unauthorized: synthetic authentication failure, url: https://example.invalid/v1/responses";
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async (input, options) => {
+            const codex = await createProfileCodex(
+              {
+                codexPathOverride: nodeCommand().command,
+                env: {
+                  NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+                  TURN_ERROR:
+                    input.after[0]?.occurrenceId === "retry"
+                      ? `unexpected status 503 Service Unavailable: ${unauthorized}`
+                      : unauthorized,
+                },
+              },
+              "synthetic",
+            );
+            return matchScanFindings(input, { ...options, codex });
+          },
+        }),
+      );
+      expect(code, stderr.text()).toBe(2);
+      expect(saved).toEqual([["source", "empty"]]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text().match(/codex-security: warning:/gu)).toHaveLength(1);
+      expect(stderr.text()).toContain("unexpected status 503");
+      expect(stderr.text().trim().split("\n").at(-1)).toContain(unauthorized);
+    });
+
+    test.each([
+      ["save", new Error("Storage failed")],
+      ["cancellation", new Error("Interrupted matcher")],
+    ] as const)("stops on %s after a saved batch", async (failure, error) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const signals = new FakeSignals();
+      const matched: string[] = [];
+      const { saved, onWorkbench } = batchWorkbench(
+        ["first", "second", "third"],
+        ["source"],
+        (id) => {
+          if (id === "second" && failure === "save") throw error;
+        },
+      );
+      const code = await runCli(
+        argv,
+        dependencies({
+          signals,
+          onWorkbench,
+          onMatch: async (input) => {
+            const id = input.after[0]!.occurrenceId;
+            matched.push(id);
+            if (id === "second" && failure !== "save") {
+              if (failure === "cancellation") signals.emit("SIGINT");
+              throw error;
+            }
+            return { matches: [], uncertain: [] };
+          },
+        }),
+      );
+      expect(code).toBe(failure === "cancellation" ? 130 : 2);
+      expect(matched).toEqual(["first", "second"]);
+      expect(saved).toEqual([["source", "first"]]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).not.toContain("warning:");
+      expect(stderr.text()).toContain(
+        failure === "cancellation"
+          ? "Saved comparisons are preserved"
+          : error.message,
+      );
+    });
+
+    test.each(["synchronous", "asynchronous"] as const)(
+      "continues matching after %s warning write failure",
+      async (kind) => {
+        const name = `continues matching after ${kind} warning write failure`;
+        if (
+          kind === "asynchronous" &&
+          runTestInSubprocess(import.meta.path, name)
+        )
+          return;
+        let warningWrites = 0;
+        const stderr = new Writable({
+          write(chunk, _encoding, done) {
+            if (!String(chunk).startsWith("codex-security: warning:"))
+              return done();
+            warningWrites++;
+            const error = new Error("Synthetic warning write failed");
+            if (kind === "synchronous") throw error;
+            setImmediate(() => done(error));
+          },
+        });
+        const { stdout } = createCliTest(main);
+        const { saved, onWorkbench } = batchWorkbench(["failed", "healthy"]);
+        try {
+          const code = await main(
+            argv,
+            stdout.stream,
+            stderr,
+            dependencies({
+              onWorkbench,
+              onMatch: async (input) => {
+                if (input.after[0]!.occurrenceId === "failed")
+                  throw new Error("Synthetic matcher failure");
+                return { matches: [], uncertain: [] };
+              },
+            }),
+          );
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(code).toBe(0);
+          expect(saved).toEqual([["source", "healthy"]]);
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            matchedPairs: 1,
+            unmatchedBatches: 1,
+          });
+          expect(warningWrites).toBe(1);
+          expect(stderr.listenerCount("error")).toBe(0);
+        } finally {
+          stderr.destroy();
+        }
+      },
+    );
   });
 
   test("preserves confirmed groups and related pairs while matching all scans", async () => {
