@@ -66,10 +66,12 @@ def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> lis
     ]
 
 
-def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> None:
+def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> Path:
     """Create one Windows directory with a protected inheritable DACL."""
     import ctypes
     import ctypes.wintypes
+
+    from windows_scan_local_files import verify_private_scan_root
 
     class SecurityAttributes(ctypes.Structure):
         _fields_ = [
@@ -109,7 +111,8 @@ def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> None:
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        dacl = f"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid.value})"
+        owner = "" if exist_ok else f"O:{sid.value}"
+        dacl = f"{owner}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid.value})"
     finally:
         kernel.LocalFree(sid)
 
@@ -121,10 +124,12 @@ def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> None:
     try:
         attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
         if kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
-            return
+            if exist_ok:
+                return path
+            return verify_private_scan_root(path, descriptor)
         error = ctypes.get_last_error()
         if exist_ok and error == 183 and path.is_dir():  # ERROR_ALREADY_EXISTS
-            return
+            return path
         raise ctypes.WinError(error)
     finally:
         kernel.LocalFree(descriptor)
@@ -156,17 +161,10 @@ def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
 
     import secrets
 
-    from windows_scan_local_files import scan_root_identity
-
     for _ in range(100):
         path = parent / f"{prefix}{secrets.token_hex(4)}"
         try:
-            _create_private_windows_directory(path, exist_ok=False)
+            return _create_private_windows_directory(path, exist_ok=False)
         except FileExistsError:
             continue
-        canonical, created_identity = scan_root_identity(path)
-        current = canonical.lstat()
-        if (current.st_dev, current.st_ino) != created_identity:
-            raise OSError("New scan directory changed after creation.")
-        return canonical
     raise FileExistsError(f"Could not create a unique directory beneath {parent}.")

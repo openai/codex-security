@@ -78,6 +78,7 @@ _ERROR_FILE_EXISTS = 80
 _ERROR_INSUFFICIENT_BUFFER = 122
 _ERROR_ALREADY_EXISTS = 183
 _ERROR_DIRECTORY = 267
+_OWNER_SECURITY_INFORMATION = 0x00000001
 _DACL_SECURITY_INFORMATION = 0x00000004
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
@@ -496,19 +497,22 @@ def _create_directory(path: Path) -> None:
         _raise_last_error("CreateDirectoryW", path)
 
 
-def create_directory_with_same_dacl(path: Path, source: Path) -> None:
-    """Create an archive replacement with the original directory's DACL."""
-    _require_windows()
+def _directory_security_descriptor(source: Path, information: int) -> ctypes.Array:
     source_path = _extended_path(source)
     size = wintypes.DWORD()
-    _GetFileSecurityW(source_path, _DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(size))
+    _GetFileSecurityW(source_path, information, None, 0, ctypes.byref(size))
     if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
         _raise_last_error("GetFileSecurityW", source)
     descriptor = ctypes.create_string_buffer(size.value)
-    if not _GetFileSecurityW(
-        source_path, _DACL_SECURITY_INFORMATION, descriptor, size.value, ctypes.byref(size)
-    ):
+    if not _GetFileSecurityW(source_path, information, descriptor, size.value, ctypes.byref(size)):
         _raise_last_error("GetFileSecurityW", source)
+    return descriptor
+
+
+def create_directory_with_same_dacl(path: Path, source: Path) -> None:
+    """Create an archive replacement with the original directory's DACL."""
+    _require_windows()
+    descriptor = _directory_security_descriptor(source, _DACL_SECURITY_INFORMATION)
     attributes = _SecurityAttributes(
         ctypes.sizeof(_SecurityAttributes), ctypes.cast(descriptor, wintypes.LPVOID), False
     )
@@ -570,6 +574,37 @@ def _locked_parent(
     finally:
         for handle in reversed(handles):
             handle.close()
+
+
+def _generated_directory_policy(descriptor: object) -> tuple[str, bool, frozenset[str]]:
+    # Let Windows normalize SID aliases, access masks and inheritance flags in
+    # both descriptors. ACE order is immaterial for our three allow grants.
+    sddl = wintypes.LPWSTR()
+    if not _advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor,
+        1,
+        _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION,
+        ctypes.byref(sddl),
+        None,
+    ):
+        _raise_last_error("ConvertSecurityDescriptorToStringSecurityDescriptorW")
+    try:
+        owner, _, dacl = sddl.value.partition("D:")
+        flags, _, entries = dacl.partition("(")
+        return owner, "P" in flags, frozenset(entries.removesuffix(")").split(")("))
+    finally:
+        _kernel32.LocalFree(sddl)
+
+
+def verify_private_scan_root(scan_dir: Path, expected_descriptor: object) -> Path:
+    """Verify the new directory's owner and protected grants while the path is pinned."""
+    with _locked_parent(scan_dir, ".security", create=False) as (root_path, _):
+        actual = _directory_security_descriptor(
+            root_path, _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
+        )
+        if _generated_directory_policy(actual) != _generated_directory_policy(expected_descriptor):
+            raise _invalid_path(scan_dir, "new scan directory lacks its private owner or DACL")
+        return root_path
 
 
 def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
