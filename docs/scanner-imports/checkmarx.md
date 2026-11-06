@@ -20,9 +20,10 @@ codex-security publish findings "$report" --to local --repository . \
 ```
 
 For CxSAST, use the XML path and a key such as `cxsast/example-instance/example-project/main/sast`.
-Check `report.scanId`, the SAST findings and any exclusions. A confirmed local import
-with exclusions saves the accepted findings and exits with status 1. Use the same
-file for confirmation and retries. [Save or publish and verify](README.md#save-or-publish-and-verify).
+Check `report.scanId`, the SAST findings and any exclusions. If the preview
+contains both findings and exclusions, a confirmed local import saves the
+accepted findings and exits with status 1. Use the same file for confirmation
+and retries. [Save or publish and verify](README.md#save-or-publish-and-verify).
 
 ## Collect an existing scan with Codex
 

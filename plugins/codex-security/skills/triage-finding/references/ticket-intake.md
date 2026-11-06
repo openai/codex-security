@@ -6,7 +6,11 @@ Retrieve the requested content before normalization. Do not infer inaccessible t
 
 By default, use the native [Atlassian](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app for Jira. Resolve identity and site with `atlassianUserInfo` and `getAccessibleAtlassianResources`; keep that connection and site for the selected set. Ask when the source is ambiguous.
 
-Use `getJiraIssue` for exact issues and `searchJiraIssuesUsingJql` for collections. Exhaust the JQL result pages by following `nextPageToken` until `isLast` is true. When the request includes comments, use `listJiraIssueComments` and advance `startAt` until `isLast` is true. Preserve each comment’s visibility and whether it is an internal note. Use only read operations for intake. Discover deferred metadata through `discover` and `executeRead`.
+Use `getJiraIssue` for a single issue. For collections, use `searchJiraIssuesUsingJql` and follow `nextPageToken` until `isLast` is true.
+
+When the request includes comments, use `listJiraIssueComments` and advance `startAt` until `isLast` is true. Preserve each comment’s visibility and whether it is an internal note.
+
+Use only read operations for intake. Discover deferred metadata through `discover` and `executeRead`.
 
 Use natural-language search to discover a site, project, issue family, or first key from a vague request, then use JQL or exact fetches. Keep user-supplied JQL intact. Order queries you build by a stable field and preserve the JQL as provenance. Jira text search tokenizes punctuation: if an exact marker gives no results, search a stable token and filter summaries for the exact family when those fields are authorized.
 

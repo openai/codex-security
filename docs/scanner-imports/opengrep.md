@@ -37,8 +37,10 @@ codex-security publish findings "$opengrep_report" --to local --repository . \
 
 Check the findings, exclusions and `report.errors`, even if the findings list
 is empty. A zero-result report with scanner errors fails the import. In the
-Cloud preview, check `excluded` again. If the traces grouped at one occurrence
-exceed the 256 KiB evidence limit, Cloud excludes that entire occurrence.
+Cloud preview, compare `findings` and `excluded` by `source_finding_id`.
+An oversized trace can be excluded while other traces for the same occurrence
+are retained. If the remaining group still exceeds 256 KiB, the reader
+excludes the whole occurrence.
 Keep `--provider opengrep` for both destinations.
 [Save or publish and verify](README.md#save-or-publish-and-verify).
 

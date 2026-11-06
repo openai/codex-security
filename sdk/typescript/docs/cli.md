@@ -1464,8 +1464,14 @@ directory. Each imported record starts as `not_assessed`. Unknown revisions and
 locations stay unknown. Repository-scoped sources are checked against comparable
 configured Git remotes as described in the provider guide. Reimporting the same
 source key and finding ID reports created, updated, or unchanged records.
-Records omitted from the new selection stay stored. An import with exclusions
-exits with status 1. Local imports can retain evidence that exceeds Cloud's per-finding limits.
+Records omitted from the new selection stay stored. Local imports can retain
+evidence that exceeds Cloud's per-finding limits.
+
+If a report contains both ready and excluded records, the local dry run exits
+with status 0. After confirmation, the import stores the ready records and
+exits with status 1. If all records are excluded, both commands exit with
+status 2. A clean empty report exits with status 0 in either mode and stores
+no findings.
 
 Preview the same file and source key again for the intended destination before
 publishing. Semgrep Guardian captures support local import only. Both Web API

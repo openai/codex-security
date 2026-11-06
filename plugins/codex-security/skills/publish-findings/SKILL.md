@@ -163,9 +163,11 @@ Obtain explicit confirmation for this concrete upload, including skipped records
 
 ### Upload and report
 
-Read the structured result even when the process exits nonzero. Progress appears on stderr. For a private inbox import, check `privateJob.status`, the job counts, errors and unprocessed records. A completed job can have `verified: 0`. For the repository publisher, report verified and unacknowledged records from the item receipts. For either destination, include exclusions, failures and any `savedSubmission` checkpoint. [Result fields and exit codes](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#results-and-exit-codes)
+Read the structured result even when the process exits nonzero. Progress appears on stderr. For a private inbox import, check `privateJob.status`, the job counts, errors and unprocessed records. A completed job can have `verified: 0`.
 
-A receipt confirms ingestion of scanner evidence. A private finding can then be assessed against the repository and published to shared Findings. Link to the returned `cloudUrl` when available.
+For the repository publisher, report `verified` for findings the CLI confirmed by readback and `unacknowledged` for records without a receipt. Use `failures` to identify records the publisher rejected. For either destination, include exclusions and any `savedSubmission` checkpoint. [Result fields and exit codes](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#results-and-exit-codes)
+
+A private finding can be assessed against the repository and published to shared Findings. Link to the returned `cloudUrl` when available.
 
 ### Resume an interrupted upload
 
