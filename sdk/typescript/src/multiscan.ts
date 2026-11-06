@@ -18,13 +18,21 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
-import type { CodexSecurity } from "./api.js";
-import type { CodexSecurityConfig } from "./config.js";
+import type { CodexSecurity, ScanOptions } from "./api.js";
+import type { CodexSecurityConfig, JsonObject } from "./config.js";
 import { ContractSchemaError, loadContract } from "./contract.js";
-import type { ScanCost } from "./cost.js";
+import type { ScanCost, ScanUsageMeasurement } from "./cost.js";
 import { deepScanOptions } from "./deep-config.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
@@ -38,6 +46,8 @@ import {
 } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
+  canonicalConfigPath,
+  createWindowsOutputDirectory,
   requireSecureOutputAncestry,
   resolvePluginPath,
   validateOutputDir,
@@ -70,9 +80,13 @@ type MultiscanTask = ReturnType<typeof parseInventory>[number];
 interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "failed";
   attempt: number;
+  operationId?: string;
   outputDir: string;
   threatModelPath?: string;
   cost?: ScanCost;
+  measurement?: Readonly<ScanUsageMeasurement>;
+  usage?: JsonObject;
+  outcome?: "completed" | "failed" | "canceled";
   error?: string;
   warnings?: string[];
   policyFailed?: boolean;
@@ -103,10 +117,18 @@ export interface MultiscanOptions extends ScanPromptSettings {
   maxAttempts: number;
   recoverScan?(
     scanDir: string,
-    prompts: ScanPromptSettings & {
-      knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
-    },
-  ): Promise<Pick<ScanResult, "manifest" | "cost" | "findings"> | undefined>;
+    prompts: ScanPromptSettings &
+      Pick<ScanOptions, "onMeasurement" | "onTelemetry"> & {
+        knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
+        /** @internal Preserve correlation when the resumed SDK has no saved binding. */
+        telemetryContext?: { operationId: string; parentAttemptId?: string };
+      },
+  ): Promise<
+    | (Pick<ScanResult, "manifest" | "cost" | "findings"> & {
+        usage?: JsonObject;
+      })
+    | undefined
+  >;
   maxCostUsd?: number;
   // Prompts are shared across modes and prepared from the top-level options.
   scanOptionsByMode?: Partial<
@@ -415,6 +437,7 @@ async function runCampaign(
       if (task === undefined) return;
       const knowledge = knowledgeByMode[task.mode];
       const history = receipts.get(task.id.toLowerCase());
+      let operationId = history?.scan?.operationId;
       let maxAttempt = history?.maxAttempt ?? 0;
       const nextAttempt = () => {
         if (maxAttempt === Number.MAX_SAFE_INTEGER)
@@ -449,6 +472,17 @@ async function runCampaign(
         const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        let measurement: Readonly<ScanUsageMeasurement> | null = null;
+        let savedUsage: JsonObject | undefined;
+        const observers: Pick<ScanOptions, "onMeasurement" | "onTelemetry"> = {
+          onMeasurement: (value) => {
+            measurement = value;
+            cost = value.cost;
+          },
+          onTelemetry: (event) => {
+            operationId = event.operationId;
+          },
+        };
         let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
         let requiresRecovery = false;
@@ -457,7 +491,9 @@ async function runCampaign(
           await ensureOutputDirectory(artifactRoot);
           let result:
             | (Pick<ScanResult, "manifest" | "cost" | "findings"> &
-                Partial<Pick<ScanResult, "threatModelPath">>)
+                Partial<Pick<ScanResult, "threatModelPath">> & {
+                  usage?: JsonObject;
+                })
             | undefined;
           if (
             options.recoverScan !== undefined &&
@@ -494,6 +530,10 @@ async function runCampaign(
               result = await options.recoverScan(scanDir, {
                 ...options,
                 knowledgeBaseSnapshot: knowledge?.snapshot,
+                ...observers,
+                ...(operationId === undefined
+                  ? {}
+                  : { telemetryContext: { operationId } }),
               });
               attemptedResume = result !== undefined;
             }
@@ -550,6 +590,7 @@ async function runCampaign(
             const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
               .filter(Boolean)
               .join("\n\n");
+            operationId ??= randomUUID();
             result = await security.run(checkout, {
               ...scanSettings,
               knowledgeBaseSnapshot: knowledge?.snapshot,
@@ -560,6 +601,7 @@ async function runCampaign(
                 ? { knowledgeBasePaths: options.knowledgeBasePaths }
                 : {}),
               mode: task.mode,
+              telemetryContext: { operationId },
               outputDir: scanDir,
               ...(scanPrompt ? { scanPrompt } : {}),
               ...(options.validationPrompt === undefined
@@ -571,6 +613,7 @@ async function runCampaign(
               ...(options.maxCostUsd === undefined
                 ? {}
                 : { maxCostUsd: options.maxCostUsd }),
+              ...observers,
               onWarning: (warning) => {
                 runWarnings.push(warning);
                 notifyProgress(options, {
@@ -587,6 +630,7 @@ async function runCampaign(
           }
           threatModelPath = result.threatModelPath;
           cost = result.cost;
+          savedUsage = result.usage;
           const failureSeverity = scanSettings?.failureSeverity;
           if (failureSeverity !== undefined) {
             attemptPolicyFailed = result.findings.findings.some((finding) =>
@@ -597,14 +641,16 @@ async function runCampaign(
             throw new Error(`Multiscan scan ${result.manifest.scan.status}.`);
         } catch (error) {
           if (error instanceof AttemptNumberExhaustedError) throw error;
-          if (options.signal?.aborted === true) options.signal.throwIfAborted();
+          // Recovery retains its resumable attempt and checkout; SDK telemetry records cancellation.
+          if (options.signal?.aborted && options.recoverScan !== undefined)
+            options.signal.throwIfAborted();
           if (error instanceof ScanCostLimitExceededError) {
             cost = error.cost;
             exhaustedBudget = true;
           }
           requiresRecovery = error instanceof OutputDirectoryNotEmptyError;
           failure = requiresRecovery
-            ? `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts and checkout were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`
+            ? `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
@@ -621,7 +667,7 @@ async function runCampaign(
           threatModelPath = await readThreatModelPath(scanDir, {
             pythonPath: options.config.pythonPath,
             protectedRoot,
-            signal: options.signal,
+            signal: options.signal?.aborted ? undefined : options.signal,
           });
         const recoveryCheckout =
           options.recoverScan !== undefined && failure === undefined
@@ -631,9 +677,13 @@ async function runCampaign(
           ...task,
           status,
           attempt,
+          ...(operationId === undefined ? {} : { operationId }),
           outputDir: scanDir,
           ...(threatModelPath === null ? {} : { threatModelPath }),
           ...(cost === null ? {} : { cost }),
+          ...(measurement === null ? {} : { measurement }),
+          ...(savedUsage === undefined ? {} : { usage: savedUsage }),
+          outcome: options.signal?.aborted ? "canceled" : status,
           ...(reportedError === undefined ? {} : { error: reportedError }),
           ...(recoveryCheckout !== undefined
             ? { cleanupPending: "recovery-checkout" }
@@ -649,6 +699,7 @@ async function runCampaign(
           appendReceipt(ledger, receiptLine),
         );
         await receiptTail;
+        options.signal?.throwIfAborted();
         if (recoveryCheckout !== undefined) {
           reportedError = await removeCheckout(recoveryCheckout);
         }
@@ -708,29 +759,28 @@ async function removeCheckout(path: string): Promise<string | undefined> {
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {
-  const metadata = await lstat(path, { bigint: true }).catch(
+  let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
-  if (metadata?.isSymbolicLink()) {
+  if (metadata === undefined) {
+    if (process.platform === "win32") {
+      // Resolve parent aliases while leaving the leaf for lstat to verify.
+      path = join(await canonicalConfigPath(dirname(path)), basename(path));
+      await createWindowsOutputDirectory(path, true);
+    } else {
+      await mkdir(path, { recursive: true, mode: 0o700 });
+    }
+    metadata = await lstat(path, { bigint: true });
+  }
+  if (metadata.isSymbolicLink()) {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
-  if (metadata !== undefined && !metadata.isDirectory()) {
+  if (!metadata.isDirectory()) {
     throw new Error("Multiscan output paths must be directories.");
   }
-  let prepared = path;
-  if (metadata === undefined) {
-    prepared =
-      process.platform === "win32"
-        ? await canonicalWindowsCreationPath(path)
-        : path;
-    await mkdir(prepared, { recursive: true, mode: 0o700 });
-  }
-  const canonical = await realpath(prepared);
+  const canonical = await realpath(path);
   const directory = await lstat(canonical, { bigint: true });
-  if (
-    metadata !== undefined &&
-    (directory.dev !== metadata.dev || directory.ino !== metadata.ino)
-  ) {
+  if (directory.dev !== metadata.dev || directory.ino !== metadata.ino) {
     throw new Error("Multiscan output directories changed during preparation.");
   }
   if (process.platform === "win32") return canonical;
@@ -746,20 +796,6 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     );
   }
   return canonical;
-}
-
-async function canonicalWindowsCreationPath(path: string): Promise<string> {
-  let ancestor = dirname(path);
-  for (;;) {
-    try {
-      return resolve(await realpath(ancestor), relative(ancestor, path));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      const parent = dirname(ancestor);
-      if (parent === ancestor) throw error;
-      ancestor = parent;
-    }
-  }
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
@@ -1144,7 +1180,7 @@ function parseInventory(
   if (errors.length > 0) {
     throw new Error(`Multiscan CSV could not be parsed: ${errors[0]!.message}`);
   }
-  const headers = rows.shift();
+  const headers = rows.shift()?.map((header) => header.trim());
   if (
     headers === undefined ||
     !["id", "repository", "revision"].every((name) => headers.includes(name)) ||

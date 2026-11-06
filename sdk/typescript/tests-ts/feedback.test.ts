@@ -130,7 +130,6 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
   expect(requests[2].params).toMatchObject({
     classification: "bug",
     reason: "Scan stopped",
-    threadId: "thread-1",
     includeLogs: true,
     tags: {
       codex_security_version: VERSION,
@@ -138,6 +137,7 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
       codex_security_scan_id: "scan-1",
     },
   });
+  expect(requests[2].params).not.toHaveProperty("threadId");
   expect(attachments).toHaveLength(1);
   expect(
     JSON.parse(attachments[0].content).sessions.map(
@@ -149,6 +149,30 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
   expect(existsSync(attachments[0].path)).toBe(false);
   context.expectClosed();
 });
+
+test.each([
+  ["complete", null],
+  ["running", "2026-08-21T12:02:00Z"],
+] as const)(
+  "uploads the full execution thread for a %s scan without an active log cutoff",
+  async (status, logCompletedAt) => {
+    const context = await setup();
+    await sendFeedback(
+      {
+        ...context.options,
+        scan: {
+          ...context.options.scan,
+          progress: { status },
+          logCompletedAt,
+        },
+      },
+      context.startCodex,
+    );
+    const { requests, attachments } = await context.transcript();
+    expect(requests[2].params.threadId).toBe("thread-1");
+    expect(attachments[0].content).toContain("Configured follow-up prompt.");
+  },
+);
 
 for (const missingParent of [false, true]) {
   test(`uploads only the selected Desktop scan logs with parent ${missingParent ? "missing" : "available"}`, async () => {
@@ -272,6 +296,7 @@ test("without log opt-in, does not read or attach saved sessions", async () => {
   ).toBe(false);
   const { requests, attachments } = await context.transcript();
   expect(requests[2].params.includeLogs).toBe(false);
+  expect(requests[2].params.threadId).toBe("thread-1");
   expect(requests[2].params.extraLogFiles).toEqual([]);
   expect(attachments).toEqual([]);
 });

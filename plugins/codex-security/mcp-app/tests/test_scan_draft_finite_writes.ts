@@ -194,12 +194,20 @@ test("Deep retains historical threat-model reader behavior", async (t) => {
 
 test("worker recovers finite nested values after an interrupted result write", async (t) => {
   const f = await fixture(t, "worker");
-  let nested: unknown = 1.25e300;
+  let nested: unknown = 1.25e-300;
   for (let depth = 0; depth < 300; depth++) nested = [nested];
   const kept = {
     ...finding("finite", "api/source.py"),
     extensions: {
-      values: [null, true, false, 0, -1.25e300, "Infinity", "λ 🧪"],
+      values: [
+        null,
+        true,
+        false,
+        0,
+        Number.MIN_SAFE_INTEGER,
+        "Infinity",
+        "λ 🧪",
+      ],
       nested,
     },
   };

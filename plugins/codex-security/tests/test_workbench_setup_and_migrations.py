@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -105,7 +107,8 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "persist scan log completion boundaries"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "persist scan log completion boundaries"),
 ]
 
 
@@ -1144,8 +1147,38 @@ def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
     }
 
 
+@pytest.mark.parametrize("preview_version", [48, 50, 63])
+def test_log_boundary_preview_preserves_saved_boundary_and_repairs_history(preview_version):
+    name = "persist scan log completion boundaries"
+    connection, apply_migrations = create_historical_database(
+        preview_version,
+        ((preview_version, name, "ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"),),
+    )
+    insert_historical_row(connection, "workspaces", "created", id="workspace")
+    insert_legacy_scan(
+        connection, "created", id="preview", workspace_id="workspace", log_completed_at="boundary"
+    )
+
+    apply_migrations(connection)
+    apply_migrations(connection)
+
+    assert (
+        connection.execute("SELECT log_completed_at FROM scans WHERE id = 'preview'").fetchone()[0]
+        == "boundary"
+    )
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (63,64) ORDER BY version"
+        )
+    ] == [(63, "retain unverified Deep Scan worker attempts"), (64, name)]
+    assert "worker_usage_gap" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
+
+
 def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
-    connection, apply_migrations = create_historical_database(63)
+    connection, apply_migrations = create_historical_database(64)
     insert_historical_row(connection, "workspaces", "created", id="legacy-workspace")
     for case in ("running", "complete", "failed", "canceled"):
         insert_legacy_scan(
@@ -1320,6 +1353,25 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
     assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone()[0] == 2.5
     assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
+
+
+@pytest.mark.cross_platform
+def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
+    db, migrate = create_historical_database(63)
+    with closing(db):
+        timestamp = "2026-01-01T00:00:00Z"
+        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
+        record_migration(db, 63, "retain native investigation time allowances", timestamp)
+        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
+        migrate(db)
+        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
+        receipt = db.execute(query).fetchone()
+        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
+        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
+        migrate(db)
+        assert db.execute(query).fetchone() == receipt
+        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:

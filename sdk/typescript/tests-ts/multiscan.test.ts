@@ -103,7 +103,7 @@ describe("multiscan", () => {
     const source = await repository(paths.root, "comma, quoted");
     await writeFile(
       paths.input,
-      `\uFEFF"id","repository","revision","scope","mode","prompt","notes"\r\n"payments","${source.path}","${source.revision}","src","deep","Focus on authentication, authorization.","contains ""quotes"""\r\n\r\n`,
+      `\uFEFF" id "," repository "," revision ","scope","mode","prompt","notes"\r\n"payments","${source.path}","${source.revision}","src","deep","Focus on authentication, authorization.","contains ""quotes"""\r\n\r\n`,
     );
 
     const summary = await runMultiscan(
@@ -171,6 +171,49 @@ describe("multiscan", () => {
       { id: "priced", status: "completed", cost },
     ]);
   });
+
+  test.each([false, true])(
+    "retains usage for failed or canceled bulk attempts: canceled=%p",
+    async (cancel) => {
+      const { paths } = await repositoryFixture("synthetic-usage");
+      const controller = new AbortController();
+      const measurement = {
+        coverage: "partial" as const,
+        cost: null,
+        observedAt: "2026-10-01T00:00:00.000Z",
+        threadCount: 1,
+        missingThreadCount: 1,
+        usage: {
+          input_tokens: 100,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 5,
+          reasoning_output_tokens: 0,
+          total_tokens: 105,
+        },
+      };
+      const run = runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            scanOptions.onMeasurement?.(measurement);
+            if (cancel) controller.abort(new Error("Synthetic cancellation"));
+            throw new Error("Synthetic execution failure");
+          }),
+          { maxAttempts: 1, signal: controller.signal },
+        ),
+      );
+      if (cancel) await expect(run).rejects.toThrow("Synthetic cancellation");
+      else expect(await run).toMatchObject({ completed: 0, failed: 1 });
+      expect(await results(join(paths.output, "results.jsonl"))).toMatchObject([
+        {
+          status: "failed",
+          outcome: cancel ? "canceled" : "failed",
+          measurement,
+        },
+      ]);
+    },
+  );
 
   test("records an exhausted repository budget without retrying the scan", async () => {
     const { paths } = await repositoryFixture("over-budget");

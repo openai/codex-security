@@ -1,3 +1,5 @@
+"""Exercise selected Checkmarx One and CxSAST report collection with isolated vendor tools."""
+
 import io
 import json
 import os
@@ -34,7 +36,6 @@ def capture_dir(monkeypatch, tmp_path):
     source.mkdir()
     monkeypatch.chdir(source)
     monkeypatch.setattr(tempfile, "tempdir", str(directory))
-    monkeypatch.setenv("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS", "1")
     for setting in ("CX_CONFIG_FILE_PATH", "CX_APIKEY", "CX_CLIENT_ID", "CX_CLIENT_SECRET"):
         monkeypatch.delenv(setting, raising=False)
     return directory
@@ -390,18 +391,10 @@ def test_one_discards_failed_exports(failure, capture_dir, one_args, monkeypatch
     assert not list(capture_dir.iterdir())
 
 
-@pytest.mark.parametrize("refusal", ["opt-in disabled", "relative config"])
 @pytest.mark.cross_platform
-def test_one_refuses_before_vendor_invocation(refusal, one_args, monkeypatch, reject):
-    if refusal == "relative config":
-        monkeypatch.setenv("CX_CONFIG_FILE_PATH", "my-config.yaml")
-        reject(one_args, "CX_CONFIG_FILE_PATH to a trusted absolute path")
-    else:
-        monkeypatch.delenv("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS")
-        monkeypatch.setattr(
-            Path, "is_file", lambda path: pytest.fail(f"Probed {path} before opt-in")
-        )
-        reject(one_args, "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS")
+def test_one_refuses_relative_config_before_vendor_invocation(one_args, monkeypatch, reject):
+    monkeypatch.setenv("CX_CONFIG_FILE_PATH", "my-config.yaml")
+    reject(one_args, "CX_CONFIG_FILE_PATH to a trusted absolute path")
 
 
 @pytest.mark.parametrize("use_env_credentials", [False, True])
