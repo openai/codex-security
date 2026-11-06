@@ -1138,7 +1138,13 @@ async function withFakeCodex(
     }
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
-    await rm(root, { recursive: true, force: true });
+    // On Windows a terminated fixture descendant may briefly retain its working directory.
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
   }
 }
 
