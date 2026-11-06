@@ -3126,6 +3126,201 @@ if __name__ == "__main__":
     await client.close();
   });
 
+  test.each([false, true])(
+    "warns before completion when repository HEAD drifts (observer fails: %s)",
+    async (observerFails) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      let revision = "deadbeef";
+      let completed = false;
+      const details: unknown[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        repositoryRevision: async () => revision,
+        runWorkbench: async (_options, args, input) => {
+          const result = mockWorkbench(args, input);
+          if (args[0] === "register-cli-scan") revision = "changed";
+          return result;
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              expect(details).toEqual([undefined]);
+              expect(completed).toBe(false);
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onWarning: (message, detail) => {
+            if (!message.startsWith("Repository HEAD changed")) return;
+            expect(completed).toBe(false);
+            details.push(detail);
+            if (observerFails) throw new Error("Synthetic observer failure");
+          },
+          onObserverError: () => {
+            throw new Error("Synthetic observer error handler failure");
+          },
+        });
+        completed = true;
+        expect(details).toEqual([undefined]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each(["success", "failure"] as const)(
+    "stops HEAD monitoring before post-scan instructions after %s",
+    async (outcome) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const releaseRead = Promise.withResolvers<void>();
+      let revision = "deadbeef";
+      let reads = 0;
+      let monitorSignal: AbortSignal | undefined;
+      let turns = 0;
+      let finalization: string | undefined;
+      let finalizationAtFollowup: string | undefined;
+      let monitorAbortedAtFollowup: boolean | undefined;
+      const warnings: string[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        resolvePluginPython: async () => pythonExecutable()!,
+        repositoryRevision: async (_repository, signal) => {
+          if (++reads > 1) {
+            monitorSignal = signal;
+            await releaseRead.promise;
+          }
+          return revision;
+        },
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "complete-scan" || args[0] === "fail-scan") {
+            finalization = args[0];
+            return { scan: { warnings: [] }, targetWarnings: [] };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          if (++turns === 1) {
+            if (outcome === "failure")
+              return {
+                events: (async function* () {
+                  yield {
+                    type: "turn.failed" as const,
+                    error: { message: "SYNTHETIC_MAIN_SCAN_FAILURE" },
+                  };
+                })(),
+              };
+            await copyCompletedScan(root);
+            return { events: completedEvents() };
+          }
+          finalizationAtFollowup = finalization;
+          monitorAbortedAtFollowup = monitorSignal?.aborted;
+          revision = "temporary-follow-up-revision";
+          releaseRead.resolve();
+          // Let the pending read and warning observer settle without a polling delay.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          revision = "deadbeef";
+          return { events: completedEvents() };
+        }, "thread-1"),
+      });
+      try {
+        const result = client.run(repository, {
+          postScanPrompt:
+            "Inspect another local revision and restore the checkout.",
+          onWarning: (message) => {
+            if (message.startsWith("Repository HEAD changed"))
+              warnings.push(message);
+          },
+        });
+        if (outcome === "success")
+          expect((await result).manifest.scan.status).toBe("completed");
+        else
+          await expect(result).rejects.toThrow("SYNTHETIC_MAIN_SCAN_FAILURE");
+        expect(turns).toBe(2);
+        expect(finalizationAtFollowup).toBe(
+          outcome === "success" ? "complete-scan" : "fail-scan",
+        );
+        expect(monitorAbortedAtFollowup).toBe(true);
+        expect(revision).toBe("deadbeef");
+        expect(warnings).toEqual([]);
+      } finally {
+        releaseRead.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    ["repository", true, 2],
+    ["repository", false, 1],
+    ["worktree", true, 2],
+    ["working_tree", true, 2],
+    ["refs", true, 1],
+    ["unversioned", true, 1],
+  ] as const)(
+    "monitors HEAD only for mutable %s targets with a warning observer (observed: %s)",
+    async (kind, observed, expectedReads) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      if (kind === "refs" || kind === "working_tree") {
+        gitText(["init", "-q"], { cwd: repository });
+        gitText(
+          [
+            "-c",
+            "user.name=Synthetic Test",
+            "-c",
+            "user.email=synthetic@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Synthetic revision",
+          ],
+          { cwd: repository },
+        );
+      }
+      const readRevision = mock(async () =>
+        kind === "unversioned" ? null : "deadbeef",
+      );
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        repositoryRevision: readRevision,
+        runWorkbench: async (_options, args, input) => {
+          const result = mockWorkbench(args, input);
+          if (args[0] === "register-cli-scan" && kind === "worktree")
+            result["contract"] = {
+              target: {
+                allowedKinds: ["git_worktree"],
+                requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
+              },
+            };
+          return result;
+        },
+        createCodex: () => {
+          throw new Error("Synthetic scan boundary");
+        },
+      });
+      try {
+        await expect(
+          client.run(repository, {
+            onWarning: observed ? mock() : undefined,
+            target:
+              kind === "refs"
+                ? DiffTarget.refs({ base: "HEAD", head: "HEAD" })
+                : kind === "working_tree"
+                  ? DiffTarget.workingTree({ base: "HEAD" })
+                  : "repository",
+          }),
+        ).rejects.toThrow("Synthetic scan boundary");
+        expect(readRevision).toHaveBeenCalledTimes(expectedReads);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("passes the workbench snapshot contract to dirty Git scans", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();
     const createCodex = mock((_options: CodexOptions) => {

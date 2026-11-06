@@ -177,6 +177,7 @@ const distModules = [
   "server/errors",
   "server/sqlite-store",
   "server/storage",
+  "target-drift",
   "targets",
   "terminal-columns",
   "thread-source",

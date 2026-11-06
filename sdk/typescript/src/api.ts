@@ -309,6 +309,7 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
+import { startHeadDriftMonitor } from "./target-drift.js";
 import {
   inspectTrustedExecutable,
   isWithin,
@@ -2216,6 +2217,7 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    let stopHeadDriftMonitor: (() => void) | undefined;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
@@ -2514,11 +2516,11 @@ export class CodexSecurity {
         );
       }
       checkOpen();
+      const readRepositoryRevision =
+        this.#dependencies.repositoryRevision ?? repositoryRevision;
       const expectation: ScanExpectation = {
         repository: repo,
-        repositoryRevision: await (
-          this.#dependencies.repositoryRevision ?? repositoryRevision
-        )(repo, signal),
+        repositoryRevision: await readRepositoryRevision(repo, signal),
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
@@ -3151,6 +3153,27 @@ export class CodexSecurity {
       }
       throwIfAborted(signal, scanDir);
       if (
+        options.onWarning !== undefined &&
+        targetRevision !== null &&
+        (targetKind === "git_revision" ||
+          targetKind === "git_worktree" ||
+          (targetKind === "git_diff" && normalized.kind === "working_tree"))
+      ) {
+        stopHeadDriftMonitor = startHeadDriftMonitor({
+          expectedRevision: registeredRevision,
+          readRevision: (revisionSignal) =>
+            readRepositoryRevision(repo, revisionSignal),
+          signal,
+          onDrift: () =>
+            notifyObserver(
+              options,
+              "onWarning",
+            )(
+              `Repository HEAD changed while the scan was running. This scan remains bound to ${registeredRevision}. To scan the new revision, stop this scan and restart it.`,
+            ),
+        });
+      }
+      if (
         this.#dependencies.hostedScan === undefined &&
         ((mode !== "deep" && options.onProgress !== undefined) ||
           (mode === "deep" && options.onDeepProgress !== undefined))
@@ -3695,6 +3718,7 @@ export class CodexSecurity {
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
+      stopHeadDriftMonitor?.();
       activeScan = null;
       const completedScan = completion["scan"];
       notifyScanLifecycle(options, completedScan);
@@ -4113,6 +4137,7 @@ export class CodexSecurity {
           activeScan = null;
         } catch {}
       }
+      stopHeadDriftMonitor?.();
       if (runPostScan !== null && !signal.aborted) {
         scanProgressTracker?.stop();
         try {
@@ -4140,6 +4165,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      stopHeadDriftMonitor?.();
       budgetAbortController.abort();
       scanProgressTracker?.stop();
       // Temporary-input cleanup must not replace the scan's outcome.
