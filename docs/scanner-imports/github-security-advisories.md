@@ -72,7 +72,9 @@ matches, [save locally or publish to Cloud and verify the result](README.md#save
 ## Identity and evidence
 
 Repository and global advisories have distinct finding IDs, even when they
-share a GHSA ID and source key. A global advisory has no source repository.
+share a GHSA ID and source key. The finding URL opens the selected disclosure.
+A repository advisory links to that repository’s advisory page. A global advisory
+links to the advisory database and has no source repository.
 Compare the affected package ranges with the versions installed in your
 checkout to decide whether the advisory applies.
 

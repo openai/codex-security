@@ -60,8 +60,9 @@ JSON can contain a single finding, an array of selected findings, a detailed
 vulnerability report or a complete `data.vulnerabilityFindings.nodes`
 collection. JSONL can hold one package record per line. Preserve `id`, `name`,
 `detailedName`, `vulnerableAsset.id` and `vendorSeverity` or `severity`, plus
-available package, image and repository metadata. Use the Wiz finding ID for
-identity. Many package occurrences can share a CVE.
+available package, image and repository metadata. JSON uses `vendorSeverity`
+when present, then `severity`. A reported `NONE` becomes `unknown`. The Wiz
+finding ID identifies the occurrence. Many occurrences can share a CVE.
 
 For GitHub Enterprise branch assets, keep `vulnerableAsset.cloudProviderURL`
 and either `nativeType: "github#repositoryBranch"` or both

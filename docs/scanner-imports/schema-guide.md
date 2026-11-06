@@ -48,15 +48,19 @@ inspect the reader’s exclusions or input error before retrying.
 
 Imported records start with `assessment.state` set to `not_assessed`. The
 [evidence schema](../../sdk/typescript/schemas/external-findings.schema.json)
-defines the fields the reader can populate.
+defines the fields under `evidence`. Read the normalized fields first. Use the
+saved vendor record to investigate a detail the scanner did not expose there.
 
-| Field                          | How to use it                                                                                                                                             |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `title`, `severity`            | Required source evidence. Severity can be `unknown`. A scanner verdict or suppression can be reported alongside it.                                       |
-| `packages[]`                   | Compare an observed `installed_version` with the reported `vulnerable_version_range` and `fixed_versions`. An advisory may supply only a range or fix.    |
-| `locations[]`, `code_revision` | Navigate to a reported repository path and line at the scanned revision when available. `details.code.end_line` extends the first location.               |
-| `details`                      | Optional context for `sast`, `secret`, `iac` or `advisory` findings. For GHSA, `details.advisory.source` distinguishes repository and global disclosures. |
-| `source_data`                  | The vendor fields retained for this record. Keep the original export when you need scan-wide diagnostics or inventory.                                    |
+| Field                                                      | How to use it                                                                                                                                             |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`, `description`, `severity`                         | The title identifies what the scanner reported. An optional description explains the finding. Severity can be `unknown`.                                  |
+| `url`                                                      | Open the scanner finding or advisory supplied by the reader. This link can lead to a vendor portal that requires sign-in.                                 |
+| `details.repository.url`, `details.file_url`               | Open the source repository or the reported file. A repository link alone does not identify a file or revision.                                            |
+| `advisory_ids[]`, `details.weakness_ids[]`, `details.rule` | CVE and GHSA IDs identify vulnerabilities or advisories. CWEs classify weaknesses. A rule ID identifies the scanner check.                                |
+| `packages[]`                                               | Compare an observed `installed_version` with the reported `vulnerable_version_range` and `fixed_versions`. An advisory may supply only a range or fix.    |
+| `locations[]`, `code_revision`                             | Navigate to a reported repository path and line at the scanned revision when available. `details.code.end_line` extends the first location.               |
+| `details`                                                  | Optional context for `sast`, `secret`, `iac` or `advisory` findings. For GHSA, `details.advisory.source` distinguishes repository and global disclosures. |
+| `source_data`                                              | The vendor fields retained for this record. Keep the original export when you need scan-wide diagnostics or inventory.                                    |
 
 Use finite JSON numbers in evidence and report metadata. Supply integers outside
 JavaScript’s safe range as strings to preserve their value. In SDK inputs, use
@@ -71,8 +75,14 @@ readers also apply the Cloud size limit to the evidence they return.
 
 ## Operate the two destinations
 
-**Local.** Run `codex-security findings imported PATH --format json` with the
-repository path from the preview. Each record includes
+**Local.** Run `codex-security findings imported PATH` with the repository path
+from the preview. In a terminal, the list shows the source key and finding ID,
+severity and title. It also shows the first reported package and location,
+the primary reference, and a distinct file link when available. Installed,
+affected and fixed package versions appear when the scanner supplied them. If the reported
+scanner differs from the stored provider, both appear (for example, OpenGrep
+and `semgrep`). A rule-ID title can include a short scanner message. Pass `--format json` for
+all locations and the complete saved evidence. Each record includes
 `sourceKey`, `sourceFindingId`, `version`, `evidence` and `assessment`.
 
 **Private Cloud inbox.** Check the format, size and digest under

@@ -51,7 +51,13 @@ test("the reader preserves vendor state and optional severity and locations", as
   await fixture.writeJson({
     ...report,
     findings: [
-      { ...row, severity: "INFO", state: "FIXED" },
+      {
+        ...row,
+        severity: "INFO",
+        state: "FIXED",
+        description: "Outdated dependency",
+        solution: "Update the dependency",
+      },
       {
         ...row,
         finding_id: "00018",
@@ -63,8 +69,11 @@ test("the reader preserves vendor state and optional severity and locations", as
   const { findings } = await readTenableFindings(fixture.file, repositoryUrl);
   expect(findings[0]!.evidence).toMatchObject({
     severity: "informational",
+    description: "Outdated dependency",
     locations: [],
-    source_data: { finding: { state: "FIXED" } },
+    source_data: {
+      finding: { state: "FIXED", solution: "Update the dependency" },
+    },
   });
   expect(findings[1]!.evidence).toMatchObject({
     severity: "unknown",

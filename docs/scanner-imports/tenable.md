@@ -42,4 +42,13 @@ codex-security publish findings "$reports/selection.json" --provider tenable \
   --source-key "TENANT_ALIAS/$asset_id" --dry-run --format json
 ```
 
-Check the preview against your selection. Remove `--dry-run` and confirm to save, then run `codex-security findings imported "$checkout" --format json`. The saved record retains Tenable's exact finding ID and state. Its Codex assessment starts as `not_assessed`. With the same source key, changed evidence updates that record and identical evidence preserves its version.
+Check the preview against your selection. The repository URL identifies the code
+repository mapped to the Tenable asset. For a reported code location, check
+`evidence.locations`. The vendor description is in `evidence.description`.
+The original state and optional solution are in `evidence.source_data.finding`.
+
+Remove `--dry-run` and confirm to save. Run
+`codex-security findings imported "$checkout" --format json` to read back
+the exact Tenable finding ID and its initial `not_assessed` Codex assessment.
+Reusing the source key updates changed evidence and preserves the version of
+an identical finding.

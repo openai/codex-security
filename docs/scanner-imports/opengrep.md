@@ -51,9 +51,12 @@ Both destinations store `semgrep` as the provider and `OpenGrep` in
 Moving a match or changing the spelling of a Windows path can create a new
 record. [Imported evidence](schema-guide.md)
 
-The reader groups traces at the same occurrence. It keeps the rule level,
-snippets, ignored state and fingerprints when present. Severity is `unknown`
-because OpenGrep levels such as `ERROR` describe rule matches.
+The title is the rule ID and the description is the rule's message. The reader
+groups traces at the same occurrence and keeps snippets, ignored state and
+fingerprints when present. OpenGrep levels such as `ERROR` describe rule
+matches, so the vulnerability severity is `unknown`. The local workbench
+and private Cloud inbox accept that value. A Cloud repository publisher that
+requires a known severity excludes these findings in the preview.
 
 ## Diagnostics and coverage
 

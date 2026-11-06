@@ -75,11 +75,12 @@ Check the repository, finding ARNs, paths, and exclusions. In a
 multi-repository environment, a customer-supplied path can begin with a
 repository name. The reader keeps that prefix. For local repeat imports, a summary replaces richer evidence already saved for the same ARN and source key. Use the detail export to keep locations, mitigation and validation evidence. To save locally, remove `--dry-run` and confirm.
 
-### Publish to your Cloud inbox
+<a id="publish-to-your-cloud-inbox"></a>
 
-For an inbox import, sign in to a Cloud workspace with the GitHub repository
-connected and support for Continuum private import jobs. If you need locations,
-mitigation, or validation evidence, publish the detailed `get-code-finding` export first. A later upload
+### Publish to Cloud
+
+If you need locations, mitigation, or validation evidence, publish the detailed
+`get-code-finding` export first. For private inbox imports, a later upload
 with changed evidence for the same ARN can return `source_order_unknown`.
 Preview the file and source key using your connected repository URL.
 
@@ -91,9 +92,9 @@ codex-security publish findings "$report" --to cloud --repository "$repo" \
   --dry-run --format json
 ```
 
-Confirm the account, repository, expected finding ARNs and `privateImport`
-in the preview. Remove `--dry-run`, rerun and confirm to upload. Check the
-receipt, then open a finding in your inbox and compare its source ID with the AWS ARN. [Verify the import](README.md#verify-the-import)
+Check the account, repository and finding ARNs. The preview identifies the inbox
+(`privateImport`) or repository environments (`requests`) that will receive them.
+Remove `--dry-run` and confirm. Match the resulting source IDs to the Continuum ARNs. [Verify the import](README.md#verify-the-import)
 
 ## Detail, summaries, and repeat imports
 
