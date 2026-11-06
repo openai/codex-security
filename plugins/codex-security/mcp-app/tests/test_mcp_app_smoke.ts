@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { gitText } from "../scripts/git.mjs";
@@ -753,7 +754,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
         assert.equal(scan.progress.status, "running");
         const { deepScan } = JSON.parse(
           execFileSync(
-            process.env.PYTHON?.trim() || "python3",
+            fixturePython,
             [
               path.join(pluginRoot, "scripts", "workbench_db.py"),
               "get-deep-scan",
@@ -808,7 +809,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
 
     const publicationFailure =
       "Saved result publication failed: fixture retained result publication failure";
-    execFileSync(process.env.PYTHON?.trim() || "python3", [
+    execFileSync(fixturePython, [
       "-c",
       `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
@@ -3068,7 +3069,7 @@ try {
     "delivered",
   );
   const rotatedFallbackClaimToken = `recovery_${randomUUID()}`;
-  execFileSync(process.env.PYTHON?.trim() || "python3", [
+  execFileSync(fixturePython, [
     "-c",
     `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
