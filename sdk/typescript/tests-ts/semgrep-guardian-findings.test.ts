@@ -2,6 +2,7 @@ import { expect, mock, test } from "bun:test";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { collectSelectedSemgrepGuardianFindings } from "../src/semgrep-guardian-findings.js";
+import { stableId } from "../src/scanner-import.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
 import { collectSemgrepPlatformFindings } from "../src/semgrep-platform-collector.js";
 import { isolatedGitReportFixture } from "./external-findings-local-helpers.js";
@@ -157,22 +158,7 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
     },
   };
   const normalized = normalizeSemgrepFindings(sca, {}, "local");
-  expect(() => normalizeSemgrepFindings(sca)).toThrow(/local workbench/);
-  await expect(
-    prepareNormalizedExternalPublication(
-      {
-        ...normalized,
-        report: {},
-        findings: [{ ...normalized.findings[0]!, source_finding_id: "custom" }],
-      },
-      { repository: project, provider: "semgrep", sourceKey: "example/topic" },
-      {
-        credentials: async () => {
-          throw new Error("Unexpected credential lookup");
-        },
-      },
-    ),
-  ).rejects.toThrow(/local import/);
+  expect(normalizeSemgrepFindings(sca).findings).toEqual(normalized.findings);
   expect(normalized.findings[0]!.evidence).toMatchObject({
     locations: [],
     source_data: { finding: sca.structuredContent.findings[0] },
@@ -270,6 +256,43 @@ test("normalized Guardian imports verify the original finding against the select
   }
 });
 
+test("normalized Guardian rows require a real selection scope even with a matching hash", async () => {
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const normalized = normalizeSemgrepFindings(capture, {}, "local");
+  for (const [override, nativeId, error] of [
+    [{ tool: "list_findings" }, id, /Guardian SAST or Supply Chain/],
+    [{ deployment: null }, id, /Guardian deployment/],
+    [{ repository: "" }, id, /Guardian repository/],
+    [{ ref: "main" }, id, /fully qualified Semgrep ref/],
+    [{}, 12, /Guardian finding ID/],
+    [{}, "  ", /Guardian finding ID/],
+  ] as const) {
+    const input = structuredClone(normalized);
+    const finding = input.findings[0]!;
+    const data = finding.evidence.source_data!;
+    Object.assign(data, override);
+    // Each malformed row agrees with its stored scope and ID. A matching hash alone is insufficient.
+    data["finding"] = {
+      id: nativeId,
+      repository: { name: data["repository"] },
+      ref: data["ref"],
+    };
+    finding.evidence.branch = String(data["ref"]);
+    finding.source_finding_id = stableId("semgrep-guardian", [
+      data["deployment"],
+      data["repository"],
+      data["tool"],
+      data["ref"],
+      nativeId,
+    ]);
+    await expect(fixture.prepareNormalized(input)).rejects.toThrow(error);
+  }
+});
+
 test("normalized Guardian repository claims use the checkout's HTTP port identity", async () => {
   await using fixture = await isolatedGitReportFixture(
     "guardian.json",
@@ -296,7 +319,7 @@ test("normalized Guardian repository claims use the checkout's HTTP port identit
   );
 });
 
-test("SDK exports containing Guardian findings fail before Cloud credential lookup", async () => {
+test("SDK exports containing Guardian findings require their original provider", async () => {
   const guardian = normalizeSemgrepFindings(capture, {}, "local");
   const normalized = {
     read: 1,
@@ -325,12 +348,12 @@ test("SDK exports containing Guardian findings fail before Cloud credential look
         input,
         {
           repository: project,
-          provider: "semgrep",
+          provider: "wiz",
           sourceKey: "example/topic",
         },
         { credentials },
       ),
-    ).rejects.toThrow(/local import/);
+    ).rejects.toThrow(/semgrep provider/);
   }
   expect(credentials).not.toHaveBeenCalled();
 });

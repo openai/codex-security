@@ -51,7 +51,7 @@ import {
   tenableSourceRepository,
 } from "./tenable-findings.js";
 import {
-  guardianFindingSourceData,
+  guardianFindingRepository,
   guardianSelectionFormat,
 } from "./semgrep-guardian-findings.js";
 import {
@@ -997,10 +997,10 @@ export async function prepareLocalImport(
       );
       if (source) sources.set(source, { url: source, platform: "github" });
     }
-    const guardian = guardianFindingSourceData(finding);
+    const guardian = guardianFindingRepository(finding, "local");
     const url = evidence.details?.repository?.url;
     if (guardian) {
-      const source = addGuardianSource(guardian["sourceRepositoryUrl"]);
+      const source = addGuardianSource(guardian);
       if (
         (guardianReport &&
           !semgrepReferenceMatches(guardianReport, source.url)) ||

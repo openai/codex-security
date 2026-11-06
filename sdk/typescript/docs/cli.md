@@ -1474,9 +1474,8 @@ status 2. A clean empty report exits with status 0 in either mode and stores
 no findings.
 
 Preview the same file and source key again for the intended destination before
-publishing. Semgrep Guardian captures support local import only. Both Web API
-formats, a selected SAST capture and a full project collection, support local
-and Cloud import. Choose the [Semgrep import method](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) that matches your source.
+publishing. Semgrep Guardian selections, Web API SAST selections and full
+project collections support both destinations. Choose the [Semgrep import method](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) that matches your source.
 
 ## Import Trivy dependency findings
 

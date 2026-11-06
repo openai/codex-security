@@ -1,4 +1,7 @@
-import { validateExternalEvidence } from "./external-import-contract.js";
+import {
+  type ExternalImportTarget,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
 import { CodexSecurityError } from "./errors.js";
 import type {
   ExternalFinding,
@@ -25,30 +28,53 @@ export const guardianSelectionFormat = "semgrep-guardian-selection/v1";
 
 export const guardianFindingId = /^semgrep-guardian:[0-9a-f]{64}$/u;
 
-function guardianId(scope: Record<string, unknown>, id: unknown) {
+function guardianScope(data: Record<string, unknown>) {
+  const tool = data["tool"];
+  if (
+    tool !== "get_semgrep_sast_findings" &&
+    tool !== "get_semgrep_supply_chain_findings"
+  )
+    throw new Error("Select a Guardian SAST or Supply Chain findings tool.");
+  const deployment = requiredText(data["deployment"], "Guardian deployment");
+  const repository = requiredText(data["repository"], "Guardian repository");
+  const ref = requiredText(data["ref"], "Guardian Git ref");
+  requireSemgrepFullRef(ref);
+  return { tool, deployment, repository, ref };
+}
+
+function guardianId(scope: ReturnType<typeof guardianScope>, id: unknown) {
   return stableId("semgrep-guardian", [
-    scope["deployment"],
-    scope["repository"],
-    scope["tool"],
-    scope["ref"],
-    id,
+    scope.deployment,
+    scope.repository,
+    scope.tool,
+    scope.ref,
+    requiredText(id, "Guardian finding ID"),
   ]);
 }
 
-export function guardianFindingSourceData({
-  source_finding_id,
-  evidence,
-}: ExternalFinding) {
+export function guardianFindingRepository(
+  { source_finding_id, evidence }: ExternalFinding,
+  target: ExternalImportTarget,
+) {
   const data = evidence.source_data ?? {};
   const generated = guardianFindingId.test(source_finding_id);
   if (data["format"] !== guardianSelectionFormat && !generated) return;
   const row = record(data["finding"], "Original Guardian finding");
-  requireGuardianRowScope(data, row);
-  if (source_finding_id !== guardianId(data, row["id"]))
+  const scope = guardianScope(data);
+  requireGuardianRowScope(scope, row);
+  if (evidence.branch != null && evidence.branch !== scope.ref)
+    throw new CodexSecurityError(
+      "The Guardian finding branch does not match the selected ref.",
+    );
+  if (source_finding_id !== guardianId(scope, row["id"]))
     throw new CodexSecurityError(
       "The normalized finding ID does not match the original Guardian finding.",
     );
-  return data;
+  return declaredScannerRepositoryUrl(
+    data["sourceRepositoryUrl"],
+    "Guardian",
+    target,
+  );
 }
 
 type GuardianTool =
@@ -69,47 +95,36 @@ interface GuardianRequest {
 
 function selectionScope(request: unknown, findingIds: unknown) {
   const tool = record(request, "Guardian tool request");
-  const name = tool["name"];
-  if (
-    name !== "get_semgrep_sast_findings" &&
-    name !== "get_semgrep_supply_chain_findings"
-  )
-    throw new Error("Select a Guardian SAST or Supply Chain findings tool.");
   const args = record(tool["arguments"], "Guardian tool arguments");
-  const deployment = requiredText(
-    args["deployment_name"],
-    "Guardian deployment",
-  );
-  const repository = requiredText(
-    args["repository_name"],
-    "Guardian repository",
-  );
-  const ref = requiredText(args["ref"], "Guardian Git ref");
-  requireSemgrepFullRef(ref);
+  const scope = guardianScope({
+    tool: tool["name"],
+    deployment: args["deployment_name"],
+    repository: args["repository_name"],
+    ref: args["ref"],
+  });
   const ids = new Set(
     array(findingIds, "Guardian finding IDs").map((id) =>
       requiredText(id, "Guardian finding ID"),
     ),
   );
   if (!ids.size) throw new Error("Select at least one Guardian finding ID.");
-  return { tool: name, deployment, repository, ref, ids };
+  return { ...scope, ids };
 }
 
 function requireGuardianRowScope(
-  scope: Record<string, unknown>,
+  scope: ReturnType<typeof guardianScope>,
   row: Record<string, unknown>,
 ): void {
   const id = row["id"];
   const repository = record(row["repository"], "Guardian finding repository");
   if (
-    repository["name"] !== scope["repository"] ||
-    (row["ref"] != null && row["ref"] !== scope["ref"])
+    repository["name"] !== scope.repository ||
+    (row["ref"] != null && row["ref"] !== scope.ref)
   )
     throw new Error(
       `Guardian finding ${id} does not match the selected repository and ref.`,
     );
-  const expected =
-    scope["tool"] === "get_semgrep_sast_findings" ? "sast" : "sca";
+  const expected = scope.tool === "get_semgrep_sast_findings" ? "sast" : "sca";
   if (
     row["issueType"] != null &&
     text(row["issueType"])
@@ -197,6 +212,7 @@ export async function collectSelectedSemgrepGuardianFindings(
 
 export function normalizeGuardianSelection(
   document: Record<string, unknown>,
+  target: ExternalImportTarget,
   declaredUrl?: string,
   references: readonly ExternalSourceRepository[] = [],
 ) {
@@ -204,13 +220,13 @@ export function normalizeGuardianSelection(
   const url = declaredScannerRepositoryUrl(
     document["sourceRepositoryUrl"],
     "Guardian",
-    "local",
+    target,
   );
-  const repositoryBinding = selectionRepository(url, references);
+  const repositoryBinding = selectionRepository(url, references, target);
   if (
     declaredUrl !== undefined &&
     repositoryBinding.key(
-      declaredScannerRepositoryUrl(declaredUrl, "Guardian", "local"),
+      declaredScannerRepositoryUrl(declaredUrl, "Guardian", target),
     ) !== repositoryBinding.key(url)
   )
     throw new Error(
@@ -257,12 +273,12 @@ export function normalizeGuardianSelection(
             finding,
           },
         },
-        "local",
+        target,
       );
     },
     // Guardian's string ID has not been verified against Web API occurrence IDs.
     (finding) => guardianId(scope, finding["id"]),
-    "local",
+    target,
     { report: { format: guardianSelectionFormat, repositoryUrl: url } },
   );
 }
