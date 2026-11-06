@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -79,7 +80,7 @@ async function finalizeParentFindings({
     document.scanId = context.scanId;
     await writeJson(filePath, document);
   }
-  await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+  await execFileAsync(fixturePython, [
     fileURLToPath(
       new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
     ),
@@ -201,11 +202,9 @@ for (const [layout, status] of [
         saved.findings[1].identity.instance = "saved-distinct-location";
         await writeFile(file, JSON.stringify(saved));
       }
-      const { stdout } = await execFileAsync(
-        process.env.PYTHON?.trim() || "python3",
-        [
-          "-c",
-          `import sys,json
+      const { stdout } = await execFileAsync(fixturePython, [
+        "-c",
+        `import sys,json
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -223,12 +222,11 @@ prepared=_prepare_scan_finalization(root,completion_binding=binding,recover_unse
 warnings.extend(prepared.warnings)
 published=_write_prepared_scan_finalization(prepared)
 print(json.dumps({'count':len(published[1]['findings']),'status':published[0]['scan']['status'],'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
-          fileURLToPath(new URL("../../scripts", import.meta.url)),
-          f.root,
-          f.context.scanId!,
-          status,
-        ],
-      );
+        fileURLToPath(new URL("../../scripts", import.meta.url)),
+        f.root,
+        f.context.scanId!,
+        status,
+      ]);
       assert.deepEqual(JSON.parse(stdout), {
         count,
         status,
@@ -630,11 +628,9 @@ for (const headTime of [1, 2, 3]) {
     ]) {
       originals.set(filename, await readFile(filename));
     }
-    const { stdout } = await execFileAsync(
-      process.env.PYTHON?.trim() || "python3",
-      [
-        "-c",
-        `import json,sys
+    const { stdout } = await execFileAsync(fixturePython, [
+      "-c",
+      `import json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -644,12 +640,11 @@ binding={"status":"interrupted","allowedTargetKinds":["git_revision"],"target":{
 first=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted")
 replay=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted",frozen_source_digests=first[0]["scan"]["preservedSources"])
 print(json.dumps([first[2],replay[2]]))`,
-        path.join(import.meta.dirname, "../../scripts"),
-        path.dirname(f.root),
-        f.root,
-        f.context.scanId!,
-      ],
-    );
+      path.join(import.meta.dirname, "../../scripts"),
+      path.dirname(f.root),
+      f.root,
+      f.context.scanId!,
+    ]);
     const [reviewState, replay] = JSON.parse(stdout);
     assert.deepEqual(replay, reviewState);
     for (const [field, rows] of Object.entries(added)) {
