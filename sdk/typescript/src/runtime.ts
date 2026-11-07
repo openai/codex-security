@@ -2881,17 +2881,15 @@ async function pluginRuntimeProjection(
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
-  const launchVariables = ["CODEX_SECURITY_PLUGIN_ROOT"];
   if (
-    process.platform !== "win32" &&
-    server["command"] === "./scripts/launch_codex_security_mcp"
+    !Array.isArray(environment) ||
+    !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
   ) {
-    launchVariables.push(SDK_NODE_SEARCH_PATH);
+    server["env_vars"] = [
+      ...(Array.isArray(environment) ? environment : []),
+      "CODEX_SECURITY_PLUGIN_ROOT",
+    ];
   }
-  server["env_vars"] = [
-    ...(environment ?? []),
-    ...launchVariables.filter((name) => !environment?.includes(name)),
-  ];
   const files: PluginRuntimeProjection["files"] = new Map();
   server["command"] =
     server["command"] === "./scripts/launch_codex_security_mcp.cmd"

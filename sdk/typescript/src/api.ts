@@ -4642,11 +4642,10 @@ export class CodexSecurity {
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
-      ...(process.platform === "win32"
-        ? {}
-        : {
-            [SDK_NODE_SEARCH_PATH]: await sdkNodeSearchPath(session.toolRoots),
-          }),
+      [SDK_NODE_SEARCH_PATH]:
+        process.platform === "win32"
+          ? undefined
+          : await sdkNodeSearchPath(session.toolRoots),
     };
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
