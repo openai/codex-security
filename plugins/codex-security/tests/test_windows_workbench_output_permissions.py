@@ -71,15 +71,13 @@ def test_parent_remains_in_place_while_verifying_new_output(
     parent = tmp_path / "parent"
     moved = tmp_path / "moved"
     parent.mkdir()
-    read_descriptor = windows_scan_local_files._directory_security_descriptor
 
-    def inspect(path: Path, information: int):
-        with pytest.raises(PermissionError) as error:
-            parent.rename(moved)
-        assert error.value.winerror == 32  # ERROR_SHARING_VIOLATION
-        return read_descriptor(path, information)
+    def rename_parent(_path: Path, _information: int) -> None:
+        parent.rename(moved)
+        pytest.fail("Renamed the parent during verification")
 
-    monkeypatch.setattr(windows_scan_local_files, "_directory_security_descriptor", inspect)
-    scan = storage.create_private_temporary_directory(parent, prefix="scan_")
+    monkeypatch.setattr(windows_scan_local_files, "_directory_security_descriptor", rename_parent)
+    with pytest.raises(PermissionError) as error:
+        storage.create_private_temporary_directory(parent, prefix="scan_")
+    assert error.value.winerror == 32  # ERROR_SHARING_VIOLATION
     parent.rename(moved)
-    assert (moved / scan.name).is_dir()
