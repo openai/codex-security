@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -34,24 +35,28 @@ def worker_usage_directory(scan_id: str) -> Path:
 
 def require_host_deep_scan_output(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
     """Keep a running SDK composition from being adopted as a fresh host run."""
-    from finalize_scan_contract import ContractError, open_scan_local_file_descriptor
+    from finalize_scan_contract import (
+        ContractError,
+        MissingScanLocalFileError,
+        open_scan_local_file_descriptor,
+        scan_root_identity,
+    )
 
     scan_dir = Path(scan["scan_dir"])
     try:
-        descriptor = open_scan_local_file_descriptor(
-            scan_dir, "artifacts/deep-scan/checkpoint.json", "Deep Scan preview checkpoint"
-        )
-    except ContractError as exc:
-        if not isinstance(exc.__cause__, FileNotFoundError) or exc.__cause__.filename == str(
-            scan_dir
-        ):
-            raise SystemExit(f"Cannot inspect the saved Deep Scan checkpoint: {exc}") from exc
-    else:
-        os.close(descriptor)
-        raise SystemExit(
-            "This scan has a Deep Scan preview checkpoint. Finish it with its original "
-            "SDK version or start a new scan in another output directory."
-        )
+        with suppress(MissingScanLocalFileError):
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, "artifacts/deep-scan/checkpoint.json", "Deep Scan preview checkpoint"
+            )
+            os.close(descriptor)
+            raise SystemExit(
+                "This scan has a Deep Scan preview checkpoint. Finish it with its original "
+                "SDK version or start a new scan in another output directory."
+            )
+        # A native missing-path error can also mean the root vanished while opening the file.
+        scan_root_identity(scan_dir)
+    except (ContractError, OSError) as exc:
+        raise SystemExit(f"Cannot inspect the saved Deep Scan checkpoint: {exc}") from exc
     # A lost checkpoint can still have persisted preview child membership.
     if (
         connection.execute(
