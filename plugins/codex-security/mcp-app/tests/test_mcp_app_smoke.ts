@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { gitText } from "../scripts/git.mjs";
@@ -113,7 +114,6 @@ assert.deepEqual(
     "PYTHONUTF8",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -490,7 +490,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       CODEX_SECURITY_STATE_DIR: headlessStateDir,
     },
   });
-  const ownerThread = "fixture-headless-standard-thread";
+  // Option-like metadata must reach the workbench as the literal owner ID.
+  const ownerThread = "--help";
   const headlessContext =
     `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`.trim();
   assert.ok(headlessContext.length > 1_000_000);
@@ -753,7 +754,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
         assert.equal(scan.progress.status, "running");
         const { deepScan } = JSON.parse(
           execFileSync(
-            process.env.PYTHON?.trim() || "python3",
+            fixturePython,
             [
               path.join(pluginRoot, "scripts", "workbench_db.py"),
               "get-deep-scan",
@@ -808,7 +809,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
 
     const publicationFailure =
       "Saved result publication failed: fixture retained result publication failure";
-    execFileSync(process.env.PYTHON?.trim() || "python3", [
+    execFileSync(fixturePython, [
       "-c",
       `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
@@ -3068,7 +3069,7 @@ try {
     "delivered",
   );
   const rotatedFallbackClaimToken = `recovery_${randomUUID()}`;
-  execFileSync(process.env.PYTHON?.trim() || "python3", [
+  execFileSync(fixturePython, [
     "-c",
     `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:

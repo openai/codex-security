@@ -108,6 +108,7 @@ import {
   MODEL_FILE_SETTINGS,
   resolveNestedConfigPaths,
   scanApprovalPolicy,
+  scanPricingContext,
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
@@ -129,7 +130,7 @@ import {
   type ScanUsageObservation,
   type ScanWorkerEvent,
 } from "./cost.js";
-import type { ScanTokenUsage } from "./cost-model.js";
+import type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 import { measuredScanCost, combineMeasurements } from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
@@ -200,7 +201,6 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import {
   knowledgeBaseProtectedRoots,
   prepareKnowledgeBase,
@@ -283,6 +283,7 @@ import {
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
   createIsolatedHome,
+  logoutCredentialHome,
   executablePathForSpawn,
   expandHome,
   importAmbientAuth,
@@ -364,6 +365,7 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
+  pricingContext?: ScanPricingContext;
   safetyIdentifier?: string;
   runtime: PreparedRuntime;
   runtimeHome: string;
@@ -1772,6 +1774,7 @@ export class CodexSecurity {
       tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model: scanModelConfiguration(session.effectiveConfig).model,
+        pricingContext: session.pricingContext,
         repository: inputs.repository,
         onMeasurement: (measurement) => {
           if (this.#operationTelemetry !== null)
@@ -1942,6 +1945,7 @@ export class CodexSecurity {
           ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
           : repository;
       const configured = scanModelConfiguration(session.effectiveConfig);
+      const { pricingContext } = session;
       const model = options.model ?? configured.model;
       const reasoningEffort =
         options.reasoningEffort ?? configured.reasoningEffort;
@@ -1969,6 +1973,7 @@ export class CodexSecurity {
       tracker = new ScanCostTracker({
         codexHome: session.runtime.codexHome,
         model,
+        pricingContext,
         repository,
         onMeasurement: (measurement) => {
           if (this.#operationTelemetry !== null)
@@ -2065,7 +2070,10 @@ export class CodexSecurity {
       tracker = null;
       const snapshot = await activeTracker.stop(turn.usage).catch((error) => {
         reportTrackingError(error);
-        return { usage: turn.usage, cost: estimateScanCost(model, turn.usage) };
+        return {
+          usage: turn.usage,
+          cost: estimateScanCost(model, turn.usage, pricingContext),
+        };
       });
       return {
         ...outcome,
@@ -2119,7 +2127,11 @@ export class CodexSecurity {
     );
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
-    validateScanCostLimit(options.maxCostUsd, model.model);
+    validateScanCostLimit(
+      options.maxCostUsd,
+      model.model,
+      scanPricingContext(configuration, this.#dependencies.environment),
+    );
     const archiveDir =
       options.archiveExisting === true
         ? await planOutputArchive(inputs.outputDir)
@@ -2265,9 +2277,9 @@ export class CodexSecurity {
         signal,
         temporaryRoot,
       );
-      const { runtime, effectiveConfig } = session;
+      const { runtime, effectiveConfig, pricingContext } = session;
       const model = scanModelConfiguration(effectiveConfig);
-      validateScanCostLimit(options.maxCostUsd, model.model);
+      validateScanCostLimit(options.maxCostUsd, model.model, pricingContext);
       for (const path of [
         "references/threat-model.md",
         "references/security-guidance.md",
@@ -2421,6 +2433,7 @@ export class CodexSecurity {
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
           model: model.model,
+          pricingContext,
           repository: target.repository,
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
@@ -2430,6 +2443,7 @@ export class CodexSecurity {
               this.#operationTelemetry.measurement = combineMeasurements(
                 [...stageMeasurements.values()],
                 model.model,
+                pricingContext,
               );
           },
           onCost:
@@ -2476,7 +2490,7 @@ export class CodexSecurity {
             warn(
               `Could not track policy-generation cost: ${errorMessage(error)}`,
             );
-            const cost = estimateScanCost(model.model, usage);
+            const cost = estimateScanCost(model.model, usage, pricingContext);
             if (cost !== null) reportCost(cost);
             return { usage, cost };
           });
@@ -2596,6 +2610,7 @@ export class CodexSecurity {
       pythonPath: string;
       protectedRoot: string;
       model: string;
+      pricingContext?: ScanPricingContext;
       threadId: string | null;
     } | null = null;
     let preparedTargetWarnings: string[] = [];
@@ -2732,6 +2747,7 @@ export class CodexSecurity {
         effectiveConfig,
         preflightConfig,
         modelProvider,
+        pricingContext,
         authentication,
         approvalPolicy,
         python,
@@ -2912,7 +2928,7 @@ export class CodexSecurity {
         pluginVersion: runtime.plugin.version,
       };
       const { model } = scanModelConfiguration(effectiveConfig);
-      validateScanCostLimit(options.maxCostUsd, model);
+      validateScanCostLimit(options.maxCostUsd, model, pricingContext);
       if (mode === "deep" && options.maxCostUsd !== undefined) {
         budgetRecovery = {
           expectation,
@@ -2920,6 +2936,7 @@ export class CodexSecurity {
           pythonPath: session.python,
           protectedRoot,
           model,
+          pricingContext,
           threadId: null,
         };
       }
@@ -3333,6 +3350,7 @@ export class CodexSecurity {
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
+        pricingContext,
         repository: repo,
         scanDirectory: scanDir,
         ...(mode === "deep"
@@ -3886,6 +3904,7 @@ export class CodexSecurity {
         modelProvider,
         workbenchValidated: true,
         model,
+        pricingContext,
         onTurnStatus: (status, message) => {
           scanTurnStatus = status;
           // A later caller abort during iterator cleanup cannot undo a reported failure.
@@ -4010,7 +4029,7 @@ export class CodexSecurity {
             reportTrackingError(error);
             return {
               usage,
-              cost: estimateScanCost(model, usage),
+              cost: estimateScanCost(model, usage, pricingContext),
               measurement: latestMeasurement,
             };
           });
@@ -4163,6 +4182,7 @@ export class CodexSecurity {
             protectedRoot,
             expectation,
             model,
+            pricingContext,
             onReconnect: options.onReconnect,
             onWorkerStatus: options.onWorkerStatus,
             onObserverError: options.onObserverError,
@@ -4391,6 +4411,7 @@ export class CodexSecurity {
             {
               status: "completed",
               model: budgetRecovery.model,
+              ...turnPricingMetadata(budgetRecovery.pricingContext),
               usage: snapshot.usage,
             },
             budgetRecovery.threadId,
@@ -4621,25 +4642,26 @@ export class CodexSecurity {
 
   public async logout(): Promise<void> {
     await this.#trackOperation(async () => {
-      const authentication = await this.#authentication();
+      const { codexHome, environment } = await this.#authentication();
+      const signal = this.#abortController.signal;
       this.#requireOpen();
       await withCredentialHomeLock(
-        authentication.codexHome,
+        codexHome,
         async () => {
-          await codexLogout(
-            await this.#providerPreflightCommand(),
-            authentication.environment,
-            this.#abortController.signal,
-          );
-          await setCodexSecurityCredentialLogout(
-            authentication.codexHome,
-            true,
+          const command = await this.#providerPreflightCommand();
+          await logoutCredentialHome(
+            codexHome,
+            scanCodexHome(this.#dependencies.environment),
+            () => codexLogout(command, environment, signal),
+            () => {
+              if (this.#runtime !== null)
+                this.#runtime.credentialsAvailable = false;
+              this.#runtimeCredentialSource = null;
+            },
           );
         },
-        this.#abortController.signal,
+        signal,
       );
-      if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
-      this.#runtimeCredentialSource = null;
       this.#requireOpen();
     });
   }
@@ -5392,6 +5414,10 @@ export class CodexSecurity {
         preflightConfig,
         sessionConfig,
         modelProvider,
+        pricingContext: scanPricingContext(
+          effectiveConfig,
+          runtime.environment,
+        ),
         providerEnvKey,
         nativeProviderEnvironment:
           providerEnvKey !== undefined &&
@@ -5605,11 +5631,14 @@ export class CodexSecurity {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       const revision = await repositoryRevision(local.repository, signal);
-      const { model } = scanModelConfiguration(
-        await mergedCodexConfig(
-          this.config,
-          scanCodexHome(this.#dependencies.environment),
-        ),
+      const config = await mergedCodexConfig(
+        this.config,
+        scanCodexHome(this.#dependencies.environment),
+      );
+      const { model } = scanModelConfiguration(config);
+      const pricingContext = scanPricingContext(
+        config,
+        this.#dependencies.environment,
       );
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
@@ -5696,7 +5725,7 @@ export class CodexSecurity {
         cached_input_tokens: 0,
         output_tokens: 0,
       };
-      const cost = estimateScanCost(model, usage);
+      const cost = estimateScanCost(model, usage, pricingContext);
       await workbench(
         workbenchOptions,
         workbenchArgs("prepare-scan-completion", { scanId }),
@@ -5728,6 +5757,7 @@ export class CodexSecurity {
           model,
           usage,
           mock: true,
+          ...turnPricingMetadata(pricingContext),
           finalResponse:
             "Synthetic mock scan; no security analysis was performed.",
         },
@@ -6121,6 +6151,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   modelProvider?: unknown;
   workbenchValidated?: boolean;
   model?: string;
+  pricingContext?: ScanPricingContext;
   onFinalize?: (usage: unknown) => Promise<unknown>;
   onTurnStatus?: (status: "completed" | "failed", message?: string) => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
@@ -6288,6 +6319,7 @@ export async function runScanEvents(
         finalResponse,
         usage,
         ...(options.model === undefined ? {} : { model: options.model }),
+        ...turnPricingMetadata(options.pricingContext),
       },
       threadId,
       options.scanDir,
@@ -6681,14 +6713,43 @@ async function prepareScanOutputDir(
   return output;
 }
 
+function turnPricingMetadata(context?: ScanPricingContext) {
+  if (context === undefined) return {};
+  // Preserve the region field written on Bedrock scan results.
+  return context.provider === "amazon-bedrock"
+    ? { bedrockRegion: context.region }
+    : { pricingContext: context };
+}
+
 function validateScanCostLimit(
   maxCostUsd: number | undefined,
   model: string,
+  pricingContext?: ScanPricingContext,
 ): void {
   if (maxCostUsd === undefined) return;
-  if (estimateScanCost(model, { input_tokens: 0, output_tokens: 0 }) === null) {
+  if (
+    estimateScanCost(
+      model,
+      { input_tokens: 0, output_tokens: 0 },
+      pricingContext,
+    ) === null
+  ) {
+    const region =
+      pricingContext?.provider === "amazon-bedrock"
+        ? pricingContext.region
+        : undefined;
+    const location =
+      pricingContext?.provider === "gcp"
+        ? " on Google Cloud"
+        : region
+          ? ` in ${region}`
+          : "";
+    const detail =
+      region === null
+        ? " Set the Bedrock billing region to check its regional price."
+        : "";
     throw new CodexSecurityError(
-      `A scan cost limit is not available for the configured model: ${model}.`,
+      `A scan cost limit is not available for the configured model: ${model}${location}.${detail}`,
     );
   }
 }
@@ -6930,7 +6991,6 @@ function withoutProviderKey(
   for (const name of Object.keys(child)) {
     if (name.toUpperCase() === key.toUpperCase()) delete child[name];
   }
-  forwardExternalImportSetting(environment, child);
   return child;
 }
 
@@ -6988,7 +7048,6 @@ export function selectedScanEnvironment(
       ),
     );
   }
-  forwardExternalImportSetting(environment, selected);
   return selected;
 }
 
@@ -7897,13 +7956,11 @@ function standaloneFindingForPrompt(finding: string | object): string {
 export function definedEnvironment(
   environment: ProcessEnvironment,
 ): Record<string, string> {
-  const child = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(environment).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
 
 function withoutCodexHome(

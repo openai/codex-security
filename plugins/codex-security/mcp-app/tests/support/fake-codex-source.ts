@@ -71,7 +71,7 @@ const profileContents = profileIndex === -1 ? undefined : readFileSync(join(proc
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
 const codexConfig = stdin.includes('CAPTURE_SYNTHETIC_CODEX_CONFIG') ? readFileSync(join(process.env.CODEX_HOME, 'config.toml'), 'utf8') : undefined;
-const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'CODEX_MCP_NODE_PATH', 'CODEX_BROWSER_USE_NODE_PATH', 'CODEX_ELECTRON_RESOURCES_PATH', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'CODEX_MCP_NODE_PATH', 'CODEX_BROWSER_USE_NODE_PATH', 'CODEX_ELECTRON_RESOURCES_PATH', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
 const toolProbe = stdin.includes('CAPTURE_SYNTHETIC_RG') ? spawnSync('rg', ['--version'], { encoding: 'utf8' }) : undefined;
 if (toolProbe && toolProbe.status !== 0) throw toolProbe.error ?? new Error(toolProbe.stderr);
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
@@ -154,6 +154,7 @@ export function workerRuntimeEnvironment(root: string, virtualenv?: string) {
         : path.join(virtualenv, "bin"),
       path.dirname(process.execPath),
     ].join(path.delimiter),
+    CODEX_MCP_NODE_PATH: process.execPath,
     HOME: path.join(root, "home"),
     PYTHON:
       virtualenv === undefined
@@ -168,29 +169,12 @@ export function workerRuntimeEnvironment(root: string, virtualenv?: string) {
     DYLD_LIBRARY_PATH: path.join(root, "dylibs"),
     DYLD_FALLBACK_LIBRARY_PATH: path.join(root, "fallback-libraries"),
     CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
-    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     RUNNER_TRACKING_ID: "synthetic-worker-job",
   };
 }
 
-export const externalImports: {
-  inherited: string | undefined;
-  override?: string;
-}[] = [
-  { inherited: undefined },
-  { inherited: "1" },
-  { inherited: "0" },
-  { inherited: "0", override: "1" },
-  { inherited: "1", override: "0" },
-  { inherited: "" },
-];
-
 export function workerScanEnvironment(root: string, index: number) {
-  const { override } = externalImports[index]!;
   return {
-    ...(override === undefined
-      ? {}
-      : { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: override }),
     HOME: path.join(root, `scan home ${index}`),
     PATH: path.join(root, `scan tools ${index}`),
     NODE_OPTIONS: `--stack-trace-limit=${20 + index}`,

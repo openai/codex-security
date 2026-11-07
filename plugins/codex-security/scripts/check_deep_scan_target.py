@@ -1,4 +1,4 @@
-"""Check the physical contents of the targets registered for a fresh Deep Scan."""
+"""Reject registered Deep Scan targets containing only empty directories."""
 
 from __future__ import annotations
 
@@ -45,16 +45,38 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
     for selection in selections:
         check_path(selection)
 
+    def has_content(selection: str) -> bool:
+        pending = [selection]
+        failure = None
+        while pending:
+            current = pending.pop()
+            try:
+                target, regular = check_path(current)
+                if regular:
+                    return True
+                with os.scandir(target) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=False):
+                            return True
+                        # Preserve link entries as content without traversing their targets.
+                        if (
+                            getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0)
+                            & 0x20000000
+                        ):
+                            return True
+                        pending.append(str(Path(entry.path).relative_to(root)))
+            except OSError as exc:
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
+        return False
+
     failure = None
     for selection in selections:
         try:
-            # A previously validated directory may have changed during another probe.
-            target, regular = check_path(selection)
-            if regular:
+            if has_content(selection):
                 return
-            with os.scandir(target) as entries:
-                if next(entries, None) is not None:
-                    return
         except OSError as exc:
             if selection in files:
                 raise

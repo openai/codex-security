@@ -595,6 +595,7 @@ export async function directoryPaths(
 export interface Change {
   path: string;
   status: string;
+  renameSource?: string;
 }
 async function changed(repo: string, args: string[]): Promise<Change[]> {
   const result = await git(repo, [
@@ -623,12 +624,13 @@ async function changed(repo: string, args: string[]): Promise<Change[]> {
   for (let index = 0; index < fields.length;) {
     const metadata = fields[index++]!.split(" "),
       status = metadata.at(-1)![0]!;
+    const renameSource = status === "R" ? fields[index] : undefined;
     if (status === "C" || status === "R") index++;
     const path = fields[index++]!;
     if (
       (status === "D" ? metadata[0]!.slice(1) : metadata[1]!).startsWith("100")
     )
-      changes.push({ path, status });
+      changes.push({ path, status, renameSource });
   }
   return changes;
 }
@@ -643,26 +645,37 @@ export async function changedPaths(
     staged = await changed(repo, ["--cached", base]);
   const result = new Map(staged.map((change) => [change.path, change]));
   for (const change of unstaged) result.set(change.path, change);
+  function localStatus(path: string, status: string): string | undefined {
+    if (path.split("/").some((part) => sourceMetadata.has(part))) return;
+    if (status === "D") return status;
+    const absolute = append(repo, path);
+    try {
+      if ((status === "M" || status === "R") && linkedParent(repo, absolute))
+        return status === "M" ? "D" : undefined;
+      return regular(absolute) ? status : undefined;
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+
+  const selected = new Map<string, string>();
+  for (const { path, status, renameSource } of result.values()) {
+    const chosen = localStatus(path, status);
+    if (chosen) selected.set(path, chosen);
+    else if (
+      renameSource !== undefined &&
+      !selected.has(renameSource) &&
+      localStatus(renameSource, "D")
+    )
+      selected.set(renameSource, "D");
+  }
   for (const path of paths(
     requireSuccess(
       await git(repo, ["ls-files", "--others", "--exclude-standard", "-z"]),
     ),
   ))
-    if (!path.endsWith("/")) result.set(path, { path, status: "A" });
-  const selected: Change[] = [];
-  for (const change of result.values()) {
-    const { path, status } = change;
-    if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
-    const absolute = append(repo, path);
-    try {
-      if (status === "M" && linkedParent(repo, absolute))
-        selected.push({ path, status: "D" });
-      else if (status === "D" || regular(absolute)) selected.push(change);
-    } catch (error) {
-      if (!isMissingPathError(error)) throw error;
-    }
-  }
-  return selected;
+    if (!path.endsWith("/") && localStatus(path, "A")) selected.set(path, "A");
+  return [...selected].map(([path, status]) => ({ path, status }));
 }
 
 /** Consume each complete blob while retaining at most the preview prefix. */

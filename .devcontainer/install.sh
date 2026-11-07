@@ -15,7 +15,7 @@ export COREPACK_ENABLE_DOWNLOAD_PROMPT
 corepack install
 
 # Keep bun aligned with the version pinned in .github/workflows/node-ci.yml.
-npm install --global bun@1.3.14 --no-audit --no-fund
+npm install --global bun@1.4.4 --no-audit --no-fund
 
 if ! command -v rg >/dev/null 2>&1; then
     # Refresh only the Ubuntu sources. Dev container features add APT sources of
