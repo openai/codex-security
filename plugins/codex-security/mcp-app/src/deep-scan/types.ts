@@ -114,6 +114,7 @@ export interface CodexWorkerDiagnostic {
 }
 
 export interface CodexWorkerExecutor {
+  validateModelFileInputs?(signal: AbortSignal): Promise<void>;
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
   compareFindings?(
     prompt: string,

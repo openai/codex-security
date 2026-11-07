@@ -411,6 +411,7 @@ export async function* runDeepScan(
     node?.executable ?? process.execPath,
     [join(options.pluginRoot, "mcp", "server.mjs"), "--deep-scan-engine"],
     node?.environment ?? environment,
+    options.scanId,
     JSON.stringify({
       scanId: options.scanId,
       ...session,
@@ -436,10 +437,13 @@ export async function* runDeepScan(
   };
 }
 
+export class DirectDeepScanInputRecoveryError extends CodexSecurityError {}
+
 function runEngine(
   command: string,
   args: string[],
   env: NodeJS.ProcessEnv,
+  scanId: string,
   request: string,
   signal: AbortSignal,
   onDiagnostic: DirectDeepScanOptions["onDiagnostic"],
@@ -492,13 +496,31 @@ function runEngine(
       signal.removeEventListener("abort", cancel);
       if (signal.aborted) reject(signal.reason);
       else if (processError) reject(processError);
-      else if (code !== 0)
+      else if (code !== 0) {
+        if (stdout.trim()) {
+          let receipt: unknown;
+          try {
+            receipt = JSON.parse(stdout);
+          } catch {
+            // An incomplete child reply still reports the original process error.
+          }
+          if (
+            isRecord(receipt) &&
+            receipt["scanId"] === scanId &&
+            receipt["error"] === "model_input_recovery" &&
+            typeof receipt["message"] === "string" &&
+            receipt["message"]
+          ) {
+            reject(new DirectDeepScanInputRecoveryError(receipt["message"]));
+            return;
+          }
+        }
         reject(
           new CodexSecurityError(
             stderr.trim() || `Deep Scan engine exited with code ${code}.`,
           ),
         );
-      else resolve(stdout);
+      } else resolve(stdout);
     });
   });
   child.stdin.write(request + "\n");

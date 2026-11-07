@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -41,12 +42,16 @@ const validateProjectConfig = new Ajv({
 
 export interface ProjectConfigSource {
   path?: string;
+  resolvedPath?: string;
   directory: string;
   input: ProjectConfigInput;
 }
 
 export interface ResolvedProjectConfig {
-  config: { codexOverrides: JsonObject };
+  config: {
+    codexOverrides: JsonObject;
+    executableSourcePaths?: readonly string[];
+  };
   options: ResolvedScanSettings;
   sources: ConfigurationSources;
   projectConfig?: ProjectConfigProvenance;
@@ -132,11 +137,29 @@ export async function readProjectConfig(
   file: string,
   directory = process.cwd(),
 ): Promise<ProjectConfigSource> {
-  const path = resolve(directory, expandHome(file));
+  const expanded = expandHome(file);
+  const path = resolve(directory, expanded);
+  const selected =
+    process.platform === "win32" || isAbsolute(expanded)
+      ? expanded
+      : `${directory}/${expanded}`;
   const extension = projectConfigExtension(path);
+  let settingsDirectory = dirname(path);
   let text: string;
+  let resolvedPath: string;
   try {
-    text = await readFile(path, "utf8");
+    let source = process.platform === "win32" ? path : selected;
+    const selectedParent = dirname(source);
+    if (
+      process.platform !== "win32" &&
+      selectedParent.split("/").includes("..")
+    ) {
+      // Resolve parent traversal before joining the file or any relative settings.
+      settingsDirectory = await realpath(selectedParent);
+      source = resolve(settingsDirectory, basename(source));
+    }
+    resolvedPath = await realpath(source);
+    text = await readFile(resolvedPath, "utf8");
   } catch (error) {
     throw new ConfigurationError(
       `Cannot read project configuration at ${path}: ${errorMessage(error)}`,
@@ -161,7 +184,12 @@ export async function readProjectConfig(
     );
   }
   requireProjectConfig(value, path);
-  return { path, directory: dirname(path), input: value };
+  return {
+    path,
+    ...(path === resolvedPath ? {} : { resolvedPath }),
+    directory: settingsDirectory,
+    input: value,
+  };
 }
 
 function projectConfigExtension(path: string): string {
@@ -410,7 +438,20 @@ export function resolveScanSettings(
   };
   const resolvedSources = configurationSources({ ...sources, ...scopeSources });
   return {
-    config: { codexOverrides },
+    config: {
+      codexOverrides,
+      ...(project?.path
+        ? {
+            executableSourcePaths: [
+              ...new Set([
+                project.path,
+                resolve(project.directory, basename(project.path)),
+                ...(project.resolvedPath ? [project.resolvedPath] : []),
+              ]),
+            ],
+          }
+        : {}),
+    },
     options: settings,
     sources: resolvedSources,
     ...(project?.path === undefined

@@ -14703,6 +14703,70 @@ if __name__ == "__main__":
     },
   );
 
+  test.each(["model_instructions_file"] as const)(
+    "checks the recorded %s before resuming a Deep model turn",
+    async (setting) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const path = join(codexHome, "scan-model-input.json");
+      await writeFile(path, '{"models":[]}');
+      const scanId = "scan_example_001";
+      const threadId = "thread-1";
+      const routed = mock(rejecting("restored model input reached routing"));
+      const commands: string[] = [];
+      let recipe: JsonObject = {};
+      await using client = new TestClient(
+        { codexOverrides: { [setting]: path } },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          canRunDirectDeepScan: () => false,
+          createCodex: routed,
+          runWorkbench: async (_options, args, input): Promise<JsonObject> => {
+            commands.push(args[0]!);
+            if (args[0] === "register-cli-scan") {
+              recipe = JSON.parse(input!).recipe;
+              throw new Error("saved synthetic registration");
+            }
+            if (args[0] === "get-cli-scan-resume")
+              return {
+                scanId,
+                scanDir,
+                threadId,
+                targetId: "target_sha256_example",
+                targetRevision: "deadbeef",
+                recipe,
+                contract: { target: { allowedKinds: ["git_revision"] } },
+              };
+            return mockWorkbench(args, input);
+          },
+        },
+      );
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "saved synthetic registration",
+      );
+      expect(structuredClone(recipe["scanInputs"])).toMatchObject({
+        modelFileInputs: {
+          [setting]: { path, sha256: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+        },
+      });
+      await writeUsageSession(codexHome, threadId, {}, { cwd: scanDir });
+      const resume = () =>
+        client.run(repository, {
+          mode: "deep",
+          resumeScanId: scanId,
+          outputDir: scanDir,
+        });
+      await writeFile(path, '{"models":[],"new":true}');
+      await expect(resume()).rejects.toThrow(`${setting} changed`);
+      expect(commands).not.toContain("fail-scan");
+      expect(routed).not.toHaveBeenCalled();
+      await writeFile(path, '{"models":[]}');
+      await expect(resume()).rejects.toThrow(
+        "restored model input reached routing",
+      );
+      expect(routed).toHaveBeenCalledTimes(1);
+    },
+  );
+
   test("checks the resumed budget before routing a Deep Scan failure follow-up", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();
     const scanId = "scan_example_001";

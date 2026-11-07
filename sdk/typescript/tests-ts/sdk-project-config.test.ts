@@ -1,5 +1,5 @@
 import { createCliTest } from "./support/cli-run.js";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { stringify } from "yaml";
@@ -105,7 +105,13 @@ test.each(["standard", "deep"] as const)(
       commands.push(["scan", repository, "-c", file]);
     }
     for (const configuration of configurations) {
-      expect(configuration.config).toEqual({ codexOverrides: input.codex });
+      const path = configuration.projectConfig?.path;
+      expect(configuration.config).toEqual({
+        codexOverrides: input.codex,
+        ...(path && {
+          executableSourcePaths: [...new Set([path, await realpath(path)])],
+        }),
+      });
       expect<ScanOptions>(configuration.options).toEqual({
         ...options,
         validationPromptFile: undefined,

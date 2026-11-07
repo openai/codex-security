@@ -13,6 +13,8 @@ export interface JsonObject {
 }
 
 export interface CodexSecurityConfig {
+  /** Configuration files whose checkouts cannot supply a native executable. */
+  executableSourcePaths?: readonly string[];
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;

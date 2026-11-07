@@ -213,6 +213,18 @@ await test("built MCP setup previews and saves the selected project before scan 
       ).setup;
       assert.equal(throughLink.target.targetPath, targetPath);
       assert.deepEqual(throughLink.deepScanConfig, preview);
+      const configLink = join(root, "selected-config-link.yaml");
+      await symlink(join(targetPath, "selected.yaml"), configLink);
+      const linkedConfig = (
+        await call("inspect_codex_security_setup", {
+          ...selection,
+          projectConfigPath: configLink,
+        })
+      ).setup.deepScanConfig;
+      assert.deepEqual(linkedConfig.projectConfigPaths, [
+        configLink,
+        preview.projectConfigPath,
+      ]);
     }
     const workspace = (
       await call("open_codex_security_workspace", {

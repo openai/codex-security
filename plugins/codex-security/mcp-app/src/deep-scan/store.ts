@@ -1,4 +1,5 @@
 import { workbenchArgs } from "../workbench-arguments.js";
+import { currentModelFileInputs } from "./executor.js";
 import { readDeepScanProjectConfig } from "./project-config.js";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
@@ -159,10 +160,22 @@ export class WorkbenchDeepScanStore {
     let result = await this.enqueueWrite(
       workbenchArgs("begin-deep-scan", {
         ...args,
-        joinOnly: input.projectConfigPath !== undefined,
+        probeModelFileInputs: true,
       }),
       userContext,
     );
+    let modelFileInputsJson: string | undefined;
+    if (typeof result.newScanTarget === "string") {
+      modelFileInputsJson = JSON.stringify(await currentModelFileInputs());
+      result = await this.enqueueWrite(
+        workbenchArgs("begin-deep-scan", {
+          ...args,
+          joinOnly: input.projectConfigPath !== undefined,
+          modelFileInputsJson,
+        }),
+        userContext,
+      );
+    }
     if (
       input.projectConfigPath !== undefined &&
       typeof result.newScanTarget === "string"
@@ -176,6 +189,7 @@ export class WorkbenchDeepScanStore {
           ...args,
           targetPath: result.newScanTarget,
           deepScanProjectJson: JSON.stringify(project),
+          modelFileInputsJson,
         }),
         userContext,
       );
