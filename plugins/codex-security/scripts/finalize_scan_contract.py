@@ -632,12 +632,22 @@ def _open_scan_local_file_with_path(
                     f"{context}: expected a file inside the scan directory"
                 ) from exc
             raise ContractError(str(exc)) from exc
+    return _open_posix_file_with_path(
+        scan_dir, PurePosixPath(relative_path), context, resolve_spelling
+    )
+
+
+def _open_posix_file_with_path(
+    scan_dir: Path, relative: PurePosixPath, context: str, resolve_spelling: bool = False
+) -> tuple[int, str]:
+    parts = relative.parts
+    if not parts or relative.is_absolute() or ".." in parts:
+        raise ContractError(f"{context}: expected a file inside the scan directory")
     root_fd: int | None = None
     parent_fd: int | None = None
     descriptor: int | None = None
     try:
         root_fd = _open_verified_scan_directory(scan_dir)
-        parts = PurePosixPath(relative_path).parts
         try:
             parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=False)
             descriptor = os.open(
@@ -676,11 +686,11 @@ def _open_scan_local_file_with_path(
                     except FileNotFoundError:
                         continue
                     if os.path.samestat(metadata, entry):
-                        relative_path = PurePosixPath(relative_path).with_name(name).as_posix()
+                        relative = relative.with_name(name)
                         break
         result = descriptor
         descriptor = None
-        return result, relative_path
+        return result, relative.as_posix()
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -2163,10 +2173,19 @@ def _validate_schema_node(
             raise ContractError(f"{context}: array has too few items")
         if "maxItems" in schema and len(value) > schema["maxItems"]:
             raise ContractError(f"{context}: array has too many items")
+        item_schema = schema.get("items")
         if schema.get("uniqueItems") is True:
-            for index, item in enumerate(value):
-                if any(_schema_values_equal(item, candidate) for candidate in value[:index]):
-                    raise ContractError(f"{context}: array items must be unique")
+            if isinstance(item_schema, dict) and item_schema.get("type") == "string":
+                seen = set()
+                for item in value:
+                    if isinstance(item, str):
+                        if item in seen:
+                            raise ContractError(f"{context}: array items must be unique")
+                        seen.add(item)
+            else:
+                for index, item in enumerate(value):
+                    if any(_schema_values_equal(item, candidate) for candidate in value[:index]):
+                        raise ContractError(f"{context}: array items must be unique")
         contains = schema.get("contains")
         if isinstance(contains, dict):
             matches = 0
@@ -2181,7 +2200,6 @@ def _validate_schema_node(
                 raise ContractError(f"{context}: array contains too few matching items")
             if "maxContains" in schema and matches > schema["maxContains"]:
                 raise ContractError(f"{context}: array contains too many matching items")
-        item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
                 _validate_schema_node(item, item_schema, f"{context}[{index}]", root_schema)
@@ -3364,6 +3382,7 @@ def finalize_scan(
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
     projection_warnings: list[str] | None = None,
+    verify_manifest: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     prepared = _prepare_scan_finalization(
         scan_dir,
@@ -3371,6 +3390,8 @@ def finalize_scan(
         expected_coverage_mode=expected_coverage_mode,
         completion_binding=completion_binding,
     )
+    if verify_manifest is not None:
+        verify_manifest(prepared.manifest)
     return _write_prepared_scan_finalization(
         prepared, source_root, projection_warnings=projection_warnings
     )

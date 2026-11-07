@@ -2791,6 +2791,23 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertEqual(coverage["includePaths"], ["src/"])
         self.assertEqual(coverage["excludePaths"], [])
 
+    def test_existing_seal_rejects_changed_bound_instruction_digest(self) -> None:
+        self.write_scan()
+        binding = self.completion_binding()
+        original = "sha256:" + "1" * 64
+        substituted = "sha256:" + "2" * 64
+        binding["producer"]["instructionDigests"] = [original]
+        FINALIZER.finalize_scan(self.scan_dir, completion_binding=binding)
+
+        manifest_path = self.scan_dir / "scan-manifest.json"
+        sealed = manifest_path.read_bytes()
+        self.assertIn(original.encode(), sealed)
+        manifest_path.write_bytes(sealed.replace(original.encode(), substituted.encode()))
+        canonical = self.scan_file_bytes(*CANONICAL_FILES)
+        with self.assertRaisesRegex(FINALIZER.ContractError, "manifest.scan.producer"):
+            FINALIZER.finalize_scan(self.scan_dir, completion_binding=binding)
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), canonical)
+
     def test_completion_binding_rejects_sealed_wrong_producer_without_rewriting(self) -> None:
         manifest, _, _ = self.write_sealed_scan()
         binding = self.completion_binding()

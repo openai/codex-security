@@ -117,7 +117,7 @@ describe("bundled plugin build", () => {
       recursive: true,
       filter: (path) => !["node_modules", ".preview"].includes(basename(path)),
     });
-    for (const directory of ["schemas", "shared"]) {
+    for (const directory of ["references/deep-scan", "schemas", "shared"]) {
       await cp(join(plugin, directory), join(source, directory), {
         recursive: true,
       });

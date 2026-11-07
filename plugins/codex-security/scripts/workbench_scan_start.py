@@ -283,6 +283,7 @@ def insert_running_scan(
     target_summary: str | None,
     scope_file_count: int | None,
     timestamp: str,
+    instruction_digest: str | None,
     handoff_status: str = "pending",
     model: str | None = None,
     reasoning_effort: str | None = None,
@@ -311,9 +312,9 @@ def insert_running_scan(
             target_device, target_inode, source_scopes_json, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
-            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at,
+            reasoning_effort, instruction_digest, status, phase, handoff_status, started_at, created_at, updated_at,
             launch_surface, launch_package_version, launch_plugin_version, launch_kind
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'running', 'preflight', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
@@ -332,6 +333,7 @@ def insert_running_scan(
             str(scan_dir),
             optional_text(model, maximum=200),
             optional_text(reasoning_effort, maximum=32),
+            instruction_digest,
             handoff_status,
             timestamp,
             timestamp,

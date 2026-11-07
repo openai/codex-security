@@ -200,7 +200,15 @@ const scanManifest = z.looseObject({
   scan: z
     .looseObject({
       id: text,
-      producer: z.looseObject({ name: text, version: text }),
+      producer: z.looseObject({
+        name: text,
+        version: text,
+        instructionDigests: z
+          .array(pattern("^sha256:[0-9a-f]{64}$").max(71))
+          .min(1)
+          .meta({ uniqueItems: true })
+          .optional(),
+      }),
       status: z.enum(["completed", "failed", "canceled", "interrupted"]),
       warnings: textList.optional(),
       startedAt: timestamp,

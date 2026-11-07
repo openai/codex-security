@@ -26,6 +26,7 @@ type JsonObject = Record<string, unknown>;
 export type WorkbenchRunner = (
   args: string[],
   input?: string,
+  options?: { workerInstructionDigest?: string; signal?: AbortSignal },
 ) => Promise<JsonObject>;
 
 const WORKFLOW_VERSION = "deep-scan-mcp/v1";
@@ -115,17 +116,30 @@ const RETRYABLE_PERSISTENCE_COMMANDS = new Set([
   "record-deep-scan-publication-failure",
 ]);
 
+interface InstructionMeasurement {
+  controller: AbortController;
+  digest?: string;
+}
+
 export class WorkbenchDeepScanStore {
   private writeTail: Promise<void> = Promise.resolve();
+  private readonly measurementShutdown = new AbortController();
   private readonly coordinatorLeases = new Map<
     string,
     {
       input: DeepScanCoordinatorLeaseInput;
       run: DeepScanRunState;
+      measurement?: InstructionMeasurement;
     }
   >();
 
-  constructor(private readonly runWorkbench: WorkbenchRunner) {}
+  constructor(
+    private readonly runWorkbench: WorkbenchRunner,
+    private readonly instructions?: {
+      pluginRoot: string;
+      roleDigests: { discovery: string };
+    },
+  ) {}
 
   async begin(input: {
     scanId?: string;
@@ -204,6 +218,7 @@ export class WorkbenchDeepScanStore {
         run.coordinatorGeneration !== undefined &&
         run.coordinatorGeneration > generation)
     ) {
+      this.coordinatorLeases.get(scanId)?.measurement?.controller.abort();
       this.coordinatorLeases.delete(scanId);
     }
     return run;
@@ -212,35 +227,83 @@ export class WorkbenchDeepScanStore {
   async claimCoordinator(
     input: DeepScanCoordinatorLeaseInput,
   ): Promise<DeepScanCoordinatorClaim> {
-    const result = await this.enqueueWrite(
-      workbenchArgs("claim-deep-scan-coordinator", {
-        scanId: input.scanId,
-        threadId: input.threadId,
-        coordinatorGeneration: this.coordinatorGeneration(input.scanId),
-        claimToken: input.handoffClaimToken || undefined,
-      }),
-    );
-    const run = parseDeepScan(result);
-    const disposition = result.coordinatorDisposition;
-    if (
-      disposition !== "claimed" &&
-      disposition !== "adopted" &&
-      disposition !== "observing"
-    ) {
-      throw new Error(
-        "Codex Security workbench returned an invalid coordinator disposition.",
+    const candidate = this.coordinatorLeases.has(input.scanId)
+      ? undefined
+      : this.measureInstructions();
+    try {
+      const result = await this.enqueueWrite(
+        workbenchArgs("claim-deep-scan-coordinator", {
+          scanId: input.scanId,
+          threadId: input.threadId,
+          coordinatorGeneration: this.coordinatorGeneration(input.scanId),
+          claimToken: input.handoffClaimToken || undefined,
+        }),
       );
-    }
-    const acquired = disposition !== "observing";
-    if (acquired) {
-      if (!run.coordinatorGeneration || run.coordinatorGeneration <= 1) {
+      const run = parseDeepScan(result);
+      const disposition = result.coordinatorDisposition;
+      if (
+        disposition !== "claimed" &&
+        disposition !== "adopted" &&
+        disposition !== "observing"
+      ) {
         throw new Error(
-          "Codex Security workbench returned an invalid coordinator lease.",
+          "Codex Security workbench returned an invalid coordinator disposition.",
         );
       }
-      this.coordinatorLeases.set(input.scanId, { input, run });
+      const acquired = disposition !== "observing";
+      if (acquired) {
+        if (!run.coordinatorGeneration || run.coordinatorGeneration <= 1) {
+          throw new Error(
+            "Codex Security workbench returned an invalid coordinator lease.",
+          );
+        }
+        const previous = this.coordinatorLeases.get(input.scanId);
+        if (previous?.run.coordinatorGeneration !== run.coordinatorGeneration) {
+          previous?.measurement?.controller.abort();
+          this.coordinatorLeases.set(input.scanId, {
+            input,
+            run,
+            measurement: candidate ?? this.measureInstructions(),
+          });
+        }
+      }
+      return { run, acquired };
+    } finally {
+      if (candidate !== this.coordinatorLeases.get(input.scanId)?.measurement)
+        candidate?.controller.abort();
     }
-    return { run, acquired };
+  }
+
+  private measureInstructions(): InstructionMeasurement | undefined {
+    const instructions = this.instructions;
+    if (!instructions || this.measurementShutdown.signal.aborted) return;
+    const measurement: InstructionMeasurement = {
+      controller: new AbortController(),
+    };
+    const signal = AbortSignal.any([
+      this.measurementShutdown.signal,
+      measurement.controller.signal,
+    ]);
+    // Start alongside the claim once earlier writes finish, without holding its lease.
+    void this.writeTail.then(async () => {
+      if (signal.aborted) return;
+      try {
+        const value = await this.runWorkbench(
+          ["measure-deep-scan-instructions"],
+          JSON.stringify(instructions),
+          { signal },
+        );
+        if (typeof value.instructionDigest === "string")
+          measurement.digest = value.instructionDigest;
+      } catch {
+        // Workers can start and finish when their optional bundle identity is unavailable.
+      }
+    });
+    return measurement;
+  }
+
+  stopInstructionMeasurements(): void {
+    this.measurementShutdown.abort();
   }
 
   async heartbeatCoordinator(
@@ -276,25 +339,32 @@ export class WorkbenchDeepScanStore {
   async updateWorker(
     update: DeepScanWorkerMutation,
   ): Promise<PersistedDeepScanWorker> {
-    const result = await this.enqueueWrite([
-      ...workbenchArgs("upsert-deep-scan-worker", {
-        scanId: update.scanId,
-        workerId: update.id,
-        kind: update.kind,
-        status: update.status,
-        promptPath: update.promptPath,
-        artifactDir: update.artifactDir,
-        attempt: update.attempt,
-        coordinatorGeneration: this.coordinatorGeneration(update.scanId),
-        resultManifestPath: update.resultManifestPath || undefined,
-        sdkThreadId: update.threadId || undefined,
-      }),
-      ...(update.error ? [`--error-message=${update.error}`] : []),
-      ...(update.terminalFailure ? ["--terminal-failure"] : []),
-      ...(update.replaceableFailureKind
-        ? ["--replaceable-failure-kind", update.replaceableFailureKind]
-        : []),
-    ]);
+    const lease = this.coordinatorLeases.get(update.scanId);
+    const result = await this.enqueueWrite(
+      [
+        ...workbenchArgs("upsert-deep-scan-worker", {
+          scanId: update.scanId,
+          workerId: update.id,
+          kind: update.kind,
+          status: update.status,
+          promptPath: update.promptPath,
+          artifactDir: update.artifactDir,
+          attempt: update.attempt,
+          coordinatorGeneration: lease?.run.coordinatorGeneration,
+          resultManifestPath: update.resultManifestPath || undefined,
+          sdkThreadId: update.threadId || undefined,
+        }),
+        ...(update.error ? [`--error-message=${update.error}`] : []),
+        ...(update.terminalFailure ? ["--terminal-failure"] : []),
+        ...(update.replaceableFailureKind
+          ? ["--replaceable-failure-kind", update.replaceableFailureKind]
+          : []),
+      ],
+      undefined,
+      update.status === "running" && update.kind !== "setup"
+        ? lease?.measurement
+        : undefined,
+    );
     return parseWorker(result, update.id);
   }
 
@@ -418,12 +488,17 @@ export class WorkbenchDeepScanStore {
    * other workbench processes. Reads remain concurrent and observe a committed
    * state before or after each mutation.
    */
-  private enqueueWrite(args: string[], input?: string): Promise<JsonObject> {
+  private enqueueWrite(
+    args: string[],
+    input?: string,
+    measurement?: InstructionMeasurement,
+  ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
+      const workerInstructionDigest = measurement?.digest;
       try {
         return RETRYABLE_PERSISTENCE_COMMANDS.has(args[0])
-          ? await this.runIdempotentPersistence(args)
-          : await this.runWorkbench(args, input);
+          ? await this.runIdempotentPersistence(args, workerInstructionDigest)
+          : await this.runWorkbench(args, input, { workerInstructionDigest });
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
         const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;
@@ -455,11 +530,16 @@ export class WorkbenchDeepScanStore {
   }
 
   /** Replay only existing, same-identity workbench mutations after transient failures. */
-  private async runIdempotentPersistence(args: string[]): Promise<JsonObject> {
+  private async runIdempotentPersistence(
+    args: string[],
+    workerInstructionDigest?: string,
+  ): Promise<JsonObject> {
     const startedAt = Date.now();
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.runWorkbench(args);
+        return await this.runWorkbench(args, undefined, {
+          workerInstructionDigest,
+        });
       } catch (error) {
         if (!isTransientPersistenceError(error)) {
           throw error;

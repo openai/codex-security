@@ -53,21 +53,6 @@ def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def preserve_sealed_completion(
-    binding: dict[str, Any], manifest: dict[str, Any] | None
-) -> dict[str, Any]:
-    """Copy the original timestamps and producer version from a sealed manifest into binding, then return it."""
-    manifest_scan = manifest.get("scan") if manifest is not None else None
-    if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-        # Keep the original producer; finalization still validates schema, seal and owner.
-        binding["startedAt"] = manifest_scan.get("startedAt")
-        binding["completedAt"] = manifest_scan.get("completedAt")
-        producer = manifest_scan.get("producer")
-        if isinstance(producer, dict):
-            binding["producer"]["version"] = producer.get("version")
-    return binding
-
-
 def cli_scan_resume(
     wb: Any,
     connection: sqlite3.Connection,
@@ -136,7 +121,9 @@ def cli_scan_resume(
             manifest_scan = manifest.get("scan")
             if isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan):
                 try:
-                    binding = wb.workbench_completion_binding(scan, scan["started_at"], manifest)
+                    binding = wb.workbench_completion_binding(
+                        connection, scan, scan["started_at"], manifest
+                    )
                     _prepare_scan_finalization(
                         scan_dir,
                         expected_coverage_mode=binding["coverageMode"],
@@ -149,7 +136,10 @@ def cli_scan_resume(
 
 
 def coverage_summary_for_history(
-    wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
+    wb: Any,
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    canonical_scan_directory: Callable[[Path], Path],
 ) -> dict[str, Any]:
     """Return the coverage mode and path filters for history after verifying the sealed scan data."""
     scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
@@ -158,7 +148,7 @@ def coverage_summary_for_history(
         if scan["seal_manifest_digest"] is None:
             # Older workbench rows can have valid seals without a pinned digest.
             manifest, _, coverage, _ = _read_sealed_scan(scan_dir, None, "history coverage")
-            wb.verify_manifest_binding(scan, manifest)
+            wb.verify_manifest_binding(scan, manifest, connection)
             if coverage["mode"] != wb.expected_coverage_mode(scan):
                 raise ContractError("coverage.mode: must match the workbench scan")
         else:

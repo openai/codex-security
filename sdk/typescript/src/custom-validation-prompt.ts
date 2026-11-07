@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { resolveCodexProfile, type JsonObject } from "./config.js";
@@ -35,20 +35,6 @@ const DISABLED_TOOLS = [
 const HANDOFF =
   "Preserve every surviving source-backed candidate as a provisional finding, including its identity, source locations, evidence, counterevidence, and preliminary assessments. Assemble unsealed scan-manifest.json and findings.json using <plugin_dir>/examples/completed-scan/ and <plugin_dir>/schemas/ as shape references. Put candidate dispositions and pending work in scan.reviewState. Set scan.scope.validationMode to custom_pending and put each finding's matching review-state surface IDs in extensions.customValidationSurfaceIds. Every reported review-state surface must have a candidate. When source discovery finishes and a bound semantic draft tool is available, submit an accepted final source-discovery draft with complete: true, preserving the provisional findings, reviewState, threat model, and custom_pending validation mode. This marks source discovery finished; it does not claim custom validation has occurred or seal the scan. Keep complete: false when requested source review remains unfinished. Verify both files exist, then return control to the SDK without invoking validation or attack-path skills, running application code, sealing files, generating a report, or calling a scan completion tool or helper.";
 
-async function source(pluginRoot: string, name: keyof typeof SOURCES) {
-  const text = (await readFile(join(pluginRoot, name), "utf8")).replaceAll(
-    "\r\n",
-    "\n",
-  );
-  const digest = createHash("sha256").update(text).digest("hex");
-  if (!SOURCES[name].includes(digest)) {
-    throw new IncompleteScanError(
-      `Custom validation is incompatible with the installed plugin workflow (${name}). Update the SDK and plugin together. Default validation was not started.`,
-    );
-  }
-  return text;
-}
-
 function step(text: string, number: number): string {
   return text.match(new RegExp(`^${number}\\. (.+)$`, "m"))![1]!;
 }
@@ -56,12 +42,25 @@ function step(text: string, number: number): string {
 export async function customDiscoveryPrompt(
   pluginRoot: string,
   skillName: string,
-): Promise<string> {
+) {
+  const sourceDigests: Record<string, string> = {};
+  async function source(name: keyof typeof SOURCES) {
+    const bytes = await readFile(join(pluginRoot, name));
+    const text = bytes.toString("utf8").replaceAll("\r\n", "\n");
+    if (!SOURCES[name].includes(hash("sha256", text))) {
+      throw new IncompleteScanError(
+        `Custom validation is incompatible with the installed plugin workflow (${name}). Update the SDK and plugin together. Default validation was not started.`,
+      );
+    }
+    sourceDigests[name] = hash("sha256", bytes);
+    return text;
+  }
+
   let workflow: string;
   if (skillName === "security-scan") {
     const [skill, core] = await Promise.all([
-      source(pluginRoot, "skills/security-scan/SKILL.md"),
-      source(pluginRoot, "references/core-scan.md"),
+      source("skills/security-scan/SKILL.md"),
+      source("references/core-scan.md"),
     ]);
     const discovery = core
       .replace(
@@ -90,10 +89,7 @@ export async function customDiscoveryPrompt(
       discovery,
     ].join("\n\n");
   } else if (skillName === "security-diff-scan") {
-    const skill = await source(
-      pluginRoot,
-      "skills/security-diff-scan/SKILL.md",
-    );
+    const skill = await source("skills/security-diff-scan/SKILL.md");
     workflow = [
       skill.slice(skill.indexOf("## Setup"), skill.indexOf("\n4. ")),
       `4. ${HANDOFF} Use diff for scan.mode.`,
@@ -103,10 +99,11 @@ export async function customDiscoveryPrompt(
       "Custom validation is not supported for this scan workflow.",
     );
   }
-  return [
+  const prompt = [
     "Follow this SDK-owned discovery workflow, derived from the installed plugin. It replaces the ordinary top-level scan skill for this turn. The SDK owns the separate custom validation pass and all completion. <plugin_dir> is CODEX_SECURITY_PLUGIN_ROOT; other bare reference filenames are relative to its references directory.",
     workflow.replaceAll("../../references/", "<plugin_dir>/references/"),
   ].join("\n\n");
+  return { prompt, sourceDigests };
 }
 
 export async function customValidationConfig(

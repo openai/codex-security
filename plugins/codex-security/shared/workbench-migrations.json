@@ -543,5 +543,14 @@
       "CREATE TRIGGER record_scan_admission_insert\nAFTER INSERT ON scans\nWHEN NEW.status = 'complete' OR (NEW.status = 'failed' AND NEW.seal_manifest_digest IS NOT NULL)\nBEGIN\n    INSERT OR IGNORE INTO scan_admissions (scan_id) VALUES (NEW.id);\nEND;",
       "CREATE TRIGGER record_scan_admission_update\nAFTER UPDATE OF status, seal_manifest_digest ON scans\nWHEN NEW.status = 'complete' OR (NEW.status = 'failed' AND NEW.seal_manifest_digest IS NOT NULL)\nBEGIN\n    INSERT OR IGNORE INTO scan_admissions (scan_id) VALUES (NEW.id);\nEND;"
     ]
+  },
+  {
+    "version": 67,
+    "name": "record scan and worker instruction digests",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN instruction_digest TEXT;",
+      "ALTER TABLE scans ADD COLUMN prepared_instruction_digests_json TEXT;",
+      "ALTER TABLE deep_scan_workers ADD COLUMN instruction_digest TEXT;"
+    ]
   }
 ]

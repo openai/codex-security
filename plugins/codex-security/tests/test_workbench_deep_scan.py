@@ -98,6 +98,94 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
     return DeepScan(state_dir, codex_home, str(run["scanId"]), Path(str(run["scanDir"])))
 
 
+def test_deep_worker_keeps_bundle_selected_by_its_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deep = start_empty_target_scan(
+        tmp_path, config="[deep_scan]\nworkers = 2\nmax_discovery_runs = 3\n"
+    )
+    plugin = tmp_path / "plugin"
+    (plugin / "skills").mkdir(parents=True)
+    (plugin / "references").mkdir()
+    reference = plugin / "references/core-scan.md"
+    roles = {"discovery": hashlib.sha256(b"discovery").hexdigest()}
+
+    def measure(text: str) -> str:
+        reference.write_text(text)
+        return run_workbench(
+            deep.state_dir,
+            "measure-deep-scan-instructions",
+            input_text=json.dumps({"pluginRoot": str(plugin), "roleDigests": roles}),
+        )["instructionDigest"]
+
+    first = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    generation = first["deepScan"]["coordinatorGeneration"]
+    marker = "_CODEX_SECURITY_WORKER_INSTRUCTION_DIGEST"
+    initial = measure("first")
+    monkeypatch.setenv(marker, initial)
+    known = deep.dispatch_discovery_worker(
+        name="known", succeed=False, coordinator_generation=generation
+    )
+    monkeypatch.delenv(marker)
+    unknown = deep.dispatch_discovery_worker(
+        name="unknown", succeed=False, coordinator_generation=generation
+    )
+
+    updated = measure("updated")
+    assert initial != updated
+    monkeypatch.setenv(marker, updated)
+    for worker_id, prompt, artifacts, result in (known, unknown):
+        deep.upsert_worker(
+            worker_id=worker_id,
+            prompt_path=prompt,
+            artifact_dir=artifacts,
+            coordinator_generation=generation,
+        )
+        result.write_text("{}\n")
+        deep.upsert_worker(
+            worker_id=worker_id,
+            status="succeeded",
+            prompt_path=prompt,
+            artifact_dir=artifacts,
+            result_path=result,
+            coordinator_generation=generation,
+        )
+
+    observer = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    assert observer["coordinatorDisposition"] == "observing"
+    expire_deep_scan_coordinator(deep.state_dir, deep.id)
+    replacement = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    assert replacement["coordinatorDisposition"] == "adopted"
+    stale = deep.upsert_worker(
+        worker_id=known[0],
+        status="succeeded",
+        prompt_path=known[1],
+        artifact_dir=known[2],
+        result_path=known[3],
+        coordinator_generation=generation,
+        check=False,
+    )
+    assert stale["returncode"] != 0 and "newer generation" in stale["stderr"]
+    generation = replacement["deepScan"]["coordinatorGeneration"]
+    new_worker, *_ = deep.dispatch_discovery_worker(
+        name="replacement", coordinator_generation=generation
+    )
+    saved = deep.record_iteration(
+        name="iteration-1",
+        input_worker_ids=[known[0], unknown[0], new_worker],
+        new_findings_count=0,
+        coordinator_generation=generation,
+    )
+    checkpoint = next(worker["id"] for worker in saved["workers"] if worker["kind"] == "dedup")
+    manifest = deep.directory / "coordinator-manifest.json"
+    manifest.write_text("{}\n")
+    deep.finish("capped", manifest, "--coordinator-generation", str(generation))
+
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+        digests = dict(connection.execute("SELECT id, instruction_digest FROM deep_scan_workers"))
+    assert digests == {known[0]: initial, unknown[0]: None, new_worker: updated, checkpoint: None}
+
+
 @pytest.mark.cross_platform
 def test_target_admission_stops_at_the_first_non_directory_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -139,6 +227,9 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN launch_plugin_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_surface")
+        connection.execute("ALTER TABLE scans DROP COLUMN instruction_digest")
+        connection.execute("ALTER TABLE scans DROP COLUMN prepared_instruction_digests_json")
+        connection.execute("ALTER TABLE deep_scan_workers DROP COLUMN instruction_digest")
         connection.execute("DROP TRIGGER record_scan_admission_insert")
         connection.execute("DROP TRIGGER record_scan_admission_update")
         connection.execute("DROP TABLE scan_admissions")

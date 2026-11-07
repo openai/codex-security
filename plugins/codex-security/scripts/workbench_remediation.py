@@ -466,7 +466,7 @@ def matching_patch_metadata(source: BinaryIO, expected_digest: str) -> tuple[os.
 
 
 def patch_manifest_version(
-    db: Any, scan: sqlite3.Row, scan_dir: Path
+    db: Any, connection: sqlite3.Connection, scan: sqlite3.Row, scan_dir: Path
 ) -> tuple[str, tuple[os.stat_result, int]]:
     """Verify the sealed scan manifest and return its byte digest and file version, including for legacy scans."""
     manifest_path = db.ARTIFACTS["manifest"]
@@ -477,7 +477,7 @@ def patch_manifest_version(
         manifest, _, _, _ = _read_sealed_scan(scan_dir, None, "remediation")
         if saved != manifest:
             raise SystemExit("The sealed scan manifest changed during validation.")
-        db.verify_manifest_binding(scan, manifest)
+        db.verify_manifest_binding(scan, manifest, connection)
         expected = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     with db.open_scan_local_file(scan_dir, manifest_path) as source:
         digest, version = file_digest_and_version(source, "sealed scan manifest")
@@ -545,7 +545,9 @@ def save_patch(
                 scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
                 if identity is None:
                     scan_dir, root_identity = scan_root_identity(scan_dir)
-                    manifest_digest, manifest_version = patch_manifest_version(db, scan, scan_dir)
+                    manifest_digest, manifest_version = patch_manifest_version(
+                        db, connection, scan, scan_dir
+                    )
                     root_changed_during_validation = (
                         scan_root_identity(scan_dir)[1] != root_identity
                     )

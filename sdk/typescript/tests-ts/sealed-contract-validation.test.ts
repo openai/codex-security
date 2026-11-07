@@ -386,6 +386,14 @@ test.each(invalidCases)(
 
 const invalidInBothProfiles: typeof invalidCases = [
   [
+    "duplicate instruction digests",
+    ({ manifest }) => {
+      const digest = `sha256:${"a".repeat(64)}`;
+      manifest.scan.producer.instructionDigests = [digest, digest];
+    },
+    "uniqueItems",
+  ],
+  [
     "blank producer",
     ({ manifest }) => {
       manifest.scan.producer.name = " ";

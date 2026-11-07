@@ -2139,7 +2139,10 @@ New records save the authentication mode, explicit safety
 identifier, and post-scan prompt; older records cannot reconstruct missing values.
 A failed connection leaves the scan available for another resume attempt.
 Compatible scans can resume after plugin updates; sealed results keep their
-original producer version. Unsupported artifacts are rejected without rewriting them.
+original producer version. When available, `scan.producer.instructionDigests`
+in the manifest records the bundles selected at registration and by Deep workers
+that started, including replacement workers on resume. Unsupported artifacts
+are rejected without rewriting them.
 
 For bulk scans, use [bulk recovery](#recovering-failed-or-interrupted-bulk-scans)
 to update campaign receipts. Individual resume does not update `results.jsonl`.

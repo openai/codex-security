@@ -100,10 +100,11 @@ def recovered_review_state(state, scan_dir, scan_id):
         workers = connection.execute(
             "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
         ).fetchall()
+        binding = workbench_db.workbench_completion_binding(connection, scan, workbench_db.now())
     return saved.merge_saved_results(
         scan_dir,
         scan_id,
-        workbench_db.workbench_completion_binding(scan, workbench_db.now()),
+        binding,
         workers,
         [],
         stopped=True,

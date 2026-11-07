@@ -789,6 +789,9 @@ service_tier = "ultrafast"
 
     const restartStartIndex = (await readLogLines(startLogPath)).length;
     await writeFile(restartControlPath, "before-restart");
+    const holdClaimForMeasurement = (pid: number) =>
+      writeFile(`${workbenchLaunchLogPath}.${pid}.hold-claim`, "");
+    await holdClaimForMeasurement(server.pid!);
     server.sendRequest(
       29,
       "tools/call",
@@ -834,6 +837,11 @@ service_tier = "ultrafast"
     const completedWorker = partial!.workers.find(
       (worker: PersistedDeepScanWorker) => worker.status === "succeeded",
     );
+    const interruptedWorker = partial!.workers.find(
+      (worker: PersistedDeepScanWorker) =>
+        worker.kind === "discovery" && worker.status === "running",
+    );
+    assert.ok(interruptedWorker);
     const completedDraft = await readJson(completedWorker.resultManifestPath);
     assert.equal(completedDraft.scanId, resumedScanId);
     assert.deepEqual(completedDraft.findings, []);
@@ -880,6 +888,7 @@ service_tier = "ultrafast"
     const restartedServer = startServer(serverBundlePath, environment);
     try {
       await restartedServer.initialize("deep-scan-restarted-artifacts");
+      await holdClaimForMeasurement(restartedServer.pid!);
       restartedServer.sendRequest(
         2,
         "tools/call",
@@ -943,16 +952,25 @@ service_tier = "ultrafast"
           },
         ),
       );
-      const modelRows = await execFileAsync(
+      const scanRows = await execFileAsync(
         process.env.PYTHON?.trim() || "python3",
         [
           "-c",
-          "import sqlite3,sys,json; c=sqlite3.connect(sys.argv[1]); print(json.dumps(c.execute('SELECT model, reasoning_effort FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()))",
+          `import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+scan = (sys.argv[2],)
+parent = db.execute("SELECT model, reasoning_effort, instruction_digest FROM scans WHERE id = ?", scan).fetchone()
+workers = db.execute("SELECT id, instruction_digest FROM deep_scan_workers WHERE scan_id = ? AND kind = 'discovery' AND started_at IS NOT NULL", scan)
+print(json.dumps([*parent, list(workers)]))`,
           path.join(stateDir, "workbench.sqlite3"),
           resumedScanId,
         ],
       );
-      assert.deepEqual(JSON.parse(modelRows.stdout), ["gpt-6.1-sol", "max"]);
+      const [model, effort, parentDigest, workerRows] = JSON.parse(
+        scanRows.stdout,
+      );
+      assert.deepEqual([model, effort], ["gpt-6.1-sol", "max"]);
+      assert.match(parentDigest, /^sha256:[a-f0-9]{64}$/);
       const instructions = resumed.structuredContent.instructions;
       assert.match(
         instructions,
@@ -1037,6 +1055,29 @@ service_tier = "ultrafast"
       const completedScan = resumed.structuredContent;
       const sealedManifest = await readJson(completedScan.manifestPath);
       assert.equal(sealedManifest.scan.status, "completed");
+      const helperLaunches = await readLogLines(workbenchLaunchLogPath);
+      assert.deepEqual(
+        new Set(workerRows.map(([id]: [string, string]) => id)),
+        new Set([
+          interruptedWorker.id,
+          ...successfulDiscoveries.map(
+            (worker: PersistedDeepScanWorker) => worker.id,
+          ),
+        ]),
+      );
+      for (const [id, digest] of workerRows) {
+        const firstRunning = helperLaunches.find(
+          ({ workbenchArgs: args }) =>
+            args[0] === "upsert-deep-scan-worker" &&
+            args[args.indexOf("--worker-id") + 1] === id &&
+            args[args.indexOf("--status") + 1] === "running",
+        );
+        assert.equal(firstRunning?.workerInstructionDigest, parentDigest, id);
+        assert.equal(digest, parentDigest, id);
+      }
+      assert.deepEqual(sealedManifest.scan.producer.instructionDigests, [
+        parentDigest,
+      ]);
       assert.ok(sealedManifest.scan.sealedAt);
       const report = await readFile(
         path.join(completedScan.scanDir, "report.md"),
@@ -1045,7 +1086,6 @@ service_tier = "ultrafast"
       assert.ok(report.length > 0);
       assert.equal(await readFile(manifestPath, "utf8"), sealedBeforeRejoin);
       assert.equal(report, reportBeforeRejoin);
-      const helperLaunches = await readLogLines(workbenchLaunchLogPath);
       for (const command of ["get-scan", "write-scan-draft", "complete-scan"]) {
         const launches = helperLaunches.filter(
           (launch) => launch.workbenchArgs[0] === command,
@@ -1835,14 +1875,35 @@ async function writePythonWrapper(executablePath: string) {
   await writeFile(
     executablePath,
     `#!/usr/bin/env node
-import { appendFileSync, existsSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 const args = process.argv.slice(2);
 const input = Buffer.concat(await process.stdin.toArray());
 const workbenchArgs = args.at(-1).endsWith('workbench_db.py')
   ? JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'))
   : [];
-if (workbenchArgs.length) appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
+const launchLog = process.env.FAKE_WORKBENCH_LAUNCH_LOG;
+const workerInstructionDigest = process.env._CODEX_SECURITY_WORKER_INSTRUCTION_DIGEST;
+if (workbenchArgs.length) appendFileSync(launchLog, JSON.stringify({ args, workbenchArgs, cwd: process.cwd(), workerInstructionDigest }) + '\\n');
+const gate = launchLog + '.' + process.ppid + '.hold-claim';
+if (workbenchArgs[0] === 'claim-deep-scan-coordinator' && existsSync(gate)) {
+  // Release the claim only after this host has reaped its measurement helper.
+  const signal = AbortSignal.timeout(10_000);
+  for (;;) {
+    const measurementPid = readFileSync(gate, 'utf8');
+    if (measurementPid) {
+      try {
+        process.kill(Number(measurementPid), 0);
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+        break;
+      }
+    }
+    await delay(10, undefined, { signal });
+  }
+  unlinkSync(gate);
+}
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
 if (workbenchArgs[0] === 'cancel-scan') {
   appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(workbenchArgs) + '\\n');
@@ -1860,6 +1921,9 @@ if (workbenchArgs[0] === 'complete-scan' && completionControl && existsSync(comp
 }
 const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { input, stdio: ['pipe', 'inherit', 'inherit'] });
 if (result.error) throw result.error;
+if (workbenchArgs[0] === 'measure-deep-scan-instructions' && result.status === 0 && existsSync(gate)) {
+  writeFileSync(gate, String(process.pid));
+}
 process.exit(result.status ?? 1);
 `,
   );

@@ -1,6 +1,6 @@
 [
   [
-    "-- Move saved finding history previews before repairing the main history.",
+    "-- Move saved finding history and instruction digest receipts before restoring released migrations.",
     "WITH history AS (",
     "    SELECT json_extract(value, '$.version') AS destination, json_extract(value, '$.name') AS name",
     "    FROM json_each(:history)",
@@ -10,10 +10,11 @@
     "FROM schema_migrations JOIN history USING (name)",
     "WHERE (destination = 64 AND version IN (42, 43, 48, 50, 53, 54, 61, 63))",
     "    OR (destination = 65 AND version IN (43, 44, 49, 51, 54, 55, 62, 64))",
-    "    OR (destination = 66 AND version IN (56, 63, 65)) ORDER BY version DESC;"
+    "    OR (destination = 66 AND version IN (56, 63, 65))",
+    "    OR (destination = 67 AND version IN (59, 61, 63, 64)) ORDER BY version DESC;"
   ],
   [
-    "-- A released reader can add its columns while a finding history preview still owns the version.",
+    "-- A released reader can add its columns while a preview still owns the version.",
     "WITH released(version, table_name, column_name) AS (",
     "    VALUES (54, 'workspaces', 'deep_scan_config_json'),",
     "        (55, 'deep_scan_runs', 'pending_target_project_path'),",
@@ -26,7 +27,8 @@
     "        released.version || ', ' || quote(json_extract(history.value, '$.name')) || ', ?)' AS value",
     "FROM released JOIN json_each(:history) AS history",
     "    ON json_extract(history.value, '$.version') = released.version",
-    "WHERE EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'preserve finding decision append chronology')",
+    "WHERE EXISTS (SELECT 1 FROM schema_migrations WHERE name IN (",
+    "    'preserve finding decision append chronology', 'record scan and worker instruction digests'))",
     "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = released.version)",
     "    AND EXISTS (SELECT 1 FROM pragma_table_info(released.table_name) WHERE name = released.column_name);"
   ],
@@ -288,11 +290,11 @@
     "ORDER BY position;"
   ],
   [
-    "-- Refuse unknown receipts for either version of the finding-history preview.",
+    "-- Refuse unknown receipts at versions shared by the published previews.",
     "WITH history AS (SELECT json_extract(value, '$.version') AS version,",
     "    json_extract(value, '$.name') AS name FROM json_each(:history))",
-    "SELECT 'error' AS operation, 'Unsupported finding history migration receipt.' AS value",
+    "SELECT 'error' AS operation, 'Unsupported workbench migration receipt.' AS value",
     "FROM schema_migrations AS receipt JOIN history USING (version)",
-    "WHERE receipt.version BETWEEN 63 AND 66 AND receipt.name != history.name LIMIT 1;"
+    "WHERE receipt.version BETWEEN 63 AND 67 AND receipt.name != history.name LIMIT 1;"
   ]
 ]

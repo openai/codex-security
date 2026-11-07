@@ -5,12 +5,25 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { importSource } from "./import-module.ts";
+import { importModule } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 
-const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
-  join(import.meta.dirname, "../src/deep-scan/store.ts"),
-);
+const {
+  WorkbenchDeepScanStore,
+  parseDeepScan,
+  DeepScanWorkerRunner,
+  createDeepScanArtifacts,
+} = await importModule({
+  stdin: {
+    contents: [
+      'export { WorkbenchDeepScanStore, parseDeepScan } from "./store.ts";',
+      'export { DeepScanWorkerRunner } from "./worker-runner.ts";',
+      'export { createDeepScanArtifacts } from "./artifacts.ts";',
+    ].join("\n"),
+    resolveDir: join(import.meta.dirname, "../src/deep-scan"),
+  },
+  loader: { ".md": "text" },
+});
 
 await testBeginProtocolAndParsing();
 await testScopeResponseParsing();
@@ -24,6 +37,7 @@ await testBeginUsesTheWriteQueue();
 await testHeartbeatBypassesBlockedWriteQueue();
 await testOwnershipReadClearsStaleLease();
 await testWorkerResponseParsing();
+await testWorkerInstructionMeasurement();
 await testReplaceableDiscoveryFailureProtocol();
 await testTransientIdempotentPersistenceRetries();
 await testTransientTimeoutAndNestedCauseRetries();
@@ -345,6 +359,221 @@ async function testOwnershipReadClearsStaleLease() {
       (error: unknown) => error === original,
     );
     assert.equal(owned.coordinatorGeneration(scanId), 2);
+  }
+}
+
+async function testWorkerInstructionMeasurement() {
+  const scanId = randomUUID();
+  const id = randomUUID();
+  const instructions = {
+    pluginRoot: "/fixture/plugin",
+    roleDigests: { discovery: "1".repeat(64) },
+  };
+  const digest = "sha256:" + "a".repeat(64);
+  for (const scenario of [
+    "ready",
+    "late",
+    "queued",
+    "retry",
+    "unknown",
+    "observing",
+    "failed",
+    "closed",
+  ]) {
+    const claimGate = Promise.withResolvers<void>();
+    const precedingWrite = Promise.withResolvers<void>();
+    let claimStarted = false;
+    const measurement = Promise.withResolvers<{ instructionDigest: string }>();
+    const signals: AbortSignal[] = [];
+    const received: [string, string | undefined][] = [];
+    const store = new WorkbenchDeepScanStore(
+      async (
+        args: string[],
+        input?: string,
+        options?: { workerInstructionDigest?: string; signal?: AbortSignal },
+      ) => {
+        if (args[0] === "measure-deep-scan-instructions") {
+          assert.deepEqual(JSON.parse(input!), instructions);
+          const signal = options?.signal;
+          assert.ok(signal);
+          signals.push(signal);
+          signal.addEventListener(
+            "abort",
+            () => measurement.reject(signal.reason),
+            { once: true },
+          );
+          if (scenario === "unknown") throw new Error("Unknown command");
+          return measurement.promise;
+        }
+        if (args[0] === "claim-deep-scan-coordinator") {
+          claimStarted = true;
+          await claimGate.promise;
+          if (scenario === "failed") throw new Error("claim failed");
+          return {
+            ...stateResult(scanId, { deepScan: { coordinatorGeneration: 2 } }),
+            coordinatorDisposition:
+              scenario === "observing" ? "observing" : "claimed",
+          };
+        }
+        if (args[0] !== "upsert-deep-scan-worker") {
+          if (scenario === "queued") await precedingWrite.promise;
+          received.push([args[0], options?.workerInstructionDigest]);
+          return stateResult(scanId);
+        }
+        const status = flagValue(args, "--status");
+        received.push([status, options?.workerInstructionDigest]);
+        if (scenario === "retry" && received.length === 1) {
+          measurement.resolve({ instructionDigest: digest });
+          throw Object.assign(new Error("database is locked"), {
+            code: "SQLITE_BUSY",
+          });
+        }
+        const worker = {
+          id: flagValue(args, "--worker-id"),
+          kind: flagValue(args, "--kind"),
+          status,
+          mergeState: "none",
+          promptPath: "/prompt",
+          artifactDir: "/artifacts",
+          attempt: 1,
+        };
+        return stateResult(scanId, { deepScan: { workers: [worker] } });
+      },
+      instructions,
+    );
+    const lease = { scanId, threadId: "fixture" };
+    const claim = store.claimCoordinator(lease);
+    await new Promise(setImmediate);
+    assert.ok(claimStarted);
+    assert.equal(
+      signals.length,
+      1,
+      "the bundle measurement must overlap the pending claim",
+    );
+    if (scenario === "ready")
+      measurement.resolve({ instructionDigest: digest });
+    claimGate.resolve();
+    if (scenario === "failed") {
+      await assert.rejects(claim, /claim failed/);
+      assert.equal(signals[0].aborted, true);
+      continue;
+    }
+    const { acquired, run } = await claim;
+    assert.equal(acquired, scenario !== "observing");
+    if (!acquired) {
+      assert.equal(signals[0].aborted, true);
+      continue;
+    }
+    if (scenario === "closed") {
+      store.stopInstructionMeasurements();
+      assert.equal(signals[0].aborted, true);
+      continue;
+    }
+    if (scenario === "late") {
+      const scanDir = await mkdtemp(
+        join(tmpdir(), "pending-worker-instructions-"),
+      );
+      const abort = new AbortController();
+      try {
+        const runner = new DeepScanWorkerRunner({
+          run: { ...run, scanDir },
+          artifacts: createDeepScanArtifacts(scanDir),
+          store,
+          executor: {
+            run: async () => {
+              assert.deepEqual(received, [
+                ["queued", undefined],
+                ["running", undefined],
+              ]);
+              measurement.resolve({ instructionDigest: digest });
+              await new Promise(setImmediate);
+              abort.abort();
+              return {};
+            },
+          },
+          pluginRoot: instructions.pluginRoot,
+          clock: { now: Date.now, sleep: assert.fail },
+          random: Math.random,
+          log: () => {},
+          retryDelaysMs: [],
+          signal: abort.signal,
+        });
+        assert.equal(
+          (await runner.runDiscoveryWorker(randomUUID(), "first-worker"))
+            .status,
+          "canceled",
+        );
+        assert.deepEqual(received.at(-1), ["canceled", undefined]);
+      } finally {
+        await rm(scanDir, { recursive: true, force: true });
+      }
+    }
+
+    const worker = {
+      id,
+      scanId,
+      status: "running",
+      promptPath: "/prompt",
+      artifactDir: "/artifacts",
+      attempt: 1,
+    };
+    received.length = 0;
+    if (scenario === "queued") {
+      const progress = store.updateProgress({ scanId, phase: "discovery" });
+      const start = store.updateWorker({ ...worker, kind: "discovery" });
+      measurement.resolve({ instructionDigest: digest });
+      await new Promise(setImmediate);
+      precedingWrite.resolve();
+      await Promise.all([progress, start]);
+      assert.deepEqual(received.at(-1), ["running", digest]);
+      continue;
+    }
+    await store.updateWorker({ ...worker, kind: "discovery" });
+    if (scenario === "retry") {
+      assert.deepEqual(received, [
+        ["running", undefined],
+        ["running", undefined],
+      ]);
+      continue;
+    }
+    assert.equal((await store.claimCoordinator(lease)).acquired, true);
+    assert.equal(
+      signals.length,
+      1,
+      "a repeated claim must retain the owned measurement",
+    );
+    for (const kind of ["dedup", "setup"])
+      await store.updateWorker({ ...worker, kind, id: randomUUID() });
+    await store.updateWorker({
+      ...worker,
+      kind: "discovery",
+      status: "failed",
+    });
+    await store.recordIteration({
+      scanId,
+      id: randomUUID(),
+      workerIds: [id],
+      resultPath: "/result",
+      noNewStreak: 1,
+      consecutiveErrors: 0,
+    });
+    await store.finish({
+      scanId,
+      reason: "capped",
+      manifestPath: "/manifest",
+      omittedWorkerIds: [],
+    });
+    await store.fail(scanId, "fixture");
+    const known = scenario === "unknown" ? undefined : digest;
+    assert.deepEqual(received, [
+      ["running", known],
+      ["running", known],
+      ["running", undefined],
+      ["failed", undefined],
+      ["record-deep-scan-iteration", undefined],
+      ["finish-deep-scan", undefined],
+      ["fail-deep-scan", undefined],
+    ]);
   }
 }
 

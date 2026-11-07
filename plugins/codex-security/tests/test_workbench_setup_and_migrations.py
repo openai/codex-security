@@ -111,6 +111,7 @@ EXPECTED_MIGRATIONS = [
     (64, "preserve finding decision append chronology"),
     (65, "bind new finding decisions to admitted scans"),
     (66, "record first scan result admission order"),
+    (67, "record scan and worker instruction digests"),
 ]
 
 
@@ -904,6 +905,43 @@ def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) 
         assert connection.execute(
             "SELECT details_json != '{}' FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
         ).fetchone() == (1,)
+
+
+@pytest.mark.parametrize("preview", [59, 61, 63, 64])
+def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
+    workbench_api,
+    preview: int,
+) -> None:
+    digest_migration = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 67)
+    connection, migrate = create_historical_database(preview, ((preview, *digest_migration[1:]),))
+    digest = "sha256:" + "a" * 64
+    try:
+        if preview == 61:
+            connection.execute("ALTER TABLE scans ADD COLUMN launch_surface TEXT")
+        insert_legacy_scan(connection, "timestamp", instruction_digest=digest)
+        migrate(connection)
+        migrate(connection)
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            )
+        ] == EXPECTED_MIGRATIONS
+        assert connection.execute("SELECT instruction_digest FROM scans").fetchone()[0] == digest
+    finally:
+        connection.close()
+
+
+def test_instruction_digest_migration_rolls_back_on_unknown_receipt(workbench_api) -> None:
+    digest = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 67)
+    connection, migrate = create_historical_database(64, ((64, *digest[1:]),))
+    with closing(connection):
+        rename_migration(connection, 63, "unrecognized preview")
+        with pytest.raises(SystemExit, match="Unsupported workbench migration receipt"):
+            migrate(connection)
+        assert migration_name_row(connection, 63)["name"] == "unrecognized preview"
+        assert migration_name_row(connection, 64)["name"] == digest[1]
+        assert migration_name_row(connection, 67) is None
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -2811,7 +2849,7 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
 @pytest.mark.parametrize(
     ("installed_version", "migration_count"),
     [(version, count) for version in [42, 43, 48, 50, 53, 54, 61, 63] for count in (1, 2)]
-    + [(54, 3), (61, 3), (63, 3)],
+    + [(54, 3), (61, 3), (63, 3), (64, 3)],
 )
 def test_decision_history_upgrade_preserves_published_sequences(
     installed_version: int, migration_count: int

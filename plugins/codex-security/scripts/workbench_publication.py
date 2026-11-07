@@ -325,7 +325,7 @@ def export_findings(
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
     manifest_path = scan_dir / db.ARTIFACTS["manifest"]
-    db.verify_manifest_binding(scan, db.read_json_object(manifest_path))
+    db.verify_manifest_binding(scan, db.read_json_object(manifest_path), connection)
     if getattr(args, "validate_only", False):
         # SDK/CLI exports use their requested destination without modifying saved artifacts.
         return {"scan": {"scanId": scan["id"], "scanDir": str(scan_dir)}}
@@ -345,10 +345,10 @@ def export_findings(
         manifest, findings_document, _ = finalize_scan(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
+            verify_manifest=lambda manifest: db.verify_manifest_binding(scan, manifest, connection),
         )
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
-    db.verify_manifest_binding(scan, manifest)
     manifest_digest = db.published_manifest_digest(scan_dir, manifest)
     db.pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
     if args.format == "json":

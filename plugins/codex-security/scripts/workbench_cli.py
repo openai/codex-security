@@ -133,6 +133,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     begin_deep_scan.add_argument("--join-only", action="store_true")
     begin_deep_scan.add_argument("--workflow-version", default="deep-security-scan/v1")
 
+    add_command("measure-deep-scan-instructions")
     add_command("get-deep-scan", "--scan-id", "--thread-id")
 
     add_command("acknowledge-deep-scan-result", "--scan-id")
