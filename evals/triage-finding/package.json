@@ -34,8 +34,7 @@
     "eval:sca:smoke": "node --experimental-strip-types sca/scripts/run-promptfoo.js eval -c ./sca/promptfooconfig.yaml -o ./artifacts/sca-smoke.json --no-cache --no-share --filter-range 0:3"
   },
   "dependencies": {
-    "@openai/codex-sdk": "0.166.0",
-    "@opencode-ai/sdk": "1.19.5",
+    "@openai/codex-sdk": "0.167.0",
     "promptfoo": "0.124.1"
   },
   "devDependencies": {

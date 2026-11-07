@@ -1,3 +1,5 @@
+"""Check how finding previews fit a size budget while retaining report text and diagnostics."""
+
 from __future__ import annotations
 
 import json

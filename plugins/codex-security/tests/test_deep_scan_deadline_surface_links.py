@@ -1,3 +1,5 @@
+"""Track source-to-surface links through deadline recovery, reused IDs, and repeated crashes."""
+
 from __future__ import annotations
 
 import json

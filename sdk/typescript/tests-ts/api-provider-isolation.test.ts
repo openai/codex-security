@@ -1,7 +1,14 @@
 import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import type { JsonObject } from "../src/config.js";
+import {
+  OPENROUTER_CODEX_PROVIDER,
+  resolveCodexProfile,
+  type JsonObject,
+} from "../src/config.js";
+import { main } from "../src/cli.js";
+import { dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -27,6 +34,9 @@ const { workerRuntimeSettings } = (await import(workerExecutorUrl)) as {
   }>;
 };
 
+const nativeTestTimeoutMs = Number(
+  process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? 30_000,
+);
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
@@ -50,7 +60,14 @@ async function nativeRequest(
   const lines = createInterface({ input: child.stdout });
   let stderr = "";
   child.stderr.on("data", (chunk) => (stderr += chunk));
-  const timer = setTimeout(() => child.kill(), 15_000);
+  // Keep the child deadline inside the CI runner's per-test budget.
+  const probeTimeoutMs = nativeTestTimeoutMs / 2;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    // A descendant may retain stdout, so EOF cannot be the signal to stop reading.
+    lines.close();
+  }, probeTimeoutMs);
   const send = (message: unknown) =>
     child.stdin.write(JSON.stringify(message) + "\n");
   try {
@@ -71,13 +88,23 @@ async function nativeRequest(
       }
       if (response.id === 2) return response.result;
     }
-    throw new Error(`Native ${method} probe did not finish: ${stderr}`);
+    const reason = timedOut
+      ? `timed out after ${probeTimeoutMs}ms`
+      : "closed before replying";
+    throw new Error(`Native ${method} probe ${reason}: ${stderr}`);
   } finally {
     clearTimeout(timer);
     lines.close();
+    // Bun on Windows can keep these pipes open after the app-server process exits.
+    child.stdout.destroy();
+    child.stderr.destroy();
     child.kill();
     await closed;
   }
+}
+
+async function readProviderProfile(home: string, name: string) {
+  return parseToml(await readFile(join(home, `${name}.config.toml`), "utf8"));
 }
 
 async function effectiveProvider(
@@ -87,11 +114,9 @@ async function effectiveProvider(
   nativeProfile?: string,
 ) {
   if (nativeProfile !== undefined) {
-    const config = parseToml(
-      await readFile(
-        join(environment["CODEX_HOME"]!, `${nativeProfile}.config.toml`),
-        "utf8",
-      ),
+    const config = await readProviderProfile(
+      environment["CODEX_HOME"]!,
+      nativeProfile,
     );
     const result = await nativeRequest(environment, cwd, [], "thread/start", {
       cwd,
@@ -716,7 +741,7 @@ test.each(["openrouter", "fireworks"] as const)(
     );
     expect(selected).toMatchObject({ env_key: "SYNTHETIC_CUSTOM_API_KEY" });
   },
-  30_000,
+  nativeTestTimeoutMs,
 );
 
 for (const mode of ["standard", "deep"] as const) {
@@ -1110,51 +1135,85 @@ test("standard scans do not require Deep Scan plugin capabilities", async () => 
   }
 });
 
-test.each(["root", "profile"])(
-  "current Deep workers inherit the %s endpoint",
-  async (selection) => {
+test.each([
+  ["root", "openai"],
+  ["profile", "openai"],
+  ["root", "openrouter"],
+  ["profile", "openrouter"],
+] as const)(
+  "Deep workers, rerun and resume inherit the %s %s endpoint",
+  async (selection, provider) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
     await mkdir(repository);
     await mkdir(scan, { mode: 0o700 });
     const endpoint = "https://endpoint.example.test/v1";
+    const routing: JsonObject =
+      provider === "openai"
+        ? {
+            openai_base_url: endpoint,
+            chatgpt_base_url: "https://account.example.test",
+          }
+        : {
+            model_provider: provider,
+            model_providers: {
+              [provider]: {
+                ...OPENROUTER_CODEX_PROVIDER,
+                base_url: endpoint,
+                query_params: { version: "preview" },
+              },
+            },
+          };
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-openai-key",
+      OPENROUTER_API_KEY: "synthetic-openrouter-key",
+    };
+    let recipe: JsonObject;
     const client = new TestClient(
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides:
           selection === "root"
-            ? { openai_base_url: endpoint }
+            ? routing
             : {
+                openai_base_url: "https://unused.example.test/v1",
                 profile: "selected",
-                profiles: {
-                  selected: {
-                    model_provider: "openai",
-                    openai_base_url: endpoint,
-                  },
-                },
+                profiles: { selected: routing },
               },
       },
       {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-openai-key",
+        environment,
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "register-cli-scan")
+            recipe = JSON.parse(input!).recipe;
+          return mockWorkbench(args, input);
         },
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
         createCodex: (options) =>
           codexFactory(async function runStreamed() {
-            expect(options.config?.["openai_base_url"]).toBe(endpoint);
             const worker = parseToml(
               await readFile(
                 options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
                 "utf8",
               ),
             );
-            expect(
-              (worker["worker_runtime"] as JsonObject)["openai_base_url"],
-            ).toBe(endpoint);
+            const runtime = worker["worker_runtime"] as JsonObject;
+            const profile = runtime["native_profile"];
+            const providerConfig =
+              typeof profile === "string"
+                ? await readProviderProfile(
+                    options.env!["CODEX_HOME"]!,
+                    profile,
+                  )
+                : {};
+            expect({ ...options.config, ...providerConfig }).toMatchObject(
+              routing,
+            );
+            expect({ ...runtime, ...providerConfig }).toMatchObject(routing);
             throw new Error("synthetic endpoint inherited");
           })(),
       },
@@ -1163,6 +1222,24 @@ test.each(["root", "profile"])(
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "synthetic endpoint inherited",
       );
+      expect(JSON.stringify(recipe!)).not.toContain(endpoint);
+      for (const command of ["rerun", "resume"]) {
+        const { runCli, stderr } = createCliTest(main);
+        const status = await runCli(
+          ["scans", command, "saved", "--json"],
+          dependencies({
+            currentDirectory: repository,
+            environment,
+            onWorkbench: () => ({ scanId: "saved", scanDir: scan, recipe }),
+            onConfig: ({ codexOverrides }) => {
+              expect(resolveCodexProfile(codexOverrides!)).toMatchObject(
+                routing,
+              );
+            },
+          }),
+        );
+        expect(status, stderr.text()).toBe(0);
+      }
     } finally {
       await client.close();
     }

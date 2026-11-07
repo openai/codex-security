@@ -12,7 +12,7 @@ import {
 import { rejecting, throwing } from "./support/errors.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
 
-function importDependencies() {
+function importDependencies(result = fakeResult(["high", "high"])) {
   const deps = dependencies({
     currentDirectory: resolve("workspace"),
     onConfig: throwing("Import must not create a model client"),
@@ -26,11 +26,11 @@ function importDependencies() {
           dryRun: true,
           inputPath: options.sourcePath,
           format: options.format,
-          findingCount: 2,
+          findingCount: result.findings.findings.length,
         }
-      : fakeResult(["high", "high"]);
+      : result;
   };
-  return { deps, calls };
+  return { deps, calls, result };
 }
 
 describe("scan import", () => {
@@ -150,7 +150,7 @@ describe("scan import", () => {
   test.each(["csv", "json"] as const)(
     "imports --%s while --format json controls output",
     async (format) => {
-      const { deps, calls } = importDependencies();
+      const { deps, calls, result } = importDependencies();
       const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(
@@ -179,13 +179,8 @@ describe("scan import", () => {
         signal: expect.any(AbortSignal),
       });
       expect(JSON.parse(stdout.text())).toMatchObject({
-        manifest: { scan: { id: "scan" } },
-        findings: {
-          findings: [
-            { severity: { level: "high" } },
-            { severity: { level: "high" } },
-          ],
-        },
+        manifest: result.manifest,
+        findings: result.findings,
       });
       expect(stderr.text()).toContain("Imported 2 findings as scan scan.");
     },
@@ -217,15 +212,15 @@ describe("scan import", () => {
     expect(stderr.text()).toBe("");
   });
 
-  test("uses a concise summary for default output", async () => {
-    const { deps } = importDependencies();
+  test("uses a concise singular summary for one imported finding", async () => {
+    const { deps } = importDependencies(fakeResult(["high"]));
     const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
       await runCli(["scan", "import", "--json", "findings.json"], deps),
     ).toBe(0);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Imported 2 findings as scan scan.");
+    expect(stderr.text()).toContain("Imported 1 finding as scan scan.");
   });
 
   test.each([

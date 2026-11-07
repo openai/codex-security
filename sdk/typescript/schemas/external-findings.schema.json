@@ -389,7 +389,8 @@
             "veracode",
             "sonar",
             "continuum",
-            "checkmarx"
+            "checkmarx",
+            "trivy"
           ],
           "title": "Provider",
           "type": "string"

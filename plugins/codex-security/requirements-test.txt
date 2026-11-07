@@ -1,4 +1,5 @@
 # Development test and lint dependencies; install from the repository root.
+backports.zstd==1.8.0; python_version < "3.14"
 jsonschema==4.26.0
 packaging==26.3
 pytest==9.2.0

@@ -4,7 +4,6 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import type { JsonObject } from "./config.js";
 import {
   CodexSecurityError,
@@ -40,14 +39,12 @@ export function environmentEntry(
 export function withoutOpenAiApiKeys<Value>(
   environment: Record<string, Value>,
 ): Record<string, Value> {
-  const child = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(environment).filter(
       ([name]) =>
         !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
     ),
   );
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
 
 /** @internal */
@@ -105,9 +102,10 @@ export async function readCodexHomeConfig(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<JsonObject> {
+  const path = join(configuredCodexHome(environment), "config.toml");
   try {
     return parse(
-      await readFile(join(configuredCodexHome(environment), "config.toml"), {
+      await readFile(path, {
         encoding: "utf8",
         signal,
       }),
@@ -116,7 +114,7 @@ export async function readCodexHomeConfig(
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw new CodexSecurityError(
-      `Could not read the configured Codex provider: ${errorMessage(error)}`,
+      `Could not read the configured Codex provider from ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }

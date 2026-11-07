@@ -1,3 +1,5 @@
+"""Check that embedding cache migrations preserve vectors and distinguish local and service records."""
+
 from __future__ import annotations
 
 import sqlite3
