@@ -10892,6 +10892,13 @@ async function checkDeinitializedPatchSubmodules(
   }
 }
 
+function gitPublicationPathMetadata(path: Buffer) {
+  return lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return undefined;
+  });
+}
+
 async function checkPatchReflogs(
   repository: string,
   dependencies: CliDependencies,
@@ -10912,10 +10919,7 @@ async function checkPatchReflogs(
   );
   while (pending.length) {
     const path = pending.pop()!;
-    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-      return undefined;
-    });
+    const metadata = await gitPublicationPathMetadata(path);
     if (metadata === undefined) continue;
     if (metadata.isDirectory()) {
       for (const name of await readdir(path, { encoding: "buffer" }))
@@ -11660,6 +11664,28 @@ async function createPatchPullRequest(
           ...pathspec,
         ]);
         await removeSources(stage);
+        // --git-path with absolute output follows the leaf symlink. Resolve
+        // only the worktree's Git directory before inspecting the literal leaf.
+        const directoryOutput = await stage(
+          ["rev-parse", "--absolute-git-dir"],
+          {
+            encoding: "base64",
+          },
+        );
+        const directoryKey = Buffer.from(directoryOutput, "base64")
+          .toString("latin1")
+          .replace(/\n$/u, "");
+        if (!isAbsolute(directoryKey))
+          throw new CodexSecurityError(
+            "Cannot resolve Git's COMMIT_EDITMSG path.",
+          );
+        const message = await gitPublicationPathMetadata(
+          Buffer.from(join(directoryKey, "COMMIT_EDITMSG"), "latin1"),
+        );
+        if (message && (!message.isFile() || message.nlink !== 1))
+          throw new CodexSecurityError(
+            "Patch publication requires a regular, unlinked Git COMMIT_EDITMSG file.",
+          );
         await stage(["commit", "--no-gpg-sign", "-m", PATCH_PR_TITLE]);
         committed = true;
         if (!(await matchesCapturedTree()))
