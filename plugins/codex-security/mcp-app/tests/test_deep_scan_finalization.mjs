@@ -240,6 +240,9 @@ test("retains unresolved coverage for a persisted zero-success deadline selectio
   assert.deepEqual(result.findings, []);
   assert.equal(result.reviewState.completeness, undefined);
   assert.equal(result.reviewState.deferred.length, 1);
+  assert.deepEqual(result.scope?.limitations, [
+    result.reviewState.deferred[0].reason,
+  ]);
   await assert.rejects(
     readSelectedDeepScanDraft(createDeepScanArtifacts("unused"), scanId, {
       ...selection,

@@ -1,5 +1,5 @@
 /// <reference lib="es2023.array" />
-import { publishSelectedDeepScan } from "./finalization.js";
+import { emptyDeadlineDraft, publishSelectedDeepScan } from "./finalization.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
@@ -26,7 +26,6 @@ import {
   type ScanUnion,
 } from "./artifact-validation.js";
 import {
-  scanDraftInputSchema,
   type DeepScanPublication,
   findingsWithinScope,
   type ScanDraftInput,
@@ -57,8 +56,6 @@ import type {
 const RETRY_DELAYS_MS = [60_000, 180_000, 540_000] as const;
 const COORDINATOR_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_HOURS = 96;
-const NO_REVIEW_BEFORE_DEADLINE =
-  "The configured discovery time limit elapsed before any source review completed.";
 
 function acceptedResult(path?: string, sha256?: string) {
   return path && sha256 ? { path, sha256 } : undefined;
@@ -408,16 +405,7 @@ export class DeepScanCoordinator {
       }
       const draft = loopResult.result
         ? scanUnionToDraft(loopResult.result)
-        : scanDraftInputSchema.parse({
-            scanId: this.state.scanId,
-            findings: [],
-            scope: { limitations: [NO_REVIEW_BEFORE_DEADLINE] },
-            reviewState: {
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: [{ reason: NO_REVIEW_BEFORE_DEADLINE }],
-            },
-          });
+        : emptyDeadlineDraft(this.state.scanId);
       if (draft.scanId !== this.state.scanId) {
         throw new Error(
           "Deep Scan aggregate does not match its authoritative scan identity.",

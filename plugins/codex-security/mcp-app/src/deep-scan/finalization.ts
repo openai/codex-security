@@ -5,6 +5,8 @@ import {
 } from "../artifact-context.js";
 import {
   recordCodexSecurityScanDraftViaWorkbench,
+  scanDraftInputSchema,
+  type ScanDraftInput,
   type DeepScanPublication,
 } from "../artifact-scan-draft.js";
 import { WorkbenchDeepScanStore } from "./store.js";
@@ -14,7 +16,6 @@ import {
 } from "./artifacts.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { type ScanDraftInput } from "../artifact-scan-draft.js";
 import { readSealedScanFile as readScanFile } from "../sealed-contract.js";
 import type {
   DeepScanFinalizationInput,
@@ -65,6 +66,21 @@ export async function publishSelectedDeepScan(input: {
   });
 }
 
+export function emptyDeadlineDraft(scanId: string): ScanDraftInput {
+  const limitation =
+    "The configured discovery time limit elapsed before any source review completed.";
+  return scanDraftInputSchema.parse({
+    scanId,
+    findings: [],
+    scope: { limitations: [limitation] },
+    reviewState: {
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [{ reason: limitation }],
+    },
+  });
+}
+
 /** Recreate the chosen draft without scheduling discovery or reducer work. */
 export async function readSelectedDeepScanDraft(
   artifacts: DeepScanArtifacts,
@@ -83,20 +99,7 @@ export async function readSelectedDeepScanDraft(
         "An empty Deep Scan finalization requires the recorded discovery deadline.",
       );
     }
-    return {
-      scanId,
-      findings: [],
-      reviewState: {
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [
-          {
-            reason:
-              "The configured discovery time limit elapsed before any source review completed.",
-          },
-        ],
-      },
-    };
+    return emptyDeadlineDraft(scanId);
   }
   const contents = await readScanFile(
     artifacts.scanDir,
