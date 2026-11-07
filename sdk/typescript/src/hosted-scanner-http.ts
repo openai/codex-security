@@ -2,7 +2,6 @@ import { waitForRetry } from "./deduplication/retry.js";
 import { canonicalNumber } from "./external-import-contract.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { normalizeHostedGitRepositoryUrl } from "./hosted-git-repository.js";
-import { importEnvironmentSetting } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
@@ -69,6 +68,34 @@ export function hostedNativeRepositoryUrl(
   return hostedRepositoryUrl(normalized, label);
 }
 
+export function scannerEnvironmentValue(
+  environment: NodeJS.ProcessEnv,
+  requested: string,
+) {
+  const exact = environment[requested];
+  if (process.platform !== "win32") return exact;
+  // A scan can override a case-insensitive process.env with its own spelling.
+  function callerDeclares(key: string): boolean {
+    for (
+      let owner: object | null = environment;
+      owner && owner !== process.env;
+      owner = Object.getPrototypeOf(owner)
+    ) {
+      if (Object.hasOwn(owner, key)) return true;
+    }
+    return false;
+  }
+  if (exact !== undefined && callerDeclares(requested)) return exact;
+  // Node includes enumerable prototype keys and sorts competing spellings.
+  const keys: string[] = [];
+  for (const name in environment) {
+    if (name.toUpperCase() === requested) keys.push(name);
+  }
+  keys.sort();
+  const key = keys.find(callerDeclares) ?? keys[0];
+  if (key !== undefined) return key === requested ? exact : environment[key];
+}
+
 /** Use the selected vendor credential only with its configured service origin. */
 export function hostedScannerToken(
   environment: NodeJS.ProcessEnv,
@@ -78,10 +105,10 @@ export function hostedScannerToken(
   ...originNames: string[]
 ): string | undefined {
   const token =
-    explicitToken ?? importEnvironmentSetting(environment, tokenName)?.value;
+    explicitToken ?? scannerEnvironmentValue(environment, tokenName);
   if (token) {
     for (const name of originNames) {
-      const configured = importEnvironmentSetting(environment, name)?.value;
+      const configured = scannerEnvironmentValue(environment, name);
       if (!configured) continue;
       if (URL.parse(configured)?.origin !== origin)
         throw new Error(

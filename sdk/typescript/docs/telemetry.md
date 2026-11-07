@@ -85,12 +85,20 @@ Resuming a saved scan keeps its operation ID but creates a new attempt ID.
 resumed cumulative receipts. The supplied summary takes the maximum observed cost
 per usage scope; separate retry scans have separate scopes.
 
+Pass the Codex Security state directory as the first argument to this script.
+Use `CODEX_SECURITY_STATE_DIR` if you set it, or the default
+`$CODEX_HOME/state/plugins/codex-security`. The reader looks for `telemetry/`
+inside that directory.
+
 ```ts
 import {
   readOperationTelemetry,
   summarizeOperationTelemetry,
 } from "@openai/codex-security";
 
+const stateDirectory = process.argv[2];
+if (!stateDirectory)
+  throw new Error("Pass the Codex Security state directory.");
 const { events, parseFailures } = await readOperationTelemetry(stateDirectory);
 const summary = summarizeOperationTelemetry(events);
 console.log({ ...summary, parseFailures });
@@ -118,13 +126,13 @@ production collector's loss rate.
 
 ## Usage and completeness
 
-Prefer `onMeasurement` when displaying or collecting live usage:
+Use `onMeasurement` on your SDK client to see usage during a scan of your checkout:
 
 ```ts
 await security.run(repository, {
   onMeasurement(measurement) {
     // usage and cost may be null; partial values are observed subtotals.
-    display(measurement.usage, measurement.cost, measurement.coverage);
+    console.log(measurement.usage, measurement.cost, measurement.coverage);
   },
 });
 ```

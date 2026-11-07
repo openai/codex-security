@@ -51,6 +51,28 @@ export function inspectorPackageFinding() {
   };
 }
 
+export function inspectorCodeFinding(
+  filePath = "src/example.ts",
+  fileName = "example.ts",
+  startLine = 8,
+) {
+  const { packageVulnerabilityDetails: _packages, ...common } =
+    inspectorPackageFinding();
+  return {
+    ...common,
+    type: "CODE_VULNERABILITY",
+    findingArn: common.findingArn.replace(/a{32}$/u, "b".repeat(32)),
+    title: "Synthetic code finding",
+    codeVulnerabilityDetails: {
+      detectorId: "synthetic-detector",
+      detectorName: "Synthetic detector",
+      cwes: ["CWE-79"],
+      detectorTags: ["example-tag"],
+      filePath: { fileName, filePath, startLine, endLine: 12 },
+    },
+  };
+}
+
 export function inspectorReport() {
   return { findings: [inspectorPackageFinding()] };
 }

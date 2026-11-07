@@ -1,11 +1,9 @@
 ---
 name: publish-findings
-description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import scanner findings, including issues selected in the SonarQube plugin, into the local workbench or Codex Security Cloud.
+description: Preview and import scanner findings, including issues selected in the SonarQube plugin, into the local workbench or Codex Security Cloud.
 ---
 
 # Publish external findings
-
-Before acquiring or importing findings, check for `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` in the command environment. If it is unset or has another value, stop and ask the user to enable imports.
 
 Use `codex-security import sonar` for [live SonarQube Cloud issues](#sonarqube-cloud-issues) or a capture saved by that command. Use `codex-security publish findings` for native scanner exports, including Sonar `/api/issues/search` pages with `--provider sonar`. Select the requested destination. The CLI owns source mapping, persistence, and Cloud authentication and retries. Do not implement another store or uploader or put credentials in command arguments.
 
@@ -17,7 +15,7 @@ Use the same acquisition format for repeated imports. Check the provider's ident
 
 ## Import locally
 
-Use a local repository path with `--repository`. No Cloud login is required.
+Use the checkout path with `--repository`. A saved report can be imported locally offline. Use this destination for Tenable One Code Repository captures and selected Semgrep Guardian findings. [Supported inputs by provider](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#choose-your-scanner)
 
 ```sh
 codex-security publish findings /path/to/selected-wiz-findings.json \
@@ -94,7 +92,7 @@ For CLI automation, prefer `snyk test --file=package.json --json-file-output=sny
 
 Use one format consistently per repository, branch and scan target, with a stable source key such as `github.com/example/project/main/root/native-sca`. Plugin, native JSON and SARIF have distinct identities; use separate keys when switching, without claiming cross-format deduplication or removal of older records. Existing `snyk test --sarif-file-output=snyk-open-source.sarif` reports remain a compatibility path. SARIF groups advisory occurrences and exposes one package coordinate, so prefer JSON for acquisition. Its target-relative manifest paths lack a Git-root offset and stay in original evidence with synthetic line numbers, without being projected as repository locations or package manifest paths.
 
-Retain package versions, reported fixed versions, provenance and original evidence without claiming a fix was applied. Known repository claims must match the selected Cloud repository or, when available, a configured local Git remote. Resolve an unknown repository with the user; never infer that an export belongs to the current checkout. Follow [local imports](#import-locally) for preview, confirmation and readback or [Cloud publication](#publish-to-cloud) for upload authorization. All three Snyk formats support either destination.
+Retain package versions, reported fixed versions, provenance and original evidence without claiming a fix was applied. Known repository claims must match the selected Cloud repository or, when available, a configured local Git remote. Resolve an unknown repository with the user; never infer that an export belongs to the current checkout. Follow [local imports](#import-locally) for preview, confirmation and readback or [Cloud publication](#publish-to-cloud) for upload authorization. Snyk workspace reports and monitored-project exports support local and Cloud import.
 
 ## Semgrep Code
 
@@ -149,7 +147,7 @@ Code-scanning identities include the ref; repository alerts and advisories must 
 
 Resolve the user's destination to a connected GitHub or GitHub Enterprise repository URL or Cloud repository ID, including custom Enterprise hosts. Confirm the intended Cloud account and authorized repository environment before running a preview that can contact Cloud. Use the existing file-backed ChatGPT login; explain a missing or incompatible login rather than changing credential storage automatically.
 
-For staging or another Cloud deployment, configure the [deployment settings](#deployment-settings) before previewing. Keep the selected deployment and login throughout the upload.
+For an alternate Cloud deployment, configure the [deployment settings](#deployment-settings) before previewing. Keep the selected deployment and login throughout the upload.
 
 ### Preview and approve
 
@@ -159,31 +157,22 @@ codex-security publish findings /path/to/selected-wiz-findings.json \
   --source-key TENANT_ID/vulnerability-finding --dry-run --format json
 ```
 
-When the preview returns `status: "empty"`, report that there is nothing to upload, then stop. For a nonempty preview, show the Cloud API endpoint, account, repository, environments, source namespace, severity counts, and exclusions. Identify the evidence file and make the complete JSON preview available for inspection without pasting a large report into the conversation. Explain that vendor evidence is not a Codex assessment.
+When the preview returns `status: "empty"`, report that there is nothing to upload. For a nonempty preview, show the endpoint, account, repository, source key, severity counts and exclusions. The `privateImport` entry describes the report for the user’s private inbox. For the repository publisher, `requests` identifies the environments that will receive the records. Identify the evidence file and make the complete JSON preview available for inspection without pasting a large report into the conversation. Explain that vendor evidence is not a Codex assessment.
 
 Obtain explicit confirmation for this concrete upload, including skipped records. Then run the same command without `--dry-run`, adding `--yes`. Authorization to inspect or assess findings alone does not authorize sending them to Cloud. Keep approval when the user already approved this preview and the input and destination are unchanged.
 
 ### Upload and report
 
-Read the structured result even when the process exits nonzero. Progress appears on stderr.
+Read the structured result even when the process exits nonzero. Progress appears on stderr. For a private inbox import, check `privateJob.status`, the job counts, errors and unprocessed records. A completed job can have `verified: 0`. For the repository publisher, report verified and unacknowledged records from the item receipts. For either destination, include exclusions, failures and any `savedSubmission` checkpoint. [Result fields and exit codes](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#results-and-exit-codes)
 
-| Status        | Exit code | Meaning                                                 |
-| ------------- | --------- | ------------------------------------------------------- |
-| `complete`    | 0         | All selected records were acknowledged and read back.   |
-| `partial`     | 1         | Some records were excluded or have final item failures. |
-| `interrupted` | 2         | Upload, verification, or receipt persistence stopped.   |
-| `failed`      | 2         | Preparation failed before upload.                       |
-
-Cancellation uses the normal signal exit code. Report verified, unacknowledged, excluded, and failed records separately. Include source IDs from `failures`, any `savedSubmission` path, and recovery errors. Receipts and readback confirm stored vendor evidence. Assessment and visibility in the shared Cloud Findings view require separate verification. Link to the returned `cloudUrl` when available.
+A receipt confirms ingestion of scanner evidence. A private finding can then be assessed against the repository and published to shared Findings. Link to the returned `cloudUrl` when available.
 
 ### Resume an interrupted upload
 
-After a lost response or retryable failure, repeat the command with the same input and destination. Cloud may already have accepted some records. The publisher reuses saved request IDs and bodies, resends only requests without a saved receipt, and verifies the acknowledged records. Existing findings keep their original Cloud environment when the repository default changes.
-
-If the repository was reset, stop and report the error. Rediscover the repository and get fresh confirmation before starting a new publication.
+Preview the original file again with the same source key, repository, account, endpoint and state directory. If `resumed` is true, the CLI reuses the saved submission. If a reset or changed destination requires a new submission, review the new preview before confirming. [Retry a Cloud submission](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md#retry-a-cloud-submission)
 
 ### Deployment settings
 
 Set `CODEX_SECURITY_CLOUD_BASE_URL` to the deployment's API root for preview and upload. Use its login and an isolated state directory for tests. If the user or Cloud page supplies an app URL, set `CODEX_SECURITY_CLOUD_WEB_URL` to that full URL. This setting controls the returned UI link. The API root and login still determine routing and authentication.
 
-Check the preview's `cloudApiUrl` and any `cloudUrl` against the intended API endpoint and app. Saved retries are scoped to the deployment. `CODEX_SECURITY_CLOUD_PUBLISH_URL` applies only to native scan publication. If staging is unavailable, stop before uploading.
+Check the preview's `cloudApiUrl` and any `cloudUrl` against the intended API endpoint and app. Saved retries are scoped to the deployment. `CODEX_SECURITY_CLOUD_PUBLISH_URL` applies only to native scan publication.

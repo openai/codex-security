@@ -56,6 +56,8 @@ import {
 } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
+  canonicalConfigPath,
+  createWindowsOutputDirectory,
   requireSecureOutputAncestry,
   validateOutputDir,
   resolvePluginPath,
@@ -940,29 +942,28 @@ async function removeCheckout(path: string): Promise<string | undefined> {
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {
-  const metadata = await lstat(path, { bigint: true }).catch(
+  let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
-  if (metadata?.isSymbolicLink()) {
+  if (metadata === undefined) {
+    if (process.platform === "win32") {
+      // Resolve parent aliases while leaving the leaf for lstat to verify.
+      path = join(await canonicalConfigPath(dirname(path)), basename(path));
+      await createWindowsOutputDirectory(path, true);
+    } else {
+      await mkdir(path, { recursive: true, mode: 0o700 });
+    }
+    metadata = await lstat(path, { bigint: true });
+  }
+  if (metadata.isSymbolicLink()) {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
-  if (metadata !== undefined && !metadata.isDirectory()) {
+  if (!metadata.isDirectory()) {
     throw new Error("Multiscan output paths must be directories.");
   }
-  let prepared = path;
-  if (metadata === undefined) {
-    prepared =
-      process.platform === "win32"
-        ? await canonicalWindowsCreationPath(path)
-        : path;
-    await mkdir(prepared, { recursive: true, mode: 0o700 });
-  }
-  const canonical = await realpath(prepared);
+  const canonical = await realpath(path);
   const directory = await lstat(canonical, { bigint: true });
-  if (
-    metadata !== undefined &&
-    (directory.dev !== metadata.dev || directory.ino !== metadata.ino)
-  ) {
+  if (directory.dev !== metadata.dev || directory.ino !== metadata.ino) {
     throw new Error("Multiscan output directories changed during preparation.");
   }
   if (process.platform === "win32") return canonical;
@@ -978,20 +979,6 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     );
   }
   return canonical;
-}
-
-async function canonicalWindowsCreationPath(path: string): Promise<string> {
-  let ancestor = dirname(path);
-  for (;;) {
-    try {
-      return resolve(await realpath(ancestor), relative(ancestor, path));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      const parent = dirname(ancestor);
-      if (parent === ancestor) throw error;
-      ancestor = parent;
-    }
-  }
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
