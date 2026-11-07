@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { readJson } from "./support/json.ts";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.ts";
 import {
   coordinatorFixture,
+  createCoordinator,
+  FakeExecutor,
   immediateClock,
   readModelFileInputs,
   runCoordinator,
@@ -72,3 +75,71 @@ test("a changed model file stops discovery retries and preserves interrupted sib
     ),
   );
 });
+
+for (const stage of ["batch", "retry"] as const) {
+  test(`a discovery deadline during ${stage} model-file validation retains accepted evidence`, async (t) => {
+    const { fixture, store } = await coordinatorFixture({
+      stopAfterNoNew: 99,
+      maxDiscoveryRuns: 8,
+    });
+    const first = new FakeExecutor({ discoveryCandidateId: "accepted" });
+    let turns = 0;
+    let discoverySignal: AbortSignal | undefined;
+    let entered!: () => void;
+    const validating = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const coordinator = createCoordinator(
+      fixture,
+      store,
+      {
+        async validateModelFileInputs(signal) {
+          discoverySignal ??= signal;
+          if (
+            signal !== discoverySignal ||
+            turns !== (stage === "batch" ? 1 : 2)
+          )
+            return;
+          entered();
+          return new Promise<void>((_, reject) =>
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            }),
+          );
+        },
+        async run(request) {
+          if (++turns === 1) return first.run(request);
+          throw new Error("transient connection failure");
+        },
+      },
+      { discoveryTimeoutMs: 500, retryDelaysMs: [1], clock: immediateClock },
+    );
+    t.after(() => coordinator.cancel("fixture cleanup"));
+    coordinator.start();
+    await validating;
+    t.mock.timers.tick(500);
+    t.mock.timers.reset();
+    const terminal = await coordinator.wait(undefined, 5_000);
+    assert.equal(terminal?.status, "succeeded", terminal?.error);
+    assert.equal(terminal.terminalReason, "capped");
+    const manifest = await readJson(terminal.manifestPath);
+    assert.deepEqual(
+      manifest.findings.map(
+        (finding: { provenance: { candidateId: string } }) =>
+          finding.provenance.candidateId,
+      ),
+      ["accepted"],
+    );
+    assert.equal(turns, stage === "batch" ? 1 : 2);
+    assert.equal(store.iterations[0]?.workerIds.length, 1);
+    assert.deepEqual(store.finishCalls[0]?.omittedWorkerIds, []);
+    assert.equal(store.failureMessages.length, 0);
+    if (stage === "retry")
+      assert.ok(
+        store.workerUpdates.some(
+          (worker) => worker.status === "canceled" && worker.attempt === 1,
+        ),
+      );
+  });
+}

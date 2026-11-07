@@ -119,6 +119,7 @@ import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
+  DirectDeepScanInputRecoveryError,
   deepScanParentToolOverrides,
   readDeepScanParentConfig,
   runDeepScan,
@@ -4263,6 +4264,12 @@ export class CodexSecurity {
         ?.stop(measuredExecution?.usage)
         .catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
+      // The coordinator deliberately kept its accepted worker receipts and run open.
+      if (
+        failure instanceof DirectDeepScanInputRecoveryError &&
+        !signal.aborted
+      )
+        throw failure;
       const terminalTurnStatus = terminalScanTurnStatus();
       const verifiedCost = snapshot?.measurement.cost;
       if (

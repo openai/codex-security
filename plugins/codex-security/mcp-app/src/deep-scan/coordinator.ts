@@ -1041,9 +1041,7 @@ export class DeepScanCoordinator {
     nextLabel: () => string,
     previousFindings: string[],
   ): Promise<DiscoveryOutcome[]> {
-    await this.options.executor.validateModelFileInputs?.(
-      this.discoveryAbortController.signal,
-    );
+    if (!(await this.discoveryWorkers.validateModelFileInputs())) return [];
     // Reserve in dispatch order. Another coordinator may create one of these
     // labels after our directory listing but before we write its prompt.
     const labels: string[] = [];

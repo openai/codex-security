@@ -77,6 +77,22 @@ type WorkerAttemptOutcome =
 export class DeepScanWorkerRunner {
   constructor(private readonly options: DeepScanWorkerRunnerOptions) {}
 
+  /** Discovery can stop while a model-input file is being read. */
+  async validateModelFileInputs(): Promise<boolean> {
+    const { executor, signal } = this.options;
+    try {
+      await executor.validateModelFileInputs?.(signal);
+    } catch (error) {
+      if (
+        !signal.aborted ||
+        (error !== signal.reason &&
+          !(error instanceof Error && error.name === "AbortError"))
+      )
+        throw error;
+    }
+    return !signal.aborted;
+  }
+
   async runDiscoveryWorker(
     workerId: string,
     workerLabel: string,
@@ -233,8 +249,8 @@ export class DeepScanWorkerRunner {
       }
       // The coordinator checks the initial batch before reserving work. Retry
       // delays may outlive the captured file contents.
-      if (attempt > 1)
-        await this.options.executor.validateModelFileInputs?.(signal);
+      if (attempt > 1 && !(await this.validateModelFileInputs()))
+        return await this.cancelAttempt(input, attempt - 1, lastThreadId);
       let validationStarted = false;
       let validationCompleted = false;
       let activeThreadId = resumableThreadId;

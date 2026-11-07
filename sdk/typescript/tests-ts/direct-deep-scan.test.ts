@@ -67,6 +67,8 @@ if (request.diagnosticsVersion === 1 && process.env.SYNTHETIC_OLD_ENGINE !== '1'
   process.send({ event: 'discovery_worker_replaced', scanId: request.scanId, reason: 'tool error' });
 }
 if (process.env.SYNTHETIC_FAIL === '1') {
+  if (process.env.SYNTHETIC_OLD_ENGINE !== '1')
+    console.log(JSON.stringify({scanId: request.scanId + "-other", error: "model_input_recovery", message: "Unrelated scan's recovery message"}));
   process.stderr.write('first detail\\nlast detail');
   process.exitCode = 1;
   lines.close();
