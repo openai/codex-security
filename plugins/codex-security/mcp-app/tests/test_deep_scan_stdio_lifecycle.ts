@@ -55,7 +55,7 @@ async function testDeepScanStdioLifecycle() {
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const expiredTargetPath = path.join(fixtureRoot, "expired-target");
-  const stateDir = path.join(fixtureRoot, "state");
+  const stateDir = path.join(fixtureRoot, "state]");
   const codexHome = path.join(fixtureRoot, "codex [home]");
   const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
@@ -121,6 +121,10 @@ async function testDeepScanStdioLifecycle() {
         entries: [
           ...parentSandbox.permissionProfile.file_system.entries,
           { path: { type: "path", path: codexHome }, access: "deny" },
+          {
+            path: { type: "path", path: path.join(stateDir, "codex-home") },
+            access: "deny",
+          },
         ],
       },
     },
@@ -1672,12 +1676,32 @@ function assertReadOnlyWorkerInvocation(
   const overrides = args.filter((arg) =>
     arg.startsWith("permissions.codex_security_deep_scan_worker="),
   );
+  const credentialHome = path.join(stateDirectory, "codex-home");
+  const workerUsageDirectory = path.join(
+    credentialHome,
+    "worker-usage",
+    scanId,
+  );
+  const filesystem = {
+    ":root": "read",
+    [deniedHome]: { ".": "deny" },
+    [credentialHome]: { ".": "deny" },
+    ...(process.platform === "linux"
+      ? {}
+      : { [workerUsageDirectory]: { ".": "deny" } }),
+  };
   assert.deepEqual(
-    overrides.map((value) => parseToml(value)),
+    overrides.map((value) => JSON.parse(JSON.stringify(parseToml(value)))),
     [
-      parseToml(
-        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"},${JSON.stringify(path.join(stateDirectory, "codex-home", "worker-usage", scanId))}={"."="deny"}},network={enabled=false}}`,
-      ),
+      {
+        permissions: {
+          codex_security_deep_scan_worker: {
+            extends: ":read-only",
+            filesystem,
+            network: { enabled: false },
+          },
+        },
+      },
     ],
   );
 }
