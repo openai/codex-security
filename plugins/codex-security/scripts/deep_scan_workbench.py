@@ -616,7 +616,9 @@ def begin_deep_scan_for_scan(
     if (
         candidate["mode"] == "deep"
         and candidate["status"] == "running"
-        and candidate["recipe_json"] is not None
+        and (
+            candidate["recipe_json"] is not None or candidate["continuation_thread_id"] == thread_id
+        )
         and candidate["handoff_status"] == "delivered"
         and candidate["deep_scan_owner_thread_id"] is None
         and workspace["thread_id"] is None
@@ -637,8 +639,8 @@ def begin_deep_scan_for_scan(
                 "UPDATE scans SET deep_scan_owner_thread_id = ?, updated_at = ? "
                 "WHERE id = ? AND deep_scan_owner_thread_id IS NULL "
                 "AND handoff_status = 'delivered' AND handoff_claim_token IS ? "
-                "AND (handoff_claim_token IS NOT NULL OR continuation_thread_id = ? "
-                "OR (? IS NULL AND continuation_thread_id IS NULL))",
+                "AND (continuation_thread_id = ? OR (recipe_json IS NOT NULL AND "
+                "(handoff_claim_token IS NOT NULL OR (? IS NULL AND continuation_thread_id IS NULL))))",
                 (
                     thread_id,
                     timestamp,
