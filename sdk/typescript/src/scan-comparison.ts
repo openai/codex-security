@@ -2,7 +2,7 @@ import { workbenchArgs } from "./workbench-arguments.js";
 import { existsSync } from "node:fs";
 import { isRecord } from "./record.js";
 import { notify } from "./value.js";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -16,6 +16,7 @@ import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import {
   scanCodexHome,
   scanAuthentication,
+  runtimeScanAuthentication,
   selectedScanEnvironment,
   definedEnvironment,
   type CodexSecuritySurface,
@@ -48,6 +49,7 @@ import {
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
+import { resolveScanCyberAccessProgram } from "./scan-cyber-access.js";
 import {
   createProfileCodex,
   createProviderProfile,
@@ -63,12 +65,16 @@ import {
 } from "./finding-catalogue.js";
 import {
   codexSecurityCredentialHome,
+  environmentWithGit,
   executablePathForSpawn,
+  expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
   type CodexCommand,
 } from "./runtime.js";
+import { gitMarkerRoot } from "./targets.js";
+import { inspectTrustedExecutable } from "./trusted-executable.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
@@ -277,7 +283,9 @@ export async function matchScanFindingsInternal(
   runtimeOptions: {
     surface: CodexSecuritySurface;
     singleTurn?: boolean;
+    componentRepository?: string;
     nativeProviderEnvironment?: Record<string, string>;
+    getKeyCatalogHome?: (parent: string) => Promise<string>;
   },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
@@ -334,11 +342,12 @@ export async function matchScanFindingsInternal(
       }
     }
   }
-  const { thread, cleanup } = await startReadOnlyCodexThread(options, {
-    ...runtimeOptions,
-    command: "compare",
-    threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
-  });
+  const { thread, cleanup, cyberAccessProgram } =
+    await startReadOnlyCodexThread(options, {
+      ...runtimeOptions,
+      command: "compare",
+      threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
+    });
   const remainingPages = new Set(pages.keys());
   remainingPages.delete(0);
   const evidenceCursors = new Map<string, EvidenceCursor>();
@@ -362,7 +371,7 @@ export async function matchScanFindingsInternal(
     outputSchema: z.toJSONSchema(matchingTurnSchema.required(), {
       target: "draft-7",
     }),
-    cyberAccessProgram: options.cyberAccessProgram,
+    cyberAccessProgram,
     signal: options.signal,
   };
   let prompt = comparisonPrompt(pages[0]!, 0, pages.length, crossModeSites);
@@ -554,12 +563,14 @@ async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
   runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
     nativeProviderEnvironment?: Record<string, string>;
+    getKeyCatalogHome?: (parent: string) => Promise<string>;
   },
 ): Promise<{
   thread: ReturnType<ReadOnlyCodex["startThread"]>;
+  cyberAccessProgram?: CyberAccessProgram;
   cleanup?: () => Promise<void>;
 }> {
-  const source = {
+  let source: NodeJS.ProcessEnv = {
     ...(options.environment ?? process.env),
     CODEX_HOME: scanCodexHome(options.environment ?? process.env),
   };
@@ -585,7 +596,18 @@ async function startReadOnlyCodexThread(
     skipGitRepoCheck: true,
   };
   if (options.codex !== undefined) {
-    return { thread: options.codex.startThread(threadOptions) };
+    return {
+      thread: options.codex.startThread(threadOptions),
+      cyberAccessProgram: options.cyberAccessProgram,
+    };
+  }
+  const componentRepository = runtimeOptions.componentRepository;
+  if (componentRepository !== undefined) {
+    const root =
+      (await gitMarkerRoot(componentRepository, options.signal, "outermost")) ??
+      componentRepository;
+    const git = await inspectTrustedExecutable("git", source, root);
+    source = environmentWithGit(source, git);
   }
   const homeConfig = await readCodexHomeConfig(source, options.signal);
   const homeExecutionConfig = resolveCodexProfile(homeConfig);
@@ -651,6 +673,7 @@ async function startReadOnlyCodexThread(
     !commandAuth && !isExternalModelProvider(modelProvider)
       ? scanProviderEnvKey(providerConfig)
       : undefined;
+  let credentialType: "chatgpt" | "api_key" | undefined;
   const environment = await comparisonEnvironment(
     source,
     accountStatus,
@@ -659,6 +682,12 @@ async function startReadOnlyCodexThread(
     providerConfig,
     nativeKey,
     options.auth,
+    componentRepository !== undefined &&
+      options.cyberAccessProgram === undefined
+      ? (type) => {
+          credentialType = type;
+        }
+      : undefined,
   );
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
@@ -746,6 +775,39 @@ async function startReadOnlyCodexThread(
         ...environment,
       };
     }
+    let cyberAccessProgram = options.cyberAccessProgram;
+    if (componentRepository !== undefined && model !== undefined) {
+      // The helper may use a different credential home than the caller.
+      // Only send configuration that this Codex process actually receives.
+      const catalogConfig: JsonObject = {
+        ...(codexOptions.config as JsonObject),
+        responses_api_metadata: requestContext.metadata,
+        ...(isRecord(providers) ? { model_providers: providers } : {}),
+      };
+      const cwd = threadOptions.workingDirectory!;
+      const catalogPath = catalogConfig["model_catalog_json"];
+      if (typeof catalogPath === "string") {
+        catalogConfig["model_catalog_json"] = resolve(
+          cwd,
+          expandHome(catalogPath, environment),
+        );
+      }
+      const nativeEnvironment = codexOptions.env ?? environment;
+      cyberAccessProgram = await resolveScanCyberAccessProgram({
+        command,
+        cwd,
+        environment: codexOptions.apiKey
+          ? { ...nativeEnvironment, CODEX_API_KEY: codexOptions.apiKey }
+          : nativeEnvironment,
+        config: catalogConfig,
+        model,
+        credentialType,
+        getKeyCatalogHome: runtimeOptions.getKeyCatalogHome,
+        program: cyberAccessProgram,
+        nativeProfile: profile !== undefined,
+        signal: options.signal ?? new AbortController().signal,
+      });
+    }
     const codex =
       profile === undefined
         ? new Codex(codexOptions)
@@ -756,6 +818,7 @@ async function startReadOnlyCodexThread(
           );
     return {
       thread: codex.startThread(threadOptions),
+      cyberAccessProgram,
       ...(ownProfile === undefined ? {} : { cleanup: ownProfile.cleanup }),
     };
   } catch (error) {
@@ -772,16 +835,15 @@ export async function runReadOnlyCodex(
     surface: CodexSecuritySurface;
     command: string;
     threadSource: ReadOnlyCodexThreadSource;
+    componentRepository?: string;
   },
 ): Promise<string> {
-  const { thread, cleanup } = await startReadOnlyCodexThread(
-    options,
-    runtimeOptions,
-  );
+  const { thread, cleanup, cyberAccessProgram } =
+    await startReadOnlyCodexThread(options, runtimeOptions);
   try {
     const turn = await thread.run(prompt, {
       outputSchema,
-      cyberAccessProgram: options.cyberAccessProgram,
+      cyberAccessProgram,
       signal: options.signal,
     });
     return turn.finalResponse;
@@ -1252,6 +1314,7 @@ export async function comparisonEnvironment(
   config?: JsonObject,
   nativeKey?: string,
   auth: ScanAuthMode = "api-key",
+  onStoredCredential?: (type: "chatgpt" | "api_key") => void,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const environment = Object.fromEntries(
@@ -1306,9 +1369,24 @@ export async function comparisonEnvironment(
       storedEnvironment,
       signal,
     );
-    if (status.authenticated) return storedEnvironment;
+    if (status.authenticated) {
+      if (/^Logged in using ChatGPT\r?$/mu.test(status.details))
+        onStoredCredential?.("chatgpt");
+      else if (/^API key configured - /mu.test(status.details))
+        onStoredCredential?.("api_key");
+      return storedEnvironment;
+    }
   }
   if (existsSync(join(home, "auth.json"))) {
+    if (
+      onStoredCredential &&
+      (config?.["cli_auth_credentials_store"] ?? "file") === "file" &&
+      environmentEntry(environment, "CODEX_ACCESS_TOKEN") === undefined
+    ) {
+      const stored = await runtimeScanAuthentication(environment, home);
+      if (stored.method === "stored_credentials" && stored.credentialType)
+        onStoredCredential(stored.credentialType);
+    }
     return withoutOpenAiApiKeys(environment);
   }
   return environment;

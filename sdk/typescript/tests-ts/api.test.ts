@@ -2029,6 +2029,159 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each([
+    ["api-key", "daybreak_blue", false],
+    ["chatgpt", "standard", false],
+    ["api-key", "daybreak_blue", true],
+  ] as const)(
+    "selects the scan program with %s credentials (expected %s, replacing output %p)",
+    async (auth, program, archiveExisting) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      if (archiveExisting) {
+        await mkdir(join(scanDir, ".codex"));
+        await writeFile(
+          join(scanDir, ".codex", "config.toml"),
+          "daybreak = false\n",
+        );
+      }
+      const repositoryBin = join(repository, "node_modules", ".bin");
+      const trustedBin = join(root, "bin");
+      await mkdir(repositoryBin, { recursive: true });
+      await mkdir(trustedBin);
+      const environment = {
+        OPENAI_API_KEY: "synthetic-project-key",
+        CODEX_SQLITE_HOME: join(root, "stale-sqlite"),
+        PATH: [repositoryBin, trustedBin].join(delimiter),
+      };
+      const sqliteSetting =
+        auth === "api-key" ? "scan-db" : join(root, "selected-sqlite");
+      const scanDb = resolve(scanDir, sqliteSetting);
+      let probeDir: string | undefined;
+      let catalogMetadata: unknown;
+      const registered = mock();
+      const turn = mock(rejecting("synthetic scan turn"));
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            model: "synthetic-model",
+            model_catalog_json: "catalog.json",
+            responses_api_metadata: { "test.tag": "scan-attribution" },
+            sqlite_home: sqliteSetting,
+          },
+        },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          environment,
+          createOperationTelemetry: (options) =>
+            new OperationTelemetry({
+              ...options,
+              directory: join(root, "journal"),
+            }),
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            environment,
+          }),
+          resolveScanCyberAccessProgram: async (query) => {
+            expect(query.model).toBe("synthetic-model");
+            catalogMetadata = query.config["responses_api_metadata"];
+            expect(catalogMetadata).toMatchObject({
+              "test.tag": "scan-attribution",
+              codex_security_command: "scan",
+              codex_security_surface: "sdk",
+              codex_security_operation_id: expect.any(String),
+              codex_security_attempt_id: expect.any(String),
+            });
+            expect(query.config["model_catalog_json"]).toBe(
+              join(scanDir, "catalog.json"),
+            );
+            probeDir = query.cwd;
+            if (archiveExisting) {
+              expect(dirname(probeDir)).toBe(dirname(scanDir));
+              expect(probeDir).not.toBe(scanDir);
+              expect(await readdir(probeDir)).toEqual([]);
+            } else expect(probeDir).toBe(scanDir);
+            expect(query.environment["PATH"]).toBe(await realpath(trustedBin));
+            expect(query.environment["CODEX_HOME"]).toBe(
+              await realpath(codexHome),
+            );
+            expect(query.environment["OPENAI_API_KEY"]).toBeUndefined();
+            expect(query.environment["CODEX_API_KEY"]).toBe(
+              auth === "api-key" ? environment.OPENAI_API_KEY : undefined,
+            );
+            return program;
+          },
+          runWorkbench: async (options, args, input) => {
+            if (args[0] === "register-cli-scan") {
+              expect(options.environment?.["CODEX_SQLITE_HOME"]).toBe(scanDb);
+              if (archiveExisting) expect(existsSync(probeDir!)).toBe(false);
+              const recipe = JSON.parse(input!).recipe;
+              expect(recipe.cyberAccessProgram).toBeUndefined();
+              expect(recipe.requestedCyberAccessProgram).toBe(program);
+            }
+            return mockWorkbench(args, input);
+          },
+          createCodex: (options) => {
+            const metadataOverride = options.configOverrides!.find((value) =>
+              value.startsWith("responses_api_metadata="),
+            );
+            expect(catalogMetadata).toEqual(
+              parseToml(metadataOverride!)["responses_api_metadata"],
+            );
+            expect(options.env?.["CODEX_SQLITE_HOME"]).toBe(scanDb);
+            expect(options.env?.["PATH"]?.split(delimiter)).toContain(
+              trustedBin,
+            );
+            expect(options.env?.["PATH"]?.split(delimiter)).not.toContain(
+              repositoryBin,
+            );
+            return codexFactory(turn)();
+          },
+        },
+      );
+      await expect(
+        client.run(repository, {
+          auth,
+          archiveExisting,
+          outputDir: scanDir,
+          onScanRegistered: registered,
+        }),
+      ).rejects.toThrow("synthetic scan turn");
+      expect(turn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ cyberAccessProgram: program }),
+      );
+      expect(registered).toHaveBeenCalledWith(
+        expect.objectContaining({ cyberAccessProgram: program }),
+      );
+    },
+  );
+
+  test("keeps existing output and removes the temporary catalog workspace when selection fails", async () => {
+    const { repository, codexHome, scanDir } = await scanDirectories();
+    const previous = join(scanDir, "previous.txt");
+    await writeFile(previous, "previous scan");
+    let probed: string | undefined;
+    const registration = mock();
+    await using client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      resolveScanCyberAccessProgram: async ({ cwd }) => {
+        probed = cwd;
+        throw new Error("Synthetic Red-only model");
+      },
+    });
+    await expect(
+      client.run(repository, {
+        outputDir: scanDir,
+        archiveExisting: true,
+        onScanRegistered: registration,
+      }),
+    ).rejects.toThrow("Synthetic Red-only model");
+    expect(registration).not.toHaveBeenCalled();
+    expect(probed).toBeDefined();
+    expect(existsSync(probed!)).toBe(false);
+    expect(await readFile(previous, "utf8")).toBe("previous scan");
+  });
+
   test("retains the registered scan ID when continuation storage becomes unavailable", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const document = join(root, "architecture.md");
@@ -2112,12 +2265,20 @@ describe("CodexSecurity orchestration", () => {
       );
       const onAuthentication =
         mock<(authentication: ScanAuthentication) => void>();
-      const client = TestClient.withDependencies({
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        repositoryRevision: async () => null,
-        createCodex: codexFactory(scanDidNotStart),
-      });
+      const catalogCredentialTypes: Array<string | undefined> = [];
+      const client = new TestClient(
+        { codexOverrides: { cli_auth_credentials_store: "file" } },
+        {
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          resolveScanCyberAccessProgram: async ({ credentialType }) => {
+            catalogCredentialTypes.push(credentialType);
+            return "standard";
+          },
+          createCodex: codexFactory(scanDidNotStart),
+        },
+      );
 
       await expect(
         client.run(repository, {
@@ -2126,6 +2287,9 @@ describe("CodexSecurity orchestration", () => {
         }),
       ).rejects.toThrow("scan did not start");
       expect(onAuthentication.mock.lastCall?.[0]).toEqual(expected);
+      expect(catalogCredentialTypes).toEqual([
+        "credentialType" in expected ? expected.credentialType : undefined,
+      ]);
       expect(JSON.stringify(onAuthentication.mock.lastCall?.[0])).not.toContain(
         "SYNTHETIC",
       );
@@ -2142,6 +2306,47 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     }
   });
+
+  test.each([
+    ["keyring", false],
+    ["auto", false],
+    ["ephemeral", false],
+    ["file", true],
+  ] as const)(
+    "ignores a stale file login for catalog selection with %s storage (access token %p)",
+    async (store, accessToken) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(
+        join(codexHome, "auth.json"),
+        JSON.stringify({ auth_mode: "chatgpt" }),
+      );
+      const environment: Record<string, string> = accessToken
+        ? { CODEX_ACCESS_TOKEN: "synthetic" }
+        : {};
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            cli_auth_credentials_store: "file",
+            profile: "selected",
+            profiles: { selected: { cli_auth_credentials_store: store } },
+          },
+        },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          environment,
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            environment,
+          }),
+          resolveScanCyberAccessProgram: async ({ credentialType }) => {
+            expect(credentialType).toBeUndefined();
+            throw new Error("catalog inspected");
+          },
+        },
+      );
+      await expect(client.run(repository)).rejects.toThrow("catalog inspected");
+    },
+  );
 
   test("previews an existing output archive without changing files", async () => {
     const root = await temporaryDirectory();
@@ -14700,6 +14905,77 @@ if __name__ == "__main__":
       } finally {
         await client.close();
       }
+    },
+  );
+
+  test.each([
+    ["requestedCyberAccessProgram", "daybreak_blue"],
+    ["requestedCyberAccessProgram", "standard"],
+    ["cyberAccessProgram", "daybreak_red"],
+    [undefined, undefined],
+  ] as const)(
+    "preserves saved %p=%p across repeated Deep Scan resumes",
+    async (savedKey, savedProgram) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const scanId = "scan_example_001";
+      const threadId = "thread-1";
+      const configPath = join(codexHome, "worker-config.toml");
+      await writeUsageSession(codexHome, threadId, {}, { cwd: scanDir });
+      const discover = mock<() => Promise<"daybreak_blue" | "standard">>();
+      const runStreamed = mock(rejecting("resumed turn reached"));
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          configPath,
+        }),
+        resolveScanCyberAccessProgram: discover,
+        readDeepScanParentConfig: async () => undefined,
+        createCodex: () => ({
+          startThread: throwing("Expected the original scan thread"),
+          resumeThread: () => ({ id: threadId, runStreamed }),
+        }),
+        runWorkbench: async (_options, args, input): Promise<JsonObject> =>
+          args[0] === "get-cli-scan-resume"
+            ? {
+                scanId,
+                scanDir,
+                threadId,
+                targetId: "target_sha256_example",
+                targetRevision: "deadbeef",
+                contract: { target: { allowedKinds: ["git_revision"] } },
+                recipe: {
+                  repository,
+                  target: { kind: "repository", paths: [] },
+                  ...(savedKey === undefined
+                    ? {}
+                    : { [savedKey]: savedProgram }),
+                },
+              }
+            : mockWorkbench(args, input),
+      });
+      for (const available of ["daybreak_blue", "standard"] as const) {
+        discover.mockResolvedValue(available);
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+          }),
+        ).rejects.toThrow("resumed turn reached");
+        expect(runStreamed).toHaveBeenLastCalledWith(
+          expect.any(String),
+          expect.objectContaining({ cyberAccessProgram: savedProgram }),
+        );
+        expect(
+          parseToml(await readFile(configPath, "utf8"))["codex_security"],
+        ).toEqual(
+          savedProgram === undefined
+            ? undefined
+            : { cyber_access_program: savedProgram },
+        );
+      }
+      expect(discover).not.toHaveBeenCalled();
     },
   );
 

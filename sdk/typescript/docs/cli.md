@@ -147,8 +147,9 @@ Some cybersecurity requests and protected findings require
 
 ### Daybreak opt-in
 
-Codex 0.163.0 and later default the Daybreak toggle to off. Enable it through
-the existing native configuration override:
+CLI and SDK scans [select Daybreak Blue automatically](#select-a-cyber-access-program)
+when the OpenAI model catalog advertises it. Passing `daybreak=true` opts in to
+native Codex selection, which can choose Red when the model offers Red without Blue.
 
 ```bash
 codex-security scan . --codex daybreak=true
@@ -185,7 +186,7 @@ can apply Daybreak Blue to compatible mainline models when the API organization
 and project have access. An omitted `access_programs.cyber` field does not by
 itself mean that Daybreak treatment is disabled.
 
-Choose a compatible model available to your project and select Daybreak Blue
+To require Daybreak Blue, select a compatible model and request Blue
 explicitly. If you use `--max-cost` or the SDK's `maxCostUsd`, choose a model
 with built-in pricing so the scan can enforce the limit.
 
@@ -205,8 +206,34 @@ instead of passing it as a `--codex` configuration key.
 
 ### Select a Cyber access program
 
-For the built-in OpenAI provider, choose `standard`, `daybreak_blue`, or
-`daybreak_red`:
+At scan startup, the CLI and SDK consult the built-in OpenAI provider's model
+catalog for the selected ChatGPT account or API key. If the selected model
+advertises Blue, the scan requests `daybreak_blue`, even when Red is also
+available. If the model offers Standard without Blue, or the catalog has no
+program metadata, the scan requests `standard`. For a Red-only model, choose
+another model or opt in with `--cyber-access-program daybreak_red`. `cs scan`
+reports when it requests Blue. `init` and `scan --dry-run` work offline.
+
+With an environment API key, the bundled Codex runtime can query a private
+catalog set through `model_providers.openai.model_catalog_url`. A stored login
+can use its native catalog. A readable `model_catalog_json` file also works
+when remote API-key discovery is disabled.
+
+For project-key scans, automatic discovery keeps any separate saved login
+private from custom launchers. If lookup cannot establish the scan's workspace
+policy or catalog this way, it requests Standard when the provider and
+credentials support explicit programs. A custom launcher missing catalog commands
+or the requirements RPC can use the same fallback without passing credentials to
+another executable. The bundled launcher can detect workspace policies that
+disable program forwarding before they cause the scan to reject Standard. For launchers that locate catalogs
+relative to the scan directory or their original `CODEX_HOME`, use an absolute
+catalog path readable during lookup. If a launcher needs private files to start
+and inject its Daybreak setting, pass `--codex daybreak=true` or
+`--cyber-access-program <program>` directly to the scan. Managed disables and
+native Daybreak preferences keep their usual behavior.
+
+To request a particular program, pass `standard`, `daybreak_blue`, or
+`daybreak_red`.
 
 ```bash
 codex-security scan . --auth api-key --cyber-access-program daybreak_blue
@@ -221,12 +248,14 @@ await security.run("/path/to/repository", {
 
 `scan-components` accepts the same flag. Project files use
 `scan.cyber_access_program`, including for bulk scans. Explicit CLI or SDK values
-override the file; omission preserves Codex defaults. `standard` explicitly
-selects the standard program.
+override the file. An explicit program takes precedence over the native
+`daybreak` toggle, which in turn takes precedence over automatic selection.
 
-The selection applies to workers, resumed scans, planning, matching, and scan
-follow-ups. Recipes retain it for resume and rerun. API-key selection enables
-Codex's experimental Cyber support unless native configuration explicitly disables
+Workers, planning, matching, and scan follow-ups use the selected program.
+Resuming an interrupted scan retains its requested program. Older scans with
+no recorded program continue with their native Codex settings. A fresh rerun
+rechecks the catalog when the original scan had no explicit selection. Selecting an explicit API-key
+program enables Codex's experimental Cyber support unless native configuration disables
 `features.api_key_cyber_access_programs`. A selection does not grant entitlement;
 explicit disables and access denials remain errors.
 

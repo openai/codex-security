@@ -3429,7 +3429,7 @@ export function isDisconnectedChildStdin(
 }
 
 export async function runCodexCommand(
-  command: CodexCommand,
+  command: CodexCommand & { cwd?: string },
   args: readonly string[],
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
@@ -3445,6 +3445,7 @@ export async function runCodexCommand(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {
+      cwd: command.cwd,
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,

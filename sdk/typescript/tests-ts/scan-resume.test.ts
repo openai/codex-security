@@ -661,6 +661,43 @@ test.each([false, true])(
   },
 );
 
+test("resume rejects a checkout changed during preparation before starting a turn", async () => {
+  const f = await interruptedScan();
+  let turns = 0;
+  const { stderr, runCli } = createCliTest(main);
+  const code = await runCli(
+    ["scans", "resume", f.scanId, "--json"],
+    resumeDependencies(
+      f,
+      () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread: (id) => ({
+          id,
+          async runStreamed() {
+            turns++;
+            throw new Error("Unexpected resumed turn");
+          },
+        }),
+      }),
+      {},
+      {
+        async repositoryRevision(repository) {
+          await appendFile(
+            join(repository, "source.py"),
+            "# changed during resume\n",
+          );
+          return null;
+        },
+      },
+    ),
+  );
+  expect(code).toBe(2);
+  expect(stderr.text()).toContain(
+    "original checkout revision or contents changed",
+  );
+  expect(turns).toBe(0);
+});
+
 test("resuming reports a committed cancellation once without another launch", async () => {
   const f = await interruptedScan();
   const { stderr, runCli } = createCliTest(main);
@@ -738,9 +775,10 @@ function resumeDependencies(
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
   runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
-  createOperationTelemetry?: ConstructorParameters<
-    typeof TestClient
-  >[1]["createOperationTelemetry"],
+  clientOverrides: Pick<
+    ConstructorParameters<typeof TestClient>[1],
+    "createOperationTelemetry" | "repositoryRevision"
+  > = {},
 ) {
   return {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
@@ -770,9 +808,7 @@ function resumeDependencies(
         resolvePluginPython: async () => f.python,
         runWorkbench,
         createCodex,
-        ...(createOperationTelemetry === undefined
-          ? {}
-          : { createOperationTelemetry }),
+        ...clientOverrides,
       }),
   };
 }
@@ -876,7 +912,10 @@ test.each(["completed", "failed"] as const)(
           },
         }),
         {},
-        (options) => new OperationTelemetry(options),
+        {
+          createOperationTelemetry: (options) =>
+            new OperationTelemetry(options),
+        },
       ),
     );
     expect(code, stderr.text()).toBe(outcome === "completed" ? 0 : 2);

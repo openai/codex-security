@@ -10,6 +10,7 @@ import {
   PluginBootstrapError,
   errorMessage,
 } from "./errors.js";
+import { isRecord } from "./record.js";
 import {
   executablePathForSpawn,
   expandHome,
@@ -54,6 +55,24 @@ export function configuredCodexHome(environment: ProcessEnvironment): string {
       environment,
     ),
   );
+}
+
+/** @internal Identify file-backed login metadata without returning credentials. */
+export async function readStoredFileCredentialType(
+  codexHome: string,
+): Promise<"missing" | "api_key" | "chatgpt" | "unknown"> {
+  try {
+    const stored: unknown = JSON.parse(
+      await readFile(join(codexHome, "auth.json"), "utf8"),
+    );
+    const mode = isRecord(stored) ? stored["auth_mode"] : undefined;
+    if (mode === "apikey" || mode === "api_key") return "api_key";
+    return mode === "chatgpt" ? "chatgpt" : "unknown";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? "missing"
+      : "unknown";
+  }
 }
 
 /** @internal */

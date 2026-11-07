@@ -10,6 +10,7 @@ import {
   loginApiKey,
   logout,
   readCodexHomeConfig,
+  readStoredFileCredentialType,
 } from "../src/auth.js";
 import { PluginBootstrapError } from "../src/index.js";
 import { runCodexCommand } from "../src/runtime.js";
@@ -22,6 +23,19 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 
 afterEach(cleanup);
+
+test("a missing auth file is distinct from unreadable or unrecognized login data", async () => {
+  const home = await temporaryDirectory();
+  const file = join(home, "auth.json");
+  expect(await readStoredFileCredentialType(home)).toBe("missing");
+  await writeFile(file, "{");
+  expect(await readStoredFileCredentialType(home)).toBe("unknown");
+  await writeFile(file, JSON.stringify({ auth_mode: "unrecognized" }));
+  expect(await readStoredFileCredentialType(home)).toBe("unknown");
+  const otherHome = join(home, "other");
+  await mkdir(join(otherHome, "auth.json"), { recursive: true });
+  expect(await readStoredFileCredentialType(otherHome)).toBe("unknown");
+});
 
 async function fakeCodex() {
   const root = await temporaryDirectory();

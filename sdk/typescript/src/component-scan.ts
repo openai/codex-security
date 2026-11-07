@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { notify } from "./value.js";
-import { writeFile } from "node:fs/promises";
+import { realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   CodexSecurity,
   DEFAULT_DEPENDENCIES,
@@ -336,7 +336,11 @@ export async function runComponentScans(
     }
   }
   const { findings, matches, uncertain, related, error } =
-    await deduplicateFindings(receipts, results, { ...options, environment });
+    await deduplicateFindings(receipts, results, {
+      ...options,
+      repository,
+      environment,
+    });
   const deduplication: ComponentDeduplicationSummary = {
     status: error === undefined ? "completed" : "failed",
     confirmedGroups: matches.length,
@@ -434,6 +438,14 @@ async function deduplicateFindings(
     }));
   const previous = first === undefined ? [] : componentFindings(first);
   let error: string | undefined;
+  let catalogHome: string | undefined;
+  const getKeyCatalogHome = async (parent: string) => {
+    const directory = await realpath(parent);
+    if (catalogHome && dirname(catalogHome) === directory) return catalogHome;
+    if (catalogHome) await rm(catalogHome, { recursive: true, force: true });
+    catalogHome = await prepareOutputDir(undefined, "catalog", directory);
+    return catalogHome;
+  };
   try {
     options.signal?.throwIfAborted();
     if (remaining.length) notify(() => options.onDeduplicationStarted?.());
@@ -452,7 +464,11 @@ async function deduplicateFindings(
           signal: options.signal,
           workingDirectory: tmpdir(),
         },
-        { surface: options.surface ?? "sdk" },
+        {
+          surface: options.surface ?? "sdk",
+          componentRepository: options.repository,
+          getKeyCatalogHome,
+        },
       );
       matching.matches.push(...comparison.matches);
       matching.uncertain.push(...comparison.uncertain);
@@ -472,6 +488,13 @@ async function deduplicateFindings(
     error = options.signal?.aborted
       ? "Cross-component matching was canceled."
       : errorMessage(failure);
+  } finally {
+    if (catalogHome)
+      await rm(catalogHome, { recursive: true, force: true }).catch(
+        (failure: unknown) => {
+          error ??= errorMessage(failure);
+        },
+      );
   }
   const remainSeparate = ({
     beforeOccurrenceId,
