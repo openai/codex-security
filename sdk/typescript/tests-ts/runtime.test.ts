@@ -6253,7 +6253,9 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.track(output);
+      // The fixture root already owns its descendants. Only the fallback
+      // output needs a separate removal during parallel cleanup.
+      if (stickyParent !== shared) temporaryDirectories.track(output);
 
       await expect(
         requireSecureOutputAncestry(output),
