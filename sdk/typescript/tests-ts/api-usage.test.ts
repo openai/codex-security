@@ -213,8 +213,10 @@ test.each([false, true])(
                   {},
                   { parent: "scan-thread" },
                 );
-                if (cancel)
+                if (cancel) {
                   controller.abort(new Error("Synthetic cancellation"));
+                  controller.signal.throwIfAborted();
+                }
                 throw new Error("Synthetic execution failure");
               })(),
             }),

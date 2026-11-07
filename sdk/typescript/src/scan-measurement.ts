@@ -35,20 +35,25 @@ export function combineMeasurements(
   const warnings = [
     ...new Set(values.flatMap((value) => value.warnings ?? [])),
   ].sort();
+  const coverage =
+    usage === null
+      ? "unavailable"
+      : values.every((value) => value.coverage === "complete")
+        ? "complete"
+        : "partial";
+  const missingThreadCount = values.reduce(
+    (sum, value) => sum + value.missingThreadCount,
+    0,
+  );
+  // A stage can lack tokens without naming a missing thread.
+  if (coverage === "partial" && !missingThreadCount && !warnings.length)
+    warnings.push("token_usage_unavailable");
   return {
     ...measurementFromUsage(usage, model, pricingContext),
     ...(warnings.length ? { warnings } : {}),
-    coverage:
-      usage === null
-        ? "unavailable"
-        : values.every((value) => value.coverage === "complete")
-          ? "complete"
-          : "partial",
+    coverage,
     threadCount: values.reduce((sum, value) => sum + value.threadCount, 0),
-    missingThreadCount: values.reduce(
-      (sum, value) => sum + value.missingThreadCount,
-      0,
-    ),
+    missingThreadCount,
     ...(values.every((value) => value.coverageScope !== undefined)
       ? {
           coverageScope: [

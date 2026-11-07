@@ -2235,7 +2235,20 @@ export class CodexSecurity {
     >();
     const recordedCost = (total: Readonly<ScanCost> | null | undefined) => {
       const measured = measuredScanCost(latestMeasurement);
-      if (measured === null || total == null) return measured ?? total;
+      if (measured === null) return total;
+      // A thread subtotal cannot price an entire composition with missing receipts.
+      if (total == null && accounting.hasUnknown) {
+        return {
+          usage: {
+            ...measured.usage,
+            coverage: "partial" as const,
+            warnings: measured.usage.warnings?.length
+              ? measured.usage.warnings
+              : ["token_usage_unavailable"],
+          },
+        };
+      }
+      if (total == null) return measured;
       // A resumed batch can include durable child costs whose logs are no longer available.
       const { usage } = measured;
       if (
@@ -3754,6 +3767,7 @@ export class CodexSecurity {
       const finalize = async (
         usage: unknown,
         savedCost: ScanCost | null = null,
+        noModelWork = false,
       ): Promise<unknown> => {
         if (options.validationPrompt !== undefined) {
           tracker.recordUsage(usage);
@@ -3824,7 +3838,11 @@ export class CodexSecurity {
           mode === "deep" && snapshot.cost !== null
             ? accounting.complete
             : (snapshot.cost ?? savedCost);
-        if (options.maxCostUsd !== undefined && accounting.completed === null) {
+        if (
+          options.maxCostUsd !== undefined &&
+          accounting.completed === null &&
+          !noModelWork
+        ) {
           runPostScan = null;
           throw new IncompleteScanError(
             "Could not verify the requested scan cost limit because scan-owned token usage is incomplete.",
@@ -3896,7 +3914,7 @@ export class CodexSecurity {
                 options.onScanStarted,
                 options.onObserverError,
               );
-              await runDeepScans({
+              const finished = await runDeepScans({
                 onDiagnostic: this.#onDeepScanDiagnostic,
                 scanId,
                 scanDir,
@@ -4163,6 +4181,11 @@ export class CodexSecurity {
               const usage = await finalize(
                 undefined,
                 thread.id === null ? accounting.complete : null,
+                finished.passes.length === 0 &&
+                  !finished.mergeStarted &&
+                  !finished.costUnavailable &&
+                  thread.id === null &&
+                  options.validationPrompt === undefined,
               );
               return {
                 threadId: thread.id,

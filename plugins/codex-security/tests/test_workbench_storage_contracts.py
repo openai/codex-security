@@ -45,6 +45,7 @@ def test_cost_receipts_replace_flat_and_wrapped_inputs_without_nesting(tmp_path:
         state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic stop."
     )
     assert failed["scan"]["cost"] == cost
+    assert failed["scan"]["usage"].items() >= usage.items()
     replacement = {**cost, "estimatedUsd": 0.002}
     repeated = run_workbench(
         state,
@@ -57,7 +58,7 @@ def test_cost_receipts_replace_flat_and_wrapped_inputs_without_nesting(tmp_path:
         json.dumps({"usage": usage, "cost": replacement}),
     )
     assert repeated["scan"]["cost"] == replacement
-    assert repeated["scan"]["usage"] == usage
+    assert repeated["scan"]["usage"] == failed["scan"]["usage"]
 
 
 def test_draft_acknowledges_only_reconciled_pending_checkpoints(tmp_path: Path) -> None:

@@ -123,7 +123,7 @@ async function interruptedScan(
   const codexHome = join(root, "state", "codex-home");
   await mkdir(repository, { recursive: true, mode: 0o700 });
   await mkdir(scanDir, { recursive: true, mode: 0o700 });
-  await mkdir(join(codexHome, "sessions"), { recursive: true });
+  await mkdir(join(codexHome, "sessions"), { recursive: true, mode: 0o700 });
   await writeFile(join(repository, "source.py"), "# synthetic source\n");
   const input = join(root, "repositories.csv");
   if (bulk) {
@@ -4397,7 +4397,7 @@ test.each([
     let prompted = false;
     let runtimeStarts = 0;
     const code = await main(
-      ["scans", "resume", f.scanId, "--json"],
+      ["scans", "resume", f.scanId],
       stdout.stream,
       stderr.stream,
       {

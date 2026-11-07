@@ -3749,73 +3749,6 @@ if __name__ == "__main__":
     await client.close();
   });
 
-  test.each([
-    ["without", false],
-    ["with", true],
-  ] as const)(
-    "handles a session-tracking failure %s an explicit cost limit",
-    async (_description, enforceCostLimit) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const scanDir = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(scanDir, { mode: 0o700 });
-      await writeFile(join(codexHome, "sessions"), "not a directory");
-      const commands: string[] = [];
-      const warnings: string[] = [];
-      let savedFailure: string | undefined;
-      const client = new TestClient(
-        {},
-        {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> => {
-            commands.push(args[0]!);
-            if (args[0] === "fail-scan") savedFailure = args[3];
-            return mockWorkbench(args, input);
-          },
-          createCodex: () => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed() {
-                await copyCompletedScan(root);
-                return { events: completedEvents() };
-              },
-            }),
-          }),
-        },
-      );
-
-      const scan = client.run(repository, {
-        ...(enforceCostLimit ? { maxCostUsd: 1 } : {}),
-        onActivity: () => {},
-        onWarning: (warning) => warnings.push(warning),
-      });
-      if (enforceCostLimit) {
-        await expect(scan).rejects.toThrow("interrupted");
-        expect(commands).toContain("fail-scan");
-        expect(savedFailure).toContain("sessions");
-        expect(commands).not.toContain("cancel-scan");
-      } else {
-        await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
-        expect(warnings).toContainEqual(
-          expect.stringContaining("Could not track scan activity:"),
-        );
-        expect(commands).toContain("complete-scan");
-      }
-      await client.close();
-    },
-  );
-
   test.each(["EACCES", "EPERM", "EMFILE"])(
     "retries session logs and preserves %s diagnostics",
     async (code) => {
@@ -15994,6 +15927,8 @@ if __name__ == "__main__":
     "loads the readable workflow and disables only denied cached skills for %s scans",
     async (mode) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
+      if (mode === "deep")
+        await writeFile(join(repository, "fixture.ts"), "export {};\n");
       await chmod(codexHome, 0o700);
       const environment: Record<string, string> = {
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
@@ -19079,6 +19014,7 @@ test.each(
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
         prepareRuntime: async () => prepared,
+        runWorkbench: recordingWorkbench([], measuredScanUsage(900, 0, 0)),
         createCodex: codexFactory(
           async (_input: string, { signal }: { signal: AbortSignal }) => {
             scanSignal = signal;

@@ -368,4 +368,5 @@ export function configuredAuthEnvironment<Value>(
   );
 }
 
-export { configuredAuthEnvironment as withoutOpenAiApiKeys };
+/** @internal */
+export const withoutOpenAiApiKeys = configuredAuthEnvironment;

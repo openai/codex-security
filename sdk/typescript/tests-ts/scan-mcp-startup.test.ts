@@ -32,8 +32,9 @@ test.each(["standard", "diff", "deep", "custom"] as const)(
     const scanDir = join(root, "scan");
     for (const directory of [repository, codexHome, scanDir])
       await mkdir(directory, { mode: 0o700 });
-    if (mode === "diff") {
+    if (mode === "diff" || mode === "deep")
       await writeFile(join(repository, "fixture.ts"), "export {};\n");
+    if (mode === "diff") {
       for (const args of [
         ["init", "-q"],
         ["add", "fixture.ts"],

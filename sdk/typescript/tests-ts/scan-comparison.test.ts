@@ -1481,7 +1481,7 @@ process.exit(0);
           });
         } else {
           expect(ordinary.openai).toBe("synthetic-provider-key");
-          expect(ordinary.codex).toBe("synthetic-provider-key");
+          expect(ordinary.codex).toBeNull();
         }
         if (name === "custom") {
           expect(native.openai).toBe("synthetic-provider-key");

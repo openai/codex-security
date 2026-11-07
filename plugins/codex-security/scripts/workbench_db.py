@@ -1584,8 +1584,6 @@ def register_cli_scan(
     an output directory, coordinate archiving with registration so previous results
     can still be located. Return the scan ID, contract, and target metadata.
     """
-    repository = require_target(args.repository)
-    require_scannable_target(repository)
     scan_dir = None
     user_context = None
     registration = {}
