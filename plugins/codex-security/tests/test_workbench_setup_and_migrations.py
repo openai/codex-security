@@ -2027,6 +2027,35 @@ def test_workbench_applies_shadowed_delivered_claim_cleanup_once(tmp_path: Path)
         ).fetchone() == ("2026-07-01T00:00:00Z", "current-claim")
 
 
+def test_legacy_delivered_scan_waits_for_its_thread(tmp_path: Path) -> None:
+    state_dir, _, scan_id, database = start_migration_scan(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan_id,))
+
+    assert get_scan(state_dir, scan_id)["scan"]["scanId"] == scan_id
+    for command, args in (
+        ("get-scan", ("--context-claim-token", "")),
+        ("update-progress", ("--phase", "threat_model")),
+    ):
+        result = scan_command(
+            state_dir, command, scan_id, "--model-thread-id", "fixture-thread", *args, check=False
+        )
+        assert result["returncode"] != 0
+        assert "awaiting its owning Codex thread" in result["stderr"]
+
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "fixture-thread")
+    updated = scan_command(
+        state_dir,
+        "update-progress",
+        scan_id,
+        "--model-thread-id",
+        "fixture-thread",
+        "--phase",
+        "threat_model",
+    )
+    assert updated["scan"]["progress"]["phase"] == "threat_model"
+
+
 @pytest.mark.parametrize(
     "legacy_name",
     ("structured scan guidance context", "idempotent scan lifecycle requests"),

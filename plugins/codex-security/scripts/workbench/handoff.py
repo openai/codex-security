@@ -38,9 +38,8 @@ def require_tokenless_scan_owner(
             "SELECT thread_id FROM workspaces WHERE id = ?", (scan["workspace_id"],)
         ).fetchone()[0]
     if owner is None:
-        # Only a completed import is intentionally ownerless among registered scans.
         completed_import = scan["launch_kind"] == "import" and scan["status"] == "complete"
-        if scan["recipe_json"] is not None and not completed_import:
+        if not completed_import:
             raise SystemExit("This scan is awaiting its owning Codex thread.")
     elif owner != model_thread_id:
         raise SystemExit("This scan requires its owning Codex thread.")
