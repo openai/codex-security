@@ -29,7 +29,7 @@ use windows_sys::Win32::{
     },
     Security::{
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-        GetAce, LookupAccountSidW, SidTypeUser, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION,
+        LookupAccountSidW, SidTypeUser, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION,
         INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     },
     Storage::FileSystem::{
@@ -87,18 +87,23 @@ fn inspect_dacl(acl: *const ACL, user: &str) -> Result<u32, u32> {
     }
     let mut grants = 0;
     let mut denied = HashMap::<String, u32>::new();
-    for index in 0..unsafe { (*acl).AceCount } {
-        let mut ace = null_mut();
-        if unsafe { GetAce(acl, u32::from(index), &mut ace) } == 0 {
-            return Err(unsafe { GetLastError() });
+    // GetSecurityInfo owns the ACL and its ACEs in one descriptor until LocalFree.
+    let header = unsafe { &*acl };
+    let bytes = unsafe { std::slice::from_raw_parts(acl.cast::<u8>(), header.AclSize.into()) };
+    let mut entries = bytes.get(size_of::<ACL>()..).ok_or(ERROR_INVALID_ACL)?;
+    for _ in 0..header.AceCount {
+        let &[kind, flags, low, high, ..] = entries else {
+            return Err(ERROR_INVALID_ACL);
+        };
+        let size = usize::from(u16::from_le_bytes([low, high]));
+        if size < size_of::<ACE_HEADER>() {
+            return Err(ERROR_INVALID_ACL);
         }
-        // The descriptor comes from Windows. Inspect the variable-length SID
-        // within this ACE, including optional GUIDs on object-specific entries.
-        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-        if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 {
+        let (bytes, rest) = entries.split_at_checked(size).ok_or(ERROR_INVALID_ACL)?;
+        entries = rest;
+        if u32::from(flags) & INHERIT_ONLY_ACE != 0 {
             continue;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(ace.cast::<u8>(), header.AceSize.into()) };
         let number = |offset| {
             Ok::<_, u32>(u32::from_le_bytes(
                 bytes
@@ -121,11 +126,11 @@ fn inspect_dacl(acl: *const ACL, user: &str) -> Result<u32, u32> {
         }
         // ACCESS_ALLOWED, ACCESS_DENIED, their object and callback variants.
         // A conditional deny cannot prove that another identity lacks access.
-        let sid_offset = match header.AceType {
+        let sid_offset = match kind {
             0 | 1 | 9 => 8,
             5 | 6 | 11 => {
                 let flags = number(8)?;
-                if header.AceType == 6 && flags & 1 != 0 {
+                if kind == 6 && flags & 1 != 0 {
                     continue; // Object-specific deny.
                 }
                 12 + 16 * (flags & 3).count_ones() as usize
@@ -142,7 +147,7 @@ fn inspect_dacl(acl: *const ACL, user: &str) -> Result<u32, u32> {
         if trusted(&sid, user) || sid == "S-1-3-4" {
             continue; // OWNER RIGHTS applies to the already-verified owner.
         }
-        if matches!(header.AceType, 1 | 6) {
+        if matches!(kind, 1 | 6) {
             *denied.entry(sid).or_default() |= mask;
         } else {
             let mut excluded =
