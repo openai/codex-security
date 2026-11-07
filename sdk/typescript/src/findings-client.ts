@@ -162,18 +162,15 @@ export class FindingsClient {
     return new URL(path, this.url);
   }
 
-  private async requestEndpoint(url: URL, body?: string): Promise<Response> {
+  private async requestEndpoint(
+    url: URL,
+    post?: RequestInit,
+  ): Promise<Response> {
     for (let redirects = 0; ; redirects++) {
       const response = await this.request(url, {
+        ...post,
         signal: this.signal,
         redirect: "manual",
-        ...(body === undefined
-          ? {}
-          : {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body,
-            }),
       });
       const location = response.headers.get("Location");
       if (
@@ -188,10 +185,7 @@ export class FindingsClient {
         Buffer.from(location, "latin1").toString("utf8"),
         url,
       );
-      if (
-        next.origin !== this.url.origin ||
-        next.protocol !== this.url.protocol
-      )
+      if (next.protocol !== this.url.protocol || next.host !== this.url.host)
         throw new FindingsHttpError(
           `Findings API redirect leaves the configured service origin (HTTP ${response.status}). Configure the final service URL.`,
           response.status,
@@ -201,16 +195,17 @@ export class FindingsClient {
       // Retain Fetch's redirect limit and POST-to-GET behavior.
       if (redirects === 20)
         throw new TypeError("Too many findings service redirects.");
-      if ([301, 302, 303].includes(response.status)) body = undefined;
+      if ([301, 302, 303].includes(response.status)) post = undefined;
       url = next;
     }
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {
-    const response = await this.requestEndpoint(
-      this.endpoint(path),
-      JSON.stringify(body),
-    );
+    const response = await this.requestEndpoint(this.endpoint(path), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
     if (!response.ok) {
       throw await FindingsHttpError.fromResponse(
         response,
