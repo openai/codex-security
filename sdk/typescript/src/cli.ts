@@ -10395,8 +10395,10 @@ async function executeScan(
     };
     const otel = resolvedConfiguration["otel"];
     if (isJsonObject(otel)) patchOtel = otel;
+    const needsModelAuthentication =
+      !arguments_.mock && !arguments_.requireSealedResume;
     auth =
-      !arguments_.dryRun && !arguments_.mock && interactive
+      !arguments_.dryRun && needsModelAuthentication && interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
@@ -10421,16 +10423,16 @@ async function executeScan(
           : providerConfiguration,
       };
     }
-    selectedAuthentication = arguments_.mock
-      ? null
-      : scanAuthentication(
+    selectedAuthentication = needsModelAuthentication
+      ? scanAuthentication(
           dependencies.environment,
           auth,
           provider,
           hasCommandAuth(effectiveConfiguration),
           arguments_.dryRun,
           scanProviderEnvKey(effectiveConfiguration),
-        );
+        )
+      : null;
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,

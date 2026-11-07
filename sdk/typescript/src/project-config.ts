@@ -1,5 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -143,12 +144,21 @@ export async function readProjectConfig(
       ? expanded
       : `${directory}/${expanded}`;
   const extension = projectConfigExtension(path);
+  let settingsDirectory = dirname(path);
   let text: string;
   let resolvedPath: string;
   try {
-    resolvedPath = await realpath(
-      process.platform === "win32" ? path : selected,
-    );
+    let source = process.platform === "win32" ? path : selected;
+    const selectedParent = dirname(source);
+    if (
+      process.platform !== "win32" &&
+      selectedParent.split("/").includes("..")
+    ) {
+      // Resolve parent traversal before joining the file or any relative settings.
+      settingsDirectory = await realpath(selectedParent);
+      source = resolve(settingsDirectory, basename(source));
+    }
+    resolvedPath = await realpath(source);
     text = await readFile(resolvedPath, "utf8");
   } catch (error) {
     throw new ConfigurationError(
@@ -177,7 +187,7 @@ export async function readProjectConfig(
   return {
     path,
     ...(path === resolvedPath ? {} : { resolvedPath }),
-    directory: dirname(path),
+    directory: settingsDirectory,
     input: value,
   };
 }
@@ -433,8 +443,11 @@ export function resolveScanSettings(
       ...(project?.path
         ? {
             executableSourcePaths: [
-              project.path,
-              ...(project.resolvedPath ? [project.resolvedPath] : []),
+              ...new Set([
+                project.path,
+                resolve(project.directory, basename(project.path)),
+                ...(project.resolvedPath ? [project.resolvedPath] : []),
+              ]),
             ],
           }
         : {}),
