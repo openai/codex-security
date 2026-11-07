@@ -374,17 +374,12 @@ jobs:
       matrix: ${{ fromJSON(needs.classify-changes.outputs.python-matrix) }}
     steps:
       - *checkout-repository
-      - name: Set up TypeScript tools
+      - name: Install plugin dependencies and compile source checks
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         uses: ./.github/actions/setup-tools
         with:
           compile: true
-          cache-dependency-path: |
-            sdk/typescript/pnpm-lock.yaml
-            plugins/codex-security/mcp-app/pnpm-lock.yaml
-      - name: Install plugin dependencies
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+          cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
