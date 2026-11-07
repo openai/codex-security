@@ -231,22 +231,19 @@ test.each([
 });
 
 function publishSyntheticChange(directory: string) {
-  return runWorkflow(
-    ["patch", "Synthetic issue", "--create-pr", "--json"],
-    {
-      currentDirectory: directory,
-      onRepositoryCommand: (command, args, cwd, options) => {
-        if (command === "git")
-          return runGitRepositoryCommand(command, args, cwd, options);
-        return args[1] === "list"
-          ? "[]"
-          : "https://github.example.test/example/repository/pull/1";
-      },
-      onCodex: async (_args, output) => {
-        await writeFile(join(directory, "selected.txt"), "Synthetic change\n");
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
-      },
+  return runWorkflow(["patch", "Synthetic issue", "--create-pr", "--json"], {
+    currentDirectory: directory,
+    onRepositoryCommand: (command, args, cwd, options) => {
+      if (command === "git")
+        return runGitRepositoryCommand(command, args, cwd, options);
+      return args[1] === "list"
+        ? "[]"
+        : "https://github.example.test/example/repository/pull/1";
     },
-  );
+    onCodex: async (_args, output) => {
+      await writeFile(join(directory, "selected.txt"), "Synthetic change\n");
+      output?.stdout.write("Synthetic patch complete.\n");
+      return 0;
+    },
+  });
 }
