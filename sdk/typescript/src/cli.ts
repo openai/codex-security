@@ -1215,6 +1215,7 @@ interface SkillPermissions {
 
 interface PatchSnapshotSandbox {
   readonly profile: JsonObject;
+  readonly refreshWindowsReadGrants?: boolean;
   readonly environment: NodeJS.ProcessEnv;
   readonly providerKeyVariable?: string;
   readonly stripAwsCredentials?: boolean;
@@ -1543,10 +1544,20 @@ export async function runRepositoryCommand(
       try {
         await file.chmod(0o600);
         await requirePrivateSnapshotProfileFile(path);
+        const permissions = { ...sandbox.profile };
+        if (sandbox.refreshWindowsReadGrants) {
+          // The elevated Windows backend omits explicit read roots for a full-read
+          // policy. Denying the probe's own private profile retains the individual
+          // Git configuration grants and the normal platform read roots.
+          permissions["filesystem"] = {
+            ...(permissions["filesystem"] as JsonObject | undefined),
+            [path]: { ".": "deny" },
+          };
+        }
         await file.writeFile(
           Object.entries({
             ...sandbox.configuration,
-            permissions: { [profile]: sandbox.profile },
+            permissions: { [profile]: permissions },
           })
             .map(
               ([key, value]) => `${JSON.stringify(key)}=${inlineToml(value)}`,
@@ -2699,7 +2710,7 @@ export async function main(
         const sandbox = options.sandbox;
         snapshotConfigReady ??= ensureWindowsSnapshotConfigReadable(
           snapshotConfigPaths,
-          (probeArgs, input) =>
+          (probeArgs, input, refreshReadGrants) =>
             parentDependencies.runRepositoryCommand(
               "git",
               probeArgs,
@@ -2709,6 +2720,7 @@ export async function main(
                 environment: options.environment,
                 sandbox: {
                   ...sandbox,
+                  refreshWindowsReadGrants: refreshReadGrants,
                   gitEnvironment: { ...sandbox.gitEnvironment, LC_ALL: "C" },
                 },
                 input,
