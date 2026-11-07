@@ -129,6 +129,7 @@ const distModules = [
   "record",
   "remediation",
   "request-metadata",
+  "rollout-session-index",
   "runtime",
   "scan-activity",
   "scan-comparison",

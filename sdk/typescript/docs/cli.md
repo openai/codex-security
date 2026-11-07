@@ -2079,6 +2079,23 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
+For registered local scans, the SDK writes a private index of the available
+coordinator and worker sessions to `artifacts/rollout-sessions/index.json` in
+the scan directory. It records thread relationships and survives removal of the
+native logs. It can also be available after a failed scan. Look for
+`rolloutSessionIndexPath` in `scans show SCAN_ID --json`, scan JSON, or
+`--json --full-output` on failure. Older or interrupted scans may lack an index.
+
+Pass `--retain-rollout-sessions` to `scan` or `bulk-scan` to save private JSONL
+files of attributable scan events alongside the index. These files may include
+prompts, source code, and tool output. Sessions with ambiguous turn ownership
+can appear in the index without an event file. For retried Deep workers, the
+exporter keeps only turns identified by the scan’s receipts. If those receipts
+lack turn IDs, the worker appears only in the index. Worker input is omitted
+when its origin cannot be verified. To retain events on a later invocation,
+pass the flag again to `scans rerun`, `scans resume`, or `bulk-scan --recover`.
+A retention failure leaves the original scan outcome intact.
+
 Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
 work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder

@@ -1299,9 +1299,14 @@ export async function withCredentialHomeLock<T>(
 export async function acquireCodexSecurityCredentialHomeLock(
   codexHome: string,
   signal?: AbortSignal,
-  securityOptions: Parameters<typeof requirePrivateDirectory>[3] = {},
+  securityOptions: Parameters<typeof requirePrivateDirectory>[3] & {
+    allowImmediateAcquisitionOnAbort?: boolean;
+  } = {},
 ): Promise<() => Promise<void>> {
-  throwIfSignalAborted(signal);
+  const acquisitionSignal = securityOptions.allowImmediateAcquisitionOnAbort
+    ? undefined
+    : signal;
+  throwIfSignalAborted(acquisitionSignal);
   const homeMetadata = await requireSecureCredentialHome(
     codexHome,
     securityOptions,
@@ -1356,7 +1361,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
 
     database.exec("PRAGMA busy_timeout = 0");
     while (true) {
-      throwIfSignalAborted(signal);
+      throwIfSignalAborted(acquisitionSignal);
       await requireSecureCredentialHome(codexHome, {
         ...securityOptions,
         expectedDevice,

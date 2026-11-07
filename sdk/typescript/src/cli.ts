@@ -284,6 +284,10 @@ import {
   type PublishScanResult,
 } from "./publish.js";
 import type { ScanResult } from "./result.js";
+import {
+  readRolloutSessionIndex,
+  ROLLOUT_SESSION_INDEX_RELATIVE_PATH,
+} from "./rollout-session-index.js";
 import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
@@ -509,6 +513,12 @@ const PROVIDER_OPTION = z
   .describe("Inference provider for scans.");
 const positiveInteger = z.number().int().positive();
 
+const RETAIN_ROLLOUT_SESSIONS_OPTION = z
+  .boolean()
+  .default(false)
+  .describe(
+    "Keep private copies of this scan’s session events in its artifacts.",
+  );
 const SHOW_COST_OPTION = z
   .boolean()
   .default(false)
@@ -1130,6 +1140,7 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  retainRolloutSessions?: boolean;
   rubricPath?: string;
   severityRubric?: ScanOptions["severityRubric"];
   rerunInputIdentity?: JsonValue;
@@ -2767,13 +2778,21 @@ export async function main(
         return presentHistory(
           await history(["get-scan", "--scan-id", scanId], async (value) => {
             const { scan, recipe, parentScanId } = value;
+            const saved = scan as JsonObject;
             await showHistoryNavigation(
               scan as JsonObject,
               format,
               args.scanId === undefined ? "latest completed scan" : undefined,
             );
             return {
-              ...(scan as JsonObject),
+              ...saved,
+              ...(typeof saved["scanDir"] === "string" &&
+              typeof saved["scanId"] === "string"
+                ? await rolloutSessionIndexOutput(
+                    saved["scanDir"],
+                    saved["scanId"],
+                  )
+                : {}),
               ...(recipe === undefined ? {} : { recipe }),
               ...(parentScanId === undefined ? {} : { parentScanId }),
             };
@@ -2862,6 +2881,7 @@ export async function main(
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
       }),
       options: z.object({
+        retainRolloutSessions: RETAIN_ROLLOUT_SESSIONS_OPTION,
         showCost: SHOW_COST_OPTION,
         verbose: z
           .boolean()
@@ -2918,6 +2938,7 @@ export async function main(
           scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
+          scanArguments.retainRolloutSessions = options.retainRolloutSessions;
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
@@ -2952,6 +2973,7 @@ export async function main(
           .describe("Saved scan identifier (default: latest completed scan)."),
       }),
       options: z.object({
+        retainRolloutSessions: RETAIN_ROLLOUT_SESSIONS_OPTION,
         showCost: SHOW_COST_OPTION,
         scanPromptFile: optionValue("--scan-prompt-file")
           .optional()
@@ -3068,6 +3090,7 @@ export async function main(
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
+          scanArguments.retainRolloutSessions = options.retainRolloutSessions;
           scanArguments.parentScanId = parentScanId;
           scanArguments.rerunInputIdentity = isJsonObject(recipe)
             ? (recipe["scanInputs"] ?? null)
@@ -5073,6 +5096,7 @@ export async function main(
             `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
           ).shape,
           provider: PROVIDER_OPTION,
+          retainRolloutSessions: RETAIN_ROLLOUT_SESSIONS_OPTION,
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -5222,6 +5246,7 @@ export async function main(
               verbose: options.verbose,
               repository: args.repository,
               archiveExisting: options.archiveExisting,
+              retainRolloutSessions: options.retainRolloutSessions,
               pluginPath: options.pluginPath,
               pythonPath: options.python,
               patch: options.patch,
@@ -5991,6 +6016,7 @@ export async function main(
           ),
       }),
       options: z.object({
+        retainRolloutSessions: RETAIN_ROLLOUT_SESSIONS_OPTION,
         config: PROJECT_CONFIG_OPTION,
         recover: z
           .boolean()
@@ -6140,6 +6166,7 @@ export async function main(
             workers: options.workers,
             mode: settings.mode,
             maxAttempts: options.maxAttempts,
+            retainRolloutSessions: options.retainRolloutSessions,
             ...(settings.maxCostUsd === undefined
               ? {}
               : { maxCostUsd: settings.maxCostUsd }),
@@ -6248,6 +6275,9 @@ export async function main(
                         onTelemetry: prompts.onTelemetry,
                         onMeasurement: prompts.onMeasurement,
                         resumeScanId: scan.scanId,
+                        ...(options.retainRolloutSessions
+                          ? { retainRolloutSessions: true }
+                          : {}),
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,
                         postScanPrompt:
@@ -10137,6 +10167,25 @@ async function withTerminalErrorsHandled<T>(
   }
 }
 
+async function rolloutSessionIndexOutput(
+  scanDir: string,
+  scanId: string,
+): Promise<{ rolloutSessionIndexPath?: string }> {
+  try {
+    if (await readRolloutSessionIndex(scanDir, scanId)) {
+      return {
+        rolloutSessionIndexPath: join(
+          scanDir,
+          ROLLOUT_SESSION_INDEX_RELATIVE_PATH,
+        ),
+      };
+    }
+  } catch {
+    // An inaccessible or invalid index must not hide the scan result.
+  }
+  return {};
+}
+
 async function executeScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
@@ -10497,6 +10546,9 @@ async function executeScan(
       safetyIdentifier: arguments_.safetyIdentifier,
       ...prompts,
       archiveExisting: arguments_.archiveExisting,
+      ...(arguments_.retainRolloutSessions
+        ? { retainRolloutSessions: true }
+        : {}),
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
       onTelemetry: (event) =>
@@ -11061,6 +11113,20 @@ async function executeScan(
         };
       } catch {
         // Missing or invalid retained artifacts must not replace the execution error.
+      }
+    }
+    if (registeredScan !== undefined) {
+      const index = await rolloutSessionIndexOutput(
+        registeredScan.scanDir,
+        registeredScan.scanId,
+      );
+      if (index.rolloutSessionIndexPath !== undefined) {
+        failureData = {
+          scanDir: registeredScan.scanDir,
+          scanId: registeredScan.scanId,
+          ...failureData,
+          ...index,
+        };
       }
     }
   }

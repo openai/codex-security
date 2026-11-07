@@ -1,9 +1,10 @@
 import { hash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import type { JsonObject } from "../src/config.js";
+import { readRolloutSessionIndex } from "../src/rollout-session-index.js";
 import { copyCompletedScan } from "./plugin-root.js";
 import { mockWorkbench, TestClient } from "./support/api-client.js";
 import {
@@ -12,6 +13,7 @@ import {
   scanRuntimeDependencies,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { jsonLines } from "./support/json.js";
 import { writeSession } from "./support/usage-rollout.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -142,9 +144,10 @@ test.each([
   "post-turn-cancel",
   "transport-error",
   "resumed",
+  "resumable",
   "accounting-error",
 ] as const)(
-  "preserves a sealed scan and its %s outcome while finalizing usage",
+  "preserves a saved scan and its %s outcome while finalizing usage",
   async (scenario) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -157,8 +160,10 @@ test.each([
     );
     const report = "# Sealed scan report\n";
     await writeFile(join(scanDir, "report.md"), report);
-    if (scenario === "resumed")
-      await writeSession(codexHome, "thread-1", {}, { cwd: scanDir });
+    const rollout =
+      scenario === "resumed" || scenario === "resumable"
+        ? await writeSession(codexHome, "thread-1", {}, { cwd: scanDir })
+        : undefined;
     const controller = new AbortController();
     const commands: Array<readonly string[]> = [];
     const warnings: string[] = [];
@@ -198,7 +203,28 @@ test.each([
         }),
         resumeThread: (threadId) => ({
           id: threadId,
-          runStreamed: async () => ({ events: events() }),
+          runStreamed: async (prompt) => {
+            if (scenario === "resumable") {
+              const timestamp = new Date().toISOString();
+              const later = new Date(Date.now() + 60_000).toISOString();
+              const rows = [
+                [timestamp, "task_started"],
+                [timestamp, "user_message", prompt],
+                [timestamp, "agent_message", "diagnostic from this attempt"],
+                [timestamp, "turn_aborted"],
+                [later, "task_started"],
+                [later, "agent_message", "private later turn"],
+              ].map(([timestamp, type, message]) => ({
+                type: "event_msg",
+                timestamp,
+                payload: { type, message },
+              }));
+              await appendFile(rollout!, jsonLines(rows) + "\n");
+              // The synthetic turn must end after its recorded input.
+              setSystemTime(Date.parse(timestamp) + 1000);
+            }
+            return { events: events() };
+          },
         }),
       }),
       runWorkbench: async (options, args, input): Promise<JsonObject> => {
@@ -221,7 +247,10 @@ test.each([
             expect(options.signal).toBeUndefined();
           return {
             scan: {
-              progress: { status: "complete" },
+              scanId: "scan_example_001",
+              progress: {
+                status: scenario === "resumable" ? "running" : "complete",
+              },
               usage: {
                 completion: {
                   threadId: "completion-thread",
@@ -245,9 +274,10 @@ test.each([
       const failure = await client
         .run(repository, {
           mode: "deep",
-          ...(scenario === "resumed"
+          ...(rollout !== undefined
             ? { resumeScanId: "scan_example_001", outputDir: scanDir }
             : {}),
+          retainRolloutSessions: scenario === "resumable",
           signal: controller.signal,
           onWarning: (warning) => {
             warnings.push(warning);
@@ -274,7 +304,7 @@ test.each([
         (args) => args[0] === "finalize-scan-usage",
       );
       expect(finalization).toEqual(
-        scenario === "transport-error"
+        scenario === "transport-error" || scenario === "resumable"
           ? []
           : [
               [
@@ -296,6 +326,23 @@ test.each([
             ],
       );
       expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+      if (scenario === "resumable") {
+        expect(commands.some((args) => args[0] === "cancel-scan")).toBe(false);
+        const index = await readRolloutSessionIndex(
+          scanDir,
+          "scan_example_001",
+        );
+        const segment = index?.sessions.find(
+          (entry) => entry.threadId === "thread-1",
+        )?.eventSegments?.[0];
+        expect(segment).toBeDefined();
+        const retained = await readFile(
+          join(scanDir, "artifacts/rollout-sessions", segment!.path),
+          "utf8",
+        );
+        expect(retained).toContain("diagnostic from this attempt");
+        expect(retained).not.toContain("private later turn");
+      }
       expect(warnings).toEqual(
         scenario === "accounting-error"
           ? [`Could not finalize scan token usage: ${accountingFailure}`]
@@ -303,6 +350,7 @@ test.each([
       );
       expect(await readFile(join(scanDir, "report.md"), "utf8")).toBe(report);
     } finally {
+      if (scenario === "resumable") setSystemTime();
       await client.close();
     }
   },
