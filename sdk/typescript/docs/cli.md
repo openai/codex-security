@@ -254,8 +254,8 @@ codex-security scan . --provider cheaperinference --model gpt-5.4
 
 ### Hugging Face compatibility
 
-The bundled Codex 0.166.0 scanner sends its scan-completion tool inside a
-`namespace` and can request `web_search`. Hugging Face's published Responses
+In compatibility testing, Codex 0.166.0 sent its scan-completion tool inside a
+`namespace` and could request `web_search`. Hugging Face's published Responses
 implementation accepts `function` and remote `mcp` tool declarations. A named
 Hugging Face scan provider is deferred until the scanner and router can exchange
 the tools a complete scan requires. [Hugging Face's implementation notes](https://huggingface.co/docs/inference-providers/en/guides/gpt-oss#responses-api)
@@ -974,16 +974,17 @@ executable outside all saved scan targets. If a historical target includes the
 available Git installation, use `codex-security dedupe --scan SCAN_ID` with an
 explicit saved scan ID. Exact-path `latest` lookup still works without Git.
 
-Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
-`--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are
-rejected, including a `--model` or `--effort` flag plus its native equivalent.
+Repeat `--codex KEY=VALUE` for supported native settings. For example,
+`--codex "model_reasoning_effort='high'"` passes the TOML string `high` in Bash,
+Command Prompt, and PowerShell. Repeated or conflicting keys are rejected,
+including a `--model` or `--effort` flag plus its native equivalent.
 
 To select a Codex file profile, put its settings in
 `$CODEX_HOME/review.config.toml` (or `~/.codex/review.config.toml` when
 `CODEX_HOME` is unset), then run:
 
 ```bash
-npx @openai/codex-security scan . --codex 'profile="review"'
+npx @openai/codex-security scan . --codex "profile='review'"
 ```
 
 In the SDK, set `codexOverrides: { profile: "review" }`. In a project config,
@@ -1009,11 +1010,11 @@ Multi-agent v2 must remain enabled; `agents.max_threads` is unsupported.
 
 ```bash
 codex-security patch "Security issue" --model gateway-model \
-  --codex 'model_provider="gateway"' \
-  --codex 'model_providers.gateway.name="Gateway"' \
-  --codex 'model_providers.gateway.base_url="https://gateway.example.test/v1"' \
-  --codex 'model_providers.gateway.wire_api="responses"' \
-  --codex 'model_providers.gateway.env_key="GATEWAY_API_KEY"'
+  --codex "model_provider='gateway'" \
+  --codex "model_providers.gateway.name='Gateway'" \
+  --codex "model_providers.gateway.base_url='https://gateway.example.test/v1'" \
+  --codex "model_providers.gateway.wire_api='responses'" \
+  --codex "model_providers.gateway.env_key='GATEWAY_API_KEY'"
 ```
 
 Set the provider's key environment variable before running. Patching and
@@ -1045,7 +1046,7 @@ starts, outcomes, duration, and usage coverage; see
 [telemetry and measurement](telemetry.md).
 
 Disable Codex usage analytics and built-in metrics with
-`--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
+`--codex analytics.enabled=false`. The setting carries into `scan --patch`,
 patch-risk assessment, and Deep Scan discovery workers, including
 resumed workers. Selected-profile settings take precedence over root settings.
 Explicit OpenTelemetry settings also carry into scan patches and Deep Scan

@@ -53,7 +53,7 @@ An AWS inference request can succeed even when the bundled metadata is incomplet
 Bedrock defaults `model_reasoning_summary` to `none` because some models reject
 `reasoning.summary`. This setting reaches Deep Scan discovery workers,
 including resumes. To request summaries from a model that supports them, add
-`--codex 'model_reasoning_summary="auto"'` to the scan command. This explicit
+`--codex "model_reasoning_summary='auto'"` to the scan command. This explicit
 override takes precedence over the default and does not change reasoning effort.
 See [native configuration overrides](../sdk/typescript/docs/cli.md#runtime-configuration-and-worker-limits)
 for the `--codex KEY=VALUE` syntax.
