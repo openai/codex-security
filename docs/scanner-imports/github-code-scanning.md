@@ -5,8 +5,7 @@ alert and the instance GitHub returned for the selected ref.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the matching
-checkout, set the repository and source key. For GitHub Enterprise, export
+In the matching checkout, set the repository and source key. For GitHub Enterprise, export
 `GH_HOST` with your hostname first. For a repeat import, use the exact source
 key from your previous preview, including case.
 
@@ -89,6 +88,8 @@ console.log(prepared.preview);
 ```
 
 After reviewing the Cloud preview, call `await prepared.publish()` to confirm.
+If you supply normalized evidence that keeps the collector record in
+`source_data`, imports check its original repository against the destination.
 
 For local storage, call `normalizeGitHubCodeScanningAlerts(alerts, "local")` on
 the original alerts to retain evidence that exceeds Cloud limits. Pass the result

@@ -6,8 +6,7 @@ summaries from an environment dedicated to one repository.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report) and open the matching
-checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which
+Open the matching checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which
 repository supplied the scanned code, including the archive for an S3 source.
 For a finding from another scanner, you can also check its repository in that
 scanner. [AWS Continuum code sources](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html)
@@ -78,9 +77,9 @@ repository name. The reader keeps that prefix. For local repeat imports, a summa
 
 ### Publish to your Cloud inbox
 
-Sign in to a workspace with the GitHub repository connected and private
-Continuum imports enabled. If you need locations, mitigation, or validation
-evidence, publish the detailed `get-code-finding` export first. A later upload
+For an inbox import, sign in to a Cloud workspace with the GitHub repository
+connected and support for Continuum private import jobs. If you need locations,
+mitigation, or validation evidence, publish the detailed `get-code-finding` export first. A later upload
 with changed evidence for the same ARN can return `source_order_unknown`.
 Preview the file and source key using your connected repository URL.
 

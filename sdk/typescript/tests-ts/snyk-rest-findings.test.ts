@@ -19,7 +19,6 @@ import {
 } from "./support/snyk-rest-fixtures.js";
 
 const environment = {
-  CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
   SNYK_TOKEN: "test-token",
 };
 
@@ -184,7 +183,7 @@ test.each([
       collectSnykIssues(
         { ...options, apiOrigin, token },
         {
-          environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+          environment: {},
           fetch: async (url, init) => {
             seen.push(url.origin);
             expect(new Headers(init.headers).get("authorization")).toBe(

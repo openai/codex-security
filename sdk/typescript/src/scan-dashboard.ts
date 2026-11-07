@@ -26,6 +26,7 @@ import {
   formatScanCosts,
   formatScanCostTokens,
   formatTokenUsage,
+  type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
 import { formatDeepScanReviews } from "./scan-progress.js";
@@ -92,6 +93,7 @@ interface ScanDashboardOptions {
   componentName?: string;
   mode?: ScanMode;
   model?: ScanModelConfiguration;
+  pricingContext?: ScanPricingContext;
   maxCostUsd?: number;
   showCost?: boolean;
   clock: DashboardClock;
@@ -1165,10 +1167,11 @@ export class ScanDashboard {
     if (
       this.#cost === null &&
       this.#options.maxCostUsd === undefined &&
-      estimateScanCost(this.#options.model?.model, {
-        input_tokens: 0,
-        output_tokens: 0,
-      }) === null
+      estimateScanCost(
+        this.#options.model?.model,
+        { input_tokens: 0, output_tokens: 0 },
+        this.#options.pricingContext,
+      ) === null
     ) {
       return [];
     }

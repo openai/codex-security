@@ -4,6 +4,19 @@ import { isBoxedPrimitive, isProxy } from "node:util/types";
 import type { ExternalFindings } from "./external-findings.js";
 import { canonicalJson, cloneWithoutGetters } from "./record.js";
 
+const changedCloudProjections = new WeakSet<ExternalFindings>();
+
+// Readers mark selections whose original Cloud request can have different evidence.
+export function markPreviousCloudProjection(findings: ExternalFindings): void {
+  changedCloudProjections.add(findings);
+}
+
+export function hasPreviousCloudProjection(
+  findings: ExternalFindings,
+): boolean {
+  return changedCloudProjections.has(findings);
+}
+
 export interface LegacyReaderSelection {
   sourceFindingIds: string[];
   snapshot?: ExternalFindings;

@@ -699,6 +699,7 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
     for (const model of [
       "gpt-6-astra",
+      "gpt-6-cyber",
       "gpt-6-sol",
       "gpt-6.1-sol",
       "gpt-6-luna",
@@ -1175,6 +1176,7 @@ describe("CodexSecurity orchestration", () => {
         CODEX_API_KEY: "synthetic-codex-key",
         OPENROUTER_API_KEY: "synthetic-openrouter-key",
         FIREWORKS_API_KEY: "synthetic-fireworks-key",
+        AWS_DEFAULT_REGION: "us-east-2",
         ...credentials,
       };
       const client = new TestClient(
@@ -1245,11 +1247,13 @@ describe("CodexSecurity orchestration", () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const createCodex = mock(completedCodex(root));
     const onAuthentication = mock<(selected: ScanAuthentication) => void>();
+    const onCost = mock<(cost: ScanCost) => void>();
+    let savedCost: ScanCost | undefined;
     let savedRecipe: Record<string, unknown> | undefined;
     const environment = {
       OPENAI_API_KEY: "synthetic-openai-key-must-not-be-used",
       AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
-      AWS_REGION: "us-east-2",
+      AWS_REGION: "us-gov-west-1",
     };
     const client = new TestClient(
       {
@@ -1258,13 +1262,13 @@ describe("CodexSecurity orchestration", () => {
           model_provider: "openai",
           profiles: {
             bedrock: {
-              model: "openai.gpt-5.6-luna",
+              model: "openai.gpt-5.6-cyber",
               model_provider: "amazon-bedrock",
             },
           },
           model_providers: {
             "amazon-bedrock": {
-              aws: { region: "us-east-2", profile: "security-prod" },
+              aws: { region: "us-gov-east-1", profile: "security-prod" },
             },
           },
         },
@@ -1280,6 +1284,9 @@ describe("CodexSecurity orchestration", () => {
         ): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
             savedRecipe = JSON.parse(input!).recipe;
+          } else if (args[0] === "complete-scan") {
+            const costJson = args[args.indexOf("--cost-json") + 1]!;
+            savedCost = JSON.parse(costJson).cost;
           }
           return mockWorkbench(args, input);
         },
@@ -1292,7 +1299,7 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.preflight(repository, { maxCostUsd: 1 }),
     ).resolves.toMatchObject({
-      model: "openai.gpt-5.6-luna",
+      model: "openai.gpt-5.6-cyber",
       modelProvider: "amazon-bedrock",
       maxCostUsd: 1,
       authentication: {
@@ -1304,6 +1311,7 @@ describe("CodexSecurity orchestration", () => {
     const result = await client.run(repository, {
       maxCostUsd: 1,
       onAuthentication,
+      onCost,
     });
 
     expect(onAuthentication.mock.lastCall?.[0]).toEqual({
@@ -1313,7 +1321,7 @@ describe("CodexSecurity orchestration", () => {
     });
     expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
       AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
-      AWS_REGION: "us-east-2",
+      AWS_REGION: "us-gov-west-1",
     });
     expect(createCodex.mock.lastCall?.[0]?.config).toMatchObject({
       model_reasoning_summary: "none",
@@ -1322,26 +1330,74 @@ describe("CodexSecurity orchestration", () => {
     expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
       "OPENAI_API_KEY",
     );
-    expect(result.cost).toMatchObject({ model: "openai.gpt-5.6-luna" });
+    expect(result.turnResult.bedrockRegion).toBe("us-gov-east-1");
+    expect(result.cost).toMatchObject({
+      model: "openai.gpt-5.6-cyber",
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      outputTokens: 3,
+      estimatedUsd: 0.000442125,
+      estimatedUsdRange: { min: 0.000442125, max: null },
+      pricing: {
+        usdPerMillionTokens: {
+          input: 16.875,
+          cacheRead: 1.6875,
+          cacheWrite: 21.09375,
+          output: 101.25,
+        },
+      },
+    });
+    expect(onCost.mock.lastCall?.[0]).toEqual(result.cost!);
+    expect(savedCost).toEqual(result.cost!);
     expect(savedRecipe).toMatchObject({
       config: {
         model_provider: "openai",
         profile: "bedrock",
         profiles: {
           bedrock: {
-            model: "openai.gpt-5.6-luna",
+            model: "openai.gpt-5.6-cyber",
             model_provider: "amazon-bedrock",
           },
         },
         model_providers: {
           "amazon-bedrock": {
-            aws: { region: "us-east-2", profile: "security-prod" },
+            aws: { region: "us-gov-east-1", profile: "security-prod" },
           },
         },
       },
     });
     await client.close();
   });
+
+  test.each([
+    ["missing", {}],
+    [
+      "unsupported",
+      { AWS_REGION: "us-gov-west-1", AWS_DEFAULT_REGION: "us-gov-east-1" },
+    ],
+  ] as const)(
+    "rejects Bedrock budgets when the billing region is %s",
+    async (_reason, environment) => {
+      const { repository } = await repositoryDirectories();
+      const { client, prepareRuntime } = localClient(
+        {
+          codexOverrides: {
+            model: "openai.gpt-5.6-cyber",
+            model_provider: "amazon-bedrock",
+          },
+        },
+        environment,
+      );
+      await expect(
+        client.preflight(repository, { maxCostUsd: 1 }),
+      ).rejects.toThrow("cost limit is not available for the configured model");
+      await expect(client.preflight(repository)).resolves.toMatchObject({
+        model: "openai.gpt-5.6-cyber",
+      });
+      expect(prepareRuntime).not.toHaveBeenCalled();
+      await client.close();
+    },
+  );
 
   test.each(["standard", "deep"] as const)(
     "identifies Bedrock account advisory applicability in the %s parent prompt",
@@ -14424,13 +14480,20 @@ if __name__ == "__main__":
     }
   });
 
-  test("reports unpriced model usage without letting its observer stop the scan", async () => {
+  test("reports unpriced GCP usage without letting its observer stop the scan", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const usages: unknown[] = [];
     const observerErrors: string[] = [];
     const commands: Array<readonly string[]> = [];
     const client = new TestClient(
-      { codexOverrides: { model: "synthetic-unpriced-model" } },
+      {
+        codexOverrides: {
+          model: "gpt-6-astra",
+          model_provider: "openai",
+          profile: "review",
+          profiles: { review: { model_provider: "gcp" } },
+        },
+      },
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench(commands),
@@ -14438,6 +14501,13 @@ if __name__ == "__main__":
       },
     );
     try {
+      await expect(
+        client.preflight(repository, { maxCostUsd: 1 }),
+      ).rejects.toThrow("cost limit is not available for the configured model");
+      await expect(client.preflight(repository)).resolves.toMatchObject({
+        model: "gpt-6-astra",
+        modelProvider: "gcp",
+      });
       const result = await client.run(repository, {
         onUsage: async (usage) => {
           usages.push(usage);
@@ -14470,8 +14540,15 @@ if __name__ == "__main__":
     }
   });
   const prices = [
-    { model: "gpt-6-astra", min: 0.000232, max: 0.000429 },
-    { model: "gpt-5.6-cyber", min: 0.0003275, max: null },
+    { model: "gpt-6-astra", provider: "openai", min: 0.000232, max: 0.000429 },
+    { model: "gpt-6-cyber", provider: "openai", min: 0.000464, max: null },
+    { model: "gpt-5.6-cyber", provider: "openai", min: 0.0003275, max: null },
+    {
+      model: "openai/gpt-oss-120b-maas",
+      provider: "gcp",
+      min: 0.00000198,
+      max: 0.00000198,
+    },
   ];
   test.each(prices)("tracks live and saved $model costs", async (price) => {
     const { model, min, max } = price;
@@ -14488,6 +14565,7 @@ if __name__ == "__main__":
           profiles: {
             review: {
               model,
+              model_provider: price.provider,
               model_reasoning_effort: "high",
             },
           },

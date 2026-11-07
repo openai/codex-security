@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { parse } from 'yaml';
-import { parseInputs, scanArguments } from '../src/inputs.js';
+import { parseInputs, scanArguments } from '../src/inputs.ts';
 
 test('Bedrock OIDC example scopes temporary credentials to the native scan step', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');

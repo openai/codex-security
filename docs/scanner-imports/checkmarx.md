@@ -7,7 +7,7 @@ self-managed CxSAST scan (XML). Both formats support gzip. If you need the repor
 
 ## Preview, import and verify
 
-[Enable external imports](README.md#preview-a-report). From the matching checkout, preview the report with its verified Git URL.
+From the matching checkout, preview the report with its verified Git URL.
 Choose a source key for the product, tenant or instance, project and ref.
 Reuse it for later exports from that stream.
 
@@ -41,8 +41,9 @@ Python 3.10+ interpreter and vendor tools installed outside the scanned source t
   CxFlow fetches by ID and exports the full XML even when issue-tracker filters are set.
   Session credentials require confirmation for that server. [CxSAST All Scans](https://docs.checkmarx.com/en/34965-46419-viewing-results-from-all-scans.html)
 
-For a subset, an older CLI, or a custom runtime, supply a native export from
-your usual environment. Keep reports in a private directory outside the checkout.
+If you need a subset or your tools differ from the collector requirements
+above, supply a native export from your usual environment. Keep reports in
+a private directory outside the checkout.
 [Supported sign-in and collection settings](../../plugins/codex-security/skills/publish-findings/references/checkmarx-import.md).
 
 ## Export one scan manually

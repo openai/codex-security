@@ -5,6 +5,7 @@ import { isBoxedPrimitive, isDate, isProxy } from "node:util/types";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
+  cloudRepositoryUrlKey,
   CloudEvidenceDepthError,
   exportedGitHubRecord,
   previousGitHubExclusion,
@@ -78,11 +79,8 @@ function codeScanningPrefix(
     return `${host}/${name}/${alert}/`;
 }
 
-function codeScanningFinding(record: Record<string, unknown>): {
-  source_finding_id: string;
-  evidence: unknown;
-} {
-  const repository = repositoryName(record["repository"]);
+function codeScanningSource(record: Record<string, unknown>) {
+  const name = repositoryName(record["repository"]);
   const alert = asRecord(record["alert"]);
   const number = record["number"];
   if (
@@ -99,11 +97,20 @@ function codeScanningFinding(record: Record<string, unknown>): {
   if (!url || url !== alert["html_url"])
     throw new Error("GitHub alert URL must match the original alert.");
   const link = sourceUrl(url);
-  const prefix = codeScanningPrefix(link, repository, number);
+  const prefix = codeScanningPrefix(link, name, number);
   if (!prefix)
     throw new Error(
       "GitHub alert URL does not match the selected repository and alert.",
     );
+  const repository = { url: `${link.origin}/${name}`, name };
+  return { alert, number, prefix, url, repository };
+}
+
+function codeScanningFinding(record: Record<string, unknown>): {
+  source_finding_id: string;
+  evidence: unknown;
+} {
+  const { alert, number, prefix, url, repository } = codeScanningSource(record);
   const rule = asRecord(alert["rule"]);
   const instance = asRecord(alert["most_recent_instance"]);
   const ref = text(instance?.["ref"]);
@@ -148,10 +155,7 @@ function codeScanningFinding(record: Record<string, unknown>): {
       source_data: record,
       details: {
         kind: "sast",
-        repository: {
-          url: `${link.origin}/${repository}`,
-          name: repository,
-        },
+        repository,
         // Dismissal covers every branch; detection state belongs to the selected ref.
         source_status:
           alert["state"] === "dismissed"
@@ -176,11 +180,8 @@ function advisorySourceId(
   return `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`;
 }
 
-function advisoryFinding(record: Record<string, unknown>): {
-  source_finding_id: string;
-  evidence: unknown;
-} {
-  const repository = repositoryName(record["repository"]);
+function advisorySource(record: Record<string, unknown>) {
+  const name = repositoryName(record["repository"]);
   const advisory = asRecord(record["advisory"]);
   const id = text(record["ghsaId"]);
   const selection = record["selection"];
@@ -205,7 +206,7 @@ function advisoryFinding(record: Record<string, unknown>): {
     selection === "global" && parsedUrl.host === "github.com";
   const expectedPath =
     selection === "repository"
-      ? `/${repository}/security/advisories/${id}`
+      ? `/${name}/security/advisories/${id}`
       : `/advisories/${id}`;
   if (
     !host ||
@@ -215,6 +216,16 @@ function advisoryFinding(record: Record<string, unknown>): {
     throw new Error(
       "GitHub advisory URL does not match the selected source and GHSA ID.",
     );
+  const repository = { url: `${origin}/${name}`, name };
+  return { advisory, id, selection, url, host, repository } as const;
+}
+
+function advisoryFinding(record: Record<string, unknown>): {
+  source_finding_id: string;
+  evidence: unknown;
+} {
+  const { advisory, id, selection, url, host, repository } =
+    advisorySource(record);
   const vulnerabilities =
     advisory["vulnerabilities"] === null ? [] : advisory["vulnerabilities"];
   if (!Array.isArray(vulnerabilities))
@@ -250,7 +261,7 @@ function advisoryFinding(record: Record<string, unknown>): {
   });
   const cwes = Array.isArray(advisory["cwes"]) ? advisory["cwes"] : [];
   return {
-    source_finding_id: advisorySourceId(host, selection, repository, id),
+    source_finding_id: advisorySourceId(host, selection, repository.name, id),
     evidence: {
       title: text(advisory["summary"]) ?? id,
       severity: severity(advisory["severity"]),
@@ -263,14 +274,7 @@ function advisoryFinding(record: Record<string, unknown>): {
       details: {
         kind: "advisory",
         advisory: { source: selection },
-        ...(selection === "repository"
-          ? {
-              repository: {
-                url: `${origin}/${repository}`,
-                name: repository,
-              },
-            }
-          : {}),
+        ...(selection === "repository" ? { repository } : {}),
         source_status: text(advisory["withdrawn_at"])
           ? "withdrawn"
           : (text(advisory["state"]) ??
@@ -282,6 +286,45 @@ function advisoryFinding(record: Record<string, unknown>): {
       },
     },
   };
+}
+
+/** Keep the repository from a retained collector export when SDK callers supply their own projection. */
+export function retainedGitHubRepository(
+  { evidence }: ExternalFinding,
+  repositoryKey = cloudRepositoryUrlKey,
+): string | undefined {
+  const data = evidence.source_data;
+  if (!data?.["url"] || !data["repository"]) return;
+  let source;
+  if (
+    data["source"] === "github-code-scanning" &&
+    data["number"] !== undefined &&
+    asRecord(data["alert"])?.["html_url"]
+  ) {
+    source = codeScanningSource(data);
+  } else if (
+    data["source"] === "github-security-advisory" &&
+    data["ghsaId"] &&
+    data["githubHost"] &&
+    data["selection"] &&
+    asRecord(data["advisory"])?.["html_url"]
+  ) {
+    source = advisorySource(data);
+    if (source.selection === "global") {
+      if (evidence.details?.repository)
+        throw new CodexSecurityError(
+          "Global advisory evidence cannot claim a source repository.",
+        );
+      return;
+    }
+  } else return;
+  const native = source.repository.url;
+  const projected = evidence.details?.repository?.url;
+  if (projected && repositoryKey(projected) !== repositoryKey(native))
+    throw new CodexSecurityError(
+      "The normalized repository does not match the original GitHub finding.",
+    );
+  return native;
 }
 
 function mapRecord(input: unknown) {

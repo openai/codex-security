@@ -8,9 +8,9 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
-import { parseInputs, scanArguments } from '../src/inputs.js';
-import { analyzeResults } from '../src/results.js';
-import { captureRunnerPath, checkPython, checkSandbox, resolveTool, runtimeEnvironment, SandboxUnavailableError, writeRuntimeLauncher } from '../src/runtime.js';
+import { parseInputs, scanArguments } from '../src/inputs.ts';
+import { analyzeResults } from '../src/results.ts';
+import { captureRunnerPath, checkPython, checkSandbox, resolveTool, runtimeEnvironment, SandboxUnavailableError, writeRuntimeLauncher } from '../src/runtime.ts';
 import runtimeManifest from '../runtime/package.json' with { type: 'json' };
 
 const [candidatePackage, candidateVersion] = process.argv.slice(2);
