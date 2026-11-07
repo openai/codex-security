@@ -51,11 +51,19 @@ const assets = new Map([
   ],
 ]);
 
+const MAX_JSON_BYTES = 64 * 1024;
+
 async function readBody(request) {
   if (!request.headers["content-type"]?.startsWith("application/json"))
     throw new HttpError(415, "Send a JSON document.");
   const chunks = [];
-  for await (const chunk of request) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+    size += chunk.length;
+    if (size > MAX_JSON_BYTES)
+      throw new HttpError(413, "JSON documents must be 64 KiB or smaller.");
+    chunks.push(chunk);
+  }
   let value;
   try {
     value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -255,6 +263,8 @@ export function createApp() {
       }
       throw new HttpError(404, "Page not found.");
     } catch (error) {
+      if (error instanceof HttpError && error.status === 413)
+        response.shouldKeepAlive = false;
       respond(response, error instanceof HttpError ? error.status : 500, {
         error:
           error instanceof HttpError

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { test } from "node:test";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -65,7 +66,7 @@ async function app(t) {
     const cookie = response.headers.get("set-cookie").split(";")[0];
     return (path, options = {}) => request(path, { ...options, cookie });
   };
-  return { request, login };
+  return { request, login, origin };
 }
 
 function scenario(id, run) {
@@ -417,6 +418,42 @@ test("health, static assets, and every ordinary page are served", async (t) => {
     assert.ok(response.body.includes("Invoice Desk"));
   }
 });
+
+test(
+  "JSON requests accept 64 KiB and reject larger bodies",
+  { timeout: 5000 },
+  async (t) => {
+    const { origin } = await app(t);
+    const url = new URL("/api/login", origin);
+    const headers = { "Content-Type": "application/json" };
+    const credentials = JSON.stringify({
+      email: accounts.alex[0],
+      password: accounts.alex[1],
+      note: "é",
+    });
+    const atLimit =
+      credentials + " ".repeat(64 * 1024 - Buffer.byteLength(credentials));
+    const post = async (body) => {
+      const response = await fetch(url, { method: "POST", headers, body });
+      await response.text();
+      return response.status;
+    };
+    assert.equal(await post(atLimit), 200);
+    assert.equal(await post(atLimit + " "), 413);
+
+    // A chunked upload can receive the response before sending its final chunk.
+    const upload = httpRequest(url, { method: "POST", headers });
+    t.after(() => upload.destroy());
+    const response = once(upload, "response");
+    upload.write(atLimit);
+    upload.write(" ");
+    const [rejected] = await response;
+    assert.equal(rejected.statusCode, 413);
+    assert.equal(rejected.headers.connection, "close");
+    rejected.resume();
+    upload.end();
+  },
+);
 
 test("anonymous callers and incorrect passwords do not authenticate", async (t) => {
   const { request } = await app(t);
