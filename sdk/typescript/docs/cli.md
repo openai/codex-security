@@ -2564,8 +2564,10 @@ including code, HTML, and math, retain their original text.
 GITLAB_HOST=gitlab.example.com codex-security patch --scan SCAN_ID --create-pr
 ```
 
-Both providers return `pullRequest: { branch, url }`. Supplied-issue patching
-requires a clean tree. If publication fails, run the printed
+Both providers return `pullRequest: { branch, url }`. Saved-finding publication
+includes files changed and verified in the same patch turn. If a selected file
+already had local edits, the CLI keeps the patch in the working tree for review.
+Supplied-issue patching requires a clean tree. If publication fails, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
 commit and refuses changed branches. Retain the GitLab host setting on resume.
 

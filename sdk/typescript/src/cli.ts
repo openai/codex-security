@@ -6874,6 +6874,14 @@ export async function main(
             const patchBase =
               patchRiskBase ??
               (await snapshotPatchState(selected.repository, dependencies));
+            const publication =
+              options.createPr && selected.findings.length > 0
+                ? await prepareSavedPatchPublication(
+                    selected.repository,
+                    dependencies,
+                    patchBase,
+                  )
+                : undefined;
             const patches = await runFindingPatches(
               selected,
               options,
@@ -6884,6 +6892,7 @@ export async function main(
                 externalSandbox: options.externalSandbox,
                 validationPrompt,
                 verificationMode: options.verificationMode,
+                publication,
               },
             );
             exitCode = patchExitCode(patches);
@@ -6911,7 +6920,9 @@ export async function main(
             );
             let patchRisk: PatchRiskAssessment | undefined;
             if (patchRiskBase !== undefined) {
-              const files = verifiedPatchFiles(selected, patches);
+              const files = publication
+                ? [...publication.files.keys()]
+                : verifiedPatchFiles(selected, patches);
               if (files.length > 0) {
                 patchRisk = await runPatchRiskAssessment(
                   {
@@ -6926,11 +6937,11 @@ export async function main(
                 );
               }
             }
-            const pullRequest = options.createPr
+            const pullRequest = publication
               ? await createPatchPullRequest(
                   selected.repository,
                   selected.scanId,
-                  verifiedPatchFiles(selected, patches),
+                  publication,
                   errorOutput,
                   dependencies,
                   patchRisk,
@@ -8595,6 +8606,7 @@ function directPatchDigest(
 async function publishPatchBranch(
   repository: string,
   branch: string,
+  commit: string,
   body: string,
   stderr: Writable,
   dependencies: CliDependencies,
@@ -8614,7 +8626,20 @@ async function publishPatchBranch(
       body,
       publisher,
       pushBranch: async (branch) => {
-        await run("git", ["push", "--set-upstream", "origin", branch]);
+        await run("git", ["push", "origin", `${commit}:refs/heads/${branch}`]);
+        // A SHA refspec cannot set upstream implicitly.
+        await run("git", [
+          "config",
+          "--local",
+          `branch.${branch}.remote`,
+          "origin",
+        ]);
+        await run("git", [
+          "config",
+          "--local",
+          `branch.${branch}.merge`,
+          `refs/heads/${branch}`,
+        ]);
       },
     });
     stderr.write(`${publisher.label}: ${safePatchText(url)}\n`);
@@ -8662,7 +8687,14 @@ async function resumePatchPullRequest(
     PATCH_PR_BODY,
     patchPullRequestBodyKey(branch),
   ]);
-  return publishPatchBranch(repository, branch, body, stderr, dependencies);
+  return publishPatchBranch(
+    repository,
+    branch,
+    commit,
+    body,
+    stderr,
+    dependencies,
+  );
 }
 
 function verifiedPatchFiles(
@@ -8689,15 +8721,91 @@ function verifiedPatchFiles(
   });
 }
 
+interface SavedPatchPublication {
+  parent: string;
+  ignored: Set<string>;
+  worktree: string;
+  index: string;
+  /** Exact tree at the end of the finding turn that verified each path. */
+  files: Map<string, string>;
+}
+
+async function prepareSavedPatchPublication(
+  repository: string,
+  dependencies: CliDependencies,
+  base?: string | Map<string, string>,
+): Promise<SavedPatchPublication> {
+  const git = (args: string[], trim = true) =>
+    dependencies.runRepositoryCommand("git", args, repository, { trim });
+  return {
+    parent: await git(["rev-parse", "HEAD"]),
+    // Keep only names: ignored input contents are never added to a snapshot here.
+    ignored: new Set(
+      (
+        await git(
+          [
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+          ],
+          false,
+        )
+      )
+        .split("\0")
+        .filter(Boolean),
+    ),
+    worktree:
+      typeof base === "string"
+        ? base
+        : await snapshotPatchTree(repository, dependencies),
+    index: await git(["write-tree"]),
+    files: new Map(),
+  };
+}
+
+function patchTreeDiff(
+  repository: string,
+  dependencies: CliDependencies,
+  base: string,
+  head: string,
+  paths: readonly string[],
+): Promise<string> {
+  return dependencies.runRepositoryCommand(
+    "git",
+    [
+      "-c",
+      "core.quotePath=true",
+      "--literal-pathspecs",
+      "diff",
+      "--no-relative",
+      "--no-renames",
+      "--raw",
+      "--no-abbrev",
+      base,
+      head,
+      "--",
+      ...paths,
+    ],
+    repository,
+    { trim: false },
+  );
+}
+
 async function createPatchPullRequest(
   repository: string,
   patchId: string,
-  files: readonly string[],
+  selection: readonly string[] | SavedPatchPublication,
   stderr: Writable,
   dependencies: CliDependencies,
   patchRisk?: PatchRiskAssessment,
   introduction = PATCH_PR_BODY,
 ): Promise<{ branch: string; url: string } | undefined> {
+  const publication = "worktree" in selection ? selection : undefined;
+  const files = "files" in selection ? [...selection.files.keys()] : selection;
   if (files.length === 0) {
     stderr.write("No verified patch changes to publish.\n");
     return;
@@ -8710,6 +8818,25 @@ async function createPatchPullRequest(
       : `${introduction}\n\n## Patch risk assessment\n\n${patchRisk.summary}`;
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
+  const diff = (base: string, head: string, paths: readonly string[]) =>
+    patchTreeDiff(repository, dependencies, base, head, paths);
+  if (
+    publication &&
+    (await run(["rev-parse", "HEAD"])) !== publication.parent
+  ) {
+    throw new CodexSecurityError(
+      "The patch base changed during verification. Local edits were kept for review.",
+    );
+  }
+  if (
+    publication &&
+    ((await diff("HEAD", publication.worktree, files)) ||
+      (await diff("HEAD", publication.index, files)))
+  ) {
+    throw new CodexSecurityError(
+      "The selected patch files contain pre-existing changes. Local edits were kept for review.",
+    );
+  }
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
   );
@@ -8725,9 +8852,39 @@ async function createPatchPullRequest(
     ...files,
   ]);
   const commit = await run(["rev-parse", "HEAD"]);
+  if (publication) {
+    // Compare complete blob IDs, modes and paths before recording a resumable commit.
+    const groups = Map.groupBy(publication.files, ([, tree]) => tree);
+    const expected: string[] = [];
+    for (const [tree, entries] of groups) {
+      const delta = await diff(
+        publication.worktree,
+        tree,
+        entries.map(([path]) => path),
+      );
+      expected.push(...delta.split("\n").filter(Boolean));
+    }
+    const committed = await diff(commit + "^", commit, []);
+    if (
+      (await run(["rev-parse", commit + "^@"])) !== publication.parent ||
+      committed.split("\n").filter(Boolean).sort().join("\n") !==
+        expected.sort().join("\n")
+    ) {
+      throw new CodexSecurityError(
+        "The patch commit differs from the verified changes. The commit was kept locally for review.",
+      );
+    }
+  }
   await run(["config", "--local", patchCommitKey(branch), commit]);
   await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
-  return publishPatchBranch(repository, branch, body, stderr, dependencies);
+  return publishPatchBranch(
+    repository,
+    branch,
+    commit,
+    body,
+    stderr,
+    dependencies,
+  );
 }
 
 async function requireCleanPatchPullRequestBase(
@@ -8751,6 +8908,7 @@ async function changedPatchFiles(
   repository: string,
   base: string | Map<string, string>,
   dependencies: CliDependencies,
+  observedTree?: string,
 ): Promise<string[]> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
@@ -8758,10 +8916,19 @@ async function changedPatchFiles(
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
   }
-  const head = await snapshotPatchTree(repository, dependencies);
+  const head =
+    observedTree ?? (await snapshotPatchTree(repository, dependencies));
   const output = await dependencies.runRepositoryCommand(
     "git",
-    ["--literal-pathspecs", "diff", "--name-only", "-z", base, head],
+    [
+      "--literal-pathspecs",
+      "diff",
+      ...(observedTree === undefined ? [] : ["--relative", "--no-renames"]),
+      "--name-only",
+      "-z",
+      base,
+      head,
+    ],
     repository,
     { trim: false },
   );
@@ -9056,7 +9223,12 @@ async function runFindingPatches(
   configuration: SkillConfiguration,
   stderr: Writable,
   dependencies: CliDependencies,
-  options: Omit<SkillRunOptions, "directory" | "findings"> = {},
+  {
+    publication,
+    ...options
+  }: Omit<SkillRunOptions, "directory" | "findings"> & {
+    publication?: SavedPatchPublication;
+  } = {},
   interactive = true,
 ): Promise<FindingPatch[]> {
   if (selected.findings.length === 0) {
@@ -9087,8 +9259,10 @@ async function runFindingPatches(
     });
     let status: number;
     let changedFiles: string[];
+    let observedTree: string | undefined;
+    let base: string | Map<string, string>;
     try {
-      const base = await snapshotPatchState(selected.repository, dependencies);
+      base = await snapshotPatchState(selected.repository, dependencies);
       status = await runSkill(
         "fix-finding",
         [],
@@ -9109,10 +9283,16 @@ async function runFindingPatches(
       if (status === 130 || status === 143) {
         throw new CodexSecurityError("Patch operation was interrupted.");
       }
+      if (publication)
+        observedTree = await snapshotPatchTree(
+          selected.repository,
+          dependencies,
+        );
       changedFiles = await changedPatchFiles(
         selected.repository,
         base,
         dependencies,
+        observedTree,
       );
     } finally {
       progress.stop();
@@ -9167,6 +9347,48 @@ async function runFindingPatches(
       }
     }
 
+    if (
+      publication &&
+      observedTree !== undefined &&
+      patch.status === "verified"
+    ) {
+      const reported = verifiedPatchFiles(selected, [patch]);
+      const paths = changedFiles.filter((file) =>
+        reported.some((path) => !isOutsidePath(relative(path, file))),
+      );
+      if (paths.length === 0) {
+        patch = failed(
+          "The reported patch files contain no changes from this finding.",
+        );
+      } else if (paths.some((path) => publication.ignored.has(path))) {
+        patch = failed(
+          "A selected file was ignored and untracked before patching. Local edits were kept for review.",
+        );
+      } else if (typeof base === "string") {
+        for (const [previous, group] of Map.groupBy(
+          paths,
+          (path) => publication.files.get(path) ?? publication.worktree,
+        )) {
+          if (
+            await patchTreeDiff(
+              selected.repository,
+              dependencies,
+              previous,
+              base,
+              group,
+            )
+          ) {
+            patch = failed(
+              "The selected files contain earlier unverified changes. Local edits were kept for review.",
+            );
+            break;
+          }
+        }
+        if (patch.status === "verified") {
+          for (const path of paths) publication.files.set(path, observedTree);
+        }
+      }
+    }
     const title = safePatchText(finding.title);
     stderr.write(
       `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
@@ -11314,6 +11536,14 @@ async function executeScan(
       ),
     };
     try {
+      const publication =
+        (arguments_.createPr || patchSelection?.createPullRequest) &&
+        selected.findings.length > 0
+          ? await prepareSavedPatchPublication(
+              selected.repository,
+              dependencies,
+            )
+          : undefined;
       patches = await runFindingPatches(
         selected,
         {
@@ -11338,18 +11568,16 @@ async function executeScan(
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
+          publication,
         },
         progress?.interactive === true,
       );
       scanData = { ...scanData, patchSeverity: patchThreshold, patches };
-      if (
-        (arguments_.createPr || patchSelection?.createPullRequest) &&
-        patchExitCode(patches) === 0
-      ) {
+      if (publication && patchExitCode(patches) === 0) {
         const pullRequest = await createPatchPullRequest(
           selected.repository,
           selected.scanId,
-          verifiedPatchFiles(selected, patches),
+          publication,
           errorOutput,
           dependencies,
         );

@@ -1588,7 +1588,18 @@ describe("scan and patch workflow", () => {
               join(repository, "src", "finding-1.ts"),
               "fixed  \n",
             );
-            completePatches(args, output);
+            output!.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: ["src", "unrelated.ts"],
+                    verification: "Focused checks pass.",
+                  },
+                ],
+              }),
+            );
             return 0;
           },
           onRepositoryCommand: (
@@ -1599,6 +1610,29 @@ describe("scan and patch workflow", () => {
           ) => {
             expect(workingDirectory).toBe(repository);
             if (command === "git") {
+              if (args[0] === "push") {
+                const branch = git("symbolic-ref", "HEAD");
+                const verified = git("rev-parse", branch);
+                const later = git(
+                  "commit-tree",
+                  "HEAD^{tree}",
+                  "-p",
+                  verified,
+                  "-m",
+                  "Later commit",
+                );
+                git("update-ref", branch, later, verified);
+                try {
+                  return runGitRepositoryCommand(
+                    command,
+                    args,
+                    workingDirectory,
+                    commandOptions,
+                  );
+                } finally {
+                  git("update-ref", branch, verified, later);
+                }
+              }
               return runGitRepositoryCommand(
                 command,
                 args,
@@ -1616,6 +1650,9 @@ describe("scan and patch workflow", () => {
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(git("branch", "--show-current")).toBe("codex-security/patch-scan");
+      expect(git("rev-parse", "--abbrev-ref", "@{upstream}")).toBe(
+        "origin/codex-security/patch-scan",
+      );
       expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
         "src/finding-1.ts",
       );
@@ -1837,6 +1874,99 @@ describe("scan and patch workflow", () => {
       expect(onRepositoryCommand).not.toHaveBeenCalled();
     }
   });
+
+  test.each([
+    ["worktree", "pre-existing changes"],
+    ["index", "pre-existing changes"],
+    ["after verification", "differs from the verified changes"],
+    ["ignored input", "ignored and untracked before patching"],
+    ["earlier turn", "earlier unverified changes"],
+    ["parent commit", "base changed during verification"],
+  ] as const)(
+    "keeps local edits out of saved finding publication: %s",
+    async (when, diagnostic) => {
+      const repository = await temporaryDirectory(
+        "codex-security-publication-",
+      );
+      const git = repositoryGit(repository);
+      const path = "app.ts";
+      const result = resultWithFindings(
+        when === "earlier turn" ? ["high", "high"] : ["high"],
+      );
+      let turn = 0;
+      let pushed = false;
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        await writeFile(join(repository, path), "original\n");
+        await writeFile(
+          join(repository, ".gitignore"),
+          when === "ignored input" ? path + "\n" : "",
+        );
+        git("add", "--", ".");
+        git("commit", "-m", "Initial fixture");
+        if (when === "worktree" || when === "index") {
+          await writeFile(join(repository, path), "in progress\n");
+          if (when === "index") {
+            git("add", "--", path);
+            await writeFile(join(repository, path), "original\n");
+          }
+        }
+
+        const outcome = await runWorkflow(
+          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          {
+            currentDirectory: repository,
+            result,
+            onWorkbench: () => savedScan(result, "scan-1", repository),
+            onCodex: async (_args, output) => {
+              turn++;
+              const reported =
+                when === "earlier turn" && turn === 1 ? "other.ts" : path;
+              if (when === "ignored input")
+                await writeFile(join(repository, ".gitignore"), "");
+              if (when === "parent commit")
+                git("commit", "--allow-empty", "-m", "Separate commit");
+              if (reported !== path)
+                await writeFile(join(repository, path), "first turn\n");
+              await writeFile(join(repository, reported), `updated ${turn}\n`);
+              output!.stdout.write(
+                JSON.stringify({
+                  patches: [
+                    {
+                      occurrenceId: `occ_${turn}`,
+                      status: "verified",
+                      files: [reported],
+                      verification: "Focused checks pass.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+            onRepositoryCommand: async (cmd, args, cwd, options) => {
+              if (when === "after verification" && args[0] === "switch") {
+                await writeFile(join(repository, path), "later edit\n");
+              }
+              if (args[0] === "push" || cmd !== "git") pushed = true;
+              return runGitRepositoryCommand(cmd, args, cwd, options);
+            },
+          },
+        );
+        expect(outcome.exitCode).toBe(2);
+        expect(outcome.stderr).toContain(diagnostic);
+        expect(pushed).toBe(false);
+        if (when !== "after verification")
+          expect(git("branch", "--show-current")).toBe("main");
+        if (when === "index")
+          expect(git("show", ":" + path)).toBe("in progress");
+      } finally {
+        await rm(repository, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
     for (const status of ["blocked", "no_change", "outside"] as const) {
@@ -2627,12 +2757,16 @@ describe("scan and patch workflow", () => {
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
               if (args[0] === "remote") return origin;
+              if (
+                args[0] === "rev-parse" &&
+                (args[1] === "HEAD" || args[1] === "verified-commit^@")
+              )
+                return "verified-commit";
               if (args[0] === "push") {
                 expect(args).toEqual([
                   "push",
-                  "--set-upstream",
                   "origin",
-                  branch,
+                  `verified-commit:refs/heads/${branch}`,
                 ]);
                 commands.push("push");
               }
