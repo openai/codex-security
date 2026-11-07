@@ -161,6 +161,7 @@ test.each([
       await writeSession(codexHome, "thread-1", {}, { cwd: scanDir });
     const controller = new AbortController();
     const commands: Array<readonly string[]> = [];
+    const savedScanReads: { turnExited: boolean; signal?: AbortSignal }[] = [];
     const warnings: string[] = [];
     const originalFailure = new Error("Synthetic scan turn failure");
     const accountingFailure = "Synthetic accounting failure: token=fixture";
@@ -216,12 +217,10 @@ test.each([
         }
         if (args[0] === "prepare-scan-completion") throw originalFailure;
         if (args[0] === "get-scan") {
-          if (scenario === "resumed" && !turnExited) {
+          savedScanReads.push({ turnExited, signal: options.signal });
+          if (!turnExited) {
             return { scan: { progress: { status: "running" } } };
           }
-          expect(turnExited).toBe(true);
-          if (scenario !== "post-turn-error")
-            expect(options.signal).toBeUndefined();
           return {
             scan: {
               progress: { status: "complete" },
@@ -273,6 +272,12 @@ test.each([
       } else {
         expect(failure).toMatchObject({ message: originalFailure.message });
       }
+      // Attribution polling can read this record while the caller can still cancel.
+      // The terminal cleanup always reads the sealed state without that signal.
+      expect(savedScanReads.at(-1)).toEqual({
+        turnExited: true,
+        signal: undefined,
+      });
       const finalization = commands.filter(
         (args) => args[0] === "finalize-scan-usage",
       );

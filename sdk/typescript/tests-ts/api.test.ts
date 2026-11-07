@@ -84,7 +84,7 @@ import {
   runReadOnlyCodex,
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
-import { normalizeTarget } from "../src/targets.js";
+import { abortable, normalizeTarget } from "../src/targets.js";
 import {
   copyCompletedScan,
   copyCredentialTestPlugin,
@@ -3545,6 +3545,7 @@ if __name__ == "__main__":
     async (consolidating) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const updates: DeepScanProgress[] = [];
+      const progressReads: Array<readonly string[]> = [];
       const observerErrors: unknown[] = [];
       const warnings: string[] = [];
       const environment = { CODEX_CLI_PATH: process.execPath };
@@ -3558,8 +3559,8 @@ if __name__ == "__main__":
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
-          if (args[0] === "get-scan") {
-            expect(args).toContain("--progress-only");
+          if (args[0] === "get-scan" && args.includes("--progress-only")) {
+            progressReads.push(args);
             return {
               scan: {
                 progress: {
@@ -3594,6 +3595,12 @@ if __name__ == "__main__":
         }),
       ).rejects.toThrow("deep progress captured");
       await Bun.sleep(0);
+      expect(progressReads).toContainEqual([
+        "get-scan",
+        "--scan-id",
+        "scan_example_001",
+        "--progress-only",
+      ]);
       if (consolidating === true) {
         expect(updates).toEqual([
           { completed: 3, active: 2, maximum: 40, consolidating: true },
@@ -15361,6 +15368,31 @@ if __name__ == "__main__":
         );
         await writeFile(path, lines.join("\n"));
       };
+      // The SDK publishes indexed usage while independently checking native floors.
+      // Mirror each emitted rollout snapshot in the synthetic workbench.
+      const initialInput = 800;
+      const unpricedWorker = measuredScanUsage(100, 0, 10);
+      const mixedUsage = {
+        ...measuredScanUsage(
+          knownUsage.input_tokens + 100,
+          knownUsage.cached_input_tokens,
+          knownUsage.output_tokens + 10,
+        ),
+        threadCount: 2,
+        byRole: { workers: { threadCount: 1 } },
+        modelUsage: [
+          {
+            model: "gpt-5.6-sol",
+            ...measuredScanUsage(
+              knownUsage.input_tokens,
+              knownUsage.cached_input_tokens,
+              knownUsage.output_tokens,
+            ),
+          },
+          { model: "synthetic-unpriced-model", ...unpricedWorker },
+        ],
+      };
+      let indexedUsage = measuredScanUsage(initialInput, 0, 0);
       const client = new TestClient(
         {},
         {
@@ -15371,6 +15403,7 @@ if __name__ == "__main__":
           repositoryRevision: async () => "deadbeef",
           runWorkbench: async (_options, args, input) => {
             commands.push(args);
+            if (args[0] === "read-scan-usage") return indexedUsage;
             if (args[0] === "get-scan")
               return { scan: { id: "scan_example_001" } };
             if (args[0] === "complete-budget-exhausted-scan")
@@ -15388,16 +15421,17 @@ if __name__ == "__main__":
                 async function* events(): AsyncGenerator<ThreadEvent> {
                   if (raised) {
                     await writePricedUsage({
-                      input_tokens: 800,
+                      input_tokens: initialInput,
                       output_tokens: 0,
                     });
                   } else {
                     await writePricedUsage(knownUsage);
                     await writeUnpricedUsage();
+                    indexedUsage = mixedUsage;
                   }
                   yield { type: "thread.started", thread_id: "scan-thread" };
                   if (raised) {
-                    await increased;
+                    await abortable(() => increased, options.signal);
                     await writeUnpricedUsage();
                     const path = join(
                       codexHome,
@@ -15417,6 +15451,7 @@ if __name__ == "__main__":
                         },
                       }) + "\n",
                     );
+                    indexedUsage = mixedUsage;
                   }
                   await new Promise<void>((resolve) => {
                     if (options.signal.aborted) resolve();
@@ -15521,6 +15556,14 @@ if __name__ == "__main__":
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: async (_options, args, input) => {
         commands.push(args[0]!);
+        if (args[0] === "read-scan-usage")
+          return {
+            ...measuredScanUsage(1_250, 200, 30),
+            coverage: "partial",
+            threadCount: 1,
+            missingThreadCount: 1,
+            coverageScope: ["thread:scan-thread", "thread:worker-thread"],
+          };
         return mockWorkbench(args, input);
       },
       createCodex: codexFactory(runStreamed),

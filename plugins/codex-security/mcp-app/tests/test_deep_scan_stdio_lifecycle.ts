@@ -346,10 +346,12 @@ with sqlite3.connect(sys.argv[1]) as connection:
         scanId,
       ]);
       assert.equal(afterOwner.scan.progress.status, "complete");
+      const ownerInputTokens = mode === "native-owner-usage" ? 1010 : 10;
+      // The two completed discovery turns each report one additional input token.
       assert.equal(
         afterOwner.scan.usage.inputTokens,
-        mode === "native-owner-usage" ? 1010 : 10,
-        "completion accounts for the owning continuation, excluding later conversation work",
+        ownerInputTokens + 2,
+        "completion includes worker and owning-continuation usage, excluding later conversation work",
       );
       console.log("native owning continuation usage passed", mode, scanId);
       return;

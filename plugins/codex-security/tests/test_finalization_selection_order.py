@@ -224,7 +224,9 @@ def test_final_selection_follows_committed_reducer_chain(
         "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts WHERE worker_id = ?",
         (expected_worker,),
     ).fetchone()
-    run, scan = deep.require_running_deep_scan(workbench_db, scan_id)
+    run = deep.require_deep_scan_run(workbench_db, scan_id)
+    scan = deep.dependencies().require_scan(workbench_db, scan_id)
+    deep.require_running_deep_scan(run, scan)
 
     def observe_budget_draft(document, unmerged):
         assert document == json.loads(Path(accepted["accepted_result_path"]).read_bytes())

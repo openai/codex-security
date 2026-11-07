@@ -448,13 +448,7 @@ export class DeepScanCoordinator {
       });
       if (this.canceled || this.externallyFailed) return;
       this.state = completed;
-      await this.completeParentPublication();
-      if (this.canceled || this.externallyFailed) return;
-      this.log({
-        event: "coordinator_terminal",
-        scanId: this.state.scanId,
-        reason: loopResult.reason,
-      });
+      await this.completeParentPublication(loopResult.reason);
     } catch (error) {
       const cancellationPendingAtFailure =
         this.cancellationPersistence !== undefined;
@@ -668,17 +662,26 @@ export class DeepScanCoordinator {
       await this.completeParentPublication();
   }
 
-  private async completeParentPublication(): Promise<void> {
-    if (!this.options.onFinalized) return;
-    this.parentPublicationPending = true;
-    try {
-      await this.options.onFinalized(
-        cloneState(this.state),
-        this.publicationAbortController.signal,
-      );
-    } finally {
-      this.parentPublicationPending = false;
+  private async completeParentPublication(
+    reason = this.state.terminalReason,
+  ): Promise<void> {
+    if (this.options.onFinalized) {
+      this.parentPublicationPending = true;
+      try {
+        await this.options.onFinalized(
+          cloneState(this.state),
+          this.publicationAbortController.signal,
+        );
+      } finally {
+        this.parentPublicationPending = false;
+      }
     }
+    if (!this.canceled && !this.externallyFailed)
+      this.log({
+        event: "coordinator_terminal",
+        scanId: this.state.scanId,
+        reason: reason ?? undefined,
+      });
   }
   private stopLocally(): boolean {
     if (this.terminal) return false;

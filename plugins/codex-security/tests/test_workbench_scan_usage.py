@@ -2255,7 +2255,7 @@ def test_metadata_only_deep_owner_requires_direct_control_originator(
 
 
 def test_budget_keeps_measured_totals_when_a_started_worker_has_no_thread(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     counted = fixture.started_at + timedelta(microseconds=1)
     fixture.write_parent_rollout([_token_event(counted, 100, 10)])
     artifact = fixture.scan_dir / "artifacts" / "worker"
@@ -2282,7 +2282,7 @@ def test_budget_keeps_measured_totals_when_a_started_worker_has_no_thread(tmp_pa
 
 @pytest.mark.parametrize("resume", [False, True])
 def test_budget_distinguishes_fresh_retry_from_resumed_worker(tmp_path: Path, resume: bool) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     counted = fixture.started_at + timedelta(microseconds=1)
     worker = str(uuid.uuid4())
     artifact = fixture.scan_dir / "artifacts" / "worker"
@@ -2342,7 +2342,7 @@ def test_budget_counts_compressed_comparison_or_reports_partial_usage(
         from compression import zstd
     except ImportError:
         zstd = pytest.importorskip("backports.zstd")
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     counted = fixture.started_at + timedelta(microseconds=1)
     parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 100, 10)])
     comparison = _rollout(tmp_path, "comparison", [_token_event(counted, 10, 5)])
@@ -3242,7 +3242,7 @@ def test_completed_scan_reconciles_late_runtime_usage_envelopes(
 def test_model_artifact_worker_receipts_do_not_affect_saved_usage(
     tmp_path: Path, mode: str
 ) -> None:
-    fixture = _start_scan(tmp_path, mode=mode)
+    fixture = _start_scan(tmp_path, mode=mode, dedicated=mode == "deep")
     counted = fixture.started_at + timedelta(microseconds=1)
     directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
     directory.mkdir(parents=True)
@@ -3287,7 +3287,7 @@ def test_model_artifact_worker_receipts_do_not_affect_saved_usage(
 
 
 def test_deep_worker_receipt_storage_is_isolated_between_scans(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     counted = fixture.started_at + timedelta(microseconds=1)
     directory = _worker_usage_directory(fixture)
     directory.mkdir(parents=True)
@@ -3338,7 +3338,7 @@ def test_stopped_deep_scan_reconciles_cumulative_worker_receipts(
     native_worker_tokens: int | None,
     unmeasured_attempt: bool,
 ) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     counted = fixture.started_at + timedelta(microseconds=1)
     timestamp = counted.isoformat()
     directory = _worker_usage_directory(fixture)
@@ -3407,7 +3407,7 @@ def test_stopped_deep_scan_reconciles_cumulative_worker_receipts(
 def test_worker_receipts_preserve_cumulative_totals_and_known_cache_writes(
     tmp_path: Path, reverse_files: bool, native_workers: bool
 ) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     counted = fixture.started_at + timedelta(microseconds=1)
     directory = _worker_usage_directory(fixture)
     directory.mkdir(parents=True)
@@ -3476,7 +3476,7 @@ def test_worker_receipts_preserve_cumulative_totals_and_known_cache_writes(
 def test_stopped_deep_scan_reconciles_missing_sdk_receipts_with_native_usage(
     tmp_path: Path, native_state: str
 ) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     counted = fixture.started_at + timedelta(microseconds=1)
     directory = _worker_usage_directory(fixture)
     directory.mkdir(parents=True)
