@@ -20,7 +20,6 @@ import {
   workerGitEnvironment,
   workerRuntimeEnvironment,
   workerScanEnvironment,
-  externalImports,
   expectedGitEnvironment,
   restoreEnv,
 } from "./support/fake-codex-source.ts";
@@ -1056,12 +1055,20 @@ async function testReportOnlyComparison() {
       },
     });
     const input = "Compare the two supplied reports.";
+    const onThreadStarted = mock.fn();
+    const onUsage = mock.fn();
     const response = await executor.compareFindings(
       input,
       workingDirectory,
       new AbortController().signal,
       { type: "object", properties: { reviews: { type: "array" } } },
+      { attemptId: "fixture-comparison", onThreadStarted, onUsage },
     );
+    assert.equal(
+      onThreadStarted.mock.calls[0]?.arguments[0],
+      "fixture-thread-id",
+    );
+    assert.equal(onUsage.mock.calls[0]?.arguments[0]?.total_tokens, 2);
     assert.deepEqual(JSON.parse(response), { reviews: [] });
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.stdin, input);
@@ -1070,6 +1077,7 @@ async function testReportOnlyComparison() {
     assertConfigOverrides(invocation.argv, {
       model_reasoning_effort: "high",
       "responses_api_metadata.codex_security_worker_role": "compare",
+      "responses_api_metadata.codex_security_attempt_id": "fixture-comparison",
       "mcp_servers.cs_artifacts": undefined,
       "features.shell_tool": false,
       "features.image_generation": false,
@@ -1456,7 +1464,6 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
@@ -1632,6 +1639,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
           const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
+          const workerUsageDirectory = path.join(
+            fixture.root,
+            `state-${index}`,
+            "codex-home",
+            "worker-usage",
+            `scan-${index}`,
+          );
           const parentSandbox = {
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
@@ -1695,12 +1709,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             nativeProfile,
             profilePath,
             parentSandbox,
+            workerUsageDirectory,
             permissionProfile: {
               ...deniedWorkerPermissionProfile,
               filesystem: {
                 ...deniedWorkerPermissionProfile.filesystem,
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
+                [workerUsageDirectory]: { ".": "deny" },
                 [literalDeniedPath]: { ".": "deny" },
               },
             },
@@ -1995,6 +2011,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         path.join(fixture.root, `selected node ${index}`, "node"),
       );
 
+      await Promise.all(
+        settings.map(async (_, index) => {
+          const directory = path.join(
+            fixture.root,
+            `plugin-${index}`,
+            ".codex-plugin",
+          );
+          await mkdir(directory, { recursive: true });
+          await writeJson(path.join(directory, "plugin.json"), {
+            version: `9.9.${index}`,
+          });
+        }),
+      );
       const executors = settings.map(
         (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
@@ -2036,10 +2065,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         await Promise.all(
           executors.map((executor, index) => {
             // Snapshot each scan environment independently.
-            restoreEnv(
-              "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
-              externalImports[index].inherited,
-            );
             process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
             Object.assign(process.env, temporaryEnvironments[index]);
             process.env.CODEX_SECURITY_STATE_DIR = path.join(
@@ -2067,6 +2092,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             return executor.run(
               workerRequest(promptPath, workerDirectories[index], {
+                attemptId: `worker-${index}-discovery-${resumeThreadId ?? "new"}`,
+                workerUsageDirectory:
+                  workerConfigurations[index].workerUsageDirectory,
                 subagents,
                 resumeThreadId,
                 ...(resumeThreadId
@@ -2150,17 +2178,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
             workerConfigurations[index].knowledgePath,
           );
+          assert.equal(
+            selectedProvider.parentSandbox.literalFilesystemDenies.includes(
+              selectedProvider.workerUsageDirectory,
+            ),
+            false,
+          );
           const invocation = await readJson(workerLaunch.markerPath);
           assertFlagPair(invocation.argv, "--cd", workerDirectories[index]);
-          assert.equal(
-            invocation.runtimeEnvironment
-              .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
-            externalImports[index].override ?? externalImports[index].inherited,
-          );
-          assert.equal(
-            process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
-            externalImports.at(-1)!.inherited,
-          );
           if (
             process.platform === "win32" &&
             configuration === "" &&
@@ -2313,7 +2338,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 codex_security_surface: "plugin",
                 codex_security_command: "scan",
                 codex_security_scan_mode: "deep",
+                codex_security_plugin_version: `9.9.${index}`,
                 ...workerConfigurations[index].telemetry.responses_api_metadata,
+                codex_security_operation_id:
+                  selectedProvider.telemetry.responses_api_metadata
+                    ?.codex_security_operation_id ??
+                  `fixture-scan-${model ?? "inherited"}`,
+                codex_security_attempt_id: `worker-${index}-discovery-${resumeThreadId ?? "new"}`,
+                ...(selectedProvider.telemetry.responses_api_metadata
+                  ?.codex_security_attempt_id
+                  ? { codex_security_parent_attempt_id: `parent-${index}` }
+                  : {}),
                 codex_security_worker_role: "discovery",
               },
             },
@@ -3380,6 +3415,7 @@ async function testAbortPropagation() {
 
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
   await completedWorkerSettlesWithoutWaitingForProcessExit();
+  await completedWorkerSettlesWithoutWaitingForProcessExit(false, true);
   for (const resumed of [false, true]) {
     await completedWorkerSettlesWithoutWaitingForProcessExit(true, resumed);
   }
@@ -3467,6 +3503,10 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
       result.threadId,
       resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
     );
+    assert.equal(result.usage?.cache_write_input_tokens, 0);
+    assert.equal(result.usage?.cache_write_input_tokens_reported, false);
+    assert.equal(result.usage?.input_tokens, resumed ? 2 : 1);
+    assert.equal(result.usage?.total_tokens, resumed ? 4 : 2);
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--profile"), withProfile);
     assert.equal(invocation.argv.includes("resume"), resumed);

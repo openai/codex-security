@@ -1,3 +1,4 @@
+import { fixturePython as python } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, rm, symlink, watch, writeFile } from "node:fs/promises";
@@ -15,7 +16,6 @@ import {
 } from "./deep_scan_coordinator_fixture.ts";
 import { importSource } from "./import-module.ts";
 
-const python = process.env.PYTHON?.trim() || "python3";
 const pluginRoot = resolve(import.meta.dirname, "../..");
 const { checkFreshTarget } = await importSource("src/deep-scan/engine.ts", {
   loader: { ".md": "text" },
@@ -31,6 +31,45 @@ function inspect(run: DeepScanRunState) {
 }
 
 after(() => temporaryDirectories.cleanup());
+
+test("a directory tree emptied after registration dispatches no workers", async () => {
+  const fixture = await fixtureRun();
+  await mkdir(join(fixture.run.targetPath, "first", "nested"), {
+    recursive: true,
+  });
+  await mkdir(join(fixture.run.targetPath, "second"));
+  const source = join(fixture.run.targetPath, "first", "nested", "source.py");
+  await writeFile(source, "");
+  // A registration-time inventory count remains positive after its file is removed.
+  Object.assign(fixture.run, { scopeFileCount: 1 });
+  await rm(source);
+  const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+  const coordinator = createCoordinator(
+    fixture,
+    new FakeStore(fixture.run),
+    executor,
+    {
+      checkFreshTarget: inspect,
+    },
+  );
+  coordinator.start();
+  try {
+    const outcome = await Promise.race([
+      coordinator.settled(),
+      executor.discoveryStarted.promise.then(() =>
+        assert.fail("Empty directory tree dispatched a worker"),
+      ),
+    ]);
+    assert.equal(outcome.status, "failed", outcome.error);
+    assert.match(outcome.error ?? "", /target is empty.*no security audit/iu);
+    assert.equal(executor.discoveryCalls, 0);
+    await writeFile(source, "");
+    await inspect(fixture.run);
+  } finally {
+    coordinator.cancel("fixture cleanup");
+    await coordinator.settled();
+  }
+});
 
 test("only registered paths determine whether the target is empty", async () => {
   const { run } = await fixtureRun();
@@ -61,7 +100,7 @@ test("only registered paths determine whether the target is empty", async () => 
   );
   await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
 
-  // Any entry counts, even if normal source inventory would ignore it.
+  // A file counts even when normal source inventory would ignore it.
   await writeFile(join(right, ".gitignore"), "*");
   await inspect(run);
   run.includePaths.reverse();
@@ -165,14 +204,23 @@ test(
   },
 );
 
-for (const stop of ["cancellation", "deadline"]) {
+for (const [stop, nested] of [
+  ["cancellation", false],
+  ["deadline", false],
+  ["cancellation", true],
+  ["deadline", true],
+] as const) {
   test(
-    `a blocked directory read cannot delay ${stop}`,
+    `a blocked ${nested ? "nested " : ""}directory read cannot delay ${stop}`,
     { timeout: 15_000 },
     async (t) => {
       const fixture = await fixtureRun();
       const { run } = fixture;
       await mkdir(run.targetPath);
+      const blockedPath = nested
+        ? join(run.targetPath, "nested")
+        : run.targetPath;
+      if (nested) await mkdir(blockedPath);
       const scripts = join(fixture.pluginRoot, "scripts");
       await mkdir(scripts, { recursive: true });
       const markerDir = join(dirname(run.targetPath), "ready");
@@ -187,7 +235,7 @@ import os, runpy, sys, time
 from pathlib import Path
 real_scan = os.scandir
 def blocked(path):
-    if os.fsdecode(path) == ${JSON.stringify(run.targetPath)}:
+    if os.fsdecode(path) == ${JSON.stringify(blockedPath)}:
         Path(${JSON.stringify(markerDir)}, str(os.getpid())).touch()
         time.sleep(30)
     return real_scan(path)

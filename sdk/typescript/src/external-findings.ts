@@ -1,6 +1,6 @@
 import { isNativeError, isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
-import type { ExternalPublicationOptions } from "./external-findings-publish.js";
+import type { LocalExternalImportOptions } from "./external-findings-import.js";
 import {
   checkEmittedJsonNumber,
   checkReportNumber,
@@ -217,14 +217,23 @@ export interface ExternalPublicationInput {
 
 /** Capture the caller's import settings before reading an export or resolving its destination. */
 export function snapshotImportOptions<
-  P extends ExternalPublicationOptions["provider"],
+  P extends LocalExternalImportOptions["provider"],
 >({
   repository,
   provider,
   sourceKey,
   sourceRepositoryUrl,
+  trivyScanRoot,
   inspectorProjectMap,
-}: ExternalPublicationOptions & { provider: P }) {
+}: LocalExternalImportOptions & { provider: P }) {
+  if (provider === "trivy" && sourceRepositoryUrl !== undefined)
+    throw new CodexSecurityError(
+      "Trivy reads repository provenance from the report; do not supply --source-repository-url.",
+    );
+  if (trivyScanRoot !== undefined && provider !== "trivy")
+    throw new CodexSecurityError(
+      "--trivy-scan-root applies only to --provider trivy.",
+    );
   if (inspectorProjectMap !== undefined && provider !== "inspector")
     throw new CodexSecurityError(
       "An Inspector project map requires the inspector provider.",
@@ -234,6 +243,7 @@ export function snapshotImportOptions<
     provider,
     sourceKey,
     sourceRepositoryUrl,
+    trivyScanRoot,
     inspectorProjectMap: inspectorProjectMap && new Map(inspectorProjectMap),
   };
 }

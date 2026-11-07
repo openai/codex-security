@@ -1,14 +1,16 @@
 import { expect, mock, test } from "bun:test";
-import { PassThrough, Writable } from "node:stream";
+import { PassThrough } from "node:stream";
 import { standaloneValidationPrompt } from "../src/standalone-validation-prompt.js";
 import { bundledPluginRoot } from "../src/runtime.js";
 import { main } from "../src/cli.js";
+import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import {
   validateRecords,
   type ValidateRecordsInput,
   type ValidationReviewRequest,
 } from "../src/validation-records.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { throwing } from "./support/errors.js";
 
 const input: ValidateRecordsInput = {
   version: 1,
@@ -25,30 +27,6 @@ const input: ValidateRecordsInput = {
 const result = {
   rationale: "Authentication does not restrict the destination.",
 };
-
-test("passes source-only instructions and context to one host review", async () => {
-  const run = mock(async (request: ValidationReviewRequest) => {
-    expect(request.trustedInstructions).toBe(
-      await standaloneValidationPrompt(await bundledPluginRoot()),
-    );
-    expect(request.prompt).toContain(JSON.stringify(input.findings));
-    expect(request.prompt).toContain(JSON.stringify(input.context));
-    expect(request.prompt).toContain(JSON.stringify(input.knowledgeBasePath));
-    expect(request.schema).toEqual(input.outputSchema);
-    expect(request.model).toBe("example-model");
-    expect(request.effort).toBe("high");
-    return result;
-  });
-  expect(
-    await validateRecords(
-      { ...input, model: "example-model", effort: "high" },
-      {
-        reviewRunner: { run },
-      },
-    ),
-  ).toEqual(result);
-  expect(run).toHaveBeenCalledTimes(1);
-});
 
 test("rejects invalid input and duplicate host identities before execution", async () => {
   const run = mock(async () => result);
@@ -102,58 +80,69 @@ test("aborts a stuck host review and passes cancellation to the host", async () 
   ).rejects.toThrow("Host canceled");
 });
 
-test("CLI records exchange returns schema-checked results without local Codex", async () => {
-  const stdin = new PassThrough();
-  const messages: Record<string, unknown>[] = [];
-  const stdout = new Writable({
-    write(chunk, _encoding, done) {
+test.each([undefined, "", "\t", " synthetic-effort "])(
+  "validate --records sends effort %p and source context to one host review",
+  async (effort) => {
+    const stdin = new PassThrough();
+    const send = (message: unknown) =>
+      stdin.write(JSON.stringify(message) + "\n");
+    const reviews: ValidationReviewRequest[] = [];
+    const replies: unknown[] = [];
+    const stdout = new PassThrough();
+    stdout.on("data", (chunk: Buffer) => {
       const message = JSON.parse(chunk.toString());
-      messages.push(message);
       if (message.method === "review.run") {
         expect(message.id).toBe(message.params.requestId);
-        queueMicrotask(() =>
-          stdin.write(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              id: message.id,
-              result,
-            }) + "\n",
-          ),
-        );
-      }
-      done();
-    },
-  });
-  const deps = dependencies();
-  deps.recordsInput = stdin;
-  deps.runCodex = mock(async () => {
-    throw new Error("Local execution is forbidden");
-  });
-  const stderr = capture(true);
-  const completion = main(
-    ["validate", "--records"],
-    stdout,
-    stderr.stream,
-    deps,
-  );
-  stdin.write(
-    JSON.stringify({
+        reviews.push(message.params);
+        queueMicrotask(() => send({ jsonrpc: "2.0", id: message.id, result }));
+      } else replies.push(message);
+    });
+    const deps = dependencies();
+    deps.recordsInput = stdin;
+    deps.runCodex = mock(throwing("Local execution is forbidden"));
+    const stderr = capture(true);
+    const completion = main(
+      ["validate", "--records"],
+      stdout,
+      stderr.stream,
+      deps,
+    );
+    send({
       jsonrpc: "2.0",
       id: "validation",
       method: "run",
-      params: input,
-    }) + "\n",
-  );
-  expect(await completion).toBe(0);
-  expect(messages.at(-1)).toEqual({
-    jsonrpc: "2.0",
-    id: "validation",
-    result: { status: "completed", result },
-  });
-  expect(deps.runCodex).not.toHaveBeenCalled();
-  expect(stderr.text()).toBe("");
-  stdin.destroy();
-});
+      params: { ...input, model: "example-model", effort },
+    });
+    expect(await completion).toBe(0);
+    expect(reviews).toHaveLength(1);
+    const review = reviews[0]!;
+    expect(review).toMatchObject({
+      model: "example-model",
+      effort:
+        effort ?? scanModelConfiguration(DEFAULT_CODEX_CONFIG).reasoningEffort,
+      schema: input.outputSchema,
+      trustedInstructions: await standaloneValidationPrompt(
+        await bundledPluginRoot(),
+      ),
+    });
+    for (const value of [
+      input.findings,
+      input.context,
+      input.knowledgeBasePath,
+    ])
+      expect(review.prompt).toContain(JSON.stringify(value));
+    expect(replies).toEqual([
+      {
+        jsonrpc: "2.0",
+        id: "validation",
+        result: { status: "completed", result },
+      },
+    ]);
+    expect(deps.runCodex).not.toHaveBeenCalled();
+    expect(stderr.text()).toBe("");
+    stdin.destroy();
+  },
+);
 
 test("records mode rejects local validation flags", async () => {
   const stderr = capture(true);

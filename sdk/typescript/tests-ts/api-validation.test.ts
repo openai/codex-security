@@ -95,6 +95,7 @@ describe("CodexSecurity finding validation", () => {
               destination === "state" ? storage : join(root, "state"),
             OPENAI_API_KEY: "synthetic-validation-key",
           },
+          createOperationTelemetry: undefined,
           prepareRuntime,
           resolvePluginPython: async () => "/managed/python",
           createCodex,

@@ -74,7 +74,6 @@ from workbench_constants import (
     FINDING_REMEDIATION_BYTES,
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
-    FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
@@ -1032,13 +1031,16 @@ def complete_scan(
 
 def read_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     # Validation can finish after the scan's recorded completion timestamp.
-    return scan_usage.collect_scan_usage(
+    usage = scan_usage.collect_scan_usage(
         connection,
         require_scan(connection, args.scan_id),
         thread_id=args.thread_id,
         validation_thread_id=args.validation_thread_id,
         completed_at=now(),
     )
+    if "cacheWriteInputTokens" in usage:
+        usage.setdefault("cacheWriteInputTokensReported", True)
+    return usage
 
 
 def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -1053,7 +1055,7 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
         if completion["threadId"] != args.thread_id or completion["turnId"] != args.turn_id:
             raise SystemExit("The scan usage belongs to a different completion turn.")
         if not completion["finalized"]:
-            usage = scan_usage.collect_scan_usage(
+            usage = scan_usage.collect_scan_usage_safely(
                 connection,
                 scan,
                 thread_id=args.thread_id,
@@ -1072,7 +1074,9 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
                         f"scan_turn_{args.turn_status}",
                     ]
                 usage["completion"] = {**completion, "finalized": True}
-            cost_json = parse_scan_cost(json.dumps({**stored, "usage": usage}))
+            fields = scan_usage.merge_scan_usage_fields(stored, {"usage": usage})
+            fields["usage"]["completion"] = usage["completion"]
+            cost_json = parse_scan_cost(json.dumps(fields))
             with connection:
                 connection.execute(
                     "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
@@ -1382,26 +1386,27 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
-    cost_fields = scan_usage.stored_scan_cost_fields(cost_json)
-    if "usage" not in cost_fields:
-        cost_fields["usage"] = scan_usage.collect_scan_usage(
-            connection,
-            scan,
-            thread_id=thread_id,
-            completed_at=completion_timestamp,
+    measured_usage = scan_usage.collect_scan_usage_safely(
+        connection,
+        scan,
+        thread_id=thread_id,
+        completed_at=completion_timestamp,
+    )
+    cost_fields = scan_usage.merge_scan_usage_fields(
+        scan_usage.stored_scan_cost_fields(cost_json), {"usage": measured_usage}
+    )
+    measured_usage = cost_fields["usage"]
+    if thread_id is not None and turn_id is not None:
+        measured_usage["completion"] = {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "finalized": False,
+        }
+        if measured_usage["coverage"] == "complete":
+            measured_usage["coverage"] = "partial"
+        measured_usage["warnings"] = sorted(
+            {*measured_usage.get("warnings", []), "turn_in_progress"}
         )
-        measured_usage = cost_fields["usage"]
-        if thread_id is not None and turn_id is not None:
-            measured_usage["completion"] = {
-                "threadId": thread_id,
-                "turnId": turn_id,
-                "finalized": False,
-            }
-            if measured_usage["coverage"] == "complete":
-                measured_usage["coverage"] = "partial"
-            measured_usage["warnings"] = sorted(
-                {*measured_usage.get("warnings", []), "turn_in_progress"}
-            )
     cost_json = parse_scan_cost(json.dumps(cost_fields))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
@@ -2547,7 +2552,7 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
-    limit = min(args.limit, FINDINGS_PAGE_MAX)
+    limit = args.limit
     rows = scan_history.finding_occurrence_rows(
         connection,
         scan["id"],
@@ -3227,7 +3232,15 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
     if args.command == "finding-issues":
-        result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
+        try:
+            result = publication.finding_issues(
+                _WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin)
+            )
+        except sqlite3.OperationalError as exc:
+            if not getattr(exc, "_codex_security_state_unavailable", False):
+                raise
+            print(f"sqlite3.OperationalError: {exc}", file=sys.stderr)
+            raise SystemExit(73) from None
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
@@ -3367,4 +3380,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from None
