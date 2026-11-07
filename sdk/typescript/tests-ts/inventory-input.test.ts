@@ -548,6 +548,50 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
+test.skipIf(process.platform === "win32")(
+  "inventory preserves a PATH helper's relative resource lookup in a directory with a checkout shim",
+  () => {
+    const f = fixture();
+    f.write("scope/visible.py");
+    const bin = join(f.root, "bin");
+    const lib = join(f.root, "lib");
+    mkdirSync(bin);
+    mkdirSync(lib);
+    const shim = f.write(
+      "shim",
+      "#!/bin/sh\nprintf used > shim-ran\nexit 73\n",
+    );
+    chmodSync(shim, 0o700);
+    symlinkSync(shim, join(bin, "checkout-shim"));
+    writeFileSync(
+      join(bin, "rg"),
+      '#!/bin/sh\nif command -v checkout-shim >/dev/null; then exec checkout-shim; fi\nexec inventory-helper "$@"\n',
+      { mode: 0o700 },
+    );
+    writeFileSync(
+      join(bin, "inventory-helper"),
+      '#!/bin/sh\ntest "$tool" = caller-value || exit 74\n. "${0%/*}/../lib/helper.sh"\n',
+      { mode: 0o700 },
+    );
+    writeFileSync(
+      join(lib, "helper.sh"),
+      'printf used > helper-ran\nexec "$INVENTORY_SEARCH" "$@"\n',
+    );
+    const result = runPathInventory(f, "generate-in-scope-files", {
+      ...f.toolEnvironment,
+      PATH: bin,
+      tool: "caller-value",
+      TMPDIR: process.platform === "linux" ? "/dev/shm" : f.root,
+      INVENTORY_SEARCH: Bun.which("rg", { PATH: f.toolEnvironment["PATH"] })!,
+      CODEX_SECURITY_GIT: "",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(f.out, "utf8")).toBe("scope/visible.py\n");
+    expect(readdirSync(f.repo)).toContain("helper-ran");
+    expect(readdirSync(f.repo)).not.toContain("shim-ran");
+  },
+);
+
 for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   test.skipIf(process.platform === "win32")(
     `${command} selects both ripgrep and its wrapper interpreter outside the checkout`,
@@ -582,6 +626,7 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
       );
       const missing = join(f.root, "incomplete");
       mkdirSync(missing);
+      symlinkSync(join(f.repo, "missing"), join(missing, "stale-helper"));
       writeFileSync(join(missing, "sh"), "#!/missing-interpreter\n", {
         mode: 0o700,
       });

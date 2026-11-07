@@ -196,6 +196,7 @@ const listingSizes = assertTarListingSizes(
 );
 for (const [path, name] of [
   ["package/bin/codex-security.mjs", "CLI"],
+  ["package/_bundled_plugin/scripts/dispatch_inventory_tool", "inventory tool"],
   ["package/_bundled_plugin/scripts/launch_codex_security_mcp", "MCP"],
 ]) {
   const permissions =

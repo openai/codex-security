@@ -1324,11 +1324,12 @@ the copy shipped with the selected Codex installation.
 On POSIX, campaign processes and script-based inventory tools search readable
 tool directories. Launchers must be readable so their shebang interpreters can
 be checked. Use an absolute interpreter path for campaign scripts, including
-`#!/usr/bin/env sh`, because workers run in different directories. When a directory contains an
-ineligible launcher or a link into a selected source, its other tools remain
-available through temporary links. Keep tools that locate resources relative to
-their invoked path, such as virtual environments, in directories where every
-entry can be used. On Windows, the campaign omits a tool directory
+`#!/usr/bin/env sh`, because workers run in different directories. If a directory
+contains an ineligible executable, its other tools remain available through a
+temporary PATH. Scripts using the system `/bin/sh` or `/usr/bin/env` run from
+their installed location when the packaged dispatcher can start. Keep other
+prefix-sensitive tools, including Python virtual environments, in directories
+where every entry can be used. On Windows, the campaign omits a tool directory
 from the child PATH if its Git or ripgrep link passes through a selected source.
 
 CSV scopes are literal paths relative to each checkout, including names such

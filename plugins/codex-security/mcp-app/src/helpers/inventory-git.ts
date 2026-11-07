@@ -6,6 +6,7 @@ import {
 } from "./helper-files";
 import {
   spawn,
+  spawnSync,
   type SpawnOptions,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
@@ -184,6 +185,7 @@ function interpreterCheck(
   cwd: string,
   allowsPath: (path: string) => boolean,
   shared: boolean,
+  scripts?: Map<string, string>,
 ) {
   const checked = new Map<string, boolean>();
   function allows(path: string, loader = false): boolean {
@@ -206,6 +208,8 @@ function interpreterCheck(
       // XNU redirects once; Linux can chain interpreter scripts.
       return allowsPath(file) && (macShebang || allows(file, true));
     });
+    if (safe && header.length === 1 && isAbsolute(header[0]!))
+      scripts?.set(path, header[0]!);
     checked.set(path, safe);
     return safe;
   }
@@ -297,10 +301,47 @@ function campaignPathCheck(
   };
 }
 
+// Confirm the dispatcher starts through a link on the actual temporary mount.
+// The probe reaches only the system shell, before the operator directory is attached.
+function scriptDispatcher(
+  view: string,
+  origin: string,
+  allows: (path: string, link: boolean) => boolean,
+) {
+  const probe = append(view, "sh");
+  try {
+    const dispatcher = createRequire(import.meta.url).resolve(
+      "../scripts/dispatch_inventory_tool",
+    );
+    if (
+      !allows(dispatcher, true) ||
+      !allows("/bin/sh", true) ||
+      !executable(dispatcher)
+    )
+      return;
+    symlinkSync("/bin", fsPath(origin));
+    symlinkSync(dispatcher, fsPath(probe));
+    const args = ["-c", "exit 73"];
+    const options = { env: { PATH: "/dev/null" }, stdio: "ignore" } as const;
+    const env =
+      allows("/usr/bin/env", true) &&
+      spawnSync("/usr/bin/env", [probe, ...args], options).status === 73;
+    if (env || spawnSync(probe, args, options).status === 73)
+      return { dispatcher, env };
+  } catch {
+    // Older or non-executable installations still support direct tool links.
+    return;
+  } finally {
+    rmSync(fsPath(probe), { force: true });
+    rmSync(fsPath(origin), { force: true });
+  }
+}
+
 function scriptPathDirectory(
   directory: string,
   isProtected: (path: string) => boolean,
   temporary: string[],
+  scripts: ReadonlyMap<string, string>,
   allows: (path: string, link: boolean) => boolean,
 ): string {
   const entries = readdirSync(fsPath(directory), {
@@ -339,11 +380,40 @@ function scriptPathDirectory(
   if (!copy)
     throw new Error("No external temporary directory for inventory tools");
   temporary.push(copy);
-  for (const entry of allowed) {
+  const view = append(copy, "bin"),
+    origin = append(copy, "origin");
+  mkdirSync(fsPath(view), { mode: 0o700 });
+  const systems = new Map<string, string | undefined>();
+  const retained = allowed.map((entry) => {
     const name = nameOf(entry);
-    symlinkSync(fsPath(append(directory, name)), fsPath(append(copy, name)));
+    const path = append(directory, name);
+    const loader = scripts.get(path);
+    // A forwarder would hide execvp's fallthrough for a missing kernel loader.
+    // Forward only scripts with a system interpreter whose launch we can prove.
+    if (loader && !systems.has(loader)) {
+      systems.set(
+        loader,
+        executable(loader)
+          ? ["/bin/sh", "/usr/bin/env"].find((system) =>
+              sameFile(loader, system),
+            )
+          : undefined,
+      );
+    }
+    return { name, path, interpreter: loader && systems.get(loader) };
+  });
+  const launch = retained.some((tool) => tool.interpreter)
+    ? scriptDispatcher(view, origin, allows)
+    : undefined;
+  if (launch) symlinkSync(fsPath(directory), fsPath(origin));
+  for (const tool of retained) {
+    const forward =
+      tool.interpreter === "/bin/sh" ||
+      (tool.interpreter === "/usr/bin/env" && launch?.env);
+    const target = launch && forward ? launch.dispatcher : tool.path;
+    symlinkSync(fsPath(target), fsPath(append(view, tool.name)));
   }
-  return copy;
+  return view;
 }
 
 export function inventoryToolPath(
@@ -364,10 +434,12 @@ export function inventoryToolPath(
   const pathAllowed = campaignPathCheck(isProtected, cwd);
   // Windows removes unsafe search entries in the SDK, before CreateProcess.
   if (windows) return { path, allows: pathAllowed, cleanup() {} };
+  const scripts = new Map<string, string>();
   const interpreterAllowed = interpreterCheck(
     cwd,
     pathAllowed,
     mode === "campaign",
+    scripts,
   );
   const allows = (file: string) =>
     pathAllowed(file) && interpreterAllowed(file);
@@ -382,6 +454,7 @@ export function inventoryToolPath(
           directory,
           isProtected,
           temporary,
+          scripts,
           (file, link) => (link ? allows(file) : interpreterAllowed(file)),
         );
       // A directory containing ":" can be on PATH through an external alias.
