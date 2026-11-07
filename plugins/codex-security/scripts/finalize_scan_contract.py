@@ -470,24 +470,24 @@ def _scan_local_directory_error(message: str, error: OSError) -> ContractError:
     return ScanLocalIOError(message)
 
 
-def _require_scan_directory(scan_dir: Path) -> Path:
+def _require_scan_directory(scan_dir: Path, context: str = "scan directory") -> Path:
     scan_dir = scan_dir.absolute()
     try:
         metadata = scan_dir.lstat()
     except OSError as exc:
         raise _scan_local_directory_error(
-            "scan directory: expected an existing non-symlink directory", exc
+            f"{context} {scan_dir}: expected an existing non-symlink directory: {exc}", exc
         ) from exc
     if not stat.S_ISDIR(metadata.st_mode):
-        raise ContractError("scan directory: expected an existing non-symlink directory")
+        raise ContractError(f"{context}: expected an existing non-symlink directory")
     try:
         resolved = scan_dir.resolve(strict=True)
     except OSError as exc:
         raise _scan_local_directory_error(
-            "scan directory: expected an existing non-symlink directory", exc
+            f"{context} {scan_dir}: expected an existing non-symlink directory: {exc}", exc
         ) from exc
     if os.path.normcase(resolved) != os.path.normcase(scan_dir):
-        raise ContractError("scan directory: expected a canonical non-symlink directory")
+        raise ContractError(f"{context}: expected a canonical non-symlink directory")
     return resolved
 
 
@@ -628,7 +628,9 @@ def _open_scan_local_file_with_path(
         except OSError as exc:
             # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
             if exc.errno in {2, 3}:
-                raise MissingScanLocalFileError(str(exc)) from exc
+                raise MissingScanLocalFileError(
+                    f"{context}: expected a file inside the scan directory"
+                ) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -796,7 +798,9 @@ def scan_local_file_version(descriptor: int) -> tuple[os.stat_result, int]:
 def _scan_local_write_path(
     scan_dir: Path, relative_path: str, external_name: bool
 ) -> tuple[Path, str]:
-    scan_dir = _require_scan_directory(scan_dir)
+    scan_dir = _require_scan_directory(
+        scan_dir, "export output directory" if external_name else "scan directory"
+    )
     if external_name:
         if relative_path in {"", ".", ".."} or "/" in relative_path or "\0" in relative_path:
             raise ContractError("external output path: expected a safe file name")
@@ -964,7 +968,9 @@ def _validate_remote(remote: str, context: str) -> None:
         parsed = urlsplit(remote)
     except ValueError as exc:
         # urlsplit rejects authorities with unbalanced brackets.
-        raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
+        raise ContractError(
+            f"{context}: expected a sanitized canonical absolute URL: {exc}"
+        ) from exc
     if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
     if "@" in parsed.netloc or parsed.query or parsed.fragment:
@@ -3451,8 +3457,11 @@ def main() -> int:
                     )
         else:
             finalize_scan(args.scan_dir, args.schema_dir, args.source_root)
-    except ContractError as exc:
-        parser.error(str(exc))
+    except (ContractError, OSError) as exc:
+        # Keep canonical paths readable and escape control characters at the terminal boundary.
+        parser.error(
+            "".join(char if char.isprintable() else ascii(char)[1:-1] for char in str(exc))
+        )
     return 0
 
 

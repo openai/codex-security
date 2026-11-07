@@ -29,6 +29,20 @@ function sourceFindingId(value: unknown, target: ExternalImportTarget): string {
   return id;
 }
 
+/** Distinguish original Wiz package records from opaque SDK asset metadata. */
+export function isWizPackageFinding(
+  data: VendorFinding["evidence"]["source_data"],
+): boolean {
+  return Boolean(
+    data &&
+    data["detectionMethod"] !== "EXTERNAL_NETWORK_SCAN" &&
+    text(data["id"]) &&
+    text(data["name"]) &&
+    text(data["detailedName"]) &&
+    text(asRecord(data["vulnerableAsset"])?.["id"]),
+  );
+}
+
 /** Keep a Wiz vulnerability occurrence intact; advisory names are not identities. */
 function wizFinding(
   record: Record<string, unknown>,
@@ -468,7 +482,9 @@ export function wizFindingRepository(
   if (!url) return;
   const github =
     asset["nativeType"] === "github#repositoryBranch" ||
-    (asset["type"] === "REPOSITORY_BRANCH" && isGitHubCloudHost(url.hostname));
+    (asset["type"] === "REPOSITORY_BRANCH" &&
+      (text(asset["cloudPlatform"])?.toLowerCase() === "github" ||
+        isGitHubCloudHost(url.hostname)));
   if (!github)
     return asset["type"] === "REPOSITORY_BRANCH"
       ? { url: asset["cloudProviderURL"] }

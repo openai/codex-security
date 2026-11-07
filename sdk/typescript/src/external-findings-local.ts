@@ -17,12 +17,11 @@ import {
   checkTrivyReportProvider,
   matchTrivyCheckout,
 } from "./trivy-import.js";
-import { readHostedGitRemotes } from "./hosted-git-remotes.js";
-import { CodexSecurityError } from "./errors.js";
 import {
-  forwardExternalImportSetting,
-  requireExternalImports,
-} from "./external-imports-feature.js";
+  readGitRemoteNames,
+  readHostedGitRemotes,
+} from "./hosted-git-remotes.js";
+import { CodexSecurityError } from "./errors.js";
 import {
   externalImportDisposition,
   NoPublishableFindingsError,
@@ -46,7 +45,12 @@ import type {
 import {
   localFindingRepositories,
   semgrepSarifRepositories,
+  type LocalFindingProvider,
 } from "./external-findings-read.js";
+import {
+  tenableReportFormat,
+  tenableSourceRepository,
+} from "./tenable-findings.js";
 import {
   guardianFindingSourceData,
   guardianSelectionFormat,
@@ -75,6 +79,7 @@ import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
+import { retainedGitHubRepository } from "./github-findings.js";
 import {
   type SnykIssuesFindings,
   snykRestImportRepository,
@@ -102,7 +107,7 @@ import {
 export interface StoredExternalFinding {
   id: string;
   repository: string;
-  provider: Provider;
+  provider: LocalFindingProvider;
   sourceKey: string;
   sourceFindingId: string;
   evidence: ExternalFindingEvidence;
@@ -115,10 +120,10 @@ export interface StoredExternalFinding {
 export interface NormalizedLocalImportOptions {
   /** Local checkout or source directory to associate with these records. */
   repository: string;
-  provider: Provider;
+  provider: LocalFindingProvider;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
-  /** Explicitly verified Sonar repository when a checkout uses an SSH host alias. */
+  /** Verified Git repository URL for readers that bind a finding to a checkout. */
   sourceRepositoryUrl?: string;
   /** Full Inspector project ARNs mapped to independently verified repository URLs. */
   inspectorProjectMap?: ReadonlyMap<string, string>;
@@ -134,7 +139,7 @@ export interface LocalExternalImportDependencies {
 
 export interface LocalExternalImportPreview extends ExternalFindings {
   repository: string;
-  source: { provider: Provider; source_key: string };
+  source: { provider: LocalFindingProvider; source_key: string };
 }
 
 export interface LocalExternalImportResult {
@@ -522,27 +527,8 @@ export async function configuredFetchRemotes(
         ),
       signal,
     );
-  let remoteNames: string;
-  try {
-    remoteNames = await readGit(["remote"]);
-  } catch (error) {
-    signal?.throwIfAborted();
-    // A local source directory need not be a Git checkout.
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === 128 &&
-      "stderr" in error &&
-      typeof error.stderr === "string" &&
-      (error.stderr.trimEnd() ===
-        "fatal: not a git repository (or any of the parent directories): .git" ||
-        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
-          error.stderr.trimEnd(),
-        ))
-    )
-      return [];
-    throw error;
-  }
+  const remoteNames = await readGitRemoteNames(readGit, signal);
+  if (remoteNames === undefined) return [];
   const remotes: ConfiguredFetchRemote[] = [];
   const firstUrlOnly = provider === "sonar" || provider === "checkmarx";
   for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
@@ -690,10 +676,9 @@ async function localContext(
   mode: "import" | "read" = "import",
 ) {
   dependencies.signal?.throwIfAborted();
-  const selected = dependencies.environment ?? process.env;
-  const environment = workbenchEnvironment(selected);
-  forwardExternalImportSetting(selected, environment);
-  requireExternalImports(environment);
+  const environment = workbenchEnvironment(
+    dependencies.environment ?? process.env,
+  );
   const requested = resolveInputPath(
     selectedRepository,
     process.cwd(),
@@ -759,7 +744,6 @@ export async function prepareNormalizedLocalImport(
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   return prepareLocalImport(
     input,
     snapshotImportOptions(options),
@@ -784,7 +768,8 @@ export function distinctSourceRepositories(
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
-  options: NormalizedLocalImportOptions & { sourceRepositoryUrl?: string },
+  options: NormalizedLocalImportOptions &
+    ({ provider: "tenable" } | { provider: Provider }),
   dependencies: LocalExternalImportDependencies,
   readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),
@@ -795,6 +780,16 @@ export async function prepareLocalImport(
   requireIdentity(options.sourceKey, "Source key");
   const parsedSources = distinctSourceRepositories(parsedInput);
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
+  if (
+    options.provider !== "tenable" &&
+    (current.report?.["format"] === tenableReportFormat ||
+      current.findings.some(
+        (row) => row.evidence?.source_data?.["format"] === tenableReportFormat,
+      ))
+  )
+    throw new CodexSecurityError(
+      "Retained Tenable evidence requires the tenable provider.",
+    );
   checkTrivyReportProvider(options.provider, current.report);
   // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
   if (!("snykRestContext" in current) && "snykRestContext" in input)
@@ -836,10 +831,32 @@ export async function prepareLocalImport(
       );
     dependabotSource = native;
   }
-  const { repository, options: workbenchOptions } = await localContext(
-    options.repository,
-    dependencies,
-  );
+  const context = await localContext(options.repository, dependencies);
+  if (options.provider === "tenable") {
+    const source = tenableSourceRepository(
+      current,
+      options.sourceRepositoryUrl,
+      [...readerSources, ...parsedSources],
+    );
+    const remotes = await readHostedGitRemotes(
+      context.repository,
+      [
+        ...context.options.protectedRoot,
+        await abortable(
+          () => canonicalConfigPath(process.cwd()),
+          dependencies.signal,
+        ),
+      ],
+      context.options.environment,
+      dependencies.signal,
+    );
+    if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
+      throw new CodexSecurityError(
+        "Tenable's source repository must match a configured Git fetch remote of the selected checkout.",
+      );
+    return preparedLocalStorage(current, options, context, dependencies, true);
+  }
+  const { repository, options: workbenchOptions } = context;
   const sources = new Map<string, ExternalSourceRepository>();
   const references = [...readerSources, ...parsedSources];
   const inspector = inspectorReportRepository(
@@ -996,6 +1013,13 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     }
     const { evidence } = finding;
+    if (options.provider === "github") {
+      const source = retainedGitHubRepository(
+        finding,
+        (url) => identify(url).key,
+      );
+      if (source) sources.set(source, { url: source, platform: "github" });
+    }
     const guardian = guardianFindingSourceData(finding);
     const url = evidence.details?.repository?.url;
     if (guardian) {
@@ -1338,6 +1362,25 @@ export async function prepareLocalImport(
             ? (url) => checkmarxKeys.has(identify(url).key)
             : undefined,
         );
+  return preparedLocalStorage(
+    current,
+    options,
+    context,
+    dependencies,
+    matchesRepositoryRemote,
+  );
+}
+
+function preparedLocalStorage(
+  current: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+  {
+    repository,
+    options: workbenchOptions,
+  }: Awaited<ReturnType<typeof localContext>>,
+  dependencies: LocalExternalImportDependencies,
+  matchesRepositoryRemote: boolean,
+): PreparedLocalExternalImport {
   dependencies.signal?.throwIfAborted();
   const preview = {
     ...cloneImportPreview(current),
@@ -1432,7 +1475,6 @@ export async function readLocalExternalFindings(
   dependencies: LocalExternalImportDependencies,
 ) {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
   const { repository, selectedPath, options } = await localContext(
     selection.repository,

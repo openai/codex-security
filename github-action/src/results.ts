@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { isRecord, safeSourcePath, assertSafeSarif } from './sarif.js';
+import { isRecord, safeSourcePath, assertSafeSarif } from './sarif.ts';
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'informational';
 export type ScanStatus = 'completed' | 'failed' | 'skipped';
