@@ -565,11 +565,14 @@ function* trustedTools(
         (!/\.(exe|com)$/iu.test(candidate) || /\.(bat|cmd)$/iu.test(resolved)))
     )
       continue;
+    // POSIX resolves each symlink before a following "..".
     const inRepository =
-      [resolve(candidate), invocation, resolved].some((path) =>
+      [invocation, resolved].some((path) =>
         isRepositoryPath(protectedRoot, path),
       ) ||
-      (!windows && !pathAllowed(candidate));
+      (windows
+        ? isRepositoryPath(protectedRoot, resolve(candidate))
+        : !pathAllowed(candidate));
     if (
       (inRepository &&
         !(name === "rg" && selectedBundledRipgrep(resolved, protectedRoot))) ||

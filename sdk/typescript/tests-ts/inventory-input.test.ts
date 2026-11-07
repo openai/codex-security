@@ -594,6 +594,34 @@ test.skipIf(process.platform === "win32")(
 
 for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   test.skipIf(process.platform === "win32")(
+    `${command} follows a PATH directory link before checking its parent for ripgrep`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      const tools = join(f.root, "tools");
+      const unused = join(tools, "unused");
+      const external = join(tools, "repository");
+      mkdirSync(unused, { recursive: true });
+      mkdirSync(external);
+      const prefix = join(f.root, "prefix");
+      symlinkSync(unused, prefix, "dir");
+      writeFileSync(
+        join(external, "rg"),
+        '#!/bin/sh\nprintf used > wrapper-ran\nexec "$INVENTORY_SEARCH" "$@"\n',
+        { mode: 0o700 },
+      );
+      const result = runPathInventory(f, command, {
+        ...f.toolEnvironment,
+        PATH: `${prefix}/../repository`,
+        INVENTORY_SEARCH: Bun.which("rg", { PATH: f.toolEnvironment["PATH"] })!,
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readdirSync(f.repo)).toContain("wrapper-ran");
+      expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
+    },
+  );
+  test.skipIf(process.platform === "win32")(
     `${command} selects both ripgrep and its wrapper interpreter outside the checkout`,
     () => {
       const f = fixture();
