@@ -431,10 +431,8 @@ describe("TypeScript package skeleton", () => {
       quality.jobs["mutation"]!,
     ]) {
       expect(
-        job
-          .steps!.filter((step) => step.uses?.startsWith("oven-sh/setup-bun@"))
-          .map((step) => step.with?.["bun-version"]),
-      ).toEqual(["1.4.4"]);
+        job.steps!.filter(({ uses }) => uses?.startsWith("oven-sh/setup-bun@")),
+      ).toMatchObject([{ with: { "bun-version-file": ".bun-version" } }]);
       for (const step of job.steps!) {
         expect(step.run ?? "").not.toMatch(
           /--(?:parallel|isolate)(?:[=\s]|$)/u,

@@ -467,6 +467,7 @@ describe("deinitialized patch submodule availability", () => {
         expect(current.pushes).toEqual(
           Array.from({ length: interrupted ? 2 : 1 }, () => [
             "push",
+            "--no-signed",
             configuration.expected === "opt-out"
               ? "--recurse-submodules=no"
               : "--recurse-submodules=check",

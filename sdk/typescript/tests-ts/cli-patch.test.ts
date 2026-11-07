@@ -3926,6 +3926,7 @@ describe("scan and patch workflow", () => {
               if (args[0] === "push") {
                 expect(args).toEqual([
                   "push",
+                  "--no-signed",
                   "--recurse-submodules=check",
                   "--set-upstream",
                   `--force-with-lease=refs/heads/${branch}:`,

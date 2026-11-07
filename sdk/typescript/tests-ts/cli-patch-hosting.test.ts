@@ -618,6 +618,62 @@ describe("patch change tracking", () => {
     expect(await readFile(marker, "utf8")).toBe("approved");
   });
 
+  test.each([false, true])(
+    "automatic publication pushes without signing certificates, resume=%p",
+    async (resume) => {
+      const { directory, git, remote } = await publicationRepository();
+      const branch = "codex-security/patch-scan-1";
+      git(
+        "-C",
+        remote,
+        "config",
+        "receive.certNonceSeed",
+        "synthetic-test-seed",
+      );
+      git("config", "push.gpgSign", resume ? "if-asked" : "true");
+      git("config", "gpg.format", "openpgp");
+      git(
+        "config",
+        "gpg.openpgp.program",
+        join(directory, "nonexistent-test-signer"),
+      );
+      git("config", "user.signingKey", "synthetic-test-key");
+      if (resume) {
+        git("branch", branch);
+        git(
+          "config",
+          `branch.${branch}.codexSecurityPatchCommit`,
+          git("rev-parse", "HEAD"),
+        );
+      }
+      const outcome = await runWorkflow(
+        resume
+          ? ["patch", "--resume-pr", branch, "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: (tool, args, cwd, options) =>
+            tool === "git"
+              ? runGitRepositoryCommand(tool, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(git("-C", remote, "rev-parse", `refs/heads/${branch}`)).toBe(
+        git("rev-parse", branch),
+      );
+    },
+  );
+
   test("publication commits do not run a checkout-selected signer", async () => {
     const { directory, git, remote } = await publicationRepository();
     const outside = await fixtures.create("patch-signer-");
@@ -1640,6 +1696,7 @@ process.exit(result.status ?? 1);
                 pushes++;
                 expect(args).toEqual([
                   "push",
+                  "--no-signed",
                   "--recurse-submodules=check",
                   "--set-upstream",
                   `--force-with-lease=refs/heads/${branch}:`,
@@ -1650,6 +1707,7 @@ process.exit(result.status ?? 1);
                   command,
                   [
                     "push",
+                    "--no-signed",
                     "--recurse-submodules=check",
                     "--set-upstream",
                     `--force-with-lease=refs/heads/${branch}:`,

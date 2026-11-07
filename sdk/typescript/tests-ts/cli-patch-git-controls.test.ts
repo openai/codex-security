@@ -47,6 +47,9 @@ function patchReadOnlyPaths(args: readonly string[], permissions: unknown) {
   return (permissions as { readOnlyPaths: readonly string[] }).readOnlyPaths;
 }
 
+const externalAdministrationError =
+  "requires an explicitly selected Git directory or a registered worktree";
+
 describe("patch Git administration", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
@@ -314,11 +317,17 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       }
     }
     git("config", "lfs.storage", join(alternate, "lfs"));
+    const environment = { GIT_DIR: selected, GIT_WORK_TREE: repository };
     const controls = await capturePatchGitControls(
       repository,
       async (_root, checkout, args, options) =>
-        runGitRepositoryCommand("git", args, checkout, options),
+        runGitRepositoryCommand("git", args, checkout, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        }),
+      false,
       true,
+      selected,
     );
     const paths = [join(metadata, "lfs")];
     expect(controls!.snapshotStoragePaths).toEqual(sameEntry ? paths : []);
@@ -624,7 +633,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       } else if (location === "administration-alias") {
         await symlink(external, storage, linkType);
       } else if (location === "metadata-alias") {
-        const metadata = join(external, "metadata");
+        const metadata = join(external, ".git");
         await rename(join(repository, ".git"), metadata);
         await symlink(metadata, join(repository, ".git"), linkType);
       } else if (location === "gitfile-alias") {
@@ -691,18 +700,40 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
         environment["GIT_WORK_TREE"] = repository;
         storage = join(alias, "lfs");
       }
-      const controls = await capturePatchGitControls(
-        directory,
-        async (_root, checkout, args, options) =>
-          runGitRepositoryCommand("git", args, checkout, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          }),
-        location !== "selected-git-dir" &&
-          location !== "selected-git-dir-trailing" &&
-          location !== "selected-git-dir-separators",
-        location !== "selected-common-dir",
-      );
+      const captureSelected = () =>
+        capturePatchGitControls(
+          directory,
+          async (_root, checkout, args, options) =>
+            runGitRepositoryCommand("git", args, checkout, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            }),
+          environment["GIT_DIR"] === undefined,
+          environment["GIT_COMMON_DIR"] === undefined,
+          environment["GIT_DIR"],
+        );
+      if (location === "metadata-alias" || location === "gitfile-alias") {
+        const metadata = join(
+          external,
+          location === "metadata-alias" ? ".git" : "metadata",
+        );
+        if (location === "metadata-alias") {
+          // The external metadata cannot establish its own trust by naming its
+          // parent as the worktree.
+          git("--git-dir", metadata, "config", "core.worktree", external);
+        }
+        const index = await readFile(join(metadata, "index"));
+        const entries = await readdir(metadata);
+        await expect(captureSelected()).rejects.toThrow(
+          externalAdministrationError,
+        );
+        expect(await readFile(join(metadata, "index"))).toEqual(index);
+        expect(await readdir(metadata)).toEqual(entries);
+        environment["GIT_DIR"] =
+          location === "gitfile-alias" ? join(repository, ".git") : metadata;
+        environment["GIT_WORK_TREE"] = repository;
+      }
+      const controls = await captureSelected();
       expect(controls).toBeDefined();
       if (
         [
@@ -728,6 +759,177 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       await controls!.validate();
     });
   }
+
+  test("external Git administration belongs only to its registered linked worktree", async () => {
+    const main = await fixtures.create("patch-main-registration-");
+    const registered = await fixtures.create("patch-registered-checkout-");
+    const unregistered = await fixtures.create("patch-unregistered-checkout-");
+    const git = repositoryGit(main);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(main, "app.txt"), "original\n");
+    git("add", "app.txt");
+    git("commit", "-m", "Synthetic linked worktree");
+    git("worktree", "add", "--detach", registered);
+    const administration = await realpath(
+      repositoryGit(registered)("rev-parse", "--absolute-git-dir"),
+    );
+    const common = await realpath(join(main, ".git"));
+    const marker = await readFile(join(registered, ".git"));
+    await writeFile(join(unregistered, ".git"), marker);
+    const privateFile = join(main, "unrelated.txt");
+    await writeFile(privateFile, "outside the requested checkout\n");
+    const metadata = await readdir(common);
+    const index = await readFile(join(administration, "index"));
+    const launch = mock(async () => 0);
+    for (const environment of [{}, { GIT_COMMON_DIR: common }]) {
+      const rejected = await runWorkflow(
+        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        {
+          currentDirectory: unregistered,
+          environment,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            }),
+          onCodex: launch,
+        },
+      );
+      expect(rejected.exitCode, rejected.stderr).toBe(2);
+      expect(rejected.stderr).toContain(externalAdministrationError);
+    }
+    expect(launch).not.toHaveBeenCalled();
+    expect(await readdir(common)).toEqual(metadata);
+    expect(await readFile(join(administration, "index"))).toEqual(index);
+    expect(await readFile(join(unregistered, ".git"))).toEqual(marker);
+    const accepted = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: registered,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async (args, output) => {
+        const paths = patchReadOnlyPaths(args, output?.appServer?.permissions);
+        expect(paths).toContain(administration);
+        expect(paths).toContain(common);
+        expect(paths).not.toContain(main);
+        expect(paths).not.toContain(privateFile);
+        await writeFile(join(registered, "app.txt"), "patched\n");
+        return 0;
+      },
+    });
+    expect(accepted.exitCode, accepted.stderr).toBe(0);
+    const component = join(registered, "component");
+    // An empty .git directory in a component is not a separate repository.
+    await mkdir(join(component, ".git"), { recursive: true });
+    const environment = { GIT_DIR: administration, GIT_WORK_TREE: registered };
+    const controls = await capturePatchGitControls(
+      component,
+      async (_root, checkout, args, options) =>
+        runGitRepositoryCommand("git", args, checkout, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        }),
+      false,
+      true,
+      administration,
+    );
+    expect(controls?.readOnlyPaths).toContain(common);
+    const back = join(administration, "gitdir");
+    const backlink = await readFile(back);
+    try {
+      await writeFile(back, join(unregistered, ".git") + "\n");
+      await expect(controls!.validate()).rejects.toThrow(
+        externalAdministrationError,
+      );
+    } finally {
+      await writeFile(back, backlink);
+    }
+
+    expect(await readFile(privateFile, "utf8")).toBe(
+      "outside the requested checkout\n",
+    );
+    expect(await readFile(join(main, "app.txt"), "utf8")).toBe("original\n");
+  });
+
+  test("selecting the Git directory does not implicitly select a separate external common directory", async () => {
+    const checkout = await fixtures.create("patch-separate-common-checkout-");
+    const storage = await fixtures.create("patch-separate-common-storage-");
+    const local = join(checkout, ".git");
+    const shared = join(storage, "shared.git");
+    const git = repositoryGit(checkout);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(checkout, "app.txt"), "before\n");
+    git("add", "app.txt");
+    git("commit", "-m", "Synthetic separate common directory");
+    await rename(local, shared);
+    await mkdir(local);
+    for (const name of ["HEAD", "index"])
+      await cp(join(shared, name), join(local, name));
+    await writeFile(join(local, "commondir"), shared + "\n");
+    const entries = await readdir(shared);
+    for (const explicit of [false, true]) {
+      const environment = {
+        GIT_DIR: local,
+        GIT_WORK_TREE: checkout,
+        ...(explicit && { GIT_COMMON_DIR: shared }),
+      };
+      let launched = false;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: checkout,
+          environment,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            }),
+          onCodex: async (args, output) => {
+            launched = true;
+            const paths = patchReadOnlyPaths(
+              args,
+              output?.appServer?.permissions,
+            );
+            expect(paths).toContain(shared);
+            expect(paths).not.toContain(storage);
+            await writeFile(join(checkout, "app.txt"), "after\n");
+            return 0;
+          },
+        },
+      );
+      expect(launched, outcome.stderr).toBe(explicit);
+      expect(outcome.exitCode, outcome.stderr).toBe(explicit ? 0 : 2);
+      if (!explicit) {
+        expect(outcome.stderr).toContain(externalAdministrationError);
+        expect(await readdir(shared)).toEqual(entries);
+      }
+    }
+    const unrelated = await fixtures.create("patch-unused-caller-");
+    const ignoredMarker = join(unrelated, ".git");
+    await writeFile(ignoredMarker, `gitdir: ${shared.replaceAll("\\", "/")}\n`);
+    const environment = {
+      GIT_DIR: local,
+      GIT_COMMON_DIR: shared,
+      GIT_WORK_TREE: checkout,
+    };
+    const controls = await capturePatchGitControls(
+      unrelated,
+      async (_root, directory, args, options) => {
+        expect(args).not.toContain(ignoredMarker);
+        return runGitRepositoryCommand("git", args, directory, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+      false,
+      false,
+      local,
+    );
+    expect(controls?.readOnlyPaths).toContain(shared);
+    expect(controls?.readOnlyPaths).not.toContain(unrelated);
+  });
 
   test.each(["direct", "nested", "linked"])(
     "a checkout cannot grant read access through a %s dormant external include",
