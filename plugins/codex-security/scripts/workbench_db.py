@@ -722,6 +722,24 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
     return workspace_state(connection, workspace["id"], result_scan_id=scan_id)
 
 
+def _native_deep_setup(setup: dict[str, Any]) -> dict[str, Any]:
+    result = {"deepScanSettings": setup["settings"]}
+    if "serviceTier" in setup:
+        result["serviceTier"] = setup["serviceTier"]
+    if setup.get("legacyConfigPath"):
+        result["legacyConfigPaths"] = [
+            str(Path(setup[key]).absolute())
+            for key in ("legacyConfigPath", "legacyConfigResolvedPath")
+            if key in setup
+        ]
+    if "projectConfigPaths" in setup:
+        result["projectConfigPaths"] = setup["projectConfigPaths"]
+    elif setup.get("projectConfigPath"):
+        # Older workspaces persisted only one project selection.
+        result["projectConfigPaths"] = [setup["projectConfigPath"]]
+    return result
+
+
 def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     """Bind native Deep entry to the same registered scan used by the SDK host."""
     if args.scan_id is None:
@@ -750,7 +768,7 @@ def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) ->
             )
         workspace = require_workspace(connection, scan["workspace_id"])
         saved = json.loads(workspace["deep_scan_config_json"])
-    return {**result, "deepScanSettings": saved["settings"], "serviceTier": saved["serviceTier"]}
+    return {**result, **_native_deep_setup(saved)}
 
 
 def _join_deep_scan(
@@ -769,10 +787,7 @@ def _join_deep_scan(
         scan_history.require_current_deep_scan(connection, scan)
     result = {**scan_context(connection, scan["id"]), "startDisposition": "joined"}
     if workspace["deep_scan_config_json"] is not None:
-        saved = json.loads(workspace["deep_scan_config_json"])
-        result["deepScanSettings"] = saved["settings"]
-        if "serviceTier" in saved:
-            result["serviceTier"] = saved["serviceTier"]
+        result.update(_native_deep_setup(json.loads(workspace["deep_scan_config_json"])))
     return result
 
 
@@ -1018,8 +1033,7 @@ def _start_prompt_driven_scan(
             raise
     result = {**scan_context(connection, scan_id), "startDisposition": "created"}
     if deep_scan_setup is not None:
-        result["deepScanSettings"] = deep_scan_setup["settings"]
-        result["serviceTier"] = deep_scan_setup["serviceTier"]
+        result.update(_native_deep_setup(deep_scan_setup))
     return result
 
 

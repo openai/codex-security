@@ -1134,6 +1134,7 @@ test.each(["completed", "failed"] as const)(
       resumed: true,
       measurement: {
         cost: null,
+        coverage: "complete",
         usage: {
           input_tokens: 10000,
           output_tokens: 2000,
@@ -1152,8 +1153,10 @@ test.each(["completed", "failed"] as const)(
       const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
         "scan"
       ] as JsonObject;
+      // This resumed turn is measured, but the previously sealed pass has no usage receipt.
       expect(saved["usage"]).toMatchObject({
-        coverage: "complete",
+        coverage: "partial",
+        warnings: ["token_usage_unavailable"],
         totalTokens: 12000,
       });
       expect(saved).not.toHaveProperty("cost");

@@ -1694,7 +1694,12 @@ process.exit(1);
       scanId: canceledScan.scanId,
       scanDir: canceledScan.scanDir,
     });
-    assert.equal(usage, undefined);
+    assert.deepEqual(usage, {
+      coverage: "unavailable",
+      source: "codex_rollout",
+      threadCount: 0,
+      warnings: ["codex_state_unavailable", "scan_thread_unavailable"],
+    });
     assert.deepEqual(warnings, []);
     assert.equal(cost, undefined);
     assert.deepEqual(canceledResponse.content, [

@@ -614,6 +614,10 @@ for (const [instructionKey, scenario] of [
   ["model_instructions_file", "instruction-repository-PATH"],
   ["model_instructions_file", "saved-instruction-repository-PATH"],
   ["model_instructions_file", "target-repository-PATH"],
+  ["model_instructions_file", "project-config-PATH"],
+  ["model_instructions_file", "saved-project-config-alias"],
+  ["model_instructions_file", "running-project-config"],
+  ["model_instructions_file", "saved-legacy-project-config"],
   ["model_instructions_file", "explicit-external"],
   ["experimental_compact_prompt_file", "instruction-repository-PATH"],
   ["experimental_compact_prompt_file", "saved-instruction-repository-PATH"],
@@ -653,8 +657,16 @@ for (const [instructionKey, scenario] of [
       );
       const marker = path.join(root, "executed.json");
       const configPath = path.join(root, "selected.toml");
-      const executableRoot =
-        scenario === "target-repository-PATH"
+      const project = path.join(root, "project-config");
+      const projectFile = path.join(project, "config.json");
+      const selectedProject = scenario.includes("project-config");
+      const selectedPath =
+        scenario === "saved-project-config-alias"
+          ? path.join(root, "selected.json")
+          : projectFile;
+      const executableRoot = selectedProject
+        ? project
+        : scenario === "target-repository-PATH"
           ? target
           : scenario === "explicit-external"
             ? trusted
@@ -676,9 +688,23 @@ for (const [instructionKey, scenario] of [
           path.join(guidance, "instructions.md"),
           "Synthetic security guidance.\n",
         );
+        if (selectedProject) {
+          await mkdir(project);
+          execFileSync("git", ["init", "--quiet", project], {
+            stdio: "ignore",
+          });
+          await writeFile(
+            projectFile,
+            JSON.stringify({ scan: { deep: { workers: 2 } } }),
+          );
+          if (selectedPath !== projectFile)
+            await symlink(projectFile, selectedPath);
+        }
         await writeFile(
           executable,
-          `#!${process.execPath}\nconst fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({argv:process.argv.slice(2), syntheticProvider:process.env.SYNTHETIC_PROVIDER_KEY === 'synthetic-provider-proof-value'})); process.stderr.write('synthetic Codex fixture stopped after marker\\n'); process.exit(42);\n`,
+          selectedProject
+            ? Buffer.from([0])
+            : `#!${process.execPath}\nconst fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({argv:process.argv.slice(2), syntheticProvider:process.env.SYNTHETIC_PROVIDER_KEY === 'synthetic-provider-proof-value'})); process.stderr.write('synthetic Codex fixture stopped after marker\\n'); process.exit(42);\n`,
         );
         await chmod(executable, 0o700);
         await writeFile(
@@ -712,7 +738,8 @@ for (const [instructionKey, scenario] of [
         let savedClaimToken: string | undefined;
         if (
           scenario === "saved-instruction-repository-PATH" ||
-          scenario === "running-instruction-repository-PATH"
+          scenario === "running-instruction-repository-PATH" ||
+          (selectedProject && scenario !== "project-config-PATH")
         ) {
           const workbench = (args: string[], input?: Record<string, unknown>) =>
             JSON.parse(
@@ -734,6 +761,18 @@ for (const [instructionKey, scenario] of [
             target,
             "--thread-id",
             "synthetic-executable-proof-owner",
+            ...(selectedProject
+              ? [
+                  "--project-config-path",
+                  selectedPath,
+                  "--deep-scan-project-json",
+                  JSON.stringify({
+                    path: projectFile,
+                    selectedPath,
+                    settings: { workers: 2 },
+                  }),
+                ]
+              : []),
           ]);
           const { scanId, scanDir, handoffClaimToken } = begun.scan;
           savedScanId = scanId;
@@ -762,6 +801,30 @@ for (const [instructionKey, scenario] of [
               },
             },
           );
+          if (scenario === "saved-legacy-project-config") {
+            // Older workspaces recorded only the canonical projectConfigPath.
+            execFileSync(helperPaths.python, [
+              "-c",
+              [
+                "import sqlite3, sys",
+                "with sqlite3.connect(sys.argv[1]) as db:",
+                '    db.execute("""UPDATE workspaces',
+                "        SET deep_scan_config_json = json_remove(deep_scan_config_json, '$.projectConfigPaths')",
+                '        WHERE id = (SELECT workspace_id FROM scans WHERE id = ?)""", (sys.argv[2],))',
+              ].join("\n"),
+              path.join(
+                environment.CODEX_SECURITY_STATE_DIR,
+                "workbench.sqlite3",
+              ),
+              scanId,
+            ]);
+          }
+          if (selectedPath !== projectFile) {
+            await rm(selectedPath);
+            const replacement = path.join(trusted, "config.json");
+            await writeFile(replacement, "{}");
+            await symlink(replacement, selectedPath);
+          }
           // Saved instructions take precedence over a changed ambient selection.
           await writeFile(
             configPath,
@@ -785,8 +848,14 @@ for (const [instructionKey, scenario] of [
             name: "start_codex_security_deep_scan",
             arguments:
               savedScanId === undefined ||
-              scenario === "running-instruction-repository-PATH"
-                ? { targetPath: target }
+              scenario === "running-instruction-repository-PATH" ||
+              scenario === "running-project-config"
+                ? {
+                    targetPath: target,
+                    ...(scenario === "project-config-PATH"
+                      ? { projectConfigPath: selectedPath }
+                      : {}),
+                  }
                 : { scanId: savedScanId, handoffClaimToken: savedClaimToken },
             _meta: {
               "openai/threadId": "synthetic-executable-proof-owner",

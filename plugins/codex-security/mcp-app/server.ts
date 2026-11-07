@@ -1077,7 +1077,7 @@ export function createCodexSecurityServer(): McpServer {
             abortSignalFromExtra(extra),
             modelSettings,
             begun.scan.scanDir as string,
-            project?.settings,
+            project,
           );
           begun = await begin([
             "--completed-inputs-json",
@@ -1116,6 +1116,12 @@ export function createCodexSecurityServer(): McpServer {
           {
             scan,
             semanticInputs,
+            projectConfigPaths: Array.isArray(begun.projectConfigPaths)
+              ? begun.projectConfigPaths
+              : undefined,
+            legacyConfigPaths: Array.isArray(begun.legacyConfigPaths)
+              ? begun.legacyConfigPaths
+              : undefined,
             stateDirectory: await workbenchStateDirectory(),
             ...(isJsonObject(begun.recipe)
               ? { recipe: begun.recipe as NativeScanInput["recipe"] }

@@ -14,6 +14,9 @@ export class ScanAccounting {
   has(key: string): boolean {
     return this.#receipts.has(key);
   }
+  get stageKeys(): Iterable<string> {
+    return this.#receipts.keys();
+  }
   get hasChildren(): boolean {
     return [...this.#receipts.keys()].some((key) => key !== "merge");
   }

@@ -8,7 +8,12 @@ import {
   expandHomePath,
 } from "../../../../sdk/typescript/src/codex-home.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { realpath } from "node:fs/promises";
+import {
+  selectedProjectConfigPath,
+  type DeepScanProjectConfig,
+} from "./deep-scan/project-config.js";
 import {
   modelInstructionsFileDigest,
   restoreScanKnowledge,
@@ -37,6 +42,7 @@ import { configuredCodexHome } from "../../../../sdk/typescript/src/auth.js";
 import {
   gitMarkerRoot,
   gitProtectionRoots,
+  nullIfMissingPath,
 } from "../../../../sdk/typescript/src/targets.js";
 import { CodexSecurityError } from "../../../../sdk/typescript/src/errors.js";
 import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-config.js";
@@ -63,6 +69,8 @@ import type { ScanResults } from "./types.js";
 import { isRecord } from "./record.js";
 
 export interface NativeScanSemanticInputs {
+  projectConfigPaths?: string[];
+  legacyConfigPaths?: string[];
   knowledgeBasePaths?: string[];
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   deepScanSettings: Required<DeepScanOptions>;
@@ -75,6 +83,8 @@ export interface NativeScanInput {
   scan: ScanResults;
   recipe?: JsonObject;
   savedDeepScanSettings?: DeepScanOptions;
+  projectConfigPaths?: string[];
+  legacyConfigPaths?: string[];
   semanticInputs?: NativeScanSemanticInputs;
   threadId: string;
   pluginRoot: string;
@@ -178,7 +188,7 @@ export async function readNativeScanSemanticInputs(
     "model" | "reasoningEffort" | "serviceTier"
   > = {},
   completedScanDir?: string,
-  projectSettings: DeepScanOptions = {},
+  project?: DeepScanProjectConfig,
 ): Promise<NativeScanSemanticInputs> {
   const environment = await snapshotNativeEnvironment();
   const knowledgeBasePath = environmentValue(
@@ -188,13 +198,12 @@ export async function readNativeScanSemanticInputs(
   const knowledgeBasePaths = knowledgeBasePath
     ? [knowledgeBasePath]
     : undefined;
-  const deepScanSettings = (
+  const { settings: deepScanSettings, legacyConfigPaths } =
     await resolveDeepScanConfig(
-      projectSettings,
+      project?.settings ?? {},
       nativeDeepScanConfigPath(environment),
       signal,
-    )
-  ).settings;
+    );
   const config = await nativeScanConfiguration(
     environment,
     modelSettings,
@@ -218,6 +227,10 @@ export async function readNativeScanSemanticInputs(
     modelSettings: scanModelConfiguration(
       await mergedCodexConfig({ codexOverrides: config }),
     ),
+    projectConfigPaths: project
+      ? [project.selectedPath ?? project.path, project.path]
+      : undefined,
+    legacyConfigPaths,
     knowledgeBasePaths,
     knowledgeBaseSnapshot: knowledgeBasePaths
       ? await readKnowledgeBaseSnapshot(knowledgeBasePaths, signal)
@@ -269,6 +282,20 @@ export async function prepareNativeScan(
       throw new CodexSecurityError(
         "This saved scan does not record its original target paths. Rejoin Deep Scan using the original targetPath before discovering Codex on PATH.",
       );
+    const configPaths = new Set([
+      ...(input.projectConfigPaths ?? []).map((path) =>
+        selectedProjectConfigPath(path, input.scan.targetPath),
+      ),
+      ...(semanticInputs?.projectConfigPaths ?? []),
+      ...(input.legacyConfigPaths ?? []),
+      ...(semanticInputs?.legacyConfigPaths ?? []),
+      ...(deep.legacyConfigPaths ?? []),
+    ]);
+    // Historical workspaces may record only the originally selected symlink.
+    for (const path of [...configPaths]) {
+      const destination = await realpath(path).catch(nullIfMissingPath);
+      if (destination !== null) configPaths.add(destination);
+    }
     const codex = await resolveTrustedCodex(
       explicit === undefined
         ? environment
@@ -277,6 +304,14 @@ export async function prepareNativeScan(
         input.scan.targetPath,
         ...(input.scan.targetProtectionRoots ?? []),
         ...(await gitProtectionRoots(input.scan.targetPath, signal)),
+        ...(
+          await Promise.all(
+            Array.from(configPaths, async (path) => [
+              dirname(path),
+              ...(await gitProtectionRoots(path, signal)),
+            ]),
+          )
+        ).flat(),
         ...(
           await Promise.all(
             MODEL_FILE_SETTINGS.map((key) => {

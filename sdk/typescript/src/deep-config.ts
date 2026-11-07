@@ -1,5 +1,5 @@
 import { isRecord } from "./record.js";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import { writeCodexConfig, type JsonObject } from "./config.js";
@@ -22,6 +22,7 @@ export type DeepScanSources = Record<
 export interface ResolvedDeepScanConfig {
   settings: Required<DeepScanOptions>;
   sources: DeepScanSources;
+  legacyConfigPaths?: string[];
   source: string;
   document: TomlTable;
   overrides: DeepScanOptions;
@@ -96,11 +97,13 @@ export async function resolveDeepScanConfig(
   signal?: AbortSignal,
 ): Promise<ResolvedDeepScanConfig> {
   const explicit = deepScanOptions({ ...options, mode: "deep" });
-  let document: TomlTable = {};
   // Complete saved settings do not depend on today's ambient configuration.
-  if (!DEEP_SCAN_SETTINGS.every(([name]) => explicit[name] !== undefined)) {
-    document = await readDeepScanDocument(source, signal);
-  }
+  const legacy = DEEP_SCAN_SETTINGS.every(
+    ([name]) => explicit[name] !== undefined,
+  )
+    ? undefined
+    : await readDeepScanDocument(source, signal);
+  const document = legacy?.document ?? {};
   const existing = document["deep_scan"];
   if (
     existing !== undefined &&
@@ -145,6 +148,7 @@ export async function resolveDeepScanConfig(
   return {
     settings,
     sources,
+    ...(legacy && { legacyConfigPaths: [source, legacy.destination] }),
     source,
     document,
     overrides: explicit,
@@ -164,7 +168,7 @@ export async function writeDeepScanConfig(
   const sameFile = source === target;
   if (sameFile) {
     if (Object.keys(resolved.overrides).length === 0) return;
-    document = await readDeepScanDocument(destination);
+    document = (await readDeepScanDocument(destination))?.document ?? {};
   }
   // An isolated runtime needs a complete snapshot. An ambient file keeps
   // inherited defaults unset so future releases can still update them.
@@ -206,16 +210,22 @@ async function runtimeConfigPath(path: string): Promise<string> {
 async function readDeepScanDocument(
   source: string,
   signal?: AbortSignal,
-): Promise<TomlTable> {
+): Promise<{ document: TomlTable; destination: string } | undefined> {
+  let destination: string | undefined;
   try {
-    return parseToml(await readFile(source, { encoding: "utf8", signal }));
+    destination = await realpath(source);
+    const contents = await readFile(destination, { encoding: "utf8", signal });
+    return { document: parseToml(contents), destination };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new CodexSecurityError(
-        `Cannot read Codex Security configuration at ${source}.`,
-        { cause: error },
-      );
-    }
-    return {};
+    // A missing optional config is fine until its destination has been selected.
+    if (
+      destination === undefined &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    )
+      return undefined;
+    throw new CodexSecurityError(
+      `Cannot read Codex Security configuration at ${source}.`,
+      { cause: error },
+    );
   }
 }

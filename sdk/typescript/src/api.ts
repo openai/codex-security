@@ -2238,6 +2238,13 @@ export class CodexSecurity {
       if (measured === null) return total;
       // A thread subtotal cannot price an entire composition with missing receipts.
       if (total == null && accounting.hasUnknown) {
+        // Unpriced stages may still have complete token measurements.
+        if (
+          [...accounting.stageKeys].every(
+            (key) => observedMeasurements.get(key)?.usage != null,
+          )
+        )
+          return { usage: measured.usage };
         return {
           usage: {
             ...measured.usage,
