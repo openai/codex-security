@@ -813,13 +813,16 @@ test.each([
       process.platform === "win32"
         ? "synthetic_custom_header"
         : "SYNTHETIC_CUSTOM_HEADER";
-    const providerEnvironment = {
+    const providerEnvironment: Record<string, string> = {
       [providerKey]: external
         ? " synthetic-custom-key\n"
         : " synthetic-custom-key ",
       [headerKey]: " synthetic-custom-header ",
       SYNTHETIC_REQUIRED_KEY: "synthetic-required-key",
     };
+    if (process.platform === "win32")
+      providerEnvironment["SYNTHETIC_CUSTOM_HEADER"] =
+        " synthetic-child-header ";
     const client = new TestClient(
       {
         pluginPath: plugin,
@@ -851,9 +854,6 @@ test.each([
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "synthetic-account-key",
           ...providerEnvironment,
-          ...(process.platform === "win32"
-            ? { SYNTHETIC_CUSTOM_HEADER: " synthetic-child-header " }
-            : {}),
           SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
         },
         resolvePluginPython: async () => "/managed/python",
@@ -886,8 +886,9 @@ test.each([
                     "X-Synthetic-Token": headerKey,
                   },
                 });
+                // Windows child processes use the first lexicographic case variant.
                 expect(options.env![headerKey]).toBe(
-                  providerEnvironment[headerKey],
+                  providerEnvironment["SYNTHETIC_CUSTOM_HEADER"],
                 );
                 // Reproduce the actual SDK constructor's native configuration.
                 const status = await nativeRequest(
