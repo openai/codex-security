@@ -5,6 +5,7 @@ import {
   chmod,
   mkdir,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -95,7 +96,7 @@ async function fixture(scanId?: string, savedRoot?: string) {
 }
 
 async function savedFixture(repositoryPath = "repository") {
-  const root = await temporaryDirectory();
+  const root = await realpath(await temporaryDirectory());
   const repository = join(root, repositoryPath);
   const caller = join(root, "caller");
   const scanDirectory = join(root, "scan");
