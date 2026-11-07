@@ -315,6 +315,24 @@ still require deep mode. Deep diff scans and custom validation remain unsupporte
 Counts retain their existing bounds; zero subagents is valid, and discovery time
 cannot exceed 96 hours.
 
+`stop_after_consecutive_errors` stops discovery after that many consecutive
+unsuccessful workers. The same saved limit also interrupts an individual Deep
+worker turn after that many consecutive failed `record_codex_security_scan_draft`
+submissions (default: 3). The executor counts completed MCP failure events,
+including argument-schema rejections before the tool handler, handler errors,
+and transport failures. Reads and other tools do not reset this count; a
+successful persisted draft does. Each new or resumed attempt starts a fresh
+count and uses the existing bounded retry and worker-replacement policies.
+The guard cancels the worker process; it does not rely on the model obeying an
+error message. Checkpoints and accepted findings remain available to recovery,
+and a partial draft does not become a completed scan.
+
+This applies to the shared engine used by the SDK and plugin. It observes
+top-level `cs_artifacts` draft-call events, not reads, unrelated tool errors,
+stalled calls, or failures hidden inside delegated or code-mode calls that do
+not emit those events. Current Deep Scan merges discoveries in the host and
+does not expose the former `record_codex_security_deep_reduction` tool.
+
 `scan.max_time_minutes` accepts positive fractional minutes: an optional advisory
 allowance in Standard, or the enforced discovery limit in Deep (default and
 maximum: 5760 minutes). See [investigation time](../sdk/typescript/docs/cli.md#set-investigation-time)

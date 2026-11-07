@@ -932,6 +932,9 @@ hours. Explicit settings override lower-priority configuration across units.
 At the winning source, conflicting minute/hour durations are errors; equivalent
 durations are accepted.
 `stopAfterConsecutiveErrors` is an SDK/project-file setting, with no CLI flag.
+It also bounds consecutive failed draft submissions within each Deep worker
+attempt, before turn completion. The host cancels the attempt and uses the
+existing recovery policy; successful reads do not reset the submission count.
 `--codex` does not configure deep-scan settings. See
 [Deep settings and limits](https://github.com/openai/codex-security/blob/main/docs/project-configuration.md#deep-settings-and-limits).
 

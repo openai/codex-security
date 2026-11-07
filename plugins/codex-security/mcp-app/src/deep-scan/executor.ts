@@ -461,6 +461,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             parentProgram ?? runtimeSettings.cyberAccessProgram,
         });
         const diagnostics: CodexWorkerDiagnostic[] = [];
+        let failedSubmissions = 0;
+        const submissionErrorLimit = discovery
+          ? this.modelSettings.deepScanConfig?.stopAfterConsecutiveErrors
+          : undefined;
         let turnId: string | undefined;
         const turn = await readCodexSessionTurn({
           thread,
@@ -495,6 +499,32 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               await request.onThreadStarted?.(event.thread_id);
             } else if (event.type === "item.completed") {
               appendItemDiagnostic(diagnostics, event.item);
+              const item = event.item;
+              if (
+                submissionErrorLimit !== undefined &&
+                item.type === "mcp_tool_call" &&
+                item.server === "cs_artifacts" &&
+                item.tool === "record_codex_security_scan_draft"
+              ) {
+                // MCP schema validation can reject arguments before our handler
+                // runs. Count the SDK's terminal tool outcomes, not handler calls
+                // or intervening reads. A successful draft call has persisted it.
+                if (item.status === "completed") failedSubmissions = 0;
+                if (
+                  item.status === "failed" &&
+                  ++failedSubmissions >= submissionErrorLimit
+                ) {
+                  const failure: CodexWorkerDiagnostic[] = [];
+                  appendItemDiagnostic(failure, item);
+                  const error = new Error(
+                    `Deep Scan worker stopped after ${failedSubmissions} consecutive failed draft submissions: ${failure.map(({ message }) => message).join(" ")}`,
+                  );
+                  // Stop dispatch now, even if turn.completed is already buffered.
+                  // Only abort this attempt; the runner owns retry and recovery.
+                  controller.abort(error);
+                  throw error;
+                }
+              }
             } else if (event.type === "turn.completed") {
               request.signal.removeEventListener("abort", forwardAbort);
             } else if (event.type === "turn.failed") {
