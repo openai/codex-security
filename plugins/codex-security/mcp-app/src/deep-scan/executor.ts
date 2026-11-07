@@ -176,6 +176,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         );
       }
       const resolved = this.modelSettings.codexOptions;
+      const workerProfile = workerPermissionProfile(
+        parentSandbox,
+        request.workerUsageDirectory,
+      );
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment(resolved?.env);
       const runtimeSettings = await (this.runtimeSettings ??= (async () => {
@@ -300,17 +304,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           );
         }
       }
-      const workerProfile = workerPermissionProfile(
-        request.workerUsageDirectory
-          ? {
-              ...parentSandbox,
-              literalFilesystemDenies: [
-                ...(parentSandbox.literalFilesystemDenies ?? []),
-                request.workerUsageDirectory,
-              ],
-            }
-          : parentSandbox,
-      );
       // Use the same native configuration for preflight and the worker turn.
       const inheritedMetadata = isRecord(workerConfig.responses_api_metadata)
         ? workerConfig.responses_api_metadata
@@ -727,12 +720,33 @@ function workerSubagentConfig(
   };
 }
 
-function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+function workerPermissionProfile(
+  sandbox: DeepWorkerParentSandbox,
+  workerUsageDirectory?: string,
+) {
+  const literalDenies = sandbox.literalFilesystemDenies ?? [];
   const filesystem = new Map<string, string | Record<string, string>>([
     [":root", "read"],
-    ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
+    ...[...sandbox.filesystemDenies, ...literalDenies].map(
+      (key): [string, string] => [key, "deny"],
+    ),
   ]);
-  for (const literal of sandbox.literalFilesystemDenies ?? []) {
+  const pointDenies = literalDenies.filter((path) => /[*?[\]]/u.test(path));
+  // Bubblewrap cannot mount a second mask inside a directory it already hid.
+  if (
+    workerUsageDirectory &&
+    (process.platform !== "linux" ||
+      !literalDenies.some(
+        (path) =>
+          workerUsageDirectory === path ||
+          workerUsageDirectory.startsWith(
+            path.endsWith(sep) ? path : `${path}${sep}`,
+          ),
+      ))
+  ) {
+    pointDenies.push(workerUsageDirectory);
+  }
+  for (const literal of pointDenies) {
     if (sandbox.filesystemDenies.includes(literal)) {
       const root = parse(literal).root;
       const scope = filesystem.get(root);

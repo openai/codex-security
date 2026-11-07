@@ -1763,6 +1763,8 @@ def test_sealed_target_result_replays_only_the_pending_request(tmp_path: Path) -
         scan_dir, scan_id, target, relative_path="source.py", coverage_mode="deep_repository"
     )
     assert scan_command(state_dir, "complete-scan", scan_id)["scan"]["reportAvailable"]
+    progress = get_scan(state_dir, scan_id, "--progress-only")["scan"]["progress"]
+    assert progress["independentReviews"]["consolidating"] is False
     project.unlink()
 
     # A probe neither reopens the selected file nor consumes the result.
@@ -3148,6 +3150,7 @@ def test_cancel_scan_overrides_succeeded_deep_run_during_parent_tail(
     assert canceled["manifestPath"] == (str(manifest) if with_manifest else None)
     scan = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert scan["progress"]["status"] == "canceled"
+    assert scan["progress"]["independentReviews"]["consolidating"] is False
 
 
 @pytest.mark.parametrize("deep_status", ["failed", "interrupted"])
@@ -3185,6 +3188,7 @@ def test_saturated_run_without_manifest_can_be_marked_failed_or_interrupted(
     assert terminal["error"] == message
     scan = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert scan["progress"]["status"] == "failed"
+    assert scan["progress"]["independentReviews"]["consolidating"] is False
     assert scan["failureMessage"] == terminal["error"]
 
 

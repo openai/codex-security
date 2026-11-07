@@ -2717,7 +2717,9 @@ def scan_progress_result(
     connection: sqlite3.Connection, scan: sqlite3.Row
 ) -> tuple[dict[str, Any], str]:
     independent_reviews = (
-        deep_scan.independent_review_progress(connection, scan["id"])
+        deep_scan.independent_review_progress(
+            connection, scan["id"], parent_running=scan["status"] == "running"
+        )
         if scan["mode"] == "deep"
         else None
     )

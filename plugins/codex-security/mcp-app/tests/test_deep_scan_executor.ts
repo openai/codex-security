@@ -1701,16 +1701,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
           const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
+          const nestedReceipts = index === 0;
           const workerUsageDirectory = path.join(
-            fixture.root,
-            `state-${index}`,
-            "codex-home",
+            nestedReceipts ? codexHome : `${codexHome}-sibling`,
             "worker-usage",
             `scan-${index}`,
           );
+          const receiptRoot = path.parse(workerUsageDirectory).root;
           const parentSandbox = {
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
+              ...(nestedReceipts ? [] : [workerUsageDirectory]),
             ],
             literalFilesystemDenies: [
               ...trustedParentSandboxWithDenials.literalFilesystemDenies,
@@ -1778,8 +1779,21 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ...deniedWorkerPermissionProfile.filesystem,
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
-                [workerUsageDirectory]: { ".": "deny" },
-                [literalDeniedPath]: { ".": "deny" },
+                ...(!nestedReceipts || process.platform !== "linux"
+                  ? { [workerUsageDirectory]: { ".": "deny" } }
+                  : {}),
+                ...(nestedReceipts
+                  ? {}
+                  : {
+                      [receiptRoot]: {
+                        ...(receiptRoot === "/"
+                          ? deniedWorkerPermissionProfile.filesystem["/"]
+                          : {}),
+                        [workerUsageDirectory.slice(receiptRoot.length)]:
+                          "deny",
+                      },
+                    }),
+                [literalDeniedPath]: "deny",
               },
             },
             provider,

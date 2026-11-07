@@ -42,6 +42,23 @@ describe("deep scan completion summary", () => {
       "--max-discovery-runs greater than 40",
     ],
     [
+      "completed review limit even if finalization outlasts the deadline",
+      { completedAt: "2026-01-05T00:01:00Z" },
+      "40 review rounds. The latest review still found new issues",
+      "--max-discovery-runs greater than 40",
+    ],
+    [
+      "time limit before any dispatched review completed",
+      {
+        dispatchedCount: 1,
+        completionSequence: 0,
+        config: { maxDiscoveryRuns: 1, maxTimeHours: 5 / 60 },
+        completedAt: "2026-01-01T00:05:01Z",
+      },
+      "5-minute time limit. No source review completed.",
+      "--max-time greater than 5",
+    ],
+    [
       "quiet round",
       { noNewStreak: 1 },
       "More issues may remain",
