@@ -81,6 +81,35 @@ async function repositoryFixture({
 }
 
 describe("patch outcomes", () => {
+  test("ignores staged SVN metadata changes during an external-sandbox patch", async () => {
+    await using fixture = await repositoryFixture();
+    const metadata = join(fixture.directory, ".svn", "wc.db");
+    await mkdir(join(fixture.directory, ".svn"));
+    await writeFile(metadata, "original metadata\n");
+    await fixture.git("add", ".svn/wc.db");
+    await fixture.git("commit", "-m", "Synthetic metadata");
+    const outcome = await fixture.patch(
+      ["Synthetic issue", "--external-sandbox"],
+      {
+        onCodex: async () => {
+          await writeFile(metadata, "updated metadata\n");
+          await fixture.git("add", ".svn/wc.db");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.status, outcome.stderr).toBe(2);
+    expect(outcome.result).toMatchObject({
+      applied: false,
+      filesChanged: 0,
+      files: [],
+      error: { code: "NO_PATCH_APPLIED" },
+    });
+    expect(await fixture.git("diff", "--cached", "--name-only")).toBe(
+      ".svn/wc.db",
+    );
+  });
+
   test("uses the external sandbox only after explicit opt-in and prints a warning", async () => {
     await using fixture = await repositoryFixture();
     const source = `
@@ -110,6 +139,7 @@ lines.on("line", (line) => {
     const outcome = await fixture.patch(
       ["Synthetic issue", "--external-sandbox"],
       {
+        manualCodexPreparation: true,
         onCodex: nodeCodex(source),
       },
     );
@@ -644,7 +674,8 @@ const lines = require("node:readline").createInterface({ input: process.stdin })
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
-  if (["initialize", "account/login/start", "config/read"].includes(request.method)) send({ id: request.id, result: {} });
+  if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
+  if (request.method === "config/read") send({ id: request.id, result: { config: { permissions: { codex_security_patch: { extends: ":workspace" } } } } });
   if (request.method === "thread/start") send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
@@ -656,6 +687,7 @@ lines.on("line", (line) => {
       const outcome = await fixture.patch(
         ["Synthetic issue", "--full-output"],
         {
+          manualCodexPreparation: true,
           onCodex: nodeCodex(source),
         },
       );
