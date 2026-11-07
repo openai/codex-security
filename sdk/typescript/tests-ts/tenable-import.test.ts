@@ -1,11 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import {
-  type NormalizedExternalPublicationOptions,
-  prepareExternalPublication,
-  prepareNormalizedExternalPublication,
-} from "../src/external-findings-publish.js";
 import { readTenableFindings } from "../src/tenable-findings.js";
 import { dependencies as cliDependencies } from "./cli-fixtures.js";
 import {
@@ -14,26 +9,13 @@ import {
   updateStoredFinding,
 } from "./external-findings-local-helpers.js";
 import { createCliTest } from "./support/cli-run.js";
+import {
+  tenableFinding as row,
+  tenableReport as report,
+} from "./support/tenable-import-fixtures.js";
 
-const repositoryUrl = "https://github.com/example/repo";
-const asset = {
-  asset_id: "10000000-0000-4000-8000-000000000001",
-  asset_class: "CODE_REPOSITORY",
-  asset_name: "example/repo",
-};
-const row = {
-  asset_id: asset.asset_id,
-  finding_id: "00017",
-  finding_name: "Example finding",
-  severity: "High",
-  state: "ACTIVE",
-};
-const report = {
-  format: "tenable-one-code-repository/v1",
-  asset,
-  repository_url: repositoryUrl,
-  findings: [{ ...row, code_file_path: "src/app.ts", code_line_number: "7" }],
-};
+const repositoryUrl = report.repository_url;
+const asset = report.asset;
 const source = {
   provider: "tenable",
   sourceKey: "example/tenable/code-repository",
@@ -189,34 +171,4 @@ test("file and normalized imports verify repository and finding identity, even f
     unchanged: 0,
   });
   expect(runWorkbench).not.toHaveBeenCalled();
-});
-
-test("Cloud rejects local Tenable findings before file access or credential lookup", async () => {
-  await using fixture = await checkout();
-  const options = { ...source, repository: fixture.repository };
-  const unexpected = mock(async () => {
-    throw new Error("Unexpected Cloud call");
-  });
-  const deps = {
-    environment: fixture.environment,
-    fetch: unexpected,
-    credentials: unexpected,
-  };
-  // JavaScript callers may supply a local provider despite the SDK's Cloud types.
-  const cloudOptions =
-    options as unknown as NormalizedExternalPublicationOptions;
-  const empty = { read: 0, findings: [], excluded: [] };
-  await expect(
-    prepareExternalPublication(fixture.file, cloudOptions, deps),
-  ).rejects.toThrow(/local/i);
-  await expect(
-    prepareNormalizedExternalPublication(empty, cloudOptions, deps),
-  ).rejects.toThrow(/local/i);
-  await fixture.writeJson(report);
-  const { preview } = await fixture.prepare();
-  const relabeled = { ...options, provider: "wiz" as const };
-  await expect(
-    prepareNormalizedExternalPublication(preview, relabeled, deps),
-  ).rejects.toThrow(/local/i);
-  expect(unexpected).not.toHaveBeenCalled();
 });

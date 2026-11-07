@@ -8,6 +8,8 @@ import type {
 } from "./external-findings.js";
 import {
   repositoryUrlKey,
+  cloudRepositoryUrlKey,
+  type ExternalImportTarget,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import {
@@ -60,9 +62,14 @@ function findingLocations(rawPath?: string, rawLine?: number | string) {
   return [{ path, line }];
 }
 
-function assertRepository(claim: unknown, expected: string) {
-  const url = declaredScannerRepositoryUrl(claim, "Tenable", "local");
-  if (repositoryUrlKey(url) !== repositoryUrlKey(expected))
+function assertRepository(
+  claim: unknown,
+  expected: string,
+  target: ExternalImportTarget,
+) {
+  const url = declaredScannerRepositoryUrl(claim, "Tenable", target);
+  const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  if (key(url) !== key(expected))
     throw new CodexSecurityError(
       "Tenable repository URL does not match --source-repository-url.",
     );
@@ -71,24 +78,37 @@ function assertRepository(claim: unknown, expected: string) {
 
 /** Verify retained identities when importing a normalized selection through the SDK. */
 export function tenableSourceRepository(
-  input: ExternalFindings,
+  input: Pick<ExternalFindings, "findings" | "report">,
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
+  target: ExternalImportTarget = "local",
 ) {
-  const url = declaredScannerRepositoryUrl(declared, "Tenable", "local");
-  const asset = asRecord(input.report?.["asset"]);
+  const first = input.findings[0]?.evidence.source_data;
+  const reportless = target === "cloud" && input.report === undefined;
+  const asset = asRecord(
+    input.report?.["asset"] ?? (reportless ? first?.["asset"] : undefined),
+  );
   if (
-    input.report?.["format"] !== tenableReportFormat ||
+    (!reportless && input.report?.["format"] !== tenableReportFormat) ||
     asset?.["asset_class"] !== "CODE_REPOSITORY" ||
-    !nonblank.safeParse(asset["asset_id"]).success
+    !assetId.safeParse(asset["asset_id"]).success
   )
     throw new CodexSecurityError(
       "Tenable imports require a report for one code repository asset.",
     );
-  assertRepository(input.report["repositoryUrl"], url);
-  for (const ref of references) assertRepository(ref.url, url);
+  const url = declaredScannerRepositoryUrl(
+    declared ??
+      (target === "cloud"
+        ? (input.report?.["repositoryUrl"] ?? first?.["repository_url"])
+        : undefined),
+    "Tenable",
+    target,
+  );
+  if (input.report)
+    assertRepository(input.report["repositoryUrl"], url, target);
+  for (const ref of references) assertRepository(ref.url, url, target);
   for (const { source_finding_id, evidence } of input.findings) {
-    validateExternalEvidence(evidence, "local");
+    validateExternalEvidence(evidence, target);
     const data = evidence.source_data;
     const rowAsset = asRecord(data?.["asset"]);
     const finding = asRecord(data?.["finding"]);
@@ -102,9 +122,9 @@ export function tenableSourceRepository(
       throw new CodexSecurityError(
         "Tenable findings must retain their native finding ID and one code repository asset.",
       );
-    assertRepository(data["repository_url"], url);
+    assertRepository(data["repository_url"], url, target);
     if (evidence.details?.repository?.url !== undefined)
-      assertRepository(evidence.details.repository.url, url);
+      assertRepository(evidence.details.repository.url, url, target);
   }
   const { hostname } = new URL(url);
   return {
@@ -120,18 +140,19 @@ export function tenableSourceRepository(
 export async function readTenableFindings(
   path: string,
   sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "local",
 ): Promise<ExternalFindings> {
   const declared = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
     "Tenable",
-    "local",
+    target,
   );
   const {
     asset,
     repository_url,
     findings: rows,
   } = selection.parse(await readScannerJson(path));
-  const repository = assertRepository(repository_url, declared);
+  const repository = assertRepository(repository_url, declared, target);
   const ids = new Set<string>();
   const findings = rows.map((finding) => {
     if (finding.asset_id !== asset.asset_id)
@@ -162,7 +183,7 @@ export async function readTenableFindings(
             finding,
           },
         },
-        "local",
+        target,
       ),
     };
   });

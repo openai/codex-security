@@ -26,6 +26,7 @@ export const privateJobVersions: Partial<
   checkmarx: 3,
   sonar: 3,
   trivy: 3,
+  tenable: 3,
   veracode: 3,
 };
 const fileId = z.string().regex(/^aifile_[0-9a-f]{32}$/u);

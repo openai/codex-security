@@ -6,7 +6,7 @@
 | Supply your own validation test | [Custom validation demo](custom-validation/README.md). Run the local HTTP test on its own or let a model-backed scan invoke it. |
 | Scan pull requests and repositories with GitHub Actions | [GitHub Actions with Amazon Bedrock](github-actions/README.md) uses AWS OIDC and saves SARIF and readable reports. |
 | Scan Azure Repos from a central pipeline | [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md) runs manual full or committed-diff scans. |
-| Import Tenable One findings locally | [Tenable One export guide](../docs/scanner-imports/tenable.md) shows how to select code repository findings. |
+| Import Tenable One findings | [Tenable One export guide](../docs/scanner-imports/tenable.md) shows how to select findings for a local checkout or connected Cloud repository. |
 | Prepare a ServiceNow AVIT export | [AVIT template](servicenow-avit-template.csv). Replace the synthetic application and assignment values before using it as input to [export findings for ServiceNow](../sdk/typescript/docs/cli.md#export-findings-for-servicenow). |
 | Preview a Codex Security findings CSV for Cloud | [Findings CSV template](findings.csv). Add one row per finding and preview the file as shown below. |
 
