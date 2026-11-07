@@ -1,3 +1,5 @@
+"""Export saved findings from stopped scans while retaining newer drafts across recovery."""
+
 from __future__ import annotations
 
 import copy
@@ -866,9 +868,9 @@ def test_completed_findings_are_returned_in_bounded_pages(
         state_dir, "list-findings", scan_id, "--offset", "20", "--limit", "50"
     )["findingsPage"]
     assert second_page["offset"] == 20
-    assert second_page["nextOffset"] == (40 if finding_count > 40 else None)
+    assert second_page["nextOffset"] == (70 if finding_count > 70 else None)
     assert second_page["total"] == finding_count
-    assert len(second_page["findings"]) == min(finding_count - 20, 20)
+    assert len(second_page["findings"]) == min(finding_count - 20, 50)
     assert embedded_occurrence_ids.isdisjoint(
         finding["occurrenceId"] for finding in second_page["findings"]
     )

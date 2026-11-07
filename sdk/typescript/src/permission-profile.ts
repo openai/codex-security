@@ -27,6 +27,7 @@ export function createPermissionCheckedCodex(
   suppliedCodex?: Pick<Codex, "startThread" | "resumeThread">,
   nativeRoot?: string,
   preflightEnvironment?: Record<string, string>,
+  verifyExecutable?: () => Promise<void>,
 ) {
   // Raw tables preserve literal MCP server names and filesystem selectors.
   const overrides = [
@@ -122,6 +123,7 @@ export function createPermissionCheckedCodex(
           signal,
         );
         try {
+          await verifyExecutable?.();
           await verifyPermissionProfile({
             executable: options.codexPathOverride,
             cwd: threadOptions.workingDirectory ?? process.cwd(),
@@ -142,6 +144,7 @@ export function createPermissionCheckedCodex(
         events: (async function* () {
           let permissionFailure: ScanPermissionError | undefined;
           try {
+            await verifyExecutable?.();
             const { events } = await thread.runStreamed(input, {
               ...turnOptions,
               signal,

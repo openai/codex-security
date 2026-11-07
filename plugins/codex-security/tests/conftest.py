@@ -1,3 +1,5 @@
+"""Provide an isolated in-memory workbench database for each test using a shared migrated schema."""
+
 from __future__ import annotations
 
 import runpy
@@ -16,6 +18,7 @@ from publication_fixtures import (  # noqa: F401 -- pytest discovers these share
 
 @pytest.fixture(scope="session")
 def workbench_api():
+    """Return the script globals used to exercise the workbench directly without starting its CLI."""
     script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
     return runpy.run_path(str(script), run_name="codex_security_test_workbench")
 
@@ -32,6 +35,7 @@ def workbench_schema(workbench_api):
 
 @pytest.fixture
 def workbench_db(workbench_schema):
+    """Yield a fresh in-memory copy of the migrated schema with foreign keys enabled and named rows."""
     with closing(sqlite3.connect(":memory:")) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")

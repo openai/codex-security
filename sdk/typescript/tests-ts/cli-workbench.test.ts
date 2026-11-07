@@ -1806,7 +1806,7 @@ describe("CLI workbench", () => {
       expect(
         await runCapturedCli(
           main,
-          ["scans", "rerun", "scan-original"],
+          ["scans", "rerun", "scan-orig"],
           dependencies({
             onConfig,
             onTurn,

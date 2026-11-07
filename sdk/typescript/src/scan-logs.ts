@@ -6,7 +6,6 @@ import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
   isScanArtifactDirectory,
-  readsCompressedSessions,
   sessionEvents,
   sessionOwnsTurn,
   sessionParentThreadId,
@@ -76,10 +75,7 @@ interface SessionLog {
 }
 
 async function* scanSessions(codexHome: string, directory = "sessions") {
-  for await (const path of sessionFiles(
-    join(codexHome, directory),
-    readsCompressedSessions,
-  )) {
+  for await (const path of sessionFiles(join(codexHome, directory), true)) {
     for await (const first of sessionEvents(path)) {
       if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
         break;

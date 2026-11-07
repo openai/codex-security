@@ -53,6 +53,10 @@ import {
 } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { workflowDigest } from "../src/finding-workflow.js";
+import {
+  OperationTelemetry,
+  readOperationTelemetry,
+} from "../src/operation-telemetry.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
@@ -107,6 +111,7 @@ async function interruptedScan(
     cost?: ScanCost;
     findings?: SemanticScan["findings"];
     coverage?: SemanticScan["coverage"];
+    threatModel?: SemanticScan["threatModel"];
   } | null = {},
   knowledgeState: "saved" | "legacy" = "saved",
 ) {
@@ -346,6 +351,9 @@ async function interruptedScan(
     const aggregate: SemanticScan = {
       scanId,
       findings: ordinaryPass.findings ?? [],
+      ...(ordinaryPass.threatModel
+        ? { threatModel: ordinaryPass.threatModel }
+        : {}),
       coverage: ordinaryPass.coverage ?? {
         surfaces: [],
         explicitExclusions: [],
@@ -414,11 +422,19 @@ function resumeDependencies(
   createCodex: NonNullable<
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
+  createOperationTelemetry?: ConstructorParameters<
+    typeof TestClient
+  >[1]["createOperationTelemetry"],
 ) {
   return {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
     runWorkbench: f.command,
-    createSecurity: resumeClient(f, createCodex),
+    createSecurity: resumeClient(
+      f,
+      createCodex,
+      runWorkbench,
+      createOperationTelemetry,
+    ),
   };
 }
 
@@ -1537,6 +1553,208 @@ test.each(["changed", "missing"] as const)(
   },
 );
 
+test.each(["completed", "failed"] as const)(
+  "bulk recovery retains original correlation and unpriced usage after %s without a ledger",
+  async (outcome) => {
+    const f = await interruptedScan(
+      "deep",
+      true,
+      {
+        config: { model: "synthetic-unpriced-model", approval_policy: "never" },
+      },
+      false,
+      true,
+      { threatModel: { summary: "First pass" } },
+    );
+    // Two completed passes with distinct threat models must resume the grouping turn.
+    const directory = "artifacts/deep-scan/passes/pass-2";
+    const scanDir = join(f.scanDir, directory);
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const child = await f.command(
+      [
+        "register-cli-scan",
+        "--repository",
+        f.repository,
+        "--scan-dir",
+        scanDir,
+        "--parent-scan-id",
+        f.scanId,
+        "--registration-json-stdin",
+      ],
+      JSON.stringify({
+        recipe: {
+          repository: f.repository,
+          target: f.recipe.target,
+          mode: "standard",
+          config: f.recipe.config,
+        },
+        parentScanRole: "deep_pass",
+      }),
+    );
+    const childId = child["scanId"] as string;
+    await writeDraft(f.command, child, "standard", {
+      scanId: childId,
+      findings: [],
+      coverage: semanticCoverage(),
+      threatModel: { summary: "Second pass" },
+    });
+    await f.command(["prepare-scan-completion", "--scan-id", childId]);
+    await f.command(["complete-scan", "--scan-id", childId]);
+    const checkpoint = JSON.parse(
+      await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+    );
+    checkpoint.mergedScanIds = [];
+    checkpoint.passes.push({ directory, scanId: childId });
+    await f.command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        f.scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify(checkpoint),
+    );
+    await rm(join(f.root, "results.jsonl"));
+    const original = new OperationTelemetry({
+      directory: f.environment.CODEX_SECURITY_STATE_DIR,
+      protectedRepository: f.repository,
+      protectedOutput: f.scanDir,
+      command: "scan",
+      surface: "cli",
+      mode: "deep",
+    });
+    await original.start();
+    await original.bindScan(f.scanId);
+    const { stdout, stderr, runCli } = createCliTest(main);
+    let resumed = 0;
+    const code = await runCli(
+      ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+      resumeDependencies(
+        f,
+        () => ({
+          startThread: () => fail("Unexpected new session"),
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            resumed++;
+            return {
+              id: threadId,
+              async runStreamed() {
+                await appendFile(
+                  f.sessionPath,
+                  JSON.stringify({
+                    type: "event_msg",
+                    payload: {
+                      type: "token_count",
+                      info: {
+                        total_token_usage: {
+                          input_tokens: 10000,
+                          output_tokens: 2000,
+                        },
+                      },
+                    },
+                  }) + "\n",
+                );
+                if (outcome === "failed")
+                  throw new Error("Synthetic resumed failure");
+                return {
+                  events: completedEvents(
+                    threadId,
+                    (async function* () {
+                      yield {
+                        type: "item.completed" as const,
+                        item: {
+                          id: "merge",
+                          type: "agent_message" as const,
+                          text: JSON.stringify({
+                            threatModel: { summary: "Reconciled assessments" },
+                          }),
+                        },
+                      };
+                    })(),
+                  ),
+                };
+              },
+            };
+          },
+        }),
+        (options) => new OperationTelemetry(options),
+      ),
+    );
+    expect(code, stderr.text()).toBe(outcome === "completed" ? 0 : 2);
+    expect(resumed).toBe(1);
+    const result = JSON.parse(stdout.text());
+    const receipts = await readJsonLines(result.resultsPath);
+    expect(receipts).toHaveLength(1);
+    const { events } = await readOperationTelemetry(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+    );
+    const starts = events.filter((event) => event.type === "attempt_started");
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map((event) => event.attemptId)).size).toBe(2);
+    expect(
+      starts.every((event) => event.operationId === original.operationId),
+    ).toBe(true);
+    const terminal = events.find((event) => event.type === "attempt_finished");
+    expect(terminal).toMatchObject({
+      operationId: original.operationId,
+      outcome,
+      resumed: true,
+      measurement: {
+        cost: null,
+        usage: {
+          input_tokens: 10000,
+          output_tokens: 2000,
+          total_tokens: 12000,
+        },
+      },
+    });
+    expect(receipts[0]).toMatchObject({
+      attempt: 1,
+      status: outcome,
+      operationId: original.operationId,
+      measurement: terminal!.measurement,
+    });
+    expect(receipts[0]).not.toHaveProperty("cost");
+    if (outcome === "completed") {
+      const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+        "scan"
+      ] as JsonObject;
+      expect(saved["usage"]).toMatchObject({
+        coverage: "complete",
+        totalTokens: 12000,
+      });
+      expect(saved).not.toHaveProperty("cost");
+      await rm(result.resultsPath);
+      const recovered = createCliTest(main);
+      expect(
+        await recovered.runCli(
+          ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+          {
+            ...dependencies({
+              environment: f.environment,
+              currentDirectory: f.root,
+              onRun: () => fail("A sealed scan needs no Codex invocation"),
+            }),
+            runWorkbench: f.command,
+          },
+        ),
+        recovered.stderr.text(),
+      ).toBe(0);
+      const restored = await readJsonLines(result.resultsPath);
+      expect(restored).toHaveLength(1);
+      expect(restored[0]!["usage"]).toEqual(saved["usage"]);
+      for (const key of ["cost", "measurement", "operationId"])
+        expect(restored[0]).not.toHaveProperty(key);
+      expect(
+        (await readOperationTelemetry(f.environment.CODEX_SECURITY_STATE_DIR))
+          .events,
+      ).toEqual(events);
+    }
+  },
+  120000,
+);
+
 test.each([false, true])(
   "resumed CLI starts with terminal Deep progress (interactive=%p)",
   async (interactive) => {
@@ -1707,6 +1925,7 @@ test.each([
         attempt: 1,
         cost: { inputTokens: 10000, outputTokens: 2000 },
       });
+      expect(reconciled[1]).not.toHaveProperty("operationId");
       // A subsequent bulk recovery must skip the reconciled completion.
       const nextOutput = capture();
       expect(
@@ -1752,6 +1971,9 @@ function resumeClient(
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
   workbench: typeof runWorkbench = runWorkbench,
+  createOperationTelemetry?: ConstructorParameters<
+    typeof TestClient
+  >[1]["createOperationTelemetry"],
 ) {
   return (config: ConstructorParameters<typeof TestClient>[0]) =>
     new TestClient(config, {
@@ -1776,6 +1998,7 @@ function resumeClient(
       prepareScanArtifactRestorer,
       runWorkbench: workbench,
       createCodex,
+      ...(createOperationTelemetry ? { createOperationTelemetry } : {}),
     });
 }
 
@@ -2793,7 +3016,7 @@ test("resuming Deep Scan includes archived spending before starting another turn
   const f = await interruptedScan(
     "deep",
     false,
-    { maxCostUsd: 0.000001 },
+    { maxCostUsd: 0.000001, postScanPrompt: "Summarize the interrupted scan." },
     false,
     true,
     {
@@ -3045,6 +3268,7 @@ test.each([
       scanDir: "/synthetic/scan",
       codexHome: "/synthetic/home",
       model: "gpt-6-astra",
+      pricingContext: priced ? undefined : { provider: "gcp" },
       startedAt: "2026-10-01T01:00:00Z",
       checkpoint: null,
       expectation: {
@@ -3073,6 +3297,9 @@ test.each([
       },
       onCost() {},
     });
+    expect(recovered.turnResult.pricingContext).toEqual(
+      priced ? undefined : { provider: "gcp" },
+    );
     expect(recovered.turnResult.usage).toMatchObject({
       input_tokens: 100,
       cached_input_tokens: 20,

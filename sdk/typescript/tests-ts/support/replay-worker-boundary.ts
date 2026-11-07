@@ -3,7 +3,7 @@ import * as childProcess from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { spyOn } from "bun:test";
+import { expect, spyOn } from "bun:test";
 import { parse } from "smol-toml";
 import { fakeCodexSource } from "../../../../plugins/codex-security/mcp-app/tests/support/fake-codex-source.ts";
 import { scanRuntimeCodexConfig } from "../../src/api.js";
@@ -131,20 +131,18 @@ export async function checkReplayWorkerSettings(
           "skills",
           "model_catalog_json",
         ])
-          assert.deepEqual(selected[key], config[key]);
-        assert.deepEqual(
-          (selected["agents"] as JsonObject)["reviewer"],
+          expect(selected[key]).toEqual(config[key]);
+        expect((selected["agents"] as JsonObject)["reviewer"]).toEqual(
           (config["agents"] as JsonObject)["reviewer"],
         );
         for (const key of ["view_image", "shell_tool"])
           assert.equal((selected["features"] as JsonObject)[key], false);
         assert.equal(selected["approval_policy"], "never");
-        assert.deepEqual(
+        expect(
           (selected["permissions"] as JsonObject)[
             "codex_security_deep_scan_worker"
           ],
-          profile,
-        );
+        ).toEqual(profile);
         assert.equal(args.includes("resume"), resumed);
       }
     }

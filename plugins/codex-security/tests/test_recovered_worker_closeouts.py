@@ -1,3 +1,5 @@
+"""Track worker closeouts through parent copies, reopened work, and archived attempts."""
+
 from __future__ import annotations
 
 import json

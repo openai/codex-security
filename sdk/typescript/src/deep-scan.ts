@@ -4,7 +4,11 @@ import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { JsonObject } from "./config.js";
-import { scanCostUsage, type ScanCost } from "./cost.js";
+import {
+  scanCostUsage,
+  type ScanCost,
+  type ScanUsageMeasurement,
+} from "./cost.js";
 import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
@@ -71,7 +75,14 @@ export class DeepScanInputRecoveryError extends DeepScanRecoveryError {
   }
 }
 
+export type DeepScanDiagnostic = Readonly<Record<string, string | number>>;
+
 export interface DeepScanComposition {
+  onDiagnostic?(event: DeepScanDiagnostic): void;
+  onMeasurement?(
+    key: string,
+    measurement: Readonly<ScanUsageMeasurement>,
+  ): void;
   scanId: string;
   scanDir: string;
   repository: string;
@@ -98,7 +109,9 @@ export interface DeepScanComposition {
     newFindings: number;
     retainedFindings: number;
   }): void;
-  writer: ScanArtifactRestorer;
+  writer: ScanArtifactRestorer & {
+    reserveDirectory?(relativePath: string): Promise<boolean>;
+  };
   projectChild(
     sourceScanId: string,
     sourceDirectory: string,
@@ -123,11 +136,22 @@ export interface DeepScanComposition {
   costUnavailable?: boolean;
 }
 
-function validatePassDirectories(state: DeepScanCheckpoint): void {
-  for (const [index, pass] of state.passes.entries()) {
-    if (pass.directory !== passDirectory(index))
+function validatePassDirectories(state: DeepScanCheckpoint): number {
+  const directories = new Set<string>();
+  let maximum = 0;
+  for (const pass of state.passes) {
+    const number = Number(pass.directory.split("pass-").at(-1));
+    if (
+      !Number.isSafeInteger(number) ||
+      number < 1 ||
+      pass.directory !== passDirectory(number - 1) ||
+      directories.has(pass.directory)
+    )
       throw new Error("Saved scan pass escaped its parent.");
+    directories.add(pass.directory);
+    maximum = Math.max(maximum, number);
   }
+  return maximum;
 }
 
 function savedPassIndex(
@@ -189,7 +213,16 @@ export async function runDeepScans(
   if (input.costUnavailable) state.costUnavailable = true;
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
-  validatePassDirectories(state);
+  let lastDirectory = validatePassDirectories(state);
+  const diagnostic = (event: DeepScanDiagnostic) => {
+    try {
+      void Promise.resolve(input.onDiagnostic?.(event)).catch(() => {});
+    } catch {
+      // An optional observer cannot interrupt retained scan work.
+    }
+  };
+  diagnostic({ event: "coordinator_started", scanId });
+
   if (state.discoveryUserContext === undefined)
     state.discoveryUserContext = input.scanOptions.scanPrompt ?? null;
   const deadlineController = new AbortController();
@@ -749,6 +782,10 @@ export async function runDeepScans(
                 error instanceof ScanCostTrackingError
               )
                 throw error;
+              diagnostic({
+                event: "finding_comparison_failed",
+                reason: errorMessage(error),
+              });
               // Keep disputed findings separate and checkpoint the completed scans.
               if (isCodexNonRetryableFailure(error)) comparisonStop ??= error;
             },
@@ -845,6 +882,7 @@ export async function runDeepScans(
       }
       let result;
       try {
+        diagnostic({ event: "worker_started", directory: pass.directory });
         result = await client.run(input.repository, {
           ...input.scanOptions,
           scanPrompt: state.discoveryUserContext ?? undefined,
@@ -869,6 +907,9 @@ export async function runDeepScans(
             await save();
             if (state.costUnavailable) reportPassCost("previous-work", null);
           },
+          onMeasurement: input.onMeasurement
+            ? (value) => input.onMeasurement!(pass.directory, value)
+            : input.scanOptions.onMeasurement,
           onUsage:
             input.onUsage === undefined
               ? input.scanOptions.onUsage
@@ -1092,7 +1133,15 @@ export async function runDeepScans(
         stopDiscovery(state, stop);
         break;
       }
-      if (state.passes.length === 0 && state.aggregate === null) {
+      if (
+        state.aggregate === null &&
+        !state.mergeStarted &&
+        state.passes.every(
+          (pass) =>
+            pass.failedBeforeRegistration === undefined &&
+            (pass.scanId === undefined || pass.executionNotStarted),
+        )
+      ) {
         try {
           await workbench(
             ["check-deep-scan-target", "--scan-id", scanId],
@@ -1109,7 +1158,25 @@ export async function runDeepScans(
         batch.length < settings.workers &&
         state.passes.length < settings.maxDiscoveryRuns
       ) {
-        batch.push(reservePass(state));
+        const pass = reservePass(state);
+        pass.directory = passDirectory(lastDirectory++);
+        batch.push(pass);
+      }
+      if (input.writer.reserveDirectory) {
+        // Reserve labels in dispatch order before publishing them. Existing
+        // directories may belong to a coordinator finishing a handoff.
+        for (const pass of batch) {
+          if (pass.scanId !== undefined) continue;
+          while (!(await input.writer.reserveDirectory(pass.directory))) {
+            if (!Number.isSafeInteger(++lastDirectory))
+              throw new Error("No Deep Scan pass directory is available.");
+            pass.directory = passDirectory(lastDirectory - 1);
+          }
+          lastDirectory = Math.max(
+            lastDirectory,
+            Number(pass.directory.split("pass-").at(-1)),
+          );
+        }
       }
       await save();
       await settlePasses(batch);

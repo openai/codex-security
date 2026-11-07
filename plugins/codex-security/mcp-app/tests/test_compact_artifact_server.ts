@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, snapshotScanDraft } from "./support/json.ts";
 import type { TextContent } from "@modelcontextprotocol/sdk/types.js";
 import type {
@@ -1285,7 +1286,7 @@ async function testClaimedParentArtifactOperations() {
       assert.equal(await readFile(inventoryPath, "utf8"), originalInventory);
     }
 
-    execFileSync(process.env.PYTHON ?? "python3", [
+    execFileSync(fixturePython, [
       "-c",
       "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); " +
         "c.execute('UPDATE scans SET handoff_claim_token = ? WHERE id = ?', " +
@@ -1712,7 +1713,7 @@ process.exit(1);
       scanId: canceledScan.scanId,
       scanDir: canceledScan.scanDir,
     });
-    assert.equal(usage, undefined);
+    assert.equal(usage.coverage, "unavailable");
     assert.deepEqual(warnings, []);
     assert.equal(cost, undefined);
     assert.deepEqual(canceledResponse.content, [

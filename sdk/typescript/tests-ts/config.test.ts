@@ -16,6 +16,7 @@ import {
   resolveCodexProfile,
   resolveCommandAuthConfig,
   scanCompositionOverrides,
+  scanPricingContext,
   scanModelConfiguration,
   scanModelProvider,
 } from "../src/config.js";
@@ -179,6 +180,70 @@ function macOsSandboxUnavailable(): boolean {
       "sandbox-exec: sandbox_apply: Operation not permitted"
   );
 }
+
+function shouldScheduleNativeSandboxTests(
+  platform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv,
+): boolean {
+  if (platform !== "win32") return true;
+  const setting =
+    environment["CODEX_SECURITY_TEST_WINDOWS_SANDBOX"]?.toLowerCase();
+  if (setting === "1" || setting === "true") return true;
+  if (setting === "0" || setting === "false") return false;
+  return (
+    environment["GITHUB_ACTIONS"] === "true" &&
+    environment["RUNNER_ENVIRONMENT"] === "github-hosted"
+  );
+}
+
+const skipNativeSandboxTests =
+  !shouldScheduleNativeSandboxTests(process.platform, process.env) ||
+  macOsSandboxUnavailable();
+
+describe("native sandbox test scheduling", () => {
+  const local = { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false" };
+  const hosted = {
+    ...local,
+    GITHUB_ACTIONS: "true",
+    RUNNER_ENVIRONMENT: "github-hosted",
+  };
+  const setting = "CODEX_SECURITY_TEST_WINDOWS_SANDBOX";
+  const onWindows = (env: NodeJS.ProcessEnv) =>
+    shouldScheduleNativeSandboxTests("win32", env);
+
+  test("defaults Windows coverage to GitHub-hosted Actions runners", () => {
+    expect(onWindows(local)).toBe(false);
+    expect(onWindows(hosted)).toBe(true);
+    expect(onWindows({ ...hosted, [setting]: "" })).toBe(true);
+    expect(onWindows({ RUNNER_ENVIRONMENT: "github-hosted" })).toBe(false);
+    expect(onWindows({ ...hosted, RUNNER_ENVIRONMENT: "self-hosted" })).toBe(
+      false,
+    );
+  });
+
+  test.each(["1", "true", "True"])(
+    "opts into local Windows coverage with %s",
+    (value) => {
+      expect(onWindows({ ...local, [setting]: value })).toBe(true);
+    },
+  );
+
+  test.each(["0", "false"])(
+    "opts out of hosted Windows coverage with %s",
+    (value) => {
+      expect(onWindows({ ...hosted, [setting]: value })).toBe(false);
+    },
+  );
+
+  test.each(["darwin", "linux"] as const)(
+    "ignores the Windows setting on %s",
+    (platform) => {
+      expect(
+        shouldScheduleNativeSandboxTests(platform, { [setting]: "false" }),
+      ).toBe(true);
+    },
+  );
+});
 
 async function sandboxFailureDetails(codexHome: string, details: string) {
   if (process.platform !== "win32") return details;
@@ -642,6 +707,133 @@ describe("Codex configuration", () => {
     }
   });
 
+  test.each(["amazon-bedrock", "amazon-bedrock-runtime"])(
+    "uses the selected %s provider's AWS region before the environment",
+    (provider) => {
+      const config = {
+        profile: "gov",
+        model_provider: "openai",
+        model_providers: { [provider]: { aws: { region: "us-east-2" } } },
+        profiles: {
+          gov: {
+            model_provider: provider,
+            model_providers: {
+              [provider]: { aws: { region: " us-gov-east-1 " } },
+            },
+          },
+        },
+      };
+      expect(scanPricingContext(config, { AWS_REGION: "us-west-1" })).toEqual({
+        provider: "amazon-bedrock",
+        region: "us-gov-east-1",
+      });
+    },
+  );
+
+  test("resolves Bedrock environment regions and preserves an unknown region", () => {
+    const config = { model_provider: "amazon-bedrock" };
+    const environment = {
+      AWS_REGION: "us-gov-west-1",
+      AWS_DEFAULT_REGION: "us-east-1",
+    };
+    expect(scanPricingContext(config, environment)).toEqual({
+      provider: "amazon-bedrock",
+      region: "us-gov-west-1",
+    });
+    expect(
+      scanPricingContext(config, { ...environment, AWS_REGION: " " }),
+    ).toEqual({ provider: "amazon-bedrock", region: "us-east-1" });
+    expect(scanPricingContext(config, { AWS_PROFILE: "synthetic" })).toEqual({
+      provider: "amazon-bedrock",
+      region: null,
+    });
+    expect(
+      scanPricingContext({ model_provider: "openai" }, environment),
+    ).toBeUndefined();
+  });
+
+  test.each([
+    ["https://bedrock-mantle.us-gov-east-1.api.aws/openai/v1", "us-gov-east-1"],
+    [
+      "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+      "us-gov-west-1",
+    ],
+    ["https://gateway.example.test", null],
+  ])(
+    "uses the billing region from a Bedrock endpoint override %s",
+    (baseUrl, region) => {
+      const config = {
+        model_provider: "amazon-bedrock",
+        model_providers: {
+          "amazon-bedrock": { base_url: baseUrl, aws: { region: "us-east-1" } },
+        },
+      };
+      expect(scanPricingContext(config, { AWS_REGION: "us-west-2" })).toEqual({
+        provider: "amazon-bedrock",
+        region,
+      });
+    },
+  );
+
+  test("distinguishes managed Vertex APIs from dedicated endpoints and other gateways", () => {
+    const base =
+      "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/example/locations/us-central1";
+    const fromUrl = (baseUrl: string) =>
+      scanPricingContext({ openai_base_url: baseUrl }, {});
+    expect(fromUrl(`${base}/endpoints/openapi`)).toEqual({
+      provider: "gcp",
+      managedEndpoint: true,
+    });
+    expect(fromUrl(`${base}/endpoints/1234`)).toEqual({
+      provider: "gcp",
+      managedEndpoint: false,
+    });
+    expect(
+      fromUrl("https://123.us-central1-example.prediction.vertexai.goog"),
+    ).toEqual({ provider: "gcp", managedEndpoint: false });
+    expect(
+      fromUrl(
+        "https://aiplatform.mtls.googleapis.com./v1/projects/example/locations/global/endpoints/openapi",
+      ),
+    ).toEqual({ provider: "gcp", managedEndpoint: true });
+    expect(fromUrl("https://gateway.example.test")).toBeUndefined();
+    expect(
+      scanPricingContext(
+        { model_providers: { openai: { base_url: base } } },
+        { OPENAI_BASE_URL: base },
+      ),
+    ).toBeUndefined();
+    const config = {
+      profile: "review",
+      profiles: {
+        review: {
+          model_provider: "vertex",
+          model_providers: {
+            vertex: {
+              base_url:
+                "https://aiplatform.googleapis.com/v1/projects/example/locations/global/publishers/openai/v1/",
+            },
+          },
+        },
+      },
+    };
+    expect(scanPricingContext(config, {})).toEqual({
+      provider: "gcp",
+      managedEndpoint: true,
+    });
+    expect(
+      scanPricingContext(
+        {
+          model_provider: "gcp",
+          model_providers: {
+            gcp: { base_url: "https://gateway.example.test" },
+          },
+        },
+        {},
+      ),
+    ).toEqual({ provider: "gcp", managedEndpoint: false });
+  });
+
   test("rejects invalid model settings from the selected Codex profile", async () => {
     for (const [profile, message] of [
       [{ model: " " }, "model must be a nonempty string"],
@@ -892,7 +1084,7 @@ describe("Codex configuration", () => {
     expect(result.stdout.length).toBeGreaterThan(0);
   });
 
-  test.skipIf(macOsSandboxUnavailable())(
+  test.skipIf(skipNativeSandboxTests)(
     "allows scan helpers to write workspace files without writable credential ancestry",
     async () => {
       const { root, codexHome, stateDirectory, workspace, environment } =
@@ -986,7 +1178,7 @@ describe("Codex configuration", () => {
     },
   );
 
-  test.skipIf(macOsSandboxUnavailable())(
+  test.skipIf(skipNativeSandboxTests)(
     "reads policy source without exposing credentials or changing host files",
     async () => {
       const { root, codexHome, workspace, stateDirectory, environment } =

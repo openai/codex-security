@@ -1,3 +1,5 @@
+"""Check cross-scan finding identity, repository counts, and Unicode search in the workbench indexes."""
+
 from __future__ import annotations
 
 import argparse

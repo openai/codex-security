@@ -832,12 +832,19 @@ try {
     /lin_api_|security@example\.test/u,
   );
 
+  let credentialLockState = join(consumer, "credential-lock-state");
+  if (process.platform === "win32" && !process.versions.bun) {
+    // Exercise a long SQLite guard while the canonical home fits the ACL tools' path limit.
+    const state = join(await realpath(consumer), "credential-lock-state");
+    const padding = Math.max(0, 240 - join(state, "codex-home").length - 1);
+    credentialLockState = join(state, "x".repeat(padding));
+  }
   run(
     process.execPath,
     [
       join(packageRoot, "scripts", "fixtures", "credential-lock.mjs"),
       pathToFileURL(join(installedRoot, "dist", "runtime.js")).href,
-      join(consumer, "credential-lock-state"),
+      credentialLockState,
     ],
     { cwd: consumer },
   );

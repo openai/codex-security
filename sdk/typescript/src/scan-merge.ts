@@ -9,7 +9,11 @@ import {
   matchScanFindingsInternal,
   unionFindingGroups,
 } from "./scan-comparison.js";
-import { checkSameFix, type CompareReports } from "./same-fix.js";
+import {
+  checkSameFix,
+  exceedsComparisonContext,
+  type CompareReports,
+} from "./same-fix.js";
 import type { ComparisonFinding } from "./finding-catalogue.js";
 import { errorMessage } from "./errors.js";
 import {
@@ -559,38 +563,78 @@ export async function createScanMerger(pluginRoot: string) {
     );
     let groups =
       previous?.findings.map((finding) => [...sourceIds(finding)]) ?? [];
+    const limitations = new Set<string>();
     for (const input of inputs) {
       const after = input.sourceFindings.map((finding, index) =>
         observation(`${input.scanId}:${index}`, finding),
       );
-      const comparison = await matchScanFindingsInternal(
-        { before, after, knownFindingGroups: groups },
-        {
-          signal,
-          allowHistoricalUncertainty: true,
-          codex: {
-            startThread: () => ({
-              run: async (prompt, options) => ({
-                finalResponse: JSON.stringify(
-                  await run(prompt, signal, options.outputSchema),
-                ),
-              }),
-            }),
-          },
-        },
-        {
-          surface: "sdk",
-          requireFullEvidence: true,
-          onInvalidResponse: options.onInvalidResponse,
-        },
+      const byId = new Map(
+        before.map((finding) => [finding.occurrenceId, finding]),
       );
+      const proposals: string[][] = [];
+      async function compare(known: string[][], incoming: ComparisonFinding[]) {
+        const earlier =
+          known === groups
+            ? before
+            : known.flatMap((ids) => ids.map((id) => byId.get(id)!));
+        try {
+          const comparison = await matchScanFindingsInternal(
+            { before: earlier, after: incoming, knownFindingGroups: known },
+            {
+              signal,
+              allowHistoricalUncertainty: true,
+              codex: {
+                startThread: () => ({
+                  run: async (prompt, options) => ({
+                    finalResponse: JSON.stringify(
+                      await run(prompt, signal, options.outputSchema),
+                    ),
+                  }),
+                }),
+              },
+            },
+            {
+              surface: "sdk",
+              requireFullEvidence: true,
+              onInvalidResponse: options.onInvalidResponse,
+            },
+          );
+          for (const match of comparison.matches)
+            proposals.push([
+              ...match.beforeOccurrenceIds,
+              ...match.afterOccurrenceIds,
+            ]);
+        } catch (error) {
+          signal.throwIfAborted();
+          if (
+            !exceedsComparisonContext(error) ||
+            !known.length ||
+            !incoming.length
+          )
+            throw error;
+          if (known.length >= incoming.length && known.length > 1) {
+            const mid = Math.ceil(known.length / 2);
+            await compare(known.slice(0, mid), incoming);
+            await compare(known.slice(mid), incoming);
+          } else if (incoming.length > 1) {
+            const mid = Math.ceil(incoming.length / 2);
+            await compare(known, incoming.slice(0, mid));
+            await compare(known, incoming.slice(mid));
+          } else {
+            // The full catalogue evidence for this one pair still does not fit.
+            // Only the independent repair check below may confirm the pair.
+            proposals.push([...known[0]!, incoming[0]!.occurrenceId]);
+            limitations.add(
+              "Some complete reports exceeded the comparison context and required pairwise repair checks.",
+            );
+          }
+        }
+      }
+      await compare(groups, after);
       groups = unionFindingGroups([
         ...groups,
         ...after.map(({ occurrenceId }) => [occurrenceId]),
-        ...comparison.matches.map((match) => [
-          ...match.beforeOccurrenceIds,
-          ...match.afterOccurrenceIds,
-        ]),
+        ...proposals,
       ]);
       before.push(...after);
     }
@@ -622,7 +666,6 @@ export async function createScanMerger(pluginRoot: string) {
       throw new ScanMergeValidationError(
         `Invalid scan merge: ${JSON.stringify(validate.errors)}`,
       );
-    const limitations = new Set<string>();
     const confirmed = await confirmScanGroups(
       groups,
       inputs,

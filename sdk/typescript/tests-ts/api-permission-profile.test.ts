@@ -40,7 +40,7 @@ type Scenario =
   | "substituted-profile";
 
 async function fixture(
-  role: Role,
+  requestedRole: Role | "merge-comparison",
   resumed: boolean,
   scenario: Scenario,
   surface: "sdk" | "cli",
@@ -49,11 +49,13 @@ async function fixture(
   composedDiscovery = false,
   replaceSelectedPlugin = false,
 ) {
+  const role = requestedRole === "merge-comparison" ? "merge" : requestedRole;
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const scanDir = join(root, role === "followup" ? "scan[ab]" : "scan");
   const codexHome = join(root, "codex-home");
   const executable = join(root, "synthetic-codex.exe");
+  await writeFile(executable, "synthetic executable identity", { mode: 0o700 });
   const script = join(root, "synthetic-codex.cjs");
   const capture = join(root, "processes.jsonl");
   const projects = Object.fromEntries(
@@ -454,13 +456,18 @@ async function fixture(
               sourceFindingIds: [`${sourceScanId}:0`],
             },
           });
+          // Distinct scope summaries exercise the file-backed consolidation worker.
+          // Report comparison instead needs disputed findings and no tools.
+          const reconcileContext = requestedRole === "merge";
+          const findings = reconcileContext ? [] : [finding];
           return {
             scanId: sourceScanId,
             scanDir: sourceDirectory,
-            sourceFindings: [finding],
+            sourceFindings: findings,
             draft: {
               scanId: parentScanId,
-              findings: [finding],
+              findings,
+              ...(reconcileContext ? { scope: { summary: sourceScanId } } : {}),
               coverage: {
                 completeness: "complete",
                 surfaces: [],
@@ -764,7 +771,14 @@ test.each(["sdk", "cli"] as const)(
     for (const role of ["discovery", "merge"] as const)
       for (const resumed of [false, true])
         for (const scenario of ["rejected", "fallback"] as const) {
-          const h = await fixture(role, resumed, scenario, surface);
+          const comparison = role === "merge";
+          const h = await fixture(
+            comparison ? "merge-comparison" : role,
+            resumed,
+            scenario,
+            surface,
+          );
+          const launchDirectory = comparison ? join(h.cwd, "artifacts") : h.cwd;
           h.runtimeEnvironment["OPENAI_API_KEY"] =
             "synthetic-stale-runtime-key";
           h.runtimeEnvironment["SYNTHETIC_EXECUTION_CONTEXT"] =
@@ -785,14 +799,14 @@ test.each(["sdk", "cli"] as const)(
             ]);
             expect(requests.at(-1).params).toMatchObject({
               cursor: "selected-page",
-              cwd: h.cwd,
+              cwd: launchDirectory,
             });
             const observations = await h.observations();
             expect(
               observations.filter(({ kind }) => kind === "preflight"),
             ).toMatchObject([
               {
-                cwd: h.cwd,
+                cwd: launchDirectory,
                 surface,
                 modelProvider: "openai",
                 forcedLogin: null,
@@ -804,7 +818,9 @@ test.each(["sdk", "cli"] as const)(
             );
             expect(executions).toHaveLength(scenario === "rejected" ? 0 : 1);
             if (executions.length) {
-              expect(executions[0].args.includes("resume")).toBe(resumed);
+              expect(executions[0].args.includes("resume")).toBe(
+                resumed && !comparison,
+              );
               expect(executions[0]).toMatchObject({
                 modelProvider: "openai",
                 forcedLogin: null,
@@ -834,12 +850,17 @@ test.each(["sdk", "cli"] as const)(
                 launch.args.some((arg: string) => arg.startsWith("projects=")),
               ).toBe(false);
               expect(launch.mcpServers).toEqual({
-                "codex-security": { command: "node", enabled: false },
+                "codex-security": {
+                  command: "synthetic-workbench",
+                  enabled: false,
+                },
                 synthetic: {
+                  ...(comparison ? { enabled: false } : {}),
                   command: "synthetic-mcp",
                   env: { SETTING: "inherited" },
                 },
                 "synthetic.literal": {
+                  ...(comparison ? { enabled: false } : {}),
                   command: "synthetic-mcp",
                   env: { "SETTING.KEY": "literal-value" },
                 },

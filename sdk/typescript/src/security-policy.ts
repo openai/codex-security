@@ -61,6 +61,7 @@ export interface SecurityPolicyOptions extends Pick<
   | "onAuthentication"
   | "onOutputDirReady"
   | "onCost"
+  | "onTelemetry"
   | "onWarning"
   | "onObserverError"
 > {

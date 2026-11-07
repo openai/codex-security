@@ -1,3 +1,5 @@
+"""Recover and publish scans whose earlier writers stored Unicode review identifiers."""
+
 from __future__ import annotations
 
 import os

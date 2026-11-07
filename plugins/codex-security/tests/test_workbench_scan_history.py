@@ -1,3 +1,5 @@
+"""Exercise history updates and reruns against the original checkout, scope, and revisions."""
+
 from __future__ import annotations
 
 import copy
@@ -55,6 +57,9 @@ def test_rename_persists_without_changing_scan_results(
 
     assert renamed == {"scanId": scan["scanId"], "name": "Release audit"}
     after = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert get_scan(state_dir, scan["scanId"][:8], "--progress-only") == {
+        "scan": {"progress": after["progress"]}
+    }
     assert after == {**before, "name": "Release audit"}
     listed = run_workbench(state_dir, "list-scans", "--query", "release audit")["scans"]
     assert [(item["scanId"], item["name"]) for item in listed] == [
@@ -675,7 +680,9 @@ def test_migration_preserves_historical_worker_thread_associations(tmp_path: Pat
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("DROP TABLE scan_execution_threads")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 65")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = 'persist scan execution sessions'"
+        )
     run_workbench(state_dir, "database-info")
     detail = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert detail["continuationThreadId"] is None
@@ -819,9 +826,16 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
                 json.dumps(
                     {
                         "usage": {
-                            "status": "complete",
+                            "source": "codex_runtime",
+                            "coverage": "complete",
+                            "threadCount": 1,
+                            "missingThreadCount": 0,
                             "inputTokens": 5_000,
+                            "cachedInputTokens": 0,
+                            "cacheWriteInputTokens": 0,
                             "outputTokens": 120,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 5_120,
                         }
                     }
                 ),
@@ -2108,3 +2122,16 @@ def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_
             assert known_scans == ["parent", "rerun"]
         rows, _, _ = matches(connection, "c", "child", "2026-01-01T00:00:02Z")
         assert {row["occurrenceId"] for row in rows} == {"p", "c2", "r"}
+
+
+def test_scan_list_honors_advertised_page_size(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    for index in range(21):
+        output = tmp_path / f"scan-{index}"
+        output.mkdir(mode=0o700)
+        create_cli_scan(state_dir, output, repository, complete=False)
+    page = run_workbench(state_dir, "list-scans", "--limit", "50")
+    assert len(page["scans"]) == 21
+    assert page["nextOffset"] is None

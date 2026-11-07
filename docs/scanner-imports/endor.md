@@ -3,12 +3,25 @@
 Prefer Endor's native Finding JSON. It keeps the scanned commit,
 severity, package and advisory details, and primary SAST or AI SAST locations
 that Endor reports. You can also import self-contained `endorctl` SARIF 2.1.0
-with finding UUIDs.
+with finding UUIDs. A later SARIF import for the same UUID, destination
+and source key can replace the stored commit, package and
+advisory details, and leave severity `unknown`. Use native JSON for updates
+when you need those fields. If the Cloud repository publisher requires a
+reported severity, the preview lists unscored findings under exclusions. Local
+imports and the private inbox can retain findings with an unreported severity.
+
+Native JSON keeps vulnerability and malware advisory IDs and aliases. When
+Endor supplies only the fully qualified dependency name, the import preserves
+that name, including its ecosystem and version. A branch scan uses its REF
+context ID. The source version's ref can also identify a tag or commit. If
+optional package or advisory details exceed Cloud's field or finding size
+limits, private imports use `security.findings.v1` to upload the reviewed
+fields and original Endor record together. The service must support that
+format for these findings. Retrying a saved import reuses its original upload.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). In Endor, verify that
-the project and scan context match your checkout. A project UUID alone doesn't
+In Endor, verify that the project and scan context match your checkout. A project UUID alone doesn't
 establish that link. From the checkout root, set the namespace and project
 UUID for this default-branch example.
 
@@ -66,10 +79,8 @@ and dismissals come from Endor.
 
 ## SARIF and repeat imports
 
-Both formats identify findings by UUID. Importing SARIF after native JSON
-with the same destination and source key replaces the earlier evidence. You
-can lose the scanned commit, package and advisory details, and severity can
-become `unknown`. The local workbench keeps findings omitted from later exports.
+The local workbench keeps findings omitted from later exports. Use a separate
+source key if you want to retain both formats' evidence for a finding.
 [Imported finding identity and evidence](schema-guide.md)
 
 SARIF keeps finding links, direct repository paths and reported SAST or

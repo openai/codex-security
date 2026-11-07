@@ -1,3 +1,4 @@
+import type { ScanPricingContext } from "./cost-model.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -15,6 +16,9 @@ export interface TurnResultMetadata {
   id?: string;
   status?: string;
   model?: string;
+  pricingContext?: ScanPricingContext;
+  /** Source region recorded for Bedrock scans. */
+  bedrockRegion?: string | null;
   durationMs?: number;
   finalResponse?: string;
   usage?: unknown;
@@ -92,7 +96,12 @@ export class ScanResult {
     this.cost =
       options.cost === undefined
         ? (options.recordedCost ??
-          estimateScanCost(options.turnResult.model, options.turnResult.usage))
+          estimateScanCost(
+            options.turnResult.model,
+            options.turnResult.usage,
+            options.turnResult.pricingContext ??
+              options.turnResult.bedrockRegion,
+          ))
         : options.cost;
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;

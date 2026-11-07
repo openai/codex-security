@@ -1,6 +1,6 @@
 import { effectiveCodexConfiguration } from "./support/api-events.js";
 import { requestMetadata } from "./support/request-metadata.js";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   CodexOptions,
@@ -156,6 +156,27 @@ describe("CodexSecurity headless patching", () => {
       projectTrustKey,
     };
   }
+
+  test("patches and verifies oversized evidence through a temporary file", async () => {
+    const finding = {
+      evidence: "Synthetic evidence. ".repeat(100_000),
+      tail: "Final evidence",
+    };
+    let path = "";
+    const fixture = await patchClient(async function* () {
+      const prompt = fixture.captured.prompt!;
+      expect(prompt.length).toBeLessThan(1 << 20);
+      path = JSON.parse(prompt.match(/^".*finding\.json"$/m)![0]);
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual(finding);
+      yield* patchEvents();
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual(finding);
+    });
+    await using client = fixture.client;
+    expect(await client.patch({ ...fixture.options, finding })).toMatchObject(
+      verified,
+    );
+    await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 
   test.each(["text", "object"] as const)(
     "patches a %s finding without CLI orchestration or implicit file reads",

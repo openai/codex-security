@@ -3,7 +3,9 @@ import { afterEach, expect, jest, mock, test } from "bun:test";
 import {
   hostedScannerHttp,
   type HostedScannerHttpOptions,
+  hostedScannerToken,
 } from "../src/hosted-scanner-http.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const url = new URL(
   "https://semgrep.dev/api/v1/deployments/example/findings?page=1",
@@ -14,6 +16,27 @@ function get(options: HostedScannerHttpOptions) {
 
 const now = Date.UTC(2026, 10, 6, 8, 49, 20, 250);
 afterEach(() => jest.useRealTimers());
+
+const overlay =
+  "hosted scanners resolve caller token overrides using the host's environment casing";
+test(overlay, () => {
+  if (runTestInSubprocess(import.meta.path, overlay)) return;
+  process.env["SEMGREP_APP_TOKEN"] = "synthetic-host-token";
+  const environment = Object.create(process.env, {
+    Semgrep_App_Token: { value: "synthetic-caller-token", enumerable: true },
+  });
+  const token = hostedScannerToken(
+    environment,
+    "SEMGREP_APP_TOKEN",
+    undefined,
+    url.origin,
+  );
+  expect(token).toBe(
+    process.platform === "win32"
+      ? "synthetic-caller-token"
+      : "synthetic-host-token",
+  );
+});
 
 function limited(hint: string, cancel: () => void) {
   return new Response(new ReadableStream({ cancel }), {

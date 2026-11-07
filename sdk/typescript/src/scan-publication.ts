@@ -21,7 +21,12 @@ import {
 import { IncompleteScanError, OutputDirectoryError } from "./errors.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
 import { scanCostUsage, ScanCostTracker, type ScanCost } from "./cost.js";
-import { tokenUsage } from "./cost-model.js";
+import {
+  tokenUsage,
+  turnPricingMetadata,
+  type ScanPricingContext,
+} from "./cost-model.js";
+import type { measuredScanCost } from "./scan-measurement.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
 import { type DeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
 import type { SavedScanRecord } from "./workbench-types.js";
@@ -91,6 +96,7 @@ export async function readSealedScanTurn(
   context: Omit<ScanPublicationContext, "pluginRoot"> & {
     codexHome: string;
     model: string;
+    pricingContext?: ScanPricingContext;
     startedAt: unknown;
     checkpoint: DeepScanCheckpointSummary | null;
     maxCostUsd?: number;
@@ -150,6 +156,7 @@ export async function readSealedScanTurn(
         codexHome,
         includeArchivedSessions: true,
         model,
+        pricingContext: context.pricingContext,
         repository: context.expectation.repository,
         scanDirectory: scanDir,
       });
@@ -185,6 +192,7 @@ export async function readSealedScanTurn(
     turnResult: {
       status: "completed",
       model,
+      ...turnPricingMetadata(context.pricingContext),
       usage: usage ?? (cost === null ? null : scanCostUsage(cost)),
     },
   };
@@ -194,7 +202,7 @@ export async function readSealedScanTurn(
 export async function publishScan(
   context: ScanPublicationContext,
   turn: CompletedScanTurn,
-  cost: ScanCost | null,
+  receipt: ScanCost | ReturnType<typeof measuredScanCost>,
   sealed = false,
 ): Promise<{
   result: ScanResult;
@@ -327,12 +335,14 @@ export async function publishScan(
       throw error;
     }
   }
+  const cost =
+    receipt !== null && "usage" in receipt ? (receipt.cost ?? null) : receipt;
   const result = await collectResult(context, turn, true, cost);
   const completion = await workbench([
     "complete-scan",
     "--scan-id",
     scanId,
-    ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
+    ...(receipt === null ? [] : ["--cost-json", JSON.stringify(receipt)]),
   ]);
   return {
     result,

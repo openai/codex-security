@@ -746,6 +746,45 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
     );
   });
 
+  test("oversized catalogues preserve accepted groups and independently compare the remaining reports", async () => {
+    const first = child("a", [finding("a", { codeEvidence })]);
+    const duplicate = child("b", [finding("b", { codeEvidence })]);
+    const previous = merge(
+      [["a:0", "b:0"]],
+      [first, duplicate],
+      null,
+    ).aggregate;
+    const incoming = child("c", [
+      duplicate.draft.findings[0]!,
+      finding("other", { summary: "An independent defect." }),
+    ]);
+    const compared: string[][] = [];
+    const result = await mergeScans(
+      parent,
+      [incoming],
+      previous,
+      new AbortController().signal,
+      async (prompt) => {
+        const catalogue = JSON.parse(prompt.split("\n").at(-1)!);
+        const after = catalogue.findings.after.map(
+          (entry: JsonObject) => entry["occurrenceId"],
+        );
+        compared.push(after);
+        if (after.includes("c:0"))
+          throw Object.assign(new Error("Complete evidence is too long"), {
+            code: "context_length_exceeded",
+          });
+        return { matches: [], uncertain: [], related: [], request: null };
+      },
+      mergeOptions,
+    );
+    expect(compared).toEqual([["c:0", "c:1"], ["c:0"], ["c:1"]]);
+    expect(
+      result.aggregate.findings.map((f) => f.provenance.sourceFindingIds),
+    ).toEqual([["a:0", "b:0", "c:0"], ["c:1"]]);
+    expect(result.newFindingScanIds).toEqual(["c"]);
+  });
+
   test.each([
     "same",
     "exact repeat",

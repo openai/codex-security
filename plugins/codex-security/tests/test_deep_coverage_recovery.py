@@ -194,14 +194,24 @@ def test_stopped_child_receipt_collisions_preserve_other_child_findings(tmp_path
 
 
 @pytest.mark.parametrize(
-    "missing,surviving_case_variant,reverse",
-    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+    "historical,surviving_case_variant,reverse",
+    [
+        ("unsafe", False, False),
+        ("missing", False, False),
+        ("missing", True, False),
+        ("missing", True, True),
+        ("directory", True, False),
+    ],
 )
 def test_terminal_child_closeout_replaces_invalid_historical_receipt(
-    tmp_path, missing, surviving_case_variant, reverse
+    tmp_path, historical, surviving_case_variant, reverse
 ):
     state, target, parent, parent_dir = composed_scan(tmp_path)
-    old_ref = "artifacts/missing.md" if missing else "artifacts/unsafe:name.md"
+    old_ref = {
+        "unsafe": "artifacts/unsafe:name.md",
+        "missing": "artifacts/missing.md",
+        "directory": "artifacts/directory",
+    }[historical]
     surface = {
         "id": "api",
         "label": "Original review",
@@ -221,10 +231,14 @@ def test_terminal_child_closeout_replaces_invalid_historical_receipt(
         surfaces=[surface],
         deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
     )
-    if not missing:
+    if historical == "unsafe":
         receipt(directory, "unsafe:name.md")
+    elif historical == "directory":
+        (directory / old_ref).mkdir(parents=True)
     if surviving_case_variant:
         receipt(directory, "Missing.md")
+        if historical == "missing" and (directory / old_ref).exists():
+            pytest.skip("This case requires distinct receipt path spellings.")
     replacement = receipt(directory, "replacement.md")
     selected = save_child(
         child,
@@ -246,7 +260,9 @@ def test_terminal_child_closeout_replaces_invalid_historical_receipt(
     retained = next(row for row in result["surfaces"] if row["id"] == f"{child['scanId']}/api")
     assert retained["label"] == "Accepted review"
     assert retained["notes"] == "Accepted notes"
-    assert retained["disposition"] == "no_issue_found"
+    assert retained["disposition"] == (
+        "needs_follow_up" if historical == "directory" else "no_issue_found"
+    )
     expected = {(directory / replacement).relative_to(parent_dir).as_posix()}
     if surviving_case_variant:
         expected.add((directory / "artifacts/Missing.md").relative_to(parent_dir).as_posix())

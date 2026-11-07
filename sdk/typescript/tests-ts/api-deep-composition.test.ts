@@ -1870,7 +1870,16 @@ function unavailableFinalCost(
       const snapshot = await stop.call(this, fallbackUsage);
       return h.records.get(scans.get(this)!)?.mode === mode &&
         h.launches.length > 1
-        ? { usage: null, cost: null }
+        ? {
+            usage: null,
+            cost: null,
+            measurement: {
+              ...snapshot.measurement,
+              usage: null,
+              cost: null,
+              coverage: "unavailable" as const,
+            },
+          }
         : snapshot;
     },
   );

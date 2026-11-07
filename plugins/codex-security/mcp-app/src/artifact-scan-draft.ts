@@ -14,7 +14,10 @@ import {
 } from "../../../../sdk/typescript/src/scan-semantics.js";
 import { isNonEmptyString } from "./record.js";
 import { requireFiniteNumbers } from "./helpers/json.js";
-import { coverageReceiptComponents } from "./coverage-publication.js";
+import {
+  coverageReceiptComponents,
+  validateRetainedCoverage,
+} from "./coverage-publication.js";
 import { createHash, randomUUID } from "node:crypto";
 import { writePreparedScanDraft } from "../../../../sdk/typescript/src/scan-draft-publication.js";
 import { promises as fs } from "node:fs";
@@ -144,6 +147,8 @@ export async function recordCodexSecurityScanDraft(
             ),
           }
         : preserved.input;
+    if (context.mode === "deep" || reconciled.complete !== false)
+      validateRetainedCoverage(reconciled.coverage);
     const hardening = await readExistingHardeningPortfolio(context);
     const draft = prepareSemanticScanDraft(context, reconciled, hardening);
     try {

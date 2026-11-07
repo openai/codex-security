@@ -1,5 +1,7 @@
 import { codexSecurityRequestContext } from "./request-metadata.js";
-import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
+import { lstat, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
+import { DeepScanRecoveryError } from "./deep-scan.js";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -75,6 +77,11 @@ const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 
 export type ExecutionPolicy = "ordinary" | "discovery" | "merge";
 interface ExecutionClient {
+  telemetryContext?: {
+    operationId: string;
+    attemptId: string;
+    parentAttemptId?: string;
+  };
   surface: "cli" | "sdk";
   command: string;
   mode?: import("./targets.js").ScanMode;
@@ -85,6 +92,7 @@ interface ExecutionClient {
 
 /** One per-scan snapshot; worker construction never consults a mutable parent environment. */
 export interface ExecutionSource {
+  readonly verifyExecutable?: () => Promise<void>;
   readonly command?: CodexCommand;
   readonly configuration: JsonObject;
   readonly environment: ProcessEnvironment;
@@ -95,6 +103,45 @@ export interface ExecutionSource {
   readonly modelEnvironment?: Record<string, string>;
   readonly apiKey: string | null;
   readonly preserveProviderEnvironment: boolean;
+}
+
+/** Every worker in one live composition uses the executable admitted for its first launch. */
+export function bindDeepScanExecutable(
+  path: string,
+  scanDir: string,
+): () => Promise<void> {
+  let binding: Promise<BigIntStats> | undefined;
+  const inspect = async () => {
+    const file = await stat(path, { bigint: true });
+    if (!file.isFile() || file.size === 0n)
+      throw new Error("Codex executable is not a non-empty file.");
+    return file;
+  };
+  return async () => {
+    if (binding === undefined) {
+      binding = inspect().catch((error) => {
+        binding = undefined;
+        throw error;
+      });
+      await binding;
+      return;
+    }
+    const original = await binding;
+    const current = await inspect().catch(() => null);
+    if (
+      !current ||
+      original.dev !== current.dev ||
+      original.ino !== current.ino ||
+      original.mtimeNs !== current.mtimeNs ||
+      original.ctimeNs !== current.ctimeNs ||
+      original.size !== current.size
+    ) {
+      throw new DeepScanRecoveryError(
+        `The Codex executable "${path}" changed after this Deep Scan started. Retry after the update finishes.`,
+        scanDir,
+      );
+    }
+  };
 }
 
 export function executionCommand(source: ExecutionSource): CodexCommand {
@@ -198,6 +245,7 @@ export interface PreparedRuntime {
 export type ScanPermissions = { filesystem: JsonObject; network: JsonObject };
 
 export interface PreparedExecution {
+  pricingContext?: import("./cost-model.js").ScanPricingContext;
   readonly auth?: ScanAuthMode;
   readonly policy: ExecutionPolicy;
   readonly source: ExecutionSource;
@@ -353,6 +401,7 @@ export async function createExecutionCodex(
     command: client.command ?? "scan",
     pluginVersion: runtime.plugin.version,
     mode: client.mode,
+    ...client.telemetryContext,
   });
   delete processConfig["responses_api_metadata"];
   let codexPathOverride =
@@ -391,6 +440,7 @@ export async function createExecutionCodex(
           sdkCodexConfig,
           checkPermissions,
           preflightEnvironment,
+          session.source.verifyExecutable,
         );
       if (checkPermissions)
         return createPermissionCheckedCodex(
@@ -398,6 +448,7 @@ export async function createExecutionCodex(
           undefined,
           undefined,
           preflightEnvironment,
+          session.source.verifyExecutable,
         );
       const { config, configOverrides, ...settings } = options;
       return new Codex({
@@ -456,6 +507,8 @@ export async function createExecutionCodex(
               });
           }
           try {
+            if (client.createCodex || !checkPermissions)
+              await session.source.verifyExecutable?.();
             hasAttemptedExecution = true;
             const { events } = await thread.runStreamed(
               input,
@@ -725,6 +778,48 @@ export function prepareMergeExecution(
       scanCompositionOverrides(session.sessionConfig, subagents),
     ),
   };
+}
+
+/** Independent comparisons receive the complete reports in the prompt. */
+export function prepareReportComparisonExecution(
+  session: PreparedExecution,
+): PreparedExecution {
+  const config = deepWorkerConfig(resolveCodexProfile(session.sessionConfig));
+  config["web_search"] = "disabled";
+  config["project_doc_max_bytes"] = 0;
+  config["tools"] = {
+    ...(isRecord(config["tools"]) ? config["tools"] : {}),
+    experimental_request_user_input: { enabled: false },
+    update_plan: { enabled: false },
+  };
+  config["features"] = {
+    ...(isRecord(config["features"]) ? config["features"] : {}),
+    apps: false,
+    plugins: false,
+    shell_tool: false,
+    view_image: false,
+    image_generation: false,
+    goals: false,
+    request_permissions_tool: false,
+    computer_use: false,
+    unified_exec: false,
+    code_mode: false,
+    code_mode_only: false,
+    js_repl: false,
+    multi_agent: false,
+    multi_agent_v2: false,
+    enable_fanout: false,
+  };
+  for (const [name, server] of Object.entries(
+    config["mcp_servers"] as JsonObject,
+  )) {
+    if (isRecord(server))
+      (config["mcp_servers"] as JsonObject)[name] = {
+        ...server,
+        enabled: false,
+      };
+  }
+  return { ...session, policy: "merge", sessionConfig: config };
 }
 
 /** Read-only helpers retain denied paths while intentionally removing write access. */

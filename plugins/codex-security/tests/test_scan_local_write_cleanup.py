@@ -1,3 +1,5 @@
+"""Exercise cleanup and file-identity checks when scan-local writes race or fail partway."""
+
 from __future__ import annotations
 
 import ctypes

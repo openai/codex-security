@@ -1,3 +1,5 @@
+"""Exercise persisted workbench operations, including scan budgets, finding state, and patch identity."""
+
 from __future__ import annotations
 
 import errno

@@ -177,6 +177,8 @@ function migrateWorkflowResults(database: DatabaseSync): void {
     "SELECT rowid, results_json FROM finding_workflows",
   );
   rows.setReadBigInts(true);
+  // run() also returns the connection's last inserted row ID after an UPDATE.
+  update.setReadBigInts(true);
   for (const row of rows.all()) {
     const { stages } = parseJson(String(row.results_json)) as {
       stages: Record<
@@ -373,9 +375,15 @@ export function applyMigrations(
       } else {
         database.exec(item.statements.join("\n"));
         if (item.version === 38) migrateWorkflowResults(database);
-        else if ([63, 67, 68].includes(item.version))
+        else if (
+          [
+            "persist composition child membership",
+            "repair stored composition membership",
+            "repair archived composition paths",
+          ].includes(item.name)
+        )
           backfillCompositionChildren(database);
-        else if (item.version === 66)
+        else if (item.name === "recover unindexed severity assessments")
           backfillUnindexedSeverityAssessments(database);
       }
       if (!applied.has(item.version)) {

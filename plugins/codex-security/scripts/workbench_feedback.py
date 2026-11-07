@@ -20,6 +20,11 @@ from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
+    """Return reviewed false-positive decisions from other completed scans of the same target.
+
+    For each finding, include the latest decision only if it closes the finding as a
+    false positive with a nonblank reason. Prefer the root-control location in its preview.
+    """
     rows = connection.execute(
         """
         WITH ranked_decisions AS (

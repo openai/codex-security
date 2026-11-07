@@ -45,7 +45,9 @@ class WindowsScanLocalPathError(WindowsScanLocalFileError):
 
 
 # CreateFile access and sharing flags.
+_DRIVE_FIXED = 3
 _DELETE = 0x00010000
+_FILE_TRAVERSE = 0x00000020
 _FILE_READ_ATTRIBUTES = 0x00000080
 _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
@@ -84,6 +86,7 @@ _ERROR_INVALID_PARAMETER = 87
 _ERROR_INSUFFICIENT_BUFFER = 122
 _ERROR_ALREADY_EXISTS = 183
 _ERROR_DIRECTORY = 267
+_OWNER_SECURITY_INFORMATION = 0x00000001
 _DACL_SECURITY_INFORMATION = 0x00000004
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
@@ -185,6 +188,10 @@ if os.name == "nt":
         ctypes.POINTER(wintypes.DWORD),
     ]
     _GetFileSecurityW.restype = wintypes.BOOL
+
+    _GetDriveTypeW = _kernel32.GetDriveTypeW
+    _GetDriveTypeW.argtypes = [wintypes.LPCWSTR]
+    _GetDriveTypeW.restype = wintypes.UINT
 
     _CreateFileW = _kernel32.CreateFileW
     _CreateFileW.argtypes = [
@@ -468,11 +475,12 @@ def _open_directory(
     missing_ok: bool = False,
     missing_is_path_error: bool = True,
     movable: bool = False,
+    require_traverse: bool = False,
 ) -> _OwnedHandle | None:
     try:
         handle = _create_file(
             path,
-            access=_FILE_READ_ATTRIBUTES,
+            access=_FILE_READ_ATTRIBUTES | (_FILE_TRAVERSE if require_traverse else 0),
             share=_FILE_SHARE_READ | _FILE_SHARE_WRITE | (_FILE_SHARE_DELETE if movable else 0),
             disposition=_OPEN_EXISTING,
             flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
@@ -502,19 +510,22 @@ def _create_directory(path: Path) -> None:
         _raise_last_error("CreateDirectoryW", path)
 
 
-def create_directory_with_same_dacl(path: Path, source: Path) -> None:
-    """Create an archive replacement with the original directory's DACL."""
-    _require_windows()
+def _directory_security_descriptor(source: Path, information: int) -> ctypes.Array:
     source_path = _extended_path(source)
     size = wintypes.DWORD()
-    _GetFileSecurityW(source_path, _DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(size))
+    _GetFileSecurityW(source_path, information, None, 0, ctypes.byref(size))
     if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
         _raise_last_error("GetFileSecurityW", source)
     descriptor = ctypes.create_string_buffer(size.value)
-    if not _GetFileSecurityW(
-        source_path, _DACL_SECURITY_INFORMATION, descriptor, size.value, ctypes.byref(size)
-    ):
+    if not _GetFileSecurityW(source_path, information, descriptor, size.value, ctypes.byref(size)):
         _raise_last_error("GetFileSecurityW", source)
+    return descriptor
+
+
+def create_directory_with_same_dacl(path: Path, source: Path) -> None:
+    """Create an archive replacement with the original directory's DACL."""
+    _require_windows()
+    descriptor = _directory_security_descriptor(source, _DACL_SECURITY_INFORMATION)
     attributes = _SecurityAttributes(
         ctypes.sizeof(_SecurityAttributes), ctypes.cast(descriptor, wintypes.LPVOID), False
     )
@@ -578,12 +589,87 @@ def _locked_parent(
             handle.close()
 
 
+def _generated_directory_policy(descriptor: object) -> tuple[str, bool, frozenset[str]]:
+    # Let Windows normalize SID aliases, access masks and inheritance flags in
+    # both descriptors. ACE order is immaterial for our three allow grants.
+    sddl = wintypes.LPWSTR()
+    if not _advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor,
+        1,
+        _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION,
+        ctypes.byref(sddl),
+        None,
+    ):
+        _raise_last_error("ConvertSecurityDescriptorToStringSecurityDescriptorW")
+    try:
+        owner, _, dacl = sddl.value.partition("D:")
+        flags, _, entries = dacl.partition("(")
+        return owner, "P" in flags, frozenset(entries.removesuffix(")").split(")("))
+    finally:
+        _kernel32.LocalFree(sddl)
+
+
+def verify_private_scan_root(scan_dir: Path, expected_descriptor: object) -> Path:
+    """Verify the new directory's owner and protected grants while the path is pinned."""
+    with _locked_parent(scan_dir, ".security", create=False) as (root_path, _):
+        actual = _directory_security_descriptor(
+            root_path, _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
+        )
+        if _generated_directory_policy(actual) != _generated_directory_policy(expected_descriptor):
+            raise _invalid_path(scan_dir, "new scan directory lacks its private owner or DACL")
+        return root_path
+
+
 def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
     """Return a canonical scan root and its identity while holding it fixed."""
 
     with _locked_parent(scan_dir, ".identity", create=False) as (root_path, _):
         metadata = root_path.lstat()
         return root_path, (metadata.st_dev, metadata.st_ino)
+
+
+@contextlib.contextmanager
+def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
+    """Bind a canonical worktree beneath a fixed-drive root to its exact .git marker."""
+    if (
+        not cwd.is_absolute()
+        or not metadata.is_absolute()
+        or len(cwd.drive) != 2
+        or cwd.drive != metadata.drive
+        or len(cwd.parts) < 2
+        or len(metadata.parts) < 2
+        or _GetDriveTypeW(cwd.anchor) != _DRIVE_FIXED
+    ):
+        yield None
+        return
+    marker = None
+    with contextlib.ExitStack() as pins:
+        try:
+            for path in (cwd, metadata):
+                _validated_parts(PurePosixPath(*path.parts[1:]).as_posix())
+                # Pin each literal ancestor before opening the next component. Never resolve
+                # a repository-controlled reparse point to find the directory to be pinned.
+                for directory in (*reversed(path.parents), path):
+                    handle = _open_directory(directory, require_traverse=True)
+                    assert handle is not None
+                    pins.enter_context(handle)
+                assert handle.value is not None
+                if _final_path(handle.value) != _extended_path(path):
+                    raise ValueError("the selected Git directory spelling is not canonical")
+            if str(cwd / ".git") != str(metadata):
+                # The literal canonical root is already pinned before opening its regular file.
+                fd, leaf = open_read_fd_with_path(cwd, ".git", "Git metadata pointer")
+                pointer = pins.enter_context(os.fdopen(fd, "rb"))
+                if leaf != ".git":
+                    raise ValueError("the root marker name does not match .git")
+                expected = f"gitdir: {metadata}".encode("utf-8")
+                value = pointer.read(len(expected) + 3).removesuffix(b"\n").removesuffix(b"\r")
+                if value.replace(b"/", b"\\") != expected:
+                    raise ValueError("the root marker does not name the selected Git directory")
+            marker = Path(".git")
+        except (OSError, ValueError):
+            pins.close()
+        yield marker
 
 
 def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
@@ -593,7 +679,11 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
 
 
 def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> tuple[int, str]:
-    """Return the descriptor and its filename while the verified parents are held."""
+    """Return an owned read descriptor and the scan-relative path with the file's actual leaf name.
+
+    Verify the regular file while holding its parent directories. The caller must
+    close the returned descriptor.
+    """
 
     try:
         with _locked_parent(scan_dir, relative_path, create=False, missing_is_path_error=False) as (
@@ -661,6 +751,7 @@ def file_change_time(descriptor: int) -> int:
 
 
 def stream_matches_payload(stream: BinaryIO, payload: bytes) -> bool:
+    """Compare bytes from the current stream position to payload, requiring EOF after the final byte."""
     offset = 0
     while offset < len(payload):
         chunk = stream.read(min(_MAX_COMPARE_CHUNK, len(payload) - offset))
@@ -976,6 +1067,23 @@ def atomic_write(
             assert handle.value is not None
             _rename_handle(handle.value, destination, replace_existing)
             _verify_regular_file(handle.value, destination)
+
+
+def reserve_directory(
+    scan_dir: Path,
+    relative_path: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> bool:
+    with _locked_parent(
+        scan_dir, relative_path, create=True, expected_root_identity=expected_root_identity
+    ) as (parent, leaf):
+        path = parent / leaf
+        if _CreateDirectoryW(_extended_path(path), None):
+            return True
+        if ctypes.get_last_error() in _COLLISION_ERRORS:
+            return False
+        _raise_last_error("CreateDirectoryW", path)
 
 
 def prepare_directory(

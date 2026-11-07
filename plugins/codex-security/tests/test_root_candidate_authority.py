@@ -1,3 +1,5 @@
+"""Resolve competing root candidate outcomes from canonical, pending, and legacy checkpoint evidence."""
+
 from __future__ import annotations
 
 import copy

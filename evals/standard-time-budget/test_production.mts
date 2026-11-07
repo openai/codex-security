@@ -83,6 +83,7 @@ test("state cleanup failure saves the attempt and stops before the paired arm", 
         stateRoot: join(root, "states"),
         outputRoot,
         createClient: (_config, dependencies) => {
+          assert.equal(dependencies.createCodex, undefined);
           states.push(dependencies.environment["CODEX_SECURITY_STATE_DIR"]!);
           return {
             run: async (_target, options) => {

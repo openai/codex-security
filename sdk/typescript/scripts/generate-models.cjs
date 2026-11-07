@@ -150,7 +150,6 @@ Promise.all([generate(), generateSemanticModels()]).then(
       "workbench-arguments",
       "executable-path",
       "contract-values",
-      "finding-normalization",
       "windows-path",
     ].map((name) => [
       `src/${name}.ts`,

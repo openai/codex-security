@@ -3,6 +3,7 @@ import { artifactSchemaDocuments } from "../artifact-contracts.js";
 import { discoveryLocationRoles } from "../discovery-location-roles.js";
 import { isRecord as object } from "../record.js";
 import { decodeUtf8 } from "./utf8";
+import { escapeControls } from "./json";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -546,7 +547,10 @@ export function normalizeCandidatesCommand(
           else unlinkSync(temporary);
         }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+          console.error(
+            `normalize_candidates: Could not remove temporary file: ${escapeControls((error as Error).message)}`,
+          );
       }
     }
     console.log(

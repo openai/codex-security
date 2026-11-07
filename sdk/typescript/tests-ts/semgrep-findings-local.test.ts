@@ -282,8 +282,20 @@ test.each(formats)(
       },
       { remote: repositoryUrl },
     );
-    await fixture.writeJson(report(format));
+    const input = report(format);
+    await fixture.writeJson(input);
     await expect(fixture.prepare()).rejects.toThrow("does not match");
+    if ("runs" in input) input.runs[0]!.results.length = 0;
+    else input.results.length = 0;
+    await fixture.writeJson(input);
+    await expect(fixture.prepare()).rejects.toThrow("does not match");
+    const empty = await fixture.prepare({ sourceRepositoryUrl: repositoryUrl });
+    expect((await empty.import()).counts).toEqual({
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+    });
+    await expect(access(fixture.stateDirectory)).rejects.toThrow();
     expect(await fixture.read()).toEqual([]);
   },
 );
@@ -352,6 +364,12 @@ test.each([
     }
     await writeReport(originalUrl, true);
     if (platform === "unknown host") {
+      await expect(
+        prepareLocalExternalImport(file, options, dependencies),
+      ).rejects.toThrow("does not match");
+      const empty = sarifWithRepositories([sourceRepositoryUrl, originalUrl]);
+      empty.runs[0]!.results.length = 0;
+      await writeFile(file, JSON.stringify(empty));
       await expect(
         prepareLocalExternalImport(file, options, dependencies),
       ).rejects.toThrow("does not match");

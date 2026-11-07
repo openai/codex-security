@@ -64,9 +64,7 @@
   {
     "version": 8,
     "name": "sealed manifest digests",
-    "statements": [
-      "ALTER TABLE scans\nADD COLUMN seal_manifest_digest TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans\nADD COLUMN seal_manifest_digest TEXT;"]
   },
   {
     "version": 9,
@@ -79,9 +77,7 @@
   {
     "version": 10,
     "name": "scan cancellation state",
-    "statements": [
-      "ALTER TABLE scans\nADD COLUMN canceled_at TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans\nADD COLUMN canceled_at TEXT;"]
   },
   {
     "version": 11,
@@ -100,9 +96,7 @@
   {
     "version": 12,
     "name": "scan continuation threads",
-    "statements": [
-      "ALTER TABLE scans\nADD COLUMN continuation_thread_id TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans\nADD COLUMN continuation_thread_id TEXT;"]
   },
   {
     "version": 13,
@@ -141,9 +135,7 @@
   {
     "version": 17,
     "name": "scan target summaries",
-    "statements": [
-      "ALTER TABLE scans\nADD COLUMN target_summary TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans\nADD COLUMN target_summary TEXT;"]
   },
   {
     "version": 18,
@@ -198,9 +190,7 @@
   {
     "version": 24,
     "name": "persist scan cost estimates",
-    "statements": [
-      "ALTER TABLE scans ADD COLUMN cost_json TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans ADD COLUMN cost_json TEXT;"]
   },
   {
     "version": 25,
@@ -366,9 +356,7 @@
   {
     "version": 42,
     "name": "editable scan names",
-    "statements": [
-      "ALTER TABLE scans ADD COLUMN name TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans ADD COLUMN name TEXT;"]
   },
   {
     "version": 43,
@@ -381,9 +369,7 @@
   {
     "version": 44,
     "name": "version local finding embedding inputs",
-    "statements": [
-      "ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"
-    ]
+    "statements": ["ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"]
   },
   {
     "version": 45,
@@ -428,9 +414,7 @@
   {
     "version": 50,
     "name": "persist authorized source excerpt scopes",
-    "statements": [
-      "ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;"]
   },
   {
     "version": 51,
@@ -496,9 +480,7 @@
   {
     "version": 59,
     "name": "retain the launching Deep Scan service tier",
-    "statements": [
-      "ALTER TABLE deep_scan_runs ADD COLUMN service_tier TEXT;"
-    ]
+    "statements": ["ALTER TABLE deep_scan_runs ADD COLUMN service_tier TEXT;"]
   },
   {
     "version": 60,
@@ -529,6 +511,15 @@
   },
   {
     "version": 63,
+    "name": "retain unverified Deep Scan worker attempts",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN worker_usage_gap INTEGER NOT NULL DEFAULT 0 CHECK (worker_usage_gap IN (0, 1));",
+      "UPDATE deep_scan_runs SET worker_usage_gap = 1\nWHERE scan_id IN (\n    SELECT w.scan_id FROM deep_scan_workers AS w\n    WHERE w.kind IN ('discovery', 'dedup') AND w.attempt > 1\n      AND w.started_at IS NOT NULL AND w.sdk_thread_id IS NULL\n      AND NOT EXISTS (SELECT 1 FROM deep_scan_worker_threads AS t\n                      WHERE t.scan_id = w.scan_id AND t.worker_id = w.id)\n);",
+      "CREATE TRIGGER retain_unverified_deep_scan_worker_attempt\nAFTER UPDATE OF attempt ON deep_scan_workers\nWHEN NEW.attempt > OLD.attempt AND OLD.started_at IS NOT NULL\n     AND OLD.sdk_thread_id IS NULL AND OLD.kind IN ('discovery', 'dedup')\nBEGIN\n    UPDATE deep_scan_runs SET worker_usage_gap = 1 WHERE scan_id = OLD.scan_id;\nEND;"
+    ]
+  },
+  {
+    "version": 64,
     "name": "persist composition child membership",
     "statements": [
       "ALTER TABLE scans ADD COLUMN parent_scan_role TEXT\n    CHECK (parent_scan_role IS NULL OR parent_scan_role = 'deep_pass');",
@@ -536,14 +527,14 @@
     ]
   },
   {
-    "version": 64,
+    "version": 65,
     "name": "reuse scan severity assessments",
     "statements": [
       "CREATE INDEX scan_severity_reuse ON scan_severity_assessments\n    (finding_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at DESC);"
     ]
   },
   {
-    "version": 65,
+    "version": 66,
     "name": "persist scan execution sessions",
     "statements": [
       "CREATE TABLE scan_execution_threads (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    thread_id TEXT NOT NULL,\n    PRIMARY KEY (scan_id, thread_id)\n);",
@@ -552,17 +543,17 @@
     ]
   },
   {
-    "version": 66,
+    "version": 67,
     "name": "recover unindexed severity assessments",
     "statements": []
   },
   {
-    "version": 67,
+    "version": 68,
     "name": "repair stored composition membership",
     "statements": []
   },
   {
-    "version": 68,
+    "version": 69,
     "name": "repair archived composition paths",
     "statements": []
   }

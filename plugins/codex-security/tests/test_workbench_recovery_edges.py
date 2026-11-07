@@ -1239,6 +1239,7 @@ def test_parent_recovery_honors_unsealed_child_frozen_sources(
         )
         assert retry["returncode"] != 0
         assert "Frozen stopped-scan checkpoint set is incomplete" in retry["stderr"]
+        assert "Traceback" not in retry["stderr"]
     else:
         retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
         assert [row["title"] for row in retained] == [finding["title"]]

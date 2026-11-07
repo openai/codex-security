@@ -37,6 +37,7 @@ from workbench.saved_sources import (
     _source_digests,
 )
 from workbench.saved_sources import _digest as _digest
+from workbench.storage import saved_deep_workers
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
@@ -85,11 +86,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
-        workers = connection.execute(
-            "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
-            "FROM deep_scan_workers WHERE scan_id = ?",
-            (scan["id"],),
-        ).fetchall()
+        workers = saved_deep_workers(connection, scan)
         paths = dict(_saved_result_paths(scan_dir, workers))
         frozen_sources = scan["retained_source_digests_json"]
 
@@ -228,11 +225,7 @@ def _recovery_source_digests(
             else:
                 include_parent = True
 
-    workers = connection.execute(
-        "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
-        "FROM deep_scan_workers WHERE scan_id = ?",
-        (scan["id"],),
-    ).fetchall()
+    workers = saved_deep_workers(connection, scan)
     previous_heads = checkpoint_heads
     if previous_heads is None:
         previous_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], frozen_sources or {})
@@ -505,10 +498,7 @@ def preserve_scan_results_locked(
             scan_dir,
             scan_id,
             binding,
-            connection.execute(
-                "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                (scan_id,),
-            ).fetchall(),
+            saved_deep_workers(connection, scan),
             warnings,
             stopped=True,
             scan_mode=scan["mode"],

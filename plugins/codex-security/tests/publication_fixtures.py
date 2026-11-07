@@ -1,3 +1,5 @@
+"""Build recorded workbench scans and worker artifacts for publication and crash-recovery tests."""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +16,17 @@ from workbench_test_support import (
 
 
 class PublicationScan(SimpleNamespace):
+    """Drive publication and recovery against one test scan and its persisted worker records."""
+
+    def worker_draft(self, findings=(), **coverage_updates):
+        """Build a completed worker result using this scan's coverage as the starting point."""
+        return {
+            "scanId": self.scan_id,
+            "complete": True,
+            "findings": list(findings),
+            "coverage": {**self.coverage, **coverage_updates},
+        }
+
     def add_worker(self, connection=None, *, status="succeeded") -> Path:
         """Seed a worker row and artifact directory from a persisted coordinator database."""
         worker_id = str(uuid.uuid4())

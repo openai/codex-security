@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { cp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -71,6 +79,26 @@ try {
   await assert.rejects(stat(path.join(stateDirectory, "workbench.sqlite3")), {
     code: "ENOENT",
   });
+
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    const database = path.join(stateDirectory, "workbench.sqlite3");
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(database, "");
+    await chmod(database, 0);
+    try {
+      const unavailable = await client.callTool({
+        name: "get_codex_security_finding_issues",
+        arguments: { ...source, destination: jira },
+      });
+      assert.equal(unavailable.isError, true);
+      assert.deepEqual(unavailable.structuredContent, {
+        code: "state_unavailable",
+      });
+    } finally {
+      await chmod(database, 0o600);
+      await rm(database);
+    }
+  }
 
   const accepted = await call("record_codex_security_finding_issues", {
     ...source,

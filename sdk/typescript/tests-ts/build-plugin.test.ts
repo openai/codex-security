@@ -377,6 +377,65 @@ describe("bundled plugin build", () => {
     expect(workerImport.stderr).toBe("");
   });
 
+  test
+    .skipIf(process.platform !== "win32")
+    .each(["released", "persistent", "unrestorable"])(
+    "handles Windows file locks during bundle publication (%s)",
+    async (lock) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "source");
+      const destination = join(root, "_bundled_plugin");
+      const manifest = ".codex-plugin/plugin.json";
+      await writeFixture(source, manifest, "new");
+      await writeFixture(destination, manifest, "previous");
+      await writeFixture(
+        source,
+        "contract.json",
+        JSON.stringify({ externalOwnedExact: [manifest], shippedExact: [] }),
+      );
+      const fixture = fileURLToPath(
+        new URL("./fixtures/locked-bundle-build.mjs", import.meta.url),
+      );
+      const { stdout } = await execFileAsync("node", [fixture, root, lock]);
+      const outcome = JSON.parse(stdout);
+      if (lock === "released") {
+        expect(outcome).toEqual({
+          failed: ["_bundled_plugin", "bundle", "previous"],
+        });
+        expect(await readFile(join(destination, manifest), "utf8")).toBe("new");
+      } else {
+        expect(["EPERM", "EACCES", "EBUSY"]).toContain(outcome.code);
+        expect(outcome.failed).toEqual([
+          "_bundled_plugin",
+          "bundle",
+          "previous",
+        ]);
+        if (lock === "unrestorable") {
+          const remaining = await readdir(root);
+          const backups = remaining.filter((name) =>
+            name.startsWith(".plugin-build-"),
+          );
+          expect(backups).toHaveLength(1);
+          expect(remaining).not.toContain("_bundled_plugin");
+          expect(
+            await readFile(
+              join(root, backups[0]!, "previous", manifest),
+              "utf8",
+            ),
+          ).toBe("previous");
+          return;
+        }
+        expect(await readFile(join(destination, manifest), "utf8")).toBe(
+          "previous",
+        );
+      }
+      expect((await readdir(root)).sort()).toEqual([
+        "_bundled_plugin",
+        "source",
+      ]);
+    },
+  );
+
   test.each(["compiler", "file contract"])(
     "preserves the previous bundle when the %s fails",
     async (failure) => {

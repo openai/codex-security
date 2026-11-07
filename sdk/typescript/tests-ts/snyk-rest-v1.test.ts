@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
+import { normalizeSnykFile } from "../src/snyk-findings.js";
+import { parseSnykReport } from "../src/snyk-rest-v1.js";
 import {
   normalizeSnykIssues,
   snykRestFindingRepository,
@@ -141,4 +143,33 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
     updated: 0,
     unchanged: 1,
   });
+});
+
+test("a second projection preserves both native numbers and v1 type witnesses", async () => {
+  const token = "9007199254740995";
+  const document = parseSnykReport(
+    JSON.stringify({
+      ...snykOptions,
+      format: "snyk-rest-issues/v1",
+      apiVersion: "2026-03-25",
+      complete: true,
+      project: { ...snykProject().data, counter: token },
+      target: null,
+      pages: [
+        {
+          startingAfter: null,
+          response: {
+            data: [{ ...snykIssue(false), counter: "native-number" }],
+          },
+        },
+      ],
+      numericFields: { project: { counter: token } },
+    }).replace('"native-number"', token),
+  );
+  const first = await normalizeSnykFile(document, "cloud", []);
+  expect(first.findings[0]?.evidence.source_data?.["numericFields"]).toEqual({
+    project: { counter: token },
+    issue: { counter: token },
+  });
+  expect(await normalizeSnykFile(document, "cloud", [])).toEqual(first);
 });

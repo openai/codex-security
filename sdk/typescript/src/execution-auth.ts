@@ -1,4 +1,3 @@
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 /** @internal */
 import {
   environmentEntry,
@@ -218,7 +217,6 @@ export function selectedScanEnvironment(
       ),
     );
   }
-  forwardExternalImportSetting(environment, selected);
   return selected;
 }
 
@@ -300,7 +298,6 @@ export function withoutProviderEnvironment(
   const child = Object.fromEntries(
     Object.entries(environment).filter(([key]) => !keys.has(key.toUpperCase())),
   );
-  forwardExternalImportSetting(environment, child);
   return child;
 }
 
@@ -312,7 +309,6 @@ export function definedEnvironment(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
-  forwardExternalImportSetting(environment, child);
   return child;
 }
 

@@ -37,11 +37,11 @@ The workspace **Evidence** section is an artifact navigator, not another source-
 
 ## Structured Example
 
-This fictional item-service fixture illustrates the field shape. Its paths, identifiers, snippets and scenario were invented for this example; they are not taken from a scan target or finding. Use the shape with your own validated source evidence.
+This fictional item service illustrates how several sections reference the same code evidence. Use source evidence from your scan when filling these fields.
 
 ```json
 {
-  "summary": "In this fictional item service, an authenticated caller can change another tenant's item title by supplying its item identifier. The write route never checks tenant ownership.",
+  "summary": "An authenticated caller can change another tenant's item title by supplying its item identifier. The write route never checks tenant ownership.",
   "codeEvidence": [
     {
       "id": "request-fields",
@@ -52,7 +52,7 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
       "language": "python",
       "role": "user_input",
       "code": "def rename_fields(body):\n    return body[\"itemId\"], body[\"title\"]",
-      "explanation": "The fictional request body selects both the item and its replacement title."
+      "explanation": "The request body selects both the item and its replacement title."
     },
     {
       "id": "route-forward",
@@ -74,7 +74,7 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
       "language": "python",
       "role": "root_control",
       "code": "def rename(self, item_id, title):\n    self.items[item_id].title = title",
-      "explanation": "The store updates the selected object without an ownership check. A caller can select another tenant's fictional item."
+      "explanation": "The store updates the selected object without an ownership check. A caller can select another tenant's item."
     },
     {
       "id": "item-title",
@@ -96,7 +96,7 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
       "language": "python",
       "role": "expected_control",
       "code": "def read_item(request, store, item_id):\n    item = store.items[item_id]\n    if item.tenant_id != request.tenant_id:\n        raise PermissionError(\"Item belongs to another tenant\")\n    return item",
-      "explanation": "The fictional read route compares the stored owner with the authenticated tenant. The write route needs the same invariant."
+      "explanation": "The read route compares the stored owner with the authenticated tenant. The write route needs the same invariant."
     }
   ],
   "rootCause": {
@@ -110,8 +110,8 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
     ]
   },
   "validation": {
-    "method": "static trace of the fictional fixture",
-    "summary": "The illustrated request controls the item identifier. Neither the route nor the store checks its owner before replacing the title.",
+    "method": "static source trace",
+    "summary": "The request supplies the item identifier. Neither the route nor the store checks its owner before replacing the title.",
     "evidenceRefs": [
       "request-fields",
       "route-forward",
@@ -122,11 +122,11 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
       "The store updates the caller-selected item."
     ],
     "limitations": [
-      "This example is invented to demonstrate the field shape; it is not a scan result."
+      "The trace covers the route and store. Runtime middleware was outside the review."
     ]
   },
   "attackPath": {
-    "summary": "A fictional authenticated caller submits item/rename with another tenant's item identifier and a replacement title.",
+    "summary": "An authenticated caller submits `item/rename` with another tenant's item identifier and a replacement title.",
     "dataflow": {
       "summary": "request body -> rename_fields() -> rename_item() -> ItemStore.rename() -> item_title()",
       "source": "caller-selected item identifier and title",
@@ -140,10 +140,10 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
       ]
     },
     "reachability": {
-      "summary": "The fictional caller needs access to the authenticated rename route and an item identifier belonging to another tenant.",
-      "attacker": "authenticated caller in the invented service",
+      "summary": "The caller needs access to the authenticated rename route and an item identifier belonging to another tenant.",
+      "attacker": "authenticated caller",
       "entrypoint": "item/rename",
-      "outcome": "unauthorized modification of a fictional item"
+      "outcome": "another tenant's item title changes"
     },
     "evidenceRefs": [
       "route-forward",
@@ -152,20 +152,20 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
     ],
     "impact": {
       "level": "medium",
-      "why": "The fictional failure permits cross-tenant modification of an item title."
+      "why": "The caller can alter another tenant's title. The store operation changes only that field."
     },
     "likelihood": {
       "level": "medium",
-      "why": "The invented route accepts an item identifier from the caller."
+      "why": "The route accepts an item identifier from the caller."
     },
     "limitations": [
-      "No real service, repository, scan target or finding is represented."
+      "The trace does not establish how easily callers can learn another tenant's item identifier."
     ]
   },
-  "remediation": "Check the selected item's tenant against the authenticated tenant before writing it; reuse the same ownership check on read and write routes.",
+  "remediation": "Check the selected item's tenant against the authenticated tenant before writing it. Reuse the same ownership check on read and write routes.",
   "remediationTests": [
-    "Reject a rename when the selected fictional item belongs to another tenant.",
-    "Allow an owner to rename its own fictional item."
+    "Reject a rename when the selected item belongs to another tenant.",
+    "Allow an owner to rename its own item."
   ],
   "preventiveControls": [
     "Keep the tenant ownership invariant in a shared item-access operation."

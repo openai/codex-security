@@ -1,15 +1,45 @@
 import { fixtureSpawn } from "./support/codex-process.js";
 import { expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  rename,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bindDeepScanExecutable } from "../src/execution-preparation.js";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import {
   acquireScanExecution,
   ScanPermissionError,
 } from "../src/scan-execution.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+
+test("pins the native executable before discovery and rejects a same-size replacement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deep-executable-"));
+  const executable = join(root, "synthetic-codex.exe");
+  const verify = bindDeepScanExecutable(executable, root);
+  try {
+    await expect(verify()).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(executable, "first");
+    await Promise.all([verify(), verify()]);
+    const metadata = await stat(executable);
+    const replacement = join(root, "replacement.exe");
+    await writeFile(replacement, "other");
+    await utimes(replacement, metadata.atime, metadata.mtime);
+    await rename(replacement, executable);
+    await expect(verify()).rejects.toThrow(
+      "changed after this Deep Scan started",
+    );
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
 
 test("cancellation drains a preflight child that ignores graceful termination", async () => {
   const root = await mkdtemp(join(tmpdir(), "permission-stop-"));

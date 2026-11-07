@@ -78,6 +78,7 @@ test.each([false, true])(
       });
       const ordinary = new ScanCostTracker({
         codexHome: home,
+        includeArchivedSessions: false,
         model: "gpt-5.6-sol",
       });
       ordinary.start("root");

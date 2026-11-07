@@ -4,7 +4,6 @@ import {
   githubRepositoryParts,
 } from "./github-identifiers.js";
 import { CodexSecurityError } from "./errors.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 import {
   githubImportHost,
   githubImportClient,
@@ -52,7 +51,6 @@ export async function importGitHubAdvisories(
 ): Promise<ImportedGitHubAdvisory[]> {
   options.signal?.throwIfAborted();
   const environment = dependencies.environment ?? process.env;
-  requireExternalImports(environment);
   const repository = options.repository.trim();
   const parts = githubRepositoryParts(repository);
   if (!parts)

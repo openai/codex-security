@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -106,12 +108,13 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "persist composition child membership"),
-    (64, "reuse scan severity assessments"),
-    (65, "persist scan execution sessions"),
-    (66, "recover unindexed severity assessments"),
-    (67, "repair stored composition membership"),
-    (68, "repair archived composition paths"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "persist composition child membership"),
+    (65, "reuse scan severity assessments"),
+    (66, "persist scan execution sessions"),
+    (67, "recover unindexed severity assessments"),
+    (68, "repair stored composition membership"),
+    (69, "repair archived composition paths"),
 ]
 
 
@@ -1023,7 +1026,7 @@ def insert_classified_scan(
 
 
 @pytest.mark.parametrize("indexed", [False, True])
-@pytest.mark.parametrize("previous_version", [41, 52, 65, 66])
+@pytest.mark.parametrize("previous_version", [41, 52, 66, 67])
 def test_severity_migration_preserves_assessments_for_their_original_scan(
     indexed: bool,
     previous_version: int,
@@ -1075,12 +1078,12 @@ def test_severity_migration_preserves_assessments_for_their_original_scan(
             connection.execute("UPDATE finding_severity_assessments SET classification_runs = 3")
             connection.execute("UPDATE scan_severity_assessments SET classification_runs = 5")
             connection.execute("UPDATE scan_severity_classifications SET classification_runs = 3")
-        updated = previous_version == 66 or (previous_version == 65 and indexed)
+        updated = previous_version == 67 or (previous_version == 66 and indexed)
         if updated:
             connection.execute(
                 "UPDATE scan_severity_assessments SET rationale = 'Updated assessment'"
             )
-        if previous_version >= 64:
+        if previous_version >= 65:
             assert (
                 connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE name = 'scan_severity_reuse'"
@@ -1101,7 +1104,7 @@ def test_severity_migration_preserves_assessments_for_their_original_scan(
         ).fetchall()
         assert [tuple(row) for row in migrated] == [("second-scan", occurrence_id)]
         expected_runs = (
-            None if previous_version < 52 else 5 if indexed or previous_version >= 66 else 3
+            None if previous_version < 52 else 5 if indexed or previous_version >= 67 else 3
         )
         assert (
             connection.execute(
@@ -1388,6 +1391,25 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
     assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone()[0] == 2.5
     assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
+
+
+@pytest.mark.cross_platform
+def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
+    db, migrate = create_historical_database(63)
+    with closing(db):
+        timestamp = "2026-01-01T00:00:00Z"
+        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
+        record_migration(db, 63, "retain native investigation time allowances", timestamp)
+        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
+        migrate(db)
+        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
+        receipt = db.execute(query).fetchone()
+        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
+        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
+        migrate(db)
+        assert db.execute(query).fetchone() == receipt
+        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
@@ -2203,7 +2225,9 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
         connection.execute("DELETE FROM schema_migrations WHERE version = 62")
         connection.execute("DROP INDEX scans_by_composition_parent")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 63")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = 'persist composition child membership'"
+        )
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         rename_migration(connection, 22, "dynamic scan execution profiles")
@@ -2889,27 +2913,35 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
         "previous-merge",
         "pre-external-merge",
         "pre-lifecycle-composition",
+        "previous-head",
+        "released-usage",
     ],
 )
 def test_workbench_upgrades_colliding_released_migration_histories(history: str) -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     timestamp = "2026-09-01T00:00:00Z"
-    old_versions = {43: 42, 63: 43, 64: 44, 65: 45, 66: 46, 67: 48, 68: 49}
-    if history in {"main-severity", "released-main", "external-main"}:
+    old_versions = {43: 42, 64: 43, 65: 44, 66: 45, 67: 46, 68: 48, 69: 49}
+    if history in {"main-severity", "released-main", "external-main", "released-usage"}:
         old_versions = {}
     elif history == "current-composition":
-        old_versions = {43: 50, **{version: version - 12 for version in range(63, 69)}}
+        old_versions = {43: 50, **{version: version - 13 for version in range(64, 70)}}
     elif history == "previous-merge":
-        old_versions = {version: version - 11 for version in range(63, 69)}
+        old_versions = {version: version - 12 for version in range(64, 70)}
     elif history == "pre-external-merge":
-        old_versions = {version: version - 10 for version in range(63, 69)}
+        old_versions = {version: version - 11 for version in range(64, 70)}
     elif history == "pre-lifecycle-composition":
-        old_versions = {version: version - 2 for version in range(63, 69)}
+        old_versions = {version: version - 3 for version in range(64, 70)}
+    elif history == "previous-head":
+        old_versions = {version: version - 1 for version in range(64, 70)}
     historical = [
         (old_versions.get(version, version), name, sql)
         for version, name, sql in namespace["MIGRATIONS"]
         if (
-            (version <= 60 or version >= 63)
+            version <= 63
+            if history == "released-usage"
+            else (version <= 62 or version >= 64)
+            if history == "previous-head"
+            else (version <= 60 or version >= 64)
             if history == "pre-lifecycle-composition"
             else version <= 42
             if history == "main"
@@ -2919,13 +2951,13 @@ def test_workbench_upgrades_colliding_released_migration_histories(history: str)
             if history == "released-main"
             else version <= 53
             if history == "external-main"
-            else (version <= 41 or version == 43 or version >= 63)
+            else (version <= 41 or version == 43 or version >= 64)
             if history == "published-composition"
-            else (version <= 51 or version >= 63)
+            else (version <= 51 or version >= 64)
             if history == "previous-merge"
-            else (version <= 52 or version >= 63)
+            else (version <= 52 or version >= 64)
             if history == "pre-external-merge"
-            else (version <= 43 or version >= 63)
+            else (version <= 43 or version >= 64)
         )
     ]
     with sqlite3.connect(":memory:") as connection:

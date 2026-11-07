@@ -73,6 +73,7 @@ if (process.argv[2] === "exec") {
     prepareDiscoveryExecution,
     prepareExecutionSource,
     prepareMergeExecution,
+    prepareReportComparisonExecution,
   } = await import("../../src/execution-preparation.ts");
   const { scanRuntimeCodexConfig } = await import("../../src/api.ts");
   const { preparedRuntime } = await import("../support/api-events.ts");
@@ -113,7 +114,9 @@ if (process.argv[2] === "exec") {
     const worker =
       request.kind === "discovery"
         ? prepareDiscoveryExecution(session)
-        : prepareMergeExecution(session, 0);
+        : request.kind === "compare"
+          ? prepareReportComparisonExecution(session)
+          : prepareMergeExecution(session, 0);
     const { codex } = await createExecutionCodex(
       { surface: "sdk", command: "scan", mode: "deep" },
       worker,
@@ -150,7 +153,22 @@ if (process.argv[2] === "exec") {
         ...launch,
         executable: workerCommand,
         threadId: thread.id,
+        ...(request.kind === "compare" && {
+          requestedComparisonTools: worker.sessionConfig.tools,
+          comparisonTools: config.tools,
+          comparisonFeatures: Object.fromEntries(
+            Object.entries(config.features ?? {}).map(([name, value]) => [
+              name,
+              value?.enabled ?? value,
+            ]),
+          ),
+        }),
         daybreak: config.daybreak ?? null,
+        telemetry: {
+          analyticsEnabled: config.analytics?.enabled ?? null,
+          environment: config.otel?.environment ?? null,
+          metadataTag: config.responses_api_metadata?.["synthetic.tag"] ?? null,
+        },
         daybreakFeatures: Object.fromEntries(
           [
             "cli_daybreak",

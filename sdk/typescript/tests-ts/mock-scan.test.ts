@@ -10,10 +10,18 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test, mock } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+  mock,
+} from "bun:test";
 import { main } from "../src/cli.js";
 import { DiffTarget } from "../src/targets.js";
-import { runWorkbench } from "../src/runtime.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { TestClient } from "./support/api-client.js";
@@ -41,19 +49,21 @@ async function fixture(workbench: typeof runWorkbench = runWorkbench) {
     CODEX_HOME: join(root, "codex-home"),
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
-  const python = Bun.which("python3") ?? Bun.which("python");
-  expect(python).not.toBeNull();
+  const python = await resolvePluginPython({
+    environment,
+    protectedRoot: repository,
+  });
   const client = new TestClient(
-    { pythonPath: python! },
+    { pythonPath: python },
     {
       environment,
       runWorkbench: workbench,
-      resolvePluginPython: async () => python!,
+      resolvePluginPython: async () => python,
       prepareRuntime: rejecting("Mock scan initialized Codex"),
       matchFindings: rejecting("Mock scan called model matching"),
     },
   );
-  return { root, repository, client, environment, python: python! };
+  return { root, repository, client, environment, python };
 }
 
 test("mock scans seal real artifacts and index shared and unique findings without Codex", async () => {
@@ -485,4 +495,58 @@ test.each([
   } finally {
     await client.close();
   }
+});
+
+describe("interrupted workbench registration", () => {
+  let registeredId: string | undefined;
+  let saved: { id: string; status: string } | undefined;
+
+  afterAll(cleanup);
+
+  beforeAll(async () => {
+    const controller = new AbortController();
+    const { client, repository, environment, python } = await fixture(
+      async (options, args, input) => {
+        const reply = await runWorkbench(options, args, input);
+        if (args[0] === "register-cli-scan") {
+          if (typeof reply["scanId"] !== "string")
+            throw new Error("Missing registered scan ID");
+          registeredId = reply["scanId"];
+          controller.abort();
+          throw new DOMException(
+            "Synthetic registration reply lost",
+            "AbortError",
+          );
+        }
+        return reply;
+      },
+    );
+    const workbench = { environment, python, pluginRoot: PLUGIN_ROOT };
+    try {
+      await expect(
+        client.run(repository, { mock: true, signal: controller.signal }),
+      ).rejects.toThrow(ScanInterruptedError);
+      if (registeredId === undefined)
+        throw new Error("Registration did not commit");
+      const { scan } = await runWorkbench(workbench, [
+        "get-scan",
+        "--scan-id",
+        registeredId,
+      ]);
+      const row = scan as { scanId: string; lifecycle: { status: string } };
+      saved = { id: row.scanId, status: row.lifecycle.status };
+    } finally {
+      await client.close();
+    }
+  }, 60_000);
+
+  test("finds the exact saved scan after interruption", () => {
+    expect(registeredId).toEqual(expect.any(String));
+    expect(saved?.id).toBe(registeredId);
+    expect(saved?.status).toEqual(expect.any(String));
+  });
+
+  test.todo("marks that saved scan canceled when its reply was lost", () => {
+    expect(saved?.status).toBe("canceled");
+  });
 });

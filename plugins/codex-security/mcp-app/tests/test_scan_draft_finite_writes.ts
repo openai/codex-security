@@ -189,12 +189,20 @@ for (const field of ["deferred", "surfaces", "threatModel"] as const) {
 
 test("publication preserves finite nested values", async (t) => {
   const context = await fixture(t, "standard");
-  let nested: unknown = 1.25e300;
+  let nested: unknown = 1.25e-300;
   for (let depth = 0; depth < 300; depth++) nested = [nested];
   const kept = {
     ...finding("finite", "api/source.py"),
     extensions: {
-      values: [null, true, false, 0, -1.25e300, "Infinity", "λ 🧪"],
+      values: [
+        null,
+        true,
+        false,
+        0,
+        Number.MIN_SAFE_INTEGER,
+        "Infinity",
+        "λ 🧪",
+      ],
       nested,
     },
   };

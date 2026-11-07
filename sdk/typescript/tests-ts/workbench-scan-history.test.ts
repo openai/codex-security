@@ -1,10 +1,21 @@
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, onTestFinished, test } from "bun:test";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-test("keeps inline and stdin comparison transports compatible", async () => {
-  const python = await resolvePluginPython();
+function testProbe(name: string, run: (signal: AbortSignal) => Promise<void>) {
+  test.serial(name, () => {
+    const controller = new AbortController();
+    onTestFinished(() => controller.abort());
+    return run(controller.signal).catch((error) => {
+      // Bun already reported the timeout if teardown aborted the probe.
+      if (!controller.signal.aborted) throw error;
+    });
+  });
+}
+
+testProbe("accepts comparison matches inline or over stdin", async (signal) => {
+  const python = await resolvePluginPython({ signal });
   const probe = [
     "import json, sys",
     "sys.path.insert(0, sys.argv.pop(1))",
@@ -50,7 +61,7 @@ test("keeps inline and stdin comparison transports compatible", async () => {
       [...args, ...transport.args],
       process.env,
       undefined,
-      AbortSignal.timeout(10_000),
+      signal,
     );
     expect(result.exitCode, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual(transport.expected);
@@ -60,14 +71,14 @@ test("keeps inline and stdin comparison transports compatible", async () => {
     [...args, "--matches-json", payload, "--matches-json-stdin"],
     process.env,
     payload,
-    AbortSignal.timeout(10_000),
+    signal,
   );
   expect(conflicting.exitCode).toBe(2);
   expect(conflicting.stderr).toContain("not allowed with argument");
 });
 
-test("loads oversized comparison matches from stdin", async () => {
-  const python = await resolvePluginPython();
+testProbe("loads oversized comparison matches from stdin", async (signal) => {
+  const python = await resolvePluginPython({ signal });
 
   const probe = [
     "import argparse, sqlite3, sys",
@@ -103,7 +114,7 @@ test("loads oversized comparison matches from stdin", async () => {
     ["-I", "-X", "utf8", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
     process.env,
     payload,
-    AbortSignal.timeout(10_000),
+    signal,
   );
 
   expect(result.exitCode, result.stderr).toBe(0);

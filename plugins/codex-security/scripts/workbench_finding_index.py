@@ -74,6 +74,7 @@ def index_findings(
     document: dict[str, Any],
     timestamp: str,
 ) -> None:
+    """Index findings for this scan and write occurrence and ordered location rows in the caller’s transaction."""
     scan = connection.execute(
         "SELECT target_id, parent_scan_role FROM scans WHERE id = ?", (scan_id,)
     ).fetchone()

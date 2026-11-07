@@ -1,9 +1,6 @@
-import { createReadStream } from "node:fs";
-import { createInterface } from "node:readline";
-import { pipeline } from "node:stream";
-import zlib from "node:zlib";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { isRecord } from "./record.js";
+import { sessionLines } from "./session-lines.js";
 
 export function sessionStartedAt(timestamp: unknown): number | null {
   const startedAt =
@@ -74,21 +71,11 @@ export function isScanArtifactDirectory(
   );
 }
 
-// Codex can compress cold rollouts to `.jsonl.zst`. Node 22.13 and 22.14 lack
-// zstd, so they still read plain rollouts only.
-export const readsCompressedSessions =
-  typeof zlib.createZstdDecompress === "function";
-
 export async function* sessionEvents(
   path: string,
 ): AsyncGenerator<Record<string, unknown>> {
-  const file = createReadStream(path);
-  const stream = path.endsWith(".zst")
-    ? pipeline(file, zlib.createZstdDecompress(), () => {})
-    : file;
-  const lines = createInterface({ input: stream, crlfDelay: Infinity });
   try {
-    for await (const line of lines) {
+    for await (const line of sessionLines(path)) {
       if (line.trim() === "") continue;
       try {
         const event: unknown = JSON.parse(line);
@@ -99,8 +86,5 @@ export async function* sessionEvents(
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  } finally {
-    lines.close();
-    stream.destroy();
   }
 }

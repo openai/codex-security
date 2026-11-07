@@ -25,6 +25,7 @@ export function createExecutionProfileCodex(
   configuration: JsonObject,
   checkPermissions = false,
   preflightEnvironment?: Record<string, string>,
+  verifyExecutable?: () => Promise<void>,
 ): Pick<Codex, "startThread" | "resumeThread"> {
   const wrap = (
     threadOptions: ThreadOptions,
@@ -70,6 +71,7 @@ export function createExecutionProfileCodex(
                     codex,
                     undefined,
                     preflightEnvironment,
+                    verifyExecutable,
                   )
                 : codex;
               const current =

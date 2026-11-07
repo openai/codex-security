@@ -8,7 +8,15 @@ import {
 import { nativeRequest } from "./support/native-request.js";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { resolveCodexProfile, type JsonObject } from "../src/config.js";
+import {
+  OPENROUTER_CODEX_PROVIDER,
+  resolveCodexProfile,
+  type JsonObject,
+} from "../src/config.js";
+import { main } from "../src/cli.js";
+import { dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
+import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -18,9 +26,16 @@ import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
+const nativeTestTimeoutMs = Number(
+  process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? 30_000,
+);
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 
 afterEach(cleanup);
+
+async function readProviderProfile(home: string, name: string) {
+  return parseToml(await readFile(join(home, `${name}.config.toml`), "utf8"));
+}
 
 async function effectiveProvider(
   environment: Record<string, string>,
@@ -29,11 +44,9 @@ async function effectiveProvider(
   nativeProfile?: string,
 ) {
   if (nativeProfile !== undefined) {
-    const config = parseToml(
-      await readFile(
-        join(environment["CODEX_HOME"]!, `${nativeProfile}.config.toml`),
-        "utf8",
-      ),
+    const config = await readProviderProfile(
+      environment["CODEX_HOME"]!,
+      nativeProfile,
     );
     const result = await nativeRequest(environment, cwd, [], "thread/start", {
       cwd,
@@ -521,7 +534,7 @@ test.each(["openrouter", "fireworks"] as const)(
     );
     expect(selected).toMatchObject({ env_key: "SYNTHETIC_CUSTOM_API_KEY" });
   },
-  30_000,
+  nativeTestTimeoutMs,
 );
 
 for (const mode of ["standard", "deep"] as const) {
@@ -1294,6 +1307,129 @@ test.each(legacyScanCases)(
     }
   },
   30_000,
+);
+
+test.each([
+  ["root", "openai"],
+  ["profile", "openai"],
+  ["root", "openrouter"],
+  ["profile", "openrouter"],
+] as const)(
+  "Deep workers, rerun and resume inherit the %s %s endpoint",
+  async (selection, provider) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    await mkdir(repository);
+    await writeFile(join(repository, "source.py"), "# synthetic source\n");
+    await mkdir(scan, { mode: 0o700 });
+    const endpoint = "https://endpoint.example.test/v1";
+    const routing: JsonObject =
+      provider === "openai"
+        ? {
+            openai_base_url: endpoint,
+            chatgpt_base_url: "https://account.example.test",
+          }
+        : {
+            model_provider: provider,
+            model_providers: {
+              [provider]: {
+                ...OPENROUTER_CODEX_PROVIDER,
+                base_url: endpoint,
+                query_params: { version: "preview" },
+              },
+            },
+          };
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-openai-key",
+      OPENROUTER_API_KEY: "synthetic-openrouter-key",
+    };
+    let recipe: JsonObject | undefined;
+    const workerRoutes: JsonObject[] = [];
+    const client = new TestClient(
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides:
+          selection === "root"
+            ? routing
+            : {
+                openai_base_url: "https://unused.example.test/v1",
+                profile: "selected",
+                profiles: { selected: routing },
+              },
+      },
+      {
+        environment,
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "list-scans") return { scans: [] };
+          if (args[0] === "get-scan")
+            return { scan: { progress: { status: "running" } } };
+          if (
+            args[0] === "register-cli-scan" &&
+            !args.includes("--parent-scan-id")
+          )
+            recipe = JSON.parse(input!).recipe;
+          return mockWorkbench(args, input);
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              workerRoutes.push(effectiveCodexConfiguration(options));
+              throw new ScanTransportClosedError(
+                "synthetic endpoint inherited",
+              );
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          outputDir: scan,
+          workers: 1,
+          maxDiscoveryRuns: 1,
+        }),
+      ).rejects.toThrow("synthetic endpoint inherited");
+      expect(workerRoutes).toHaveLength(1);
+      expect(workerRoutes[0]).toMatchObject(routing);
+      expect(recipe).toMatchObject({
+        mode: "deep",
+        providerProfile: { home: "managed" },
+      });
+      expect(JSON.stringify(recipe)).not.toContain(endpoint);
+      for (const command of ["rerun", "resume"]) {
+        const { runCli, stderr } = createCliTest(main);
+        let restored: JsonObject | undefined;
+        const status = await runCli(
+          ["scans", command, "saved", "--json"],
+          dependencies({
+            currentDirectory: repository,
+            environment,
+            onWorkbench: () => ({
+              scanId: "saved",
+              scanDir: scan,
+              recipe: recipe!,
+            }),
+            onConfig: ({ codexOverrides }) => {
+              restored = resolveCodexProfile(codexOverrides!);
+            },
+          }),
+        );
+        expect(status, stderr.text()).toBe(0);
+        expect(restored).toMatchObject(routing);
+      }
+    } finally {
+      await client.close();
+    }
+  },
+  nativeTestTimeoutMs,
 );
 
 async function createPluginProbe(root: string, report: string) {

@@ -4,17 +4,30 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { ScanCostTracker } from "../src/cost.js";
+import {
+  readScanBudgetUsage,
+  ScanCostTracker,
+  type ScanUsageMeasurement,
+} from "../src/cost.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
 import { copyCompletedScan } from "./plugin-root.js";
 import {
+  completedCodex,
   completedEvents,
   runEvents,
   scanRuntimeDependencies,
 } from "./support/api-events.js";
-import { mockWorkbench, TestClient } from "./support/api-client.js";
+import {
+  measuredScanUsage,
+  mockWorkbench,
+  TestClient,
+} from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { writeSession } from "./support/usage-rollout.js";
+import {
+  ownedPythonUsage,
+  ownedSdkUsage,
+  writeSession,
+} from "./support/usage-rollout.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -73,8 +86,9 @@ test.each([false, true])(
         parent: "scan-thread",
       },
     );
+    let measured = raiseLimit ? 900 : 3_000;
     const parent = await writeSession(codexHome, "scan-thread", {
-      input_tokens: raiseLimit ? 900 : 3_000,
+      input_tokens: measured,
       output_tokens: 0,
     });
     const limitSaved = Promise.withResolvers<void>();
@@ -84,6 +98,9 @@ test.each([false, true])(
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: async (_options, args, input) => {
+        if (args[0] === "read-scan-usage") {
+          return { ...measuredScanUsage(measured, 0, 0), coverage: "partial" };
+        }
         if (args[0] === "set-scan-cost-limit") limitSaved.resolve();
         return mockWorkbench(args, input);
       },
@@ -97,6 +114,7 @@ test.each([false, true])(
                 await limitSaved.promise;
                 // Resume after the caller adopts the saved limit.
                 await setImmediate();
+                measured = 3_000;
                 await appendFile(
                   parent,
                   JSON.stringify({
@@ -144,3 +162,210 @@ test.each([false, true])(
     }
   },
 );
+
+test.each([false, true])(
+  "persists unpriced usage and reports complete-to-partial coverage on terminal cancellation=%p",
+  async (cancel) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeSession(codexHome, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 5,
+    });
+    const observed: Readonly<ScanUsageMeasurement>[] = [];
+    const observerErrors = mock();
+    const observerFailure = new Error("Synthetic measurement observer failure");
+    const saved: readonly string[][] = [];
+    const controller = new AbortController();
+    const complete = Promise.withResolvers<void>();
+    const client = new TestClient(
+      { codexOverrides: { model: "synthetic-unpriced-model" } },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "fail-scan" || args[0] === "cancel-scan") {
+            (saved as string[][]).push([...args]);
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            runStreamed: async () => ({
+              events: (async function* (): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                await complete.promise;
+                await writeSession(
+                  codexHome,
+                  "missing-worker",
+                  {},
+                  { parent: "scan-thread" },
+                );
+                if (cancel)
+                  controller.abort(new Error("Synthetic cancellation"));
+                throw new Error("Synthetic execution failure");
+              })(),
+            }),
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          signal: controller.signal,
+          onMeasurement: (measurement) => {
+            observed.push(measurement);
+            if (measurement.coverage === "complete") complete.resolve();
+            throw observerFailure;
+          },
+          onObserverError: observerErrors,
+        }),
+      ).rejects.toThrow();
+      expect(observed.map((value) => value.coverage)).toEqual([
+        "complete",
+        "partial",
+      ]);
+      expect(observerErrors).toHaveBeenCalledTimes(2);
+      expect(observerErrors).toHaveBeenNthCalledWith(
+        1,
+        "onMeasurement",
+        observerFailure,
+      );
+      expect(observerErrors).toHaveBeenNthCalledWith(
+        2,
+        "onMeasurement",
+        observerFailure,
+      );
+      expect(observed.at(-1)).toMatchObject({
+        cost: null,
+        usage: { input_tokens: 100, output_tokens: 5 },
+        missingThreadCount: 1,
+      });
+      expect(saved).toHaveLength(1);
+      expect(saved[0]![0]).toBe(cancel ? "cancel-scan" : "fail-scan");
+      const args = saved[0]!;
+      const receipt = JSON.parse(args[args.indexOf("--cost-json") + 1]!);
+      expect(receipt).toMatchObject({
+        usage: {
+          source: "codex_runtime",
+          coverage: "partial",
+          inputTokens: 100,
+          outputTokens: 5,
+        },
+      });
+      expect(receipt.cost).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each([false, true])(
+  "completes with an unmeasured worker only when no budget was requested (budgeted=%p)",
+  async (budgeted) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await writeSession(codexHome, "worker", {}, { parent: "thread-1" });
+    const commands: string[] = [];
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      createCodex: completedCodex(root),
+      runWorkbench: async (_options, args, input) => {
+        commands.push(args[0]!);
+        if (args[0] === "read-scan-usage") {
+          expect(args).toEqual([
+            "read-scan-usage",
+            "--scan-id",
+            "scan_example_001",
+            "--thread-id",
+            "thread-1",
+          ]);
+          return { coverage: "partial", missingThreadCount: 1 };
+        }
+        return mockWorkbench(args, input);
+      },
+    });
+    try {
+      // The completed parent supplies a receipt; its worker supplies none.
+      const run = client.run(repository, budgeted ? { maxCostUsd: 1 } : {});
+      if (budgeted) {
+        await expect(run).rejects.toThrow(/cost limit|usage/i);
+        expect(commands).not.toContain("prepare-scan-completion");
+        expect(commands).toContain("fail-scan");
+      } else {
+        expect((await run).cost).toBeNull();
+      }
+      expect(commands.includes("complete-scan")).toBe(!budgeted);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test("a direct scan needs measured workers in addition to its control thread", async () => {
+  let workerCount = 0;
+  const workbench = async () => ({
+    ...ownedPythonUsage,
+    coverage: "complete",
+    byRole: { workers: { threadCount: workerCount } },
+  });
+  const read = () =>
+    readScanBudgetUsage(workbench, "scan", "controller", undefined, true);
+  expect((await read()).complete).toBe(false);
+  workerCount = 1;
+  expect(await read()).toEqual({
+    complete: true,
+    usage: { ...ownedSdkUsage, cache_write_input_tokens_reported: false },
+  });
+});
+
+test("a worker-shaped directory alone cannot exhaust a scan budget", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const scanDir = join(root, "scan");
+  const codexHome = join(root, "codex-home");
+  await mkdir(repository);
+  await writeSession(
+    codexHome,
+    "thread-1",
+    { input_tokens: 10, output_tokens: 3 },
+    {
+      cwd: scanDir,
+      timestamp: "2026-07-26T10:00:00Z",
+    },
+  );
+  await writeSession(
+    codexHome,
+    "unrelated",
+    { input_tokens: 1_000_000, output_tokens: 0 },
+    {
+      cwd: join(
+        scanDir,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "other",
+        "output",
+      ),
+      timestamp: "2026-07-26T10:00:01Z",
+    },
+  );
+  const client = TestClient.withDependencies({
+    ...scanRuntimeDependencies(codexHome, scanDir),
+    createCodex: completedCodex(root),
+  });
+  try {
+    const result = await client.run(repository, { maxCostUsd: 1 });
+    expect(result.cost).toMatchObject({ inputTokens: 10, outputTokens: 3 });
+  } finally {
+    await client.close();
+  }
+});

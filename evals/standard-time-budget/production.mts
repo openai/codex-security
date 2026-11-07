@@ -1,10 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import * as sdk from "../../sdk/typescript/dist/api.js";
 import { deepScanOptions } from "../../sdk/typescript/dist/deep-config.js";
-import { createProfileCodex } from "../../sdk/typescript/dist/provider-profile.js";
 import {
   codexExecutableReadPaths,
   resolveCodexCommand,
@@ -69,10 +67,7 @@ export function createStandardRunner({
   environment = process.env,
   createClient = (config, dependencies) =>
     new CodexSecurity(config, dependencies, { surface: "sdk" }),
-  createCodex = ({ nativeProfile, ...settings }) =>
-    nativeProfile === undefined
-      ? new Codex(settings)
-      : createProfileCodex(settings, nativeProfile),
+  createCodex,
 }: {
   stateRoot: string;
   outputRoot: string;
@@ -105,22 +100,9 @@ export function createStandardRunner({
           ...environment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
-        createCodex: async (settings) => {
-          const codex = await createCodex(settings);
-          return {
-            startThread: (threadOptions) => {
-              const thread = codex.startThread(threadOptions);
-              return {
-                get id() {
-                  return thread.id;
-                },
-                runStreamed: (prompt, turnOptions) => {
-                  options.observation.prompt ??= prompt;
-                  return thread.runStreamed(prompt, turnOptions);
-                },
-              };
-            },
-          };
+        createCodex,
+        onScanPrompt: (prompt) => {
+          options.observation.prompt ??= prompt;
         },
       },
     );
