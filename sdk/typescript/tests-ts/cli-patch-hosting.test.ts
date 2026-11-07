@@ -121,6 +121,99 @@ describe("patch change tracking", () => {
     },
   );
 
+  test.each([
+    { key: "credential.useHttpPath", source: "local", value: "false" },
+    {
+      key: "credential.https://gitlab.example.test/team.useHttpPath",
+      source: "branch include",
+      value: "false",
+    },
+    {
+      key: "credential.https://gitlab.example.test.username",
+      source: "resume",
+      value: "",
+    },
+  ])(
+    "HTTP publication refuses checkout-selected $key from $source",
+    async ({ key, source, value }) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-credential-settings-");
+      const global = join(external, "operator.gitconfig");
+      const environment = {
+        GIT_CONFIG_GLOBAL: global,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GITLAB_HOST: "gitlab.example.test",
+      };
+      const remote = "https://gitlab.example.test/team/repository.git";
+      git("remote", "set-url", "origin", remote);
+      git("config", "--file", global, "credential.useHttpPath", "true");
+      const branch = "codex-security/patch-scan-1";
+      if (source === "resume") {
+        git("branch", branch);
+        git(
+          "config",
+          `branch.${branch}.codexSecurityPatchCommit`,
+          git("rev-parse", "HEAD"),
+        );
+      }
+      if (source !== "branch include") {
+        git("config", key, value);
+      } else {
+        const included = join(
+          directory,
+          ".git",
+          "credential-settings.gitconfig",
+        );
+        git("config", "--file", included, key, value);
+        git(
+          "config",
+          "--file",
+          global,
+          "includeIf.onbranch:codex-security/**.path",
+          included,
+        );
+      }
+      const transports: string[] = [];
+      const outcome = await runWorkflow(
+        source === "resume"
+          ? ["patch", "--resume-pr", branch, "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: (tool, args, cwd, options) => {
+            if (tool !== "git") return "";
+            if (args.includes("ls-remote") || args[0] === "push") {
+              transports.push(
+                args.includes("ls-remote") ? "ls-remote" : "push",
+              );
+              return "";
+            }
+            return runGitRepositoryCommand(tool, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            });
+          },
+        },
+        { localHosting: false },
+      );
+      expect(transports).toEqual(
+        source === "branch include" ? ["ls-remote"] : [],
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain(
+        "checkout-selected Git credential settings",
+      );
+    },
+  );
+
   test.each(["preflight", "push", "push from removed component"] as const)(
     "HTTP %s uses the operator credential helper without executing checkout helpers",
     async (stage) => {
@@ -148,10 +241,18 @@ describe("patch change tracking", () => {
         const global = join(external, "global.gitconfig");
         await writeFile(
           script,
-          `require("node:fs").appendFileSync(${JSON.stringify(marker)}, process.argv[2] + "\\n");`,
+          `const fs = require("node:fs"); const path = fs.readFileSync(0, "utf8").split("\\n").find(line => line.startsWith("path=")); fs.appendFileSync(${JSON.stringify(marker)}, process.argv[2] + " " + path + "\\n");`,
         );
         const helper = (owner: string) =>
           `!node "${script.replaceAll("\\", "/")}" ${owner}`;
+        git("config", "--file", global, "credential.useHttpPath", "false");
+        git(
+          "config",
+          "--file",
+          global,
+          `credential.${remote}.useHttpPath`,
+          "true",
+        );
         // This helper is trusted even though its URL scope is more specific than a generic reset.
         git(
           "config",
@@ -224,7 +325,9 @@ describe("patch change tracking", () => {
         );
         expect(outcome.exitCode, outcome.stderr).toBe(2);
         expect(challenged, outcome.stderr).toBe(true);
-        expect(await readFile(marker, "utf8")).toBe("operator\n");
+        expect(await readFile(marker, "utf8")).toBe(
+          "operator path=example/repository.git\n",
+        );
       } finally {
         server.stop(true);
       }
