@@ -2574,9 +2574,14 @@ try {
     });
   const generationClaim = {
     occurrenceId,
-    requestId: remediationRequestId,
-    actionToken: generationActionToken,
+    requestId: remediationRequestId.toUpperCase(),
+    actionToken: generationActionToken.toUpperCase(),
   };
+  const otherFinding = await stageContext(6301, {
+    ...generationClaim,
+    occurrenceId: results.findings[1].occurrenceId,
+  });
+  assert.equal(otherFinding.result.isError, true);
   const stage = await stageContext(6300, generationClaim);
   assertNoError(stage);
   assert.deepEqual(Object.keys(stage.result.structuredContent), ["scan"]);
@@ -2622,9 +2627,9 @@ try {
   const generatedPatch = await testServer.callSuccessfulTool(62, {
     name: "set_codex_security_finding_remediation",
     arguments: {
-      actionToken: generationActionToken,
+      actionToken: generationActionToken.toUpperCase(),
       occurrenceId,
-      requestId: remediationRequestId,
+      requestId: remediationRequestId.toUpperCase(),
       expectedVersion: 1,
       state: "generated",
       patch: remediationPatch,
