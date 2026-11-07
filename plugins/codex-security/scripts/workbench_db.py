@@ -1713,7 +1713,7 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
     return {"scanId": scan["id"], "maxCostUsd": limit}
 
 
-def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
+def parse_scan_recipe(value: str, repository: Path, *, sealed: bool = False) -> dict[str, Any]:
     try:
         recipe = json.loads(value, parse_constant=reject_non_finite_json)
     except (TypeError, UnicodeError, ValueError) as exc:
@@ -1721,11 +1721,23 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     if not isinstance(recipe, dict):
         raise SystemExit("Scan launch recipe must be a JSON object.")
     requested_repository = recipe.get("repository")
-    if (
-        not isinstance(requested_repository, str)
-        or require_target(requested_repository) != repository
-    ):
+    if not isinstance(requested_repository, str):
         raise SystemExit("Scan launch recipe repository must match the scanned repository.")
+    requested_path = Path(requested_repository).expanduser()
+    if not requested_path.is_absolute():
+        raise SystemExit("Scan launch recipe repository must match the scanned repository.")
+    # A canonical stored path is already bound to the sealed receipt, even after replacement.
+    if not sealed or requested_path != repository:
+        try:
+            matched_path = (
+                requested_path.resolve() if sealed else require_target(requested_repository)
+            )
+        except (RuntimeError, OSError) as exc:
+            raise SystemExit(
+                "Scan launch recipe repository must match the scanned repository."
+            ) from exc
+        if matched_path != repository:
+            raise SystemExit("Scan launch recipe repository must match the scanned repository.")
     if recipe.get("mode") not in {"standard", "deep"}:
         raise SystemExit("Scan launch recipe mode must be standard or deep.")
     if not isinstance(recipe.get("config"), dict):
@@ -1752,8 +1764,8 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
             or candidate.is_absolute()
             or ".." in candidate.parts
             or "\\" in path
-            or not (repository / candidate).exists()
-            or not (repository / candidate).resolve().is_relative_to(repository)
+            or (not sealed and not (repository / candidate).exists())
+            or (not sealed and not (repository / candidate).resolve().is_relative_to(repository))
         ):
             raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
     if target["kind"] in {"refs", "working_tree"}:

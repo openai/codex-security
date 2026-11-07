@@ -335,6 +335,10 @@ test.each(
     const scanDir = join(root, "scan");
     for (const path of [repository, home, runtimeHome, scanDir])
       await mkdir(path, { mode: 0o700 });
+    await writeFile(
+      join(root, "caller-catalog.json"),
+      JSON.stringify({ models: [] }),
+    );
     const profilePath = join(home, "review.config.toml");
     const fileProfile = (version: string) => ({
       model: version === "first" ? "initial-model" : "updated-model",

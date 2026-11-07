@@ -190,6 +190,41 @@ def create_historical_database(
     return connection, apply_migrations
 
 
+@pytest.mark.parametrize(
+    "last_preview",
+    ["persist scan target executable protection", "persist scan execution sessions"],
+)
+def test_composition_preview_keeps_receipts_when_host_worker_gap_is_added(
+    last_preview: str,
+) -> None:
+    connection, migrate = create_historical_database(63)
+    preview = [
+        (63, "persist composition child membership", "membership"),
+        (64, "reuse scan severity assessments", "severity"),
+        (65, last_preview, "final"),
+    ]
+    with closing(connection):
+        connection.executemany("INSERT INTO schema_migrations VALUES (?, ?, ?)", preview)
+        for _ in range(2):
+            migrate(connection)
+            rows = connection.execute(
+                "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 64 "
+                "ORDER BY version"
+            )
+            assert [tuple(row) for row in rows] == [
+                (version + 1, name, timestamp) for version, name, timestamp in preview
+            ]
+            assert (
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version = 63"
+                ).fetchone()[0]
+                == "retain unverified Deep Scan worker attempts"
+            )
+            assert "worker_usage_gap" in {
+                row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+            }
+
+
 def insert_historical_row(
     connection: sqlite3.Connection, table: str, timestamp: str, **columns: object
 ) -> None:

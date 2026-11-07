@@ -80,10 +80,19 @@ def resolve_deep_scan_setup(
         raise SystemExit("Available parallelism must be a positive integer.")
     path = config_path()
     configured: dict[str, Any] = {}
-    exists = path.exists()
-    if exists and not all(name in overrides for name in CONFIG_FIELDS):
+    destination: Path | None = None
+    if not all(name in overrides for name in CONFIG_FIELDS):
         try:
-            with path.open("rb") as source:
+            destination = path.resolve(strict=True)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise SystemExit(
+                f"Cannot resolve Codex Security configuration at {path}: {exc}"
+            ) from exc
+    if destination is not None:
+        try:
+            with destination.open("rb") as source:
                 document: object = tomllib.load(source)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise SystemExit(f"Cannot read Codex Security configuration at {path}: {exc}") from exc
@@ -115,12 +124,22 @@ def resolve_deep_scan_setup(
             if name == "maxTimeHours"
             else require_integer(value, f"deep_scan.{key}", minimum=0 if name == "subagents" else 1)
         )
-    return {
+    setup: dict[str, Any] = {
         "settings": settings,
         "sources": sources,
-        **({"legacyConfigPath": str(path)} if exists else {}),
-        **({"projectConfigPath": project["path"]} if project is not None else {}),
     }
+    if destination is not None:
+        selected = path.absolute()
+        setup["legacyConfigPath"] = str(selected)
+        if destination != selected:
+            setup["legacyConfigResolvedPath"] = str(destination)
+    if project is not None:
+        setup["projectConfigPath"] = project["path"]
+        # Retain the checkout on each side of a selected symlink, even after it moves.
+        setup["projectConfigPaths"] = [
+            project[key] for key in ("selectedPath", "path") if key in project
+        ]
+    return setup
 
 
 def require_integer(value: object, label: str, *, minimum: int) -> int:

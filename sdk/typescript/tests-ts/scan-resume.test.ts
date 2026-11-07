@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
@@ -15,9 +16,10 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
@@ -45,7 +47,10 @@ afterEach(cleanup);
 async function interruptedScan(
   mode: "deep" | "standard" = "deep",
   bulk = false,
-  settings: Pick<
+  {
+    recipeRepositoryAlias = false,
+    ...settings
+  }: Pick<
     ScanOptions,
     | "safetyIdentifier"
     | "postScanPrompt"
@@ -53,7 +58,11 @@ async function interruptedScan(
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
     | "severityRubric"
-  > & { config?: JsonObject; providerProfile?: JsonObject } = {},
+  > & {
+    config?: JsonObject;
+    providerProfile?: JsonObject;
+    recipeRepositoryAlias?: boolean;
+  } = {},
   resolvedDeep = false,
   modelProvider?: string,
   knowledgeState: "saved" | "legacy" = "saved",
@@ -155,8 +164,13 @@ async function interruptedScan(
     !bulk && knowledgeState === "saved" && settings.knowledgeBasePaths?.length
       ? await readKnowledgeBaseSnapshot(settings.knowledgeBasePaths)
       : undefined;
+  const savedRepository = recipeRepositoryAlias
+    ? join(root, "saved-repository-alias")
+    : repository;
+  if (recipeRepositoryAlias)
+    await symlink(repository, savedRepository, "junction");
   const recipe = {
-    repository,
+    repository: savedRepository,
     target: { kind: "repository", paths: [] },
     mode,
     config: {
@@ -1137,8 +1151,219 @@ test.each([
   },
 );
 
+async function sealWithOriginalPlugin(
+  f: Awaited<ReturnType<typeof interruptedScan>>,
+) {
+  await finishDiscovery(f);
+  const oldPlugin = join(f.root, "old-plugin");
+  for (const path of ["scripts", "schemas", "shared", ".codex-plugin"]) {
+    await cp(join(PLUGIN_ROOT, path), join(oldPlugin, path), {
+      recursive: true,
+    });
+  }
+  const pluginManifest = join(oldPlugin, ".codex-plugin", "plugin.json");
+  const plugin = JSON.parse(await readFile(pluginManifest, "utf8"));
+  plugin.version = f.recipe.pluginVersion;
+  await writeFile(pluginManifest, JSON.stringify(plugin));
+  await runWorkbench(
+    { python: f.python, pluginRoot: oldPlugin, environment: f.environment },
+    ["prepare-scan-completion", "--scan-id", f.scanId],
+  );
+}
+
+test.each([false, true])(
+  "CLI external-provider recovery skips model authentication only for sealed results (sealed: %p)",
+  async (sealed) => {
+    const f = await interruptedScan("deep", false, {
+      auth: "api-key",
+      config: { model_provider: "openrouter" },
+    });
+    if (sealed) await sealWithOriginalPlugin(f);
+    const { stderr, runCli } = createCliTest(main);
+    const deps = resumeDependencies(f, () =>
+      fail("Unexpected new model session"),
+    );
+    deps.environment = {
+      ...deps.environment,
+      OPENROUTER_API_KEY: sealed ? "synthetic-provider-key" : undefined,
+      OPENAI_API_KEY: undefined,
+      CODEX_API_KEY: undefined,
+    };
+    const code = await runCli(["scans", "resume", f.scanId, "--json"], deps);
+    expect(code, stderr.text()).toBe(sealed ? 0 : 2);
+    if (!sealed) expect(stderr.text()).toContain("Set OPENROUTER_API_KEY");
+    const saved = await f.command(["get-scan", "--scan-id", f.scanId]);
+    expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
+      status: sealed ? "complete" : "running",
+    });
+  },
+);
+
+test.each(["complete", "partial", "unpriced"] as const)(
+  "sealed SDK resume reconciles %s usage and cost before the completion receipt",
+  async (scenario) => {
+    const model =
+      scenario === "unpriced" ? "synthetic-unpriced-model" : "gpt-5.6-sol";
+    const f = await interruptedScan("deep", false, { config: { model } });
+    const worker = randomUUID();
+    const timestamp = new Date().toISOString();
+    const counters = {
+      input_tokens: 1000,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+      total_tokens: 1000,
+    };
+    const counter = {
+      timestamp,
+      type: "event_msg",
+      payload: { type: "token_count", info: { total_token_usage: counters } },
+    };
+    const workerPath = join(f.codexHome, "sessions", `rollout-${worker}.jsonl`);
+    await writeFile(
+      workerPath,
+      [
+        {
+          type: "session_meta",
+          payload: {
+            id: worker,
+            source: {
+              subagent: { thread_spawn: { parent_thread_id: f.threadId } },
+            },
+          },
+        },
+        {
+          timestamp,
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "worker-turn" },
+        },
+        counter,
+        { timestamp, type: "event_msg", payload: { type: "task_complete" } },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n") + "\n",
+    );
+    if (scenario !== "partial")
+      await appendFile(f.sessionPath, JSON.stringify(counter) + "\n");
+    const database = new Database(join(f.codexHome, "state_5.sqlite"));
+    try {
+      database.exec(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)",
+      );
+      database.exec(
+        "CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)",
+      );
+      const insert = database.query(
+        "INSERT INTO threads (id, rollout_path) VALUES (?, ?)",
+      );
+      insert.run(f.threadId, f.sessionPath);
+      insert.run(worker, workerPath);
+      database
+        .query("INSERT INTO thread_spawn_edges VALUES (?, ?)")
+        .run(f.threadId, worker);
+    } finally {
+      database.close();
+    }
+    await sealWithOriginalPlugin(f);
+    const client = resumeDependencies(f, () =>
+      fail("Unexpected new model session"),
+    ).createSecurity({});
+    const options = {
+      mode: "deep" as const,
+      resumeScanId: f.scanId,
+      outputDir: f.scanDir,
+    };
+    const total = scenario === "partial" ? 1000 : 2000;
+    const coverage = scenario === "partial" ? "partial" : "complete";
+    try {
+      expect(
+        await f.command([
+          "read-scan-usage",
+          "--scan-id",
+          f.scanId,
+          "--thread-id",
+          f.threadId,
+        ]),
+      ).toMatchObject({ coverage, totalTokens: total });
+      if (scenario === "partial")
+        await expect(
+          client.run(f.repository, { ...options, maxCostUsd: 1 }),
+        ).rejects.toThrow("usage is incomplete");
+      if (scenario === "complete")
+        await expect(
+          client.run(f.repository, { ...options, maxCostUsd: 0.001 }),
+        ).rejects.toMatchObject({ name: "ScanCostLimitExceededError" });
+      const result = await client.run(f.repository, options);
+      expect(result.turnResult.usage).toMatchObject({ total_tokens: total });
+      const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+        "scan"
+      ] as JsonObject;
+      expect(saved["usage"]).toMatchObject({ coverage, totalTokens: total });
+      if (scenario === "unpriced") {
+        expect(result.cost).toBeNull();
+        expect(saved["cost"]).toBeUndefined();
+      } else {
+        expect(result.cost).toMatchObject({
+          model,
+          inputTokens: total,
+          estimatedUsd: total * 0.000004,
+        });
+        expect(saved["cost"]).toEqual(result.cost);
+      }
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test("sealed SDK resume accepts the canonical target of a saved repository alias", async () => {
+  const f = await interruptedScan("deep", false, {
+    recipeRepositoryAlias: true,
+  });
+  await sealWithOriginalPlugin(f);
+  const client = resumeDependencies(f, () =>
+    fail("Unexpected new model session"),
+  ).createSecurity({});
+  let outputDir = f.scanDir;
+  if (process.platform !== "win32") {
+    const parentAlias = join(
+      await temporaryDirectory(),
+      "original-output-parent",
+    );
+    await symlink(f.root, parentAlias);
+    outputDir = join(parentAlias, basename(f.scanDir));
+  }
+  const options = {
+    mode: "deep" as const,
+    resumeScanId: f.scanId,
+    outputDir,
+  };
+  try {
+    const unrelatedOutput = join(f.root, "unrelated-output");
+    await mkdir(unrelatedOutput, { mode: 0o700 });
+    await cp(
+      join(f.scanDir, "scan-manifest.json"),
+      join(unrelatedOutput, "scan-manifest.json"),
+    );
+    await expect(
+      client.run(f.repository, { ...options, outputDir: unrelatedOutput }),
+    ).rejects.toThrow("mismatched scan resume context");
+    await expect(client.run(f.root, options)).rejects.toThrow(
+      "mismatched scan resume context",
+    );
+    const result = await client.run(f.repository, options);
+    expect(result.manifest.scan.id).toBe(f.scanId);
+    expect(result.threadId).toBe(f.threadId);
+  } finally {
+    await client.close();
+  }
+});
+
 test.each([
   "single",
+  "source-removed",
+  ...(process.platform === "win32" ? [] : ["source-replaced", "source-loop"]),
   "bulk",
   "unsupported-schema",
   "wrong-producer",
@@ -1147,21 +1372,7 @@ test.each([
   "resume preserves sealed artifacts across a plugin upgrade (%s)",
   async (scenario) => {
     const f = await interruptedScan("deep", scenario === "bulk");
-    await finishDiscovery(f);
-    const oldPlugin = join(f.root, "old-plugin");
-    for (const path of ["scripts", "schemas", "shared", ".codex-plugin"]) {
-      await cp(join(PLUGIN_ROOT, path), join(oldPlugin, path), {
-        recursive: true,
-      });
-    }
-    const pluginManifest = join(oldPlugin, ".codex-plugin", "plugin.json");
-    const plugin = JSON.parse(await readFile(pluginManifest, "utf8"));
-    plugin.version = f.recipe.pluginVersion;
-    await writeFile(pluginManifest, JSON.stringify(plugin));
-    await runWorkbench(
-      { python: f.python, pluginRoot: oldPlugin, environment: f.environment },
-      ["prepare-scan-completion", "--scan-id", f.scanId],
-    );
+    await sealWithOriginalPlugin(f);
     const manifestPath = join(f.scanDir, "scan-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     expect(manifest.scan.producer.version).toBe(f.recipe.pluginVersion);
@@ -1179,7 +1390,25 @@ test.each([
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
     const before = await f.command(["get-scan", "--scan-id", f.scanId]);
-    const rejected = !["single", "bulk"].includes(scenario);
+    const rejected = ![
+      "single",
+      "bulk",
+      "source-removed",
+      "source-replaced",
+      "source-loop",
+    ].includes(scenario);
+    if (scenario.startsWith("source-")) {
+      await rm(f.repository, { recursive: true });
+      if (scenario === "source-replaced") {
+        const replacement = join(f.root, "unrelated-checkout");
+        await mkdir(replacement);
+        await symlink(replacement, f.repository);
+      } else if (scenario === "source-loop") {
+        await symlink(f.repository, f.repository);
+      }
+    }
+    if (scenario === "bulk" || scenario === "source-removed")
+      await rm(f.sessionPath);
     let turns = 0;
     const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -1208,9 +1437,9 @@ test.each([
       ),
     ).toEqual(artifacts);
     const after = await f.command(["get-scan", "--scan-id", f.scanId]);
+    expect(turns).toBe(0);
     if (rejected) {
       expect(stderr.text()).toContain("Cannot resume sealed scan");
-      expect(turns).toBe(0);
       expect(after).toEqual(before);
     } else {
       expect(after["scan"], stderr.text()).toMatchObject({

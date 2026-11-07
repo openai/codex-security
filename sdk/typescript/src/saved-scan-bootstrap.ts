@@ -4,7 +4,7 @@ import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { sqliteFilename } from "./windows-path.js";
 import {
   gitHistoryIdentity,
@@ -42,6 +42,7 @@ export async function savedScanWorkbench(
   options: {
     environment: ProcessEnvironment;
     pluginRoot: string;
+    configuredPython?: string;
     currentDirectory: string;
     signal?: AbortSignal;
   },
@@ -91,12 +92,28 @@ export async function savedScanWorkbench(
   );
   const protectedRoots = [
     ...callerRoots,
-    ...targets.map((row) => row.target_path),
     ...(
       await Promise.all(
-        targets.map((row) =>
-          gitProtectionRoots(row.target_path, options.signal),
-        ),
+        targets.map(async ({ target_path: target }) => {
+          let candidate = target;
+          for (;;) {
+            try {
+              return [
+                candidate,
+                ...(await gitProtectionRoots(candidate, options.signal)),
+              ];
+            } catch (error) {
+              const parent = dirname(candidate);
+              if (
+                (error as NodeJS.ErrnoException).code !== "ELOOP" ||
+                parent === candidate
+              )
+                throw error;
+              // The old target cannot resolve. Protect its containing directory before choosing Python.
+              candidate = parent;
+            }
+          }
+        }),
       )
     ).flat(),
   ];
@@ -122,6 +139,7 @@ export async function savedScanWorkbench(
       );
     // Pin the interpreter selected with every candidate and the caller checkout protected.
     python ??= await resolvePluginPython({
+      configuredPath: options.configuredPython,
       environment,
       protectedRoot: protectedRoots,
       currentDirectory: options.currentDirectory,

@@ -7,6 +7,7 @@ import {
   type WorkerUsageReceipt,
 } from "./usage-receipt.js";
 import { mergeBatch } from "./iteration.js";
+import { DeepScanModelInputRecoveryError } from "./model-file-inputs.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
@@ -416,6 +417,12 @@ export class DeepScanCoordinator {
       });
     } catch (error) {
       if (this.canceled || this.externallyFailed) {
+        return;
+      }
+      if (error instanceof DeepScanModelInputRecoveryError) {
+        // The saved inputs can be restored. Leave the workbench run and its
+        // accepted evidence available to the next coordinator.
+        if (this.stopLocally()) this.terminalResult.reject(error);
         return;
       }
       if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
@@ -924,6 +931,7 @@ export class DeepScanCoordinator {
         }
       },
       (error) => {
+        if (error instanceof DeepScanModelInputRecoveryError) throw error;
         this.abortController.signal.throwIfAborted();
         this.log({
           event: "finding_comparison_failed",
@@ -940,6 +948,7 @@ export class DeepScanCoordinator {
     schema: Record<string, unknown>,
   ): Promise<string> {
     const { executor } = this.options;
+    await executor.validateModelFileInputs?.(this.abortController.signal);
     if (!executor.compareFindings)
       throw new Error("No Deep Scan finding comparison executor");
     const { scanId, workerUsageDirectory } = this.state;
@@ -1032,6 +1041,7 @@ export class DeepScanCoordinator {
     nextLabel: () => string,
     previousFindings: string[],
   ): Promise<DiscoveryOutcome[]> {
+    if (!(await this.discoveryWorkers.validateModelFileInputs())) return [];
     // Reserve in dispatch order. Another coordinator may create one of these
     // labels after our directory listing but before we write its prompt.
     const labels: string[] = [];
@@ -1066,6 +1076,11 @@ export class DeepScanCoordinator {
       )
         throw scan.reason;
     }
+    if (
+      this.abortController.signal.reason instanceof
+      DeepScanModelInputRecoveryError
+    )
+      throw this.abortController.signal.reason;
     return settled.map((scan) => {
       if (scan.status === "rejected") throw scan.reason;
       return scan.value;
