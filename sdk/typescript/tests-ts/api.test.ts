@@ -621,6 +621,7 @@ describe("CodexSecurity orchestration", () => {
       },
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
+      maxConcurrentThreadsPerSession: 9,
     });
     await expect(
       client.preflight(repository, { outputDir: join(repository, "scan") }),

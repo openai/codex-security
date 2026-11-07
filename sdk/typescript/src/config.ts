@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
+import { isSafeNonNegativeInteger } from "./value.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
@@ -111,6 +112,18 @@ export function scanModelConfiguration(
     );
   }
   return { model, reasoningEffort };
+}
+
+/** Effective native multi-agent capacity for one scan session, including its parent. */
+export function scanMaxConcurrentThreadsPerSession(
+  config: JsonObject,
+): number | undefined {
+  const features = resolveCodexProfile(config)["features"];
+  if (!isObject(features)) return undefined;
+  const multiAgent = features["multi_agent_v2"];
+  if (!isObject(multiAgent)) return undefined;
+  const capacity = multiAgent["max_concurrent_threads_per_session"];
+  return isSafeNonNegativeInteger(capacity) ? capacity : undefined;
 }
 
 export function scanModel(config: Readonly<JsonObject>): unknown {
