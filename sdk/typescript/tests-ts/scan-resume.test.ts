@@ -222,7 +222,10 @@ async function interruptedScan(
       {
         type: "turn_context",
         timestamp: new Date().toISOString(),
-        payload: { turn_id: "synthetic-scan-turn", model: "gpt-5.6-sol" },
+        payload: {
+          turn_id: "synthetic-scan-turn",
+          model: recipe.config["model"],
+        },
       },
     ]
       .map((event) => JSON.stringify(event))
@@ -862,6 +865,7 @@ test.each(["completed", "failed"] as const)(
                   f.sessionPath,
                   JSON.stringify({
                     type: "event_msg",
+                    timestamp: new Date().toISOString(),
                     payload: {
                       type: "token_count",
                       info: {

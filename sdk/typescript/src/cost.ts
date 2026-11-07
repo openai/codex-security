@@ -3663,13 +3663,13 @@ export class ScanCostTracker {
         this.#options.onCost === undefined
       )
         return;
-      const receiptCost =
-        cost ??
-        estimateScanCostLowerBound(
-          this.#options.model,
-          usage,
-          this.#options.pricingContext,
-        );
+      const receiptCost = cost
+        ? { ...cost, coverage: "partial" as const }
+        : estimateScanCostLowerBound(
+            this.#options.model,
+            usage,
+            this.#options.pricingContext,
+          );
       const liveCost = estimateScanCostLowerBound(
         this.#options.model,
         liveUsage,

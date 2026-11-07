@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { cp, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pythonExecutable } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -29,8 +29,9 @@ const laterFrame = Buffer.from(
 const workerFrames = {
   first:
     "KLUv/WBuADUGADJMJR5gZ9sGBqGhvdpM+qNbLXaX7jcEObew2na8jABwIXjFe+8hB5PCFltObT9Iu9VeDZFSogMq1Q8e6NyOYUuVZJcO2dtbYOvnzdyqxNSwrfCSmimBHk3x3pUW6NFVNbf8cwFEZIAQAwhoENAAOPA4OrNksy6rf97U0BZhNLdVOHqy3qAnuYdEMj/P1iWxXczKR1cm0W8CEQB4BKBhOOxn96XiBlC+dhIAT6kAapxW/0zxeiGCZlZi8irGIav12lWPyMtFAQ==",
+  // A legacy child proves its task began after its session was created.
   child:
-    "KLUv/WBvAQUIAOKOKx5gR9wGQQuHRBuJ4LvoY7FlzhiCXM3Jv4oDEQAeCRiEw+HZuTRmlyGQzgcpRJkuY7ofo99mM9copI5MFq6fgHTu15QhyE8t2NtbUPbz1rdLaSprnFD3sh02K4WxEWYM0kA4nGh2rKBa02HTBhurA9Ml3ZoIFjzO5d7yzwmKhNBAgYgCEQAGMp7eGGxOhvXPj4Uli3CpuG2efrAb0g/c5QDbz7GTUbqMOfnp2Q76hh8AgynE7UMYhsN+dl8qbgDlC2TXTvlxUK/QRn6w1D9rA3ToQGxmSfcFyGPG0lwPmoWkyaCCIdPckA6E8YXpwHJDAzrdzNz0Wk6E9cjVnQE=",
+    "KLUv/WCHAX0IAMJPLh5gR6wDSBTGFnS7j16EQpDIDGEQPFwMcf8ORAB4JGCD5/n2LpGBTQWsM0oMee5B1pVHqifcdrJhiR2bNG1Hxjr3jM8hypMt2rAh4bmj95uwsbcKVEQqAJQyCoNYb2XDk3NbajNTWBthpmCdwfOhWToC67dS42s0Mjt0ZdL9FlGCydvkhHz0AWKlJECkgUhDoZL6emS0eRnXRz8Wl7RBriJh8/XD3Vk/FC4FjUfXXoY96JiXv76x0HcCISAwAkOgOj7DFBJ9CEMc9um+FDeA+CK7VvlRqIfWyAdLCbH20IVxUiS4P8xG426azcexRPOwG5KRQc2QiRvSRRgXpo3l3oDqZt6mczlx65FrOQM=",
   boundary:
     "KLUv/WB0AFUGAJJMJh9gSdsGCHYYtH22+2PTLPZb5n+KgmUM2I0hUBHkEjgBhffew2MwIbuWWyq7wdOOtRdDpHTogUp1g3jQWztllyLZXDpkc7PBrpv3OlZp1cCNtCT1KoIaicJ7V5qgR1fFHLebEyAGACDEgYPFwULAQOPoSpLdNFl9c6YGxohiYXms44KjH+sJ9CP5sKRy82xN0vJqTdvRVVn6iREAegTgYTgMqE5JxQ2gfO0kgJ6yAnw47fsZSPaCBc1WxaRgjK+sVmFXPSgvFwU=",
 };
@@ -38,17 +39,13 @@ const workerFrames = {
 async function fixture() {
   const root = await temporaryDirectory();
   const plugin = join(root, "plugin");
-  const paths = [
-    "scripts/workbench_scan_usage.py",
-    "scripts/windows_scan_local_files.py",
-    "scripts/read_codex_session.mjs",
-    "scripts/workbench/__init__.py",
-    "scripts/workbench/storage.py",
-  ];
-  for (const path of paths) {
-    await mkdir(dirname(join(plugin, path)), { recursive: true });
-    await copyFile(join(sourcePlugin, path), join(plugin, path));
-  }
+  await cp(join(sourcePlugin, "scripts"), join(plugin, "scripts"), {
+    recursive: true,
+    filter: (source) => basename(source) !== "__pycache__",
+  });
+  await cp(join(sourcePlugin, "schemas"), join(plugin, "schemas"), {
+    recursive: true,
+  });
   await build({
     entryPoints: [join(sourcePlugin, "mcp-app/src/session-decompression.ts")],
     outfile: join(plugin, "mcp/session-decompression.mjs"),
@@ -94,15 +91,16 @@ with sqlite3.connect(":memory:") as db:
     db.row_factory = sqlite3.Row
     db.execute("CREATE TABLE workspaces (id TEXT, thread_id TEXT)")
     db.execute("INSERT INTO workspaces VALUES ('workspace', ?)", (options["owner"],))
+    db.execute("CREATE TABLE deep_scan_attempt_sessions (scan_id TEXT, sdk_thread_id TEXT)")
     db.execute("CREATE TABLE deep_scan_worker_threads (scan_id TEXT, sdk_thread_id TEXT)")
-    db.execute("CREATE TABLE deep_scan_runs (scan_id TEXT, worker_usage_gap INTEGER)")
+    db.execute("CREATE TABLE deep_scan_runs (scan_id TEXT, worker_usage_gap INTEGER, workflow_version TEXT)")
     db.execute("CREATE TABLE deep_scan_workers (scan_id TEXT, kind TEXT, artifact_dir TEXT, started_at TEXT, sdk_thread_id TEXT, attempt INTEGER)")
     mode = "deep" if options.get("workerKind") else "standard"
     if mode == "deep":
-        db.execute("INSERT INTO deep_scan_runs VALUES ('scan', 0)")
+        db.execute("INSERT INTO deep_scan_runs VALUES ('scan', 0, 'deep-security-scan/v1')")
         db.execute("INSERT INTO deep_scan_workers VALUES ('scan', ?, ?, '2026-01-01T00:00:01Z', 'current-worker', 2)", (options["workerKind"], str(root / "artifacts" / "worker")))
         db.execute("INSERT INTO deep_scan_worker_threads VALUES ('scan', 'current-worker')")
-    scan = db.execute("SELECT 'scan' AS id, 'workspace' AS workspace_id, ? AS mode, ? AS scan_dir, '2026-01-01T00:00:00.500123Z' AS started_at, '2026-01-01T00:00:05Z' AS completed_at, NULL AS deep_scan_owner_thread_id", (mode, str(root))).fetchone()
+    scan = db.execute("SELECT 'scan' AS id, 'workspace' AS workspace_id, ? AS mode, ? AS scan_dir, '2026-01-01T00:00:00.500123Z' AS started_at, '2026-01-01T00:00:05Z' AS completed_at, NULL AS deep_scan_owner_thread_id, NULL AS recipe_json, NULL AS continuation_thread_id", (mode, str(root))).fetchone()
     print(json.dumps(collect_scan_usage(db, scan)))
 `;
   return JSON.parse(
