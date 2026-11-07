@@ -3529,15 +3529,19 @@ export async function probeCodexSandbox(
   // Reuse the resolved Codex executable instead of looking up a probe on PATH.
   const args = ["sandbox", "--", command.command, "--version"];
   const timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
+  const probeSignal =
+    signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
   let detail: string;
   try {
+    probeSignal.throwIfAborted();
     const result = await runCodexCommand(
       command,
       args,
       environment,
       undefined,
-      signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+      probeSignal,
     );
+    probeSignal.throwIfAborted();
     if (result.success) return;
     detail =
       result.stderr.trim() ||
