@@ -940,6 +940,21 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
   ).toBe(repo);
 });
 
+test.skipIf(process.platform === "win32")(
+  "protects the enclosing checkout when a saved component becomes a symlink loop",
+  async () => {
+    const repo = await repository();
+    const component = join(repo, "component");
+    await symlink("component", component);
+    expect(await gitProtectionRoots(component)).toContain(repo);
+    await expect(
+      gitMarkerRoot(component, undefined, "nearest"),
+    ).rejects.toMatchObject({
+      code: "ELOOP",
+    });
+  },
+);
+
 test("ordinary storage folders with malformed config are not Git metadata", async () => {
   const root = await temporaryDirectory();
   await mkdir(join(root, "objects"));

@@ -75,7 +75,6 @@ from workbench_constants import (
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
     FINDINGS_RESULT_LIMIT,
-    PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
@@ -85,6 +84,7 @@ from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
     loaded_plugin_version,
+    restore_cli_scan_archive,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -92,6 +92,8 @@ from workbench_scan_start import (
 )
 from workbench_schema import (
     MIGRATIONS,
+    migration_target_paths,
+    recorded_git_checkout_roots,
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
@@ -129,16 +131,24 @@ from workbench_target import (
     git_submodule_entries,
     git_target_metadata,
     git_worktree_context,
+    rejected_checkout_roots,
     remediation_checkout_snapshot,
     require_remediation_target,
     require_scan_target_identity,
     require_scan_target_unchanged,
     restore_directory_junctions,
     scan_target_warning,
+    scoped_git_discovery,
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
-from workbench_target_state import backfill_security_targets, ensure_security_target
+from workbench_target_state import (
+    RepositoryScanScope,
+    backfill_security_targets,
+    ensure_security_target,
+    register_security_target,
+    require_scan_checkout_owner,
+)
 from workbench_validation import (
     bounded_output_text,
     optional_text,
@@ -237,12 +247,16 @@ def release_completion_file_lock(descriptor: int) -> None:
     windows_file_lock.locking(descriptor, windows_file_lock.LK_UNLCK, 1)
 
 
-def connect(*, deferred: bool = False) -> sqlite3.Connection:
+def connect(
+    *, deferred: bool = False, discovery_roots: tuple[Path, ...] = ()
+) -> sqlite3.Connection:
     """Open the workbench SQLite database and bring its schema up to date.
 
     Args:
         deferred (bool): Let the first migration attempt defer its write lock.
             Retries after lock contention use an immediate transaction.
+
+        discovery_roots: Additional local paths for bounded target discovery.
 
     Returns:
         sqlite3.Connection: A caller-owned connection with named rows, foreign
@@ -274,7 +288,9 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
             # Keep writer admission retries; readers only wait when a repair needs to write.
-            apply_migrations(connection, immediate=not deferred or attempt > 0)
+            apply_migrations(
+                connection, immediate=not deferred or attempt > 0, discovery_roots=discovery_roots
+            )
             connection.execute("PRAGMA journal_mode = WAL")
             path.chmod(0o600)
             return connection
@@ -287,9 +303,19 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
     raise AssertionError("SQLite retry loop exhausted unexpectedly.")
 
 
-def apply_migrations(connection: sqlite3.Connection, *, immediate: bool = False) -> None:
+def apply_migrations(
+    connection: sqlite3.Connection,
+    *,
+    immediate: bool = False,
+    discovery_roots: tuple[Path, ...] = (),
+) -> None:
     apply_schema_migrations(
-        connection, MIGRATIONS, now, backfill_security_targets, immediate=immediate
+        connection,
+        MIGRATIONS,
+        now,
+        backfill_security_targets,
+        immediate=immediate,
+        discovery_roots=discovery_roots,
     )
 
 
@@ -529,6 +555,8 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
     diff_content_digest = (
         optional_text(args.diff_content_digest, maximum=128) if args.mode == "diff" else None
     )
+    target_path_unvalidated = False
+    rejected_roots = None
     if target_path:
         try:
             inspected = inspect_setup_values(
@@ -548,11 +576,17 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_head_revision = inspected["diffTarget"]["headRevision"]
                 diff_content_digest = inspected["diffTarget"].get("contentDigest")
         except SystemExit:
-            # Preserve an incomplete setup so workspace_state can report its validation error.
-            pass
+            # Setup may fail on scope even when the target itself is valid.
+            try:
+                require_target(target_path)
+            except SystemExit:
+                target_path_unvalidated = True
+                rejected_roots = rejected_checkout_roots(target_path)
     with connection:
         target_id = (
-            ensure_security_target(connection, target_path) if target_path is not None else None
+            ensure_security_target(connection, target_path)
+            if target_path is not None and not target_path_unvalidated
+            else None
         )
         connection.execute(
             """
@@ -560,8 +594,8 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 id, thread_id, target_id, target_path, target_title, target_summary,
                 default_scope, default_mode,
                 user_context, diff_target_kind, diff_base_revision, diff_head_revision,
-                diff_content_digest, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                diff_content_digest, created_at, updated_at, target_path_unvalidated, rejected_checkout_roots_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace_id,
@@ -579,6 +613,8 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_content_digest,
                 timestamp,
                 timestamp,
+                target_path_unvalidated,
+                json.dumps(rejected_roots) if rejected_roots is not None else None,
             ),
         )
     return workspace_state(connection, workspace_id)
@@ -613,7 +649,10 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
             SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
-                deep_scan_config_json = ?, submitted = 1, updated_at = ?
+                deep_scan_config_json = ?, submitted = 1, updated_at = ?, target_path_unvalidated = 0,
+                -- JSON null keeps PATH discovery disabled after a legacy rejection.
+                rejected_checkout_roots_json = COALESCE(rejected_checkout_roots_json,
+                    CASE WHEN target_path_unvalidated = 1 AND target_id IS NULL THEN 'null' END)
             WHERE id = ? AND active_scan_id IS NULL
             """,
             (
@@ -684,6 +723,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             (workspace["id"],),
         ).fetchone()
         if active is not None:
+            require_scan_checkout_owner(connection, active)
             return workspace_state(connection, workspace["id"], result_scan_id=active["id"])
         workspace_version = workspace["updated_at"]
         scan_id = str(uuid.uuid4())
@@ -733,6 +773,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             (workspace["id"],),
         ).fetchone()
         if active is not None:
+            require_scan_checkout_owner(connection, active)
             if manages_transaction:
                 connection.commit()
             return workspace_state(connection, workspace["id"], result_scan_id=active["id"])
@@ -759,6 +800,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
+        registration = register_security_target(connection, str(current_target))
+        if registration.target_id != workspace["target_id"]:
+            raise SystemExit(
+                "The saved workspace no longer matches the selected repository target."
+            )
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -767,6 +813,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             source_scopes=source_scopes,
             target_root=target_root,
             target_summary=target_summary,
@@ -886,6 +933,7 @@ def _start_prompt_driven_scan(
                 ),
             ).fetchone()
             if existing is not None:
+                require_scan_checkout_owner(connection, existing)
                 connection.commit()
                 return {
                     **scan_context(connection, existing["id"]),
@@ -895,7 +943,8 @@ def _start_prompt_driven_scan(
             workspace_id = str(uuid.uuid4())
             scan_id = str(uuid.uuid4())
             timestamp = now()
-            target_id = ensure_security_target(connection, target_path)
+            registration = register_security_target(connection, target_path)
+            target_id = registration.target_id
             connection.execute(
                 """
                 INSERT INTO workspaces (
@@ -928,6 +977,7 @@ def _start_prompt_driven_scan(
                 scope=scope,
                 diff_target=diff_target,
                 target_identity=target_identity,
+                repository_generation=registration.repository_generation,
                 source_scopes=source_scopes,
                 target_root=target_root,
                 target_summary=target_summary,
@@ -1493,10 +1543,9 @@ def register_cli_scan(
     """
     repository = require_target(args.repository)
     require_scannable_target(repository)
-    scan_dir = None
     if not args.archive_existing or args.archived_scan_dir is not None:
         # Preserve early output rejection when this call will not move the directory.
-        scan_dir = require_cli_scan_directory(repository, args)
+        require_cli_scan_directory(repository, args)
     user_context = None
     workflow_id = None
     surface = None
@@ -1564,9 +1613,19 @@ def register_cli_scan(
         with ExitStack() as archive:
             deadline = None
             while True:
-                if scan_dir is None:
-                    # Wait for any previous archive to finish before inspecting its replacement.
-                    scan_dir = require_cli_scan_directory(repository, args)
+                registration = register_security_target(connection, str(repository))
+                target_id = registration.target_id
+                if parent_scan_id is not None:
+                    parent = require_scan(connection, parent_scan_id)
+                    parent_scope = RepositoryScanScope(
+                        registration.repository_generation, target_id
+                    )
+                    if not parent_scope.contains(parent):
+                        raise SystemExit(
+                            "A rerun must belong to the same repository as its parent scan."
+                        )
+                # Revalidate the output and its owner under the current write lock.
+                scan_dir = require_cli_scan_directory(repository, args)
                 try:
                     archived_scan_dir = archive.enter_context(
                         archive_scan(
@@ -1595,17 +1654,8 @@ def register_cli_scan(
                         raise
                     connection.rollback()
                     before_archive = None  # The host already acknowledged this registration.
-                    scan_dir = None  # Revalidate the directory and its owner under the next lock.
                     time.sleep(min(0.05, remaining))
                     connection.execute("BEGIN IMMEDIATE")
-            target_id = ensure_security_target(connection, str(repository))
-            if parent_scan_id is not None:
-                parent = require_scan(connection, parent_scan_id)
-                if parent["target_id"] != target_id:
-                    raise SystemExit(
-                        "A rerun must belong to the same repository as its parent scan."
-                    )
-
             connection.execute(
                 """
                 INSERT INTO workspaces (
@@ -1635,6 +1685,7 @@ def register_cli_scan(
                 scope=scope,
                 diff_target=diff_target,
                 target_identity=target_identity,
+                repository_generation=registration.repository_generation,
                 source_scopes=source_scopes,
                 target_root=scan_dir.parent,
                 target_summary=None,
@@ -3086,48 +3137,9 @@ def finding_remediation_result(
 def patch_artifact_preview(
     scan_dir: Path, relative_path: str | None, expected_digest: str | None
 ) -> tuple[str | None, dict[str, int | bool] | None]:
-    if relative_path is None or expected_digest is None:
-        return None, None
-    digest = hashlib.sha256()
-    preview = bytearray()
-    additions = 0
-    deletions = 0
-    file_count = 0
-    old_headers = 0
-    new_headers = 0
-    at_line_start = True
-    try:
-        with open_scan_local_file(scan_dir, relative_path) as patch:
-            while chunk := patch.readline(1024 * 1024):
-                digest.update(chunk)
-                if len(preview) <= PATCH_PREVIEW_BYTES:
-                    preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start:
-                    if chunk.startswith(b"diff --git "):
-                        file_count += 1
-                    elif chunk.startswith(b"+++ "):
-                        new_headers += 1
-                    elif chunk.startswith(b"--- "):
-                        old_headers += 1
-                    elif chunk.startswith(b"+"):
-                        additions += 1
-                    elif chunk.startswith(b"-"):
-                        deletions += 1
-                at_line_start = chunk.endswith(b"\n")
-    except SystemExit:
-        return None, None
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
-        return None, None
-    preview_truncated = len(preview) > PATCH_PREVIEW_BYTES
-    preview_text = preview[:PATCH_PREVIEW_BYTES].decode("utf-8", errors="replace")
-    if preview_truncated:
-        preview_text = f"{preview_text}\n... patch preview truncated ..."
-    return preview_text, {
-        "additions": additions,
-        "deletions": deletions,
-        "fileCount": file_count or min(old_headers, new_headers),
-        "previewTruncated": preview_truncated,
-    }
+    return remediation_state.patch_artifact_preview(
+        scan_dir, relative_path, expected_digest, open_scan_local_file
+    )
 
 
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
@@ -3233,11 +3245,24 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             raise SystemExit(73) from None
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
-    with closing(
-        connect(
-            deferred=args.command in {"get-scan", "read-scan-usage", "list-scans", "database-info"}
-        )
-    ) as connection:
+    command_targets = tuple(
+        Path(value).expanduser()
+        for field in ("target_path", "repository")
+        if (value := getattr(args, field, None))
+    )
+    with (
+        closing(
+            connect(
+                deferred=args.command
+                in {"get-scan", "read-scan-usage", "list-scans", "database-info"},
+                discovery_roots=command_targets,
+            )
+        ) as connection,
+        scoped_git_discovery(
+            lambda: [*migration_target_paths(connection), *command_targets],
+            recorded_git_roots=lambda: recorded_git_checkout_roots(connection),
+        ),
+    ):
         remediation_state.require_available(connection, args, require_scan)
         handlers = {
             "create-workspace": create_workspace,
@@ -3254,6 +3279,9 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "record-deep-scan-publication-failure": deep_scan.record_deep_scan_publication_failure,
             "list-scans": scan_history.list_scans,
             "register-cli-scan": partial(register_cli_scan, before_archive=before_archive),
+            "restore-cli-scan-archive": partial(
+                restore_cli_scan_archive, canonical_directory=require_canonical_scan_directory
+            ),
             "set-scan-thread": set_scan_thread,
             "set-scan-cost-limit": set_scan_cost_limit,
             "read-scan-usage": read_scan_usage,

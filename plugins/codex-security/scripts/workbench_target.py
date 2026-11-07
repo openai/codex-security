@@ -14,7 +14,10 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, cast
 
@@ -26,6 +29,7 @@ from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
 _WINDOWS = os.name == "nt"
+_SCOPED_GIT: ContextVar[Callable[[Path], str] | None] = ContextVar("workbench_git", default=None)
 
 
 class UnreadableLocalFile(SystemExit):
@@ -204,8 +208,10 @@ def _stream_is_binary(output: BinaryIO, size: int, *, drain: bool = False) -> bo
 
 def _protected_repository_root(target: Path) -> Path:
     root = target.resolve()
-    if root.is_file():
-        root = root.parent
+    return _outer_checkout_root(root.parent if root.is_file() else root)
+
+
+def _outer_checkout_root(root: Path) -> Path:
     protected = root
     for ancestor in (root, *root.parents):
         try:
@@ -216,9 +222,67 @@ def _protected_repository_root(target: Path) -> Path:
     return protected
 
 
+def rejected_checkout_roots(value: str) -> list[str] | None:
+    # Retain both spellings before a checkout marker or symlink can move.
+    try:
+        lexical = Path(value).expanduser().absolute()
+        canonical = lexical.resolve()
+        lexical_root = _outer_checkout_root(lexical)
+        roots = {
+            lexical,
+            canonical,
+            lexical_root,
+            lexical_root.resolve(),
+            _protected_repository_root(canonical),
+        }
+        return sorted(map(str, roots))
+    except (OSError, RuntimeError):
+        return None
+
+
+def pin_scoped_git(target: Path) -> str | None:
+    scoped = _SCOPED_GIT.get()
+    return scoped(target) if scoped is not None else None
+
+
 def trusted_git_executable(protected_root: Path) -> str | None:
     """Validate host-selected Git, or discover Git for a direct plugin invocation."""
     configured = os.environ.get("CODEX_SECURITY_GIT")
+    if configured is None:
+        configured = pin_scoped_git(protected_root)
+    return _resolve_git_executable(protected_root, configured)
+
+
+def _historical_repository_roots(target: Path) -> Iterator[Path]:
+    try:
+        yield _protected_repository_root(target)
+    except (OSError, RuntimeError):
+        # Keep checking lexical ancestry when the saved path cannot be resolved.
+        pass
+    # A moved or unavailable descendant still excludes its lexical checkout ancestry.
+    root = Path(os.path.abspath(target))
+    protected = root
+    for ancestor in (root, *root.parents):
+        try:
+            (ancestor / ".git").lstat()
+        except (OSError, RuntimeError):
+            continue
+        protected = ancestor
+    yield protected
+    try:
+        yield protected.resolve()
+    except (OSError, RuntimeError):
+        # The lexical root above still excludes tools at an unavailable checkout.
+        pass
+
+
+def _resolve_git_executable(
+    protected_root: Path,
+    configured: str | None,
+    *,
+    discovery_roots: Iterable[Path] = (),
+    recorded_git_roots: Iterable[Path] | None = (),
+) -> str | None:
     windows = sys.platform == "win32"
     if configured is None:
         names = ("git.exe", "git.com") if windows else ("git",)
@@ -236,7 +300,22 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         candidates = iter((candidate,))
 
     try:
-        repository = _protected_repository_root(protected_root)
+        repositories = [_protected_repository_root(protected_root)]
+        if configured is None:
+            # A legacy Git target has no trustworthy boundary to exclude from PATH.
+            if recorded_git_roots is None:
+                return None
+            saved_boundaries = tuple(recorded_git_roots)
+            for root in saved_boundaries:
+                repositories.extend(_historical_repository_roots(root))
+            for root in discovery_roots:
+                for repository in _historical_repository_roots(root):
+                    if not repository.is_dir() and not any(
+                        repository.is_relative_to(boundary) for boundary in saved_boundaries
+                    ):
+                        # Its former checkout is neither discoverable nor already excluded.
+                        return None
+                    repositories.append(repository)
     except (OSError, RuntimeError):
         return None
 
@@ -261,6 +340,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
             continue
         if any(
             path == repository or repository in path.parents
+            for repository in repositories
             for path in (lexical, invocation, canonical)
         ):
             if configured is not None:
@@ -268,6 +348,39 @@ def trusted_git_executable(protected_root: Path) -> str | None:
             continue
         return str(invocation)
     return None
+
+
+@contextmanager
+def scoped_git_discovery(
+    protected_roots: Callable[[], Iterable[Path]],
+    *,
+    recorded_git_roots: Callable[[], Iterable[Path] | None] = lambda: (),
+) -> Iterator[None]:
+    """Pin ambient Git when an operation first needs to inspect repository targets."""
+    if os.environ.get("CODEX_SECURITY_GIT") is not None:
+        yield
+        return
+    executable: str | None = None
+
+    def resolve_once(target: Path) -> str:
+        nonlocal executable
+        if executable is None:
+            executable = (
+                _resolve_git_executable(
+                    Path.cwd(),
+                    None,
+                    discovery_roots=(*protected_roots(), target),
+                    recorded_git_roots=recorded_git_roots(),
+                )
+                or ""
+            )
+        return executable
+
+    token = _SCOPED_GIT.set(resolve_once)
+    try:
+        yield
+    finally:
+        _SCOPED_GIT.reset(token)
 
 
 def git_command(
