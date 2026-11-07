@@ -174,6 +174,8 @@ export interface NormalizedExternalPublicationOptions {
   repository: string;
   provider: FindingImportRequest["source"]["provider"];
   sourceKey: string;
+  /** For Tenable, verify this declaration against the retained repository evidence. */
+  sourceRepositoryUrl?: string;
   /** Full Inspector project ARNs mapped to independently verified repository URLs. */
   inspectorProjectMap?: ReadonlyMap<string, string>;
 }
@@ -838,6 +840,7 @@ export async function prepareNormalizedExternalPublication(
     settings,
     dependencies,
     snapshotSourceRepositories(dependencies.sourceRepositories),
+    settings.provider === "tenable" ? settings.sourceRepositoryUrl : undefined,
   );
 }
 

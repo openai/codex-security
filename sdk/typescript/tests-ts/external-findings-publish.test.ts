@@ -1402,6 +1402,58 @@ test("Tenable verifies the catalog repository and retained SDK identity before u
   expect(f.posts).toHaveLength(0);
 });
 
+test("Tenable rejects conflicting custom-host casing before authentication", async () => {
+  const url = "https://git.example.test/Team/Repo";
+  const otherCase = "https://git.example.test/Team/repo";
+  const f = await fixture({ ...tenableReport, repository_url: url }, url);
+  const parsed = await readTenableFindings(f.file, url, "cloud");
+  const credentials = mock(async () => {
+    throw new Error("Unexpected credential read");
+  });
+  const deps = { ...f.deps, credentials };
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      { ...tenableOptions, sourceRepositoryUrl: otherCase },
+      deps,
+    ),
+  ).rejects.toThrow(/repository/i);
+  parsed.report!["repositoryUrl"] = otherCase;
+  await expect(
+    prepareNormalizedExternalPublication(
+      parsed,
+      { ...tenableOptions, sourceRepositoryUrl: url },
+      deps,
+    ),
+  ).rejects.toThrow(/repository/i);
+  expect(credentials).not.toHaveBeenCalled();
+  expect(f.posts).toHaveLength(0);
+});
+
+test("normalized Tenable callers cannot replace the retained repository declaration", async () => {
+  const f = await fixture(tenableReport, tenableReport.repository_url);
+  const parsed = await readTenableFindings(
+    f.file,
+    tenableReport.repository_url,
+    "cloud",
+  );
+  const credentials = mock(async () => {
+    throw new Error("Unexpected credential read");
+  });
+  await expect(
+    prepareNormalizedExternalPublication(
+      parsed,
+      {
+        ...tenableOptions,
+        sourceRepositoryUrl: "https://github.com/example/another",
+      },
+      { ...f.deps, credentials },
+    ),
+  ).rejects.toThrow(/repository/i);
+  expect(credentials).not.toHaveBeenCalled();
+  expect(f.posts).toHaveLength(0);
+});
+
 test("Tenable private imports require structured support and upload only the approved findings", async () => {
   const { f, deps, inbox, uploads, jobs, fileId } = await privateUploadFixture(
     tenableReport,

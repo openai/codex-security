@@ -8,7 +8,6 @@ import type {
 } from "./external-findings.js";
 import {
   repositoryUrlKey,
-  cloudRepositoryUrlKey,
   type ExternalImportTarget,
   validateExternalEvidence,
 } from "./external-import-contract.js";
@@ -68,8 +67,7 @@ function assertRepository(
   target: ExternalImportTarget,
 ) {
   const url = declaredScannerRepositoryUrl(claim, "Tenable", target);
-  const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  if (key(url) !== key(expected))
+  if (repositoryUrlKey(url) !== repositoryUrlKey(expected))
     throw new CodexSecurityError(
       "Tenable repository URL does not match --source-repository-url.",
     );
@@ -91,7 +89,8 @@ export function tenableSourceRepository(
   if (
     (!reportless && input.report?.["format"] !== tenableReportFormat) ||
     asset?.["asset_class"] !== "CODE_REPOSITORY" ||
-    !assetId.safeParse(asset["asset_id"]).success
+    !(target === "cloud" ? assetId : nonblank).safeParse(asset["asset_id"])
+      .success
   )
     throw new CodexSecurityError(
       "Tenable imports require a report for one code repository asset.",
