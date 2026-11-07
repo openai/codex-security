@@ -15,14 +15,9 @@ import { loadContract } from "../src/contract.js";
 import { runMultiscan } from "../src/multiscan.js";
 import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import {
-  client,
-  completeRun,
-  createMultiscanFixtures,
-  options,
-} from "./support/multiscan.js";
+import { client, createMultiscanFixtures } from "./support/multiscan.js";
 
-const { temporaryDirectory, repositoryFixture, cleanup } =
+const { temporaryDirectory, repositoryFixture, cleanup, completeRun, options } =
   createMultiscanFixtures();
 afterEach(cleanup);
 const exec = promisify(execFile);

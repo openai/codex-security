@@ -1478,7 +1478,10 @@ async function campaignCheckoutRoots(
   return [
     checkout,
     process.platform === "win32"
-      ? await canonicalWindowsCreationPath(recoveryCheckout)
+      ? join(
+          await canonicalConfigPath(dirname(recoveryCheckout)),
+          basename(recoveryCheckout),
+        )
       : recoveryCheckout,
   ];
 }
