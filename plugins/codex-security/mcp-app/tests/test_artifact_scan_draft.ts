@@ -752,6 +752,10 @@ try {
       ],
       deferred: [
         { candidateId: "obsolete-review", reason: "Earlier review work." },
+        {
+          id: "obsolete-generic-review",
+          reason: "Earlier generic review work.",
+        },
       ],
     },
   };
@@ -825,6 +829,23 @@ try {
       contents,
     );
   }
+
+  await recordCodexSecurityScanDraft(deepParentContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    reviewState: {
+      completeness: "complete",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  });
+  assert.notEqual(
+    (await readJson(deepParentRoot, "scan-manifest.json")).scan.complete,
+    false,
+    "empty late progress preserves the accepted terminal Deep marker",
+  );
 
   const obsoleteCheckpointPath = path.join(
     deepParentRoot,

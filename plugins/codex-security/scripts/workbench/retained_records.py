@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +21,10 @@ from finalize_scan_contract import (
     finding_candidate_id,
 )
 from finalize_scan_contract import _schema_values_equal as same_raw_value
-from workbench.saved_coverage import _coverage_rows, _saved_coverage_id
+from workbench.saved_coverage import _coverage_rows, _has_candidate_metadata, _saved_coverage_id
 from workbench.saved_sources import _digest, _encoded
-from workbench_coverage_receipts import resolve_coverage_receipts
+from workbench_coverage_receipts import _deferred_candidate_id, resolve_coverage_receipts
+from workbench_validation import javascript_utf8
 
 _FINDING_IDENTITY_SCHEMA = _read_json(
     Path(__file__).resolve().parents[2] / "schemas" / "findings.schema.json"
@@ -42,39 +43,6 @@ def _finding_identity(finding: dict[str, Any]) -> Any:
         else:
             return provenance["preservedIdentity"]
     return finding.get("identity")
-
-
-def _finding_key(finding: dict[str, Any], owner: str | None = None) -> str:
-    # Wording and evidence may improve between checkpoints; distinct source locations
-    # must not collide merely because two workers chose the same semantic identity.
-    provenance = finding.get("provenance")
-    identity = _finding_identity(finding)
-    if not isinstance(identity, dict):
-        normalized = dict(finding)
-        normalized.pop("identity", None)
-        _ensure_finding_identity(normalized)
-        identity = normalized["identity"]
-    owner = provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
-    parts = [finding.get("ruleId"), identity, _finding_locations(finding)]
-    if owner is not None and finding_candidate_id(finding):
-        parts.append(owner)
-    return _digest(parts)
-
-
-def _finding_locations(finding: dict[str, Any]) -> list[tuple[Any, Any, Any]]:
-    locations = finding.get("locations", [])
-    return sorted(
-        (
-            (
-                location.get("path"),
-                location.get("startLine"),
-                location.get("endLine", location.get("startLine")),
-            )
-            for location in (locations if isinstance(locations, list) else [])
-            if isinstance(location, dict)
-        ),
-        key=_encoded,
-    )
 
 
 def _worker_candidate_key(
@@ -157,16 +125,7 @@ def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> No
         if "identity" in finding:
             continue
         identity = {"anchor": anchor}
-        extensions = finding.get("extensions")
-        sibling = next(
-            (
-                value
-                for field in ("reportId", "ledgerRowId")
-                if isinstance(extensions, dict)
-                and _has_identity_text(value := extensions.get(field))
-            ),
-            None,
-        )
+        sibling = next((value for value in _report_ids(finding) if value is not None), None)
         if sibling or counts[_digest([finding.get("ruleId"), anchor])] > 1:
             identity["instance"] = _semantic_identifier(
                 sibling or str(finding.get("title") or "finding"), f"finding-{index + 1}"
@@ -197,47 +156,6 @@ def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> No
                     break
                 suffix += 1
         used.add(key)
-
-
-def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Yield canonical and historical findings without trusting candidate IDs."""
-    pending = [finding]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        marker = id(current)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        yield current
-        provenance = current.get("provenance")
-        if not isinstance(provenance, dict):
-            continue
-        previous = provenance.get("previousFindings")
-        if isinstance(previous, list):
-            pending.extend(item for item in reversed(previous) if isinstance(item, dict))
-        sources = provenance.get("sourceFindings")
-        if isinstance(sources, list):
-            pending.extend(
-                source["finding"]
-                for source in reversed(sources)
-                if isinstance(source, dict) and isinstance(source.get("finding"), dict)
-            )
-
-
-def _append_previous_finding(
-    item: dict[str, Any], finding: dict[str, Any], *, clone: bool = False
-) -> None:
-    if not isinstance(item.get("previousFindings"), list):
-        item["previousFindings"] = []
-    history = item["previousFindings"]
-    if not any(
-        isinstance(previous, dict)
-        and _finding_key(previous) == _finding_key(finding)
-        and _finding_content(previous) == _finding_content(finding)
-        for previous in history
-    ):
-        history.append(copy.deepcopy(finding) if clone else finding)
 
 
 def _recover_preserved_worker_source(
@@ -353,7 +271,7 @@ def _recover_preserved_worker_coverage(
     return discarded_coverage
 
 
-def identifiers(value: dict[str, Any]) -> tuple[Any, Any]:
+def _report_ids(value: dict[str, Any]) -> tuple[Any, Any]:
     """Return the report ID and ledger row ID from extensions, using None for missing or blank IDs."""
     extensions = value.get("extensions")
     return tuple(
@@ -361,18 +279,6 @@ def identifiers(value: dict[str, Any]) -> tuple[Any, Any]:
         for identifier in (
             extensions.get(field) if isinstance(extensions, dict) else None
             for field in ("reportId", "ledgerRowId")
-        )
-    )
-
-
-def distinct_reports(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
-    """Check the latest observations for conflicting report IDs or ledger row IDs."""
-    return (
-        left is not None
-        and right is not None
-        and any(
-            a is not None and b is not None and a != b
-            for a, b in zip(identifiers(left["latest"]), identifiers(right["latest"]), strict=True)
         )
     )
 
@@ -396,24 +302,6 @@ def raw_scope(value: dict[str, Any]) -> tuple[Any, ...]:
         location["startLine"],
         location.get("endLine"),
     )
-
-
-def same_raw_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """Check whether semantic identities match or, in their absence, whether candidate and report IDs are compatible."""
-    if isinstance(left.get("identity"), dict) and isinstance(right.get("identity"), dict):
-        return _semantic_identity_key(left, _finding_identity(left)) == _semantic_identity_key(
-            right, _finding_identity(right)
-        )
-    candidates = (_identity_candidate(left), _identity_candidate(right))
-    if all(candidates) and candidates[0] != candidates[1]:
-        return False
-    pairs = list(zip(identifiers(left), identifiers(right), strict=True))
-    if any(a is not None for a, _ in pairs) and any(b is not None for _, b in pairs):
-        if not any(a is not None and b is not None for a, b in pairs) or any(
-            a is not None and b is not None and a != b for a, b in pairs
-        ):
-            return False
-    return True
 
 
 def same_raw_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -613,3 +501,211 @@ def _competing_rejection_receipts(outcomes, all_sources, source_surface_receipts
     ):
         return {ref for spellings in receipt_spellings.values() for ref in spellings}
     return set()
+
+
+def _project_missing_record(
+    field: str,
+    item: dict[str, Any],
+    index: int,
+    worker: Any,
+    source: dict[str, Any],
+    *,
+    receipts_resolved: bool = False,
+    inferred_coverage_ids,
+    projection_origins,
+    coverage_receipts,
+    retained_coverage_record,
+    coverage,
+    projected_coverage,
+    accepted_surfaces,
+    reconciled_surface_ids,
+    accepted_coverage_sources,
+    project_missing_record,
+    canonical_coverage_record,
+) -> dict[str, Any]:
+    # Retain projectDiscoveryCoverage worker ownership.
+    prefix = f"{worker['id']}-attempt-{worker['attempt']}"
+
+    def accepted_positions(surface: dict[str, Any]) -> list[int]:
+        return [
+            position
+            for position, accepted in accepted_surfaces.get((worker["id"], surface["id"]), [])
+            if canonical_coverage_record("surfaces", accepted)
+            == canonical_coverage_record("surfaces", surface)
+        ]
+
+    def surface_id(surface: dict[str, Any], offset: int) -> str:
+        source_id = surface.get("id")
+        if id(source) not in accepted_coverage_sources and isinstance(source_id, str):
+            positions = accepted_positions(surface)
+            if len(positions) == 1:
+                offset = positions[0]
+            elif not positions:
+                return f"{prefix}-surface-{offset}-{_digest(surface)[:16]}"
+        return f"{prefix}-surface-{offset}"
+
+    result = copy.deepcopy(item)
+    provenance = result.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+    for key in ("workerId", "attempt", "sourceId", "candidateId"):
+        provenance.pop(key, None)
+    provenance.update(workerId=worker["id"], attempt=worker["attempt"])
+    result["provenance"] = provenance
+    source_rows = source.get(field, [])
+    inferred_id = (
+        isinstance(source_rows, list)
+        and index <= len(source_rows)
+        and id(source_rows[index - 1]) in inferred_coverage_ids
+    )
+    for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
+        if key == "id" and inferred_id:
+            continue
+        if key in item:
+            result["provenance"][name] = item[key]
+    if isinstance(item.get("candidateId"), str):
+        candidate_digest = hashlib.sha256(javascript_utf8(item["candidateId"])).hexdigest()
+        result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
+    if field == "surfaces":
+        original = source_rows[index - 1] if isinstance(source_rows, list) else item
+        result["id"] = surface_id(original, index)
+        if not receipts_resolved and (origin := projection_origins.get(id(original))):
+            result["receiptRefs"] = coverage_receipts(result, worker, origin[1])
+        previous = retained_coverage_record("surfaces", result)
+        if previous is not None and isinstance(previous.get("id"), str):
+            result["id"] = previous["id"]
+        else:
+            if any(
+                isinstance(row, dict) and row.get("id") == result["id"]
+                for row in _coverage_rows(coverage, "surfaces")
+            ):
+                result["id"] = f"{result['id']}-{_digest(result)[:16]}"
+    elif field == "deferred":
+        result["id"] = f"{prefix}-deferred-{index}"
+        if isinstance(item.get("surfaceIds"), list):
+            surface_ids: dict[str, str] = {}
+            for surface in _coverage_rows(projected_coverage, "surfaces"):
+                if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
+                    continue
+                provenance = surface.get("provenance", {})
+                if (
+                    isinstance(provenance, dict)
+                    and provenance.get("workerId") == worker["id"]
+                    and provenance.get("attempt") == worker["attempt"]
+                    and isinstance(provenance.get("sourceId"), str)
+                ):
+                    surface_ids.setdefault(provenance["sourceId"], surface["id"])
+            source_surface_ids: dict[str, tuple[int, dict[str, Any]]] = {}
+            for offset, surface in enumerate(_coverage_rows(source, "surfaces"), 1):
+                if isinstance(surface, dict) and isinstance(surface.get("id"), str):
+                    source_surface_ids.setdefault(surface["id"], (offset, surface))
+            for (owner, source_id), accepted in accepted_surfaces.items():
+                if owner == worker["id"] and accepted:
+                    source_surface_ids.setdefault(source_id, accepted[0])
+            for source_id, (offset, surface) in source_surface_ids.items():
+                if source_id not in item["surfaceIds"]:
+                    continue
+                if (worker["id"], source_id) in reconciled_surface_ids:
+                    surface_ids[source_id] = reconciled_surface_ids[(worker["id"], source_id)]
+                    continue
+                projected_id = surface_id(surface, offset)
+                if id(source) in accepted_coverage_sources or accepted_positions(surface):
+                    origin = projection_origins.get(id(surface))
+                    projected = project_missing_record(
+                        "surfaces", surface, offset, worker, origin[4] if origin else source
+                    )
+                    if origin := projection_origins.get(id(surface)):
+                        projected["receiptRefs"] = coverage_receipts(projected, worker, origin[1])
+                    projected_id = projected["id"]
+                    previous = retained_coverage_record("surfaces", projected)
+                    if previous is not None and isinstance(previous.get("id"), str):
+                        projected_id = previous["id"]
+                surface_ids[source_id] = projected_id
+            result["surfaceIds"] = [
+                surface_ids.get(value, value) if isinstance(value, str) else value
+                for value in item["surfaceIds"]
+            ]
+    return result
+
+
+def _coverage_row_is_retained(
+    field: str,
+    item: Any,
+    worker_id: str | None,
+    selection: tuple[bool, set[str], bool, bool, bool],
+    *,
+    resolved,
+    ambiguous_deferred,
+    coverage_candidate,
+) -> bool:
+    (
+        selected_coverage_superseded,
+        selected_candidates,
+        superseded,
+        retain_pending,
+        coverage_superseded,
+    ) = selection
+    # A selected terminal checkpoint replaces ordinary coverage, while
+    # candidate evidence and pending tasks retain their own reconciliation.
+    if (
+        selected_coverage_superseded
+        and field != "deferred"
+        and not (isinstance(item, dict) and _has_candidate_metadata(item))
+    ):
+        return False
+    # A selected outcome must retain its evidence even if its result write failed.
+    if coverage_superseded and not (
+        isinstance(item, dict)
+        and (
+            (field == "deferred" and retain_pending)
+            or (
+                isinstance(item.get("candidateId"), str)
+                and item["candidateId"] in selected_candidates
+                and item.get("disposition") == resolved.get((worker_id, item["candidateId"]))
+            )
+        )
+    ):
+        return False
+    if (
+        isinstance(item, dict)
+        and isinstance(
+            identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
+            if field == "deferred"
+            else item.get("candidateId"),
+            str,
+        )
+        and (coverage_candidate(worker_id, item) or (worker_id, identity)) in resolved
+        and (field == "deferred" or item.get("disposition") == "needs_follow_up")
+    ):
+        return False
+    return True
+
+
+def _recovered_model(
+    relative: str,
+    draft: dict[str, Any],
+    owner: str | None,
+    *,
+    model_checks,
+    warnings,
+) -> dict[str, Any] | None:
+    if relative not in model_checks:
+        model = copy.deepcopy(draft.get("threatModel"))
+        if isinstance(model, dict) and owner is not None:
+            model["origin"] = "recovered"
+        schema = _read_json(
+            Path(__file__).resolve().parents[2] / "schemas/scan-manifest.schema.json"
+        )
+        try:
+            _require_safe_json_value(model, f"Saved threat model {relative}")
+            _validate_schema_node(
+                model,
+                schema["properties"]["scan"]["properties"]["threatModel"],
+                f"Saved threat model {relative}",
+                schema,
+            )
+        except ContractError as exc:
+            warnings.append(f"Skipped malformed saved threat model {relative}: {exc}")
+            model = None
+        model_checks[relative] = model
+    return model_checks[relative]

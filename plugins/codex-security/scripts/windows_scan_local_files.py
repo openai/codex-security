@@ -44,6 +44,10 @@ class WindowsScanLocalPathError(WindowsScanLocalFileError):
     """Raised when a scan-local path fails an integrity check."""
 
 
+class WindowsScanLocalNonRegularFileError(WindowsScanLocalPathError):
+    """Raised when a verified scan-local leaf is a reparse point or non-regular file."""
+
+
 # CreateFile access and sharing flags.
 _DRIVE_FIXED = 3
 _DELETE = 0x00010000
@@ -443,8 +447,14 @@ def _verify_directory(handle: int, expected_path: Path) -> None:
 def _verify_regular_file(handle: int, expected_path: Path) -> None:
     info = _attributes(handle)
     if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-        raise _invalid_path(expected_path, "scan-local files must not be reparse points")
-    if info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY or _GetFileType(handle) != _FILE_TYPE_DISK:
+        raise WindowsScanLocalNonRegularFileError(
+            errno.EINVAL, "scan-local files must not be reparse points", str(expected_path)
+        )
+    if info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY:
+        raise WindowsScanLocalNonRegularFileError(
+            errno.EINVAL, "expected a regular scan-local file", str(expected_path)
+        )
+    if _GetFileType(handle) != _FILE_TYPE_DISK:
         raise _invalid_path(expected_path, "expected a regular scan-local file")
     _verify_handle_path(handle, expected_path)
 
@@ -685,14 +695,26 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
             leaf_name,
         ):
             path = parent_path / leaf_name
-            handle = _create_file(
-                path,
-                access=_GENERIC_READ | _FILE_READ_ATTRIBUTES,
-                # Denying write/delete sharing keeps the opened contents stable.
-                share=_FILE_SHARE_READ,
-                disposition=_OPEN_EXISTING,
-                flags=_FILE_FLAG_OPEN_REPARSE_POINT,
-            )
+            try:
+                handle = _create_file(
+                    path,
+                    access=_GENERIC_READ | _FILE_READ_ATTRIBUTES,
+                    # Denying write/delete sharing keeps the opened contents stable.
+                    share=_FILE_SHARE_READ,
+                    disposition=_OPEN_EXISTING,
+                    flags=_FILE_FLAG_OPEN_REPARSE_POINT,
+                )
+            except WindowsScanLocalFileError as exc:
+                if exc.errno == _ERROR_ACCESS_DENIED:
+                    # Opening a directory as a file reports ACCESS_DENIED. Probe
+                    # its type using only attributes, never backup access to content.
+                    try:
+                        _validate_existing_output(path)
+                    except WindowsScanLocalNonRegularFileError:
+                        raise
+                    except OSError:
+                        pass
+                raise
             assert handle is not None and handle.value is not None
             with handle:
                 _verify_regular_file(handle.value, path)
@@ -707,7 +729,7 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
                     _close_handle(raw_handle)
                     raise
     except WindowsScanLocalFileError as exc:
-        raise WindowsScanLocalFileError(
+        raise type(exc)(
             exc.errno,
             f"{context}: {exc.strerror}",
             exc.filename,
