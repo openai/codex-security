@@ -384,7 +384,7 @@ def collect_scan_usage(
 
     # Absence from one known index is not missing usage when another has it.
     missing_thread_ids.difference_update(seen_thread_ids)
-    if not missing_thread_ids:
+    if seen_thread_ids and not missing_thread_ids:
         warnings.difference_update(
             {"scan_root_unavailable", "codex_state_unavailable", "rollout_unavailable"}
         )

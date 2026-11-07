@@ -85,7 +85,7 @@ def apply_migrations(
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
-                elif 63 <= version <= 67:
+                elif 63 <= version <= 68:
                     # Recreated Deep tables need the recorded extensions too.
                     # Do not replay data updates from an already applied migration.
                     for statement in sql_statements(sql):
