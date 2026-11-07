@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -62,6 +63,66 @@ function receiptCost(onSerialized: () => void) {
 }
 
 describe("multiscan", () => {
+  test.each(["ordinary", "recovery"] as const)(
+    "preserves a replacement checkout when a completed %s attempt is skipped",
+    async (kind) => {
+      const { paths } = await repositoryFixture("replaced");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run), { maxAttempts: 1 });
+      let checkout: string;
+      if (kind === "recovery") {
+        checkout = join(
+          paths.output,
+          "recovery-checkouts",
+          "replaced",
+          "attempt-2",
+        );
+        await runMultiscan(
+          options(paths, client(rejecting("Stopped")), { maxAttempts: 1 }),
+        );
+        expect(
+          await runMultiscan({
+            ...configured,
+            recoverScan: async () => undefined,
+          }),
+        ).toMatchObject({ completed: 1 });
+        await expect(lstat(checkout)).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        checkout = join(paths.output, "checkouts", "replaced");
+        const originalRm = filesystem.rm;
+        const removeSpy = spyOn(filesystem, "rm").mockImplementation(
+          async (...args) => {
+            if (String(args[0]) === checkout)
+              throw new Error("Checkout is busy");
+            return originalRm(...args);
+          },
+        );
+        try {
+          expect(await runMultiscan(configured)).toMatchObject({
+            completed: 1,
+          });
+        } finally {
+          removeSpy.mockRestore();
+        }
+        await rename(checkout, join(paths.root, "old-checkout"));
+      }
+      await mkdir(checkout);
+      git(checkout, "init", "-q");
+      const note = join(checkout, "uncommitted.txt");
+      await writeFile(note, "Independent checkout.\n");
+      const ledger = join(paths.output, "results.jsonl");
+      const before = await readFile(ledger);
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(await readFile(ledger)).toEqual(before);
+      expect(await readFile(note, "utf8")).toBe("Independent checkout.\n");
+      expect((await lstat(join(checkout, ".git"))).isDirectory()).toBe(true);
+    },
+  );
+
   test("serializes receipt writes through close and drains workers before unlocking", async () => {
     const { paths, source } = await repositoryFixture("receipt-order", "first");
     await appendFile(paths.input, `second,${source.path},${source.revision}\n`);

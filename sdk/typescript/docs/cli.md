@@ -1331,6 +1331,11 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
+If an ordinary attempt finds its checkout path already occupied, it stops before
+fetching. Inspect the existing checkout and move it aside before retrying.
+If checkout cleanup previously failed, the next invocation removes it only when
+its marker still identifies the same directory and scan attempt. Older or
+replacement checkouts without a matching marker are preserved.
 Completed results are skipped only when their saved contract and seal are valid
 and the manifest records a completed scan. Damaged or unsuccessful results get a
 new attempt, including with `--recover`, while the old artifacts remain available.
