@@ -10,7 +10,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync, renameSync, symlinkSync } from "node:fs";
+import { existsSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -89,6 +89,7 @@ import {
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   prepareScanRegistrationOutput,
+  requireWindowsOutputPath,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -6438,6 +6439,73 @@ describe("runtime directories and plugin Python boundary", () => {
           chmodFailure.mockRestore();
           umask.mockRestore();
         }
+      }
+    },
+  );
+
+  test("creates temporary output under the directory selected before an alias changes", async () => {
+    const root = await temporaryDirectory();
+    const selected = join(root, "selected");
+    const replacement = join(root, "replacement");
+    const alias = join(root, "alias");
+    await mkdir(selected);
+    await mkdir(replacement);
+    await symlink(selected, alias, "junction");
+    const output = await prepareOutputDir(undefined, "repo", alias, (path) => {
+      if (path === selected) {
+        unlinkSync(alias);
+        symlinkSync(replacement, alias, "junction");
+      }
+    });
+    expect(await realpath(alias)).toBe(replacement);
+    expect(dirname(output)).toBe(selected);
+    expect(await readdir(replacement)).toEqual([]);
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "keeps existing output validation on the selected Windows directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const output = join(root, "output");
+      for (const writable of [false, true]) {
+        await expect(
+          requireWindowsOutputPath(output, writable),
+        ).rejects.toThrow();
+      }
+      await mkdir(output);
+      await writeFile(join(output, "old"), "");
+      expect(await validateOutputDir(join(root, "OUTPUT"), true)).toBe(output);
+
+      const staged = join(root, "staged");
+      const unrelated = join(staged, "output");
+      await mkdir(unrelated, { recursive: true });
+      await writeFile(join(unrelated, "keep"), "");
+      const original = fsPromises.realpath;
+      const substitution = spyOn(fsPromises, "realpath").mockImplementation(
+        new Proxy(original, {
+          async apply(target, receiver, args) {
+            if (args[0] !== output)
+              return Reflect.apply(target, receiver, args);
+            const moved = join(root, "moved");
+            renameSync(output, moved);
+            symlinkSync(unrelated, output, "junction");
+            const redirected = await original(output);
+            unlinkSync(output);
+            renameSync(moved, output);
+            renameSync(staged, join(root, "saved"));
+            symlinkSync(root, staged, "junction");
+            return redirected;
+          },
+        }),
+      );
+      try {
+        // The redirected path now identifies the original leaf under a different parent.
+        await expect(validateOutputDir(output, true)).rejects.toThrow(
+          "changed during preparation",
+        );
+        expect(await readdir(join(root, "saved", "output"))).toEqual(["keep"]);
+      } finally {
+        substitution.mockRestore();
       }
     },
   );

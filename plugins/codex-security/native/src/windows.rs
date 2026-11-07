@@ -14,19 +14,19 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
-        ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE, INVALID_HANDLE_VALUE,
+        GetLastError, LocalFree, SetLastError, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
+        ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
+        INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{
             ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             SDDL_REVISION_1,
         },
-        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, TOKEN_QUERY,
-        TOKEN_USER,
+        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES,
     },
     Storage::FileSystem::*,
-    System::Threading::{GetCurrentProcess, OpenProcessToken},
+    System::{SystemServices::SE_TOKEN_USER, Threading::GetCurrentProcess},
 };
 
 fn invalid(message: &str) -> napi::Error {
@@ -41,8 +41,10 @@ fn status(success: i32) -> u32 {
     }
 }
 
-fn io_error(error: io::Error) -> u32 {
-    error.raw_os_error().unwrap() as u32
+pub(crate) fn io_error(error: io::Error) -> u32 {
+    error
+        .raw_os_error()
+        .map_or(ERROR_ACCESS_DENIED, |code| code as u32)
 }
 
 fn io_status(result: io::Result<()>) -> u32 {
@@ -656,39 +658,28 @@ pub fn create_windows_directories(path: Buffer) -> napi::Result<u32> {
 }
 
 pub(crate) fn current_user_sid() -> Result<String, u32> {
-    let mut token = null_mut();
-    let error = status(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) });
-    if error != 0 {
-        return Err(error);
-    }
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
-    // TOKEN_USER is followed by the SID; use Windows' defined maximum SID size.
-    #[repr(C)]
-    struct TokenUserBuffer {
-        user: TOKEN_USER,
-        sid: [u8; SECURITY_MAX_SID_SIZE as usize],
-    }
-    let mut user = TokenUserBuffer {
-        user: TOKEN_USER::default(),
-        sid: [0; SECURITY_MAX_SID_SIZE as usize],
-    };
+    // GetCurrentProcessToken() is the SDK's query-only pseudo-handle.
+    const CURRENT_PROCESS_TOKEN: HANDLE = -4isize as HANDLE;
+    let mut user = SE_TOKEN_USER::default();
     let mut length = 0;
     let error = status(unsafe {
         GetTokenInformation(
-            token.as_raw_handle(),
+            CURRENT_PROCESS_TOKEN,
             TokenUser,
-            (&mut user as *mut TokenUserBuffer).cast(),
-            size_of::<TokenUserBuffer>() as u32,
+            (&raw mut user).cast(),
+            size_of::<SE_TOKEN_USER>() as u32,
             &mut length,
         )
     });
     if error != 0 {
         return Err(error);
     }
-    sid_string(user.user.User.Sid)
+    // GetTokenInformation filled the inline user SID in this buffer.
+    unsafe { sid_string(user.Anonymous1.User.Sid) }
 }
 
-pub(crate) fn sid_string(value: windows_sys::Win32::Security::PSID) -> Result<String, u32> {
+/// The SID must remain valid until Windows has copied its string representation.
+pub(crate) unsafe fn sid_string(value: windows_sys::Win32::Security::PSID) -> Result<String, u32> {
     let mut sid = null_mut();
     let error = status(unsafe { ConvertSidToStringSidA(value, &mut sid) });
     if error != 0 {
@@ -737,7 +728,7 @@ pub fn create_private_windows_directory(
             std::path::Path::new(&target),
             &sid,
             Some(attributes.lpSecurityDescriptor),
-            false,
+            None,
             None,
         )
         .map_or_else(|error| error, |()| 0)

@@ -32,22 +32,27 @@ public static class ScanOutputAccessProbe {
         return CreateFile(path, access, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
     }
 
-    public static Tuple<string, int> CopyJunction(SafeAccessTokenHandle token, string source,
-        string destination, uint access) {
+    private static void Check(bool succeeded, string operation) {
+        if (!succeeded) {
+            int error = Marshal.GetLastWin32Error();
+            throw new System.ComponentModel.Win32Exception(error, operation + " (Win32 " + error + ")");
+        }
+    }
+
+    public static void CopyJunction(SafeAccessTokenHandle token, string source, string destination, uint access) {
         byte[] data = new byte[16384]; // MAXIMUM_REPARSE_DATA_BUFFER_SIZE
         int length;
         using (var handle = OpenReparseDirectory(source, 0)) {
-            if (handle.IsInvalid) return Tuple.Create("template-open", Marshal.GetLastWin32Error());
-            if (!DeviceIoControl(handle, 0x900a8, null, 0, data, data.Length, out length, IntPtr.Zero))
-                return Tuple.Create("get", Marshal.GetLastWin32Error()); // FSCTL_GET_REPARSE_POINT
+            Check(!handle.IsInvalid, "open template");
+            Check(DeviceIoControl(handle, 0x900a8, null, 0, data, data.Length, out length, IntPtr.Zero),
+                "FSCTL_GET_REPARSE_POINT");
         }
-        return WindowsIdentity.RunImpersonated(token, () => {
+        WindowsIdentity.RunImpersonated(token, () => {
             using (var handle = OpenReparseDirectory(destination, access)) {
-                if (handle.IsInvalid) return Tuple.Create("open", Marshal.GetLastWin32Error());
+                Check(!handle.IsInvalid, "open destination");
                 int returned;
-                if (!DeviceIoControl(handle, 0x900a4, data, length, null, 0, out returned, IntPtr.Zero))
-                    return Tuple.Create("set", Marshal.GetLastWin32Error()); // FSCTL_SET_REPARSE_POINT
-                return Tuple.Create("complete", 0);
+                Check(DeviceIoControl(handle, 0x900a4, data, length, null, 0, out returned, IntPtr.Zero),
+                    "FSCTL_SET_REPARSE_POINT");
             }
         });
     }
@@ -74,24 +79,20 @@ public static class ScanOutputAccessProbe {
         });
     }
 
-    public static int RenameError(SafeAccessTokenHandle token, string path) {
+    public static bool CanRename(SafeAccessTokenHandle token, string path) {
         return WindowsIdentity.RunImpersonated(token, () => {
-            if (!MoveFile(path, path + ".moved")) return Marshal.GetLastWin32Error();
+            if (!MoveFile(path, path + ".moved")) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 5) return false; // ERROR_ACCESS_DENIED
+                throw new System.ComponentModel.Win32Exception(error);
+            }
             Directory.Move(path + ".moved", path);
-            return 0;
+            return true;
         });
     }
 
-    public static bool CanRename(SafeAccessTokenHandle token, string path) {
-        int error = RenameError(token, path);
-        if (error == 0) return true;
-        if (error == 5) return false; // ERROR_ACCESS_DENIED
-        throw new System.ComponentModel.Win32Exception(error);
-    }
-
-    public static int RemoveEmptyDirectory(SafeAccessTokenHandle token, string path) {
-        return WindowsIdentity.RunImpersonated(token, () =>
-            RemoveDirectory(path) ? 0 : Marshal.GetLastWin32Error());
+    public static void RemoveEmptyDirectory(SafeAccessTokenHandle token, string path) {
+        WindowsIdentity.RunImpersonated(token, () => Check(RemoveDirectory(path), "RemoveDirectory"));
     }
 }
 '@
@@ -109,31 +110,23 @@ try {
     if (-not [ScanOutputAccessProbe]::LogonUser($name, '.', $password, 2, 0, [ref]$token)) {
         throw [System.ComponentModel.Win32Exception]::new([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }
-    $reparseParent = $env:CODEX_SECURITY_TEST_REPARSE_PARENT
-    $sourceJunction = Join-Path $reparseParent 'source junction'
-    $rights = [ordered]@{
-        'write attributes' = 0x100; 'write data' = 0x2
-        'write data and attributes' = 0x102; 'writable control' = 0x40000000
-    }
-    $reparse = @(foreach ($nameAndAccess in $rights.GetEnumerator()) {
-        $path = Join-Path $reparseParent $nameAndAccess.Key
-        $renameError = [ScanOutputAccessProbe]::RenameError($token, $path)
-        $retag = [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, $path, $nameAndAccess.Value)
-        [pscustomobject]@{
-            name = $nameAndAccess.Key; access = $nameAndAccess.Value
-            stage = $retag.Item1; win32 = $retag.Item2
-            rename = $renameError -eq 0; renameWin32 = $renameError
+    if ($env:CODEX_SECURITY_TEST_REPARSE_PARENT) {
+        $root = $env:CODEX_SECURITY_TEST_REPARSE_PARENT
+        $source = Join-Path $root 'source junction'
+        $rights = @{
+            'write attributes' = 0x100; 'write data' = 0x2
+            'write data and attributes' = 0x102; 'writable control' = 0x40000000
         }
-    })
-    $intermediate = Join-Path $reparseParent 'intermediate'
-    $removeError = [ScanOutputAccessProbe]::RemoveEmptyDirectory($token, (Join-Path $intermediate 'src'))
-    $observed = @{ reparse = $reparse; intermediate = @{ stage = 'remove'; win32 = $removeError } }
-    if ($removeError -eq 0) {
-        $retag = [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, $intermediate, 0x100)
-        $observed.intermediate = @{ stage = $retag.Item1; win32 = $retag.Item2 }
-    }
-    if ($env:CODEX_SECURITY_TEST_REPARSE_ONLY -eq '1') {
-        ConvertTo-Json -InputObject $observed -Depth 4 -Compress
+        foreach ($leaf in $rights.GetEnumerator()) {
+            $path = Join-Path $root $leaf.Key
+            if ($leaf.Key -ne 'writable control' -and [ScanOutputAccessProbe]::CanRename($token, $path)) {
+                throw "The leaf-only grant unexpectedly permitted renaming $path."
+            }
+            [ScanOutputAccessProbe]::CopyJunction($token, $source, $path, $leaf.Value)
+        }
+        $intermediate = Join-Path $root 'intermediate'
+        [ScanOutputAccessProbe]::RemoveEmptyDirectory($token, (Join-Path $intermediate 'src'))
+        [ScanOutputAccessProbe]::CopyJunction($token, $source, $intermediate, 0x100)
         return
     }
     [ScanOutputAccessProbe]::ReplaceDirectory($token, $env:CODEX_SECURITY_TEST_REPLACE_DIRECTORY)
@@ -160,8 +153,7 @@ try {
             }
         }
     )
-    $observed.access = $results
-    ConvertTo-Json -InputObject $observed -Depth 4 -Compress
+    ConvertTo-Json -InputObject $results -Compress
 } finally {
     if ($null -ne $token) { $token.Dispose() }
     if ($created) { Remove-LocalUser -Name $name }

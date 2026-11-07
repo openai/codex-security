@@ -758,6 +758,7 @@ async function requireOwnedScanRoot(path: string): Promise<void> {
   if (process.platform === "win32") {
     const error = windowsBinding().validateWindowsOutputPath(
       widePath(win32.toNamespacedPath(path)),
+      false,
     );
     if (error !== 0) {
       throw new ContractValidationError(

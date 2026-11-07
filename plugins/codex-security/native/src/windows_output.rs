@@ -1,4 +1,4 @@
-use crate::windows::{current_user_sid, os_string, sid_string};
+use crate::windows::{current_user_sid, io_error, os_string, sid_string};
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::{
@@ -29,8 +29,8 @@ use windows_sys::Win32::{
     },
     Security::{
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-        LookupAccountSidW, SidTypeUser, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION,
-        INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        LookupAccountSidW, SidTypeUser, ACL, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     },
     Storage::FileSystem::{
         DELETE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
@@ -99,7 +99,7 @@ fn inspect_dacl(acl: *const ACL, user: &str) -> Result<u32, u32> {
             return Err(ERROR_INVALID_ACL);
         };
         let size = usize::from(u16::from_le_bytes([low, high]));
-        if size < size_of::<ACE_HEADER>() {
+        if size < 4 {
             return Err(ERROR_INVALID_ACL);
         }
         let (bytes, rest) = entries.split_at_checked(size).ok_or(ERROR_INVALID_ACL)?;
@@ -107,16 +107,11 @@ fn inspect_dacl(acl: *const ACL, user: &str) -> Result<u32, u32> {
         if u32::from(flags) & INHERIT_ONLY_ACE != 0 {
             continue;
         }
-        let number = |offset| {
-            Ok::<_, u32>(u32::from_le_bytes(
-                bytes
-                    .get(offset..offset + 4)
-                    .ok_or(ERROR_INVALID_ACL)?
-                    .try_into()
-                    .unwrap(),
-            ))
-        };
-        let mut mask = number(4)?;
+        // Every access ACE starts with its four-byte header and access mask.
+        let (mask, payload) = bytes[4..]
+            .split_first_chunk::<4>()
+            .ok_or(ERROR_INVALID_ACL)?;
+        let mut mask = u32::from_le_bytes(*mask);
         if mask & GENERIC_ALL != 0 {
             mask |= OUTPUT_RIGHTS;
         }
@@ -129,24 +124,28 @@ fn inspect_dacl(acl: *const ACL, user: &str) -> Result<u32, u32> {
         }
         // ACCESS_ALLOWED, ACCESS_DENIED, their object and callback variants.
         // A conditional deny cannot prove that another identity lacks access.
-        let sid_offset = match kind {
-            0 | 1 | 9 => 8,
+        let sid_bytes = match kind {
+            0 | 1 | 9 => payload,
             5 | 6 | 11 => {
-                let flags = number(8)?;
+                let (flags, rest) = payload.split_first_chunk::<4>().ok_or(ERROR_INVALID_ACL)?;
+                let flags = u32::from_le_bytes(*flags);
                 if kind == 6 && flags & 1 != 0 {
                     continue; // Object-specific deny.
                 }
-                12 + 16 * (flags & 3).count_ones() as usize
+                rest.get(16 * (flags & 3).count_ones() as usize..)
+                    .ok_or(ERROR_INVALID_ACL)?
             }
             10 | 12 => continue, // Conditional deny.
             _ => return Err(ERROR_INVALID_ACL),
         };
-        let bytes = bytes.get(sid_offset..).ok_or(ERROR_INVALID_ACL)?;
-        if bytes.len() < 8 || bytes.len() < 8 + 4 * usize::from(bytes[1]) {
+        let (sid_header, subauthorities) = sid_bytes
+            .split_first_chunk::<8>()
+            .ok_or(ERROR_INVALID_ACL)?;
+        if subauthorities.len() < 4 * usize::from(sid_header[1]) {
             return Err(ERROR_INVALID_ACL);
         }
-        let raw_sid = bytes.as_ptr().cast_mut().cast();
-        let sid = sid_string(raw_sid)?;
+        let raw_sid = sid_bytes.as_ptr().cast_mut().cast();
+        let sid = unsafe { sid_string(raw_sid) }?;
         if trusted(&sid, user) || sid == "S-1-3-4" {
             continue; // OWNER RIGHTS applies to the already-verified owner.
         }
@@ -171,6 +170,12 @@ fn inspect_dacl(acl: *const ACL, user: &str) -> Result<u32, u32> {
 }
 
 fn output_rights(file: &File, user: &str) -> Result<u32, u32> {
+    let attributes = file.metadata().map_err(io_error)?.file_attributes();
+    if attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+        != FILE_ATTRIBUTE_DIRECTORY
+    {
+        return Err(ERROR_ACCESS_DENIED);
+    }
     let mut owner = null_mut();
     let mut acl = null_mut();
     let mut descriptor = null_mut();
@@ -189,7 +194,7 @@ fn output_rights(file: &File, user: &str) -> Result<u32, u32> {
     if error != 0 {
         return Err(error);
     }
-    let rights = sid_string(owner).and_then(|sid| {
+    let rights = unsafe { sid_string(owner) }.and_then(|sid| {
         if trusted(&sid, user) {
             inspect_dacl(acl, user)
         } else {
@@ -252,11 +257,13 @@ fn relative_directory(
 /// Open each directory relative to its verified parent, including creation of
 /// a missing leaf. A reparse point added to an empty directory cannot redirect
 /// an absolute-path operation beyond the directory whose ACL we inspected.
+/// For validation, an omitted writable_leaf preflights a prospective path.
+/// Both read and write validation of a selected directory require it to exist.
 pub(crate) fn inspect_output_path(
     path: &Path,
     user: &str,
     create: Option<PSECURITY_DESCRIPTOR>,
-    writable_leaf: bool,
+    writable_leaf: Option<bool>,
     retained_directory: Option<&OsStr>,
 ) -> Result<(), u32> {
     let mut ancestors: Vec<File> = Vec::new();
@@ -266,21 +273,24 @@ pub(crate) fn inspect_output_path(
             relative_directory(handle, entry.file_name().ok_or(ERROR_ACCESS_DENIED)?, None)
         } else {
             OpenOptions::new()
-                .read(true)
                 .access_mode(PIN_ACCESS)
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
                 .open(entry)
-                .map_err(|e| e.raw_os_error().unwrap_or(5) as u32)
+                .map_err(io_error)
         };
         let file = match opened {
             Ok(file) => file,
-            Err(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => {
+            Err(error @ (ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)) => {
                 if replaceable(parent, 0) {
                     return Err(ERROR_ACCESS_DENIED);
                 }
                 if create.is_none() {
-                    return Ok(());
+                    return if writable_leaf.is_some() {
+                        Err(error)
+                    } else {
+                        Ok(())
+                    };
                 }
                 if entry != path {
                     return Err(ERROR_PATH_NOT_FOUND);
@@ -294,20 +304,11 @@ pub(crate) fn inspect_output_path(
             }
             Err(error) => return Err(error),
         };
-        let attributes = file
-            .metadata()
-            .map_err(|e| e.raw_os_error().unwrap_or(5) as u32)?
-            .file_attributes();
-        if attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
-            != FILE_ATTRIBUTE_DIRECTORY
-        {
-            return Err(ERROR_ACCESS_DENIED);
-        }
         let rights = output_rights(&file, user)?;
         if replaceable(parent, rights) {
             return Err(ERROR_ACCESS_DENIED);
         }
-        if entry == path && writable_leaf && rights & SET_REPARSE_POINT != 0 {
+        if entry == path && writable_leaf == Some(true) && rights & SET_REPARSE_POINT != 0 {
             // Windows can retag only an empty directory. A known child that
             // another user cannot remove keeps a resumed output nonempty.
             let name = retained_directory
@@ -317,13 +318,7 @@ pub(crate) fn inspect_output_path(
                 return Err(ERROR_ACCESS_DENIED);
             }
             let child = relative_directory(&file, name, None)?;
-            let attributes = child
-                .metadata()
-                .map_err(|e| e.raw_os_error().unwrap_or(5) as u32)?
-                .file_attributes();
-            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || output_rights(&child, user)? & DELETE != 0
-            {
+            if output_rights(&child, user)? & DELETE != 0 {
                 return Err(ERROR_ACCESS_DENIED);
             }
         }
@@ -355,7 +350,7 @@ pub fn validate_windows_output_path(
                 Path::new(&path),
                 &user,
                 None,
-                writable_leaf == Some(true),
+                writable_leaf,
                 retained_directory.as_deref().map(OsStr::new),
             )
         })

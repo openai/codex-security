@@ -7,7 +7,6 @@ import {
   readFile,
   realpath,
   symlink,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -407,22 +406,36 @@ windowsTest(
   },
 );
 
-windowsTest(
-  "writable admission preserves the ACL on a rejected empty directory",
-  async () => {
-    const root = await temporaryDirectory();
-    for (const rights of ["WA", "WD"]) {
-      const output = join(root, rights);
-      await mkdir(output);
-      await icacls(output, "/grant", `*S-1-1-0:(${rights})`);
-      const before = await descriptor(output);
-      await expect(
-        runtime.prepareOutputDir(output, "fixture"),
-      ).rejects.toThrow();
-      expect(await descriptor(output)).toBe(before);
-      await cp(example, output, { recursive: true });
-      await loadContract(output, { pluginRoot: PLUGIN_ROOT });
-    }
+windowsTest.each([
+  "(RD,RA,REA,RC,S,WA)",
+  "(RD,RA,REA,RC,S,WD)",
+  "(RD,RA,REA,RC,S,WA,WD)",
+  "M",
+])(
+  "rejects component planning on an empty retaggable output with peer rights %s",
+  async (right) => {
+    const repository = await temporaryDirectory();
+    await writeFile(join(repository, "source.txt"), "Synthetic component");
+    const outputDir = await runtime.prepareOutputDir(
+      join(await temporaryDirectory(), "output"),
+      "fixture",
+    );
+    await icacls(outputDir, "/grant", `*S-1-1-0:${right}`);
+    const before = await descriptor(outputDir);
+    await expect(
+      runComponentScans({
+        repository,
+        outputDir,
+        components: [{ name: "Source", paths: ["source.txt"] }],
+        planOnly: true,
+      }),
+    ).rejects.toThrow("could not be trusted");
+    await expect(
+      lstat(join(outputDir, "components.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await descriptor(outputDir)).toBe(before);
+    await cp(example, outputDir, { recursive: true });
+    await loadContract(outputDir, { pluginRoot: PLUGIN_ROOT });
   },
 );
 
@@ -610,71 +623,7 @@ test.skipIf(
     );
     const denied = join(writableParent, "named-user grant");
     await mkdir(denied);
-    const reparseParent = join(root, "output leaves");
-    await mkdir(reparseParent);
-    const repository = await temporaryDirectory();
-    await writeFile(join(repository, "source.txt"), "Synthetic component");
-    await mkdir(join(repository, "src"));
-    await icacls(repository, "/grant", "*S-1-1-0:(OI)(CI)RX");
-    await symlink(
-      repository,
-      join(reparseParent, "source junction"),
-      "junction",
-    );
-    const reparseLeaves = [
-      ["write attributes", "(RD,RA,REA,RC,S,WA)"],
-      ["write data", "(RD,RA,REA,RC,S,WD)"],
-      ["write data and attributes", "(RD,RA,REA,RC,S,WD,WA)"],
-      ["writable control", "M"],
-    ] as const;
-    async function admitted(operation: Promise<unknown>): Promise<boolean> {
-      try {
-        await operation;
-        return true;
-      } catch (error) {
-        expect(error).toBeInstanceOf(Error);
-        expect((error as Error).message).toContain("could not be trusted");
-        return false;
-      }
-    }
-    const acceptedLeaves = new Set<string>();
-    for (const [name, right] of reparseLeaves) {
-      const outputDir = await runtime.prepareOutputDir(
-        join(reparseParent, name),
-        "fixture",
-      );
-      await icacls(outputDir, "/grant", `*S-1-1-0:${right}`);
-      if (
-        await admitted(
-          runComponentScans({
-            repository,
-            outputDir,
-            components: [{ name: "Source", paths: ["source.txt"] }],
-            planOnly: true,
-          }),
-        )
-      ) {
-        acceptedLeaves.add(name);
-        await unlink(join(outputDir, "components.json"));
-      } else {
-        await expect(
-          lstat(join(outputDir, "components.json")),
-        ).rejects.toMatchObject({ code: "ENOENT" });
-      }
-    }
-    const intermediate = join(reparseParent, "intermediate");
-    await mkdir(intermediate);
-    const child = await runtime.prepareOutputDir(
-      join(intermediate, "src"),
-      "fixture",
-    );
-    await icacls(child, "/grant", "*S-1-1-0:RX");
-    await icacls(intermediate, "/grant", "*S-1-1-0:(RD,RA,REA,RC,S,X,DC,WA)");
-    const acceptedChild = await admitted(
-      runtime.prepareOutputDir(child, "fixture"),
-    );
     const result = await runPowerShell(script, {
-      CODEX_SECURITY_TEST_REPARSE_PARENT: reparseParent,
       CODEX_SECURITY_TEST_BUN: process.execPath,
       CODEX_SECURITY_TEST_RUNTIME: new URL("../src/runtime.ts", import.meta.url)
         .href,
@@ -685,48 +634,10 @@ test.skipIf(
         ...privateProbes,
       ]),
     });
-    const observed = JSON.parse(result) as {
-      access: { read: boolean; write: boolean }[];
-      reparse: {
-        name: string;
-        stage: string;
-        win32: number;
-        rename: boolean;
-        renameWin32: number;
-      }[];
-      intermediate: { stage: string; win32: number };
-    };
-    console.info("Windows directory access", JSON.stringify(observed));
-    expect(observed.access).toEqual([
+    expect(JSON.parse(result)).toEqual([
       { read: true, write: true },
       ...privateProbes.map(() => ({ read: false, write: false })),
     ]);
-    expect(observed.reparse.map((row) => row.name)).toEqual(
-      reparseLeaves.map(([name]) => name),
-    );
-    for (const row of observed.reparse) {
-      const leaf = join(await realpath(reparseParent), row.name);
-      if (row.name !== "writable control") {
-        expect(row.rename).toBe(false);
-        expect(row.renameWin32).toBe(5);
-      }
-      if (row.stage === "complete") {
-        expect(row.win32).toBe(0);
-        expect(await realpath(leaf)).toBe(await realpath(repository));
-        expect(acceptedLeaves.has(row.name)).toBe(false);
-      } else {
-        expect(["open", "set"]).toContain(row.stage);
-        expect(row.win32).toBe(5); // ERROR_ACCESS_DENIED
-        expect(await realpath(leaf)).toBe(leaf);
-      }
-    }
-    expect(observed.reparse.at(-1)).toMatchObject({
-      stage: "complete",
-      win32: 0,
-    });
-    expect(observed.intermediate).toEqual({ stage: "complete", win32: 0 });
-    expect(acceptedChild).toBe(false);
-    expect(await realpath(child)).toBe(await realpath(join(repository, "src")));
     expect(await readFile(join(selected, "marker.txt"), "utf8")).toBe(
       "replacement",
     );

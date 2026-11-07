@@ -49,7 +49,7 @@ import {
   canonicalConfigPath,
   createWindowsOutputDirectory,
   requireSecureOutputAncestry,
-  requireWritableWindowsOutput,
+  requireWindowsOutputPath,
   resolvePluginPath,
   validateOutputDir,
 } from "./runtime.js";
@@ -797,7 +797,7 @@ async function ensureOutputDirectory(
     throw new Error("Multiscan output directories changed during preparation.");
   }
   if (process.platform === "win32") {
-    await requireWritableWindowsOutput(canonical, retainedDirectory);
+    await requireWindowsOutputPath(canonical, true, retainedDirectory);
     return canonical;
   }
   if ((directory.mode & 0o022n) !== 0n) {

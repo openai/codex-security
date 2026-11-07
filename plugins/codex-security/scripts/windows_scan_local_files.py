@@ -130,6 +130,14 @@ class _FileAttributeTagInfo(ctypes.Structure):
     ]
 
 
+class _SecurityAttributes(ctypes.Structure):
+    _fields_ = [
+        ("length", wintypes.DWORD),
+        ("descriptor", wintypes.LPVOID),
+        ("inherit", wintypes.BOOL),
+    ]
+
+
 class _FileDispositionInfo(ctypes.Structure):
     _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
 
@@ -174,6 +182,7 @@ class _OwnedHandle:
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    _ntdll = ctypes.WinDLL("ntdll")
 
     _GetFileSecurityW = _advapi32.GetFileSecurityW
     _GetFileSecurityW.argtypes = [
@@ -529,7 +538,7 @@ def _sid_text(sid: wintypes.LPVOID) -> str:
 
 
 @functools.cache
-def current_user_sid() -> str:
+def _current_user_sid() -> str:
     token = wintypes.HANDLE(-4)  # GetCurrentProcessToken pseudo-handle.
     size = wintypes.DWORD()
     _advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
@@ -558,7 +567,7 @@ def _output_directory_grants(handle: int, path: Path) -> int:
         raise ctypes.WinError(status)
     try:
         trusted = {
-            current_user_sid(),
+            _current_user_sid(),
             "S-1-5-18",
             "S-1-5-32-544",  # Current user, SYSTEM, Administrators.
             "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",  # TrustedInstaller.
@@ -574,25 +583,15 @@ def _authenticated_account(sid: wintypes.LPVOID, trustee: str) -> bool:
     # The Guest account can have its own SID without Authenticated Users membership.
     if not trustee.startswith("S-1-5-21-") or trustee.endswith("-501"):
         return False
-    name_size, domain_size, sid_type = wintypes.DWORD(), wintypes.DWORD(), wintypes.DWORD()
-    arguments = (ctypes.byref(name_size), ctypes.byref(domain_size), ctypes.byref(sid_type))
-    _advapi32.LookupAccountSidW(None, sid, None, arguments[0], None, arguments[1], arguments[2])
+    name_size, domain_size, sid_type = (ctypes.pointer(wintypes.DWORD()) for _ in range(3))
+    lookup = _advapi32.LookupAccountSidW
+    lookup(None, sid, None, name_size, None, domain_size, sid_type)
     if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
         return False
-    return (
-        bool(
-            _advapi32.LookupAccountSidW(
-                None,
-                sid,
-                ctypes.create_unicode_buffer(name_size.value),
-                arguments[0],
-                ctypes.create_unicode_buffer(domain_size.value),
-                arguments[1],
-                arguments[2],
-            )
-        )
-        and sid_type.value == 1
-    )  # SidTypeUser
+    name = ctypes.create_unicode_buffer(name_size.contents.value)
+    domain = ctypes.create_unicode_buffer(domain_size.contents.value)
+    found = lookup(None, sid, name, name_size, domain, domain_size, sid_type)
+    return bool(found) and sid_type.contents.value == 1  # SidTypeUser
 
 
 def _output_dacl_grants(acl: wintypes.LPVOID, trusted: set[str], path: Path) -> int:
@@ -644,6 +643,13 @@ def _output_dacl_grants(acl: wintypes.LPVOID, trusted: set[str], path: Path) -> 
     return granted
 
 
+def _require_stable_output(path: Path, parent_grants: int, child_grants: int = 0) -> None:
+    can_remove = parent_grants & _FILE_DELETE_CHILD or child_grants & _DELETE
+    can_replace = parent_grants & (_FILE_ADD_SUBDIRECTORY | _SET_REPARSE_POINT)
+    if can_remove and can_replace:
+        raise _invalid_path(path, "Scan output directory can be replaced by another user.")
+
+
 @contextlib.contextmanager
 def _checked_output_directory(path: Path) -> Iterator[tuple[int, int]]:
     """Hold the checked canonical chain and expose its final directory handle and grants."""
@@ -671,12 +677,7 @@ def _checked_output_directory(path: Path) -> Iterator[tuple[int, int]]:
             assert handle.value is not None
             _verify_directory(handle.value, directory)
             grants = _output_directory_grants(handle.value, directory)
-            if parent_grants & (_FILE_ADD_SUBDIRECTORY | _SET_REPARSE_POINT) and (
-                parent_grants & _FILE_DELETE_CHILD or grants & _DELETE
-            ):
-                raise _invalid_path(
-                    directory, "Scan output directory can be replaced by another user."
-                )
+            _require_stable_output(directory, parent_grants, grants)
             parent, parent_grants = handle.value, grants
         yield parent, parent_grants
 
@@ -720,14 +721,13 @@ def _relative_output_directory(
         ctypes.sizeof(_ObjectAttributes),
         parent,
         ctypes.pointer(name),
-        0x40 | 0x1000,
+        0x40 | 0x1000,  # OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
         descriptor,
-        None,  # OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
+        None,
     )
     handle = wintypes.HANDLE()
     io_status = (ctypes.c_void_p * 2)()  # IO_STATUS_BLOCK
-    ntdll = ctypes.WinDLL("ntdll")
-    status = ntdll.NtCreateFile(
+    status = _ntdll.NtCreateFile(
         ctypes.byref(handle),
         _FILE_TRAVERSE | _FILE_READ_ATTRIBUTES | _READ_CONTROL | 0x100000,
         ctypes.byref(attributes),
@@ -736,21 +736,67 @@ def _relative_output_directory(
         _FILE_ATTRIBUTE_NORMAL,
         _FILE_SHARE_READ | _FILE_SHARE_WRITE,
         1 if descriptor is None else 2,  # FILE_OPEN or FILE_CREATE
-        0x200021,
+        0x200021,  # FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE
         None,
-        0,  # FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE
+        0,
     )
-    return (ntdll.RtlNtStatusToDosError(status), None) if status < 0 else (0, handle.value)
+    return (_ntdll.RtlNtStatusToDosError(status), None) if status < 0 else (0, handle.value)
 
 
 def create_windows_output_directory(path: Path, descriptor: wintypes.LPVOID) -> int:
     with _checked_output_directory(path.parent) as (parent, grants):
-        if grants & (_FILE_ADD_SUBDIRECTORY | _SET_REPARSE_POINT) and grants & _FILE_DELETE_CHILD:
-            raise _invalid_path(path, "Scan output directory can be replaced by another user.")
+        _require_stable_output(path, grants)
         error, handle = _relative_output_directory(parent, path.name, descriptor)
         if not error:
             _close_handle(handle)
         return error
+
+
+def create_private_directory(path: Path, *, exist_ok: bool, scan_output: bool) -> Path:
+    """Create one Windows directory with a protected inheritable DACL."""
+    _require_windows()
+    # Older supported Python releases ignore mkdir's 0700 mode on Windows.
+    # Apply the same owner/SYSTEM/Administrators policy at creation so a
+    # writable parent never becomes an inheritance window.
+    volume = ctypes.create_unicode_buffer(32768)
+    flags = wintypes.DWORD()
+    if not _kernel32.GetVolumePathNameW(str(path.parent.resolve()), volume, len(volume)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not _kernel32.GetVolumeInformationW(
+        volume, None, 0, None, None, ctypes.byref(flags), None, 0
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not flags.value & 0x8:  # FILE_PERSISTENT_ACLS
+        raise ValueError("Select a directory on a Windows volume that supports ACLs.")
+
+    sid = _current_user_sid()
+    owner = "" if exist_ok else f"O:{sid}"
+    dacl = f"{owner}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
+
+    descriptor = wintypes.LPVOID()
+    if not _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        dacl, 1, ctypes.byref(descriptor), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if scan_output:
+            error = create_windows_output_directory(path, descriptor)
+        else:
+            attributes = _SecurityAttributes(ctypes.sizeof(_SecurityAttributes), descriptor, False)
+            error = (
+                0
+                if _CreateDirectoryW(str(path), ctypes.byref(attributes))
+                else ctypes.get_last_error()
+            )
+        if not error:
+            return path if exist_ok else verify_private_scan_root(path, descriptor)
+        if exist_ok and error == 183 and path.is_dir():  # ERROR_ALREADY_EXISTS
+            if scan_output:
+                require_windows_output_path(path)
+            return path
+        raise ctypes.WinError(error)
+    finally:
+        _kernel32.LocalFree(descriptor)
 
 
 def create_directory_with_same_dacl(path: Path, source: Path) -> None:

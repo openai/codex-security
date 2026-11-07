@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import base64
-import json
 import os
+import string
 import subprocess
 import sys
 from pathlib import Path
@@ -25,22 +25,32 @@ pytestmark = [
 ]
 
 
+def grant(path: Path, rights: str) -> None:
+    subprocess.run(["icacls.exe", str(path), "/grant", f"*S-1-1-0:{rights}"], check=True)
+
+
+def make_junction(path: Path, target: Path) -> None:
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(path), str(target)], check=True)
+
+
+def test_missing_output_drive_reports_a_filesystem_error() -> None:
+    for letter in reversed(string.ascii_uppercase):
+        drive = Path(f"{letter}:/")
+        if not drive.is_dir():
+            with pytest.raises(OSError):
+                storage.create_private_directory(drive, scan_output=True)
+            return
+    pytest.skip("requires an unavailable drive letter")
+
+
 def test_scan_directory_checks_parent_replacement_rights(tmp_path: Path) -> None:
     shared = tmp_path / "shared"
     selected = shared / "selected"
     selected.mkdir(parents=True)
-    subprocess.run(
-        ["icacls.exe", str(shared), "/grant", "*S-1-1-0:(AD)"],
-        check=True,
-        capture_output=True,
-    )
+    grant(shared, "(AD)")
     scan = storage.create_private_temporary_directory(selected, prefix="scan_")
     assert workbench_db.require_canonical_scan_directory(scan) == scan
-    subprocess.run(
-        ["icacls.exe", str(selected), "/grant", "*S-1-1-0:(DE)"],
-        check=True,
-        capture_output=True,
-    )
+    grant(selected, "(DE)")
     with pytest.raises(OSError, match="can be replaced"):
         storage.create_private_temporary_directory(selected, prefix="next_")
     with pytest.raises(SystemExit, match="can be replaced"):
@@ -51,11 +61,7 @@ def test_scan_directory_checks_parent_replacement_rights(tmp_path: Path) -> None
 def test_registration_checks_reparse_access_before_archiving(tmp_path: Path, right: str) -> None:
     output = tmp_path / "output"
     output.mkdir()
-    subprocess.run(
-        ["icacls.exe", str(output), "/grant", f"*S-1-1-0:({right})"],
-        check=True,
-        capture_output=True,
-    )
+    grant(output, f"({right})")
     args = argparse.Namespace(scan_dir=output, archive_existing=False, archived_scan_dir=None)
     with pytest.raises(SystemExit, match="reparse point"):
         workbench_db.require_cli_scan_directory(tmp_path / "repo", args)
@@ -74,28 +80,18 @@ def test_registration_checks_reparse_access_before_archiving(tmp_path: Path, rig
     reason="creates a disposable local account on a hosted Windows runner",
 )
 def test_native_directory_write_rights_for_setting_reparse_data(tmp_path: Path) -> None:
-    def grant(path: Path, rights: str) -> None:
-        subprocess.run(
-            ["icacls.exe", str(path), "/grant", f"*S-1-1-0:{rights}"],
-            check=True,
-            capture_output=True,
-        )
-
     grant(tmp_path, "(OI)(CI)RX")
     target = tmp_path / "synthetic target"
     target.mkdir()
     (target / "src").mkdir()
-    subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(tmp_path / "source junction"), str(target)],
-        check=True,
-        capture_output=True,
-    )
-    for name, rights in {
+    make_junction(tmp_path / "source junction", target)
+    leaves = {
         "write attributes": "(WA)",
         "write data": "(WD)",
         "write data and attributes": "(WD,WA)",
         "writable control": "M",
-    }.items():
+    }
+    for name, rights in leaves.items():
         leaf = tmp_path / name
         leaf.mkdir()
         grant(leaf, rights)
@@ -108,33 +104,21 @@ def test_native_directory_write_rights_for_setting_reparse_data(tmp_path: Path) 
     with pytest.raises(SystemExit, match="can be replaced"):
         workbench_db.require_canonical_scan_directory(child)
 
-    script = Path(__file__).with_name("windows-other-user-access.ps1")
+    script = Path(__file__).with_name("windows-other-user-access.ps1").read_text(encoding="utf-8")
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    result = subprocess.run(
+    subprocess.run(
         [
             str(powershell),
             "-NoProfile",
             "-NonInteractive",
             "-EncodedCommand",
-            base64.b64encode(script.read_text(encoding="utf-8").encode("utf-16-le")).decode(
-                "ascii"
-            ),
+            base64.b64encode(script.encode("utf-16-le")).decode("ascii"),
         ],
-        env={
-            **os.environ,
-            "CODEX_SECURITY_TEST_REPARSE_ONLY": "1",
-            "CODEX_SECURITY_TEST_REPARSE_PARENT": str(tmp_path),
-        },
-        capture_output=True,
-        text=True,
+        env={**os.environ, "CODEX_SECURITY_TEST_REPARSE_PARENT": str(tmp_path)},
+        check=True,
     )
-    assert result.returncode == 0, result.stderr
-    observed = json.loads(result.stdout)
-    rows = observed["reparse"]
-    assert len(rows) == 4 and all(row["stage"] == "complete" for row in rows), json.dumps(rows)
-    for row in rows:
-        assert (tmp_path / row["name"]).resolve() == target
-    assert observed["intermediate"] == {"stage": "complete", "win32": 0}, observed
+    for name in leaves:
+        assert (tmp_path / name).resolve() == target
     assert child.resolve() == target / "src"
 
 
@@ -142,11 +126,7 @@ def test_delete_child_and_parent_reparse_rights_require_no_create_grant(tmp_path
     parent = tmp_path / "parent"
     output = parent / "output"
     output.mkdir(parents=True)
-    subprocess.run(
-        ["icacls.exe", str(parent), "/grant", "*S-1-1-0:(DC,WA)"],
-        check=True,
-        capture_output=True,
-    )
+    grant(parent, "(DC,WA)")
     with pytest.raises(SystemExit, match="can be replaced"):
         workbench_db.require_canonical_scan_directory(output)
 
@@ -162,21 +142,14 @@ def test_generated_target_name_must_be_an_ordinary_directory(
     project = tmp_path / "project"
     segment = root / project.name
 
-    def create_junction() -> None:
-        subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(segment), str(other)],
-            check=True,
-            capture_output=True,
-        )
-
     if existing:
-        create_junction()
+        make_junction(segment, other)
     else:
         open_relative = windows_scan_local_files._relative_output_directory
 
         def create_competing_directory(parent, basename, descriptor=None):
             if descriptor is not None and basename == project.name:
-                create_junction()
+                make_junction(segment, other)
             return open_relative(parent, basename, descriptor)
 
         monkeypatch.setattr(
@@ -197,11 +170,7 @@ def test_private_temporary_directory_rejects_post_creation_substitution(
 ) -> None:
     parent = tmp_path / "shared"
     parent.mkdir()
-    subprocess.run(
-        ["icacls.exe", str(parent), "/grant", "*S-1-1-0:(OI)(CI)R"],
-        check=True,
-        capture_output=True,
-    )
+    grant(parent, "(OI)(CI)R")
     external = tmp_path / "external"
     external.mkdir()
     substituted: list[Path] = []
@@ -210,12 +179,7 @@ def test_private_temporary_directory_rejects_post_creation_substitution(
     def replace_before_verification(path: Path, descriptor: object) -> Path:
         path.rmdir()
         if junction:
-            subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(path), str(external)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            make_junction(path, external)
         else:
             path.mkdir()  # An ordinary replacement inherits its parent's DACL.
         substituted.append(path)

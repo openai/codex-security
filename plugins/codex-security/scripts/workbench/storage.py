@@ -8,6 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+if os.name == "nt":
+    import windows_scan_local_files as windows_files
+
 
 def state_dir(*, canonical: bool = True) -> Path:
     """Return the workbench state path, resolving symlinks unless canonical is false."""
@@ -66,92 +69,16 @@ def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> lis
     ]
 
 
-def _create_private_windows_directory(path: Path, *, exist_ok: bool, scan_output: bool) -> Path:
-    """Create one Windows directory with a protected inheritable DACL."""
-    import ctypes
-    import ctypes.wintypes
-
-    from windows_scan_local_files import (
-        create_windows_output_directory,
-        current_user_sid,
-        require_windows_output_path,
-        verify_private_scan_root,
-    )
-
-    class SecurityAttributes(ctypes.Structure):
-        _fields_ = [
-            ("length", ctypes.wintypes.DWORD),
-            ("descriptor", ctypes.wintypes.LPVOID),
-            ("inherit", ctypes.wintypes.BOOL),
-        ]
-
-    # Older supported Python releases ignore mkdir's 0700 mode on Windows.
-    # Apply the same owner/SYSTEM/Administrators policy at creation so a
-    # writable parent never becomes an inheritance window.
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    volume = ctypes.create_unicode_buffer(32768)
-    flags = ctypes.wintypes.DWORD()
-    if not kernel.GetVolumePathNameW(str(path.parent.resolve()), volume, len(volume)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if not kernel.GetVolumeInformationW(volume, None, 0, None, None, ctypes.byref(flags), None, 0):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if not flags.value & 0x8:  # FILE_PERSISTENT_ACLS
-        raise ValueError("Select a directory on a Windows volume that supports ACLs.")
-
-    security = ctypes.WinDLL("advapi32", use_last_error=True)
-    sid = current_user_sid()
-    owner = "" if exist_ok else f"O:{sid}"
-    dacl = f"{owner}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
-
-    descriptor = ctypes.wintypes.LPVOID()
-    if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        dacl, 1, ctypes.byref(descriptor), None
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        if scan_output:
-            error = create_windows_output_directory(path, descriptor)
-        else:
-            attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
-            error = (
-                0
-                if kernel.CreateDirectoryW(str(path), ctypes.byref(attributes))
-                else ctypes.get_last_error()
-            )
-        if not error:
-            return path if exist_ok else verify_private_scan_root(path, descriptor)
-        if exist_ok and error == 183 and path.is_dir():  # ERROR_ALREADY_EXISTS
-            if scan_output:
-                require_windows_output_path(path)
-            return path
-        raise ctypes.WinError(error)
-    finally:
-        kernel.LocalFree(descriptor)
-
-
 def create_private_directory(path: Path, *, scan_output: bool = False) -> None:
     """Create missing directories privately without changing existing permissions."""
-    if os.name == "nt" and path.is_dir():
-        if scan_output:
-            from windows_scan_local_files import require_windows_output_path
-
-            require_windows_output_path(path)
-        return
-    if os.name == "nt" and scan_output and not path.parent.is_dir():
-        create_private_directory(path.parent, scan_output=True)
-    try:
-        if os.name == "nt":
-            _create_private_windows_directory(path, exist_ok=True, scan_output=scan_output)
-        else:
-            path.mkdir(mode=0o700, exist_ok=True)
-    except FileNotFoundError:
-        if path.parent == path:
-            raise
+    if path.parent != path and not path.parent.is_dir():
         create_private_directory(path.parent, scan_output=scan_output)
-        if os.name == "nt":
-            _create_private_windows_directory(path, exist_ok=True, scan_output=scan_output)
-        else:
-            path.mkdir(mode=0o700, exist_ok=True)
+    if os.name != "nt":
+        path.mkdir(mode=0o700, exist_ok=True)
+    elif not path.is_dir():
+        windows_files.create_private_directory(path, exist_ok=True, scan_output=scan_output)
+    elif scan_output:
+        windows_files.require_windows_output_path(path)
 
 
 def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
@@ -164,7 +91,7 @@ def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
     for _ in range(100):
         path = parent / f"{prefix}{secrets.token_hex(4)}"
         try:
-            return _create_private_windows_directory(path, exist_ok=False, scan_output=True)
+            return windows_files.create_private_directory(path, exist_ok=False, scan_output=True)
         except FileExistsError:
             continue
     raise FileExistsError(f"Could not create a unique directory beneath {parent}.")
