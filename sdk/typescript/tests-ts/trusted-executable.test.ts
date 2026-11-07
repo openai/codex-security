@@ -17,7 +17,11 @@ import {
   resolveTrustedExecutable,
   withProtectedExecutableRoots,
 } from "../src/trusted-executable.js";
+import { bundledCodexSdkEnvironment } from "../src/codex-sdk-environment.js";
+import { resolveCodexCommand } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { PYTHON } from "./support/security-policy.js";
+import { nodeCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -97,14 +101,16 @@ describe("trusted executable resolution", () => {
       const first = await temporaryDirectory(),
         second = await temporaryDirectory(),
         tools = await temporaryDirectory();
+      const alternate = join(dirname(first), basename(first).toUpperCase());
+      const firstAlias = existsSync(alternate) ? alternate : first;
       for (const [name, directory] of [
-        ["first", first],
+        ["first", firstAlias],
         ["second", second],
       ] as const)
         await symlink(join(directory, "tool"), join(tools, name));
       // One checkout starts missing, the other replaces a link to a trusted tool.
       await symlink("/bin/sh", join(first, "tool"));
-      await symlink(join(first, "tool"), join(tools, "git"));
+      await symlink(join(firstAlias, "tool"), join(tools, "git"));
       const environments = await Promise.all(
         [first, second].map((root) =>
           withProtectedExecutableRoots([root], async () => {
@@ -548,32 +554,78 @@ describe("trusted executable resolution", () => {
     );
   });
 
-  test("Windows checkout keeps sibling ripgrep aliases out of the child PATH", async () => {
-    const root = await temporaryDirectory();
-    const source = join(root, "source"),
-      aliases = join(root, "aliases"),
-      pending = join(root, "pending"),
-      tools = join(root, "tools");
-    await Promise.all(
-      [source, aliases, pending, tools].map((path) => mkdir(path)),
-    );
-    const sourceTool = join(source, "rg.exe");
-    await writeFile(sourceTool, "source tool");
-    await symlink(sourceTool, join(aliases, "rg.com"));
-    await symlink(join(source, "later.exe"), join(pending, "rg.exe"), "file");
-    await writeFile(join(tools, "git.exe"), "operator tool");
-    expect(
-      await resolveWindowsExecutable(
+  test.each(["direct", "relay", "linked parent"])(
+    "Windows campaign children exclude %s tool links through a selected source",
+    async (route) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "source"),
+        aliases = join(root, "aliases"),
+        pending = join(root, "pending"),
+        tools = join(root, "tools");
+      await Promise.all(
+        [source, aliases, pending, tools].map((path) => mkdir(path)),
+      );
+      const alternate = join(root, "SOURCE");
+      const spelling = existsSync(alternate) ? alternate : source;
+      const via = route === "direct" ? spelling : join(root, "via");
+      if (route === "linked parent") await symlink(spelling, via, "junction");
+      if (route === "relay") {
+        await mkdir(via);
+        for (const name of ["git.exe", "rg.exe"])
+          await symlink(join(spelling, name), join(via, name), "file");
+      }
+      const node = nodeCommand().command;
+      await symlink(node, join(tools, "git.exe"), "file");
+      await symlink(node, join(source, "git.exe"), "file");
+      await symlink(join(via, "git.exe"), join(aliases, "git.exe"), "file");
+      await symlink(join(via, "rg.exe"), join(pending, "rg.com"), "file");
+      if (process.platform !== "win32")
+        await symlink(join(pending, "rg.com"), join(pending, "rg"));
+      const command = await resolveWindowsExecutable(
         "git",
         [pending, aliases, tools].join(delimiter),
         source,
         true,
-      ),
-    ).toEqual({
-      executable: join(tools, "git.exe"),
-      environment: { KEEP: "ok", PATH: tools },
-    });
-  });
+      );
+      expect(command).toEqual({
+        executable: join(tools, "git.exe"),
+        environment: { KEEP: "ok", PATH: tools },
+      });
+      await unlink(join(source, "git.exe"));
+      for (const name of ["git.exe", "rg.exe"])
+        await writeFile(join(source, name), "checkout-owned executable");
+      const environment = bundledCodexSdkEnvironment(
+        resolveCodexCommand({}).command,
+        {
+          PATH: process.env["PATH"] ?? "",
+        },
+      );
+      await symlink(
+        Bun.which("rg", { PATH: environment["PATH"] })!,
+        join(tools, process.platform === "win32" ? "rg.exe" : "rg"),
+        "file",
+      );
+      const checkout = join(root, "checkout");
+      await mkdir(checkout);
+      await writeFile(join(checkout, "visible.ts"), "");
+      const inventory = spawnSync(
+        command!.executable,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "generate-in-scope-files",
+          "--repo",
+          checkout,
+          "--scope",
+          ".",
+          "--out",
+          join(root, "inventory.txt"),
+        ],
+        { env: command!.environment, encoding: "utf8" },
+      );
+      expect(inventory.status, inventory.stderr).toBe(0);
+      expect(inventory.stdout).toContain("Recorded 1 in-scope files.");
+    },
+  );
 
   test("removes PATH entries containing repository-linked Windows shims", async () => {
     const root = await temporaryDirectory();

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { constants } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { access, readlink, realpath, stat } from "node:fs/promises";
+import { access, realpath, stat } from "node:fs/promises";
 import {
   basename,
   delimiter,
@@ -33,7 +33,7 @@ interface ToolPathView {
 const campaignScope = new AsyncLocalStorage<{
   roots: readonly string[];
   views: Map<string, ToolPathView>;
-  project?: (
+  project: (
     path: string,
     cwd: string,
     roots: readonly string[],
@@ -49,7 +49,7 @@ async function campaignPathHelper() {
   const { bundledPluginRoot } = await import("./runtime.js");
   const path = join(await bundledPluginRoot(), "mcp/helpers.mjs");
   const project = (await import(pathToFileURL(path).href)).default
-    .posixToolPath;
+    .inventoryToolPath;
   if (typeof project !== "function")
     throw new Error("The bundled plugin is missing campaign tool lookup.");
   return project;
@@ -66,8 +66,7 @@ export async function withProtectedExecutableRoots<T>(
       ...new Set([...(campaignScope.getStore()?.roots ?? []), ...canonical]),
     ],
     views: new Map<string, ToolPathView>(),
-    project:
-      process.platform === "win32" ? undefined : await campaignPathHelper(),
+    project: await campaignPathHelper(),
   };
   try {
     return await campaignScope.run(scope, run);
@@ -161,7 +160,7 @@ export async function inspectTrustedExecutable(
   }
 
   let view: ToolPathView | undefined;
-  if (campaign?.project) {
+  if (campaign) {
     // Workers inherit this PATH across process boundaries. Keep the links until
     // every row, including its pending child processes, has settled.
     const path = entries.join(delimiter);
@@ -206,18 +205,14 @@ export async function inspectTrustedExecutable(
   const unsafeEntries = new Set<string>();
   let executable: string | null = null;
   for (const current of candidates) {
-    if (campaign && windows && current.entry !== null) {
-      // A sibling checkout can populate or replace this Windows shim later.
-      const link = await readlink(current.path).catch(() => undefined);
-      if (link && isProtected(resolve(dirname(current.path), link))) {
-        unsafeEntries.add(current.entry);
-        continue;
-      }
+    const crossesSource = view !== undefined && !view.allows(current.path);
+    if (!pathLike && crossesSource) {
+      if (current.entry !== null) unsafeEntries.add(current.entry);
+      continue;
     }
     const canonical = await realpath(current.path).catch(() => null);
     if (canonical === null) continue;
-    const crossesSource = view !== undefined && !view.allows(current.path);
-    if (isProtected(canonical) || (!pathLike && crossesSource)) {
+    if (isProtected(canonical)) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
@@ -253,7 +248,7 @@ export async function inspectTrustedExecutable(
     if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
   }
   const filteredPath =
-    view?.path ??
+    (windows ? undefined : view?.path) ??
     entries.filter((entry) => !unsafeEntries.has(entry)).join(delimiter);
   // An empty POSIX PATH searches the current directory.
   sanitizedEnvironment["PATH"] =

@@ -1323,7 +1323,8 @@ On POSIX, campaign processes and script-based inventory tools search readable
 tool directories. When a directory contains a link into a selected source, its
 other tools remain available through temporary links. Keep helpers that locate
 their installation relative to their invoked path, such as virtual environments,
-in directories without such links.
+in directories without such links. On Windows, the campaign omits a tool directory
+from the child PATH if its Git or ripgrep link passes through a selected source.
 
 CSV scopes are literal paths relative to each checkout, including names such
 as `~/src`.

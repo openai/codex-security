@@ -24,6 +24,7 @@ import {
   dirname,
   delimiter,
   isAbsolute,
+  parse,
   resolve,
   sep,
 } from "node:path";
@@ -31,7 +32,11 @@ import { createRequire } from "node:module";
 import { constants, tmpdir } from "node:os";
 import { spawnWindowsProcess } from "../../../native/windows-process.mjs";
 import { nativeTarget } from "../../../native/platform.mjs";
-import { decodePosixBytes, encodePosixPath } from "./posix-path";
+import {
+  decodePosixBytes,
+  encodePosixPath,
+  resolvePosixPath,
+} from "./posix-path";
 import { decodeUtf8 } from "./utf8";
 import {
   ancestors,
@@ -142,6 +147,42 @@ function scriptExecutable(command: string): boolean {
   }
 }
 
+// libuv can return Win32 link targets using the extended drive or UNC spelling.
+function windowsLinkPath(path: string): string {
+  return path
+    .replace(/^\\\\[?.]\\UNC\\/iu, "\\\\")
+    .replace(/^\\\\[?.]\\(?=[a-z]:\\)/iu, "");
+}
+
+function linkTarget(path: string): string | undefined {
+  if (sep === "\\") {
+    let info: ReturnType<typeof lstat>;
+    try {
+      info = lstat(path);
+    } catch (error) {
+      // Only an absent entry may later materialize in an external directory.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!("isNameSurrogate" in info) || !info.isNameSurrogate()) return;
+    // SDK source paths are UTF-8. An unreadable reparse target cannot be trusted.
+    if (!path.isWellFormed())
+      throw new Error("Cannot inspect this Windows link");
+    return windowsLinkPath(
+      decodeUtf8(readlinkSync(fsPath(path), { encoding: "buffer" })),
+    );
+  }
+  const name = encodePosixPath(path);
+  if (lstatSync(name, { throwIfNoEntry: false })?.isSymbolicLink())
+    return decodePosixBytes(readlinkSync(name, { encoding: "buffer" }));
+}
+
+function canonicalComponent(path: string): string {
+  return sep === "\\"
+    ? windowsLinkPath(canonical(path, false))
+    : decodePosixBytes(resolvePosixPath(encodePosixPath(path), false));
+}
+
 // A campaign can replace files in its checkouts after preparing the workers.
 // Check every component owned by the campaign, including intermediate links
 // whose current destination is an external executable.
@@ -151,8 +192,14 @@ function campaignPathCheck(
 ) {
   const resolved = new Map<string, string | null>();
   function expand(directory: string, target: string): string | null {
-    let parent = isAbsolute(target) ? "/" : directory;
-    for (const part of target.split("/")) {
+    // Win32 normalizes drive-relative and rooted names before filesystem
+    // lookup. POSIX processes ".." after following the preceding symlink.
+    const path =
+      sep === "\\" ? resolve(directory, windowsLinkPath(target)) : target;
+    const root = parse(path).root;
+    let parent =
+      root && sep === "\\" ? canonicalComponent(root) : root || directory;
+    for (const part of path.slice(root.length).split(sep)) {
       if (!part || part === ".") continue;
       if (part === "..") {
         parent = dirname(parent);
@@ -162,19 +209,11 @@ function campaignPathCheck(
       const child = append(parent, part);
       if (!resolved.has(child)) {
         resolved.set(child, null); // Detect symlink cycles while expanding.
-        const link = lstatSync(fsPath(child), {
-          throwIfNoEntry: false,
-        })?.isSymbolicLink();
+        const link = linkTarget(child);
+        // Filesystems may canonicalize case or DOS short names even without a link.
         resolved.set(
           child,
-          link
-            ? expand(
-                parent,
-                decodePosixBytes(
-                  readlinkSync(fsPath(child), { encoding: "buffer" }),
-                ),
-              )
-            : child,
+          link === undefined ? canonicalComponent(child) : expand(parent, link),
         );
       }
       const next = resolved.get(child);
@@ -244,21 +283,25 @@ function scriptPathDirectory(
   return copy;
 }
 
-export function posixToolPath(
+export function inventoryToolPath(
   path: string,
   cwd: string,
   roots: readonly string[],
   mode: "native" | "script" | "campaign",
 ) {
   const temporary: string[] = [];
-  const boundaries = new Set(roots);
+  const key = (path: string) =>
+    sep === "\\" ? windowsLinkPath(path).toLowerCase() : path;
+  const boundaries = new Set(roots.map(key));
   const isProtected = (entry: string) => {
     for (const parent of ancestors(entry))
-      if (boundaries.has(parent)) return true;
+      if (boundaries.has(key(parent))) return true;
     return false;
   };
   const allows =
     mode === "campaign" ? campaignPathCheck(isProtected, cwd) : undefined;
+  // Windows removes unsafe search entries in the SDK, before CreateProcess.
+  if (windows) return { path, allows, cleanup() {} };
   const directories = path.split(delimiter).flatMap((entry) => {
     try {
       const lookup = isAbsolute(entry) ? entry : append(cwd, entry);
@@ -422,7 +465,7 @@ function spawnInventoryTool(
 ) {
   if (windows || inherited.PATH === undefined)
     return spawnTool(command, args, options, inherited);
-  const view = posixToolPath(
+  const view = inventoryToolPath(
     inherited.PATH,
     options.cwd ?? process.cwd(),
     [root],
