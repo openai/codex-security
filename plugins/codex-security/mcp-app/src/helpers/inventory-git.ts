@@ -1,6 +1,7 @@
 import {
   environmentValue,
   isMissingPathError,
+  readChunks,
   resolvedPathText as canonical,
 } from "./helper-files";
 import {
@@ -9,6 +10,7 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import type { Writable } from "node:stream";
 import {
   basename,
@@ -19,7 +21,7 @@ import {
   sep,
 } from "node:path";
 import { createRequire } from "node:module";
-import { constants } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { spawnWindowsProcess } from "../../../native/windows-process.mjs";
 import { nativeTarget } from "../../../native/platform.mjs";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
@@ -29,6 +31,7 @@ import {
   append,
   executable,
   exists,
+  fsPath,
   inside,
   linkedParent,
   lstat,
@@ -104,13 +107,91 @@ function isRepositoryPath(root: string, path: string): boolean {
   }
 }
 
-/** An env-based interpreter or a wrapper can perform another PATH lookup. */
-function posixChildPath(path: string, cwd: string, root: string): string {
+// The kernel can dispatch a shebang or the POSIX shell can interpret an
+// executable text file after ENOEXEC. Only skip inspection for native images.
+const nativeImageMagic = new Set(
+  process.platform === "darwin"
+    ? [
+        0xfeedface,
+        0xcefaedfe,
+        0xfeedfacf,
+        0xcffaedfe, // Mach-O
+        0xcafebabe,
+        0xbebafeca,
+        0xcafebabf,
+        0xbfbafeca, // universal binaries
+      ]
+    : [0x7f454c46],
+); // ELF
+
+function scriptExecutable(command: string): boolean {
+  if (!executable(command)) return false;
+  try {
+    for (const chunk of readChunks(command))
+      return chunk.length < 4 || !nativeImageMagic.has(chunk.readUInt32BE());
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function scriptPathDirectory(
+  directory: string,
+  root: string,
+  temporary: string[],
+): string {
+  const entries = readdirSync(fsPath(directory), {
+    withFileTypes: true,
+    encoding: "buffer",
+  });
+  const allowed = entries.filter((entry) => {
+    if (!entry.isSymbolicLink()) return true;
+    const path = append(directory, decodePosixBytes(entry.name));
+    return !executable(path) || !isRepositoryPath(root, canonical(path));
+  });
+  if (allowed.length === entries.length) return directory;
+  // Keep safe neighbors in their original PATH position. env and the kernel
+  // then handle lookup, argument splitting and missing interpreters normally.
+  let copy: string | undefined;
+  for (const path of [tmpdir(), "/tmp"]) {
+    try {
+      const parent = canonical(path);
+      if (!parent.includes(delimiter) && !isRepositoryPath(root, parent)) {
+        const candidate = append(
+          parent,
+          `codex-security-tools-${randomUUID()}`,
+        );
+        mkdirSync(fsPath(candidate), { mode: 0o700 });
+        copy = candidate;
+        break;
+      }
+    } catch {
+      // Another external temporary directory may be usable.
+    }
+  }
+  if (!copy)
+    throw new Error("No external temporary directory for inventory tools");
+  temporary.push(copy);
+  for (const entry of allowed) {
+    const name = decodePosixBytes(entry.name);
+    symlinkSync(fsPath(append(directory, name)), fsPath(append(copy, name)));
+  }
+  return copy;
+}
+
+function posixChildPath(
+  path: string,
+  cwd: string,
+  root: string,
+  script: boolean,
+  temporary: string[],
+): string {
   const directories = path.split(delimiter).flatMap((entry) => {
     try {
       const lookup = isAbsolute(entry) ? entry : append(cwd, entry);
-      const directory = canonical(lookup);
+      let directory = canonical(lookup);
       if (isRepositoryPath(root, directory)) return [];
+      if (script) directory = scriptPathDirectory(directory, root, temporary);
       // A directory containing ":" can be on PATH through an external alias.
       if (directory.includes(delimiter))
         return lookup.includes(delimiter) ||
@@ -236,13 +317,56 @@ function windowsToolPaths(searchPath: string): string[] {
   return paths;
 }
 
+type ToolOptions = SpawnOptions & {
+  cwd?: string;
+  stdio: ["ignore" | "pipe", "pipe", "pipe"];
+};
+
+function spawnInventoryTool(
+  command: string,
+  args: string[],
+  options: ToolOptions,
+  inherited: Record<string, string>,
+  root: string,
+) {
+  if (windows || inherited.PATH === undefined)
+    return spawnTool(command, args, options, inherited);
+  const temporary: string[] = [];
+  const cleanup = () => {
+    for (const directory of temporary) {
+      try {
+        rmSync(fsPath(directory), { recursive: true, force: true });
+      } catch {
+        // A cleanup failure must not change the tool's exit status.
+      }
+    }
+  };
+  try {
+    const PATH = posixChildPath(
+      inherited.PATH,
+      options.cwd ?? process.cwd(),
+      root,
+      scriptExecutable(command),
+      temporary,
+    );
+    const result = spawnTool(
+      command,
+      args,
+      { ...options, env: { ...(options.env ?? process.env), PATH } },
+      { ...inherited, PATH },
+    );
+    if (temporary.length) result.child.once("close", cleanup);
+    return result;
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
 function spawnTool(
   command: string,
   args: string[],
-  options: SpawnOptions & {
-    cwd?: string;
-    stdio: ["ignore" | "pipe", "pipe", "pipe"];
-  },
+  options: ToolOptions,
   inheritedEnvironment: Record<string, string>,
   inputFd: 0 | 3 = 0,
 ) {
@@ -376,12 +500,6 @@ function gitProcess(repo: string, args: string[]) {
   if (!command) return undefined;
   const env: NodeJS.ProcessEnv = { ...process.env };
   const inherited = inheritedToolPaths();
-  if (!windows && inherited.PATH !== undefined)
-    env.PATH = inherited.PATH = posixChildPath(
-      inherited.PATH,
-      process.cwd(),
-      root,
-    );
   for (const name of Object.keys(env)) {
     const key = windows ? name.toUpperCase() : name;
     if (repositoryEnvironment.includes(key)) delete env[name];
@@ -389,7 +507,7 @@ function gitProcess(repo: string, args: string[]) {
   env.GIT_LITERAL_PATHSPECS = "1";
   env.GIT_NO_LAZY_FETCH = "1";
   env.GIT_ALLOW_PROTOCOL = "";
-  return spawnTool(
+  return spawnInventoryTool(
     command,
     [
       "-c",
@@ -402,6 +520,7 @@ function gitProcess(repo: string, args: string[]) {
     ],
     { env, stdio: ["pipe", "pipe", "pipe"] },
     inherited,
+    root,
   );
 }
 
@@ -416,24 +535,19 @@ export async function runRipgrep(
   ]);
   const rawWindowsLookup =
     windows && [repo, ...args, ...Object.values(inherited)].some(rawToolValue);
-  let env: NodeJS.ProcessEnv | undefined;
-  if (!windows && inherited.PATH !== undefined) {
-    inherited.PATH = posixChildPath(inherited.PATH, repo, root);
-    env = { ...process.env, PATH: inherited.PATH };
-  }
   let denied: unknown;
   for (const command of trustedTools("rg", repo, root, rawWindowsLookup)) {
     try {
       return await collect(
-        spawnTool(
+        spawnInventoryTool(
           command,
           args,
           {
             cwd: repo,
-            env,
             stdio: ["ignore", "pipe", "pipe"],
           },
           inherited,
+          root,
         ),
       );
     } catch (error) {
