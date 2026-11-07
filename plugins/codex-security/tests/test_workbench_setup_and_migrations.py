@@ -108,6 +108,8 @@ EXPECTED_MIGRATIONS = [
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
     (63, "retain unverified Deep Scan worker attempts"),
+    (64, "save scan target Git positions"),
+    (65, "save scan Git repository identities"),
 ]
 
 
@@ -1902,6 +1904,62 @@ def test_workbench_repairs_shadowed_capability_preflight_migration(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type = 'index' AND name = 'workspaces_by_thread_and_updated_at'"
         ).fetchone() == (1,)
+
+
+@pytest.mark.parametrize("prefix_version", [54, 58, 61, 63])
+@pytest.mark.parametrize("main_reader", [False, True])
+def test_upgrade_preserves_pre_release_scan_git_identity(
+    tmp_path: Path, prefix_version: int, main_reader: bool
+) -> None:
+    database = tmp_path / "workbench.sqlite3"
+    timestamp = "2026-07-01T00:00:00Z"
+    identity = json.dumps({"commonDirectoryIdentity": "synthetic"})
+    migrations = SCHEMA.MIGRATIONS
+    with sqlite3.connect(database) as connection:
+        create_migration_history(connection)
+        apply_historical_migrations(
+            connection,
+            (
+                *migrations[: prefix_version - 1],
+                (prefix_version, *migrations[63][1:]),
+                (prefix_version + 1, *migrations[64][1:]),
+            ),
+            timestamp,
+        )
+        insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(
+            connection, timestamp, target_git_prefix="component", target_git_identity_json=identity
+        )
+        if main_reader:
+            # Released readers repair their additive columns under the preview version numbers.
+            for version, _, sql in migrations[prefix_version - 1 : prefix_version + 1]:
+                if version in (54, 55, 58, 59, 61):  # Released additive repairs.
+                    for statement in SCHEMA.sql_statements(sql):
+                        connection.execute(statement)
+
+    run_workbench(tmp_path, "database-info")
+    run_workbench(tmp_path, "database-info")
+
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            == EXPECTED_MIGRATIONS
+        )
+        assert connection.execute(
+            "SELECT target_git_prefix, target_git_identity_json FROM scans WHERE id = 'legacy-scan'"
+        ).fetchone() == ("component", identity)
+        assert connection.execute(
+            "SELECT applied_at FROM schema_migrations WHERE version IN (64, 65) ORDER BY version"
+        ).fetchall() == [(timestamp,), (timestamp,)]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        assert {
+            "retained_checkpoint_heads_json",
+            "target_git_prefix",
+            "target_git_identity_json",
+        } <= columns
 
 
 def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path) -> None:

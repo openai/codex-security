@@ -2119,7 +2119,14 @@ Comparisons classify findings as new, persisting, reopened, not observed, resolv
 or unknown. An absent finding in the later scope is not observed; absence alone
 does not verify remediation. A finding is resolved only after it was explicitly
 closed as already fixed. Excluded paths and uncertain matches remain unknown.
-One comparison ID is compared with the latest completed scan.
+With one scan ID, the CLI compares that scan with the latest completed scan.
+When two scans reviewed identical content, a comparison groups unique findings
+with the same vulnerability class, primary source location, and instance. Saved
+confirmed and related decisions take precedence. Uncertain pairs remain eligible
+for this match. Git scans require the same saved target position. Older scans
+without a saved position use saved decisions. Two recorded, different Git origins
+are treated as distinct repositories, even when the checkout path and inode match.
+A remote rename therefore starts a new comparison history.
 
 ```bash
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
@@ -2132,10 +2139,10 @@ instance. Matching preserves the case of saved paths. Codex can request the
 saved evidence to distinguish separate causes at that site. Automatic matching
 under a cost limit keeps its single comparison call.
 
-Only high-confidence root-cause matches are grouped. Uncertain and related
-findings remain separate. Rebuilding retains stable identities, triage, and
-sealed artifacts; interruption preserves completed comparisons. Model/effort
-changes alone do not invalidate cached decisions.
+Semantic matching groups high-confidence root-cause matches and records
+uncertain or related pairs separately. Rebuilding retains stable identities,
+triage, and sealed artifacts; interruption preserves completed comparisons.
+Model/effort changes alone do not invalidate cached decisions.
 
 ```ts
 import { readFile } from "node:fs/promises";

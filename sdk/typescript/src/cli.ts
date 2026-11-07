@@ -317,6 +317,7 @@ import {
   comparisonFindingGroups,
   selectedComparisonContext,
   comparisonForScan,
+  findingIdsByOccurrence,
   matchScanFindingsInternal,
   unionFindingGroups,
   type matchScanFindings,
@@ -8244,18 +8245,28 @@ async function matchAllScans(
   let findingMatches = 0;
   let relatedPairs = 0;
   let uncertainPairs = 0;
-  const newlyMatchedGroups: string[][] = [];
+  const learnedComparisons: {
+    beforeScanId: string;
+    afterScanId: string;
+    groups: string[][];
+  }[] = [];
   for (const {
     afterScanId,
     afterFindings,
     beforeScans,
     knownFindingGroups = [],
+    excludedScanIds,
   } of batches) {
     options.signal?.throwIfAborted();
     const before = beforeScans.flatMap(({ findings }) => findings);
+    const excluded = new Set(excludedScanIds);
     const knownGroups = unionFindingGroups([
       ...knownFindingGroups,
-      ...newlyMatchedGroups,
+      ...learnedComparisons.flatMap((prior) =>
+        excluded.has(prior.beforeScanId) || excluded.has(prior.afterScanId)
+          ? []
+          : prior.groups,
+      ),
     ]);
     const input: ScanComparisonInput = {
       before,
@@ -8274,6 +8285,7 @@ async function matchAllScans(
       scanId,
       comparison: comparisonForScan(matching, findings),
     }));
+    const findingIds = findingIdsByOccurrence(input);
     for (const { scanId, comparison } of comparisons) {
       options.signal?.throwIfAborted();
       await dependencies.runWorkbench(
@@ -8293,8 +8305,11 @@ async function matchAllScans(
       );
       relatedPairs += comparison.related?.length ?? 0;
       uncertainPairs += comparison.uncertain.length;
+      const groups = comparisonFindingGroups(findingIds, comparison);
+      if (groups.length) {
+        learnedComparisons.push({ beforeScanId: scanId, afterScanId, groups });
+      }
     }
-    newlyMatchedGroups.push(...comparisonFindingGroups(input, matching));
   }
   return {
     repository,

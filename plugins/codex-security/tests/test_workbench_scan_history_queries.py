@@ -534,7 +534,7 @@ def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     assert set(scoped) == {"left-0"}
     (relation,) = scoped["left-0"]
     assert (relation["occurrenceId"], relation["scanId"]) == ("right-0", "two")
-    assert len(queries) <= 3
+    assert len(queries) <= 4
     queries.clear()
     assert history.finding_relations(db, "one", []) == {}
     assert queries == []
@@ -546,7 +546,7 @@ def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     link(db, "recurring-left", "bridge")
     link(db, "right-0", "bridge")
     link(db, "foreign-a", "foreign-b")
-    assert set(history._confirmed_finding_aliases(db, ["left-0"])) == {
+    assert set(history._confirmed_finding_aliases(db, ["left-0"], set())) == {
         "left-identity-0",
         "right-identity-0",
         "bridge-identity",
@@ -565,7 +565,7 @@ def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     assert {
         left: [relation["occurrenceId"] for relation in rows] for left, rows in page.items()
     } == {f"left-{i}": [f"right-{i}"] for i in range(1, 11)}
-    assert len(queries) <= 3
+    assert len(queries) <= 4
     queries.clear()
     rows = history._rows_for_ids(
         db,
@@ -629,3 +629,29 @@ def test_confirmed_history_follows_recurring_ids_and_reverts_after_unlink(
     db.execute("DELETE FROM scan_comparison_matches")
     for group in (["a", "a-repeat"], ["b"], ["c", "c-repeat"], ["unlinked"]):
         assert_history(group)
+
+
+def test_equivalent_finding_groups_keep_occurrence_ids(workbench_db, workbench_api, tmp_path):
+    for scan in ("before", "after"):
+        add_scan(workbench_db, f"selected-{scan}", tmp_path, target_id="checkout")
+        add_occurrence(
+            workbench_db,
+            f"selected-{scan}",
+            f"occurrence-{scan}",
+            finding_id=f"finding-{scan}",
+            path="src/a.py",
+        )
+    workbench_db.execute("UPDATE scans SET target_snapshot_digest = 'unchanged'")
+    compared = workbench_api["scan_history"].compare_scans(
+        workbench_db,
+        Namespace(before_scan_id="selected-before", after_scan_id="selected-after"),
+        require_scan=workbench_api["require_scan"],
+        read_coverage=lambda _: {},
+    )
+    assert len(compared["findings"]) == 1
+    finding = compared["findings"][0]
+    assert (finding["beforeOccurrenceId"], finding["afterOccurrenceId"]) == (
+        "occurrence-before",
+        "occurrence-after",
+    )
+    assert finding["status"] == "persisting"

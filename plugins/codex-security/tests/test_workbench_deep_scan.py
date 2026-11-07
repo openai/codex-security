@@ -139,6 +139,8 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN launch_plugin_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_surface")
+        connection.execute("ALTER TABLE scans DROP COLUMN target_git_identity_json")
+        connection.execute("ALTER TABLE scans DROP COLUMN target_git_prefix")
         connection.execute(
             "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json"
         )
