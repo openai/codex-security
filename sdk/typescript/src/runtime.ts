@@ -2269,10 +2269,15 @@ async function prepareOutputDirectory(
           : await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
+    // Registration retains a populated scan for archival. An empty Windows
+    // directory must still satisfy the checks for a writable scan output.
+    const preserveContents =
+      existingOutput === "preserve" &&
+      (process.platform !== "win32" || (await readdir(path)).length !== 0);
     return await validatePreparedOutputDir(
       path,
       validateLocation,
-      existingOutput === "preserve",
+      preserveContents,
     );
   } catch (error) {
     if (createdRoot !== undefined) {
@@ -2366,10 +2371,7 @@ export async function validatePreparedOutputDir(
   if (!metadata.isDirectory()) {
     throw new OutputDirectoryError(`Scan output is not a directory: ${path}`);
   }
-  const writableLeaf =
-    !allowNonempty ||
-    (process.platform === "win32" && (await readdir(path)).length === 0);
-  const canonical = await checkedOutputPath(path, writableLeaf);
+  const canonical = await checkedOutputPath(path, !allowNonempty);
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
   if (!allowNonempty && (await readdir(canonical)).length !== 0) {
