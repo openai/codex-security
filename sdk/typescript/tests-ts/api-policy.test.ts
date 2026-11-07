@@ -353,7 +353,15 @@ describe("CodexSecurity policy API", () => {
         ":workspace_roots": "read",
         ...Object.fromEntries(readPaths.map((path) => [path, { ".": "read" }])),
       });
+      const records = await readOperationTelemetry(join(f.root, "state"));
+      const started = records.events.find(
+        (event) =>
+          event.command === "policy" && event.type === "attempt_started",
+      );
+      expect(started).toBeDefined();
       expect(configuration["responses_api_metadata"]).toEqual({
+        codex_security_operation_id: started!.operationId,
+        codex_security_attempt_id: started!.attemptId,
         codex_security_surface: "sdk",
         codex_security_command: "policy",
         codex_security_package_version: VERSION,

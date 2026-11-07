@@ -58,8 +58,6 @@ import {
 } from "../src/operation-telemetry.js";
 import {
   DEFAULT_CODEX_CONFIG,
-  codexConfigOverrides,
-  providerProcessConfiguration,
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
   type JsonObject,
@@ -76,6 +74,7 @@ import {
   ScanPermissionError,
   ScanTransportClosedError,
 } from "../src/scan-execution.js";
+import * as executionPreparation from "../src/execution-preparation.js";
 import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
 import {
@@ -99,7 +98,6 @@ import {
   TestClient,
   TEST_SNAPSHOT_DIGEST,
 } from "./support/api-client.js";
-import { effectiveCodexConfiguration } from "./support/api-events.js";
 import { failedEvents } from "./support/api-events.js";
 import {
   codexFactory,
@@ -14330,18 +14328,19 @@ if __name__ == "__main__":
         },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
-          ...(failure === "managed"
-            ? {
-                environment: {
+          environment: {
+            ...(failure === "managed"
+              ? {
                   PATH: process.env["PATH"],
                   SystemRoot: process.env["SystemRoot"],
                   CODEX_HOME: codexHome,
                   CODEX_CLI_PATH: process.execPath,
-                },
-              }
-            : {}),
-          environment: gatewayEnvironment,
+                }
+              : {}),
+            ...gatewayEnvironment,
+          },
           prepareRuntime: runtimePreparer(codexHome, () => ({
+            preserveCodexHomeConfig: failure === "managed",
             environment: {
               SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
               ...gatewayEnvironment,
@@ -14547,40 +14546,26 @@ if __name__ == "__main__":
               runtimeOptions,
             );
           },
-          createCodex: async (options) => {
-            if (
-              options.config?.["default_permissions"] !==
-              "codex_security_comparison"
-            )
-              return completedCodex(root)(options);
-            const configuration = effectiveCodexConfiguration(options);
-            const nativeProfile = await import(
-              pathToFileURL(join(PLUGIN_ROOT, "scripts", "codex_profile.mjs"))
-                .href
-            );
-            const processConfiguration =
-              providerProcessConfiguration(configuration).config;
-            processConfiguration["model_providers"] =
-              nativeProfile.preflightProviderDefinitions(
-                configuration["model_providers"],
-              );
-            return createExecutionProfileCodex(
-              {
-                ...options,
-                config: undefined,
-                configOverrides: [
-                  ...codexConfigOverrides(processConfiguration),
-                  ...(options.configOverrides ?? []),
-                ],
-              },
-              codexHome,
-              configuration,
-              true,
-            );
-          },
+          createCodex: completedCodex(root),
         },
       );
 
+      const createExecutionCodex = executionPreparation.createExecutionCodex;
+      // Complete the scan synthetically, then exercise the native provider and permission checks.
+      const executionSpy =
+        failure === "managed"
+          ? spyOn(
+              executionPreparation,
+              "createExecutionCodex",
+            ).mockImplementation((executionClient, ...args) =>
+              createExecutionCodex(
+                executionClient.command === "scan"
+                  ? executionClient
+                  : { ...executionClient, createCodex: undefined },
+                ...args,
+              ),
+            )
+          : undefined;
       const ownerSpy =
         failure === "managed" && !nativeHeader
           ? spyOn(
@@ -14725,6 +14710,7 @@ if __name__ == "__main__":
         }
       } finally {
         await client.close();
+        executionSpy?.mockRestore();
         spawnSpy?.mockRestore();
         ownerSpy?.mockRestore();
       }
@@ -16411,6 +16397,7 @@ if __name__ == "__main__":
             mkdir(directory, { mode: 0o700 }),
           ),
         );
+        await writeFile(join(repository, "source.ts"), "export {};\n");
         const environment: Record<string, string> = {
           CODEX_SECURITY_STATE_DIR: join(root, `state-${index}`),
         };
@@ -16512,6 +16499,7 @@ if __name__ == "__main__":
     "loads the readable workflow and disables only denied cached skills for %s scans",
     async (mode) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(join(repository, "source.ts"), "export {};\n");
       await chmod(codexHome, 0o700);
       const environment: Record<string, string> = {
         CODEX_SECURITY_STATE_DIR: join(root, "state"),

@@ -2044,8 +2044,8 @@ export class CodexSecurity {
           total.estimatedUsd > options.maxCostUsd
         ) {
           budgetController.abort(
-            new CodexSecurityError(
-              `Security-policy generation exceeded its $${options.maxCostUsd} cost limit; output directory: ${outputDir}.`,
+            new PolicyCostLimitExceededError(
+              `Security-policy generation exceeded its $${options.maxCostUsd} cost limit; partial output remains at ${outputDir}.`,
             ),
           );
         }
@@ -2249,6 +2249,7 @@ export class CodexSecurity {
         return total;
       return { ...measured, cost: total };
     };
+    const trackedMergeThreads = new Set<string>();
     let mergeCost: Readonly<ScanCost> | null = null;
     let mergeCostComplete = true;
     let scanThreadId: string | undefined;
@@ -3120,6 +3121,17 @@ export class CodexSecurity {
         key: string,
         measurement: Readonly<ScanUsageMeasurement>,
       ) => {
+        // A batch can finish deterministically without opening a reducer thread.
+        if (
+          mode === "deep" &&
+          key === "merge" &&
+          scanThreadId === undefined &&
+          measurement.coverage === "unavailable" &&
+          measurement.missingThreadCount === 0 &&
+          !measurement.warnings?.length &&
+          !observedMeasurements.has(key)
+        )
+          return;
         observedMeasurements.set(key, measurement);
         const combined =
           observedMeasurements.size === 1
@@ -3270,6 +3282,34 @@ export class CodexSecurity {
           })) as RepositoryFinding[] | undefined;
         return published.result;
       }
+      const auxiliaryPath = "artifacts/deep-scan/execution-threads.json";
+      const readAuxiliaryThreads = async (): Promise<string[]> => {
+        const contents = await readScanFile(
+          scanDir,
+          auxiliaryPath,
+          auxiliaryPath,
+        ).catch((error: unknown) => {
+          if (
+            error instanceof Error &&
+            isRecord(error.cause) &&
+            error.cause["code"] === "ENOENT"
+          )
+            return null;
+          throw error;
+        });
+        if (contents === null) return [];
+        const ids: unknown = JSON.parse(contents.toString("utf8"));
+        if (
+          !Array.isArray(ids) ||
+          !ids.every((id): id is string => typeof id === "string")
+        )
+          throw new CodexSecurityError("Invalid saved execution thread IDs.");
+        return ids;
+      };
+      const priorComparisonThreads =
+        !sealed && mode === "deep" && registered.resumed
+          ? await readAuxiliaryThreads()
+          : [];
       const progress = new ScanProgressReporter(mode, options);
       const reportProgress = progress.report;
       const reportCost = createScanCostReporter({
@@ -3313,7 +3353,9 @@ export class CodexSecurity {
           mode === "deep"
             ? join(scanDir, "artifacts", "deep-scan", "merge")
             : scanDir,
-        includeArchivedSessions: typeof resumeThreadId === "string",
+        includeArchivedSessions:
+          typeof resumeThreadId === "string" ||
+          priorComparisonThreads.length > 0,
         maxCostUsd: options.maxCostUsd,
         workerNumber,
         onUsage:
@@ -3384,6 +3426,7 @@ export class CodexSecurity {
         if (
           checkpoint?.costUnavailable ||
           (typeof resumeThreadId !== "string" &&
+            priorComparisonThreads.length === 0 &&
             checkpoint !== null &&
             checkpoint.mergeStarted === true)
         ) {
@@ -3744,38 +3787,13 @@ export class CodexSecurity {
         signal,
         cyberAccessProgram: options.cyberAccessProgram,
       };
-      const auxiliaryPath = "artifacts/deep-scan/execution-threads.json";
       const comparisonDirectory = join(mergeDirectory, "artifacts");
-      const trackedMergeThreads = new Set<string>();
       const registerMergeThread = (id: string) => {
         if (!trackedMergeThreads.has(id)) {
           trackedMergeThreads.add(id);
           tracker.recordUsage(null, id);
         }
         tracker.start(id);
-      };
-      const readAuxiliaryThreads = async (): Promise<string[]> => {
-        const contents = await readScanFile(
-          scanDir,
-          auxiliaryPath,
-          auxiliaryPath,
-        ).catch((error: unknown) => {
-          if (
-            error instanceof Error &&
-            isRecord(error.cause) &&
-            error.cause["code"] === "ENOENT"
-          )
-            return null;
-          throw error;
-        });
-        if (contents === null) return [];
-        const ids: unknown = JSON.parse(contents.toString("utf8"));
-        if (
-          !Array.isArray(ids) ||
-          !ids.every((id): id is string => typeof id === "string")
-        )
-          throw new CodexSecurityError("Invalid saved execution thread IDs.");
-        return ids;
       };
       if (mode === "deep") {
         recordAuxiliaryThread = async (threadId, role = "post-scan") => {
@@ -3797,7 +3815,9 @@ export class CodexSecurity {
       }
       const postScanPrompt = options.postScanPrompt;
       if (postScanPrompt?.trim()) {
-        recordPostScanThread = recordAuxiliaryThread;
+        recordPostScanThread =
+          recordAuxiliaryThread ??
+          ((threadId) => saveScanThread(threadId, signal));
         runPostScan = async () => {
           const output = `artifacts/follow-up/${randomUUID()}`;
           const writer =
@@ -3961,6 +3981,7 @@ export class CodexSecurity {
         : mode === "deep"
           ? await (async () => {
               const settings = deepScanConfiguration!.settings;
+              const comparisonThreads = new WeakMap<object, CodexThreadLike>();
               const childConfig: CodexSecurityConfig = {
                 ...this.config,
                 codexOverrides: workerConfig,
@@ -4054,12 +4075,22 @@ export class CodexSecurity {
                 onMeasurement: reportMeasurement,
                 onCostsRecovered: async () => {
                   await restoreThreadAccounting?.();
-                  if (options.resumeScanId === undefined) return;
-                  const auxiliaryIds = await readAuxiliaryThreads();
-                  if (auxiliaryIds.length === 0) return;
-                  for (const id of auxiliaryIds) registerMergeThread(id);
-                  await tracker.refresh().catch(reportTrackingError);
+                  if (priorComparisonThreads.length === 0) return;
+                  for (const id of priorComparisonThreads)
+                    registerMergeThread(id);
+                  const recovered = await tracker
+                    .refresh()
+                    .catch(reportTrackingError);
                   checkOpen();
+                  if (
+                    (options.maxCostUsd !== undefined || options.requireCost) &&
+                    (!recovered?.cost ||
+                      recovered.measurement.coverage !== "complete")
+                  )
+                    throw new ScanCostTrackingError(
+                      "The saved comparison sessions have incomplete usage; the prior cost cannot be verified.",
+                      scanDir,
+                    );
                 },
                 onCost: (key, cost) => {
                   passCosts.set(key, cost);
@@ -4074,9 +4105,15 @@ export class CodexSecurity {
                 },
                 onCleanupError: (error) =>
                   warnCleanupFailed(options, error, "Deep Scan pass"),
-                merge: async (mergePrompt, mergeSignal, outputSchema) => {
-                  let comparison: CodexClientLike | undefined;
-                  if (outputSchema) {
+                merge: async (
+                  mergePrompt,
+                  mergeSignal,
+                  outputSchema,
+                  conversation,
+                ) => {
+                  let comparison =
+                    conversation && comparisonThreads.get(conversation);
+                  if (outputSchema && comparison === undefined) {
                     await artifactWriter!.prepareDirectory(
                       "artifacts/deep-scan/merge/artifacts",
                     );
@@ -4125,7 +4162,7 @@ export class CodexSecurity {
                     } finally {
                       await release?.();
                     }
-                    comparison = (
+                    const client = (
                       await this.#createSessionCodex(
                         prepared,
                         { command: "scan", mode },
@@ -4135,12 +4172,14 @@ export class CodexSecurity {
                         git,
                       )
                     ).codex;
-                  }
-                  const activeThread =
-                    comparison?.startThread({
+                    comparison = client.startThread({
                       ...threadOptions,
                       workingDirectory: comparisonDirectory,
-                    }) ?? thread;
+                    });
+                    if (conversation)
+                      comparisonThreads.set(conversation, comparison);
+                  }
+                  const activeThread = comparison ?? thread;
                   const turn = await readCodexTurn({
                     thread: activeThread,
                     events: (
@@ -4535,11 +4574,11 @@ export class CodexSecurity {
       // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
       scanFailure = true;
       // Capture cancellation before cleanup can deliver another signal.
-      const callerCancellation =
+      let callerCancellation =
         callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)
           ? callerSignal
           : undefined;
-      const savedScanStopped =
+      let savedScanStopped =
         externalScanStop.signal.aborted &&
         Object.is(signal.reason, externalScanStop.signal.reason);
       let failure =
@@ -4603,7 +4642,8 @@ export class CodexSecurity {
         );
       }
       const finalCost =
-        budgetRecovery?.threadId != null && tracked?.cost == null
+        (budgetRecovery?.threadId != null || trackedMergeThreads.size > 0) &&
+        tracked?.cost == null
           ? null
           : completeCost(tracked?.cost ?? null);
       if (
@@ -4699,6 +4739,15 @@ export class CodexSecurity {
               scanDir,
             );
           failure = interruptionSignal.reason;
+          // Budget publication can receive the first user interruption after the
+          // budget stop has already won the execution signal.
+          if (callerSignal.aborted && Object.is(failure, callerSignal.reason))
+            callerCancellation = callerSignal;
+          else if (
+            externalScanStop.signal.aborted &&
+            Object.is(failure, externalScanStop.signal.reason)
+          )
+            savedScanStopped = true;
         }
       }
       if (activeScan !== null && scanTurnStatus !== null) {

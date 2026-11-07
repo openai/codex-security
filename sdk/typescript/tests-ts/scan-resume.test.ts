@@ -3670,7 +3670,7 @@ test.each([
     let prompted = false;
     let runtimeStarts = 0;
     const code = await main(
-      ["scans", "resume", f.scanId, "--json"],
+      ["scans", "resume", f.scanId],
       stdout.stream,
       stderr.stream,
       {

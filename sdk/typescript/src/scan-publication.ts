@@ -336,7 +336,11 @@ export async function publishScan(
     }
   }
   const cost =
-    receipt !== null && "usage" in receipt ? (receipt.cost ?? null) : receipt;
+    receipt !== null && "usage" in receipt
+      ? receipt.usage.coverage === "complete"
+        ? (receipt.cost ?? null)
+        : null
+      : receipt;
   const result = await collectResult(context, turn, true, cost);
   const completion = await workbench([
     "complete-scan",

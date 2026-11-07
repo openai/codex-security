@@ -1521,25 +1521,28 @@ test("checkpoints distinct findings when optional comparison exhausts the quota"
     "Quota exceeded. Check your plan and billing details.",
   );
   let reviews = 0;
+  let matched: unknown;
   h.input.merge = async (prompt) => {
     const catalogue = JSON.parse(prompt.split("\n").at(-1)!);
     if (catalogue.pairs) {
       reviews++;
       throw quota;
     }
-    return {
-      matches: [
-        {
-          beforeOccurrenceIds: [catalogue.findings.before[0].occurrenceId],
-          afterOccurrenceIds: [catalogue.findings.after[0].occurrenceId],
-          confidence: "high",
-          reason: "The same renderer appears in both reports.",
-        },
-      ],
-      uncertain: [],
-      related: [],
-      request: null,
-    };
+    if (catalogue.findings)
+      matched = {
+        matches: [
+          {
+            beforeOccurrenceIds: [catalogue.findings.before[0].occurrenceId],
+            afterOccurrenceIds: [catalogue.findings.after[0].occurrenceId],
+            confidence: "high",
+            reason: "The same renderer appears in both reports.",
+          },
+        ],
+        uncertain: [],
+        related: [],
+        request: null,
+      };
+    return matched;
   };
   await expect(runDeepScans(h.input)).rejects.toBe(quota);
   const saved = await loadDeepScanCheckpoint(h.input.scanDir);

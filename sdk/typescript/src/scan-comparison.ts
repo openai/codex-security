@@ -645,18 +645,6 @@ async function startReadOnlyCodexThread(
       }),
       suppliedConfig,
     );
-    const selectedProvider = scanModelProvider(config);
-    const providers = providerConfig["model_providers"] as
-      JsonObject | undefined;
-    if (
-      typeof selectedProvider === "string" &&
-      providers?.[selectedProvider] !== undefined
-    ) {
-      config["model_providers"] = {
-        ...(config["model_providers"] as JsonObject | undefined),
-        [selectedProvider]: providers[selectedProvider],
-      };
-    }
   }
   const configuredModel =
     requestedConfig === undefined ? undefined : scanModelConfiguration(config!);
@@ -684,6 +672,45 @@ async function startReadOnlyCodexThread(
       `Explicit ${options.auth} authentication conflicts with command authentication in the supplied Codex home. ` +
         "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
     );
+  }
+  const modelProvider = scanModelProvider(providerConfig);
+  const nativeKey =
+    !commandAuth && !isExternalModelProvider(modelProvider)
+      ? scanProviderEnvKey(providerConfig)
+      : undefined;
+  const environment =
+    preparedFactory === undefined
+      ? await comparisonEnvironment(
+          options.environment,
+          accountStatus,
+          options.signal,
+          undefined,
+          providerConfig,
+          options.preserveProviderEnvironment,
+          nativeKey,
+          options.auth,
+        )
+      : undefined;
+  if (config !== undefined && environment !== undefined) {
+    // The managed login home cannot supply the provider selected by the caller's home.
+    if (
+      typeof modelProvider === "string" &&
+      configuredCodexHome(environment) !== configuredCodexHome(source)
+    ) {
+      config["model_provider"] = modelProvider;
+    }
+    const selectedProvider = scanModelProvider(config);
+    const providers = providerConfig["model_providers"] as
+      JsonObject | undefined;
+    if (
+      typeof selectedProvider === "string" &&
+      providers?.[selectedProvider] !== undefined
+    ) {
+      config["model_providers"] = {
+        ...(config["model_providers"] as JsonObject | undefined),
+        [selectedProvider]: providers[selectedProvider],
+      };
+    }
   }
   const prepared = prepareReadOnlyExecution(
     config ?? {},
@@ -721,24 +748,6 @@ async function startReadOnlyCodexThread(
     ...prepared.overrides,
     requestContext.configOverride,
   ];
-  const modelProvider = scanModelProvider(providerConfig);
-  const nativeKey =
-    !commandAuth && !isExternalModelProvider(modelProvider)
-      ? scanProviderEnvKey(providerConfig)
-      : undefined;
-  const environment =
-    preparedFactory === undefined
-      ? await comparisonEnvironment(
-          options.environment,
-          accountStatus,
-          options.signal,
-          undefined,
-          providerConfig,
-          options.preserveProviderEnvironment,
-          nativeKey,
-          options.auth,
-        )
-      : undefined;
   const helperEnvironment =
     nativeKey === undefined || environment === undefined
       ? environment

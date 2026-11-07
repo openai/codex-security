@@ -1493,7 +1493,9 @@ process.exit(0);
           }
         } else {
           expect(ordinary.openai).toBe("synthetic-provider-key");
-          expect(ordinary.codex).toBe("synthetic-provider-key");
+          expect(ordinary.codex).toBe(
+            name === "openai" ? "synthetic-provider-key" : null,
+          );
         }
         if (usesOpenaiKey) {
           expect(native.openai).toBe("synthetic-provider-key");
@@ -2100,14 +2102,13 @@ process.exit(0);
       await mkdir(home, { mode: 0o700 });
       await mkdir(managedHome, { recursive: true, mode: 0o700 });
       const homeConfig = stringify({
-        profile: "ambient",
-        profiles: { ambient: { model_provider: "synthetic-ambient" } },
+        model_provider: "synthetic-ambient",
         model_providers: {
           "synthetic-ambient": {
             name: "Synthetic ambient",
             base_url: "https://provider.example.test/v1",
             wire_api: "responses",
-            env_key: "SYNTHETIC_PROVIDER_KEY",
+            requires_openai_auth: true,
           },
         },
       });

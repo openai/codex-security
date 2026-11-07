@@ -101,6 +101,7 @@ export interface DeepScanComposition {
     prompt: string,
     signal: AbortSignal,
     outputSchema?: unknown,
+    conversation?: object,
   ): Promise<unknown>;
   onCleanupError?(error: unknown): void;
   onMergeCommitted?(event: {
@@ -737,7 +738,7 @@ export async function runDeepScans(
           pending,
           state.aggregate,
           executionSignal,
-          async (prompt, signal, outputSchema) => {
+          async (prompt, signal, outputSchema, conversation) => {
             if (comparisonStop !== undefined) throw comparisonStop;
             const previousMergeStarted = state.mergeStarted;
             if (previousMergeStarted !== true) {
@@ -745,7 +746,12 @@ export async function runDeepScans(
               await save();
             }
             try {
-              return await input.merge(prompt, signal, outputSchema);
+              return await input.merge(
+                prompt,
+                signal,
+                outputSchema,
+                conversation,
+              );
             } catch (error) {
               if (
                 previousMergeStarted !== true &&

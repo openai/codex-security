@@ -4478,7 +4478,7 @@ describe("CLI", () => {
             [provider]: {
               ...defaults,
               name: "Synthetic selected provider",
-              api_key: "synthetic-unsaved-key",
+              http_headers: { Authorization: "Bearer synthetic-unsaved-key" },
             },
           },
         };
@@ -4529,6 +4529,10 @@ describe("CLI", () => {
             shell_environment_policy: { inherit: "core" },
             model_instructions_file: "current-instructions.md",
             model_catalog_json: "current-models.json",
+          });
+        } else {
+          expect(savedRecipe?.["config"]).toMatchObject({
+            model_providers: { [provider]: defaults },
           });
         }
         let replayConfig: CodexSecurityConfig | undefined;
@@ -4584,8 +4588,8 @@ describe("CLI", () => {
           },
         );
         expect(checked.status, checked.stderr).toBe(0);
-        expect(effective["model_providers"]).toMatchObject(
-          native ? originalConfig.model_providers : { [provider]: defaults },
+        expect(effective["model_providers"]).toEqual(
+          originalConfig.model_providers,
         );
       } finally {
         await rm(root, { recursive: true, force: true });

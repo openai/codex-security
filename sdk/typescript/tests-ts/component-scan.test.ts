@@ -2132,11 +2132,12 @@ test.each([
         ...args: Parameters<typeof childProcess.spawn>
       ) => {
         const [command, argv, options] = args;
-        // Node needs a script argument before Codex's app-server flags. The
-        // preload implements its permission RPC and leaves exec launches intact.
+        // Place a script argument before Codex flags so Node runs the fixture
+        // preload for permission checks and MCP enumeration.
         return command === runtime.executablePathForSpawn(node) &&
           Array.isArray(argv) &&
-          argv.includes("app-server")
+          (argv.includes("app-server") ||
+            argv.slice(-3).join(" ") === "mcp list --json")
           ? spawn(command, ["exec", ...argv], options)
           : spawn(...args);
       }) as typeof childProcess.spawn),
@@ -2345,6 +2346,7 @@ test.each([
               'import { createHash } from "node:crypto";',
               'import { createInterface } from "node:readline";',
               `import { parse } from ${JSON.stringify(pathToFileURL(Bun.resolveSync("smol-toml", import.meta.dir)).href)};`,
+              'if (process.argv.slice(-3).join(" ") === "mcp list --json") { console.log("[]"); process.exit(0); }',
               'if (process.argv.includes("app-server")) {',
               'const config = {}; for (let i = 0; i < process.argv.length; i++) if (["-c", "--config"].includes(process.argv[i])) { const value = parse(process.argv[++i]); const permissions = { ...config.permissions, ...value.permissions }; Object.assign(config, value, { permissions }); }',
               'for await (const line of createInterface({ input: process.stdin })) { const request = JSON.parse(line); if (request.id === undefined) continue; const result = request.method === "config/read" ? { config } : request.method === "permissionProfile/list" ? { data: [{ id: config.default_permissions, allowed: true }], nextCursor: null } : {}; console.log(JSON.stringify({ id: request.id, result })); } process.exit(0);',

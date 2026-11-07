@@ -539,7 +539,7 @@ test("accepted patches restore ambient providers from a produced native-preserva
   let runtimeStarts = 0;
   let prompted = false;
   await main(
-    ["scans", "resume", parentId, "--json"],
+    ["scans", "resume", parentId],
     stdout.stream,
     stderr.stream,
     {

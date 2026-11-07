@@ -1790,7 +1790,7 @@ test(
       await mkdtemp(join(tmpdir(), "native-blank-home-")),
     );
     const home = join(root, ".codex");
-    const deepConfig = join(root, "selected-deep.toml");
+    const deepConfig = join(home, "selected-deep.toml");
     const repository = join(root, "repository");
     const pluginRoot = join(root, "plugin");
     const executable = join(root, "codex");

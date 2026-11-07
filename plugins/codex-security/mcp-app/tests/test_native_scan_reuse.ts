@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { syntheticModelCatalog } from "../../../../sdk/typescript/tests-ts/support/model-catalog.ts";
+import { fakeCodexSource } from "./support/fake-codex-source.ts";
 import { loadSourceModule, privateDirectory } from "./helpers/source.mjs";
 
 const applicationRoot = path.resolve(import.meta.dirname, "..");
@@ -729,9 +730,28 @@ for (const [promptFile, scenario] of [
         } else {
           await writeFile(instructions, "Synthetic security guidance.\n");
         }
+        const preflightScript = path.join(root, "permission-preflight.mjs");
+        await writeFile(
+          preflightScript,
+          fakeCodexSource(null, true, null, path.join(root, "preflight.json")),
+        );
         await writeFile(
           executable,
-          `#!${process.execPath}\nconst fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({argv:process.argv.slice(2), syntheticProvider:process.env.SYNTHETIC_PROVIDER_KEY === 'synthetic-provider-proof-value'})); process.stderr.write('synthetic Codex fixture stopped after marker\\n'); process.exit(42);\n`,
+          `#!${process.execPath}
+const fs = require("node:fs");
+const preflight = process.argv.includes("app-server");
+fs.appendFileSync(${JSON.stringify(marker)}, JSON.stringify({
+  preflight,
+  worker: process.argv.includes("exec"),
+  syntheticProvider: process.env.SYNTHETIC_PROVIDER_KEY === "synthetic-provider-proof-value",
+}) + "\\n");
+if (preflight) {
+  import(${JSON.stringify(pathToFileURL(preflightScript).href)});
+} else {
+  process.stderr.write("synthetic Codex fixture stopped after marker\\n");
+  process.exit(42);
+}
+`,
         );
         await chmod(executable, 0o700);
         await writeFile(
@@ -757,8 +777,15 @@ for (const [promptFile, scenario] of [
         delete environment.CODEX_CLI_PATH;
         delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
         delete environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-        if (scenario === "explicit-external")
+        if (scenario === "explicit-external") {
           environment.CODEX_CLI_PATH = executable;
+          const deepConfig = path.join(home, "deep.toml");
+          await writeFile(
+            deepConfig,
+            "[deep_scan]\nworkers = 1\nstop_after_consecutive_errors = 1\n",
+          );
+          environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepConfig;
+        }
         let savedScanId: string | undefined;
         let savedClaimToken: string | undefined;
         if (
@@ -864,10 +891,14 @@ for (const [promptFile, scenario] of [
             },
           },
           undefined,
-          { timeout: 30000 },
+          { timeout: 60_000 },
         );
         const observed = await readFile(marker, "utf8").then(
-          (text) => JSON.parse(text),
+          (text) =>
+            text
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line)),
           (error) => (error.code === "ENOENT" ? null : Promise.reject(error)),
         );
         if (scenario !== "explicit-external") {
@@ -879,7 +910,10 @@ for (const [promptFile, scenario] of [
           );
         } else {
           assert.ok(observed);
-          assert.equal(observed.syntheticProvider, true);
+          assert.ok(observed.some((call) => call.preflight));
+          assert.ok(observed.some((call) => call.worker));
+          for (const call of observed)
+            assert.equal(call.syntheticProvider, call.worker);
         }
       } finally {
         await client?.close();

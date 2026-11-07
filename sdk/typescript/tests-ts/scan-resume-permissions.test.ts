@@ -355,7 +355,10 @@ test("CLI resume restores saved native permissions into the shared SDK operation
     {
       ...dependencies({
         currentDirectory: root,
-        environment: { CODEX_HOME: codexHome },
+        environment: {
+          CODEX_HOME: codexHome,
+          SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
+        },
         onConfig: (config) => {
           restoredConfig = config.codexOverrides as JsonObject;
         },
@@ -383,7 +386,7 @@ test("CLI resume restores saved native permissions into the shared SDK operation
       }),
     },
   );
-  expect(result).toBe(0);
+  expect(result, stderr.text()).toBe(0);
   expect(restoredConfig).toMatchObject({
     model_provider: "synthetic",
     model_providers: { synthetic: provider },

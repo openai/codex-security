@@ -385,7 +385,7 @@ test.each([
     const repository = join(root, "repository");
     const codexHome = join(root, "state", "codex-home");
     await mkdir(repository);
-    await mkdir(codexHome, { recursive: true });
+    await mkdir(codexHome, { recursive: true, mode: 0o700 });
     await writeFile(join(repository, "source.py"), "# synthetic source\n");
     const promptFile = join(root, "post-scan.md");
     const postScanPrompt =
@@ -481,6 +481,7 @@ test.each([
         }),
         runWorkbench: command,
       }),
+      stderr.text(),
     ).toBe(0);
   },
 );

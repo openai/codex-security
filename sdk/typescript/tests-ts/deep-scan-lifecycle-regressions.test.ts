@@ -232,7 +232,8 @@ async function harness(
         await rename(temporary, path);
         return {};
       }
-      if (args[0] === "update-progress") return {};
+      if (args[0] === "update-progress" || args[0] === "check-deep-scan-target")
+        return {};
       if (args[0] === "list-scans")
         return {
           scans: [...records.values()],

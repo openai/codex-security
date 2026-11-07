@@ -12,7 +12,10 @@ import {
 } from "./auth.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import { resolveConfigPath } from "./config-path.js";
-import { restoreProviderProfile } from "./provider-profile.js";
+import {
+  providerPreflightDefinitions,
+  restoreProviderProfile,
+} from "./provider-profile.js";
 import { isRecord } from "./record.js";
 import {
   Codex,
@@ -358,7 +361,20 @@ export async function createExecutionCodex(
     ? providerProcessConfiguration(mcpLaunch.config)
     : { config: mcpLaunch.config, requiresConfigFile: false };
   const processConfig = { ...providerLaunch.config };
+  const comparison =
+    launchConfig["default_permissions"] === "codex_security_comparison";
+  const providers = sdkCodexConfig["model_providers"];
+  const privateComparisonProviders =
+    comparison &&
+    nativeTransport &&
+    isRecord(providers) &&
+    Object.keys(providers).length > 0;
+  if (privateComparisonProviders) {
+    processConfig["model_providers"] =
+      await providerPreflightDefinitions(providers);
+  }
   const requiresConfigFile =
+    privateComparisonProviders ||
     session.runtimeConfig !== undefined ||
     mcpLaunch.requiresConfigFile ||
     providerLaunch.requiresConfigFile;
@@ -366,7 +382,8 @@ export async function createExecutionCodex(
   if (client.createCodex === undefined) delete processConfig["projects"];
   const checkPermissions =
     (session.policy !== "ordinary" ||
-      session.inheritedPermissions !== undefined) &&
+      session.inheritedPermissions !== undefined ||
+      comparison) &&
     client.createCodex === undefined;
   if (
     (session.inheritedPermissions !== undefined ||

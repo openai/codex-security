@@ -39,6 +39,13 @@ export interface ProviderProfile {
   cleanup(): Promise<void>;
 }
 
+export async function providerPreflightDefinitions(
+  providers: JsonObject,
+): Promise<JsonObject> {
+  const client = await nativeProfileClient();
+  return client.preflightProviderDefinitions(providers) as JsonObject;
+}
+
 /** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
 export async function providerPreflightCommand(
   command: CodexCommand,
@@ -48,10 +55,7 @@ export async function providerPreflightCommand(
   const overrides: string[] = [];
   const providers = resolved["model_providers"];
   if (isRecord(providers) && Object.keys(providers).length > 0) {
-    const client = await nativeProfileClient();
-    const definitions = client.preflightProviderDefinitions(
-      providers,
-    ) as JsonObject;
+    const definitions = await providerPreflightDefinitions(providers);
     overrides.push(
       ...modelProviderConfigOverride({ model_providers: definitions }),
     );

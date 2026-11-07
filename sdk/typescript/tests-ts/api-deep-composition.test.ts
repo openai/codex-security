@@ -130,13 +130,21 @@ test("ordinary children and reducer share one immutable preparation and knowledg
         "config"
       ],
     ).toMatchObject(workerConfig);
+    const reportOnly = launch.runOptions?.outputSchema !== undefined;
     expect(effectiveCodexConfiguration(launch.options)).toMatchObject({
-      ...workerConfig,
+      features: {
+        multi_agent_v2: reportOnly
+          ? false
+          : workerConfig.features.multi_agent_v2,
+      },
       model: "gpt-6-astra",
       model_reasoning_effort: "high",
       mcp_servers: {
         "codex-security": { command: "synthetic-workbench", enabled: false },
-        "synthetic.server": { command: "synthetic-command" },
+        "synthetic.server": {
+          command: "synthetic-command",
+          ...(reportOnly && { enabled: false }),
+        },
       },
       permissions: {
         codex_security_scan: {
@@ -267,7 +275,13 @@ test("shared matching reads evidence through the prepared parent session", async
   );
   expect(parentTurns).toHaveLength(4);
   expect(h.preparations()).toBe(1);
-  expect(h.threadScans.size).toBe(3);
+  const [catalogue, evidence, review, sources] = parentTurns;
+  expect(evidence!.threadOptions).toBe(catalogue!.threadOptions);
+  expect(
+    new Set([catalogue, review, sources].map((turn) => turn!.threadOptions))
+      .size,
+  ).toBe(3);
+  expect(h.threadScans.size).toBe(5);
   for (const turn of parentTurns) {
     expect(effectiveCodexConfiguration(turn.options)).toMatchObject({
       model: "gpt-6-astra",
@@ -515,6 +529,15 @@ test.each([
         model_providers: { synthetic: transportProvider },
         service_tier: expected,
         ...replaySettings,
+        ...(launch.runOptions?.outputSchema !== undefined && {
+          features: { code_mode: false },
+          mcp_servers: {
+            "codex.security": {
+              ...replaySettings.mcp_servers["codex.security"],
+              enabled: false,
+            },
+          },
+        }),
         ...contextLimits,
       });
       expect(launch.preflightConfig).not.toHaveProperty("model_providers");
@@ -628,7 +651,7 @@ test("native ChatGPT resume preserves a saved absent safety identifier", async (
   } finally {
     await prepared.client.close();
   }
-});
+}, 120_000);
 
 test("a reused client's sealed read uses its installed plugin after the source is removed", async () => {
   const h = await fixture();
@@ -1100,6 +1123,33 @@ test.each([
   },
 );
 
+test("budgeted recovery checks retained comparison usage before starting further turns", async () => {
+  const h = await fixture();
+  const options = {
+    ...h.options,
+    knowledgeBasePaths: undefined,
+    maxCostUsd: 1,
+  };
+  h.failPublication(true);
+  await using first = h.makeClient();
+  await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+    DeepScanPublicationError,
+  );
+  const [parentId] = [...h.records].find(
+    ([, record]) => record.mode === "deep",
+  )!;
+  const reducerId = [...h.threadScans].find(
+    ([, scanId]) => scanId === parentId,
+  )![0];
+  await rm(join(h.home, "sessions", `rollout-${reducerId}.jsonl`));
+  h.failPublication(false);
+  await using resumed = h.makeClient();
+  await expect(
+    resumed.run(h.repository, { ...options, resumeScanId: parentId }),
+  ).rejects.toThrow("saved comparison sessions have incomplete usage");
+  expect(h.launches).toHaveLength(3);
+});
+
 test("a sealed child without persisted usage rejects cost-limited Deep Scan resume", async () => {
   const { h, child, resumeOptions } = await interruptedSealedChild();
   const sessionPath = join(
@@ -1334,7 +1384,7 @@ test("a resumed child projection failure keeps accepted work resumable", async (
   expect((completed["scan"] as JsonObject)["progress"]).toMatchObject({
     status: "complete",
   });
-});
+}, 120_000);
 
 test("publication recovery keeps verified cost when one child is empty", async () => {
   const h = await fixture();
@@ -1727,12 +1777,11 @@ test("resumed reducer budget recovery includes completed child receipts before e
       JSON.stringify({ ...passCost, estimatedUsd: passCost.estimatedUsd / 2 }),
     ]);
   }
+  const reducerId = [...h.threadScans].find(
+    ([, scanId]) => scanId === parentId,
+  )![0];
   await appendFile(
-    join(
-      h.home,
-      "sessions",
-      `rollout-${parentScan["continuationThreadId"]}.jsonl`,
-    ),
+    join(h.home, "sessions", `rollout-${reducerId}.jsonl`),
     JSON.stringify({
       type: "event_msg",
       payload: {

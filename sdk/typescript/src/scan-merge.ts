@@ -542,6 +542,7 @@ export async function createScanMerger(pluginRoot: string) {
       prompt: string,
       signal: AbortSignal,
       outputSchema?: unknown,
+      conversation?: object,
     ) => Promise<unknown>,
     options: {
       contextPath: string;
@@ -584,13 +585,21 @@ export async function createScanMerger(pluginRoot: string) {
               signal,
               allowHistoricalUncertainty: true,
               codex: {
-                startThread: () => ({
-                  run: async (prompt, options) => ({
-                    finalResponse: JSON.stringify(
-                      await run(prompt, signal, options.outputSchema),
-                    ),
-                  }),
-                }),
+                startThread: () => {
+                  const conversation = {};
+                  return {
+                    run: async (prompt, options) => ({
+                      finalResponse: JSON.stringify(
+                        await run(
+                          prompt,
+                          signal,
+                          options.outputSchema,
+                          conversation,
+                        ),
+                      ),
+                    }),
+                  };
+                },
               },
             },
             {

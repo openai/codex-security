@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 import { readCodexHomeConfig } from "../src/auth.js";
 import { main } from "../src/cli.js";
 import { ContractValidationError, IncompleteScanError } from "../src/errors.js";
-import { completedEvents, runEvents } from "./support/api-events.js";
+import { loadContract } from "../src/contract.js";
 import { parseImportedFindings } from "../src/findings-import.js";
 import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
@@ -318,9 +318,9 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     const scanDir = await copyCompletedScan(root);
     try {
       await chmod(scanDir, 0o600);
-      const failure = await runEvents(scanDir, completedEvents()).catch(
-        (error: unknown) => error,
-      );
+      const failure = await loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+      }).catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(ContractValidationError);
       const cause = (failure as Error).cause as NodeJS.ErrnoException;
       expect(cause.code).toBe("EACCES");

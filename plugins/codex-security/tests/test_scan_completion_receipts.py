@@ -18,6 +18,7 @@ def test_completion_keeps_saved_cost_unless_replaced(
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CODEX_STATE_DB", str(codex_home / "missing.sqlite"))
     scan = register(state, target, scan_dir)
     write_completed_contract(scan_dir, scan["scanId"], target, relative_path="app.py")
     unavailable = {"coverage": "unavailable", "source": "codex_rollout", "threadCount": 0}
@@ -64,12 +65,12 @@ def test_completion_keeps_saved_cost_unless_replaced(
     assert completed.get("cost") == expected
     if replacement == "unavailable":
         assert "cost" not in completed
-        assert completed["usage"] == unavailable
+        assert completed["usage"] == {**unavailable, "warnings": ["codex_state_unavailable"]}
     elif wrapped:
         assert completed["usage"] == {
             **usage,
             "coverage": "partial",
-            "warnings": ["scan_thread_unavailable"],
+            "warnings": ["codex_state_unavailable"],
         }
     elif replacement == "none":
         assert completed["usage"]["coverage"] == "unavailable"
