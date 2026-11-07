@@ -137,8 +137,15 @@ export function patchDependencies(
         repository,
         commandOptions,
       );
+      // An empty canned result cannot identify the active staging worktree.
+      const missingStagedGitDirectory =
+        output === "" &&
+        args.includes("-C") &&
+        args.at(-2) === "rev-parse" &&
+        args.at(-1) === "--absolute-git-dir" &&
+        commandOptions?.encoding === "base64";
       if (
-        output !== undefined ||
+        (output !== undefined && !missingStagedGitDirectory) ||
         command !== "git" ||
         !args.includes("rev-parse") ||
         !args.some((argument) =>
