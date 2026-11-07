@@ -122,6 +122,9 @@ export async function classifySeverityInternal(
   options: ClassifySeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   checkpoint?: SeverityClassificationCheckpoint,
+  documentRoots: readonly string[] = [
+    options.workingDirectory ?? process.cwd(),
+  ],
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
   const classificationRuns = classificationRunsSchema
@@ -142,10 +145,18 @@ export async function classifySeverityInternal(
     defaultRubric = await getDefaultSeverityRubric(options);
     rubric = [defaultRubric.markdown];
   } else {
-    rubric = await readDocuments([options.rubricPath], options.signal);
+    rubric = await readDocuments(
+      [options.rubricPath],
+      options.signal,
+      documentRoots,
+    );
   }
   const knowledge = options.knowledgeBasePaths?.length
-    ? await readDocuments(options.knowledgeBasePaths, options.signal)
+    ? await readDocuments(
+        options.knowledgeBasePaths,
+        options.signal,
+        documentRoots,
+      )
     : null;
   const rubricCheckpointSha256 = workflowDigest(rubric);
   const metadata = {
@@ -222,8 +233,13 @@ export async function classifySeverityInternal(
 async function readDocuments(
   paths: readonly string[],
   signal?: AbortSignal,
+  documentRoots?: readonly string[],
 ): Promise<string[]> {
-  const contents = await readKnowledgeBaseDocuments(paths, signal);
+  const contents = await readKnowledgeBaseDocuments(
+    paths,
+    signal,
+    documentRoots,
+  );
   if (contents.every((text) => !text.trim())) {
     throw new CodexSecurityError("Classification documents must not be empty.");
   }

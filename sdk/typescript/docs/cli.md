@@ -523,8 +523,10 @@ Use the separate `suggest-owners` command for explicit owner-only jobs.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
-explicit unsupported binary files are rejected. Bulk scans share this context
-with every repository.
+explicit unsupported binary files are rejected. Select external documents
+directly. A directory link inside the scan target or its enclosing checkout must
+keep the selected document inside that source.
+Bulk scans share this context with every repository.
 
 Use `--output-dir DIR` to choose where a scan saves its results. The directory
 must be empty and outside the scanned directory and enclosing Git worktree.
@@ -1797,7 +1799,8 @@ request. It sends the config name without findings or account identifiers.
 If the request fails, times out, or returns an invalid rubric, the built-in
 rubric is used. An explicit `--rubric` (SDK `rubricPath`) skips the lookup and
 uses your policy for every review. Rubrics and repeatable `--knowledge-base`
-context accept text, PDF, DOCX, and directories.
+context accept text, PDF, DOCX, and directories. Select external documents directly
+when a repository directory link points outside the selected source.
 
 Each finding is classified three times by default. `--runs N` accepts
 an integer from 1 through 10; SDK options use `classificationRuns` with the same
@@ -1907,8 +1910,10 @@ await publishScan(scanDirectory, {
 ```
 
 `classifySeverity()` accepts `findingId`, `title`, `summary`, and available
-evidence/metadata. Imported reports may lack severity or occurrence IDs; omitting
-`rubricPath` uses the selected default policy even when a scanner severity is present.
+evidence/metadata. For in-memory findings, `workingDirectory` (the current directory
+by default) and its enclosing checkout define the boundary for directory links.
+Imported reports may lack severity or occurrence IDs; omitting `rubricPath` uses
+the selected default policy even when a scanner severity is present.
 Scan wrappers persist checkpoints (including for
 external directories), accept `reprocess: true`, and treat `findingIds: []` as an
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and

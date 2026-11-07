@@ -74,6 +74,7 @@ export async function classifyScanSeverityInternal(
     { ...options, expectedScanId: scan.scanId },
     surface,
     bootstrap?.protectedRoots,
+    typeof scan["targetPath"] === "string" ? scan["targetPath"] : undefined,
   );
 }
 
@@ -91,6 +92,7 @@ export async function classifyScanDirectorySeverityInternal(
   options: ClassifyScanSeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   protectedRoots: readonly string[] = [],
+  repository?: string,
 ): Promise<ScanSeverityClassification> {
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     requestedDirectory,
@@ -120,6 +122,7 @@ export async function classifyScanDirectorySeverityInternal(
         findings.map(({ findingId }) => findingId),
         options.reprocess ?? false,
       ),
+      repository === undefined ? [scanDirectory] : [scanDirectory, repository],
     )),
     scanId: contract.manifest.scan.id,
   };

@@ -287,6 +287,35 @@ process.exitCode = await main(["classify-severity", "--scan", ${JSON.stringify(f
   );
 }
 
+test("saved classification checks document links against the selected repository", async () => {
+  const f = await savedFixture();
+  for (const owner of [f.repository, f.caller, f.scanDirectory]) {
+    await symlink(f.root, join(owner, "docs"), "junction");
+  }
+  const options = {
+    environment: { ...f.environment, PYTHON: f.python },
+    findingIds: [],
+    rubricPath: f.rubricPath,
+    workingDirectory: f.caller,
+  };
+  const classify = (owner: string) =>
+    classifyScanSeverityInternal(
+      f.scanId,
+      { ...options, knowledgeBasePaths: [join(owner, "docs", "policy.md")] },
+      { currentDirectory: () => f.caller },
+    );
+  await expect(classify(f.repository)).rejects.toThrow(
+    "repository symbolic link",
+  );
+  await expect(
+    classifyScanDirectorySeverity(f.scanDirectory, {
+      ...options,
+      rubricPath: join(f.scanDirectory, "docs", "policy.md"),
+    }),
+  ).rejects.toThrow("repository symbolic link");
+  expect((await classify(f.caller)).assessments).toEqual([]);
+});
+
 test.each(["id", "prefix", "latest", "missing target"])(
   "saved severity supports %s without modifying sealed inputs or the environment",
   async (selection) => {

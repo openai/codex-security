@@ -282,15 +282,22 @@ async function runCampaign(
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   const knowledgeByMode: MultiscanKnowledge = {};
+  const documentRoots = [
+    ...new Set(tasks.map((task) => task.repository).filter(isAbsolute)),
+  ];
   const sharedKnowledge = options.knowledgeBasePaths?.length
-    ? readKnowledgeBaseSnapshot(options.knowledgeBasePaths, options.signal)
+    ? readKnowledgeBaseSnapshot(
+        options.knowledgeBasePaths,
+        options.signal,
+        documentRoots,
+      )
     : undefined;
   for (const mode of new Set(tasks.map((task) => task.mode))) {
     try {
       const paths = options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
       const snapshot = await (sharedKnowledge ??
         (paths?.length
-          ? readKnowledgeBaseSnapshot(paths, options.signal)
+          ? readKnowledgeBaseSnapshot(paths, options.signal, documentRoots)
           : undefined));
       if (snapshot !== undefined) knowledgeByMode[mode] = { snapshot };
     } catch (error) {

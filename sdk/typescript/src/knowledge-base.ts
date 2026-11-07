@@ -11,11 +11,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
 import { expandHome } from "./runtime.js";
+import { escapingInputDirectoryLink } from "./prompt-files.js";
 import {
   gitMarkerRoot,
   isGitMetadataDirectory,
@@ -61,11 +62,38 @@ export async function knowledgeBaseProtectedRoots(
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
+  repository: string | readonly string[] = [],
 ): Promise<KnowledgeBaseSnapshot> {
   try {
     const sources = new Set<string>();
     const documents = new Set<string>();
 
+    const roots = typeof repository === "string" ? [repository] : repository;
+    const canonicalRoots = new Set<string>();
+    for (const root of roots) {
+      const selected = resolve(expandHome(root));
+      // Saved targets may have moved, and a bulk source can fail independently.
+      // Its nearest accessible checkout still owns its directory links.
+      for (let ancestor = selected; ; ancestor = dirname(ancestor)) {
+        signal?.throwIfAborted();
+        try {
+          const canonical = await realpath(ancestor);
+          if (ancestor === selected) canonicalRoots.add(canonical);
+          const checkout = await gitMarkerRoot(canonical, signal, "nearest");
+          if (checkout !== null) canonicalRoots.add(checkout);
+          break;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (
+            !["ENOENT", "ENOTDIR", "ELOOP", "EACCES", "EPERM"].includes(
+              code ?? "",
+            )
+          )
+            throw error;
+          if (ancestor === dirname(ancestor)) break;
+        }
+      }
+    }
     for (const requested of paths) {
       signal?.throwIfAborted();
       if (!requested.trim())
@@ -84,6 +112,17 @@ export async function readKnowledgeBaseSnapshot(
       }
 
       const source = await realpath(path);
+      const escaped = await escapingInputDirectoryLink(
+        dirname(path),
+        source,
+        [...canonicalRoots],
+        signal,
+      );
+      if (escaped !== null) {
+        throw new Error(
+          `Knowledge base paths cannot traverse a repository symbolic link to an external document: ${escaped}`,
+        );
+      }
       const selected = metadata.isDirectory()
         ? (await discover(source, signal)).sort()
         : [source];
@@ -146,12 +185,13 @@ export async function prepareKnowledgeBase(
   input: readonly string[] | KnowledgeBaseSnapshot,
   signal?: AbortSignal,
   directory?: string,
+  repository?: string,
 ): Promise<PreparedKnowledgeBase> {
   try {
     const snapshot =
       "documents" in input
         ? input
-        : await readKnowledgeBaseSnapshot(input, signal);
+        : await readKnowledgeBaseSnapshot(input, signal, repository);
     const protectedRoots = await knowledgeBaseProtectedRoots(snapshot, signal);
     const path = await mkdtemp(
       join(directory ?? tmpdir(), "codex-security-knowledge-"),
@@ -185,8 +225,13 @@ export async function prepareKnowledgeBase(
 export async function readKnowledgeBaseDocuments(
   paths: readonly string[],
   signal?: AbortSignal,
+  repository?: string | readonly string[],
 ): Promise<string[]> {
-  const { documents } = await readKnowledgeBaseSnapshot(paths, signal);
+  const { documents } = await readKnowledgeBaseSnapshot(
+    paths,
+    signal,
+    repository,
+  );
   return Object.keys(documents)
     .sort()
     .map((name) => documents[name]!);

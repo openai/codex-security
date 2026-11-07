@@ -40,14 +40,14 @@ const { fixture, repositoryFixture, cleanup } = createMultiscanFixtures();
 afterEach(cleanup);
 
 describe("multiscan", () => {
-  test("prepares shared prompt files once while missing sources remain row failures", async () => {
+  test("prepares shared document inputs once while invalid sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");
     const prompt = join(paths.root, "shared-prompt.md");
     await writeFile(prompt, "Review synthetic boundaries.");
     await writeFile(
       paths.input,
-      `id,repository,revision\nmissing,${join(paths.root, "absent")},${source.revision}\nfirst,${source.path},${source.revision}\nsecond,${source.path},${source.revision}\n`,
+      `id,repository,revision\nmissing,${join(paths.root, "absent")},${source.revision}\ninvalid,${join(prompt, "child")},${source.revision}\nfirst,${source.path},${source.revision}\nsecond,${source.path},${source.revision}\n`,
     );
     let scans = 0;
     const summary = await runMultiscan(
@@ -56,16 +56,24 @@ describe("multiscan", () => {
         client(async (_checkout, scanOptions = {}) => {
           expect(scanOptions.scanPrompt).toBe("Review synthetic boundaries.");
           expect(scanOptions.scanPromptFile).toBeUndefined();
+          expect(
+            Object.values(scanOptions.knowledgeBaseSnapshot!.documents),
+          ).toEqual(["Review synthetic boundaries."]);
           if (scans++ === 0) await rm(prompt);
           return await completedScan(scanOptions.outputDir!);
         }),
-        { maxAttempts: 1, scanPromptFile: prompt },
+        {
+          maxAttempts: 1,
+          scanPromptFile: prompt,
+          knowledgeBasePaths: [prompt],
+        },
       ),
     );
     expect(scans).toBe(2);
-    expect(summary).toMatchObject({ total: 3, completed: 2, failed: 1 });
+    expect(summary).toMatchObject({ total: 4, completed: 2, failed: 2 });
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "missing", status: "failed" },
+      { id: "invalid", status: "failed" },
       { id: "first", status: "completed" },
       { id: "second", status: "completed" },
     ]);
@@ -903,6 +911,36 @@ describe("multiscan", () => {
     expect(await readFile(join(standard, "checkpoint"), "utf8")).toBe("keep");
     expect(await readFile(join(deep, "checkpoint"), "utf8")).toBe("keep");
   });
+
+  test.each(["shared", "mode-specific"])(
+    "rejects %s knowledge reached through a local source directory link",
+    async (scope) => {
+      const paths = await fixture();
+      const source = join(paths.root, "source");
+      await mkdir(source);
+      await writeFile(join(paths.root, "context.md"), "External context.");
+      await filesystem.symlink(paths.root, join(source, "docs"), "junction");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrow,${source},${"a".repeat(40)}\n`,
+      );
+      const knowledgeBasePaths = [join(source, "docs", "context.md")];
+      const summary = await runMultiscan(
+        options(paths, client(completeRun), {
+          maxAttempts: 1,
+          ...(scope === "shared"
+            ? { knowledgeBasePaths }
+            : { scanOptionsByMode: { standard: { knowledgeBasePaths } } }),
+        }),
+      );
+      expect(await results(summary.resultsPath)).toMatchObject([
+        {
+          id: "row",
+          error: expect.stringContaining("repository symbolic link"),
+        },
+      ]);
+    },
+  );
 
   test("shared knowledge failures affect all modes before mode-specific inputs", async () => {
     const paths = await fixture();
