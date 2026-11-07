@@ -33,6 +33,7 @@ test("publishes complete sealed findings with their repository ID to a custom ba
     expect(String(url)).toBe("http://synthetic.test/service/v1/bulk/findings");
     expect(options).toEqual({
       method: "POST",
+      redirect: "manual",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         findings: document.findings,

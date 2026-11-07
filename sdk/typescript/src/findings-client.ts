@@ -93,7 +93,7 @@ export class FindingsClient {
       url.searchParams.set("allRepositories", "true");
     else url.searchParams.set("repositoryId", scope.repositoryId);
     return await this.retry(async () => {
-      const response = await this.request(url, { signal: this.signal });
+      const response = await this.requestEndpoint(url);
       if (!response.ok) {
         throw await FindingsHttpError.fromResponse(
           response,
@@ -162,13 +162,55 @@ export class FindingsClient {
     return new URL(path, this.url);
   }
 
+  private async requestEndpoint(url: URL, body?: string): Promise<Response> {
+    for (let redirects = 0; ; redirects++) {
+      const response = await this.request(url, {
+        signal: this.signal,
+        redirect: "manual",
+        ...(body === undefined
+          ? {}
+          : {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body,
+            }),
+      });
+      const location = response.headers.get("Location");
+      if (
+        location === null ||
+        ![301, 302, 303, 307, 308].includes(response.status)
+      )
+        return response;
+      void response.body?.cancel().catch(() => undefined);
+      this.signal?.throwIfAborted();
+      // Fetch exposes header bytes as a Latin-1 string; URL paths use UTF-8.
+      const next = new URL(
+        Buffer.from(location, "latin1").toString("utf8"),
+        url,
+      );
+      if (
+        next.origin !== this.url.origin ||
+        next.protocol !== this.url.protocol
+      )
+        throw new FindingsHttpError(
+          `Findings API redirect leaves the configured service origin (HTTP ${response.status}). Configure the final service URL.`,
+          response.status,
+          null,
+        );
+
+      // Retain Fetch's redirect limit and POST-to-GET behavior.
+      if (redirects === 20)
+        throw new TypeError("Too many findings service redirects.");
+      if ([301, 302, 303].includes(response.status)) body = undefined;
+      url = next;
+    }
+  }
+
   private async post(path: string, body: unknown): Promise<unknown> {
-    const response = await this.request(this.endpoint(path), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: this.signal,
-    });
+    const response = await this.requestEndpoint(
+      this.endpoint(path),
+      JSON.stringify(body),
+    );
     if (!response.ok) {
       throw await FindingsHttpError.fromResponse(
         response,
