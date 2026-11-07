@@ -152,6 +152,7 @@
 - clear Deep Scan consolidation progress when a scan stops ([#2433](https://github.com/openai/codex-security/pull/2433))
 - report when Deep Scan times out before completing a review ([#2434](https://github.com/openai/codex-security/pull/2434))
 - avoid overlapping Deep Scan worker sandbox denies ([#2416](https://github.com/openai/codex-security/pull/2416))
+- bump napi from 3.16.0 to 3.16.1 in /plugins/codex-security/native ([#2440](https://github.com/openai/codex-security/pull/2440))
 
 </details>
 
