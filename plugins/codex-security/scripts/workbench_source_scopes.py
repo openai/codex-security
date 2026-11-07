@@ -301,15 +301,15 @@ def saved_document_source_roots(scan: sqlite3.Row) -> list[str]:
         try:
             current = target.resolve(strict=True)
             info = current.lstat()
-            if (
+            if not (
                 stat.S_ISDIR(info.st_mode)
                 and stored_filesystem_identity_matches(scan["target_device"], info.st_dev)
                 and stored_filesystem_identity_matches(scan["target_inode"], info.st_ino)
             ):
-                return [str(repository_marker_root(current, outermost=False))]
+                return []
+            return [str(repository_marker_root(current, outermost=False))]
         except (OSError, RuntimeError):
-            pass
-        return []
+            return []
     if not isinstance(owner.get("path"), str):
         return []
     saved = Path(owner["path"])

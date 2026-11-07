@@ -48,7 +48,10 @@ describe("multiscan", () => {
     git(source.path, "worktree", "add", "--detach", linked, source.revision);
     const prompt = join(paths.root, "shared-prompt.md");
     await writeFile(prompt, "Review synthetic boundaries.");
-    const operator = join(paths.root, "operator");
+    const config = join(paths.root, "operator");
+    const staleMarker = join(config, ".git");
+    await mkdir(staleMarker, { recursive: true });
+    const operator = join(config, "policy");
     await mkdir(operator);
     const marker = join(operator, ".git");
     await writeFile(marker, "gitdir: docs\n");
@@ -66,6 +69,7 @@ describe("multiscan", () => {
       ["long", join(paths.root, "x".repeat(300)), "failed"],
       ["file", localFile, "failed"],
       ["marker", marker, "failed"],
+      ["stale-marker", staleMarker, "failed"],
       ["directory", localDirectory, "failed"],
       ["first", join(linked, ".git"), "completed"],
       ["second", join(source.path, ".git"), "completed"],
@@ -100,7 +104,7 @@ describe("multiscan", () => {
       ),
     );
     expect(scans).toBe(2);
-    expect(summary).toMatchObject({ total: 8, completed: 2, failed: 6 });
+    expect(summary).toMatchObject({ total: 9, completed: 2, failed: 7 });
     expect(await results(summary.resultsPath)).toMatchObject(
       rows.map(([id, , status]) => ({ id, status })),
     );
@@ -944,16 +948,18 @@ describe("multiscan", () => {
     async (scope) => {
       const paths = await fixture();
       const primary = await repository(paths.root, "source");
-      const source = join(paths.root, "linked");
-      git(
-        primary.path,
-        "worktree",
-        "add",
-        "--detach",
-        source,
-        primary.revision,
-      );
-      const selection = scope === "shared" ? source : join(source, ".git");
+      const source =
+        scope === "shared" ? primary.path : join(paths.root, "linked");
+      if (source !== primary.path)
+        git(
+          primary.path,
+          "worktree",
+          "add",
+          "--detach",
+          source,
+          primary.revision,
+        );
+      const selection = join(source, ".git");
       if (scope === "mode-specific" && process.platform !== "win32") {
         const pointer = join(paths.root, "worktree-pointer");
         await rename(selection, pointer);

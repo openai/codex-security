@@ -163,19 +163,15 @@ async function associatedMetadataRoots(
   return roots;
 }
 
-/** A selected gitfile must point at storage with a symbolic or detached Git HEAD. */
-export async function isWorktreeGitFile(
+/** Recognize a selected .git directory or gitfile by its HEAD and storage. */
+export async function isWorktreeGitMarker(
   marker: string,
   signal?: AbortSignal,
 ): Promise<boolean> {
   const context = { directory: dirname(marker), environment: process.env };
-  const target = await metadataPointer(
-    marker,
-    "gitdir: ",
-    context,
-    signal,
-    "gitfile",
-  );
+  const target = (await abortable(() => stat(marker), signal)).isDirectory()
+    ? marker
+    : await metadataPointer(marker, "gitdir: ", context, signal, "gitfile");
   if (target === undefined) return false;
   const head = join(target, "HEAD");
   const metadata = await lstat(head).catch(nullIfMissingPath);

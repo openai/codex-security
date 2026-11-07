@@ -65,7 +65,7 @@ import {
   type ScanPromptSettings,
   type ScanSettings,
 } from "./scan-settings.js";
-import { isWorktreeGitFile } from "./local-git-metadata.js";
+import { isWorktreeGitMarker } from "./local-git-metadata.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -285,8 +285,7 @@ async function localSourceRoots(
   for (const marker of new Set([repository, path])) {
     if (
       basename(marker) === ".git" &&
-      ((await lstat(path)).isDirectory() ||
-        (await isWorktreeGitFile(marker, signal)))
+      (await isWorktreeGitMarker(marker, signal))
     ) {
       roots.push(await realpath(dirname(marker)));
     }
