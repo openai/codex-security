@@ -82,6 +82,7 @@ import {
 } from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
+  sqliteFilename,
   windowsUnsafePathComponent,
 } from "./windows-path.js";
 
@@ -498,6 +499,7 @@ const WINDOWS_PRINCIPAL_ALIASES: Readonly<Record<string, string>> = {
   HA: "S-1-5-32-578",
   AA: "S-1-5-32-579",
 };
+const WINDOWS_ACCOUNT_SID = /^S-1-5-21-(?:\d+-){3}\d+$/u;
 const WINDOWS_SID = /^S-1-(?:\d+-)*\d+$/u;
 const WINDOWS_GUID =
   /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu;
@@ -541,6 +543,7 @@ export function inspectWindowsCredentialAcl(
   currentUserSid: string,
   options: {
     resolvedAliases?: Readonly<Record<string, string>>;
+    currentGroupSids?: ReadonlySet<string>;
     scope?: "directory" | "file" | "ancestor";
   } = {},
 ): WindowsCredentialAcl {
@@ -619,7 +622,10 @@ export function inspectWindowsCredentialAcl(
       if (!trustedPrincipal(principal)) {
         if (
           options.scope !== "ancestor" ||
-          windowsAceAllowsAncestorReplacement(rights!, inheritanceFlags)
+          // OWNER RIGHTS applies to the owner already verified above. Every
+          // descendant is inspected with its own security descriptor.
+          (principal !== WINDOWS_OWNER_RIGHTS_SID &&
+            windowsAceAllowsAncestorReplacement(rights!, inheritanceFlags))
         ) {
           untrustedPrincipals.add(principal);
         }
@@ -640,7 +646,11 @@ export function inspectWindowsCredentialAcl(
           grantsCurrentContainerAccess = true;
         }
       }
-    } else {
+    } else if (
+      principal === currentUserSid ||
+      !WINDOWS_ACCOUNT_SID.test(principal) ||
+      (options.currentGroupSids?.has(principal) ?? true)
+    ) {
       deniedPrincipals.add(principal);
     }
     remaining = rest;
@@ -835,6 +845,7 @@ export async function inspectWindowsCredentialAclSnapshot(
     environment?: NodeJS.ProcessEnv;
     resolvedAliases?: Readonly<Record<string, string>>;
     resolveDescriptorAliases?: (descriptor: string) => Promise<void>;
+    currentGroupSids?: ReadonlySet<string>;
   },
 ): Promise<{
   home: WindowsCredentialAcl;
@@ -889,6 +900,7 @@ export async function inspectWindowsCredentialAclSnapshot(
                 descriptor,
                 currentUserSid,
                 {
+                  currentGroupSids: options.currentGroupSids,
                   resolvedAliases: options.resolvedAliases,
                   scope: "ancestor",
                 },
@@ -919,6 +931,7 @@ export async function inspectWindowsCredentialAclSnapshot(
           if (index === ancestors.length) {
             try {
               home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
+                currentGroupSids: options.currentGroupSids,
                 resolvedAliases: options.resolvedAliases,
               });
             } catch (error) {
@@ -934,6 +947,7 @@ export async function inspectWindowsCredentialAclSnapshot(
             descriptor,
             currentUserSid,
             {
+              currentGroupSids: options.currentGroupSids,
               resolvedAliases: options.resolvedAliases,
               scope: "file",
             },
@@ -963,6 +977,33 @@ export async function inspectWindowsCredentialAclSnapshot(
     return { home, descendantsArePrivate };
   }
   throw new Error("Windows credential descendants could not be verified");
+}
+
+/** A file server may add its own groups to the client's token. */
+export async function isLocalWindowsCredentialVolume(
+  path: string,
+  readDriveType: (drive: string) => Promise<string>,
+): Promise<boolean> {
+  const drive = /^\\\\[?.]\\([A-Z]:)\\/iu.exec(
+    win32.toNamespacedPath(path),
+  )?.[1];
+  if (!drive) return false;
+  // Win32_LogicalDisk reports removable, local disk, and RAM disk as 2, 3, 6.
+  return ["2", "3", "6"].includes((await readDriveType(drive)).trim());
+}
+
+/** Keep every token group, including groups used only for deny ACEs. */
+export function parseWindowsTokenGroupSids(output: string): Set<string> {
+  const groups = new Set<string>();
+  for (const row of output.trim().split(/\r?\n/u)) {
+    const sid =
+      /^"(?:[^"]|"")*","(?:[^"]|"")*","(S-1-(?:\d+-)*\d+)","(?:[^"]|"")*"$/u.exec(
+        row,
+      )?.[1];
+    if (!sid) throw new Error("Unable to identify Windows token group SIDs");
+    groups.add(sid);
+  }
+  return groups;
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
@@ -1094,6 +1135,30 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     );
     resolvedAliases[principal] = requireNumericSid(resolved.stdout.trim());
   };
+  const loadLocalGroupSids = async (): Promise<Set<string> | null> => {
+    const local = await isLocalWindowsCredentialVolume(
+      treePath,
+      async (drive) => {
+        const volume = await execFile(
+          powershell,
+          [
+            ...powershellArgs,
+            `$ErrorActionPreference = 'Stop'; (CimCmdlets\\Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID = '${drive}'").DriveType`,
+          ],
+          processOptions,
+        );
+        return volume.stdout;
+      },
+    );
+    if (!local) return null;
+    const groups = await execFile(
+      join(systemDirectory, "whoami.exe"),
+      ["/groups", "/fo", "csv", "/nh"],
+      processOptions,
+    );
+    return parseWindowsTokenGroupSids(groups.stdout);
+  };
+  let currentGroupSids: Set<string> | null | undefined;
   const resolveDescriptorAliases = async (
     descriptor: string,
   ): Promise<void> => {
@@ -1103,8 +1168,20 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     let remaining = header[3]!;
     while (remaining.startsWith("(")) {
       const { rule, rest } = windowsSecurityDescriptorRule(remaining);
-      const principal = rule.split(";")[5];
-      if (principal !== undefined) await resolvePrincipal(principal);
+      const fields = rule.split(";");
+      const principal = fields[5];
+      if (principal !== undefined) {
+        await resolvePrincipal(principal);
+        const trustee = resolvedAliases[principal] ?? principal;
+        if (
+          currentGroupSids === undefined &&
+          ["D", "OD", "XD"].includes(fields[0]!) &&
+          trustee !== sid &&
+          WINDOWS_ACCOUNT_SID.test(trustee)
+        ) {
+          currentGroupSids = await loadLocalGroupSids();
+        }
+      }
       remaining = rest;
     }
   };
@@ -1114,6 +1191,9 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       command: powershell,
       args: [...powershellArgs, script],
       environment: processOptions.env,
+      get currentGroupSids() {
+        return currentGroupSids ?? undefined;
+      },
       resolvedAliases,
       resolveDescriptorAliases,
     });
@@ -1256,7 +1336,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
   // Let SQLite create a missing guard so no separate descriptor can close after
   // another connection acquires its process-owned POSIX lock. Keep the guard
   // across releases so every contender locks the same inode.
-  const database = new Database(databasePath);
+  const database = new Database(sqliteFilename(databasePath));
   let databaseLocked = false;
 
   try {
@@ -2991,8 +3071,19 @@ export async function bootstrapPlugin(
   const previous: unknown = await readFile(installRecord, "utf8")
     .then((value) => JSON.parse(value) as unknown)
     .catch((error: unknown) => {
-      if (nodeErrorCode(error) === "ENOENT" || error instanceof SyntaxError) {
+      const code = nodeErrorCode(error);
+      if (code === "ENOENT" || error instanceof SyntaxError) {
         return null;
+      }
+      if (
+        process.platform === "win32" &&
+        error instanceof Error &&
+        (code === "EACCES" || code === "EPERM")
+      ) {
+        // Keep the original system error, including its path, code and syscall.
+        error.message +=
+          " If the SDK created this plugin installation receipt but cannot reopen it, " +
+          "check its read permissions and the permissions new files inherit from the sdk-marketplace directory.";
       }
       throw error;
     });

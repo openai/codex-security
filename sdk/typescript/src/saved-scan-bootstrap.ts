@@ -5,6 +5,7 @@ import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { access } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
+import { sqliteFilename } from "./windows-path.js";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -355,7 +356,7 @@ function readSnapshot<T>(
   let database: BootstrapDatabase | undefined;
   try {
     database = new Database(
-      path,
+      sqliteFilename(path),
       // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
       // Open only an existing file there; query_only still prevents SQL data/schema writes.
       bun

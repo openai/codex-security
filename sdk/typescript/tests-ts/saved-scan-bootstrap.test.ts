@@ -12,13 +12,14 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, toNamespacedPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, mock, test } from "bun:test";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
 import {
   savedCheckoutBoundaries,
   savedDiscoveryRoots,
+  readSavedScanLifecycle,
   savedScanWorkbench,
 } from "../src/saved-scan-bootstrap.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
@@ -34,6 +35,7 @@ import { git } from "./git-fixture.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 
@@ -41,6 +43,86 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "saved-scan-bootstrap-résumé-",
 );
 afterEach(cleanup);
+
+function seedSavedLifecycle(filename: string): void {
+  const database = new Database(filename, { create: true });
+  try {
+    database.exec("CREATE TABLE scan_lifecycles (scan_id TEXT, snapshot TEXT)");
+    database
+      .query("INSERT INTO scan_lifecycles VALUES (?, ?)")
+      .run("synthetic", JSON.stringify({ completed: true }));
+  } finally {
+    database.close();
+  }
+}
+
+function recordSavedDatabaseOpens(rejectedFilename?: string): unknown[] {
+  const opened: unknown[] = [];
+  class RecordedDatabase extends Database {
+    constructor(...args: ConstructorParameters<typeof Database>) {
+      opened.push(args[0]);
+      if (rejectedFilename !== undefined && args[0] === rejectedFilename)
+        throw new Error("Ordinary long SQLite filename unavailable");
+      super(...args);
+    }
+  }
+  mock.module("bun:sqlite", () => ({ Database: RecordedDatabase }));
+  return opened;
+}
+
+const legacyPathTest =
+  "reads saved history when ordinary long Windows filenames are unavailable";
+test.skipIf(process.platform !== "win32")(legacyPathTest, async () => {
+  if (runTestInSubprocess(import.meta.path, legacyPathTest)) return;
+  const root = await temporaryDirectory();
+  const filename = "workbench.sqlite3";
+  const padding = Math.max(0, 260 - join(root, filename).length);
+  const state = join(root, "x".repeat(padding));
+  const ordinary = join(state, filename);
+  const namespaced = toNamespacedPath(ordinary);
+  if (ordinary === namespaced || Buffer.byteLength(namespaced) > 1032) return;
+  await mkdir(state, { recursive: true });
+  seedSavedLifecycle(namespaced);
+  const opened = recordSavedDatabaseOpens(ordinary);
+  expect(
+    readSavedScanLifecycle({ CODEX_SECURITY_STATE_DIR: state }, "synthetic"),
+  ).toEqual({ completed: true });
+  expect(opened).toEqual([namespaced]);
+});
+
+const byteLimitTest =
+  "Bun reads saved history near the Win32 SQLite filename limit";
+test.skipIf(process.platform !== "win32")(byteLimitTest, async () => {
+  if (runTestInSubprocess(import.meta.path, byteLimitTest)) return;
+  const filename = "workbench.sqlite3";
+  // A 1,030-byte filename fits the default VFS until a drive namespace is added.
+  const targetBytes = 1030;
+  let state = await temporaryDirectory();
+  if (Buffer.byteLength(join(state, filename)) > targetBytes) return;
+  while (targetBytes - Buffer.byteLength(join(state, filename)) > 128)
+    state = join(state, "a".repeat(64));
+  const padding = targetBytes - Buffer.byteLength(join(state, filename)) - 1;
+  if (padding > 0) state = join(state, "b".repeat(padding));
+  await mkdir(state, { recursive: true });
+  const ordinary = join(state, filename);
+  try {
+    seedSavedLifecycle(ordinary);
+  } catch (error) {
+    // Exercise the compatibility boundary only where Bun itself can open this filename.
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "SQLITE_CANTOPEN"
+    )
+      return;
+    throw error;
+  }
+  const opened = recordSavedDatabaseOpens();
+  expect(
+    readSavedScanLifecycle({ CODEX_SECURITY_STATE_DIR: state }, "synthetic"),
+  ).toEqual({ completed: true });
+  expect(opened).toEqual([ordinary]);
+});
 
 function writePythonProbe(path: string) {
   return writeFile(

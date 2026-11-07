@@ -9,12 +9,12 @@ import { execFileSync } from 'node:child_process';
 import * as core from '@actions/core';
 import { DefaultArtifactClient } from '@actions/artifact';
 import { BlobClient } from '@azure/storage-blob';
-import { runAction } from '../src/main.js';
-import { INPUT_NAMES } from '../src/inputs.js';
-import { gitEnvironment } from '../src/targets.js';
-import { runtimeEnvironment, type Runtime } from '../src/runtime.js';
-import type { ProcessResult } from '../src/process.js';
-import { copyCompletedScan } from './fixtures.js';
+import { runAction } from '../src/main.ts';
+import { INPUT_NAMES } from '../src/inputs.ts';
+import { gitEnvironment } from '../src/targets.ts';
+import { runtimeEnvironment, type Runtime } from '../src/runtime.ts';
+import type { ProcessResult } from '../src/process.ts';
+import { copyCompletedScan } from './fixtures.ts';
 
 type Scenario = 'schedule' | 'pr' | 'policy-pr' | 'empty-pr';
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;

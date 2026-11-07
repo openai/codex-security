@@ -188,6 +188,8 @@ function migrateWorkflowResults(database: DatabaseSync): void {
     "SELECT rowid, results_json FROM finding_workflows",
   );
   rows.setReadBigInts(true);
+  // run() also returns the connection's last inserted row ID after an UPDATE.
+  update.setReadBigInts(true);
   for (const row of rows.all()) {
     const { stages } = parseJson(String(row.results_json)) as {
       stages: Record<
