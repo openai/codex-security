@@ -1307,10 +1307,10 @@ Private checkouts use your GitHub CLI login.
 
 A usable local Git source selected by its directory protects document links
 inside it. For a standard SHA-1 repository created with `git init --bare` or
-`git clone --bare`, a `.git` marker can identify the storage alone. If other
-Git settings leave ownership ambiguous, bulk scans also protect the marker's
-parent. Pass the canonical path to select a shared external prompt or
-knowledge-base document in that case.
+`git clone --bare`, a `.git` marker can identify the storage alone. With a
+custom repository configuration or inherited command-scope Git settings, bulk
+scans may also protect the marker's parent. Pass the canonical path to select
+a shared external prompt or knowledge-base document in that case.
 
 For CI, provide CSV with `id`, `repository`, and a full commit `revision`.
 Optional `scope`, `mode`, and `prompt` customize each row:

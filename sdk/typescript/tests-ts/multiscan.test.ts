@@ -1049,6 +1049,7 @@ describe("multiscan", () => {
   test.each([
     "init",
     "clone",
+    "caller Git locations",
     "explicit directory",
     "nonbare",
     "duplicate",
@@ -1057,6 +1058,15 @@ describe("multiscan", () => {
     "commondir",
     "include",
   ])("bulk document ownership with %s metadata", async (kind) => {
+    const callerLocations = kind === "caller Git locations";
+    if (
+      callerLocations &&
+      runTestInSubprocess(
+        import.meta.path,
+        `bulk document ownership with ${kind} metadata`,
+      )
+    )
+      return;
     const paths = await fixture();
     const primary = await repository(paths.root, "source");
     const storage = join(paths.root, "storage");
@@ -1099,6 +1109,11 @@ describe("multiscan", () => {
     );
     await filesystem.symlink(paths.root, join(operator, "docs"), "junction");
     const selection = kind === "explicit directory" ? operator : marker;
+    if (callerLocations) {
+      process.env["GIT_DIR"] = join(primary.path, ".git");
+      process.env["GIT_COMMON_DIR"] = join(primary.path, ".git");
+      process.env["GIT_WORK_TREE"] = primary.path;
+    }
     await writeFile(
       paths.input,
       `id,repository,revision\nrow,${selection},${primary.revision}\n`,
@@ -1110,7 +1125,7 @@ describe("multiscan", () => {
       }),
     );
     const [row] = await results(summary.resultsPath);
-    if (kind === "init" || kind === "clone")
+    if (kind === "init" || kind === "clone" || callerLocations)
       expect(row?.["status"]).toBe("completed");
     else expect(row?.["error"]).toContain("repository symbolic link");
   });

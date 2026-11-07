@@ -215,15 +215,11 @@ async function gitSourceStorage(
 }
 
 async function isGeneratedBareStorage(directory: string, signal?: AbortSignal) {
+  // Bulk checkout drops caller repository locations and forwards command-scope Git config.
   const count = environmentEntry(process.env, "GIT_CONFIG_COUNT");
   if (
     (count !== undefined && count !== "0") ||
-    [
-      "GIT_DIR",
-      "GIT_WORK_TREE",
-      "GIT_COMMON_DIR",
-      "GIT_CONFIG_PARAMETERS",
-    ].some((key) => environmentEntry(process.env, key) !== undefined)
+    environmentEntry(process.env, "GIT_CONFIG_PARAMETERS") !== undefined
   )
     return false;
   if (await lstat(join(directory, "config.worktree")).catch(nullIfMissingPath))
