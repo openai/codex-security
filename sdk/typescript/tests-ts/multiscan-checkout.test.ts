@@ -23,7 +23,8 @@ import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { gitOutput, normalizeTarget } from "../src/targets.js";
-import { probeCodexSandbox } from "../src/runtime.js";
+import { probeCodexSandbox, runCodexCommand } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting } from "./support/errors.js";
 import {
@@ -1042,7 +1043,7 @@ describe("multiscan", () => {
   );
 
   testPosix(
-    "bootstrap launchers use the campaign's selected tool path",
+    "bootstrap launchers and inventory helpers use the campaign's selected tool path",
     async () => {
       const { paths, source } = await repositoryFixture("source");
       const install = join(paths.root, "tool:installation");
@@ -1054,26 +1055,56 @@ describe("multiscan", () => {
       await writeFile(launcher, "#!/usr/bin/env node\nprocess.exit(0);\n", {
         mode: 0o700,
       });
-      await writeFile(join(source.path, "node"), "#!/bin/sh\nexit 72\n", {
-        mode: 0o700,
-      });
-      const aliases = join(paths.root, "aliases");
-      await mkdir(aliases);
-      await symlink(join(source.path, "node"), join(aliases, "node"));
+      const aliases = [];
+      for (const name of ["node", "rg"]) {
+        const alias = join(paths.root, `${name}-aliases`);
+        await mkdir(alias);
+        await writeFile(join(source.path, name), "#!/bin/sh\nexit 73\n", {
+          mode: 0o700,
+        });
+        await symlink(join(source.path, name), join(alias, name));
+        aliases.push(alias);
+      }
+      await writeFile(
+        join(tools, "rg"),
+        "#!/bin/sh\nprintf './src/app.ts\\0'\n",
+        {
+          mode: 0o700,
+        },
+      );
+      const environment = {
+        PATH: [source.path, ...aliases, tools].join(delimiter),
+      };
+      const inventory = join(paths.root, "inventory.txt");
       const summary = await runMultiscan(
         options(
           paths,
           client(async (checkout, settings) => {
-            await probeCodexSandbox(
-              { command: launcher },
-              { PATH: [source.path, aliases, tools].join(delimiter) },
+            await probeCodexSandbox({ command: launcher }, environment);
+            const result = await runCodexCommand(
+              { command: join(tools, "node") },
+              [
+                join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+                "generate-in-scope-files",
+                "--repo",
+                checkout,
+                "--scope",
+                ".",
+                "--out",
+                inventory,
+              ],
+              environment,
             );
+            expect(result.success, result.stderr).toBe(true);
             return completeRun(checkout, settings);
           }),
           { maxAttempts: 1 },
         ),
       );
-      expect(summary).toMatchObject({ completed: 1, failed: 0 });
+      expect((await results(summary.resultsPath))[0]).toMatchObject({
+        status: "completed",
+      });
+      expect(await readFile(inventory, "utf8")).toBe("./src/app.ts\n");
     },
   );
 
@@ -1096,6 +1127,7 @@ describe("multiscan", () => {
       join(root, "node_modules", ".bin"),
     );
     const shimMarker = join(paths.root, "shim-ran");
+    const gitMarker = join(paths.root, "operator-git-ran");
     for (const directory of shimDirectories) {
       await mkdir(directory, { recursive: true });
       await writeFile(
@@ -1103,6 +1135,22 @@ describe("multiscan", () => {
         `#!/bin/sh\nprintf called > "${shimMarker}"\nexit 1\n`,
         { mode: 0o700 },
       );
+    }
+    if (process.platform !== "win32") {
+      const operatorBin = join(paths.root, "operator-bin");
+      await mkdir(operatorBin);
+      await writeFile(
+        join(second.path, "sh"),
+        `#!/bin/sh\nprintf called > "${shimMarker}"\nexec /bin/sh "$@"\n`,
+        { mode: 0o700 },
+      );
+      await symlink(join(second.path, "sh"), join(operatorBin, "sh"));
+      await writeFile(
+        join(operatorBin, "git"),
+        `#!/usr/bin/env sh\nprintf called > "${gitMarker}"\nexec '${Bun.which("git")!.replaceAll("'", "'\\''")}' "$@"\n`,
+        { mode: 0o700 },
+      );
+      shimDirectories.push(operatorBin);
     }
     const previousDirectory = process.cwd();
     const environment = new Map(
@@ -1139,6 +1187,7 @@ describe("multiscan", () => {
       );
 
       await expect(access(shimMarker)).rejects.toThrow();
+      if (process.platform !== "win32") await access(gitMarker);
       expect(summary).toMatchObject({ completed: 2, failed: 0 });
     } finally {
       process.chdir(previousDirectory);

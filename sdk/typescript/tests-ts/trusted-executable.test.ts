@@ -1,5 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  realpath,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { basename, delimiter, dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -21,23 +30,29 @@ async function resolveWindowsExecutable(
   candidate: string,
   path: string,
   protectedRoot: string,
+  campaign = false,
 ): ReturnType<typeof resolveTrustedExecutable> {
   if (process.platform === "win32") {
-    return await resolveTrustedExecutable(
-      candidate,
-      { Path: path, KEEP: "ok" },
-      protectedRoot,
-    );
+    const run = () =>
+      resolveTrustedExecutable(
+        candidate,
+        { Path: path, KEEP: "ok" },
+        protectedRoot,
+      );
+    return campaign
+      ? withProtectedExecutableRoots([protectedRoot], run)
+      : run();
   }
 
   const script = `
     Object.defineProperty(process, "platform", { value: "win32" });
-    const { resolveTrustedExecutable } = await import(process.argv[1]);
-    console.log(JSON.stringify(await resolveTrustedExecutable(
+    const { resolveTrustedExecutable, withProtectedExecutableRoots } = await import(process.argv[1]);
+    const run = () => resolveTrustedExecutable(
       process.argv[2],
       { Path: process.argv[3], KEEP: "ok" },
       process.argv[4],
-    )));
+    );
+    console.log(JSON.stringify(await (process.argv[5] === "campaign" ? withProtectedExecutableRoots([process.argv[4]], run) : run())));
   `;
   const result = spawnSync(
     process.execPath,
@@ -48,6 +63,7 @@ async function resolveWindowsExecutable(
       candidate,
       path,
       protectedRoot,
+      campaign ? "campaign" : "",
     ],
     { encoding: "utf8" },
   );
@@ -74,6 +90,50 @@ describe("trusted executable resolution", () => {
       ]),
     ).toEqual([second, first, environment.PATH]);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "campaigns isolate links into checkouts that materialize later",
+    async () => {
+      const first = await temporaryDirectory(),
+        second = await temporaryDirectory(),
+        tools = await temporaryDirectory();
+      for (const [name, directory] of [
+        ["first", first],
+        ["second", second],
+      ] as const)
+        await symlink(join(directory, "tool"), join(tools, name));
+      // One checkout starts missing, the other replaces a link to a trusted tool.
+      await symlink("/bin/sh", join(first, "tool"));
+      await symlink(join(first, "tool"), join(tools, "git"));
+      const environments = await Promise.all(
+        [first, second].map((root) =>
+          withProtectedExecutableRoots([root], async () => {
+            const input = { PATH: tools };
+            const command = await inspectTrustedExecutable("git", input, []);
+            const path = command.environment["PATH"]!;
+            if (root === first) {
+              expect(command.executable).toBeNull();
+              await unlink(join(root, "tool"));
+            }
+            await writeFile(join(root, "tool"), "#!/bin/sh\nexit 73\n", {
+              mode: 0o700,
+            });
+            const selected = root === first ? "first" : "second";
+            expect(
+              spawnSync(selected, [], { env: { PATH: path } }).error,
+            ).toMatchObject({ code: "ENOENT" });
+            const neighbor = root === first ? "second" : "first";
+            expect((await lstat(join(path, neighbor))).isSymbolicLink()).toBe(
+              true,
+            );
+            return path;
+          }),
+        ),
+      );
+      expect(environments[0]).not.toBe(environments[1]);
+      for (const path of environments) expect(existsSync(path)).toBe(false);
+    },
+  );
 
   test("accepts safe relative PATH entries without trusting repository links", async () => {
     const root = await temporaryDirectory();
@@ -486,6 +546,33 @@ describe("trusted executable resolution", () => {
         environment: { KEEP: "ok", PATH: trusted },
       },
     );
+  });
+
+  test("Windows checkout keeps sibling ripgrep aliases out of the child PATH", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "source"),
+      aliases = join(root, "aliases"),
+      pending = join(root, "pending"),
+      tools = join(root, "tools");
+    await Promise.all(
+      [source, aliases, pending, tools].map((path) => mkdir(path)),
+    );
+    const sourceTool = join(source, "rg.exe");
+    await writeFile(sourceTool, "source tool");
+    await symlink(sourceTool, join(aliases, "rg.com"));
+    await symlink(join(source, "later.exe"), join(pending, "rg.exe"), "file");
+    await writeFile(join(tools, "git.exe"), "operator tool");
+    expect(
+      await resolveWindowsExecutable(
+        "git",
+        [pending, aliases, tools].join(delimiter),
+        source,
+        true,
+      ),
+    ).toEqual({
+      executable: join(tools, "git.exe"),
+      environment: { KEEP: "ok", PATH: tools },
+    });
   });
 
   test("removes PATH entries containing repository-linked Windows shims", async () => {

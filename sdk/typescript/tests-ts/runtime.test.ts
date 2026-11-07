@@ -102,6 +102,7 @@ import {
   workbenchEnvironment,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
+  sdkNodeSearchPath,
   windowsCredentialAncestorAclScript,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
@@ -1095,12 +1096,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         cwd: mcp.mcpServers["codex-security"].cwd,
         startup_timeout_sec:
           mcp.mcpServers["codex-security"].startup_timeout_sec,
-        env_vars: declaredRoot
-          ? mcp.mcpServers["codex-security"].env_vars
-          : [
-              ...mcp.mcpServers["codex-security"].env_vars,
-              "CODEX_SECURITY_PLUGIN_ROOT",
-            ],
+        env_vars: [
+          ...mcp.mcpServers["codex-security"].env_vars,
+          ...(declaredRoot ? [] : ["CODEX_SECURITY_PLUGIN_ROOT"]),
+          ...(process.platform === "win32"
+            ? []
+            : ["_CODEX_SECURITY_SDK_NODE_SEARCH_PATH"]),
+        ],
       });
       expect(
         JSON.parse(await readFile(join(selected, ".mcp.json"), "utf8")),
@@ -2154,7 +2156,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         command: "./scripts/launch_codex_security_mcp_sdk",
         args: ["--stdio", "synthetic argument"],
         cwd: ".",
-        env_vars: ["CODEX_HOME", "CODEX_SECURITY_PLUGIN_ROOT"],
+        env_vars: [
+          "CODEX_HOME",
+          "CODEX_SECURITY_PLUGIN_ROOT",
+          ...(process.platform === "win32"
+            ? []
+            : ["_CODEX_SECURITY_SDK_NODE_SEARCH_PATH"]),
+        ],
       });
       expect(
         (await stat(join(staged, "scripts", "launch_codex_security_mcp")))
@@ -3012,6 +3020,18 @@ for await (const line of createInterface({ input: process.stdin })) {
         });
       }
       await removeTemporaryDirectory(root);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "filters SDK Node fallback directories against the scan source",
+    async () => {
+      const systemBin = await realpath("/usr/bin");
+      expect((await sdkNodeSearchPath([])).split(":")).toContain(systemBin);
+      expect((await sdkNodeSearchPath([systemBin])).split(":")).not.toContain(
+        systemBin,
+      );
+      expect(await sdkNodeSearchPath(["/"])).toBe("");
     },
   );
 

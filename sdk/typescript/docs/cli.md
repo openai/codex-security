@@ -1315,13 +1315,15 @@ codex-security bulk-scan repositories.csv \
 ```
 
 Bulk scans use clean shallow checkouts and support repository/path scopes.
-Git is resolved outside the selected local sources and campaign checkouts.
-Inventory uses a ripgrep executable outside the scanned checkout or the copy
-shipped with the selected Codex installation. On POSIX, inventory scripts use
-readable tool directories for interpreter and helper lookup. If a directory
-contains an executable link into the checkout, its other entries are available
-through temporary links. Keep interpreters and helpers that locate their installation
-relative to their invoked paths in directories without executable links into the checkout.
+Bulk checkout, scan, and recovery processes select host tools outside every local
+source and campaign checkout. Inventory uses an external ripgrep executable or
+the copy shipped with the selected Codex installation.
+
+On POSIX, campaign processes and script-based inventory tools search readable
+tool directories. When a directory contains a link into a selected source, its
+other tools remain available through temporary links. Keep helpers that locate
+their installation relative to their invoked path, such as virtual environments,
+in directories without such links.
 
 CSV scopes are literal paths relative to each checkout, including names such
 as `~/src`.

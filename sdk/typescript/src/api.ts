@@ -271,6 +271,8 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
+  SDK_NODE_SEARCH_PATH,
+  sdkNodeSearchPath,
   environmentWithGit,
   pluginMetadata,
   planOutputArchive,
@@ -346,6 +348,7 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
+  toolRoots: readonly string[];
   pricingContext?: ScanPricingContext;
   safetyIdentifier?: string;
   runtime: PreparedRuntime;
@@ -2360,10 +2363,11 @@ export class CodexSecurity {
           session.providerEnvKey,
         ),
       };
-      for (const root of [
+      session.toolRoots = [
         (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
         ...(knowledgeBase?.protectedRoots ?? []),
-      ]) {
+      ];
+      for (const root of session.toolRoots) {
         git = await inspectTrustedExecutable("git", git.environment, root);
         if (this.#dependencies.hostedScan !== undefined) {
           // Match the hosted MCP launchers' PATH-based tool lookups.
@@ -4519,6 +4523,7 @@ export class CodexSecurity {
         ),
         ...runtimePaths,
       };
+      delete environment[SDK_NODE_SEARCH_PATH];
       const model = scanModelConfiguration(session.effectiveConfig);
       return {
         environment,
@@ -4637,6 +4642,11 @@ export class CodexSecurity {
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
+      ...(process.platform === "win32"
+        ? {}
+        : {
+            [SDK_NODE_SEARCH_PATH]: await sdkNodeSearchPath(session.toolRoots),
+          }),
     };
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
@@ -4764,6 +4774,7 @@ export class CodexSecurity {
         signal,
       });
       return {
+        toolRoots: protectedRoots,
         runtime,
         runtimeHome,
         effectiveConfig,
@@ -4977,6 +4988,7 @@ export class CodexSecurity {
       return {
         runtime,
         safetyIdentifier: options.safetyIdentifier,
+        toolRoots: protectedRoots,
         runtimeHome,
         effectiveConfig,
         preflightConfig,

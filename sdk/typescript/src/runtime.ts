@@ -77,6 +77,7 @@ import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import {
   campaignCommandEnvironment,
+  inspectTrustedExecutable,
   isWithin,
   resolveTrustedExecutable,
   type InspectedExecutable,
@@ -2833,6 +2834,30 @@ type PluginRuntimeProjection = {
   files: Map<string, { contents: Buffer; mode?: number }>;
 };
 
+// Private handoff to the staged SDK launcher and shell-invoked helpers.
+export const SDK_NODE_SEARCH_PATH = "_CODEX_SECURITY_SDK_NODE_SEARCH_PATH";
+
+export async function sdkNodeSearchPath(
+  roots: readonly string[],
+): Promise<string> {
+  let fallback = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  const current = dirname(process.execPath);
+  if (
+    process.release.name === "node" &&
+    !process.versions["bun"] &&
+    !process.versions["electron"] &&
+    basename(process.execPath) === "node" &&
+    !current.includes(":")
+  )
+    fallback += `:${current}`;
+  const inspected = await inspectTrustedExecutable(
+    "node",
+    { PATH: fallback },
+    roots,
+  );
+  return inspected.environment["PATH"] ?? "";
+}
+
 async function pluginRuntimeProjection(
   root: string,
   signal?: AbortSignal,
@@ -2856,15 +2881,17 @@ async function pluginRuntimeProjection(
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
+  const launchVariables = ["CODEX_SECURITY_PLUGIN_ROOT"];
   if (
-    !Array.isArray(environment) ||
-    !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
+    process.platform !== "win32" &&
+    server["command"] === "./scripts/launch_codex_security_mcp"
   ) {
-    server["env_vars"] = [
-      ...(Array.isArray(environment) ? environment : []),
-      "CODEX_SECURITY_PLUGIN_ROOT",
-    ];
+    launchVariables.push(SDK_NODE_SEARCH_PATH);
   }
+  server["env_vars"] = [
+    ...(environment ?? []),
+    ...launchVariables.filter((name) => !environment?.includes(name)),
+  ];
   const files: PluginRuntimeProjection["files"] = new Map();
   server["command"] =
     server["command"] === "./scripts/launch_codex_security_mcp.cmd"
@@ -2876,7 +2903,7 @@ async function pluginRuntimeProjection(
         'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
         '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
         "fi\n" +
-        'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+        'exec "$(command -p dirname "$0")/launch_codex_security_mcp" "$@"\n',
     ),
     mode: 0o755,
   });

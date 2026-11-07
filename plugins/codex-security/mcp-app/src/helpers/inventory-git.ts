@@ -10,7 +10,14 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import type { Writable } from "node:stream";
 import {
   basename,
@@ -135,19 +142,77 @@ function scriptExecutable(command: string): boolean {
   }
 }
 
+// A campaign can replace files in its checkouts after preparing the workers.
+// Check every component owned by the campaign, including intermediate links
+// whose current destination is an external executable.
+function campaignPathCheck(
+  isProtected: (path: string) => boolean,
+  cwd: string,
+) {
+  const resolved = new Map<string, string | null>();
+  function expand(directory: string, target: string): string | null {
+    let parent = isAbsolute(target) ? "/" : directory;
+    for (const part of target.split("/")) {
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        parent = dirname(parent);
+        continue;
+      }
+      if (isProtected(parent)) return null;
+      const child = append(parent, part);
+      if (!resolved.has(child)) {
+        resolved.set(child, null); // Detect symlink cycles while expanding.
+        const link = lstatSync(fsPath(child), {
+          throwIfNoEntry: false,
+        })?.isSymbolicLink();
+        resolved.set(
+          child,
+          link
+            ? expand(
+                parent,
+                decodePosixBytes(
+                  readlinkSync(fsPath(child), { encoding: "buffer" }),
+                ),
+              )
+            : child,
+        );
+      }
+      const next = resolved.get(child);
+      if (!next) return null;
+      parent = next;
+    }
+    return parent;
+  }
+  return (path: string) => {
+    try {
+      const target = expand(cwd, path);
+      return target !== null && !isProtected(target);
+    } catch {
+      return false;
+    }
+  };
+}
+
 function scriptPathDirectory(
   directory: string,
-  root: string,
+  isProtected: (path: string) => boolean,
   temporary: string[],
+  campaignAllows?: (path: string) => boolean,
 ): string {
   const entries = readdirSync(fsPath(directory), {
     withFileTypes: true,
     encoding: "buffer",
   });
+  // Bun returns bare names for buffer-encoded directory entries.
+  const nameOf = (entry: (typeof entries)[number]) =>
+    decodePosixBytes(Buffer.isBuffer(entry) ? entry : entry.name);
   const allowed = entries.filter((entry) => {
-    if (!entry.isSymbolicLink()) return true;
-    const path = append(directory, decodePosixBytes(entry.name));
-    return !executable(path) || !isRepositoryPath(root, canonical(path));
+    const path = append(directory, nameOf(entry));
+    if (!(Buffer.isBuffer(entry) ? lstat(path) : entry).isSymbolicLink())
+      return true;
+    return campaignAllows
+      ? campaignAllows(path)
+      : !executable(path) || !isProtected(canonical(path));
   });
   if (allowed.length === entries.length) return directory;
   // Keep safe neighbors in their original PATH position. env and the kernel
@@ -156,7 +221,7 @@ function scriptPathDirectory(
   for (const path of [tmpdir(), "/tmp"]) {
     try {
       const parent = canonical(path);
-      if (!parent.includes(delimiter) && !isRepositoryPath(root, parent)) {
+      if (!parent.includes(delimiter) && !isProtected(parent)) {
         const candidate = append(
           parent,
           `codex-security-tools-${randomUUID()}`,
@@ -173,29 +238,43 @@ function scriptPathDirectory(
     throw new Error("No external temporary directory for inventory tools");
   temporary.push(copy);
   for (const entry of allowed) {
-    const name = decodePosixBytes(entry.name);
+    const name = nameOf(entry);
     symlinkSync(fsPath(append(directory, name)), fsPath(append(copy, name)));
   }
   return copy;
 }
 
-function posixChildPath(
+export function posixToolPath(
   path: string,
   cwd: string,
-  root: string,
-  script: boolean,
-  temporary: string[],
-): string {
+  roots: readonly string[],
+  mode: "native" | "script" | "campaign",
+) {
+  const temporary: string[] = [];
+  const boundaries = new Set(roots);
+  const isProtected = (entry: string) => {
+    for (const parent of ancestors(entry))
+      if (boundaries.has(parent)) return true;
+    return false;
+  };
+  const allows =
+    mode === "campaign" ? campaignPathCheck(isProtected, cwd) : undefined;
   const directories = path.split(delimiter).flatMap((entry) => {
     try {
       const lookup = isAbsolute(entry) ? entry : append(cwd, entry);
+      if (allows && !allows(lookup)) return [];
       let directory = canonical(lookup);
-      if (isRepositoryPath(root, directory)) return [];
-      if (script) directory = scriptPathDirectory(directory, root, temporary);
+      if (isProtected(directory)) return [];
+      if (mode !== "native")
+        directory = scriptPathDirectory(
+          directory,
+          isProtected,
+          temporary,
+          allows,
+        );
       // A directory containing ":" can be on PATH through an external alias.
       if (directory.includes(delimiter))
-        return lookup.includes(delimiter) ||
-          isRepositoryPath(root, resolve(lookup))
+        return lookup.includes(delimiter) || isProtected(resolve(lookup))
           ? []
           : [lookup];
       return [directory];
@@ -204,7 +283,19 @@ function posixChildPath(
     }
   });
   // An empty POSIX PATH searches the current directory.
-  return directories.join(delimiter) || "/dev/null";
+  return {
+    path: directories.join(delimiter) || "/dev/null",
+    allows,
+    cleanup() {
+      for (const directory of temporary) {
+        try {
+          rmSync(fsPath(directory), { recursive: true, force: true });
+        } catch {
+          // Cleanup must not change the tool or campaign's exit status.
+        }
+      }
+    },
+  };
 }
 
 function* trustedTools(
@@ -331,34 +422,24 @@ function spawnInventoryTool(
 ) {
   if (windows || inherited.PATH === undefined)
     return spawnTool(command, args, options, inherited);
-  const temporary: string[] = [];
-  const cleanup = () => {
-    for (const directory of temporary) {
-      try {
-        rmSync(fsPath(directory), { recursive: true, force: true });
-      } catch {
-        // A cleanup failure must not change the tool's exit status.
-      }
-    }
-  };
+  const view = posixToolPath(
+    inherited.PATH,
+    options.cwd ?? process.cwd(),
+    [root],
+    scriptExecutable(command) ? "script" : "native",
+  );
+  const PATH = view.path;
   try {
-    const PATH = posixChildPath(
-      inherited.PATH,
-      options.cwd ?? process.cwd(),
-      root,
-      scriptExecutable(command),
-      temporary,
-    );
     const result = spawnTool(
       command,
       args,
       { ...options, env: { ...(options.env ?? process.env), PATH } },
       { ...inherited, PATH },
     );
-    if (temporary.length) result.child.once("close", cleanup);
+    result.child.once("close", view.cleanup);
     return result;
   } catch (error) {
-    cleanup();
+    view.cleanup();
     throw error;
   }
 }

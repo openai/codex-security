@@ -1448,6 +1448,7 @@ async function testWorkerRuntimeSettings() {
     "PYTHON",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
+    "_CODEX_SECURITY_SDK_NODE_SEARCH_PATH",
     "HOME",
     "NODE_OPTIONS",
     "NODE_DEBUG",
@@ -2076,6 +2077,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             // Snapshot each scan environment independently.
             Object.assign(process.env, scanGitEnvironments[index]);
             process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
+            process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH = path.dirname(
+              nodePaths[index],
+            );
             Object.assign(process.env, temporaryEnvironments[index]);
             process.env.CODEX_SECURITY_STATE_DIR = path.join(
               fixture.root,
@@ -2154,6 +2158,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
             path.join(fixture.root, "ambient-plugin"),
+          );
+          assert.equal(
+            workerLaunch.environment!._CODEX_SECURITY_SDK_NODE_SEARCH_PATH,
+            path.dirname(nodePaths[index]),
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,

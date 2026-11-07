@@ -5,7 +5,6 @@ import {
   mkdir,
   readdir,
   readFile,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -51,21 +50,15 @@ async function fixture(
     ),
   );
   // Keep host-installed Node runtimes out of the simulated macOS runtime set.
-  const tools = path.join(root, "shell-tools");
-  await mkdir(tools);
-  for (const name of ["dirname", "od", "tr"]) {
-    const executable = spawnSync("/bin/sh", ["-c", `command -v ${name}`], {
-      encoding: "utf8",
-    }).stdout.trim();
-    await symlink(executable, path.join(tools, name));
-  }
+  const fallback = path.join(root, "fallback-bin");
+  await mkdir(fallback);
   const source = await readFile(
     path.join(sourcePluginRoot, "scripts", path.basename(launcher)),
     "utf8",
   );
   await writeFile(
     launcher,
-    source.replace(/^PATH=.*$/m, `PATH="\${PATH}:"${shellQuote(tools)}`),
+    source.replace(/^ *PATH=.*$/m, `  PATH="\${PATH}:"${shellQuote(fallback)}`),
   );
   for (const entry of await readdir(path.join(pluginRoot, "mcp"), {
     withFileTypes: true,
@@ -155,11 +148,14 @@ process.dlopen = function(module, filename, ...args) {
     "CODEX_ELECTRON_RESOURCES_PATH",
     "CODEX_CLI_PATH",
     "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_PLUGIN_ROOT",
   ])
     delete env[name];
   return {
     root,
     repo,
+    fallback,
+    launcher,
     addon,
     managed,
     ordinary,
@@ -190,6 +186,45 @@ process.dlopen = function(module, filename, ...args) {
     },
   };
 }
+
+launcherTest("SDK launches preserve the supplied search path", async () => {
+  const { repo, fallback, launcher } = await fixture(false);
+  const node = path.join(fallback, "node");
+  await writeFile(
+    node,
+    `#!/bin/sh
+if [ "\${2:-}" = --helper ]; then
+  [ -n "$(command -p cat <&3)" ] || exit 1
+fi
+printf '%s' "$PATH"
+`,
+    { mode: 0o755 },
+  );
+  const run = (args: string[], env: NodeJS.ProcessEnv = {}) =>
+    spawnSync("/bin/sh", [launcher, ...args], {
+      env: { PATH: repo, HOME: repo, XDG_CACHE_HOME: repo, ...env },
+      encoding: "utf8",
+    });
+
+  const standalone = run(["--stdio"]);
+  assert.equal(standalone.status, 0, standalone.stderr);
+  assert.equal(standalone.stdout, `${repo}:${fallback}`);
+
+  const sdk = {
+    CODEX_SECURITY_PLUGIN_ROOT: path.dirname(path.dirname(launcher)),
+  };
+  assert.equal(run(["--stdio"], sdk).status, 127);
+  for (const args of [["--stdio"], ["--helper", "probe"]]) {
+    for (const selection of [
+      { CODEX_MCP_NODE_PATH: node },
+      { _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: fallback },
+    ]) {
+      const selected = run(args, { ...sdk, ...selection });
+      assert.equal(selected.status, 0, selected.stderr);
+      assert.equal(selected.stdout, repo);
+    }
+  }
+});
 
 launcherTest(
   "macOS helpers skip managed runtimes that reject the packaged addon",

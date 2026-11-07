@@ -1,10 +1,13 @@
 #!/bin/sh
 set -eu
 
-PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-export PATH
+# The SDK may have removed directories containing repository-owned executables.
+if [ -z "${CODEX_SECURITY_PLUGIN_ROOT:-}" ] || [ -z "${PATH+x}" ]; then
+  PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+  export PATH
+fi
 
-launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+launcher_dir=$(CDPATH= cd "$(command -p dirname "$0")" && pwd)
 server_path=$launcher_dir/../mcp/server.mjs
 if [ "${1:-}" = "--helper" ]; then
   server_path=$launcher_dir/../mcp/helpers.mjs
@@ -33,7 +36,7 @@ launch_node() {
     trap 'forward_signal HUP 129' HUP
     trap 'forward_signal INT 130' INT
     trap 'forward_signal TERM 143' TERM
-    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n' |
+    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | command -p od -An -v -tx1 | command -p tr -d ' \n' |
       "$node_command" "$server_path" --helper 3<&0 0<&"$helper_stdin" 4<&- &
     exec 4<&-
     wait_helper
@@ -81,7 +84,11 @@ do
 done
 
 remaining_path=$PATH
-while :; do
+if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ] && [ -n "${_CODEX_SECURITY_SDK_NODE_SEARCH_PATH:-}" ]; then
+  # Only Node lookup uses the SDK-inspected fallback directories.
+  remaining_path=${remaining_path:+$remaining_path:}$_CODEX_SECURITY_SDK_NODE_SEARCH_PATH
+fi
+while [ -n "$remaining_path" ]; do
   path_entry=${remaining_path%%:*}
   node_path=${path_entry:-.}/node
   if [ -x "$node_path" ] && can_load_native "$node_path"; then

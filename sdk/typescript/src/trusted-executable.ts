@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { constants } from "node:fs";
-import { access, realpath, stat } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+import { access, readlink, realpath, stat } from "node:fs/promises";
 import {
   basename,
   delimiter,
@@ -23,10 +24,35 @@ export interface InspectedExecutable {
   environment: Record<string, string | undefined>;
 }
 
-const additionalRoots = new AsyncLocalStorage<readonly string[]>();
+interface ToolPathView {
+  path: string;
+  cleanup(): void;
+  allows: (path: string) => boolean;
+}
+
+const campaignScope = new AsyncLocalStorage<{
+  roots: readonly string[];
+  views: Map<string, ToolPathView>;
+  project?: (
+    path: string,
+    cwd: string,
+    roots: readonly string[],
+    mode: "campaign",
+  ) => ToolPathView;
+}>();
 
 function canonicalRoot(root: string): Promise<string> {
   return realpath(root).catch(() => resolve(root));
+}
+
+async function campaignPathHelper() {
+  const { bundledPluginRoot } = await import("./runtime.js");
+  const path = join(await bundledPluginRoot(), "mcp/helpers.mjs");
+  const project = (await import(pathToFileURL(path).href)).default
+    .posixToolPath;
+  if (typeof project !== "function")
+    throw new Error("The bundled plugin is missing campaign tool lookup.");
+  return project;
 }
 
 /** Include every selected source when a campaign launches tools from a new checkout. */
@@ -35,17 +61,26 @@ export async function withProtectedExecutableRoots<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   const canonical = await Promise.all(roots.map(canonicalRoot));
-  return additionalRoots.run(
-    [...new Set([...(additionalRoots.getStore() ?? []), ...canonical])],
-    run,
-  );
+  const scope = {
+    roots: [
+      ...new Set([...(campaignScope.getStore()?.roots ?? []), ...canonical]),
+    ],
+    views: new Map<string, ToolPathView>(),
+    project:
+      process.platform === "win32" ? undefined : await campaignPathHelper(),
+  };
+  try {
+    return await campaignScope.run(scope, run);
+  } finally {
+    for (const view of scope.views.values()) view.cleanup();
+  }
 }
 
 /** Host launchers and the workbench inherit the same Git search path as checkout. */
 export function campaignCommandEnvironment(
   environment: Record<string, string | undefined>,
 ): Promise<Record<string, string | undefined>> | undefined {
-  if (!additionalRoots.getStore() || searchPath(environment) === undefined)
+  if (!campaignScope.getStore() || searchPath(environment) === undefined)
     return undefined;
   return inspectTrustedExecutable("git", environment, []).then(
     (command) => command.environment,
@@ -83,13 +118,18 @@ export async function inspectTrustedExecutable(
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
 ): Promise<InspectedExecutable> {
-  const roots = await Promise.all(
+  const selectedRoots = await Promise.all(
     (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
       canonicalRoot,
     ),
   );
-  const campaign = additionalRoots.getStore();
-  if (campaign) roots.push(...campaign);
+  const campaign = campaignScope.getStore();
+  const extra = campaign
+    ? selectedRoots.filter(
+        (root) => !campaign.roots.some((base) => isWithin(base, root)),
+      )
+    : selectedRoots;
+  const roots = campaign ? [...campaign.roots, ...extra] : selectedRoots;
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
   const path = searchPath(environment);
@@ -120,6 +160,20 @@ export async function inspectTrustedExecutable(
       entries.push(directory);
   }
 
+  let view: ToolPathView | undefined;
+  if (campaign?.project) {
+    // Workers inherit this PATH across process boundaries. Keep the links until
+    // every row, including its pending child processes, has settled.
+    const path = entries.join(delimiter);
+    const cwd = process.cwd();
+    const key = JSON.stringify([cwd, extra, path]);
+    view = campaign.views.get(key);
+    if (!view) {
+      view = campaign.project(path || "/dev/null", cwd, roots, "campaign");
+      campaign.views.set(key, view);
+    }
+  }
+
   const pathLike = candidate.includes("/") || candidate.includes("\\");
   // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
   // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
@@ -131,9 +185,12 @@ export async function inspectTrustedExecutable(
       : pathLike
         ? [extname(candidate) === "" ? ".exe" : ""]
         : [".exe", ".com", ".bat", ".cmd", ""];
-  const names = suffixes.map((suffix) => candidate + suffix);
-  // The POSIX npm Codex launcher also searches the campaign PATH for Node.
-  if (campaign && !windows && candidate === "git") names.push("node");
+  const primary = suffixes.map((suffix) => candidate + suffix);
+  // Windows inventory searches for ripgrep after checkout passes PATH to the plugin.
+  const names =
+    campaign && windows && candidate === "git"
+      ? [...primary, "rg.exe", "rg.com"]
+      : primary;
   const candidates = (pathLike ? [null] : entries).flatMap((entry) => {
     // PATH lookup traverses links before "..". join() would collapse it first.
     const directory = entry ?? "";
@@ -142,15 +199,25 @@ export async function inspectTrustedExecutable(
     return names.map((name) => ({
       entry,
       path: entry === null && windows ? resolve(name) : prefix + name,
-      runnable: windows ? /\.(?:exe|com)$/iu.test(name) : name === candidate,
+      runnable:
+        primary.includes(name) && (!windows || /\.(?:exe|com)$/iu.test(name)),
     }));
   });
   const unsafeEntries = new Set<string>();
   let executable: string | null = null;
   for (const current of candidates) {
+    if (campaign && windows && current.entry !== null) {
+      // A sibling checkout can populate or replace this Windows shim later.
+      const link = await readlink(current.path).catch(() => undefined);
+      if (link && isProtected(resolve(dirname(current.path), link))) {
+        unsafeEntries.add(current.entry);
+        continue;
+      }
+    }
     const canonical = await realpath(current.path).catch(() => null);
     if (canonical === null) continue;
-    if (isProtected(canonical)) {
+    const crossesSource = view !== undefined && !view.allows(current.path);
+    if (isProtected(canonical) || (!pathLike && crossesSource)) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
@@ -170,7 +237,10 @@ export async function inspectTrustedExecutable(
         ? join(await realpath(dirname(current.path)), basename(current.path))
         : current.path;
       executable ??=
-        pathLike && (isProtected(current.path) || isProtected(invocationPath))
+        pathLike &&
+        (crossesSource ||
+          isProtected(current.path) ||
+          isProtected(invocationPath))
           ? canonical
           : invocationPath;
     } catch {
@@ -182,9 +252,9 @@ export async function inspectTrustedExecutable(
   for (const name of Object.keys(sanitizedEnvironment)) {
     if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
   }
-  const filteredPath = entries
-    .filter((entry) => !unsafeEntries.has(entry))
-    .join(delimiter);
+  const filteredPath =
+    view?.path ??
+    entries.filter((entry) => !unsafeEntries.has(entry)).join(delimiter);
   // An empty POSIX PATH searches the current directory.
   sanitizedEnvironment["PATH"] =
     campaign && process.platform !== "win32" && !filteredPath
