@@ -289,45 +289,46 @@ def capture_source_scopes(
     return result
 
 
-def saved_document_source_roots(scan: sqlite3.Row) -> list[str]:
-    """Keep the original checkout path and recognize that checkout through a later rename."""
+def saved_document_source_roots(
+    scan: sqlite3.Row, link_owners: list[Path]
+) -> tuple[list[str], list[str]]:
+    """Return recorded document boundaries and matching ancestors of the selected links."""
     metadata = json.loads(scan["source_scopes_json"] or "{}")
     owner = metadata.get("documentSourceRoot")
     target = Path(scan["target_path"])
-    if not isinstance(owner, dict):
-        # Older scans recorded the selected directory's identity, but not its checkout.
+    legacy = not isinstance(owner, dict)
+    if legacy:
+        # Older scans only identify the selected directory.
         if scan["target_device"] is None or scan["target_inode"] is None:
-            return []
+            return [], []
+    elif not isinstance(owner.get("path"), str) or not target.is_relative_to(owner["path"]):
+        return [], []
+
+    @cache
+    def matches(candidate: str) -> bool:
+        info = Path(candidate).lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            return False
+        if legacy:
+            return stored_filesystem_identity_matches(
+                scan["target_device"], info.st_dev
+            ) and stored_filesystem_identity_matches(scan["target_inode"], info.st_ino)
+        return (str(info.st_dev), str(info.st_ino)) == (owner.get("device"), owner.get("inode"))
+
+    roots = []
+    if legacy:
         try:
             current = target.resolve(strict=True)
-            info = current.lstat()
-            if not (
-                stat.S_ISDIR(info.st_mode)
-                and stored_filesystem_identity_matches(scan["target_device"], info.st_dev)
-                and stored_filesystem_identity_matches(scan["target_inode"], info.st_ino)
-            ):
-                return []
-            return [str(repository_marker_root(current, outermost=False))]
+            if matches(str(current)):
+                roots.append(str(repository_marker_root(current, outermost=False)))
         except (OSError, RuntimeError):
-            return []
-    if not isinstance(owner.get("path"), str):
-        return []
-    saved = Path(owner["path"])
-    if not target.is_relative_to(saved):
-        return []
-    roots = [str(saved)]
-    try:
-        current = saved.resolve(strict=True)
-        if current != saved:
-            info = current.lstat()
-            if stat.S_ISDIR(info.st_mode) and (str(info.st_dev), str(info.st_ino)) == (
-                owner.get("device"),
-                owner.get("inode"),
-            ):
-                roots.append(str(current))
-    except (OSError, RuntimeError):
-        pass  # A moved or unavailable checkout can still be selected by its recorded spelling.
-    return roots
+            pass  # The former enclosing checkout cannot be established from this path.
+    else:
+        roots.append(owner["path"])
+    candidates = dict.fromkeys(
+        str(ancestor) for directory in link_owners for ancestor in (directory, *directory.parents)
+    )
+    return roots, [ancestor for ancestor in candidates if matches(ancestor)]
 
 
 def load_source_scopes(

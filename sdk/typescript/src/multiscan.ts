@@ -65,7 +65,7 @@ import {
   type ScanPromptSettings,
   type ScanSettings,
 } from "./scan-settings.js";
-import { isWorktreeGitMarker } from "./local-git-metadata.js";
+import { localGitSourceRoots } from "./local-git-metadata.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -203,7 +203,7 @@ export async function runMultiscan(
       if (!isAbsolute(repository)) continue;
       try {
         repositories.push(
-          ...(await localSourceRoots(repository, options.signal)),
+          ...(await localGitSourceRoots(repository, options.signal)),
         );
       } catch (error) {
         nullIfUnavailableInputRoot(error as NodeJS.ErrnoException);
@@ -276,23 +276,6 @@ export async function runMultiscan(
   }
 }
 
-async function localSourceRoots(
-  repository: string,
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const path = await realpath(repository);
-  const roots = [];
-  for (const marker of new Set([repository, path])) {
-    if (
-      basename(marker) === ".git" &&
-      (await isWorktreeGitMarker(marker, signal))
-    ) {
-      roots.push(await realpath(dirname(marker)));
-    }
-  }
-  return roots.length ? roots : [path];
-}
-
 /** An unavailable CSV source fails its own checkout without claiming shared document paths. */
 async function availableLocalSources(
   tasks: readonly MultiscanTask[],
@@ -301,7 +284,7 @@ async function availableLocalSources(
   const sources = new Set<string>();
   for (const repository of new Set(tasks.map((task) => task.repository))) {
     if (!isAbsolute(repository)) continue;
-    const roots = await localSourceRoots(repository, signal).catch(
+    const roots = await localGitSourceRoots(repository, signal).catch(
       nullIfUnavailableInputRoot,
     );
     for (const root of roots ?? []) sources.add(root);

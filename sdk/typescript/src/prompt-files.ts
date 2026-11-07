@@ -69,16 +69,26 @@ export function nullIfUnavailableInputRoot(error: NodeJS.ErrnoException): null {
   throw error;
 }
 
+export interface DocumentSourceSelection {
+  directories: readonly string[];
+  lookupSavedRoots?: (
+    linkOwners: readonly string[],
+  ) => Promise<readonly string[]>;
+}
+
 /** Walk the selected path and the raw targets of any directory links it traverses. */
 export async function escapingInputDirectoryLink(
   selected: string,
   destination: string,
-  roots: readonly string[],
+  selection: DocumentSourceSelection,
   signal?: AbortSignal,
 ): Promise<string | null> {
   if (selected === destination) return null;
-  const outside = roots.filter((root) => !isWithin(root, destination));
-  if (outside.length === 0) return null;
+  const outside = (roots: readonly string[]) =>
+    roots.filter((root) => !isWithin(root, destination));
+  const known = outside(selection.directories);
+  if (!known.length && !selection.lookupSavedRoots) return null;
+  const linkOwners = new Map<string, string>();
 
   const directory = dirname(selected);
   const pending = [
@@ -96,9 +106,18 @@ export async function escapingInputDirectoryLink(
       inspected.add(entry);
       if (!(await lstat(entry)).isSymbolicLink()) continue;
       const owner = await realpath(parent);
-      if (outside.some((root) => isWithin(root, owner))) return entry;
+      if (known.some((root) => isWithin(root, owner))) return entry;
+      if (selection.lookupSavedRoots) linkOwners.set(owner, entry);
       const target = await readlink(entry);
       pending.push(isAbsolute(target) ? target : `${owner}${sep}${target}`);
+    }
+  }
+  if (linkOwners.size && selection.lookupSavedRoots) {
+    const recorded = outside(
+      await selection.lookupSavedRoots([...linkOwners.keys()]),
+    );
+    for (const [owner, entry] of linkOwners) {
+      if (recorded.some((root) => isWithin(root, owner))) return entry;
     }
   }
   return null;
@@ -118,7 +137,9 @@ export async function readRegularInputFile(
     typeof repository === "string" ? [repository] : repository;
   const roots = await Promise.all(repositories.map((root) => realpath(root)));
   const canonical = join(canonicalParent, basename(path));
-  if (await escapingInputDirectoryLink(path, canonical, roots)) {
+  if (
+    await escapingInputDirectoryLink(path, canonical, { directories: roots })
+  ) {
     throw new CodexSecurityError(
       "Input files must not follow repository directory links outside the selected repository.",
     );

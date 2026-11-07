@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { isRecord } from "./record.js";
 import { compareTimestamps } from "./timestamps.js";
 import { environmentEntry } from "./auth.js";
@@ -138,7 +139,14 @@ export async function savedScanWorkbench(
         currentDirectory: options.currentDirectory,
         failureMessage: "Could not read Codex Security scan history",
       },
-      target ? ["get-scan", "--scan-id", target.id] : args,
+      target
+        ? workbenchArgs("get-scan", {
+            scanId: target.id,
+            documentLinkOwnersStdin: args.includes(
+              "--document-link-owners-stdin",
+            ),
+          })
+        : args,
       input,
     );
     if (typeof requestedId !== "string" && args[0] === "finding-workflow") {

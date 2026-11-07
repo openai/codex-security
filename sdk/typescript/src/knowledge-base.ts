@@ -17,6 +17,7 @@ import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
 import { expandHome } from "./runtime.js";
 import {
+  type DocumentSourceSelection,
   escapingInputDirectoryLink,
   nullIfUnavailableInputRoot,
 } from "./prompt-files.js";
@@ -114,7 +115,7 @@ async function documentSourceRoots(
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
-  selection?: string | { directories: readonly string[] },
+  selection?: string | DocumentSourceSelection,
 ): Promise<KnowledgeBaseSnapshot> {
   try {
     const sources = new Set<string>();
@@ -122,8 +123,8 @@ export async function readKnowledgeBaseSnapshot(
 
     const roots =
       typeof selection === "string"
-        ? await documentSourceRoots(selection, signal)
-        : (selection?.directories ?? []);
+        ? { directories: await documentSourceRoots(selection, signal) }
+        : (selection ?? { directories: [] });
     for (const requested of paths) {
       signal?.throwIfAborted();
       if (!requested.trim())

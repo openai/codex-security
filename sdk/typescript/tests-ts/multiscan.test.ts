@@ -46,6 +46,11 @@ describe("multiscan", () => {
     const source = await repository(paths.root, "prompt-source");
     const linked = join(paths.root, "linked");
     git(source.path, "worktree", "add", "--detach", linked, source.revision);
+    const admin = git(linked, "rev-parse", "--absolute-git-dir");
+    const common = join(source.path, ".git");
+    await writeFile(join(common, "internal.md"), "Shared storage input.");
+    await filesystem.symlink(common, join(admin, "storage"), "junction");
+    const internal = join(admin, "storage", "internal.md");
     const prompt = join(paths.root, "shared-prompt.md");
     await writeFile(prompt, "Review synthetic boundaries.");
     const config = join(paths.root, "operator");
@@ -55,8 +60,14 @@ describe("multiscan", () => {
     await mkdir(operator);
     const marker = join(operator, ".git");
     await writeFile(marker, "gitdir: docs\n");
-    await filesystem.symlink(paths.root, join(operator, "current"), "junction");
-    const selected = join(operator, "current", "shared-prompt.md");
+    const bundle = join(operator, "source.bundle");
+    git(source.path, "bundle", "create", bundle, "--all");
+    const aliases = join(operator, "aliases");
+    await mkdir(aliases);
+    const pointer = join(aliases, "source.ref");
+    await writeFile(pointer, `gitdir: ${join(source.path, ".git")}\n`);
+    await filesystem.symlink(paths.root, join(aliases, "current"), "junction");
+    const selected = join(aliases, "current", "shared-prompt.md");
     const localFile = join(operator, "not-a-repository.csv");
     await writeFile(localFile, "synthetic row");
     const localDirectory = join(operator, "docs");
@@ -71,8 +82,11 @@ describe("multiscan", () => {
       ["marker", marker, "failed"],
       ["stale-marker", staleMarker, "failed"],
       ["directory", localDirectory, "failed"],
+      ["plain-directory", aliases, "failed"],
       ["first", join(linked, ".git"), "completed"],
       ["second", join(source.path, ".git"), "completed"],
+      ["bundle", bundle, "completed"],
+      ["pointer", pointer, "completed"],
     ];
     await writeFile(
       paths.input,
@@ -91,20 +105,20 @@ describe("multiscan", () => {
           expect(scanOptions.scanPrompt).toBe("Review synthetic boundaries.");
           expect(scanOptions.scanPromptFile).toBeUndefined();
           expect(
-            Object.values(scanOptions.knowledgeBaseSnapshot!.documents),
-          ).toEqual(["Review synthetic boundaries."]);
+            Object.values(scanOptions.knowledgeBaseSnapshot!.documents).sort(),
+          ).toEqual(["Review synthetic boundaries.", "Shared storage input."]);
           if (scans++ === 0) await rm(prompt);
           return await completedScan(scanOptions.outputDir!);
         }),
         {
           maxAttempts: 1,
           scanPromptFile: selected,
-          knowledgeBasePaths: [selected],
+          knowledgeBasePaths: [selected, internal],
         },
       ),
     );
-    expect(scans).toBe(2);
-    expect(summary).toMatchObject({ total: 9, completed: 2, failed: 7 });
+    expect(scans).toBe(4);
+    expect(summary).toMatchObject({ total: 12, completed: 4, failed: 8 });
     expect(await results(summary.resultsPath)).toMatchObject(
       rows.map(([id, , status]) => ({ id, status })),
     );
@@ -943,14 +957,32 @@ describe("multiscan", () => {
     expect(await readFile(join(deep, "checkpoint"), "utf8")).toBe("keep");
   });
 
-  test.each(["shared", "mode-specific"])(
-    "rejects %s knowledge reached through a local source directory link",
-    async (scope) => {
+  test.each([
+    "worktree",
+    "metadata",
+    "gitfile",
+    "bare",
+    "implicit bare",
+    "pointer",
+    "linked pointer",
+    "linked common",
+    "bare alias",
+  ])(
+    "rejects knowledge reached through a local source directory link for %s",
+    async (kind) => {
       const paths = await fixture();
       const primary = await repository(paths.root, "source");
-      const source =
-        scope === "shared" ? primary.path : join(paths.root, "linked");
-      if (source !== primary.path)
+      let source = primary.path;
+      let selection = kind === "metadata" ? join(source, ".git") : source;
+      if (kind === "pointer") {
+        selection = join(source, "target.ref");
+        await writeFile(selection, "gitdir: .git\n");
+      } else if (
+        kind === "gitfile" ||
+        kind === "linked pointer" ||
+        kind === "linked common"
+      ) {
+        source = join(paths.root, "linked");
         git(
           primary.path,
           "worktree",
@@ -959,11 +991,36 @@ describe("multiscan", () => {
           source,
           primary.revision,
         );
-      const selection = join(source, ".git");
-      if (scope === "mode-specific" && process.platform !== "win32") {
-        const pointer = join(paths.root, "worktree-pointer");
-        await rename(selection, pointer);
-        await filesystem.symlink(pointer, selection);
+        selection = join(source, ".git");
+        if (kind === "linked pointer" || kind === "linked common") {
+          const target = await readFile(selection, "utf8");
+          selection = join(paths.root, "linked.ref");
+          await writeFile(selection, target);
+          if (kind === "linked common") source = join(primary.path, ".git");
+        } else if (process.platform !== "win32") {
+          const pointer = join(paths.root, "worktree-pointer");
+          await rename(selection, pointer);
+          await filesystem.symlink(pointer, selection);
+        }
+      } else if (
+        kind === "bare" ||
+        kind === "implicit bare" ||
+        kind === "bare alias"
+      ) {
+        selection = join(paths.root, "archive");
+        source = kind === "implicit bare" ? selection + ".git" : selection;
+        git(primary.path, "clone", "--quiet", "--bare", primary.path, source);
+        await mkdir(join(source, ".git"));
+        if (kind === "bare alias") {
+          const parent = join(paths.root, "checkout");
+          await mkdir(parent);
+          selection = join(parent, ".git");
+          await filesystem.symlink(source, selection, "junction");
+        } else if (kind === "implicit bare" && process.platform !== "win32") {
+          const marker = join(selection, ".git");
+          await mkdir(marker, { recursive: true });
+          await writeFile(join(marker, "HEAD"), "unavailable", { mode: 0 });
+        }
       }
       await writeFile(join(paths.root, "context.md"), "External context.");
       await filesystem.symlink(paths.root, join(source, "docs"), "junction");
@@ -975,7 +1032,7 @@ describe("multiscan", () => {
       const summary = await runMultiscan(
         options(paths, client(completeRun), {
           maxAttempts: 1,
-          ...(scope === "shared"
+          ...(kind !== "gitfile"
             ? { knowledgeBasePaths }
             : { scanOptionsByMode: { standard: { knowledgeBasePaths } } }),
         }),

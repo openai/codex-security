@@ -10,6 +10,8 @@ import {
 import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
 import { savedDocumentSourceRoots } from "./knowledge-base.js";
+import type { DocumentSourceSelection } from "./prompt-files.js";
+import { isRecord } from "./record.js";
 import type { Finding } from "./models.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
@@ -18,6 +20,7 @@ import {
   type SavedScanDependencies,
 } from "./saved-scan.js";
 import { SeverityStore } from "./severity-store.js";
+import { workbenchArgs } from "./workbench-arguments.js";
 
 const CLASSIFICATION_FILE = "severity-classification.json";
 export interface ScanSeverityClassification extends SeverityClassification {
@@ -59,10 +62,11 @@ export async function classifyScanSeverityInternal(
         currentDirectory,
         signal: options.signal,
       });
+  const runWorkbench = (args: readonly string[], input?: string) =>
+    (dependencies.runWorkbench ?? bootstrap!)(args, input, options.signal);
   const scan = await resolveCompletedScan(scanId, {
     currentDirectory: () => currentDirectory,
-    runWorkbench: (args, input) =>
-      (dependencies.runWorkbench ?? bootstrap!)(args, input, options.signal),
+    runWorkbench,
   });
   if (
     options.expectedScanId !== undefined &&
@@ -70,19 +74,43 @@ export async function classifyScanSeverityInternal(
   ) {
     throw new CodexSecurityError("Saved scan does not match expectedScanId.");
   }
+  const lookupSavedRoots = async (owners: readonly string[]) => {
+    const target = scan["targetPath"];
+    if (typeof target !== "string") return [];
+    const result = await runWorkbench(
+      workbenchArgs("get-scan", {
+        scanId: scan.scanId,
+        documentLinkOwnersStdin: true,
+      }),
+      JSON.stringify(owners),
+    );
+    const state = result["scan"];
+    const saved = isRecord(state) ? state : {};
+    const matched = saved["matchedDocumentSourceRoots"];
+    if (
+      saved["scanId"] !== scan.scanId ||
+      !Array.isArray(matched) ||
+      !matched.every((root): root is string => typeof root === "string")
+    ) {
+      throw new CodexSecurityError(
+        "Could not identify the saved checkout for the selected document.",
+      );
+    }
+    return [
+      ...(await savedDocumentSourceRoots(
+        target,
+        saved["documentSourceRoots"],
+        options.signal,
+      )),
+      ...matched,
+    ];
+  };
   return classifyScanDirectorySeverityInternal(
     scan.scanDir,
     { ...options, expectedScanId: scan.scanId },
     surface,
     bootstrap?.protectedRoots,
-    typeof scan["targetPath"] === "string" &&
-      (options.rubricPath !== undefined || options.knowledgeBasePaths?.length)
-      ? await savedDocumentSourceRoots(
-          scan["targetPath"],
-          scan["documentSourceRoots"],
-          options.signal,
-        )
-      : [],
+    lookupSavedRoots,
   );
 }
 
@@ -100,7 +128,7 @@ export async function classifyScanDirectorySeverityInternal(
   options: ClassifyScanSeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   protectedRoots: readonly string[] = [],
-  documentRoots: readonly string[] = [],
+  lookupSavedRoots?: DocumentSourceSelection["lookupSavedRoots"],
 ): Promise<ScanSeverityClassification> {
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     requestedDirectory,
@@ -130,7 +158,10 @@ export async function classifyScanDirectorySeverityInternal(
         findings.map(({ findingId }) => findingId),
         options.reprocess ?? false,
       ),
-      [scanDirectory, ...documentRoots],
+      {
+        directories: [scanDirectory],
+        ...(lookupSavedRoots ? { lookupSavedRoots } : {}),
+      },
     )),
     scanId: contract.manifest.scan.id,
   };

@@ -1801,10 +1801,11 @@ rubric is used. An explicit `--rubric` (SDK `rubricPath`) skips the lookup and
 uses your policy for every review. Rubrics and repeatable `--knowledge-base`
 context accept text, PDF, DOCX, and directories. Select external documents directly
 when a repository directory link points outside the selected source. Saved scans
-record the original checkout boundary so it still applies if the target moves
-or is replaced. Older scans use the current checkout when the target still matches.
-If a legacy target was replaced and its original checkout is ambiguous, select
-external documents directly instead of through the remaining checkout’s links.
+recognize the original checkout when its directory is moved, even when its
+old path no longer exists. Older scans use the current checkout when the target
+still matches. If a legacy target was replaced and its original checkout is
+ambiguous, select external documents directly instead of through the remaining
+checkout’s links.
 
 Each finding is classified three times by default. `--runs N` accepts
 an integer from 1 through 10; SDK options use `classificationRuns` with the same

@@ -8,6 +8,7 @@ import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
 import { readKnowledgeBaseSnapshot } from "./knowledge-base.js";
+import type { DocumentSourceSelection } from "./prompt-files.js";
 import type { Finding } from "./models.js";
 import {
   runReadOnlyCodex,
@@ -122,7 +123,7 @@ export async function classifySeverityInternal(
   options: ClassifySeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   checkpoint?: SeverityClassificationCheckpoint,
-  documentRoots?: readonly string[],
+  documentSelection?: DocumentSourceSelection,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
   const classificationRuns = classificationRunsSchema
@@ -141,9 +142,7 @@ export async function classifySeverityInternal(
     const { documents } = await readKnowledgeBaseSnapshot(
       paths,
       options.signal,
-      documentRoots === undefined
-        ? (options.workingDirectory ?? process.cwd())
-        : { directories: documentRoots },
+      documentSelection ?? options.workingDirectory ?? process.cwd(),
     );
     const contents = Object.keys(documents)
       .sort()

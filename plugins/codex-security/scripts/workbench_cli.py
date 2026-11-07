@@ -195,6 +195,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     detail = get_scan.add_mutually_exclusive_group()
     detail.add_argument("--occurrence-id")
     detail.add_argument("--progress-only", action="store_true")
+    detail.add_argument("--document-link-owners-stdin", action="store_true", help=argparse.SUPPRESS)
     get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")

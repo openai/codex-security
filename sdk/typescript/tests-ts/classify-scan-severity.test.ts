@@ -403,6 +403,29 @@ test("saved classification recognizes its moved checkout and leaves an unrelated
   const classify = () => savedRubric(f, join(checkout, "docs", "policy.md"));
   await symlink(f.root, join(checkout, "docs"), "junction");
   await rename(checkout, moved);
+  const movedPolicy = join(moved, "docs", "policy.md");
+  await expect(savedRubric(f, movedPolicy)).rejects.toThrow(
+    "repository symbolic link",
+  );
+  await symlink(
+    join(moved, "docs"),
+    join(f.caller, "through-checkout"),
+    "junction",
+  );
+  await expect(
+    savedRubric(f, join(f.caller, "through-checkout", "policy.md")),
+  ).rejects.toThrow("repository symbolic link");
+  await symlink(f.root, join(f.caller, "direct"), "junction");
+  expect(
+    (await savedRubric(f, join(f.caller, "direct", "policy.md"))).assessments,
+  ).toEqual([]);
+  await mkdir(join(moved, "policies"));
+  await writeFile(join(moved, "policies", "guide.md"), "Checkout policy.");
+  await symlink(join(moved, "policies"), join(moved, "current"), "junction");
+  expect(
+    (await savedRubric(f, join(moved, "current", "guide.md"))).assessments,
+  ).toEqual([]);
+
   await symlink(moved, checkout, "junction");
   await expect(classify()).rejects.toThrow("repository symbolic link");
 
@@ -412,6 +435,15 @@ test("saved classification recognizes its moved checkout and leaves an unrelated
   await symlink(f.root, join(operator, "docs"), "junction");
   await symlink(operator, checkout, "junction");
   expect((await classify()).assessments).toEqual([]);
+
+  removeRecordedDocumentRoot(f.environment);
+  await symlink(f.root, join(moved, "source", "docs"), "junction");
+  await expect(
+    savedRubric(f, join(moved, "source", "docs", "policy.md")),
+  ).rejects.toThrow("repository symbolic link");
+  expect(
+    (await savedRubric(f, join(f.caller, "direct", "policy.md"))).assessments,
+  ).toEqual([]);
 });
 
 test.each(["id", "prefix", "latest", "missing target"])(
