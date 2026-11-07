@@ -1,4 +1,4 @@
-"""Bind optional finding excerpts to the Git objects selected at scan start."""
+"""Capture the checkout and Git objects selected at scan start."""
 
 from __future__ import annotations
 
@@ -15,10 +15,12 @@ from typing import Any
 from unicodedata import normalize
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from filesystem_identity import stored_filesystem_identity_matches
 from workbench_target import (
     clean_worktree_content_digest,
     git_command,
     git_worktree_context,
+    repository_marker_root,
 )
 from workbench_validation import reject_non_finite_json
 
@@ -223,7 +225,7 @@ def capture_source_scopes(
     *,
     diff_target_kind: str | None = None,
 ) -> dict[str, Any]:
-    """Bind requested paths to the local Git objects that may supply excerpts later.
+    """Record the checkout boundary and bind requested paths to Git objects for later excerpts.
 
     Return the revision and the file or tree IDs that can be verified locally.
     A working-tree diff, dirty snapshot, or replacement ref leaves the scope list
@@ -231,6 +233,17 @@ def capture_source_scopes(
     """
     revision, snapshot = target_identity[:2]
     result: dict[str, Any] = {"version": 1, "revision": revision, "scopes": []}
+    try:
+        root = repository_marker_root(target, outermost=False)
+        metadata = root.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            result["documentSourceRoot"] = {
+                "path": str(root),
+                "device": str(metadata.st_dev),
+                "inode": str(metadata.st_ino),
+            }
+    except (OSError, RuntimeError):
+        pass  # Historical checkout ownership is unavailable if the ancestry cannot be inspected.
     # HEAD cannot represent the uncommitted bytes reviewed by a working-tree scan.
     if diff_target_kind == "working_tree":
         return result
@@ -274,6 +287,47 @@ def capture_source_scopes(
         # must not prevent the scan itself from starting.
         pass
     return result
+
+
+def saved_document_source_roots(scan: sqlite3.Row) -> list[str]:
+    """Keep the original checkout path and recognize that checkout through a later rename."""
+    metadata = json.loads(scan["source_scopes_json"] or "{}")
+    owner = metadata.get("documentSourceRoot")
+    target = Path(scan["target_path"])
+    if not isinstance(owner, dict):
+        # Older scans recorded the selected directory's identity, but not its checkout.
+        if scan["target_device"] is None or scan["target_inode"] is None:
+            return []
+        try:
+            current = target.resolve(strict=True)
+            info = current.lstat()
+            if (
+                stat.S_ISDIR(info.st_mode)
+                and stored_filesystem_identity_matches(scan["target_device"], info.st_dev)
+                and stored_filesystem_identity_matches(scan["target_inode"], info.st_ino)
+            ):
+                return [str(repository_marker_root(current, outermost=False))]
+        except (OSError, RuntimeError):
+            pass
+        return []
+    if not isinstance(owner.get("path"), str):
+        return []
+    saved = Path(owner["path"])
+    if not target.is_relative_to(saved):
+        return []
+    roots = [str(saved)]
+    try:
+        current = saved.resolve(strict=True)
+        if current != saved:
+            info = current.lstat()
+            if stat.S_ISDIR(info.st_mode) and (str(info.st_dev), str(info.st_ino)) == (
+                owner.get("device"),
+                owner.get("inode"),
+            ):
+                roots.append(str(current))
+    except (OSError, RuntimeError):
+        pass  # A moved or unavailable checkout can still be selected by its recorded spelling.
+    return roots
 
 
 def load_source_scopes(

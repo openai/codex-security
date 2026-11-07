@@ -1,5 +1,7 @@
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readlink, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { buffer } from "node:stream/consumers";
 import { environmentEntry } from "./auth.js";
 import { abortReason } from "./errors.js";
 import { canonicalConfigPath } from "./runtime.js";
@@ -40,18 +42,49 @@ async function bareMetadataRoots(
   }
 }
 
+async function readMetadataText(
+  path: string,
+  signal?: AbortSignal,
+  format?: "gitfile" | "HEAD",
+): Promise<string | undefined> {
+  const selected = await abortable(
+    () => stat(path).catch(nullIfMissingPath),
+    signal,
+  );
+  if (!selected?.isFile()) return undefined;
+  const file = await open(
+    path,
+    constants.O_RDONLY |
+      (constants.O_NONBLOCK ?? 0) |
+      (format === "HEAD" ? (constants.O_NOFOLLOW ?? 0) : 0),
+  );
+  try {
+    const metadata = await abortable(() => file.stat(), signal);
+    if (!metadata.isFile()) return undefined;
+    if (format === undefined)
+      return await file.readFile({ encoding: "utf8", signal });
+    // Match Git's 1 MiB gitfile limit and its 255-byte HEAD prefix.
+    if (format === "gitfile" && metadata.size > 1024 * 1024) return undefined;
+    const length = format === "HEAD" ? 255 : metadata.size;
+    if (!length) return "";
+    const bytes = await buffer(
+      file.createReadStream({ end: length - 1, signal }),
+    );
+    return bytes.toString("utf8");
+  } finally {
+    await file.close();
+  }
+}
+
 async function metadataPointer(
   path: string,
   prefix: string,
   context: { directory: string; environment: NodeJS.ProcessEnv },
   signal?: AbortSignal,
+  format?: "gitfile",
 ): Promise<string | undefined> {
-  const metadata = await abortable(
-    () => stat(path).catch(nullIfMissingPath),
-    signal,
-  );
-  if (!metadata?.isFile()) return undefined;
-  const text = await abortable(() => readFile(path, "utf8"), signal);
+  const text = await readMetadataText(path, signal, format);
+  if (text === undefined) return undefined;
   if (!text.startsWith(prefix) || (prefix === "" && text.length === 0))
     return undefined;
   const payload = text.slice(prefix.length).replace(/[\r\n]+$/u, "");
@@ -128,6 +161,35 @@ async function associatedMetadataRoots(
     );
   }
   return roots;
+}
+
+/** A selected gitfile must point at storage with a symbolic or detached Git HEAD. */
+export async function isWorktreeGitFile(
+  marker: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const context = { directory: dirname(marker), environment: process.env };
+  const target = await metadataPointer(
+    marker,
+    "gitdir: ",
+    context,
+    signal,
+    "gitfile",
+  );
+  if (target === undefined) return false;
+  const head = join(target, "HEAD");
+  const metadata = await lstat(head).catch(nullIfMissingPath);
+  if (metadata?.isSymbolicLink()) {
+    if (!(await readlink(head)).startsWith("refs/")) return false;
+  } else {
+    const text = await readMetadataText(head, signal, "HEAD");
+    if (!text || !/^(?:ref:[ \t\r\n]*refs\/|[0-9a-fA-F]{40})/u.test(text))
+      return false;
+  }
+  return (
+    (await associatedMetadataRoots(target, context, signal, context.directory))
+      .length > 0
+  );
 }
 
 export async function localGitProtectionRoots(

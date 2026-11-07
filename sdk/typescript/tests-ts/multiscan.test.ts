@@ -26,6 +26,7 @@ import {
   type SecurityClient,
   type MultiscanOptions,
   createMultiscanFixtures,
+  git,
   repository,
   completedScan,
   customPlugin,
@@ -43,23 +44,30 @@ describe("multiscan", () => {
   test("prepares shared document inputs once while invalid sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");
+    const linked = join(paths.root, "linked");
+    git(source.path, "worktree", "add", "--detach", linked, source.revision);
     const prompt = join(paths.root, "shared-prompt.md");
     await writeFile(prompt, "Review synthetic boundaries.");
     const operator = join(paths.root, "operator");
-    await mkdir(join(operator, ".git"), { recursive: true });
+    await mkdir(operator);
+    const marker = join(operator, ".git");
+    await writeFile(marker, "gitdir: docs\n");
     await filesystem.symlink(paths.root, join(operator, "current"), "junction");
     const selected = join(operator, "current", "shared-prompt.md");
     const localFile = join(operator, "not-a-repository.csv");
     await writeFile(localFile, "synthetic row");
     const localDirectory = join(operator, "docs");
-    await mkdir(localDirectory);
+    await mkdir(join(localDirectory, "refs"), { recursive: true });
+    await mkdir(join(localDirectory, "objects"));
+    await writeFile(join(localDirectory, "HEAD"), "ordinary text");
     const rows = [
       ["missing", join(operator, "absent"), "failed"],
       ["invalid", join(prompt, "child"), "failed"],
       ["long", join(paths.root, "x".repeat(300)), "failed"],
       ["file", localFile, "failed"],
+      ["marker", marker, "failed"],
       ["directory", localDirectory, "failed"],
-      ["first", source.path, "completed"],
+      ["first", join(linked, ".git"), "completed"],
       ["second", join(source.path, ".git"), "completed"],
     ];
     await writeFile(
@@ -92,7 +100,7 @@ describe("multiscan", () => {
       ),
     );
     expect(scans).toBe(2);
-    expect(summary).toMatchObject({ total: 7, completed: 2, failed: 5 });
+    expect(summary).toMatchObject({ total: 8, completed: 2, failed: 6 });
     expect(await results(summary.resultsPath)).toMatchObject(
       rows.map(([id, , status]) => ({ id, status })),
     );
@@ -935,13 +943,27 @@ describe("multiscan", () => {
     "rejects %s knowledge reached through a local source directory link",
     async (scope) => {
       const paths = await fixture();
-      const source = join(paths.root, "source");
-      await mkdir(source);
+      const primary = await repository(paths.root, "source");
+      const source = join(paths.root, "linked");
+      git(
+        primary.path,
+        "worktree",
+        "add",
+        "--detach",
+        source,
+        primary.revision,
+      );
+      const selection = scope === "shared" ? source : join(source, ".git");
+      if (scope === "mode-specific" && process.platform !== "win32") {
+        const pointer = join(paths.root, "worktree-pointer");
+        await rename(selection, pointer);
+        await filesystem.symlink(pointer, selection);
+      }
       await writeFile(join(paths.root, "context.md"), "External context.");
       await filesystem.symlink(paths.root, join(source, "docs"), "junction");
       await writeFile(
         paths.input,
-        `id,repository,revision\nrow,${source},${"a".repeat(40)}\n`,
+        `id,repository,revision\nrow,${selection},${primary.revision}\n`,
       );
       const knowledgeBasePaths = [join(source, "docs", "context.md")];
       const summary = await runMultiscan(

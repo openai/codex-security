@@ -9,7 +9,7 @@ import {
 } from "./classify-severity.js";
 import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
-import { documentSourceRoots } from "./knowledge-base.js";
+import { savedDocumentSourceRoots } from "./knowledge-base.js";
 import type { Finding } from "./models.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
@@ -77,7 +77,11 @@ export async function classifyScanSeverityInternal(
     bootstrap?.protectedRoots,
     typeof scan["targetPath"] === "string" &&
       (options.rubricPath !== undefined || options.knowledgeBasePaths?.length)
-      ? await documentSourceRoots(scan["targetPath"], options.signal, true)
+      ? await savedDocumentSourceRoots(
+          scan["targetPath"],
+          scan["documentSourceRoots"],
+          options.signal,
+        )
       : [],
   );
 }

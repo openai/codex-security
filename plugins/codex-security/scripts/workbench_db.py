@@ -114,6 +114,7 @@ from workbench_source_scopes import (
     public_scan_recipe,
     requested_scan_paths,
     safe_source_path,
+    saved_document_source_roots,
 )
 from workbench_target import (
     clean_worktree_content_digest,
@@ -2542,6 +2543,8 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
     result = scan_context(connection, args.scan_id, args.occurrence_id)
     if result["scan"]["progress"]["status"] != "running":
         scan = require_scan(connection, args.scan_id)
+        if roots := saved_document_source_roots(scan):
+            result["scan"]["documentSourceRoots"] = roots
         try:
             result["scan"] = dict(result["scan"], coverage=coverage_summary_for_history(scan))
         except (OSError, RuntimeError, SystemExit):

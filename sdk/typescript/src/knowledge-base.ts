@@ -61,8 +61,27 @@ export async function knowledgeBaseProtectedRoots(
     : [...snapshot.protectedRoots];
 }
 
-/** A saved target's canonical spelling still identifies its original checkout if a directory was replaced. */
-export async function documentSourceRoots(
+/** New saved scans retain their original checkout, even if the target is replaced. */
+export async function savedDocumentSourceRoots(
+  target: string,
+  registered: unknown,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  if (
+    !Array.isArray(registered) ||
+    !registered.length ||
+    !registered.every((root): root is string => typeof root === "string")
+  ) {
+    return documentSourceRoots(target, signal, true);
+  }
+  signal?.throwIfAborted();
+  const roots = new Set(registered);
+  const current = await realpath(target).catch(nullIfUnavailableInputRoot);
+  if (current !== null) roots.add(current);
+  return [...roots];
+}
+
+async function documentSourceRoots(
   root: string,
   signal?: AbortSignal,
   savedTarget = false,
@@ -74,12 +93,16 @@ export async function documentSourceRoots(
     try {
       const canonical = await realpath(ancestor);
       if (ancestor === selected) roots.push(canonical);
-      if (!savedTarget || relative(ancestor, canonical) === "") {
+      // A replaced legacy target can be a new checkout. Its surviving parent may own the link.
+      const stable =
+        !savedTarget ||
+        (ancestor !== selected && relative(ancestor, canonical) === "");
+      if (ancestor === selected || stable) {
         const checkout = await gitMarkerRoot(canonical, signal, "nearest");
         if (checkout !== null && !roots.includes(checkout))
           roots.push(checkout);
-        return roots;
       }
+      if (stable) return roots;
     } catch (error) {
       nullIfUnavailableInputRoot(error as NodeJS.ErrnoException);
     }

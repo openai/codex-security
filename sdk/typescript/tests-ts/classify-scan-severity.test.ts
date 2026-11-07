@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -95,13 +96,17 @@ async function fixture(scanId?: string, savedRoot?: string) {
   };
 }
 
-async function savedFixture(repositoryPath = "repository") {
+async function savedFixture(checkout?: "enclosing" | "nested") {
   const root = await realpath(await temporaryDirectory());
-  const repository = join(root, repositoryPath);
+  const repository = checkout
+    ? join(root, "checkout", "source")
+    : join(root, "repository");
   const caller = join(root, "caller");
   const scanDirectory = join(root, "scan");
   for (const directory of [repository, caller, scanDirectory])
     await mkdir(directory, { recursive: true, mode: 0o700 });
+  if (checkout) await mkdir(join(dirname(repository), ".git"));
+  if (checkout === "nested") await mkdir(join(repository, ".git"));
   const environment = {
     PATH: process.env["PATH"],
     SystemRoot: process.env["SystemRoot"],
@@ -138,6 +143,28 @@ async function savedFixture(repositoryPath = "repository") {
   await writeFile(path, JSON.stringify(manifest));
   await runWorkbench(workbench, ["complete-scan", "--scan-id", scanId]);
   return { ...artifacts, environment, repository, caller, python };
+}
+
+function savedRubric(
+  f: Awaited<ReturnType<typeof savedFixture>>,
+  path: string,
+) {
+  return classifyScanSeverityInternal(
+    f.scanId,
+    {
+      environment: { ...f.environment, PYTHON: f.python },
+      findingIds: [],
+      rubricPath: path,
+    },
+    { currentDirectory: () => f.caller },
+  );
+}
+
+function removeRecordedDocumentRoot(environment: NodeJS.ProcessEnv) {
+  query(
+    environment,
+    "UPDATE scans SET source_scopes_json = json_remove(source_scopes_json, '$.documentSourceRoot')",
+  );
 }
 
 function classifier(finding: Finding, excluded = false) {
@@ -289,11 +316,14 @@ process.exitCode = await main(["classify-severity", "--scan", ${JSON.stringify(f
 }
 
 test("saved classification checks document links against the selected repository", async () => {
-  const f = await savedFixture(join("checkout", "source"));
+  const f = await savedFixture("enclosing");
   const checkout = dirname(f.repository);
-  await mkdir(join(checkout, ".git"));
+  // The scan directory is stored in an operator checkout outside the selected source.
+  await mkdir(join(f.root, ".git"));
+  const policy = await temporaryDirectory();
+  await writeFile(join(policy, "policy.md"), "Operator policy.");
   for (const owner of [checkout, f.repository, f.caller, f.scanDirectory]) {
-    await symlink(f.root, join(owner, "docs"), "junction");
+    await symlink(policy, join(owner, "docs"), "junction");
   }
   const options = {
     environment: { ...f.environment, PYTHON: f.python },
@@ -301,12 +331,14 @@ test("saved classification checks document links against the selected repository
     rubricPath: f.rubricPath,
     workingDirectory: f.caller,
   };
-  const classify = (owner: string) =>
+  const classifyPath = (document: string) =>
     classifyScanSeverityInternal(
       f.scanId,
-      { ...options, knowledgeBasePaths: [join(owner, "docs", "policy.md")] },
+      { ...options, knowledgeBasePaths: [document] },
       { currentDirectory: () => f.caller },
     );
+  const classify = (owner: string) =>
+    classifyPath(join(owner, "docs", "policy.md"));
   await expect(classify(f.repository)).rejects.toThrow(
     "repository symbolic link",
   );
@@ -317,12 +349,69 @@ test("saved classification checks document links against the selected repository
     }),
   ).rejects.toThrow("repository symbolic link");
   expect((await classify(f.caller)).assessments).toEqual([]);
+  expect(
+    (
+      await classifyScanDirectorySeverity(f.scanDirectory, {
+        ...options,
+        rubricPath: join(f.caller, "docs", "policy.md"),
+      })
+    ).assessments,
+  ).toEqual([]);
 
   const replacement = await temporaryDirectory();
   await mkdir(join(replacement, ".git"));
   await rm(f.repository, { recursive: true });
   await symlink(replacement, f.repository, "junction");
   await expect(classify(checkout)).rejects.toThrow("repository symbolic link");
+  removeRecordedDocumentRoot(f.environment);
+  await expect(classify(checkout)).rejects.toThrow("repository symbolic link");
+  expect((await classify(f.caller)).assessments).toEqual([]);
+  expect((await classifyPath(join(policy, "policy.md"))).assessments).toEqual(
+    [],
+  );
+});
+
+test.each([
+  ["enclosing", "recorded", false],
+  ["nested", "recorded", true],
+  ["enclosing", "legacy", false],
+  ["nested", "legacy", false],
+] as const)(
+  "saved classification handles a recreated %s target with %s metadata",
+  async (checkout, metadata, acceptsOuterAlias) => {
+    const f = await savedFixture(checkout);
+    const alias = join(dirname(f.repository), "docs");
+    await symlink(f.root, alias, "junction");
+    const classify = () => savedRubric(f, join(alias, "policy.md"));
+    if (metadata === "legacy") removeRecordedDocumentRoot(f.environment);
+    if (checkout === "nested")
+      expect((await classify()).assessments).toEqual([]);
+    await rename(f.repository, join(f.root, "old-source"));
+    await mkdir(join(f.repository, ".git"), { recursive: true });
+    if (acceptsOuterAlias) {
+      expect((await classify()).assessments).toEqual([]);
+    } else {
+      await expect(classify()).rejects.toThrow("repository symbolic link");
+    }
+  },
+);
+
+test("saved classification recognizes its moved checkout and leaves an unrelated replacement independent", async () => {
+  const f = await savedFixture("enclosing");
+  const checkout = dirname(f.repository);
+  const moved = join(f.root, "moved");
+  const classify = () => savedRubric(f, join(checkout, "docs", "policy.md"));
+  await symlink(f.root, join(checkout, "docs"), "junction");
+  await rename(checkout, moved);
+  await symlink(moved, checkout, "junction");
+  await expect(classify()).rejects.toThrow("repository symbolic link");
+
+  await rm(checkout);
+  const operator = join(f.root, "operator");
+  await mkdir(join(operator, "source"), { recursive: true });
+  await symlink(f.root, join(operator, "docs"), "junction");
+  await symlink(operator, checkout, "junction");
+  expect((await classify()).assessments).toEqual([]);
 });
 
 test.each(["id", "prefix", "latest", "missing target"])(

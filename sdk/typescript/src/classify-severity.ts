@@ -7,10 +7,7 @@ import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
-import {
-  documentSourceRoots,
-  readKnowledgeBaseSnapshot,
-} from "./knowledge-base.js";
+import { readKnowledgeBaseSnapshot } from "./knowledge-base.js";
 import type { Finding } from "./models.js";
 import {
   runReadOnlyCodex,
@@ -125,9 +122,7 @@ export async function classifySeverityInternal(
   options: ClassifySeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   checkpoint?: SeverityClassificationCheckpoint,
-  documentRoots: readonly string[] = [
-    options.workingDirectory ?? process.cwd(),
-  ],
+  documentRoots?: readonly string[],
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
   const classificationRuns = classificationRunsSchema
@@ -143,13 +138,12 @@ export async function classifySeverityInternal(
     ids.add(finding.findingId);
   }
   const readDocuments = async (paths: readonly string[]): Promise<string[]> => {
-    const roots = await Promise.all(
-      documentRoots.map((root) => documentSourceRoots(root, options.signal)),
-    );
     const { documents } = await readKnowledgeBaseSnapshot(
       paths,
       options.signal,
-      { directories: roots.flat() },
+      documentRoots === undefined
+        ? (options.workingDirectory ?? process.cwd())
+        : { directories: documentRoots },
     );
     const contents = Object.keys(documents)
       .sort()

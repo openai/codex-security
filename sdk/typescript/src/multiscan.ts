@@ -65,6 +65,7 @@ import {
   type ScanPromptSettings,
   type ScanSettings,
 } from "./scan-settings.js";
+import { isWorktreeGitFile } from "./local-git-metadata.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -201,7 +202,9 @@ export async function runMultiscan(
     for (const repository of new Set(tasks.map((task) => task.repository))) {
       if (!isAbsolute(repository)) continue;
       try {
-        repositories.push(await localSourceRoot(repository));
+        repositories.push(
+          ...(await localSourceRoots(repository, options.signal)),
+        );
       } catch (error) {
         nullIfUnavailableInputRoot(error as NodeJS.ErrnoException);
       }
@@ -273,20 +276,36 @@ export async function runMultiscan(
   }
 }
 
-async function localSourceRoot(repository: string): Promise<string> {
+async function localSourceRoots(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
   const path = await realpath(repository);
-  return basename(path) === ".git" ? dirname(path) : path;
+  const roots = [];
+  for (const marker of new Set([repository, path])) {
+    if (
+      basename(marker) === ".git" &&
+      ((await lstat(path)).isDirectory() ||
+        (await isWorktreeGitFile(marker, signal)))
+    ) {
+      roots.push(await realpath(dirname(marker)));
+    }
+  }
+  return roots.length ? roots : [path];
 }
 
 /** An unavailable CSV source fails its own checkout without claiming shared document paths. */
-async function availableLocalSources(tasks: readonly MultiscanTask[]) {
+async function availableLocalSources(
+  tasks: readonly MultiscanTask[],
+  signal?: AbortSignal,
+) {
   const sources = new Set<string>();
   for (const repository of new Set(tasks.map((task) => task.repository))) {
     if (!isAbsolute(repository)) continue;
-    const root = await localSourceRoot(repository).catch(
+    const roots = await localSourceRoots(repository, signal).catch(
       nullIfUnavailableInputRoot,
     );
-    if (root !== null) sources.add(root);
+    for (const root of roots ?? []) sources.add(root);
   }
   return [...sources];
 }
@@ -303,7 +322,7 @@ async function runCampaign(
   const knowledgeByMode: MultiscanKnowledge = {};
   let sources: Promise<string[]> | undefined;
   const readDocuments = async (paths: readonly string[]) => {
-    sources ??= availableLocalSources(tasks);
+    sources ??= availableLocalSources(tasks, options.signal);
     return readKnowledgeBaseSnapshot(paths, options.signal, {
       directories: await sources,
     });
