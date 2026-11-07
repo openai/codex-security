@@ -2,6 +2,7 @@ import { workbenchArgs } from "./workbench-arguments.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
 import type { TurnOptions } from "@openai/codex-sdk";
+import { parse as parseToml } from "smol-toml";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   explicitlyCanceled,
@@ -759,6 +760,7 @@ interface CodexSecurityRuntimeOptions {
 
 interface ClientDependencies {
   onDeepMergeCommitted?: DeepScanComposition["onMergeCommitted"];
+  onScanPrompt?: (prompt: string) => void;
   stateDirectory?: string;
   createOperationTelemetry?: (
     options: ConstructorParameters<typeof OperationTelemetry>[0],
@@ -3853,6 +3855,7 @@ export class CodexSecurity {
       }
       tracker.beginParentTurn(resumeThreadId !== undefined);
       if (!sealedTurn) scanTurnStatus = "in_progress";
+      if (prompt !== undefined) this.#dependencies.onScanPrompt?.(prompt);
       const events =
         prompt === undefined
           ? undefined
@@ -4017,17 +4020,42 @@ export class CodexSecurity {
                     );
                     const prepared =
                       prepareReportComparisonExecution(execution);
-                    if (
-                      this.#dependencies.createCodex === undefined &&
-                      this.#dependencies.hostedScan === undefined
-                    ) {
-                      const config = prepared.sessionConfig;
-                      const release = await lockExecutionConfiguration(
-                        prepared,
-                        config,
-                        mergeSignal,
-                      );
-                      try {
+                    const config = prepared.sessionConfig;
+                    const release = await lockExecutionConfiguration(
+                      prepared,
+                      config,
+                      mergeSignal,
+                    );
+                    try {
+                      const profile = prepared.runtime.providerProfile;
+                      const nativeFiles = [
+                        await readCodexHomeConfig(
+                          { CODEX_HOME: prepared.runtime.codexHome },
+                          mergeSignal,
+                        ),
+                      ];
+                      if (profile) {
+                        nativeFiles.push(
+                          parseToml(
+                            await readFile(profile.path, {
+                              encoding: "utf8",
+                              signal: mergeSignal,
+                            }),
+                          ) as JsonObject,
+                        );
+                      }
+                      const servers = config["mcp_servers"] as JsonObject;
+                      for (const file of nativeFiles) {
+                        const additional = file["mcp_servers"];
+                        if (isRecord(additional)) {
+                          for (const name of Object.keys(additional))
+                            servers[name] ??= { enabled: false };
+                        }
+                      }
+                      if (
+                        this.#dependencies.createCodex === undefined &&
+                        this.#dependencies.hostedScan === undefined
+                      ) {
                         await prepared.source.verifyExecutable?.();
                         config["mcp_servers"] = await disabledMcpServers(
                           await providerPreflightCommand(
@@ -4046,9 +4074,9 @@ export class CodexSecurity {
                             workingDirectory: comparisonDirectory,
                           },
                         );
-                      } finally {
-                        await release?.();
                       }
+                    } finally {
+                      await release?.();
                     }
                     comparison = (
                       await this.#createSessionCodex(

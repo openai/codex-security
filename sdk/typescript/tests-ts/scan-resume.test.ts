@@ -899,11 +899,16 @@ test("records independent comparison usage during a turn and restores it without
       }),
     ],
   });
+  await writeCodexConfig(join(f.codexHome, "config.toml"), {
+    mcp_servers: {
+      "inherited.report.helper": { command: "fixture-only-helper" },
+    },
+  });
   const comparisonId = randomUUID();
   const lostTransport = new AbortController();
   const captured = Promise.withResolvers<void>();
   let observedOnResume = false;
-  const restoredClient = resumeClient(f, () => ({
+  const restoredClient = resumeClient(f, (launch) => ({
     resumeThread(id) {
       expect(id).toBe(f.threadId);
       return {
@@ -935,6 +940,9 @@ test("records independent comparison usage during a turn and restores it without
       };
     },
     startThread(options) {
+      expect((launch.config as JsonObject)["mcp_servers"]).toMatchObject({
+        "inherited.report.helper": { enabled: false },
+      });
       expect(options.workingDirectory).toBe(
         join(f.scanDir, "artifacts/deep-scan/merge/artifacts"),
       );
