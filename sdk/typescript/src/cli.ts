@@ -11650,9 +11650,13 @@ async function readDeepScanStop(
   }
   if (state?.terminalReason !== "capped") return undefined;
   const { maxDiscoveryRuns, maxTimeHours } = state.config;
-  if (state.dispatchedCount >= maxDiscoveryRuns) {
+  // A capped run with no completed reviews can finish only at its discovery deadline.
+  if (
+    state.completionSequence > 0 &&
+    state.dispatchedCount >= maxDiscoveryRuns
+  ) {
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.completionSequence > 0 && state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
@@ -11663,7 +11667,7 @@ async function readDeepScanStop(
     const roundedMinutes = Number(maxTimeMinutes.toPrecision(15));
     if (roundedMinutes / 60 === maxTimeHours) maxTimeMinutes = roundedMinutes;
     return {
-      reason: `Reached the ${maxTimeMinutes}-minute time limit. More issues may remain.`,
+      reason: `Reached the ${maxTimeMinutes}-minute time limit. ${state.completionSequence === 0 ? "No source review completed." : "More issues may remain."}`,
       nextStep:
         maxTimeHours < 96
           ? `To scan further, rerun with --max-time greater than ${maxTimeMinutes}.`
