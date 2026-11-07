@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from publication_fixtures import assert_published_aggregate
 from workbench_test_support import (
-    read_review_state,
+    saved_coverage,
     saved_draft,
     write_checkpoint,
 )
@@ -80,14 +80,41 @@ def test_publication_renders_each_source_remediation(publication_scan, mode, lin
 
 
 @pytest.mark.parametrize("scope", [".", "subdir"], ids=["repository", "scoped"])
-def test_deep_publication_keeps_configured_scope(
-    workbench_api, workbench_db, publication_scan, scope
+def test_deep_publication_keeps_configured_scope_without_worker_observations(
+    publication_scan, scope
 ):
     scan = publication_scan(scope=scope)
-    completed = complete(workbench_api, workbench_db, scan)
+    result = scan.add_worker()
+    worker_coverage = {
+        "surfaces": [
+            {
+                "id": "worker-surface",
+                "label": "Worker review",
+                "disposition": "needs_follow_up",
+                "receiptRefs": [],
+            }
+        ],
+        "explicitExclusions": [{"pattern": "docs/", "reason": "Worker-local exclusion."}],
+        "deferred": [{"id": "worker-follow-up", "reason": "Review this path again."}],
+        "openQuestions": [{"question": "Which deployment controls apply?"}],
+    }
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": worker_coverage,
+            }
+        )
+    )
+    source_bytes = result.read_bytes()
+
+    completed = scan.complete()
 
     assert completed["progress"]["status"] == "complete"
     assert_published_aggregate(scan)
+    assert result.read_bytes() == source_bytes
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert coverage["mode"] == ("deep_repository" if scope == "." else "scoped_path")
     assert coverage["includePaths"] == [scope]
@@ -96,6 +123,41 @@ def test_deep_publication_keeps_configured_scope(
     assert f"- Included paths: {scope}" in report
     assert "- Excluded paths: none" in report
     assert "## Reviewed Surfaces" not in report
+    assert "Which deployment controls apply?" not in report
+
+
+def test_deep_publication_ignores_empty_canceled_checkpoint(publication_scan):
+    scan = publication_scan()
+    result = scan.add_worker(status="canceled")
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints",
+        saved_draft(scan.scan_id),
+    )
+    source_bytes = checkpoint.read_bytes()
+
+    scan.complete()
+
+    assert_published_aggregate(scan)
+    assert checkpoint.read_bytes() == source_bytes
+    assert not result.exists()
+
+
+@pytest.mark.parametrize("old_result", ["unreadable", "removed"])
+def test_deep_publication_does_not_require_old_worker_files(publication_scan, old_result):
+    scan = publication_scan()
+    result = scan.add_worker()
+    result.write_text("{old worker output is unavailable")
+    if old_result == "removed":
+        result.unlink()
+
+    completed = scan.complete()
+
+    assert completed["warnings"] == []
+    assert_published_aggregate(scan)
+    if old_result == "removed":
+        assert not result.exists()
+    else:
+        assert result.read_text() == "{old worker output is unavailable"
 
 
 REVIEWED_SURFACE = {
@@ -123,163 +185,48 @@ def reviewed_deep_scan(publication_scan, request):
 
 def test_deep_prepare_and_complete_preserve_the_same_aggregate(workbench_db, reviewed_deep_scan):
     scan = reviewed_deep_scan
+    count = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] is None
     prepared = scan.complete(prepare_only=True)
     assert prepared["progress"]["status"] == "running"
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == 1
     names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in names}
 
     scan.complete(prepare_only=True)
     scan.complete()
+    # A capped scan with a failed worker cannot publish anew, but its sealed result can be read.
+    scan.add_worker(status="failed")
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET terminal_reason = 'capped' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
     repeated = scan.complete()
 
     assert repeated["progress"]["status"] == "complete"
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == 1
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
-    assert read_review_state(workbench_db, scan.scan_dir)["surfaces"] == [REVIEWED_SURFACE]
     assert_published_aggregate(scan)
 
 
-@pytest.mark.parametrize("mode", ["standard", "deep"])
-@pytest.mark.parametrize(("scope", "has_parent"), [(".", True), ("subdir", False)])
-def test_stopped_scan_salvages_saved_parent_checkpoints(
-    workbench_api, workbench_db, publication_scan, mode, scope, has_parent
-):
-    scan = publication_scan(mode=mode, scope=scope)
-    if not has_parent:
-        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
-            (scan.scan_dir / name).unlink()
-    later_finding = copy.deepcopy(scan.findings[0])
-    later_finding["identity"]["anchor"] = "later-checkpoint-finding"
-    later_finding["summary"] = "Finding saved after the last completed aggregate."
-    saved = {
-        "scanId": scan.scan_id,
-        "complete": False,
-        "findings": [later_finding],
-        "coverage": scan.coverage,
-    }
-    checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", saved)
-    checkpoint_bytes = checkpoint.read_bytes()
+def test_complete_prepared_deep_scan_after_count_migration(workbench_db, reviewed_deep_scan):
+    scan = reviewed_deep_scan
+    scan.complete(prepare_only=True)
+    count = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
+    clear = "UPDATE deep_scan_runs SET terminal_reviewed_surface_count = NULL WHERE scan_id = ?"
+    # A seal produced before the migration has no stored count.
+    with workbench_db:
+        workbench_db.execute(clear, (scan.scan_id,))
+    scan.complete()
+    sealed = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    expected = 1 if "coverageRef" in sealed["scan"] else None
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == expected
 
-    stopped = workbench_api["saved_results"].fail_scan(
-        workbench_api["_WORKBENCH_DB_CONTEXT"],
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
-        ),
-    )["scan"]
-
-    assert stopped["progress"]["status"] == "failed"
-    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
-    coverage = read_review_state(workbench_db, scan.scan_dir)
-    assert manifest["scan"]["status"] == "failed"
-    assert "completeness" not in coverage
-    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-    expected_summaries = {later_finding["summary"]}
-    if has_parent:
-        expected_summaries.add(scan.findings[0]["summary"])
-    assert {finding["summary"] for finding in findings} == expected_summaries
-
-    artifact_names = ("scan-manifest.json", "findings.json")
-    published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
-    recovered = workbench_api["saved_results"].recover_scan_results(
-        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
-    )["scan"]
-    assert recovered["findingCount"] == len(expected_summaries)
-    assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
-    assert checkpoint.read_bytes() == checkpoint_bytes
-
-
-def test_stopped_deep_scan_preserves_checkpoint_without_coverage(
-    workbench_api, workbench_db, publication_scan
-):
-    scan = publication_scan()
-    invalid_finding = copy.deepcopy(scan.findings[0])
-    invalid_finding["identity"]["anchor"] = "checkpoint-without-coverage"
-    invalid_finding["summary"] = "Finding from a checkpoint missing required coverage."
-    saved = {
-        "scanId": scan.scan_id,
-        "complete": False,
-        "findings": [invalid_finding],
-    }
-    source_path = write_checkpoint(scan.scan_dir / "checkpoints", saved)
-    source_bytes = source_path.read_bytes()
-    source_relative = source_path.relative_to(scan.scan_dir).as_posix()
-
-    stopped = workbench_api["saved_results"].fail_scan(
-        workbench_api["_WORKBENCH_DB_CONTEXT"],
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
-        ),
-    )["scan"]
-
-    assert stopped["progress"]["status"] == "failed"
-    assert stopped["resultsRecoveryNeeded"] is False
-    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-    assert [finding["summary"] for finding in findings] == [scan.findings[0]["summary"]]
-    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
-    frozen = json.loads(
-        workbench_db.execute(
-            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
-        ).fetchone()[0]
-    )
-    assert manifest["scan"]["preservedSources"] == frozen
-    assert source_relative not in frozen
-    artifact_names = ("scan-manifest.json", "findings.json")
-    published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
-
-    recovered = workbench_api["saved_results"].recover_scan_results(
-        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
-    )["scan"]
-
-    assert recovered["findingCount"] == 1
-    assert recovered["resultsRecoveryNeeded"] is False
-    assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
-    assert source_path.read_bytes() == source_bytes
-
-
-def test_standard_publication_preserves_deliberately_partial_coverage(
-    workbench_api, workbench_db, publication_scan
-):
-    scan = publication_scan(mode="standard")
-    scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
-    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
-
-    complete(workbench_api, workbench_db, scan)
-
-    assert_published_aggregate(scan)
-
-
-@pytest.mark.parametrize("scope", ["subdir", "subdir/extract.py"])
-def test_scoped_deep_completion_filters_old_parent(
-    workbench_api, workbench_db, publication_scan, scope
-):
-    scan = publication_scan(paths=[scope, "background jobs"])
-    findings = []
-    for index, directory in enumerate(
-        ["subdir", "background jobs", "unrelated", "subdir/extract.py"]
-    ):
-        finding = copy.deepcopy(scan.findings[0])
-        finding["identity"]["anchor"] = f"scope-{index}"
-        finding["title"] = f"Scope finding {directory}"
-        finding["locations"] = [{"path": f"{directory}/extract.py", "startLine": 1}]
-        for key in ("findingId", "occurrenceId", "fingerprints"):
-            finding.pop(key, None)
-        findings.append(finding)
-    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": findings}))
-    completed = complete(workbench_api, workbench_db, scan)
-    assert completed["progress"]["status"] == "complete"
-    paths = [
-        row["locations"][0]["path"]
-        for row in json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-    ]
-    assert paths == ["subdir/extract.py", "background jobs/extract.py"] + (
-        [] if scope == "subdir/extract.py" else ["subdir/extract.py/extract.py"]
-    )
-    assert "Scope finding unrelated" not in (scan.scan_dir / "report.md").read_text()
-    indexed = workbench_db.execute(
-        "SELECT details_json FROM findings",
-    ).fetchall()
-    assert sorted(json.loads(row[0])["locations"][0]["path"] for row in indexed) == sorted(paths)
+    with workbench_db:
+        workbench_db.execute(clear, (scan.scan_id,))
+    scan.complete()
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] is None
 
 
 @pytest.mark.parametrize(
@@ -304,15 +251,18 @@ def test_complete_sealed_deep_scan_with_inline_review_state(
     path.write_text(json.dumps(sealed, indent=2, sort_keys=True) + "\n")
 
     scan.complete()
-    assert len(read_review_state(workbench_db, scan.scan_dir)["surfaces"]) == (count or 0)
+    query = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
+    assert workbench_db.execute(query, (scan.scan_id,)).fetchone()[0] == count
 
 
 @pytest.mark.parametrize("stop", ["cancel", "fail"])
-def test_stopping_prepared_deep_scan_keeps_its_review_evidence(
+def test_stopping_prepared_deep_scan_clears_its_surface_count(
     workbench_api, workbench_db, reviewed_deep_scan, stop
 ):
     scan = reviewed_deep_scan
     scan.complete(prepare_only=True)
+    count = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == 1
     if stop == "cancel":
         workbench_api["saved_results"].cancel_scan(
             workbench_api["_WORKBENCH_DB_CONTEXT"],
@@ -321,7 +271,7 @@ def test_stopping_prepared_deep_scan_keeps_its_review_evidence(
         )
     else:
         scan.fail()
-    assert read_review_state(workbench_db, scan.scan_dir)["surfaces"] == [REVIEWED_SURFACE]
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] is None
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])
@@ -563,6 +513,144 @@ def test_missing_deep_writeup_does_not_enable_general_recovery(
     )
 
 
+@pytest.mark.parametrize(
+    ("source", "scope", "has_parent"),
+    [
+        ("standard-worker-checkpoint", ".", True),
+        ("deep-reducer-checkpoint", ".", True),
+        ("deep-reducer-archived-checkpoint", ".", True),
+        ("deep-reducer-result", ".", True),
+        ("deep-reducer-result", "subdir", False),
+    ],
+    ids=[
+        "standard-worker-checkpoint",
+        "deep-reducer-checkpoint",
+        "deep-reducer-archived-checkpoint",
+        "deep-reducer-result",
+        "scoped-reducer-without-parent",
+    ],
+)
+def test_stopped_deep_scan_still_salvages_saved_findings(
+    workbench_db, publication_scan, source, scope, has_parent
+):
+    scan = publication_scan(scope=scope)
+    if not has_parent:
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'reducing', "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    result = scan.add_worker(status="succeeded" if source == "deep-reducer-result" else "running")
+    if source.startswith("deep-reducer"):
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
+                (result.parent.name,),
+            )
+    later_finding = copy.deepcopy(scan.findings[0])
+    later_finding["identity"]["anchor"] = "later-checkpoint-finding"
+    later_finding["summary"] = "Finding saved after the last completed aggregate."
+    saved = {
+        "scanId": scan.scan_id,
+        "complete": source == "deep-reducer-result",
+        "findings": [later_finding],
+    }
+    if source == "standard-worker-checkpoint":
+        saved["coverage"] = saved_coverage()
+    if source == "deep-reducer-result":
+        checkpoint = None
+        result.write_text(json.dumps(saved))
+    else:
+        checkpoint_root = (
+            result.parent / "attempts" / "attempt-01"
+            if source == "deep-reducer-archived-checkpoint"
+            else result.parent
+        )
+        checkpoint = write_checkpoint(checkpoint_root / "checkpoints", saved)
+        result.write_text("{interrupted worker output")
+    result_bytes = result.read_bytes()
+
+    stopped = scan.fail("Scan interrupted.")
+
+    assert stopped["progress"]["status"] == "failed"
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["status"] == "failed"
+
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    expected_summaries = {later_finding["summary"]}
+    if has_parent:
+        expected_summaries.add(scan.findings[0]["summary"])
+    assert {finding["summary"] for finding in findings} == expected_summaries
+
+    artifact_names = ("scan-manifest.json", "findings.json")
+    published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
+    recovered = scan.recover()
+    assert recovered["findingCount"] == len(expected_summaries)
+    assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
+    if checkpoint is not None:
+        assert json.loads(checkpoint.read_text()) == saved
+    assert result.read_bytes() == result_bytes
+
+
+@pytest.mark.parametrize("source", ["result", "checkpoint", "parent-checkpoint"])
+def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
+    workbench_db, publication_scan, source
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    invalid_finding = copy.deepcopy(scan.findings[0])
+    invalid_finding["identity"]["anchor"] = "non-reducer-without-coverage"
+    invalid_finding["summary"] = "Finding from a non-reducer artifact missing required coverage."
+    saved = {
+        "scanId": scan.scan_id,
+        "complete": source == "result",
+        "findings": [invalid_finding],
+    }
+    if source == "parent-checkpoint":
+        source_path = write_checkpoint(scan.scan_dir / "checkpoints", saved)
+    else:
+        result = scan.add_worker(status="succeeded" if source == "result" else "running")
+        if source == "result":
+            result.write_text(json.dumps(saved))
+            source_path = result
+        else:
+            source_path = write_checkpoint(result.parent / "checkpoints", saved)
+    source_bytes = source_path.read_bytes()
+    source_relative = source_path.relative_to(scan.scan_dir).as_posix()
+
+    stopped = scan.fail("Scan interrupted.")
+
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["resultsRecoveryNeeded"] is False
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert [finding["summary"] for finding in findings] == [scan.findings[0]["summary"]]
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    frozen = json.loads(
+        workbench_db.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+    )
+    assert manifest["scan"]["preservedSources"] == frozen
+    assert source_relative not in frozen
+    artifact_names = ("scan-manifest.json", "findings.json")
+    published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
+
+    recovered = scan.recover()
+
+    assert recovered["findingCount"] == 1
+    assert recovered["resultsRecoveryNeeded"] is False
+    assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
+    assert source_path.read_bytes() == source_bytes
+
+
 def test_standard_publication_preserves_deferred_work(publication_scan):
     scan = publication_scan(mode="standard")
     scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
@@ -571,6 +659,113 @@ def test_standard_publication_preserves_deferred_work(publication_scan):
     scan.complete()
 
     assert_published_aggregate(scan)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("missing_writeup", [False, True])
+@pytest.mark.parametrize("interrupted_file", ["findings.json", "report.md"])
+def test_deep_publication_write_failure_keeps_original_terminal_cause(
+    workbench_api, workbench_db, publication_scan, monkeypatch, missing_writeup, interrupted_file
+):
+    scan = publication_scan()
+    if missing_writeup:
+        scan.findings[0]["writeup"] = {"reportPath": "findings/missing/missing.md"}
+        (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
+    finalizer_globals = workbench_api["_write_prepared_scan_finalization"].__globals__
+    write_bytes = finalizer_globals["write_scan_local_bytes"]
+
+    def fail_report(scan_dir, relative_path, payload, **kwargs):
+        if relative_path == interrupted_file:
+            raise finalizer_globals["ContractError"]("Synthetic report write interruption")
+        return write_bytes(scan_dir, relative_path, payload, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setitem(finalizer_globals, "write_scan_local_bytes", fail_report)
+        for _ in range(2):
+            with pytest.raises(SystemExit, match="Synthetic report write interruption"):
+                scan.complete()
+            warnings = json.loads(
+                workbench_db.execute(
+                    "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan.scan_id,)
+                ).fetchone()[0]
+            )
+            assert len(warnings) == int(missing_writeup)
+
+    assert (
+        workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
+        == "running"
+    )
+    run = workbench_db.execute(
+        "SELECT status, terminal_reason, terminal_reviewed_surface_count "
+        "FROM deep_scan_runs WHERE scan_id = ?",
+        (scan.scan_id,),
+    ).fetchone()
+    assert tuple(run) == ("succeeded", "saturated", 0)
+    scan.coverage["surfaces"] = [
+        {"id": "entry", "label": "Entry review", "disposition": "no_issue_found", "receiptRefs": []}
+    ]
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+    completed = scan.complete()
+    assert completed["progress"]["status"] == "complete"
+    assert (
+        workbench_db.execute(
+            "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?",
+            (scan.scan_id,),
+        ).fetchone()[0]
+        == 1
+    )
+    assert completed["warnings"] == warnings
+    if missing_writeup:
+        scan.findings[0].pop("writeup")
+    assert_published_aggregate(scan)
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+@pytest.mark.parametrize("scope", ["subdir", "./subdir/", "subdir/extract.py"])
+def test_scoped_deep_completion_filters_old_parent_and_preserves_accepted_sources(
+    workbench_db, publication_scan, resumed, scope
+):
+    scan = publication_scan(paths=[scope, "background jobs"])
+    findings = []
+    for index, directory in enumerate(
+        ["subdir", "background jobs", "unrelated", "subdir/extract.py"]
+    ):
+        finding = copy.deepcopy(scan.findings[0])
+        finding["identity"]["anchor"] = f"scope-{index}"
+        finding["title"] = f"Scope finding {directory}"
+        finding["locations"] = [{"path": f"{directory}/extract.py", "startLine": 1}]
+        for key in ("findingId", "occurrenceId", "fingerprints"):
+            finding.pop(key, None)
+        findings.append(finding)
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": findings}))
+    accepted = []
+    if resumed:
+        for kind in ("discovery", "dedup"):
+            result = scan.add_worker()
+            result.write_text(json.dumps({"scanId": scan.scan_id, "findings": findings}))
+            with workbench_db:
+                workbench_db.execute(
+                    "UPDATE deep_scan_workers SET kind = ?, merge_state = 'none' "
+                    "WHERE result_manifest_path = ?",
+                    (kind, str(result)),
+                )
+            accepted.append((result, result.read_bytes()))
+    completed = scan.complete()
+    assert completed["progress"]["status"] == "complete"
+    paths = [
+        row["locations"][0]["path"]
+        for row in json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    ]
+    assert paths == ["subdir/extract.py", "background jobs/extract.py"] + (
+        [] if scope == "subdir/extract.py" else ["subdir/extract.py/extract.py"]
+    )
+    assert "Scope finding unrelated" not in (scan.scan_dir / "report.md").read_text()
+    indexed = workbench_db.execute(
+        "SELECT details_json FROM findings",
+    ).fetchall()
+    assert sorted(json.loads(row[0])["locations"][0]["path"] for row in indexed) == sorted(paths)
+    for result, contents in accepted:
+        assert result.read_bytes() == contents
 
 
 def test_resumed_sealed_out_of_scope_deep_scan_is_not_rewritten(
@@ -624,11 +819,17 @@ def test_deep_publication_preserves_original_scope_kinds_after_checkout_changes(
         descendant.pop(key, None)
     findings = [*scan.findings, descendant]
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": findings}))
-    checkpoint = write_checkpoint(
-        scan.scan_dir / "checkpoints",
-        saved_draft(scan.scan_id, findings=findings, complete=True),
-    )
-    accepted = [(checkpoint, checkpoint.read_bytes())]
+    accepted = []
+    for kind in ("discovery", "dedup"):
+        result = scan.add_worker()
+        result.write_text(json.dumps(saved_draft(scan.scan_id, findings=findings, complete=True)))
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = ?, merge_state = 'none' "
+                "WHERE result_manifest_path = ?",
+                (kind, str(result)),
+            )
+        accepted.append((result, result.read_bytes()))
     target_path = Path(row["target_path"]) / scope
     if file_paths:
         target_path.unlink()
@@ -636,6 +837,12 @@ def test_deep_publication_preserves_original_scope_kinds_after_checkout_changes(
     else:
         shutil.rmtree(target_path)
         target_path.write_text("new checkout file\n")
+    assert (
+        workbench_api["deep_scan"].deep_scan_result(workbench_db, scan.scan_id)["deepScan"][
+            "filePaths"
+        ]
+        == file_paths
+    )
     if stopped:
         scan.fail("interrupted")
     else:
@@ -690,49 +897,6 @@ def test_stopped_deep_projection_filters_the_canonical_parent(publication_scan, 
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
 
 
-@pytest.mark.parametrize("operation", ["fail", "cancel"])
-def test_stopped_standard_scan_does_not_reopen_reported_outside_candidate(
-    workbench_api, workbench_db, publication_scan, operation
-):
-    scan = publication_scan(mode="standard", paths=["subdir"])
-    finding = copy.deepcopy(scan.findings[0])
-    finding["locations"] = [{"path": "unrelated/extract.py", "startLine": 1}]
-    finding["provenance"]["candidateId"] = "candidate-x"
-    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": [finding]}))
-    manifest_path = scan.scan_dir / "scan-manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["scan"]["complete"] = False
-    manifest_path.write_text(json.dumps(manifest))
-    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
-    pending = write_checkpoint(
-        scan.scan_dir / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            deferred=[{"candidateId": "candidate-x", "reason": "Validation pending."}],
-        ),
-    )
-    os.utime(pending, ns=(50, 50))
-    evidence = pending.read_bytes()
-    saved = workbench_api["saved_results"]
-    args = Namespace(
-        scan_id=scan.scan_id,
-        claim_token=None,
-        thread_id=None,
-        cost_json=None,
-        message="Synthetic interruption.",
-    )
-    getattr(saved, f"{operation}_scan")(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
-    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-    assert len(findings) == 1
-    assert findings[0]["locations"] == finding["locations"]
-    coverage = read_review_state(workbench_db, scan.scan_dir)
-    assert not any(row.get("candidateId") == "candidate-x" for row in coverage["deferred"])
-    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
-    getattr(saved, f"{operation}_scan")(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
-    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
-    assert pending.read_bytes() == evidence
-
-
 @pytest.mark.parametrize("scope", ["subdir/extract.py", "./subdir/extract.py"])
 def test_stopped_file_scope_filters_siblings_before_assigning_identity(publication_scan, scope):
     scan = publication_scan(paths=[scope])
@@ -759,27 +923,3 @@ def test_stopped_file_scope_filters_siblings_before_assigning_identity(publicati
     scan.recover()
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
     assert checkpoint.read_bytes() == checkpoint_bytes
-
-
-def complete(workbench_api, connection, scan, *, prepare_only=False):
-    return workbench_api["complete_scan"](
-        connection,
-        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None),
-        prepare_only=prepare_only,
-    )["scan"]
-
-
-def test_standard_parent_closure_preserves_unrelated_task_without_id(
-    workbench_db, publication_scan
-):
-    scan = publication_scan(mode="standard")
-    scan.coverage["resolvedDeferred"] = [{"id": "finished", "reason": "Review completed."}]
-    scan.coverage["deferred"] = [{"reason": "Unrelated pending review."}]
-    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
-
-    scan.complete()
-
-    coverage = read_review_state(workbench_db, scan.scan_dir)
-    assert len(coverage["deferred"]) == 1
-    assert coverage["deferred"][0]["id"]
-    assert coverage["deferred"][0]["reason"] == "Unrelated pending review."

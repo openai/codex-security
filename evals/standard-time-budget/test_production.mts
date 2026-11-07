@@ -83,7 +83,6 @@ test("state cleanup failure saves the attempt and stops before the paired arm", 
         stateRoot: join(root, "states"),
         outputRoot,
         createClient: (_config, dependencies) => {
-          assert.equal(dependencies.createCodex, undefined);
           states.push(dependencies.environment["CODEX_SECURITY_STATE_DIR"]!);
           return {
             run: async (_target, options) => {
@@ -198,6 +197,9 @@ test("the paired evaluator preserves aggregate usage across production completio
             ...dependencies,
             now: () => Date.UTC(2026, 0, 1),
             probeCodexSandbox: async () => {},
+            prepareScanArtifactRestorer: async () => ({
+              restore: async () => {},
+            }),
             prepareRuntime: async () => ({
               codexHome: home,
               plugin: {

@@ -27,8 +27,6 @@ Use `schemas/tools/scan-draft.schema.json` for new drafts and `finding-detail-fi
 
 Use `scope` for reviewed context, artifacts, runtime/test status, validation mode, and limitations. Preserve the completed canonical `threatModel`, including source citations and uncertainty; do not reconstruct it from the final findings. A supplied or completed Markdown model is retained as `{ "format": "markdown", "content": "<exact model text>" }`. A historical context file can supply missing content but must not replace a newer canonical model.
 
-Every scan mode uses the same final report pipeline. Workbench-owned Standard and workbench-backed diff scans submit canonical semantics with `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`; the workbench supplies authoritative metadata and writes the unsealed canonical draft. For Deep caller behavior and completion ownership, follow the [Deep Scan lifecycle](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans). SDK-owned Standard scans instead write unsealed canonical files with the exact SDK-provided metadata and leave finalization to the SDK. Terminal scans without a `scanId` retain their existing canonical JSON workflow. No mode authors, repairs, or treats an existing `report.md` as input. Finalization validates and enriches the canonical JSON, seals the canonical JSON and evidence artifacts, then deterministically generates `report.md`. Supply report prose through structured canonical semantics rather than a separately authored report.
-
 The generated `report.md` counts informational findings and omits their details. Read those findings in `findings.json` or export them as SARIF or CSV.
 
 ## Review State And Pending Work
@@ -36,8 +34,6 @@ The generated `report.md` counts informational findings and omits their details.
 Keep unfinished requested work and essential in-scope proof gaps in `reviewState.deferred`. Retain optional follow-up in `reviewState.openQuestions`. These notes are checkpoint bookkeeping, not measured file coverage, and do not change the scan execution outcome.
 
 Standard and diff drafts use `{ surfaces, explicitExclusions, deferred }`. Give surfaces meaningful labels and schema-defined dispositions, preserving saved surface IDs in updates. Retain reasons and evidence for rejected, not-applicable, and follow-up work. Open questions may be strings or `{ question, followUpPrompt? }` objects. An open question does not prevent the configured review from finishing.
-
-During a host-backed scan, checkpoint saved findings and pending candidates with `complete: false`; a checkpoint is not a completed audit. After a final workbench-owned Standard or workbench-backed diff draft is accepted with `complete: true` (or the backwards-compatible omitted flag), call `complete_codex_security_scan({ scanId, handoffClaimToken? })` and use its returned completion metadata. An SDK-owned scan returns its unsealed canonical files without calling a completion tool or finalizer; the SDK owns completion and report generation. Read full canonical results only when explicitly requested. For a terminal/chat workflow without a `scanId` or completion tool, retain `python <plugin_dir>/scripts/finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>` after writing the canonical JSON. Outside the SDK path, do not mark the scan goal complete until finalization succeeds and the generated report exists.
 
 Preserve each saved deferred `id` or `candidateId`, use each deferred ID only once, and copy IDs assigned by the draft response into later updates. Omitting a saved task from the final draft does not by itself close it. Close a generic saved task in the final Standard or diff draft with `reviewState.resolvedDeferred: [{ id, reason }]`; keep unfinished tasks deferred and update linked surfaces by ID. Candidate-linked tasks close through findings or terminal dispositions. Deep parents cannot close worker tasks; original checkpoints remain unchanged.
 
@@ -51,8 +47,6 @@ For compact diff candidates, map recorded outcomes in this order:
 4. Validation `suppressed` or attack-path `ignore`: `rejected` coverage.
 
 A missing required phase record remains unresolved with its available evidence. Do not add another reconciliation pass or duplicate phase receipts. When an SDK/legacy caller supplies ledgers, preserve their candidate traceability and outcomes; do not drop an exact seed because a same-family neighbor survived.
-
-Before workbench-owned Standard or workbench-backed diff completion, require `record_codex_security_scan_draft` to succeed. SDK-owned Standard and terminal diff workflows instead verify their canonical JSON before the appropriate owner finalizes it. Completion validates and seals existing canonical artifacts and generates `report.md`; it does not create missing artifacts or run skipped scan phases.
 
 ## Optional Documents
 

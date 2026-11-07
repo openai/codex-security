@@ -13,6 +13,8 @@ export interface JsonObject {
 }
 
 export interface CodexSecurityConfig {
+  /** Configuration files whose checkouts cannot supply a native executable. */
+  executableSourcePaths?: readonly string[];
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;
@@ -291,12 +293,9 @@ export function inlineToml(value: JsonValue): string {
 export function scanApprovalPolicy(
   config: Readonly<JsonObject>,
 ): "never" | "on-request" {
-  const selectedProfile = selectedScanProfile(config);
   const configured =
-    selectedProfile !== undefined &&
-    Object.hasOwn(selectedProfile, "approval_policy")
-      ? selectedProfile["approval_policy"]
-      : config["approval_policy"];
+    selectedScanProfile(config)?.["approval_policy"] ??
+    config["approval_policy"];
   return configured === "never" ? "never" : "on-request";
 }
 
@@ -320,46 +319,6 @@ export function resolveCodexProfile(config: JsonObject): JsonObject {
   delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;
-}
-
-/** Remove generated plugin registration before reusing user configuration. */
-export function removeManagedPluginRegistration(config: JsonObject): void {
-  const profiles = config["profiles"];
-  for (const value of [
-    config,
-    ...(isObject(profiles) ? Object.values(profiles) : []),
-  ]) {
-    if (!isObject(value)) continue;
-    delete value["plugins"];
-    delete value["marketplaces"];
-    if (isObject(value["features"])) delete value["features"]["plugins"];
-  }
-}
-
-/** Apply a worker budget to a config owned by this scan. */
-export function setScanSubagentBudget(
-  config: JsonObject,
-  subagents: number,
-): void {
-  const features = isObject(config["features"]) ? config["features"] : {};
-  features["multi_agent_v2"] = {
-    ...(isObject(features["multi_agent_v2"]) ? features["multi_agent_v2"] : {}),
-    enabled: true,
-    max_concurrent_threads_per_session: subagents + 1,
-  };
-  config["features"] = features;
-}
-
-/** Carry a selected scan into another ordinary client without copying managed plugin registration. */
-export function scanCompositionOverrides(
-  config: JsonObject,
-  subagents: number,
-): JsonObject {
-  const result = resolveCodexProfile(config);
-  setScanSubagentBudget(result, subagents);
-  removeManagedPluginRegistration(result);
-  if (isObject(result["agents"])) delete result["agents"]["max_threads"];
-  return result;
 }
 
 /** @internal */
@@ -551,7 +510,7 @@ export async function writeCodexConfig(
 /** @internal Write private configuration without changing its serialized contents. */
 export async function writePrivateConfig(
   path: string,
-  contents: string | Uint8Array,
+  contents: string,
 ): Promise<void> {
   const parent = dirname(path);
   await mkdir(parent, { recursive: true, mode: 0o700 });

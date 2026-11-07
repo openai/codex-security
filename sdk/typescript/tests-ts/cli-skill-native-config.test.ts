@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -25,8 +26,6 @@ import {
   resolveCodexCommand,
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
-import { removeTemporaryDirectory } from "./support/temporary-directories.js";
-import { executablePathForSpawn } from "../src/executable-path.js";
 import { readOperationTelemetry } from "../src/operation-telemetry.js";
 
 const modelCatalog = fileURLToPath(
@@ -128,7 +127,7 @@ test.each([
       clearTimeout(timeout);
       lines.close();
       child.stderr.destroy();
-      await removeTemporaryDirectory(root);
+      await rm(root, { recursive: true, force: true });
     }
   },
 );
@@ -261,7 +260,7 @@ test.each([
         projectServerConfigured: trust === "trusted",
       });
     } finally {
-      await removeTemporaryDirectory(root);
+      await rm(root, { recursive: true, force: true });
     }
   },
 );
@@ -372,7 +371,7 @@ async function withStoredApiKey(
       },
     });
   } finally {
-    await removeTemporaryDirectory(root);
+    await rm(root, { recursive: true, force: true });
   }
 }
 
@@ -673,6 +672,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
       }) => {
         await writeCodexConfig(join(ambientHome, "config.toml"), {});
         const scanConfig = join(root, "scan.toml");
+        const workerConfig = join(root, "workers.toml");
         const workerRuntime: JsonObject =
           settings !== "explicit"
             ? {}
@@ -691,9 +691,14 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
                 },
                 responses_api_metadata: { "synthetic.tag": "worker" },
               };
-        await writeCodexConfig(scanConfig, workerRuntime);
+        await writeCodexConfig(scanConfig, {});
+        await writeCodexConfig(workerConfig, { worker_runtime: workerRuntime });
         const prompt = join(root, "prompt.md");
         await writeFile(prompt, "Synthetic worker request.");
+        const executor = new URL(
+          "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
+          import.meta.url,
+        );
         const child = spawn(
           process.execPath,
           [
@@ -703,6 +708,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
                 import.meta.url,
               ),
             ),
+            fileURLToPath(executor),
             prompt,
           ],
           {
@@ -713,6 +719,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
               CODEX_CLI_PATH: environment["SYNTHETIC_NATIVE_CODEX"],
               CODEX_API_KEY: "SYNTHETIC_KEY",
               CODEX_SECURITY_CONFIG_PATH: scanConfig,
+              CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerConfig,
             },
             stdio: ["pipe", "pipe", "pipe"],
             windowsHide: true,
@@ -731,19 +738,19 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           return JSON.parse(next.value!);
         };
         const worker = async (
-          kind: "discovery" | "dedup" | "compare",
+          kind: "discovery" | "compare",
           resumeThreadId?: string,
         ) => {
           child.stdin.write(JSON.stringify({ kind, resumeThreadId }) + "\n");
           return await response();
         };
         try {
+          const { baseUrl } = await response();
           const workerConfig = {
+            model_catalog_json: modelCatalog,
+            openai_base_url: baseUrl,
             mcp_servers: {
-              "codex-security": {
-                url: "https://fixture.invalid/mcp",
-                enabled: false,
-              },
+              "codex-security": { url: `${baseUrl}/mcp`, enabled: false },
             },
             cli_auth_credentials_store: "file",
             features: { plugins: false },
@@ -751,26 +758,11 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             otel: { environment: "synthetic-shared", exporter: "none" },
           };
           await writeCodexConfig(join(sharedHome, "config.toml"), workerConfig);
-          // The first worker initializes the composed scan's per-scan snapshot.
+          // The first worker initializes the executor's per-scan snapshot.
           const { threadId, resumed, ...baseline } = await worker("discovery");
           expect(threadId).toBeString();
           expect(resumed).toBe(false);
-          expect(baseline).toMatchObject({
-            codexHome: sharedHome,
-            codexPath: environment["SYNTHETIC_NATIVE_CODEX"],
-            executable: executablePathForSpawn(
-              environment["SYNTHETIC_NATIVE_CODEX"]!,
-            ),
-            apiKey: "SYNTHETIC_KEY",
-            permissionProfile: "codex_security_scan",
-          });
-          expect(baseline.permissions).toMatchObject({
-            filesystem: {
-              ":root": "read",
-              ":workspace_roots": "write",
-              [sharedHome]: { ".": "deny" },
-            },
-          });
+          expect(baseline.program).toBe("standard");
           expect(baseline.daybreak).toBe(
             settings === "explicit" ? false : null,
           );
@@ -784,16 +776,11 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             expect(baseline.daybreakFeatures).toEqual(
               workerRuntime["features"],
             );
-          const reducer = await worker("dedup");
-          expect(reducer).toEqual({
+          expect(await worker("compare")).toMatchObject({
             ...baseline,
-            threadId: reducer.threadId,
+            tools: [],
             resumed: false,
           });
-          const previousThreads = {
-            discovery: threadId,
-            dedup: reducer.threadId,
-          };
           const features =
             settings === "omitted" ? undefined : disabledDaybreakFeatures;
           await writeCodexConfig(join(ambientHome, "config.toml"), {
@@ -807,43 +794,25 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             daybreak: true,
             ...(features === undefined ? {} : { daybreakFeatures: features }),
           });
-          for (const kind of ["discovery", "dedup"] as const) {
-            for (const resume of [false, true]) {
-              const receipt = await worker(
-                kind,
-                resume ? previousThreads[kind] : undefined,
-              );
-              expect(receipt).toEqual({
-                ...baseline,
-                threadId: receipt.threadId,
-                resumed: resume,
-              });
-              if (resume) expect(receipt.threadId).toBe(previousThreads[kind]);
-            }
-          }
+          expect(await worker("discovery")).toMatchObject({
+            ...baseline,
+            resumed: false,
+          });
+          expect(await worker("discovery", threadId)).toMatchObject({
+            ...baseline,
+            resumed: true,
+            threadId,
+          });
           await writeCodexConfig(join(sharedHome, "config.toml"), {
             ...workerConfig,
             mcp_servers: {
-              "codex-security": {
-                url: `https://fixture.invalid/mcp`,
-                enabled: false,
-              },
+              "codex-security": { url: `${baseUrl}/mcp`, enabled: false },
               "fixture.catalog": { command: process.execPath, enabled: false },
             },
           });
           expect(await worker("compare")).toMatchObject({
             ...baseline,
-            comparisonTools: { web_search: null },
-            requestedComparisonTools: {
-              update_plan: { enabled: false },
-              experimental_request_user_input: { enabled: false },
-            },
-            comparisonFeatures: {
-              goals: false,
-              request_permissions_tool: false,
-              shell_tool: false,
-              multi_agent: false,
-            },
+            tools: [],
             resumed: false,
           });
         } finally {
@@ -902,7 +871,7 @@ test.each([
       ]);
       expect(record.events[1]).toMatchObject({ outcome, failureCategory });
     } finally {
-      await removeTemporaryDirectory(state);
+      await rm(state, { recursive: true, force: true });
     }
   },
 );

@@ -846,7 +846,7 @@ async function verifySymlinkRejection() {
 
 async function createContext(
   name: string,
-  layout: "scan" | "worker",
+  layout: ArtifactContext["layout"],
 ): Promise<ArtifactContext> {
   const artifactRoot = path.join(root, name);
   const discoveryDirectory = path.join(
@@ -862,6 +862,7 @@ async function createContext(
   return {
     root: artifactRoot,
     repoRoot,
+    layout,
     pluginRoot: runtimePluginRoot,
     pythonCommand: path.join(root, "python-must-not-run"),
   };

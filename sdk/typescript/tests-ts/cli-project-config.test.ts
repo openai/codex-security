@@ -27,6 +27,7 @@ import {
   createCliTest,
   captureCli,
   runCapturedCli,
+  selectionPrompt,
 } from "./support/cli-run.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -57,6 +58,28 @@ async function fixture(input: ProjectConfigInput | string) {
   );
   return { root, repository, configDirectory, config };
 }
+
+test("interactive Deep sign-in checks the project source before running Codex", async () => {
+  const input = await fixture({ scan: { mode: "deep" } });
+  const command = join(input.configDirectory, "codex.exe");
+  await writeFile(command, "inert fixture", { mode: 0o700 });
+  const deps = dependencies({
+    currentDirectory: input.repository,
+    environment: {
+      CODEX_CLI_PATH: command,
+      OPENAI_API_KEY: "sk-proj-SYNTHETIC_AUTH_FIXTURE",
+    },
+  });
+  const accountLookup = mock(async () => true);
+  deps.hasStoredChatGPTSignIn = accountLookup;
+  deps.scanAuthenticationPrompt = selectionPrompt(
+    throwing("No prompt expected"),
+  );
+  const stderr = captureCli(main, "stderr", true);
+  expect(await stderr.run(["scan", "--config", input.config], deps)).toBe(2);
+  expect(stderr.text()).toContain("protected configuration checkout");
+  expect(accountLookup).not.toHaveBeenCalled();
+});
 
 async function bulkInventory(
   input: Awaited<ReturnType<typeof fixture>>,
@@ -436,11 +459,13 @@ test.each([
     });
     const csv = await bulkInventory(input, rowModes);
     const selected: ScanOptions[] = [];
+    const onConfig = mock<(config: CodexSecurityConfig) => void>();
     const { runCli, stderr } = createCliTest(main);
     const result = await runCli(
       ["bulk-scan", csv, "-c", input.config, "--json"],
       dependencies({
         currentDirectory: input.root,
+        onConfig,
         onTurn: (_repository, options) => selected.push(options),
       }),
     );
@@ -449,6 +474,9 @@ test.each([
       expect(stderr.text()).toContain(message);
       expect(selected).toEqual([]);
     } else {
+      expect(onConfig.mock.lastCall?.[0].executableSourcePaths).toContain(
+        input.config,
+      );
       expect(selected).toHaveLength(1);
       expect(selected[0]).toMatchObject({
         mode: "standard",

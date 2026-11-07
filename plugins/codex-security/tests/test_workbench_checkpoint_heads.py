@@ -133,7 +133,7 @@ def test_frozen_parent_replay_ignores_nonreference_ancestry(
         os.utime(checkpoint, ns=(100, 100))
     pending["previousParentCheckpoints"] = [*previous, *ancestry]
     checkpoint = write_checkpoint(tmp_path / "checkpoints", pending, mtime_ns=200)
-    originals = {path: path.read_bytes() for path in (tmp_path / "checkpoints").glob("*.json")}
+    originals = {path: path.read_bytes() for path in (tmp_path / "checkpoints").iterdir()}
     warnings = []
     first = saved.merge_saved_results(
         tmp_path, scan_id, binding, [], warnings, stopped=True, reason="interrupted"

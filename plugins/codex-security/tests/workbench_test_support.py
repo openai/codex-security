@@ -30,13 +30,8 @@ BUDGET_COST = {
     "estimatedUsd": 0.00625,
 }
 
-
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
-
-
 SNAPSHOT_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "snapshot_sqlite.py"
-
-
 PLUGIN_MANIFEST = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
 
 
@@ -132,9 +127,6 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any, *, mtime_ns: int | None
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
-    if checkpoint_dir.name == "checkpoints":
-        (checkpoint_dir / "pending").mkdir(exist_ok=True)
-        (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(b"")
     checkpoint_path.write_bytes(encoded)
     if mtime_ns is not None:
         os.utime(checkpoint_path, ns=(mtime_ns, mtime_ns))
@@ -332,28 +324,104 @@ def resume_deep_scan(
     )
 
 
-def commit_deep_dedup(
+def get_deep_scan(
+    state_dir: Path, scan_id: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(state_dir, "get-deep-scan", scan_id, "--thread-id", thread_id, **options)
+
+
+def upsert_deep_worker(
     state_dir: Path,
     scan_id: str,
     worker_id: str,
-    result_manifest_path: str,
-    new_findings_count: str,
+    kind: str,
+    status: str,
+    prompt_path: str,
+    artifact_dir: str,
     *extra: str,
     **options: Any,
 ) -> dict[str, object]:
     return scan_command(
         state_dir,
-        "commit-deep-scan-dedup",
+        "upsert-deep-scan-worker",
         scan_id,
         "--worker-id",
         worker_id,
-        "--result-manifest-path",
-        result_manifest_path,
-        "--new-findings-count",
-        new_findings_count,
+        "--kind",
+        kind,
+        "--status",
+        status,
+        "--prompt-path",
+        prompt_path,
+        "--artifact-dir",
+        artifact_dir,
         *extra,
         **options,
     )
+
+
+def read_fixture_deep_scan(state_dir: Path, scan_id: str, environment: dict[str, str] | None):
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        owner = db.execute(
+            """SELECT COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id)
+               FROM scans JOIN workspaces ON scans.workspace_id = workspaces.id WHERE scans.id = ?""",
+            (scan_id,),
+        ).fetchone()[0]
+    return get_deep_scan(state_dir, scan_id, owner, environment=environment)
+
+
+def seed_legacy_reducer(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    prompt_path: str,
+    artifact_dir: str,
+    *input_worker_ids: str,
+) -> None:
+    """Recreate a pre-loop database row for tests of archived scan recovery."""
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        db.execute(
+            """INSERT INTO deep_scan_workers
+               (id, scan_id, kind, status, prompt_path, artifact_dir, created_at, updated_at)
+               VALUES (?, ?, 'dedup', 'queued', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+            (worker_id, scan_id, prompt_path, artifact_dir),
+        )
+        for i, source in enumerate(input_worker_ids):
+            db.execute(
+                "INSERT INTO deep_scan_dedup_inputs VALUES (?, ?, ?, ?)",
+                (scan_id, worker_id, source, i),
+            )
+            db.execute(
+                "UPDATE deep_scan_workers SET merge_state = 'merging' WHERE id = ?", (source,)
+            )
+
+
+def seal_legacy_reducer(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    result: str,
+    new_count: int,
+    *,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        db.execute(
+            """UPDATE deep_scan_workers SET status = 'succeeded', result_manifest_path = ?,
+               completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (result, worker_id),
+        )
+        inputs = db.execute(
+            """UPDATE deep_scan_workers SET merge_state = 'merged' WHERE id IN
+               (SELECT discovery_worker_id FROM deep_scan_dedup_inputs WHERE dedup_worker_id = ?)""",
+            (worker_id,),
+        ).rowcount
+        db.execute(
+            """UPDATE deep_scan_runs SET consecutive_no_new =
+               CASE WHEN ? > 0 THEN 0 ELSE consecutive_no_new + ? END, phase = 'discovery' WHERE scan_id = ?""",
+            (new_count, inputs, scan_id),
+        )
+    return read_fixture_deep_scan(state_dir, scan_id, environment)
 
 
 def finish_deep_scan(
@@ -617,19 +685,13 @@ def update_progress(
 
 
 def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE deep_scan_runs SET status = ?, phase = 'terminal', error_message = ? "
-            "WHERE scan_id = ?",
-            (deep_status or "failed", message, scan_id),
-        )
-    return run_workbench(
+    return scan_command(
         state_dir,
-        "fail-scan",
-        "--scan-id",
+        "fail-deep-scan",
         scan_id,
         "--message",
         message,
+        *(["--deep-status", deep_status] if deep_status is not None else []),
         environment={"CODEX_HOME": str(codex_home)},
     )
 
@@ -744,123 +806,6 @@ def create_saved_git_workspace(
     return save_workspace(state_dir, workspace_id, str(target), ".", mode)
 
 
-def mark_deep_aggregate_ready(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
-    checkpoint = scan_dir / "artifacts" / "deep-scan" / "checkpoint.json"
-    checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    document = (
-        json.loads(checkpoint.read_text())
-        if checkpoint.exists()
-        else {
-            "version": 2,
-            "startedAt": "2026-01-01T00:00:00Z",
-            "passes": [],
-            "mergedScanIds": [],
-            "aggregate": [],
-            "noNewStreak": 4,
-            "consecutiveErrors": 0,
-        }
-    )
-    document["terminalReason"] = "saturated"
-    checkpoint.write_text(json.dumps(document))
-    return checkpoint
-
-
-def begin_legacy_scan(
-    state_dir: Path, codex_home: Path, target: Path, scan_root: Path, *, thread_id: str
-) -> dict[str, object]:
-    """Seed a v1 saved scan to test historical artifact/usage readers without its retired engine."""
-    started = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--thread-id",
-        thread_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--scan-root",
-        str(scan_root),
-        environment={"CODEX_HOME": str(codex_home)},
-    )
-    scan = started["scan"]
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET handoff_claim_token = NULL, continuation_thread_id = NULL WHERE id = ?",
-            (scan["scanId"],),
-        )
-        connection.execute(
-            "INSERT INTO deep_scan_runs (scan_id,schema_version,workflow_version,status,phase,workers,"
-            "subagents,stop_after_no_new,max_discovery_runs,created_at,updated_at) "
-            "SELECT id,1,'deep-security-scan/v1','running','discovery',4,3,4,8,started_at,updated_at "
-            "FROM scans WHERE id = ?",
-            (scan["scanId"],),
-        )
-    scan["createdAt"] = scan["updatedAt"]
-    return {"deepScan": scan}
-
-
-def finding_fixture(
-    *,
-    relative_path: str = "src/extract.py",
-    identity_anchor: str = "archive-entry-write-without-containment",
-) -> dict[str, Any]:
-    return {
-        "ruleId": "path-traversal.archive-extraction",
-        "identity": {"anchor": identity_anchor},
-        "title": "Unsafe archive extraction can escape the output directory",
-        "summary": "An attacker-controlled path reaches a filesystem write.",
-        "severity": {
-            "level": "high",
-            "rationale": "The reachable write can escape the extraction root.",
-        },
-        "confidence": {"level": "high", "rationale": "Direct source trace."},
-        "taxonomy": {"category": "path-traversal", "cwe": ["CWE-22"]},
-        "locations": [{"path": relative_path, "startLine": 41, "endLine": 44, "role": "sink"}],
-        "codeEvidence": [
-            {
-                "id": "archive-write",
-                "label": "Unchecked archive write",
-                "path": relative_path,
-                "startLine": 41,
-                "endLine": 44,
-                "language": "python",
-                "code": "destination.write_bytes(entry.read())",
-                "explanation": "The destination is written before containment is checked.",
-            }
-        ],
-        "validation": {
-            "method": "archive extraction test",
-            "summary": "A crafted entry wrote outside the extraction root.",
-            "evidenceRefs": ["archive-write"],
-            "assertions": ["The archive entry controls the destination path."],
-            "limitations": ["The test used a temporary extraction directory."],
-        },
-        "rootCause": {
-            "summary": "The archive destination is written before containment is enforced.",
-            "evidenceRefs": ["archive-write"],
-        },
-        "evidenceExcerpt": "destination.write_bytes(entry.read())",
-        "attackPath": {
-            "dataflow": "archive entry -> destination path -> filesystem write",
-            "reachability": "An archive uploader can supply the crafted entry.",
-            "evidenceRefs": ["archive-write"],
-            "impact": {
-                "level": "high",
-                "why": "The write can replace files outside the extraction root.",
-            },
-            "likelihood": {
-                "level": "high",
-                "why": "No containment check blocks the crafted path.",
-            },
-            "limitations": ["Writable targets depend on process permissions."],
-        },
-        "preventiveControls": ["Use a containment-checking extraction helper."],
-        "remediation": "Reject archive entries that escape the extraction root.",
-        "remediationTests": ["Reject traversal entries during extraction."],
-        "provenance": {"source": "local_plugin"},
-    }
-
-
 def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
     artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
     artifact_dir.mkdir(parents=True)
@@ -868,6 +813,23 @@ def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
     prompt_path.write_text(f"Prompt for {name}\n")
     result_path = artifact_dir / "result.json"
     return prompt_path, artifact_dir, result_path
+
+
+def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
+    manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"status":"succeeded"}\n')
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            """
+            UPDATE deep_scan_runs
+            SET status = 'succeeded', phase = 'terminal', terminal_reason = 'saturated',
+                manifest_path = ?, completed_at = updated_at
+            WHERE scan_id = ?
+            """,
+            (str(manifest), scan_id),
+        )
+    return manifest
 
 
 def read_draft_documents(scan_dir: Path) -> dict:
@@ -883,8 +845,6 @@ def write_completed_contract(
     scan_id: str,
     target: Path,
     *,
-    artifact_scan_id: str | None = None,
-    exclude_paths: list[str] | None = None,
     identity_anchor: str = "archive-entry-write-without-containment",
     include_paths: list[str] | None = None,
     relative_path: str = "src/extract.py",
@@ -893,16 +853,13 @@ def write_completed_contract(
     diff_base_revision: str | None = None,
     diff_head_revision: str | None = None,
     snapshot_digest: str | None = None,
-    target_id: str | None = None,
     coverage_mode: str = "repository",
     inventory_strategy: str = "repository",
 ) -> None:
-    artifact_scan_id = artifact_scan_id or scan_id
-    exclude_paths = exclude_paths or []
     include_paths = include_paths or ["."]
     target_contract = {
         "kind": target_kind,
-        "targetId": target_id or stable_target_id(target),
+        "targetId": stable_target_id(target),
         "displayName": target.name,
         "snapshotDigest": snapshot_digest
         or (
@@ -920,17 +877,75 @@ def write_completed_contract(
     findings = {
         "documentType": "codex-security.findings",
         "schemaVersion": "1.0",
-        "scanId": artifact_scan_id,
-        "findings": [finding_fixture(relative_path=relative_path, identity_anchor=identity_anchor)],
+        "scanId": scan_id,
+        "findings": [
+            {
+                "ruleId": "path-traversal.archive-extraction",
+                "identity": {"anchor": identity_anchor},
+                "title": "Unsafe archive extraction can escape the output directory",
+                "summary": "An attacker-controlled path reaches a filesystem write.",
+                "severity": {
+                    "level": "high",
+                    "rationale": "The reachable write can escape the extraction root.",
+                },
+                "confidence": {"level": "high", "rationale": "Direct source trace."},
+                "taxonomy": {"category": "path-traversal", "cwe": ["CWE-22"]},
+                "locations": [
+                    {"path": relative_path, "startLine": 41, "endLine": 44, "role": "sink"}
+                ],
+                "codeEvidence": [
+                    {
+                        "id": "archive-write",
+                        "label": "Unchecked archive write",
+                        "path": relative_path,
+                        "startLine": 41,
+                        "endLine": 44,
+                        "language": "python",
+                        "code": "destination.write_bytes(entry.read())",
+                        "explanation": "The destination is written before containment is checked.",
+                    }
+                ],
+                "validation": {
+                    "method": "archive extraction test",
+                    "summary": "A crafted entry wrote outside the extraction root.",
+                    "evidenceRefs": ["archive-write"],
+                    "assertions": ["The archive entry controls the destination path."],
+                    "limitations": ["The test used a temporary extraction directory."],
+                },
+                "rootCause": {
+                    "summary": "The archive destination is written before containment is enforced.",
+                    "evidenceRefs": ["archive-write"],
+                },
+                "evidenceExcerpt": "destination.write_bytes(entry.read())",
+                "attackPath": {
+                    "dataflow": "archive entry -> destination path -> filesystem write",
+                    "reachability": "An archive uploader can supply the crafted entry.",
+                    "evidenceRefs": ["archive-write"],
+                    "impact": {
+                        "level": "high",
+                        "why": "The write can replace files outside the extraction root.",
+                    },
+                    "likelihood": {
+                        "level": "high",
+                        "why": "No containment check blocks the crafted path.",
+                    },
+                    "limitations": ["Writable targets depend on process permissions."],
+                },
+                "preventiveControls": ["Use a containment-checking extraction helper."],
+                "remediation": "Reject archive entries that escape the extraction root.",
+                "remediationTests": ["Reject traversal entries during extraction."],
+                "provenance": {"source": "local_plugin"},
+            }
+        ],
     }
     coverage = {
         "documentType": "codex-security.coverage",
         "schemaVersion": "1.0",
-        "scanId": artifact_scan_id,
+        "scanId": scan_id,
         "mode": coverage_mode,
         "inventoryStrategy": inventory_strategy,
         "includePaths": include_paths,
-        "excludePaths": exclude_paths,
+        "excludePaths": [],
         "surfaces": [
             {
                 "id": "surface_archive_extraction",
@@ -946,7 +961,7 @@ def write_completed_contract(
         "documentType": "codex-security.scan-manifest",
         "schemaVersion": "1.0",
         "scan": {
-            "id": artifact_scan_id,
+            "id": scan_id,
             "producer": {
                 "name": "codex-security-plugin",
                 "version": source_plugin_version(),
@@ -955,7 +970,7 @@ def write_completed_contract(
             "startedAt": "2026-06-02T18:00:00Z",
             "completedAt": "2026-06-02T18:09:00Z",
             "target": target_contract,
-            "scope": {"includePaths": include_paths, "excludePaths": exclude_paths},
+            "scope": {"includePaths": include_paths, "excludePaths": []},
             "coverageRef": "coverage.json",
             "findingsRef": "findings.json",
         },
@@ -964,65 +979,6 @@ def write_completed_contract(
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
     (scan_dir / "report.md").write_text("# Fixture report\n")
-
-
-def recipe(target: Path, mode: str = "standard") -> dict:
-    return {
-        "repository": str(target),
-        "target": {"kind": "repository", "paths": []},
-        "mode": mode,
-        "config": {"model": "synthetic-model", "model_reasoning_effort": "high"},
-        **({"deepScan": {"maxDiscoveryRuns": 8}} if mode == "deep" else {}),
-    }
-
-
-def register(
-    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
-) -> dict:
-    missing = []
-    current = directory
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    for path in reversed(missing):
-        path.mkdir(mode=0o700)
-    saved_recipe = recipe(target, mode)
-    if paths:
-        saved_recipe["target"] = {"kind": "paths", "paths": list(paths)}
-    return run_workbench(
-        state,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(directory),
-        "--registration-json-stdin",
-        *(("--parent-scan-id", parent) if parent else ()),
-        input_text=json.dumps({"recipe": saved_recipe, "parentScanRole": role}),
-    )
-
-
-def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
-    value = {
-        "version": 2,
-        "startedAt": "2026-01-01T00:00:00Z",
-        "passes": list(passes),
-        "mergedScanIds": list(merged),
-        "aggregate": None,
-        "noNewStreak": 0,
-        "consecutiveErrors": 0,
-        **({"terminalReason": terminal} if terminal else {}),
-    }
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        "artifacts/deep-scan/checkpoint.json",
-        input_text=json.dumps(value),
-    )
-    return value
 
 
 def windows_file_backend() -> mock.Mock:
@@ -1044,12 +1000,7 @@ def windows_file_backend() -> mock.Mock:
         with path.open("wb" if replace_existing else "xb") as handle:
             handle.write(payload)
 
-    def unlink_if_exists(
-        scan_dir: Path,
-        relative_path: str,
-        *,
-        expected_root_identity: tuple[int, int] | None = None,
-    ) -> None:
+    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
         (scan_dir / relative_path).unlink(missing_ok=True)
 
     backend.open_read_fd.side_effect = open_read_fd

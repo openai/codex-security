@@ -147,20 +147,18 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
             patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
         else:
             patch.setattr(saved_sources, "write_scan_local_bytes", fail_snapshot)
-        if termination != "canceled":
-            with sqlite3.connect(state / "workbench.sqlite3") as connection:
-                connection.execute(
-                    "UPDATE deep_scan_runs SET status = ?, phase = 'terminal' WHERE scan_id = ?",
-                    (termination, scan_id),
-                )
         call_workbench(
             patch,
             state,
             codex_home,
-            "cancel-scan" if termination == "canceled" else "fail-scan",
+            "cancel-scan" if termination == "canceled" else "fail-deep-scan",
             "--scan-id",
             scan_id,
-            *(["--message", "Worker stopped."] if termination != "canceled" else []),
+            *(
+                ["--deep-status", termination, "--message", "Worker stopped."]
+                if termination != "canceled"
+                else []
+            ),
         )
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         frozen = json.loads(

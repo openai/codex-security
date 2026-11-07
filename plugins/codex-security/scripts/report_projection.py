@@ -28,9 +28,7 @@ DISPOSITION_LABELS = {
     "not_applicable": "Not applicable",
     "needs_follow_up": "Needs follow-up",
 }
-WRITEUP_REPORT_PATH_RE = re.compile(
-    r"^findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\.md$"
-)
+WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 INLINE_CODE_RE = r"(?<!`)`[^`\n]+`(?!`)"
 ENTITY_AMP_RE = r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)"
 WWW_LINK_RE = r"(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
@@ -508,8 +506,11 @@ def _surface_notes(surface: dict[str, Any]) -> str:
     return _cell(f"{notes} Evidence: {evidence}")
 
 
-def retained_findings(finding: dict[str, Any]) -> Iterator[tuple[Any, dict[str, Any]]]:
-    """Yield canonical and retained findings in source order, visiting shared objects once."""
+def _remediation_section(finding: dict[str, Any]) -> list[str]:
+    remediation = _text(finding.get("remediation"), "No canonical remediation was recorded.")
+    lines = ["", "#### Remediation", "", remediation]
+    seen = {remediation}
+    originals: list[tuple[str, dict[str, Any]]] = []
     pending = [("finding", finding)]
     seen_findings: set[int] = set()
     while pending:
@@ -517,7 +518,7 @@ def retained_findings(finding: dict[str, Any]) -> Iterator[tuple[Any, dict[str, 
         if id(original) in seen_findings:
             continue
         seen_findings.add(id(original))
-        yield source_id, original
+        originals.append((source_id, original))
         provenance = original.get("provenance")
         if not isinstance(provenance, dict):
             continue
@@ -529,22 +530,15 @@ def retained_findings(finding: dict[str, Any]) -> Iterator[tuple[Any, dict[str, 
         sources = provenance.get("sourceFindings")
         if isinstance(sources, list):
             pending.extend(
-                (source.get("id"), source["finding"])
+                (_text(source.get("id"), "finding"), source["finding"])
                 for source in reversed(sources)
                 if isinstance(source, dict) and isinstance(source.get("finding"), dict)
             )
-
-
-def _remediation_section(finding: dict[str, Any]) -> list[str]:
-    remediation = _text(finding.get("remediation"), "No canonical remediation was recorded.")
-    lines = ["", "#### Remediation", "", remediation]
-    seen = {remediation}
-    originals = list(retained_findings(finding))
     for source_id, original in originals[1:]:
         text = _text(original.get("remediation"), "")
         if text and text not in seen:
             seen.add(text)
-            lines.extend(["", f"Source {_text(source_id, 'finding')}: {text}"])
+            lines.extend(["", f"Source {source_id}: {text}"])
     for field, label in (
         ("remediationTests", "Tests"),
         ("preventiveControls", "Preventive controls"),
@@ -948,8 +942,7 @@ def build_report_markdown(
             ]
         )
         for number, finding, report_path in numbered_findings:
-            # Composed details can go beyond any one retained source write-up.
-            if report_path is not None and not finding.get("provenance", {}).get("sourceFindings"):
+            if report_path is not None:
                 lines.extend(["", *_linked_finding_section(number, finding, report_path)])
             else:
                 lines.extend(["", *_finding_section(number, finding)])

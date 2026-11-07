@@ -5,47 +5,6 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const USAGE_LIMIT_MESSAGES = new Set([
-  "Quota exceeded. Check your plan and billing details.",
-  "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
-  "Your workspace is out of credits. Add credits to continue.",
-  "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
-  "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
-  "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
-]);
-
-/** Codex reports native quota failures as text, sometimes during compaction. */
-export function isCodexUsageLimit(message: string): boolean {
-  const reason = message.replace(/^Error running remote compact task: /, "");
-  return (
-    USAGE_LIMIT_MESSAGES.has(reason) ||
-    reason.startsWith("You’ve hit your usage limit.") ||
-    reason.startsWith("You’ve hit your usage limit for ")
-  );
-}
-
-export function isCodexNonRetryableFailure(error: unknown): boolean {
-  const message = errorMessage(error);
-  // SDK diagnostics can include repository text; match native terminal responses.
-  if (isCodexUsageLimit(message)) return true;
-  return [
-    "cyber_policy",
-    "Request rejected: cyber_policy.",
-    "Request flagged for possible cybersecurity risk.",
-    "Request flagged for potentially high-risk cyber activity.",
-    "Request blocked by cyberPolicy.",
-    "Request blocked by a safety policy violation.",
-    "This content was flagged for possible cybersecurity risk.",
-    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
-    "This content was flagged for potentially high-risk cyber activity.",
-    "This request has been flagged for possible cybersecurity risk.",
-    "This request has been flagged for potentially high-risk cyber activity.",
-    "Request blocked by a cybersecurity_policy_violation.",
-    "Request refused under cybersecurity policy.",
-    "Cybersecurity policy has refused the request.",
-  ].includes(message);
-}
-
 export function abortReason(signal: AbortSignal): unknown {
   return (
     signal.reason ??

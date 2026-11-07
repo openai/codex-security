@@ -29,9 +29,16 @@ import {
   recordCodexSecurityCandidateAttackPaths,
 } from "../artifact-candidate-ledger.js";
 import {
+  postPeerNote,
+  postPeerNoteInput,
+  readPeerNotes,
+  readPeerNotesInput,
+} from "../deep-scan/peer-notes.js";
+import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
   recordCodexSecurityScanDraftViaWorkbench,
+  recordCodexSecurityWorkerScanDraft,
   scanDraftInputSchema,
 } from "../artifact-scan-draft.js";
 
@@ -247,6 +254,46 @@ async function supplementalContext(
     root,
     input.storage,
   );
+}
+
+/** Expose only the operations appropriate to the inherited worker phase. */
+export function registerCompactWorkerArtifactTools(
+  server: McpServer,
+  context: ArtifactContext,
+): void {
+  const board = context.discoveryBoard;
+  if (board) {
+    registerCompactTool(server, {
+      name: "post_deep_scan_peer_note",
+      title: "Post Deep Scan Peer Note",
+      description:
+        "Share a lead or ask another discovery worker to check specific evidence. Pass its threadId to reply with your independent check. The host identifies the author.",
+      inputSchema: postPeerNoteInput,
+      readOnly: false,
+      handler: (input) => postPeerNote(board, context.scanId, input),
+    });
+    registerCompactTool(server, {
+      name: "read_deep_scan_peer_notes",
+      title: "Read Deep Scan Peer Notes",
+      description:
+        "List this scan’s shared leads and questions, or pass a threadId to read that lead and its replies.",
+      inputSchema: readPeerNotesInput,
+      readOnly: true,
+      handler: (input) => readPeerNotes(board, input),
+    });
+  }
+  registerCompactTool(server, {
+    name: "record_codex_security_scan_draft",
+    title: "Record Codex Security Scan Draft",
+    description:
+      "Save this Standard worker's semantic findings and reviewState. Use complete:false for progress checkpoints or when source access or execution blocks the audit; record blockers and unvalidated candidates in reviewState.deferred. Use complete:true only after the source review finishes, including a review with no findings. On terminal drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
+      semanticFindingGuidance +
+      reviewStateGuidance,
+    inputSchema: scanDraftInputSchema,
+    readOnly: false,
+    handler: async (value) =>
+      recordCodexSecurityWorkerScanDraft(context, value),
+  });
 }
 
 interface CompactToolRegistration<Input> {

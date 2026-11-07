@@ -318,7 +318,7 @@ test("ordinary TypeScript source and tests retain the reduced version matrices",
     "sdk/typescript/src/index.ts",
     "sdk/typescript/tests-ts/support/test-subprocess.ts",
     "plugins/codex-security/mcp-app/src/stdio-transport.ts",
-    "plugins/codex-security/mcp-app/tests/test_deep_scan_permission_profile_preflight.ts",
+    "plugins/codex-security/mcp-app/tests/test_deep_scan_executor.ts",
     "plugins/codex-security/mcp-app/tests/support/fixture.ts",
   ]) {
     assert.deepEqual(select([path]), regularSource, path);

@@ -15,7 +15,6 @@ from typing import Any
 from unicodedata import normalize
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_deep_scan_target import check_selected_targets
 from workbench_target import (
     clean_worktree_content_digest,
     git_command,
@@ -47,29 +46,6 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
         if target["kind"] == "paths":
             return target["paths"]
     return [scan["scope"]]
-
-
-def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
-    # Older scans did not record path kinds. Retain their lexical scope semantics
-    # rather than infer the original target from a possibly changed checkout.
-    if scan["recipe_json"] is None:
-        return []
-    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-    return recipe.get("scopeFilePaths", [])
-
-
-def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
-    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
-    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
-
-
-def check_registered_deep_target(scan: sqlite3.Row) -> None:
-    try:
-        check_selected_targets(
-            Path(scan["target_path"]), requested_scan_paths(scan), requested_scan_file_paths(scan)
-        )
-    except (OSError, ValueError) as exc:
-        raise SystemExit(str(exc)) from exc
 
 
 def public_scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:

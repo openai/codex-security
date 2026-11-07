@@ -24,10 +24,6 @@
     "darwin": 0.2,
     "win32": 1.7
   },
-  "api-deep-composition.test.ts": {
-    "darwin": 713.7,
-    "win32": 519.8
-  },
   "api-deep-scan-advisory-routing.test.ts": {
     "linux": 0.1,
     "darwin": 0.3,
@@ -523,7 +519,7 @@
     "darwin": 8.9,
     "win32": 11.2
   },
-  "deep-scan-reducer-recovery.test.ts": {
+  "deep-scan-worker-recovery.test.ts": {
     "linux": 0.4,
     "darwin": 0.5,
     "win32": 0.6
@@ -1000,8 +996,8 @@
   },
   "scan-resume.test.ts": {
     "linux": 93.9,
-    "darwin": 965.2,
-    "win32": 1611.1
+    "darwin": 129.6,
+    "win32": 249.2
   },
   "scan-skill-paths.test.ts": {
     "linux": 0.1,

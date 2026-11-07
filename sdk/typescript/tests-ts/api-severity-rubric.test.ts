@@ -3,7 +3,6 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { runWorkbench } from "../src/runtime.js";
-import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { bundledSeverityRubric } from "../src/severity-rubric.js";
 import { mockWorkbench, TestClient } from "./support/api-client.js";
 import { codexFactory, preparedRuntime } from "./support/api-events.js";
@@ -53,14 +52,10 @@ for (const mode of ["standard", "deep"] as const) {
       const workflowId = "rubric-retry";
       const registrations: unknown[] = [];
       for (const attempt of [1, 2]) {
-        const controller = new AbortController();
         await using client = TestClient.withDependencies({
           environment,
           prepareRuntime: async () => preparedRuntime(home),
-          prepareOutputDir:
-            mode === "deep"
-              ? undefined
-              : async () => mkdtemp(join(root, "scan-")),
+          prepareOutputDir: async () => mkdtemp(join(root, "scan-")),
           resolvePluginPython: async () => python,
           runWorkbench: async (options, args, input) => {
             if (args[0] === "register-cli-scan")
@@ -78,25 +73,18 @@ for (const mode of ["standard", "deep"] as const) {
           },
           createCodex: codexFactory(async (prompt: string) => {
             prompts.push(prompt);
-            const error = new ScanTransportClosedError(
-              "Synthetic transport disconnected",
-            );
-            controller.abort(error);
-            throw error;
+            throw new Error("Synthetic transport disconnected");
           }),
         });
         await expect(
           client.run(repository, {
             workflowId,
             mode,
-            signal: controller.signal,
-            ...(mode === "deep" ? { workers: 1, maxDiscoveryRuns: 1 } : {}),
             ...(source === "custom file" ? { rubricPath } : {}),
           }),
         ).rejects.toThrow("Synthetic transport disconnected");
-        const registrationsPerAttempt = mode === "deep" ? 2 : 1;
-        expect(registrations).toHaveLength(registrationsPerAttempt * attempt);
-        for (const rubric of registrations) expect(rubric).toEqual(expected);
+        expect(registrations).toHaveLength(attempt);
+        expect(registrations.at(-1)).toEqual(expected);
         expect(prompts).toHaveLength(attempt);
         expect(prompts.at(-1)).toContain(
           JSON.stringify({ severityRubric: expected }),

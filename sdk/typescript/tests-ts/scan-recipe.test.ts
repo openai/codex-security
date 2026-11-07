@@ -247,8 +247,6 @@ test.each(
               model_providers: resolveCodexProfile(initial)["model_providers"],
             });
           }
-          if (mode === "deep")
-            throw new Error("Synthetic stop after registration");
           return {
             startThread: () => ({
               id: "synthetic-recipe-thread",
@@ -597,7 +595,7 @@ test.each(
         args,
         input,
       );
-    let launches = 0;
+    let modelTurns = 0;
     const runtimeDependencies = {
       environment,
       prepareRuntime: async () => ({
@@ -615,17 +613,15 @@ test.each(
         return command(args, input);
       },
       createCodex: ({ config }: { config?: JsonObject }) => {
-        launches++;
-        if (cleared) {
-          expect(config).not.toHaveProperty(key);
-          expect(config).not.toHaveProperty("analytics");
-          expect(config).not.toHaveProperty("agents.reviewer.config_file");
-        }
-        if (mode === "deep")
-          throw new Error("Synthetic stop after registration");
         const thread = (id: string, cwd?: string) => ({
           id,
           async runStreamed() {
+            modelTurns++;
+            if (cleared) {
+              expect(config).not.toHaveProperty(key);
+              expect(config).not.toHaveProperty("analytics");
+              expect(config).not.toHaveProperty("agents.reviewer.config_file");
+            }
             await writeSession(home, id, {}, { cwd });
             return {
               events: (async function* () {
@@ -641,7 +637,7 @@ test.each(
         return {
           startThread: (options?: { workingDirectory?: string }) =>
             thread(
-              `synthetic-model-file-thread-${launches}`,
+              `synthetic-model-file-thread-${modelTurns + 1}`,
               options?.workingDirectory,
             ),
           resumeThread: (id: string, options?: { workingDirectory?: string }) =>
@@ -698,7 +694,7 @@ test.each(
             agents: { reviewer: { description: "updated reviewer" } },
           });
         }
-        expect(launches).toBe(mode === "deep" ? 3 : 2);
+        expect(modelTurns).toBe(mode === "deep" ? 3 : 2);
         expect(replay).not.toHaveProperty(key);
         expect(replay).not.toHaveProperty("analytics");
         expect(replay).not.toHaveProperty("agents.reviewer.config_file");

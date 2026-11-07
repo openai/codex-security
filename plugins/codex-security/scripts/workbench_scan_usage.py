@@ -16,17 +16,20 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 from urllib.parse import quote
 
-# Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-if TYPE_CHECKING:
-    from workbench_composition import CompositionView
 from workbench.storage import worker_usage_directory
-from workbench_constants import TOKEN_FIELDS
 
+TOKEN_FIELDS = {
+    "input_tokens": "inputTokens",
+    "cached_input_tokens": "cachedInputTokens",
+    "cache_write_input_tokens": "cacheWriteInputTokens",
+    "output_tokens": "outputTokens",
+    "reasoning_output_tokens": "reasoningOutputTokens",
+    "total_tokens": "totalTokens",
+}
 STATE_DATABASE_NAME = re.compile(r"state_(\d+)\.sqlite")
 STATE_DATABASE_TIMEOUT_SECONDS = 1.0
 
@@ -100,18 +103,6 @@ def reconcile_completed_scan_cost(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
-
-
-def merge_scan_cost(stored: str | None, incoming: str | None) -> str | None:
-    """Replace supplied cost/usage fields while retaining the other measured fields."""
-    fields = merge_scan_usage_fields(
-        stored_scan_cost_fields(stored), stored_scan_cost_fields(incoming)
-    )
-    if not fields:
-        return None
-    return json.dumps(
-        fields if "usage" in fields else fields["cost"], separators=(",", ":"), allow_nan=False
-    )
 
 
 def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
@@ -278,15 +269,8 @@ def collect_scan_usage(
     the window, Codex state, or relevant threads cannot be established.
     """
 
-    from workbench_composition import load_composition
-
-    composition = load_composition(connection, scan)
-    roots = _scan_root_thread_ids(connection, scan, thread_id, composition=composition)
-    parent_ids = set(
-        _scan_root_thread_ids(
-            connection, scan, thread_id, composition=composition, include_workers=False
-        )
-    )
+    roots = _scan_root_thread_ids(connection, scan, thread_id)
+    parent_ids = set(_scan_root_thread_ids(connection, scan, thread_id, include_workers=False))
     if validation_thread_id:
         roots.append(validation_thread_id)
         parent_ids.add(validation_thread_id)
@@ -298,23 +282,6 @@ def collect_scan_usage(
     if started_at is None:
         return _unavailable_usage("scan_window_unavailable")
 
-    checkpoint = composition.checkpoint
-    # Known currency receipts do not make unavailable session token counts complete.
-    if (
-        checkpoint is not None
-        and (
-            checkpoint.get("costUnavailable")
-            or (
-                not scan["continuation_thread_id"]
-                and (
-                    checkpoint.get("mergeStarted") is True
-                    or (checkpoint.get("mergeStarted") is not False and checkpoint["mergedScanIds"])
-                    or _merge_was_prepared(scan["scan_dir"])
-                )
-            )
-        )
-    ) or any(not child["continuation_thread_id"] for child in composition.children):
-        warnings.add("scan_thread_unavailable")
     receipts, missing_receipts, receipt_scope = _worker_usage_receipts(
         scan, started_at, stopped_at, warnings
     )
@@ -485,15 +452,6 @@ def collect_scan_usage(
     return result
 
 
-def _merge_was_prepared(scan_dir: str) -> bool:
-    # The host persists this input before launch; a completed discovery is not a merge.
-    try:
-        (Path(scan_dir) / "artifacts/deep-scan/merge-inputs.json").lstat()
-    except FileNotFoundError:
-        return False
-    return True
-
-
 def _worker_usage_receipts(
     scan: Mapping[str, Any],
     started_at: datetime,
@@ -572,7 +530,6 @@ def _scan_root_thread_ids(
     scan: sqlite3.Row,
     supplied_thread_id: str | None,
     *,
-    composition: CompositionView,
     include_owner_threads: bool = True,
     include_workers: bool = True,
 ) -> list[str]:
@@ -589,8 +546,6 @@ def _scan_root_thread_ids(
         if workspace is not None:
             candidates.append(workspace["thread_id"])
     if include_workers and scan["mode"] == "deep":
-        candidates.extend(composition.execution_threads)
-        candidates.extend(child["continuation_thread_id"] for child in composition.children)
         candidates.extend(
             row["sdk_thread_id"]
             for row in connection.execute(
@@ -610,16 +565,13 @@ def _scan_root_thread_ids(
     return list(roots)
 
 
-def _scan_execution_thread_ids(
-    connection: sqlite3.Connection, scan: sqlite3.Row, composition: CompositionView
-) -> list[str]:
+def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:
     # CLI recipes identify dedicated executions; Desktop continuations can be shared.
     return _scan_root_thread_ids(
         connection,
         scan,
         scan["continuation_thread_id"] if scan["recipe_json"] is not None else None,
         include_owner_threads=False,
-        composition=composition,
     )
 
 

@@ -123,7 +123,6 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       {
         scanId: first.manifest.scan.id,
         scanDir: first.scanDir,
-        startedAt: first.manifest.scan.startedAt,
       },
     ]);
     expect(first.findings.findings).toHaveLength(12);

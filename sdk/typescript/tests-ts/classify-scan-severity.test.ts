@@ -1,6 +1,6 @@
+import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
-
 import {
   chmod,
   mkdir,
@@ -9,16 +9,13 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-
 import {
   classifyScanDirectorySeverity,
   classifyScanSeverityInternal,
   readScanSeverityClassification,
 } from "../src/classify-scan-severity.js";
-
 import {
   classifySeverity,
   type ClassifySeverityOptions,
@@ -35,19 +32,12 @@ import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-const { temporaryDirectory, cleanup } = createApiTestFixtures();
-afterEach(cleanup);
-
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "classify-scan-",
+  false,
+);
 const destination = { destination: "linear", teamId: "team-example" } as const;
-
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
 async function fixture(scanId?: string, savedRoot?: string) {
   const root = savedRoot ?? (await temporaryDirectory());
@@ -544,17 +534,13 @@ test.each(["same", "different"])(
   },
 );
 
-test("migration preserves exact-owned legacy assessments without occurrence indexes", async () => {
+test("migration leaves unindexed legacy assessments incomplete until reclassified", async () => {
   const first = await fixture();
   const second = await fixture("scan_example_002");
   const environment = first.environment;
   const { scanId, ...classification } = await classifyScanDirectorySeverity(
     first.scanDirectory,
     { environment, codex: recordingClassifier().codex },
-  );
-  query(
-    environment,
-    "INSERT INTO finding_severity_assessments SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger, classification_runs FROM scan_severity_assessments",
   );
   query(environment, "DROP TABLE scan_severity_assessments");
   query(
@@ -569,14 +555,8 @@ test("migration preserves exact-owned legacy assessments without occurrence inde
   }
   query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (43, 52, 60) OR name = 'reuse scan severity assessments'",
+    "DELETE FROM schema_migrations WHERE version IN (43, 52, 60)",
   );
-  const legacyClassification = {
-    ...classification,
-    classificationRuns: undefined,
-    rubricRevision: undefined,
-    rubricSha256: workflowDigest([defaultSeverityRubric]),
-  };
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -585,7 +565,12 @@ test("migration preserves exact-owned legacy assessments without occurrence inde
       undefined,
       environment,
     ),
-  ).toEqual(legacyClassification);
+  ).toEqual({
+    ...classification,
+    classificationRuns: undefined,
+    rubricRevision: undefined,
+    rubricSha256: workflowDigest([defaultSeverityRubric]),
+  });
   expect(
     query(
       environment,
@@ -596,27 +581,23 @@ test("migration preserves exact-owned legacy assessments without occurrence inde
     environment,
     codex: recordingClassifier().codex,
   });
-  expect(
-    await readScanSeverityClassification(
+  await expect(
+    readScanSeverityClassification(
       first.scanDirectory,
       scanId,
       first.findings,
       undefined,
       environment,
     ),
-  ).toEqual(legacyClassification);
+  ).rejects.toThrow("incomplete");
   expect(
-    await classifyScanDirectorySeverity(first.scanDirectory, {
-      environment,
-      codex: recordingClassifier().codex,
-    }),
-  ).toMatchObject({
-    scanId,
-    assessments: classification.assessments,
-    classificationRuns: classification.classificationRuns,
-    rubricRevision: classification.rubricRevision,
-    rubricSha256: classification.rubricSha256,
-  });
+    (
+      await classifyScanDirectorySeverity(first.scanDirectory, {
+        environment,
+        codex: recordingClassifier().codex,
+      })
+    ).assessments,
+  ).toEqual(classification.assessments);
   expect(
     query(
       environment,
@@ -992,16 +973,12 @@ test("migrates existing databases without changing findings and reads older stat
     codex: recordingClassifier().codex,
   });
   const original = query(environment, "SELECT * FROM findings ORDER BY id");
-  query(
-    environment,
-    "INSERT INTO finding_severity_assessments SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger, classification_runs FROM scan_severity_assessments",
-  );
   query(environment, "DROP TABLE scan_severity_assessments");
   query(environment, "DROP TABLE finding_severity_assessments");
   query(environment, "DROP TABLE scan_severity_classifications");
   query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52, 60) OR name = 'reuse scan severity assessments'",
+    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52, 60)",
   );
   expect(
     (
@@ -1032,38 +1009,39 @@ test("migrates existing databases without changing findings and reads older stat
   );
 });
 
-import { codexWithRun, jsonCodex } from "./support/codex.js";
-
 test("classifying another scan preserves both recurring-finding assessments", async () => {
   const first = await fixture();
-  const second = await fixture("scan_example_002");
+  const second = await fixture();
+  const manifestPath = join(second.scanDirectory, "scan-manifest.json");
+  const manifest = JSON.parse(
+    await readFile(manifestPath, "utf8"),
+  ) as ScanManifest;
+  manifest.scan.id = "scan_example_002";
+  for (const file of ["findings.json", "coverage.json"]) {
+    const path = join(second.scanDirectory, file);
+    const document = JSON.parse(await readFile(path, "utf8"));
+    document.scanId = manifest.scan.id;
+    if (file === "findings.json") {
+      for (const finding of document.findings as Finding[]) {
+        finding.occurrenceId = `occ_${sha256([manifest.scan.id, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
+      }
+    }
+    await writeFile(path, JSON.stringify(document));
+  }
+  for (const artifact of manifest.scan.artifacts)
+    artifact.sha256 = sha256(
+      await readFile(join(second.scanDirectory, artifact.path)),
+    );
+  await writeFile(manifestPath, JSON.stringify(manifest));
   const { codex, calls } = recordingClassifier();
   const options = {
     environment: first.environment,
     rubricPath: first.rubricPath,
     codex,
   };
-  const firstResult = await classifyScanDirectorySeverity(
-    first.scanDirectory,
-    options,
-  );
-  expect(calls).toEqual(
-    first.findings.flatMap((finding) => Array(3).fill(finding.findingId)),
-  );
-  const secondResult = await classifyScanDirectorySeverity(
-    second.scanDirectory,
-    options,
-  );
-  expect(calls).toEqual(
-    first.findings.flatMap((finding) => Array(3).fill(finding.findingId)),
-  );
-  expect(secondResult.scanId).toBe(second.scanId);
-  expect(secondResult.assessments).toEqual(
-    firstResult.assessments.map((assessment, index) => ({
-      ...assessment,
-      occurrenceId: `occ_${sha256([second.scanId, first.findings[index]!.fingerprints.primary].join("\0")).slice(0, 24)}`,
-    })),
-  );
+  await classifyScanDirectorySeverity(first.scanDirectory, options);
+  await classifyScanDirectorySeverity(second.scanDirectory, options);
+  expect(calls).toHaveLength(12);
   calls.length = 0;
   for (const scan of [first, second, first, second]) {
     expect(
@@ -1074,44 +1052,9 @@ test("classifying another scan preserves both recurring-finding assessments", as
         })
       ).issues,
     ).toHaveLength(2);
-    expect(
-      (await classifyScanDirectorySeverity(scan.scanDirectory, options))
-        .assessments,
-    ).toEqual(
-      scan === first ? firstResult.assessments : secondResult.assessments,
-    );
+    await classifyScanDirectorySeverity(scan.scanDirectory, options);
   }
   expect(calls).toEqual([]);
-});
-
-test("reuses the matching review count across scans over a stale local assessment", async () => {
-  const first = await fixture();
-  const second = await fixture("scan_example_002");
-  const { codex, calls } = recordingClassifier();
-  const options = { environment: first.environment, codex };
-  await classifyScanDirectorySeverity(first.scanDirectory, {
-    ...options,
-    classificationRuns: 1,
-  });
-  calls.length = 0;
-  await classifyScanDirectorySeverity(second.scanDirectory, options);
-  expect(calls).toHaveLength(6);
-  calls.length = 0;
-  const { scanId, ...classification } = await classifyScanDirectorySeverity(
-    first.scanDirectory,
-    options,
-  );
-  expect(calls).toEqual([]);
-  expect(classification.classificationRuns).toBe(3);
-  expect(
-    await readScanSeverityClassification(
-      first.scanDirectory,
-      scanId,
-      first.findings,
-      undefined,
-      first.environment,
-    ),
-  ).toEqual(classification);
 });
 
 test("default rubric replaces legacy inherited assessments and respects custom policy changes", async () => {

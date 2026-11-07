@@ -19,24 +19,6 @@ from finalize_scan_contract import (
 )
 
 
-def retain_missing_scope(
-    scan: dict[str, Any], draft: dict[str, Any], binding: dict[str, Any]
-) -> None:
-    semantic_scope = draft.get("scope")
-    if not isinstance(semantic_scope, dict):
-        return
-    scope = copy.deepcopy(scan.get("scope", {}))
-    scan["scope"] = scope
-    for key, value in semantic_scope.items():
-        if key == "sourceScans" and isinstance(value, list) and isinstance(scope.get(key), list):
-            for context in value:
-                if context not in scope[key]:
-                    scope[key].append(copy.deepcopy(context))
-        else:
-            scope.setdefault(key, copy.deepcopy(value))
-    scope.update(copy.deepcopy(binding["scope"]))
-
-
 def _has_candidate_metadata(row: dict[str, Any]) -> bool:
     return any(key in row for key in ("candidateId", "candidate", "finding"))
 

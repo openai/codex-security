@@ -2,18 +2,12 @@ import { canonicalDirectory } from "./artifact-context.js";
 import type { ZodType, ZodError } from "zod/v4";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-export interface DeepReducerWorkerContext {
-  id: string;
-  resultPath: string;
-  attempt?: number;
-}
 
-export interface DeepReducerContext {
-  scanRoot: string;
-  claimedWorkers: DeepReducerWorkerContext[];
-  previousReducerResultPath?: string;
+export interface DiscoveryBoardContext {
+  root: string;
+  author: string;
 }
 
 /**
@@ -22,6 +16,8 @@ export interface DeepReducerContext {
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
+  layout: "scan" | "worker";
+  discoveryBoard?: DiscoveryBoardContext;
   scanId?: string;
   scope?: string;
   includePaths?: readonly string[];
@@ -189,7 +185,7 @@ export function paginateArtifactRows<Row>(
 }
 
 /**
- * Resolve one operation-owned destination inside its bound scan root.
+ * Resolve one operation-owned destination inside its bound scan or worker root.
  */
 export async function artifactDestination(
   context: ArtifactContext,

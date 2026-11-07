@@ -1,9 +1,4 @@
-import {
-  mcpSmokeInput,
-  mcpSmokeResponses,
-} from "../scripts/fixtures/mcp-smoke.mjs";
 import { execFile } from "node:child_process";
-import { symlink } from "node:fs/promises";
 import {
   chmod,
   copyFile,
@@ -12,12 +7,11 @@ import {
   readFile,
   readdir,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename } from "node:path";
-import { delimiter, join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { fileURLToPath } from "node:url";
+import { basename, delimiter, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -118,17 +112,7 @@ describe("bundled plugin build", () => {
     const plugin = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
     );
-    const source = join(root, "plugins", "codex-security");
-    const sdk = fileURLToPath(new URL("..", import.meta.url));
-    const sdkFixture = join(root, "sdk", "typescript");
-    for (const entry of ["src", "schemas", "package.json"]) {
-      await cp(join(sdk, entry), join(sdkFixture, entry), { recursive: true });
-    }
-    await symlink(
-      join(sdk, "node_modules"),
-      join(sdkFixture, "node_modules"),
-      "junction",
-    );
+    const source = join(root, "plugin");
     await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
       recursive: true,
       filter: (path) => !["node_modules", ".preview"].includes(basename(path)),
@@ -507,81 +491,6 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
       expect(await snapshot(destination)).toEqual(previous);
     },
   );
-  test("builds the MCP runtime without invoking an npm launcher", async () => {
-    const root = await temporaryDirectory();
-    const bin = join(root, "bin");
-    const launcher = process.platform === "win32" ? "npm.cmd" : "npm";
-    await writeFixture(
-      bin,
-      launcher,
-      process.platform === "win32" ? "@exit /b 91\r\n" : "#!/bin/sh\nexit 91\n",
-    );
-    if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
-
-    const destination = join(root, "mcp");
-    await execFileAsync(
-      "node",
-      [
-        fileURLToPath(
-          new URL(
-            "../../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs",
-            import.meta.url,
-          ),
-        ),
-        "--output",
-        destination,
-      ],
-      {
-        env: {
-          ...process.env,
-          PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
-        },
-      },
-    );
-
-    const contract = JSON.parse(
-      await readFile(
-        new URL(
-          "../../../plugins/codex-security/plugin-files.json",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
-    ) as { shippedExact: string[] };
-    expect(await files(destination)).toEqual(
-      contract.shippedExact
-        .filter((path) => path.startsWith("mcp/"))
-        .map((path) => path.slice(4))
-        .sort(),
-    );
-    const helper = await execFileAsync("node", [
-      join(destination, "helpers.mjs"),
-      "resolve-security-md",
-      "--repo",
-      root,
-      "--list",
-    ]);
-    expect(helper.stdout).toBe("[]\n");
-    expect(helper.stderr).toBe("");
-    const execution = execFileAsync(
-      "node",
-      [join(destination, "server.mjs"), "--stdio"],
-      {
-        cwd: root,
-        timeout: 10_000,
-      },
-    );
-    execution.child.stdin?.end(mcpSmokeInput);
-    const standalone = await execution;
-    const responses = mcpSmokeResponses(standalone.stdout);
-    expect(
-      responses.find((response) => response.id === 2)?.result.tools,
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "start_codex_security_deep_scan" }),
-      ]),
-    );
-  });
 
   test("builds from a source snapshot without Git metadata", async () => {
     const root = await temporaryDirectory();

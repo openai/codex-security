@@ -21,13 +21,12 @@ The GNU x64 job also runs `notices.mjs` against the locked Cargo metadata. It co
 Install the [pinned Rust toolchain](rust-toolchain.toml), then build the plugin from the repository root:
 
 ```sh
-pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
 
-`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. The MCP build bundles the shared SDK implementation. CI tests the resulting standalone package on Linux, macOS, and Windows.
+`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. CI tests this build without the SDK on Linux, macOS, and Windows.
 
 ## Build and verify the native bindings
 

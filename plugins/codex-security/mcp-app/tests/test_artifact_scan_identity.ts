@@ -1613,9 +1613,7 @@ for (const source of ["selected checkpoint", "published result"]) {
     const saved = await readJson(worker.root, "result.json");
     await normal.writeFindings(saved.findings, { complete: true });
     // Valid JSON whitespace controls filename order without changing the evidence.
-    const names = (await readdir(path.join(worker.root, "checkpoints"))).filter(
-      (name) => name.endsWith(".json"),
-    );
+    const names = await readdir(path.join(worker.root, "checkpoints"));
     let contents = JSON.stringify(initial),
       name = "";
     do {
@@ -1837,9 +1835,9 @@ for (const reverse of [false, true]) {
     const files = [
       "result.json",
       "checkpoint-head.json",
-      ...(await readdir(path.join(recoveryWriter.root, "checkpoints")))
-        .filter((name) => name.endsWith(".json"))
-        .map((name) => path.join("checkpoints", name)),
+      ...(await readdir(path.join(recoveryWriter.root, "checkpoints"))).map(
+        (name) => path.join("checkpoints", name),
+      ),
     ];
     const originals = await Promise.all(
       files.map((name) => readFile(path.join(recoveryWriter.root, name))),

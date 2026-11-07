@@ -517,28 +517,5 @@
       "UPDATE deep_scan_runs SET worker_usage_gap = 1\nWHERE scan_id IN (\n    SELECT w.scan_id FROM deep_scan_workers AS w\n    WHERE w.kind IN ('discovery', 'dedup') AND w.attempt > 1\n      AND w.started_at IS NOT NULL AND w.sdk_thread_id IS NULL\n      AND NOT EXISTS (SELECT 1 FROM deep_scan_worker_threads AS t\n                      WHERE t.scan_id = w.scan_id AND t.worker_id = w.id)\n);",
       "CREATE TRIGGER retain_unverified_deep_scan_worker_attempt\nAFTER UPDATE OF attempt ON deep_scan_workers\nWHEN NEW.attempt > OLD.attempt AND OLD.started_at IS NOT NULL\n     AND OLD.sdk_thread_id IS NULL AND OLD.kind IN ('discovery', 'dedup')\nBEGIN\n    UPDATE deep_scan_runs SET worker_usage_gap = 1 WHERE scan_id = OLD.scan_id;\nEND;"
     ]
-  },
-  {
-    "version": 64,
-    "name": "persist composition child membership",
-    "statements": [
-      "ALTER TABLE scans ADD COLUMN parent_scan_role TEXT\n    CHECK (parent_scan_role IS NULL OR parent_scan_role = 'deep_pass');",
-      "CREATE INDEX scans_by_composition_parent ON scans(parent_scan_id)\n    WHERE parent_scan_role = 'deep_pass';"
-    ]
-  },
-  {
-    "version": 65,
-    "name": "reuse scan severity assessments",
-    "statements": [
-      "CREATE INDEX scan_severity_reuse ON scan_severity_assessments\n    (finding_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at DESC);"
-    ]
-  },
-  {
-    "version": 66,
-    "name": "persist scan target executable protection",
-    "statements": [
-      "ALTER TABLE workspaces ADD COLUMN target_protection_roots_json TEXT;",
-      "ALTER TABLE scans ADD COLUMN target_protection_roots_json TEXT;"
-    ]
   }
 ]

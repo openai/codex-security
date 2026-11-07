@@ -75,7 +75,6 @@ export const ProjectConfigInputSchema = z.strictObject({
       model: nonempty.optional(),
       model_reasoning_effort: nonempty.optional(),
       model_provider: nonempty.optional(),
-      cyber_access_program: nonempty.optional(),
     })
     .catchall(z.json())
     .optional()

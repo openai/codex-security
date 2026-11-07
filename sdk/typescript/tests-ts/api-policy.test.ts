@@ -73,7 +73,7 @@ async function setup(
   const f = await fixture();
   const codexHome = join(f.root, "codex-home");
   const ambientHome = join(f.root, "ambient [codex-home]{fixture}");
-  await mkdir(codexHome, { mode: 0o700 });
+  await mkdir(codexHome);
   const runtime = preparedRuntime(codexHome);
   Object.assign(runtime.environment, options.environment);
   const createCodex = mock((_config: CodexOptions) => {
@@ -103,15 +103,14 @@ async function setup(
     "threat_model",
     "policy",
   ];
-  const environment: NodeJS.ProcessEnv = {
-    CODEX_HOME: ambientHome,
-    CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
-    ...options.environment,
-  };
   const security = new InternalSecurity(
     options.config ?? {},
     {
-      environment,
+      environment: {
+        CODEX_HOME: ambientHome,
+        CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
+        ...options.environment,
+      },
       prepareRuntime: async () => {
         options.onPrepare?.();
         return runtime;
@@ -142,7 +141,6 @@ async function setup(
     ),
     security,
     runtime,
-    environment,
     threads,
     prompts,
     turns,
@@ -178,45 +176,6 @@ async function* events(
 }
 
 describe("CodexSecurity policy API", () => {
-  test("keeps policy executable permissions bound to the prepared session", async () => {
-    const paths = await fixture();
-    const first = join(paths.root, "codex-first.exe");
-    const second = join(paths.root, "codex-second.exe");
-    await writeFile(first, "synthetic executable\n");
-    await writeFile(second, "synthetic executable\n");
-    const f = await setup({ environment: { CODEX_CLI_PATH: first } });
-    await using security = f.security;
-    await security.generatePolicy(f.repository, {
-      outputDir: f.outputDir,
-      onOutputDirReady() {
-        f.environment["CODEX_CLI_PATH"] = second;
-      },
-    });
-    const options = f.configuration()!;
-    expect(options.codexPathOverride).toBe(
-      runtime.executablePathForSpawn(first),
-    );
-    const policy = options
-      .configOverrides!.map((value) => parseToml(value))
-      .find((value) => "permissions" in value);
-    expect(policy).toEqual({
-      permissions: {
-        codex_security_policy: {
-          filesystem: {
-            [process.platform === "win32" ? ":root" : ":minimal"]: "read",
-            ":workspace_roots": "read",
-            [await realpath(first)]: { ".": "read" },
-            [await realpath(f.runtime.codexHome)]: { ".": "deny" },
-            ...(process.platform === "win32"
-              ? { [f.ambientCredentialsGlob]: "deny" }
-              : {}),
-          },
-        },
-      },
-    });
-    expect(f.threads).toHaveLength(3);
-  });
-
   test.each([
     "bundled",
     "symlink",
@@ -331,6 +290,14 @@ describe("CodexSecurity policy API", () => {
         "codex_security_policy",
       );
       expect(parseToml(overrides.join("\n"))["permissions"]).toEqual({
+        codex_security_scan: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "write",
+            [await realpath(f.runtime.codexHome)]: { ".": "deny" },
+            [f.runtime.deepScanConfigPath!]: { ".": "deny" },
+          },
+        },
         codex_security_policy: {
           filesystem: {
             [process.platform === "win32" ? ":root" : ":minimal"]: "read",
@@ -342,6 +309,7 @@ describe("CodexSecurity policy API", () => {
             ...(process.platform === "win32"
               ? { [f.ambientCredentialsGlob]: "deny" }
               : {}),
+            [f.runtime.deepScanConfigPath!]: { ".": "deny" },
           },
         },
       });
@@ -369,7 +337,7 @@ describe("CodexSecurity policy API", () => {
           config: { codexOverrides: { windows: { sandbox } } },
         });
         policyGit(f.repository, "init", "--quiet");
-        await mkdir(f.ambientHome, { mode: 0o700 });
+        await mkdir(f.ambientHome);
         if (sandbox === "unelevated") f.runtime.codexHome = f.ambientHome;
         await writeFile(
           join(f.ambientHome, "auth.json"),
@@ -379,6 +347,9 @@ describe("CodexSecurity policy API", () => {
           join(f.ambientHome, "config.toml"),
           "# Synthetic private provider configuration\n",
         );
+        // Older runtimes can keep the worker snapshot outside the credential home.
+        f.runtime.deepScanConfigPath = join(f.root, "private-worker.toml");
+        await writeFile(f.runtime.deepScanConfigPath, "synthetic = true\n");
         f.runtime.configPath = join(f.root, "config-preflight.toml");
         return { f, sandbox };
       }),
@@ -398,6 +369,7 @@ describe("CodexSecurity policy API", () => {
         )["codex_security_policy"]!["filesystem"] as Record<string, unknown>;
         for (const path of [
           await realpath(f.runtime.codexHome),
+          f.runtime.deepScanConfigPath!,
           f.runtime.configPath!,
           join(f.repository, ".git"),
         ]) {
@@ -414,6 +386,9 @@ describe("CodexSecurity policy API", () => {
         for (const { f: other } of sessions) {
           if (other !== f) {
             expect(filesystem).not.toHaveProperty(other.runtime.codexHome);
+            expect(filesystem).not.toHaveProperty(
+              other.runtime.deepScanConfigPath!,
+            );
           }
         }
         expect(f.threads).toHaveLength(3);
@@ -1087,12 +1062,13 @@ describe("CodexSecurity policy API", () => {
         path: scope,
         outputDir: f.outputDir,
       });
-      const overrides = f
-        .configuration()!
-        .configOverrides!.map((override) => parseToml(override))
-        .filter((override) => override["permissions"] !== undefined);
-      expect(overrides).toHaveLength(1);
-      expect(overrides[0]).toMatchObject({
+      const overrides = parseToml(
+        f.configuration()!.configOverrides!.join("\n"),
+      );
+      expect(f.configuration()!.config!["default_permissions"]).toBe(
+        "codex_security_policy",
+      );
+      expect(overrides).toMatchObject({
         permissions: {
           codex_security_policy: {
             filesystem: {
@@ -1112,7 +1088,7 @@ describe("CodexSecurity policy API", () => {
         bareAlternate,
         commonAlternate,
       ]) {
-        expect(overrides[0]).toMatchObject({
+        expect(overrides).toMatchObject({
           permissions: {
             codex_security_policy: { filesystem: { [path]: { ".": "deny" } } },
           },

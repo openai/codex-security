@@ -51,7 +51,7 @@ If Codex reports missing model metadata, record the bundled Codex version from
 An AWS inference request can succeed even when the bundled metadata is incomplete.
 
 Bedrock defaults `model_reasoning_summary` to `none` because some models reject
-`reasoning.summary`. This setting reaches Deep Scan discovery and reducer workers,
+`reasoning.summary`. This setting reaches Deep Scan discovery workers,
 including resumes. To request summaries from a model that supports them, add
 `--codex "model_reasoning_summary='auto'"` to the scan command. This explicit
 override takes precedence over the default and does not change reasoning effort.
@@ -260,7 +260,7 @@ is a separate path and does not establish crash recovery:
 ```
 
 Resume reads the saved model, provider, reasoning settings, and original output
-directory. Confirm discovery and reducer workers, including resumed workers, use
+directory. Confirm discovery workers, including resumed workers, use
 those settings and AWS authentication. Check the final stop reason and reported
 limitations. If no resumable scan is available, record this check as not run.
 

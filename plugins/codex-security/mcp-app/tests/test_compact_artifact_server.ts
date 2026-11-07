@@ -81,20 +81,21 @@ try {
     [runtimeBundle, "source"],
     [shipped, "shipped"],
   ]) {
-    await test(`${label}: parent tool registration`, () =>
-      testParentToolList(bundle));
+    await test(`${label}: parent and Standard scan worker tools`, async () => {
+      await testParentToolList(bundle);
+      await testDiscoveryWorkerToolList(bundle);
+    });
+    await test(`${label}: discovery workers share peer notes within their scan`, () =>
+      testDiscoveryPeerNotes(bundle));
   }
-  await test("shipped: private recipes stay in host storage", () =>
-    testPromptDrivenPrivateRecipe(shipped));
-  for (const metadata of ["valid", "missing", "unsupported"])
-    await test(`shipped: native terminal results with ${metadata} sandbox metadata`, () =>
-      testNativeDeepTerminalResults(shipped, metadata));
   await test("shipped: claimed parent operations", () =>
     testClaimedParentArtifactOperations(shipped, "shipped"));
   await test("shipped: semantic scan draft completion", () =>
     testSemanticScanDraftCompletion(shipped, "shipped"));
-  await test("shipped: large parent draft checkpoints", () =>
-    testLargeScanDraftCheckpoints(shipped, "shipped"));
+  for (const artifactWriter of [false, true]) {
+    await test(`shipped: large ${artifactWriter ? "worker" : "parent"} draft checkpoints`, () =>
+      testLargeScanDraftCheckpoints(shipped, "shipped", artifactWriter));
+  }
   await test("shipped: compact diff scan completion", () =>
     testCompactDiffScanCompletion(shipped, "shipped"));
 } finally {
@@ -115,27 +116,45 @@ async function createScanFixture(label: string) {
 async function testLargeScanDraftCheckpoints(
   bundle: string,
   runtimeLabel: string,
+  artifactWriter: boolean,
 ) {
-  const label = `large-draft-${runtimeLabel}-parent`;
+  const label = `large-draft-${runtimeLabel}-${artifactWriter ? "worker" : "parent"}`;
   const { repoRoot, environment } = await createScanFixture(label);
   await writeFile(path.join(repoRoot, "src", "fixture.py"), "value = 1\n");
-  const client = await startClient(bundle, environment);
+  let scanId: string = randomUUID();
+  let scanDir = path.join(temporaryRoot, label, "output");
+  let handoffClaimToken: string | undefined;
+  if (artifactWriter) await mkdir(scanDir);
+  const client = await startClient(bundle, {
+    ...environment,
+    ...(artifactWriter
+      ? {
+          CODEX_SECURITY_ARTIFACT_ROOT: scanDir,
+          CODEX_SECURITY_REPO_ROOT: repoRoot,
+          CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
+          CODEX_SECURITY_SCAN_ID: scanId,
+          CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
+        }
+      : {}),
+  });
   const ownerThread = `${label}-owner`;
   const call = toolCaller(client, ownerThread);
 
   try {
-    const { scanId, scanDir, handoffClaimToken } = await startScan(
-      call,
-      ownerThread,
-      { targetPath: repoRoot, scope: ".", mode: "standard" },
-      {
-        workspace: `${label}: open workspace`,
-        setup: `${label}: submit setup`,
-        scan: `${label}: start scan`,
-        claim: `${label}: claim scan`,
-        owner: `${label}: attach owner`,
-      },
-    );
+    if (!artifactWriter) {
+      ({ scanId, scanDir, handoffClaimToken } = await startScan(
+        call,
+        ownerThread,
+        { targetPath: repoRoot, scope: ".", mode: "standard" },
+        {
+          workspace: `${label}: open workspace`,
+          setup: `${label}: submit setup`,
+          scan: `${label}: start scan`,
+          claim: `${label}: claim scan`,
+          owner: `${label}: attach owner`,
+        },
+      ));
+    }
 
     const mib = 1024 * 1024;
     // Exercise both one large excerpt and a request with smaller excerpts
@@ -160,7 +179,10 @@ async function testLargeScanDraftCheckpoints(
         `${label}: save checkpoint ${step}`,
       );
       assert.equal(result.status, "draft_written");
-      const saved = await readJson(scanDir, "findings.json");
+      const saved = await readJson(
+        scanDir,
+        artifactWriter ? "result.json" : "findings.json",
+      );
       assert.equal(result.findingCount, saved.findings.length);
       const head = await readJson(scanDir, "checkpoint-head.json");
       const checkpoint = await readJson(
@@ -777,26 +799,9 @@ async function testSemanticScanDraftCompletion(
       findings: [finding],
       reviewState: { ...reviewState },
     };
-    const threatModel = {
-      summary: "Legacy structured model.",
-      format: "markdown",
-      content: "# Saved model\r\n\r\n    Preserve  spacing.\r\n",
-      origin: false,
-      scope: { includePaths: ["src/[api]"] },
-    };
-    const firstDraft = requireSuccessfulTool(
-      await call("record_codex_security_scan_draft", {
-        ...checkpoint,
-        threatModel,
-      }),
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", checkpoint),
     );
-    assert.equal(firstDraft.warnings, undefined);
-    const documentPath = path.join(scanDirectory, "threatmodel.md");
-    const savedDocument = await readFile(documentPath, "utf8");
-    assert.ok(savedDocument.startsWith(threatModel.content));
-    assert.match(savedDocument, /Model origin: not recorded\n/);
-    assert.match(savedDocument, /Model scope: src\/\\\[api\\\]\n/);
-    assert.match(savedDocument, /provisional/);
     const checkpointDeferred = (
       await readJson(scanDirectory, "scan-manifest.json")
     ).scan.reviewState.deferred;
@@ -826,11 +831,6 @@ async function testSemanticScanDraftCompletion(
     );
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
-    );
-    assert.equal(await readFile(documentPath, "utf8"), savedDocument);
-    assert.deepEqual(
-      (await readJson(scanDirectory, "scan-manifest.json")).scan.threatModel,
-      threatModel,
     );
     const validation = await progress();
     assert.equal(validation.phase, "validation");
@@ -1247,581 +1247,6 @@ function requireToolError(
   );
 }
 
-async function testPromptDrivenPrivateRecipe(bundle: string) {
-  for (const kind of ["prompt-only", "headless"]) {
-    const fixtureRoot = path.join(temporaryRoot, `private-recipe-${kind}`);
-    const repoRoot = path.join(fixtureRoot, "repository");
-    const environment = {
-      CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
-      CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
-    };
-    await mkdir(repoRoot, { recursive: true });
-    await mkdir(environment.CODEX_SECURITY_SCAN_ROOT, { mode: 0o700 });
-    await writeFile(path.join(repoRoot, "fixture.py"), "print('fixture')\n");
-    const client = await startClient(bundle, environment);
-    const ownerThread = `private-recipe-${kind}`;
-    const toolName =
-      kind === "prompt-only"
-        ? "start_codex_security_prompt_only_scan"
-        : "start_codex_security_standard_scan";
-    const callStart = () =>
-      client.callTool({
-        name: toolName,
-        arguments: {
-          targetPath: repoRoot,
-          scope: ".",
-          ...(kind === "prompt-only" ? { mode: "standard" } : {}),
-        },
-        _meta: { "openai/threadId": ownerThread },
-      });
-
-    try {
-      const startedResult = await callStart();
-      const started = requireSuccessfulTool(
-        startedResult,
-        `start ${kind} scan`,
-      );
-      const { scanId, scanDir } = started.scan;
-      const claimToken = started.handoffClaimToken;
-      const recipe = privateScanRecipe(repoRoot, "standard");
-      runWorkbenchFixture(
-        environment,
-        [
-          "register-cli-scan",
-          "--repository",
-          repoRoot,
-          "--scan-dir",
-          scanDir,
-          "--registration-json-stdin",
-        ],
-        {
-          recipe,
-          scanId,
-          threadId: ownerThread,
-          ...(claimToken ? { claimToken } : {}),
-        },
-      );
-      if (claimToken) {
-        runWorkbenchFixture(environment, [
-          "set-scan-thread",
-          "--scan-id",
-          scanId,
-          "--claim-token",
-          claimToken,
-          "--thread-id",
-          ownerThread,
-        ]);
-      }
-      const joinedResult = await callStart();
-      const joined = requireSuccessfulTool(joinedResult, `rejoin ${kind} scan`);
-      assert.equal(joined.startDisposition, "joined");
-      assert.equal(joined.scan.scanId, scanId);
-      if (kind === "prompt-only") {
-        for (const result of [startedResult, joinedResult]) {
-          const instructions = result.content
-            .filter((content) => content.type === "text")
-            .map((content) => content.text)
-            .join("\n");
-          assert.ok(instructions.includes("complete_codex_security_scan"));
-          assert.equal(
-            instructions.includes("get_codex_security_completed_scan"),
-            false,
-          );
-        }
-      }
-      assertPrivateRecipeOmitted(joinedResult, recipe, `${kind} rejoin`);
-      assert.deepEqual(
-        runWorkbenchFixture(environment, [
-          "get-scan-recipe",
-          "--scan-id",
-          scanId,
-        ]).recipe,
-        recipe,
-        `${kind} rejoin preserves the complete host recipe`,
-      );
-    } finally {
-      await client.close();
-    }
-  }
-}
-
-async function testNativeDeepTerminalResults(
-  bundle: string,
-  sandboxMetadata: string,
-) {
-  const fixtureRoot = path.join(
-    temporaryRoot,
-    `completed-native-${sandboxMetadata}`,
-  );
-  const repoRoot = path.join(fixtureRoot, "repository");
-  const invocationPath = path.join(fixtureRoot, "unexpected-codex-invocation");
-  const environment = {
-    CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
-    CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
-    CODEX_HOME: path.join(fixtureRoot, "codex-home"),
-    CODEX_CLI_PATH: path.join(fixtureRoot, "codex-stub"),
-    CODEX_API_KEY: "",
-    OPENAI_API_KEY: "",
-  };
-  await mkdir(repoRoot, { recursive: true });
-  await mkdir(environment.CODEX_SECURITY_SCAN_ROOT, { mode: 0o700 });
-  await mkdir(environment.CODEX_HOME, { mode: 0o700 });
-  await writeFile(path.join(repoRoot, "fixture.py"), "print('fixture')\n");
-  await writeFile(
-    environment.CODEX_CLI_PATH,
-    `#!${process.execPath}
-require("node:fs").writeFileSync(${JSON.stringify(invocationPath)}, "unexpected launch");
-process.exit(1);
-`,
-    { mode: 0o700 },
-  );
-
-  const ownerThread = "completed-native-owner";
-  const begun = runWorkbenchFixture(environment, [
-    "begin-deep-scan",
-    "--target-path",
-    repoRoot,
-    "--scope",
-    ".",
-    "--thread-id",
-    ownerThread,
-  ]);
-  const { scanId, scanDir, handoffClaimToken } = begun.scan;
-  runWorkbenchFixture(
-    environment,
-    [
-      "register-cli-scan",
-      "--repository",
-      repoRoot,
-      "--scan-dir",
-      scanDir,
-      "--registration-json-stdin",
-    ],
-    {
-      scanId,
-      threadId: ownerThread,
-      claimToken: handoffClaimToken,
-      recipe: {
-        repository: repoRoot,
-        mode: "deep",
-        target: { kind: "repository", paths: [] },
-        config: {},
-      },
-    },
-  );
-  runWorkbenchFixture(environment, [
-    "set-scan-thread",
-    "--scan-id",
-    scanId,
-    "--claim-token",
-    handoffClaimToken,
-    "--thread-id",
-    "completed-native-merge",
-  ]);
-  runWorkbenchFixture(
-    environment,
-    [
-      "save-scan-artifact",
-      "--scan-id",
-      scanId,
-      "--claim-token",
-      handoffClaimToken,
-      "--artifact-path",
-      "artifacts/deep-scan/checkpoint.json",
-    ],
-    {
-      version: 2,
-      passes: [],
-      mergedScanIds: [],
-      aggregate: null,
-      terminalReason: "capped",
-    },
-  );
-
-  const client = await startClient(bundle, environment);
-  const call = (name, arguments_) =>
-    client.callTool({
-      name,
-      arguments: arguments_,
-      _meta: {
-        "openai/threadId": ownerThread,
-        ...(sandboxMetadata === "missing"
-          ? {}
-          : {
-              "codex/sandbox-state-meta": {
-                permissionProfile: {
-                  type:
-                    sandboxMetadata === "unsupported"
-                      ? "synthetic-unsupported-profile"
-                      : "managed",
-                  file_system: {
-                    type: "restricted",
-                    entries: [
-                      {
-                        path: { type: "special", value: { kind: "root" } },
-                        access: "read",
-                      },
-                    ],
-                  },
-                  network: "restricted",
-                },
-                sandboxCwd: pathToFileURL(repoRoot).href,
-              },
-            }),
-      },
-    });
-  const rejoin = () =>
-    call("start_codex_security_deep_scan", { scanId, handoffClaimToken });
-  const expectedResult = {
-    scanId,
-    scanDir,
-    manifestPath: path.join(scanDir, "scan-manifest.json"),
-    reportPath: path.join(scanDir, "report.md"),
-  };
-  const assertCompleted = (response, label) => {
-    const result = requireSuccessfulTool(response, label);
-    const { instructions, usage, warnings, cost, ...paths } = result;
-    assert.match(instructions, /is complete/);
-    assert.match(
-      instructions,
-      /Do not call complete_codex_security_scan or start another scan/,
-    );
-    assert.deepEqual(paths, expectedResult);
-    assert.equal(usage.coverage, "unavailable");
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /selected checkout is no longer accessible/);
-    assert.equal(cost, undefined);
-    assert.deepEqual(response.content, [{ type: "text", text: instructions }]);
-  };
-
-  try {
-    if (sandboxMetadata !== "valid") {
-      const rejected = await rejoin();
-      assert.equal(rejected.isError, true);
-      assert.match(
-        rejected.content[0].text,
-        /cannot preserve the parent sandbox/,
-      );
-      assert.equal(rejected.structuredContent, undefined);
-      assert.equal(
-        runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId]).scan
-          .progress.status,
-        "running",
-      );
-      await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
-    }
-    requireSuccessfulTool(
-      await call("record_codex_security_scan_draft", {
-        scanId,
-        handoffClaimToken,
-        findings: [],
-        reviewState: {
-          completeness: "complete",
-          surfaces: [{ label: "Synthetic fixture", disposition: "rejected" }],
-          explicitExclusions: [],
-          deferred: [],
-        },
-      }),
-      "write native parent aggregate",
-    );
-    const head = await readJson(scanDir, "checkpoint-head.json");
-    const admitted = await readJson(
-      scanDir,
-      "checkpoints",
-      head.inputCheckpoint,
-    );
-    assert.deepEqual(admitted.publication, {
-      previousCheckpoint: null,
-      previousInputCheckpoint: null,
-    });
-    runWorkbenchFixture(environment, [
-      "prepare-scan-completion",
-      "--scan-id",
-      scanId,
-      "--claim-token",
-      handoffClaimToken,
-    ]);
-    const originalDraft = await snapshotScanDraft(scanDir);
-    assert.equal(
-      runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId]).scan
-        .progress.status,
-      "running",
-    );
-    const movedRepo = path.join(fixtureRoot, "moved-repository");
-    await rename(repoRoot, movedRepo);
-    try {
-      assertCompleted(
-        await rejoin(),
-        "publish sealed running native parent after checkout moves",
-      );
-      assert.equal(
-        runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId]).scan
-          .progress.status,
-        "complete",
-      );
-      assert.deepEqual(await snapshotScanDraft(scanDir), originalDraft);
-      await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
-    } finally {
-      await rename(movedRepo, repoRoot);
-    }
-
-    for (let repeat = 0; repeat < 2; repeat += 1) {
-      assertCompleted(await rejoin(), "rejoin intact completed native parent");
-    }
-    await rm(expectedResult.reportPath);
-    assertCompleted(
-      await rejoin(),
-      "regenerate missing report before native success",
-    );
-    assert.ok((await readFile(expectedResult.reportPath, "utf8")).length > 0);
-    assert.deepEqual(await snapshotScanDraft(scanDir), originalDraft);
-
-    for (const artifact of ["scan-manifest.json", "findings.json"]) {
-      const artifactPath = path.join(scanDir, artifact);
-      const original = await readFile(artifactPath);
-      for (const change of ["modified", "missing"]) {
-        try {
-          if (change === "modified")
-            await writeFile(
-              artifactPath,
-              Buffer.concat([original, Buffer.from("\n")]),
-            );
-          else await rm(artifactPath);
-          const rejected = await rejoin();
-          assert.equal(
-            rejected.isError,
-            true,
-            `reject ${change} completed ${artifact}`,
-          );
-          assert.equal(rejected.structuredContent, undefined);
-          assert.equal(
-            runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId])
-              .scan.progress.status,
-            "complete",
-          );
-        } finally {
-          await writeFile(artifactPath, original);
-        }
-      }
-    }
-    assert.deepEqual(await snapshotScanDraft(scanDir), originalDraft);
-    await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
-    assert.equal(
-      runWorkbenchFixture(environment, ["list-scans"]).scans.length,
-      1,
-    );
-
-    const canceledRepo = path.join(fixtureRoot, "canceled-repository");
-    await mkdir(canceledRepo);
-    await writeFile(
-      path.join(canceledRepo, "fixture.py"),
-      "print('fixture')\n",
-    );
-    const { scan: canceledScan } = runWorkbenchFixture(environment, [
-      "begin-deep-scan",
-      "--target-path",
-      canceledRepo,
-      "--scope",
-      ".",
-      "--thread-id",
-      ownerThread,
-    ]);
-    const childRelativeDirectory = "artifacts/deep-scan/passes/pass-1";
-    const childDirectory = path.join(
-      canceledScan.scanDir,
-      childRelativeDirectory,
-    );
-    await mkdir(childDirectory, { recursive: true, mode: 0o700 });
-    const child = runWorkbenchFixture(
-      environment,
-      [
-        "register-cli-scan",
-        "--repository",
-        canceledRepo,
-        "--scan-dir",
-        childDirectory,
-        "--parent-scan-id",
-        canceledScan.scanId,
-        "--registration-json-stdin",
-      ],
-      {
-        recipe: privateScanRecipe(canceledRepo, "standard"),
-        parentScanRole: "deep_pass",
-      },
-    );
-    runWorkbenchFixture(
-      environment,
-      [
-        "save-scan-artifact",
-        "--scan-id",
-        canceledScan.scanId,
-        "--claim-token",
-        canceledScan.handoffClaimToken,
-        "--artifact-path",
-        "artifacts/deep-scan/checkpoint.json",
-      ],
-      {
-        version: 2,
-        passes: [{ directory: childRelativeDirectory, scanId: child.scanId }],
-        mergedScanIds: [],
-        aggregate: null,
-      },
-    );
-    runWorkbenchFixture(environment, [
-      "cancel-scan",
-      "--scan-id",
-      canceledScan.scanId,
-      "--thread-id",
-      ownerThread,
-      "--defer-publication",
-    ]);
-    const canceledResponse = await call("start_codex_security_deep_scan", {
-      scanId: canceledScan.scanId,
-      handoffClaimToken: canceledScan.handoffClaimToken,
-    });
-    const canceledResult = requireSuccessfulTool(
-      canceledResponse,
-      "rejoin canceled scan",
-    );
-    const { instructions, usage, cost, warnings, ...retained } = canceledResult;
-    assert.match(instructions, /was canceled/);
-    assert.match(
-      instructions,
-      /Do not start additional scan work or claim complete coverage/,
-    );
-    assert.deepEqual(retained, {
-      status: "canceled",
-      scanId: canceledScan.scanId,
-      scanDir: canceledScan.scanDir,
-    });
-    assert.deepEqual(usage, {
-      coverage: "unavailable",
-      source: "codex_rollout",
-      threadCount: 0,
-      warnings: ["codex_state_unavailable", "scan_thread_unavailable"],
-    });
-    assert.deepEqual(warnings, []);
-    assert.equal(cost, undefined);
-    assert.deepEqual(canceledResponse.content, [
-      { type: "text", text: instructions },
-    ]);
-    assert.equal(
-      runWorkbenchFixture(environment, [
-        "get-scan",
-        "--scan-id",
-        canceledScan.scanId,
-      ]).scan.progress.status,
-      "canceled",
-    );
-    assert.equal(
-      runWorkbenchFixture(environment, ["get-scan", "--scan-id", child.scanId])
-        .scan.progress.status,
-      "failed",
-      "terminal rejoin finishes the deferred child stop",
-    );
-    const failedRepo = path.join(fixtureRoot, "failed-repository");
-    await mkdir(failedRepo);
-    await writeFile(path.join(failedRepo, "fixture.py"), "print('fixture')\n");
-    const { scan: failedScan } = runWorkbenchFixture(environment, [
-      "begin-deep-scan",
-      "--target-path",
-      failedRepo,
-      "--scope",
-      ".",
-      "--thread-id",
-      ownerThread,
-    ]);
-    runWorkbenchFixture(environment, [
-      "fail-scan",
-      "--scan-id",
-      failedScan.scanId,
-      "--claim-token",
-      failedScan.handoffClaimToken,
-      "--message",
-      "Synthetic retained failure.",
-      "--defer-publication",
-    ]);
-    const failedResponse = await call("start_codex_security_deep_scan", {
-      scanId: failedScan.scanId,
-      handoffClaimToken: failedScan.handoffClaimToken,
-    });
-    assert.equal(failedResponse.isError, true);
-    assert.equal(failedResponse.structuredContent?.scanId, failedScan.scanId);
-    assert.equal(failedResponse.structuredContent?.status, "failed");
-    assert.equal(failedResponse.content[0].text, "Synthetic retained failure.");
-    assert.equal(
-      runWorkbenchFixture(environment, [
-        "get-scan",
-        "--scan-id",
-        failedScan.scanId,
-      ]).scan.progress.status,
-      "failed",
-    );
-    await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
-  } finally {
-    await client.close();
-  }
-}
-
-function privateScanRecipe(repository, mode) {
-  return {
-    repository,
-    mode,
-    target: { kind: "repository", paths: [] },
-    config: {
-      model_provider: "fixture",
-      model_providers: {
-        fixture: {
-          http_headers: {
-            Authorization: "Bearer synthetic-private-header-marker",
-          },
-          auth: {
-            type: "command",
-            command: "synthetic-private-auth-command-marker",
-          },
-        },
-      },
-    },
-  };
-}
-
-function assertPrivateRecipeOmitted(result, recipe, label) {
-  assert.equal(
-    Object.hasOwn(result.structuredContent, "recipe"),
-    false,
-    `${label}: omit host recipe`,
-  );
-  const serialized = JSON.stringify(result);
-  const provider = recipe.config.model_providers.fixture;
-  for (const marker of [
-    provider.http_headers.Authorization,
-    provider.auth.command,
-  ]) {
-    assert.equal(
-      serialized.includes(marker),
-      false,
-      `${label}: omit private provider settings`,
-    );
-  }
-}
-
-function runWorkbenchFixture(environment, arguments_, input) {
-  return JSON.parse(
-    execFileSync(
-      process.env.PYTHON ?? "python3",
-      [
-        path.join(bundledPluginRoot, "scripts", "workbench_db.py"),
-        ...arguments_,
-      ],
-      {
-        env: { ...process.env, ...environment },
-        encoding: "utf8",
-        ...(input === undefined ? {} : { input: JSON.stringify(input) }),
-      },
-    ),
-  );
-}
-
 async function listSandboxAwareTools(client: Client, role: string) {
   assert.deepEqual(
     client.getServerCapabilities()?.experimental?.["codex/sandbox-state-meta"],
@@ -1878,8 +1303,6 @@ async function testParentToolList(bundle: string) {
     for (const name of [
       "get_codex_security_deep_reducer_inputs",
       "record_codex_security_deep_reduction",
-      "post_deep_scan_peer_note",
-      "read_deep_scan_peer_notes",
     ]) {
       assert.equal(
         names.has(name),
@@ -1950,6 +1373,196 @@ async function testParentToolList(bundle: string) {
       /persisted scan is authoritative/,
       "Nonempty user context must not override an existing Deep Scan.",
     );
+  } finally {
+    await client.close();
+  }
+}
+
+async function testDiscoveryPeerNotes(bundle: string) {
+  const scanId = randomUUID();
+  const root = await mkdtemp(path.join(temporaryRoot, "peer-notes-"));
+  const otherRoot = await mkdtemp(
+    path.join(temporaryRoot, "other-peer-notes-"),
+  );
+  const clients: Client[] = [];
+  const worker = async (scan: string, boardRoot: string, author: string) => {
+    const output = path.join(boardRoot, "workers", author, "output");
+    await mkdir(output, { recursive: true });
+    const client = await startClient(bundle, {
+      CODEX_SECURITY_SCAN_ID: scan,
+      CODEX_SECURITY_ARTIFACT_ROOT: output,
+      CODEX_SECURITY_REPO_ROOT: root,
+      CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
+      CODEX_SECURITY_DISCOVERY_BOARD_ROOT: boardRoot,
+      CODEX_SECURITY_DISCOVERY_WORKER: author,
+    });
+    clients.push(client);
+    return toolCaller(client, author);
+  };
+  try {
+    const first = await worker(scanId, root, "discovery-0001");
+    const second = await worker(scanId, root, "discovery-0002");
+    const other = await worker(randomUUID(), otherRoot, "discovery-0001");
+    const lead = { message: "Check the caller at api.ts:16." };
+    const post = "post_deep_scan_peer_note";
+    const read = "read_deep_scan_peer_notes";
+    assert.deepEqual(
+      requireSuccessfulTool(await first(read, {}), "no peers yet"),
+      { notes: [] },
+    );
+    const [{ threadId }, another] = await Promise.all([
+      first(post, lead),
+      second(post, { message: "Checking the decoder." }),
+    ]).then((responses) =>
+      responses.map((response) =>
+        requireSuccessfulTool<{ threadId: string }>(response, "post lead"),
+      ),
+    );
+    assert.notEqual(threadId, another.threadId);
+    assert.deepEqual(
+      requireSuccessfulTool(await first(post, lead), "retry lead"),
+      { id: threadId, threadId },
+    );
+    assert.equal(
+      requireSuccessfulTool<{ notes: unknown[] }>(
+        await second(read, {}),
+        "read leads",
+      ).notes.length,
+      2,
+    );
+    const reply = {
+      threadId,
+      message: "The caller checks the permission at api.ts:12.",
+    };
+    const { id } = requireSuccessfulTool<{ id: string }>(
+      await second(post, reply),
+      "peer reply",
+    );
+    const resumed = await worker(scanId, root, "discovery-0001");
+    assert.deepEqual(
+      requireSuccessfulTool(await resumed(read, { threadId }), "read reply"),
+      {
+        notes: [
+          { ...lead, id: threadId, threadId, author: "discovery-0001" },
+          { ...reply, id, author: "discovery-0002" },
+        ],
+      },
+    );
+    assert.equal(
+      (await second(post, { ...reply, author: "discovery-0001" })).isError,
+      true,
+    );
+    assert.deepEqual(
+      requireSuccessfulTool(await other(read, {}), "isolated scan"),
+      { notes: [] },
+    );
+    assert.equal((await other(post, reply)).isError, true);
+  } finally {
+    await Promise.all(clients.map((client) => client.close()));
+  }
+}
+
+async function testDiscoveryWorkerToolList(bundle: string) {
+  const repoRoot = path.join(temporaryRoot, "discovery-repository");
+  const artifactRoot = await mkdtemp(
+    path.join(temporaryRoot, "discovery-output-"),
+  );
+  const scanId = randomUUID();
+  const resultPath = path.join(artifactRoot, "result.json");
+  await mkdir(path.join(repoRoot, "src"), { recursive: true });
+  await writeFile(
+    path.join(repoRoot, "src", "fixture.py"),
+    "print('fixture')\n",
+  );
+
+  const client = await startClient(bundle, {
+    CODEX_SECURITY_ARTIFACT_ROOT: artifactRoot,
+    CODEX_SECURITY_REPO_ROOT: repoRoot,
+    CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
+    CODEX_SECURITY_SCAN_ID: scanId,
+    CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
+  });
+  try {
+    const tools = await listSandboxAwareTools(client, "discovery worker");
+    assert.deepEqual(
+      tools.map((tool) => tool.name),
+      ["record_codex_security_scan_draft"],
+    );
+
+    const [tool] = tools;
+    assertSemanticInputProperties(tool.inputSchema);
+    assert.deepEqual(tool.inputSchema.required, [
+      "scanId",
+      "findings",
+      "reviewState",
+    ]);
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    assertNoArtifactDestination(tool);
+
+    const input = {
+      scanId,
+      findings: [],
+      reviewState: {
+        ...workerDraft([]).reviewState,
+        explicitExclusions: [
+          { pattern: "vendor/**", reason: "Third-party source." },
+        ],
+        deferred: [
+          {
+            id: "runtime-check",
+            reason: "Runtime confirmation remains unavailable.",
+          },
+        ],
+      },
+    };
+
+    for (const forbiddenInput of [
+      { ...input, scope: { includePaths: ["src"] } },
+      { ...input, reviewState: { ...input.reviewState, mode: "repository" } },
+      {
+        ...input,
+        findings: [
+          { ...finding("fixture", "src/fixture.py"), findingId: "host-owned" },
+        ],
+      },
+    ]) {
+      requireToolError(
+        await client.callTool({ name: tool.name, arguments: forbiddenInput }),
+        /Input validation error/,
+        "Omitting forbidden properties from the advertised shape must preserve validation.",
+      );
+    }
+    await assert.rejects(readFile(resultPath), { code: "ENOENT" });
+
+    requireToolError(
+      await client.callTool({
+        name: tool.name,
+        arguments: { ...input, scanId: randomUUID() },
+      }),
+      /scanId does not match/,
+      "The Standard worker draft must use the coordinator-bound scan identity.",
+    );
+    await assert.rejects(readFile(resultPath), { code: "ENOENT" });
+
+    const result = await client.callTool({ name: tool.name, arguments: input });
+    assert.deepEqual(result.structuredContent, {
+      scanId,
+      findingCount: 0,
+      surfaceCount: 0,
+      reviewState: (await readJson(resultPath)).reviewState,
+      operation: "replace",
+      status: "draft_written",
+    });
+    assert.deepEqual(await readJson(resultPath), input);
+    for (const canonicalName of [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+    ]) {
+      await assert.rejects(readFile(path.join(artifactRoot, canonicalName)), {
+        code: "ENOENT",
+      });
+    }
   } finally {
     await client.close();
   }
@@ -2079,7 +1692,13 @@ async function startClient(
   });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [bundle, "--stdio"],
+    args: [
+      bundle,
+      ...(environment.CODEX_SECURITY_ARTIFACT_LAYOUT
+        ? ["--artifact-writer"]
+        : []),
+      "--stdio",
+    ],
     cwd: applicationRoot,
     env: {
       ...process.env,

@@ -28,12 +28,6 @@ fn same_file(left: &Metadata, right: &Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
-// dev_t and ino_t vary between Unix targets.
-#[allow(clippy::unnecessary_cast)]
-fn matches_held_file((device, inode): (libc::dev_t, libc::ino_t), held: (u64, u64)) -> bool {
-    (device as u64, inode as u64) == held
-}
-
 fn open_at(parent: RawFd, path: &OsStr, flags: i32) -> io::Result<File> {
     let path = CString::new(path.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path contains a NUL byte"))?;
@@ -68,10 +62,10 @@ fn verify_components(
         }
         let named = unsafe { named.assume_init() };
         let held_metadata = held.metadata()?;
-        if !matches_held_file(
-            (named.st_dev, named.st_ino),
-            (held_metadata.dev(), held_metadata.ino()),
-        ) {
+        // dev_t and ino_t vary between Unix targets.
+        #[allow(clippy::unnecessary_cast)]
+        if named.st_dev as u64 != held_metadata.dev() || named.st_ino as u64 != held_metadata.ino()
+        {
             return Err(io::Error::other("Scan path changed while opening the file"));
         }
         parent = held;
@@ -215,13 +209,6 @@ impl ScanReadFileBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn distinguishes_inode_values_above_double_precision() {
-        let named = (7, 1 << 60);
-        assert!(matches_held_file(named, (7, 1 << 60)));
-        assert!(!matches_held_file(named, (7, (1 << 60) + 1)));
-    }
 
     #[test]
     fn verifies_every_opened_component_including_the_leaf() -> io::Result<()> {

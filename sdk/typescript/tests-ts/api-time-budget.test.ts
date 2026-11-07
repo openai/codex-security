@@ -46,10 +46,7 @@ test("rejects an unrepresentable deadline before scan setup", async () => {
   expect(now).not.toHaveBeenCalled();
 });
 
-async function fixture(
-  start = Date.UTC(2026, 0, 1),
-  beforeDiscovery?: () => never,
-) {
+async function fixture(start = Date.UTC(2026, 0, 1)) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const codexHome = join(root, "home");
@@ -73,7 +70,6 @@ async function fixture(
         recipes.push(JSON.parse(input!).recipe);
       }
       if (args[0] === "get-scan-feedback") clock += 60_000;
-      if (args[0] === "list-scans") beforeDiscovery?.();
       return mockWorkbench(args, input);
     },
     createCodex: codexFactory(async (prompt: string, options: TurnOptions) => {
@@ -207,11 +203,12 @@ test("preflight exposes the effective Deep limit in minutes and leaves Standard 
   });
 });
 
-test("Deep stores its converted hard limit before discovery", async () => {
-  const state = await fixture(undefined, () => {
+test("Deep stores its converted hard limit without adding the Standard advisory policy", async () => {
+  const state = await fixture();
+  await using client = state.client;
+  state.setFinish(async () => {
     throw new Error("Captured Deep launch");
   });
-  await using client = state.client;
   await expect(
     client.run(state.repository, {
       mode: "deep",
@@ -219,7 +216,7 @@ test("Deep stores its converted hard limit before discovery", async () => {
     }),
   ).rejects.toThrow("Captured Deep launch");
   expect(state.clockReads).toBe(0);
-  expect(state.prompts).toEqual([]);
+  expect(state.prompts[0]).not.toContain("2026-01-01T00:01:00.000Z");
   expect(state.recipes[0]).toMatchObject({
     maxTimeMinutes: 90,
     deepScan: { maxTimeHours: 1.5 },

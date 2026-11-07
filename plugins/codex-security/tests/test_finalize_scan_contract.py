@@ -2920,8 +2920,5 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assert_finalization_fails("requires artifact records")
 
 
-CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
-
-
 if __name__ == "__main__":
     main()

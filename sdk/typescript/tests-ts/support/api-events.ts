@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
 import { CodexSecurity, runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
@@ -19,6 +20,7 @@ export function preparedRuntime(
 ): PreparedRuntime {
   return {
     codexHome,
+    deepScanConfigPath: join(codexHome, "deep-scan.toml"),
     plugin: {
       pluginRoot: PLUGIN_ROOT,
       marketplaceRoot,
@@ -89,12 +91,7 @@ export function runEvents(
   repositoryRevision = "deadbeef",
 ): ReturnType<typeof runScanEvents> {
   return runScanEvents({
-    thread: {
-      id: null,
-      async runStreamed() {
-        return { events };
-      },
-    },
+    thread: { id: null },
     events,
     signal: (options.abortController ?? new AbortController()).signal,
     scanDir,
@@ -142,5 +139,3 @@ export function codexFactory<Run>(
 }
 
 export const failedPostScanEvents = failedEvents;
-
-export { createApiTestFixtures } from "./temporary-directories.js";

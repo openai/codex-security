@@ -216,30 +216,6 @@ def _protected_repository_root(target: Path) -> Path:
     return protected
 
 
-def target_protection_roots(value: str) -> list[str]:
-    """Retain executable protection for the requested and resolved target's checkouts."""
-    requested = Path(value).expanduser()
-    if not requested.is_absolute():
-        raise SystemExit("Scan target must be an absolute local directory path.")
-    resolved = requested.resolve()
-    roots: list[str] = []
-    for path in (requested, resolved):
-        protected = None
-        # Walk the requested spelling before resolving it so a repository-owned
-        # symlink cannot discard its enclosing checkout or change `..` traversal.
-        for ancestor in (path, *path.parents):
-            try:
-                (ancestor / ".git").lstat()
-            except (FileNotFoundError, NotADirectoryError):
-                continue
-            protected = ancestor
-        if protected is not None:
-            roots.append(str(protected.resolve()))
-        elif path == resolved:
-            roots.append(str(resolved))
-    return list(dict.fromkeys(roots))
-
-
 def trusted_git_executable(protected_root: Path) -> str | None:
     """Validate host-selected Git, or discover Git for a direct plugin invocation."""
     configured = os.environ.get("CODEX_SECURITY_GIT")
@@ -1393,7 +1369,7 @@ def require_remediation_target(value: str) -> Path:
         raise SystemExit("Remediation target must be an absolute local directory path.")
     try:
         resolved = stored.resolve(strict=True)
-    except (FileNotFoundError, OSError) as exc:
+    except (OSError, RuntimeError) as exc:
         raise SystemExit(
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc

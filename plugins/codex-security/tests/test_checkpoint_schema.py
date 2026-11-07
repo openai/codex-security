@@ -42,12 +42,6 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
     workbench_api, omitted_versions, legacy_checkpoint, main_reader
 ):
     migrations = workbench_api["MIGRATIONS"]
-    last_version = migrations[-1][0]
-    if legacy_checkpoint:
-        # These installations predate the migrations after checkpoint selection.
-        last_version = 57
-    elif omitted_versions:
-        last_version = min(omitted_versions) - 1
     timestamp = "2026-07-01T00:00:00Z"
 
     def migrate(connection, selected):
@@ -65,7 +59,7 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
                 if legacy_checkpoint and version == 57
                 else (version, name, sql)
                 for version, name, sql in migrations
-                if version <= last_version
+                if version <= 57
                 and version not in omitted_versions
                 and not (legacy_checkpoint and version in (54, 55, 56))
                 and not (legacy_checkpoint in (47, 48, 50, 52, 53) and version in (52, 53))
@@ -127,11 +121,12 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
         migrate(connection, migrations)
         after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
         for original, updated in zip(before, after, strict=True):
-            retained_heads = updated.pop("retained_checkpoint_heads_json")
-            assert retained_heads == original.get("retained_checkpoint_heads_json")
-            original.pop("retained_checkpoint_heads_json", None)
-            assert {key: updated[key] for key in original} == original
-            assert all(updated[key] is None for key in updated.keys() - original.keys())
+            # Existing scan values survive the upgrade. Later nullable columns
+            # have no launch or recovery metadata to backfill for these rows.
+            for column in updated.keys() - original.keys():
+                added_value = updated.pop(column)
+                assert added_value is None
+            assert updated == original
 
         connection.execute(
             "UPDATE scans SET retained_checkpoint_heads_json = ? WHERE id = 'failed'", (heads,)

@@ -143,14 +143,6 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   };
 }
 
-export function turnPricingMetadata(context?: ScanPricingContext) {
-  if (context === undefined) return {};
-  // Preserve the region field written on Bedrock scan results.
-  return context.provider === "amazon-bedrock"
-    ? { bedrockRegion: context.region }
-    : { pricingContext: context };
-}
-
 function providerModelPricing(
   model: string,
   context?: ScanPricingContext | string | null,

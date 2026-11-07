@@ -59,7 +59,7 @@ alias expansion.
 
 For Daybreak on Codex 0.163.0 or later, set `codex.daybreak` to `true`; the toggle
 defaults off. This native setting is retained in scan recipes and passed to
-Deep Scan discovery and reducer workers, including resumes. An explicit
+Deep Scan discovery workers, including resumes. An explicit
 `scan.cyber_access_program` takes precedence for each turn. See
 [Daybreak opt-in](../sdk/typescript/docs/cli.md#daybreak-opt-in).
 
@@ -430,13 +430,3 @@ and applies its severity policy to recovered findings.
 Workflow identity records explicitly requested deep settings, not ambient values
 or shipped defaults, so changing those defaults does not prevent resumption.
 Changing the explicit request still requires a different workflow ID.
-
-### Native executable selection
-
-Native plugin sessions use `CODEX_CLI_PATH` when supplied, or a real `codex`
-executable on `PATH` (`codex.exe` on Windows). The selected executable must be
-outside the scan target. On Windows, native sessions also discover the executable
-in a managed Codex package, a global npm installation on `PATH`, or the Codex
-desktop cache. npm shims and WindowsApps aliases are not executed directly;
-selection resolves their installed native executable. Set `CODEX_CLI_PATH` to an
-installed executable to select it explicitly.

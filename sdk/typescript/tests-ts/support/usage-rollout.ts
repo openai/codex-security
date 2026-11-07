@@ -26,13 +26,6 @@ export const ownedPythonUsage = {
   totalTokens: 110,
 };
 
-export function tokenUsageEvent(usage: Record<string, number>) {
-  return {
-    type: "event_msg",
-    payload: { type: "token_count", info: { total_token_usage: usage } },
-  };
-}
-
 export function progressMarker(
   phase: string,
   filesCompleted: number,

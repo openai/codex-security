@@ -46,7 +46,7 @@ export interface ScanResultOptions {
   coverage?: CoverageDocument;
   mode?: NonNullable<ScanManifest["scan"]["mode"]>;
   scanDir: string;
-  threadId: string | null;
+  threadId: string;
   turnResult: TurnResultMetadata;
   /** Cost saved when this scan completed. */
   recordedCost?: Readonly<ScanCost>;
@@ -63,8 +63,7 @@ export class ScanResult {
   public readonly findings: FindingsDocument;
   public readonly review: NonNullable<ScanManifest["scan"]["review"]>;
   public readonly scanDir: string;
-  /** Null when an empty capped composition completed without a model session. */
-  public readonly threadId: string | null;
+  public readonly threadId: string;
   public readonly turnResult: Readonly<TurnResultMetadata>;
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;

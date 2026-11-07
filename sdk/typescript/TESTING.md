@@ -2,7 +2,7 @@
 
 ## Install dependencies
 
-Use [the repository’s pinned pnpm version](../../package.json) and [CI’s Bun version](../../.github/workflows/node-ci.yml). From the repository root, enter the SDK directory and install both packages:
+Use [the repository’s pinned pnpm version](../../package.json) and [CI’s Bun version](../../.bun-version). From the repository root, enter the SDK directory and install both packages:
 
 ```sh
 cd sdk/typescript
@@ -80,10 +80,9 @@ The SDK shards in `node-ci` use the workflow run number as their seed, so
 rerunning a job repeats its test order. To replay a shard locally, use its
 platform, shard selector, and seed, for example
 `node --experimental-strip-types scripts/run-ci-tests.mts 2/6 --seed=12345`.
-The standalone plugin jobs exercise Deep Scan worker settings on Linux, macOS
-and Windows. To replay that check locally, run
-`node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts`
-from the repository root.
+On Linux, if the original workflow ran the separate MCP tests, prefix that
+command with `CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE=true` to skip the four
+worker groups they cover. Leave it unset to replay a run that skipped MCP.
 
 The local test commands pass a 30-second per-test timeout explicitly. Windows
 CI and the Windows runner diagnostics allow 120 seconds for slower native

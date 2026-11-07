@@ -87,7 +87,7 @@ for (const [path, name, value, message] of [
     "tools/scan-draft",
     "finding/properties/writeup/properties/reportPath",
     "invalid",
-    'must match pattern "^findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md$"',
+    'must match pattern "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$"',
   ],
 ] as const) {
   const validate = jsonSchema(path, name);

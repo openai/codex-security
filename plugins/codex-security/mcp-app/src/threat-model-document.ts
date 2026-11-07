@@ -36,10 +36,10 @@ async function writeCurrentThreatModelDocument(
   try {
     const source = await readArtifactJsonObject(
       context,
-      ["scan-manifest.json"],
+      [context.layout === "scan" ? "scan-manifest.json" : "result.json"],
       "saved threat model",
     );
-    const document = asRecord(source.scan);
+    const document = asRecord(context.layout === "scan" ? source.scan : source);
     const threatModel = document?.threatModel;
     if (threatModel === undefined) return;
     const destination = await artifactDestination(
@@ -54,7 +54,7 @@ async function writeCurrentThreatModelDocument(
     const markdown = renderThreatModel({
       threatModel,
       provenance: {
-        source: "scan",
+        source: context.layout,
         scanId: context.scanId,
         target: context.repoRoot,
         revision: context.targetRevision,

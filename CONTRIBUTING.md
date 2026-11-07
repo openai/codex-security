@@ -12,7 +12,7 @@ crosses a process, persistence, or package boundary.
 | Documentation                                   | [User guides](docs/), [SDK and CLI guides](sdk/typescript/README.md), and [examples](examples/README.md)                                                                                                                               | Run `node sdk/typescript/scripts/check-markdown.mjs` after [installing the SDK dependencies](sdk/typescript/TESTING.md#install-dependencies). Check examples from their stated working directory.                                                       |
 | Plugin instructions                             | [Skills](plugins/codex-security/skills/) and shared [references](plugins/codex-security/references/)                                                                                                                                   | [Portable plugin source checks](AGENTS.md#keep-it-simple)                                                                                                                                                                                               |
 | Artifact contracts and generated SDK models     | [Contract definitions](plugins/codex-security/mcp-app/src/artifact-contracts.ts), [canonical exports](plugins/codex-security/mcp-app/scripts/canonical-schemas.mts), and [model generator](sdk/typescript/scripts/generate-models.cjs) | [Canonical contract tests](plugins/codex-security/mcp-app/tests/test_canonical_artifact_contracts.ts), [MCP wire tests](plugins/codex-security/mcp-app/tests/test_compact_artifact_wire.ts), and [schema generation checks](#how-this-repository-works) |
-| Deep Scan scheduling and workers                | SDK [batch composition](sdk/typescript/src/deep-scan.ts), [lifecycle](sdk/typescript/src/deep-scan-lifecycle.ts), and shared [scan execution](sdk/typescript/src/scan-execution.ts)                                                    | [Composition tests](sdk/typescript/tests-ts/deep-scan-composition.test.ts) and [SDK integration](sdk/typescript/tests-ts/api-deep-composition.test.ts)                                                                                                  |
+| Deep Scan scheduling and workers                | Shared [engine, coordinator, and executor](plugins/codex-security/mcp-app/src/deep-scan/), used by the MCP server and SDK launcher                                                                                                     | [MCP tests](plugins/codex-security/mcp-app/tests/) and [direct SDK integration](sdk/typescript/tests-ts/direct-deep-scan.test.ts)                                                                                                                       |
 | Durable scan state, checkpoints, and completion | [Python workbench](plugins/codex-security/scripts/workbench_db.py) and [Deep Scan persistence](plugins/codex-security/scripts/deep_scan_workbench.py)                                                                                  | [Python tests](plugins/codex-security/tests/) and [SDK workbench integration](sdk/typescript/tests-ts/deep-scan-workbench.test.ts)                                                                                                                      |
 | Helper routing and stored-finding operations    | SDK [runtime routing](sdk/typescript/src/runtime.ts), plugin [helper entrypoint](plugins/codex-security/mcp-app/helpers-main.ts), and [Node workbench commands](plugins/codex-security/mcp-app/src/workbench/commands.ts)              | [SDK runtime tests](sdk/typescript/tests-ts/runtime.test.ts) and [MCP workbench tests](plugins/codex-security/mcp-app/tests/)                                                                                                                           |
 | Public CLI and SDK behavior                     | [CLI adapter](sdk/typescript/src/cli.ts), [SDK API](sdk/typescript/src/api.ts), and adjacent modules                                                                                                                                   | [SDK tests](sdk/typescript/tests-ts/) and the [installed-package checks](sdk/typescript/TESTING.md)                                                                                                                                                     |
@@ -22,7 +22,9 @@ crosses a process, persistence, or package boundary.
 
 The SDK routes selected stored-finding and classification commands to the Node
 helper; scan lifecycle commands still use the Python workbench. Trace the
-specific command before changing either implementation. Deep Scan scheduling and recovery live in the SDK batch runner shared with the MCP server.
+specific command before changing either implementation. Shared Deep Scan
+behavior belongs in the plugin engine, with adapter changes in the MCP server
+or SDK only when their entrypoint behavior differs.
 
 ## How this repository works
 
@@ -45,7 +47,8 @@ maintained in the SDK.
 `pnpm --dir sdk/typescript run types` checks freshness.
 
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
-source. CI runs deterministic triage checks and the SDK’s Deep Scan composition tests.
+source. CI runs deterministic triage checks and the Deep Scan iteration and
+publication tests in the MCP suite.
 
 See the [CI guide](docs/ci.md) for check selection, platform/version coverage,
 required status checks, and test-runner qualification.

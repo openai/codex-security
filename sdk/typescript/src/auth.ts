@@ -1,10 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
-import { configuredCodexHome } from "./codex-home.js";
-import { inlineToml, type JsonObject } from "./config.js";
+import type { JsonObject } from "./config.js";
 import {
   CodexSecurityError,
   PluginBootstrapError,
@@ -12,14 +12,49 @@ import {
 } from "./errors.js";
 import {
   executablePathForSpawn,
+  expandHome,
   runCodexCommand,
   type CodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
+
 /** @internal */
-export { configuredCodexHome, environmentEntry } from "./codex-home.js";
+export function environmentEntry(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested];
+  if (exact !== undefined || process.platform !== "win32") return exact;
+  const upper = requested.toUpperCase();
+  return Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === upper,
+  )?.[1];
+}
+
+/** @internal */
+export function withoutOpenAiApiKeys<Value>(
+  environment: Record<string, Value>,
+): Record<string, Value> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
+  );
+}
+
+/** @internal */
+export function configuredCodexHome(environment: ProcessEnvironment): string {
+  const configured = environmentEntry(environment, "CODEX_HOME");
+  return resolve(
+    expandHome(
+      configured?.trim() ? configured : join(homedir(), ".codex"),
+      environment,
+    ),
+  );
+}
 
 /** @internal */
 export async function readCodexHomeConfig(
@@ -244,19 +279,10 @@ export async function accountStatus(
   command: CodexCommand,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
-  config: Readonly<JsonObject> = {},
 ): Promise<AccountStatus> {
   const result = await runCodexCommand(
     command,
-    [
-      ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
-        config[key] === undefined
-          ? []
-          : ["--config", `${key}=${inlineToml(config[key])}`],
-      ),
-      "login",
-      "status",
-    ],
+    ["login", "status"],
     environment,
     undefined,
     signal,
@@ -355,18 +381,3 @@ function plainTerminalText(value: string): string {
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
 }
-
-/** Copy the child environment so configured authentication takes precedence over ambient OpenAI keys. @internal */
-export function configuredAuthEnvironment<Value>(
-  environment: Record<string, Value>,
-): Record<string, Value> {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) =>
-        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-    ),
-  );
-}
-
-/** @internal */
-export const withoutOpenAiApiKeys = configuredAuthEnvironment;

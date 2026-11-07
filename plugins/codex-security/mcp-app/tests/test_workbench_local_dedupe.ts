@@ -343,53 +343,6 @@ test("preparation indexes legacy missing bodies and invalidates changed local ve
   );
 });
 
-test("global preparation excludes unpublished Deep child findings until publication", async (t) => {
-  const { database, prepare } = await fixture(t);
-  const { storeFindings } = (await importSource(
-    "src/workbench/findings.ts",
-  )) as typeof import("../src/workbench/findings.ts");
-  const child = finding("child");
-  database
-    .prepare(
-      `INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      child.findingId,
-      child.fingerprints.primary,
-      child.ruleId,
-      child.identity.anchor,
-      timestamp,
-      timestamp,
-    );
-  const global = finding("global");
-  storeFindings(
-    database,
-    [{ finding: global, embedding: { model: "synthetic", vector: [1, 0] } }],
-    timestamp,
-  );
-  const scoped = finding("scoped");
-  const globally = () => prepare([scoped], { repositoryId: undefined });
-  const first = prepared(globally());
-  assert.deepEqual(Object.keys(first.cacheKeys), ["global", "scoped"]);
-  assert.deepEqual(first.findingsToEmbed, [global, scoped]);
-  const body = database.prepare(
-    "SELECT details_json FROM findings WHERE id = ?",
-  );
-  assert.equal(body.get(child.findingId)!.details_json, null);
-
-  prepared(prepare([child]));
-  assert.deepEqual(Object.keys(prepared(globally()).cacheKeys), [
-    "child",
-    "global",
-    "scoped",
-  ]);
-  database
-    .prepare("UPDATE findings SET details_json = NULL WHERE id = ?")
-    .run(child.findingId);
-  assert.deepEqual(globally(), { error: "finding_not_indexed" });
-});
-
 test("repository scope preserves creation order, cached keys and empty-input behavior", async (t) => {
   const { database, targetId, prepare, embed } = await fixture(t);
   const other = prepared(prepare([finding("other")]));

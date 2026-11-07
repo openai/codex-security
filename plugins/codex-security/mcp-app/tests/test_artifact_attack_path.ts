@@ -227,7 +227,7 @@ test(async function testEmptyLedgerAcceptsAnEmptyBatch() {
 
   await assert.rejects(
     recordCodexSecurityCandidateAttackPaths(
-      { ...fixture.context, scanId: undefined },
+      { ...fixture.context, layout: "worker" },
       { attackPaths: [] },
     ),
     /scan-bound artifact context/,
@@ -254,7 +254,7 @@ async function createFixture(
     context: {
       root,
       repoRoot: root,
-      scanId,
+      layout: "scan",
     },
     ledgerPath,
     originalRows: structuredClone(originalRows),

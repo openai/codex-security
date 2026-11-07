@@ -11,8 +11,7 @@ Use its security workflows in Codex, or automate them with the
 
 ## Features
 
-- Scan repositories, selected paths, or Git changes. Deep scans run parallel
-  discovery workers on repositories and selected paths.
+- Scan repositories, selected paths, or Git changes. Deep scans repeat Standard scans and return their deduplicated findings.
 - Validate candidate findings, generate patches, and verify existing fixes.
 - Draft `SECURITY.md` policies and save threat models for later review.
 - Browse saved scans and findings, identify duplicates, assess severity against

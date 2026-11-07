@@ -6,7 +6,7 @@ import copy
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -98,22 +98,6 @@ def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
         for key, value in finding.items()
         if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
     }
-
-
-def legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
-    content = _finding_content(finding)
-    locations = content.get("locations")
-    if isinstance(locations, list):
-        content["locations"] = sorted(
-            [
-                {**row, "endLine": row.get("endLine", row.get("startLine"))}
-                if isinstance(row, dict)
-                else row
-                for row in locations
-            ],
-            key=_encoded,
-        )
-    return _digest([owner, _identity_candidate(finding), content])
 
 
 def _identity_candidate(finding: dict[str, Any]) -> str | None:
@@ -430,32 +414,6 @@ def same_raw_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
         ):
             return False
     return True
-
-
-def same_published_finding(
-    left: dict[str, Any], right: dict[str, Any], valid_finding: Callable[[dict[str, Any]], bool]
-) -> bool:
-    if not valid_finding(left) or not valid_finding(right):
-        return False
-    return (
-        same_raw_value(_finding_content(left), _finding_content(right))
-        and (
-            "identity" not in left
-            or same_raw_value(_finding_identity(left), _finding_identity(right))
-        )
-        and same_raw_value(
-            {
-                key: value
-                for key, value in left.get("provenance", {}).items()
-                if key not in ("previousFindings", "preservedIdentity")
-            },
-            {
-                key: value
-                for key, value in right.get("provenance", {}).items()
-                if key not in ("previousFindings", "preservedIdentity")
-            },
-        )
-    )
 
 
 def same_raw_content(left: dict[str, Any], right: dict[str, Any]) -> bool:

@@ -101,18 +101,6 @@ class ScanContractExamplesTest(unittest.TestCase):
                 self.assertFalse(
                     standard_validator.is_valid({**standard_request, "reviewState": partial})
                 )
-        for extra_field in (
-            "source_worker_id",
-            "unknown_field",
-            "resultPath",
-            "consumedWorkerIds",
-            "schemaVersion",
-        ):
-            with self.subTest(extra_field=extra_field):
-                self.assertFalse(
-                    standard_validator.is_valid({**standard_request, extra_field: "not allowed"})
-                )
-
         for missing_field in (
             "ruleId",
             "title",
@@ -133,19 +121,6 @@ class ScanContractExamplesTest(unittest.TestCase):
                         {**standard_request, "findings": [incomplete_finding]}
                     )
                 )
-
-        for missing_field in ("scanId", "findings"):
-            with self.subTest(missing_field=missing_field):
-                self.assertFalse(
-                    standard_validator.is_valid(
-                        {
-                            field: value
-                            for field, value in standard_request.items()
-                            if field != missing_field
-                        }
-                    )
-                )
-        self.assertFalse(standard_validator.is_valid({"candidates": [], "merges": []}))
 
     def test_manifest_identifies_and_hashes_the_example_documents(self) -> None:
         scan = example("scan-manifest")["scan"]

@@ -175,6 +175,19 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
+test("rejects an ambiguous composition preview before changing its history", (t) => {
+  const database = memory(t, 62);
+  database.exec(`
+    INSERT INTO schema_migrations VALUES (63, 'persist composition child membership', 'preview');
+    INSERT INTO schema_migrations VALUES (64, 'unknown migration', 'later');
+  `);
+  const history = migrationHistory(database);
+  const originalSchema = schema(database);
+  assert.throws(() => applyMigrations(database), /matching preview version/);
+  assert.deepEqual(migrationHistory(database), history);
+  assert.deepEqual(schema(database), originalSchema);
+});
+
 for (const previewVersion of [58, 59]) {
   test(`preserves the saved rubric from preview migration ${previewVersion}`, (t) => {
     const database = memory(t, previewVersion - 1);
@@ -231,7 +244,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         migrations
           .filter(
             ({ version }) =>
-              version <= 60 &&
+              version <= 57 &&
               !missingVersions.includes(version) &&
               !(firstMissing && version >= firstMissing && version <= 56),
           )

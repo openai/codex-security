@@ -4,19 +4,9 @@ import { join } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, expect, test } from "bun:test";
 import { DiffTarget } from "../src/index.js";
-import {
-  resolveCodexCommand,
-  prepareOutputDir,
-  prepareScanArtifactRestorer,
-  runWorkbench,
-} from "../src/runtime.js";
-import { ScanPermissionError } from "../src/scan-execution.js";
-import { pythonExecutable } from "./support/shell.js";
+import { resolveCodexCommand } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  scanRuntimeDependencies,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { scanRuntimeDependencies } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } =
@@ -32,9 +22,8 @@ test.each(["standard", "diff", "deep", "custom"] as const)(
     const scanDir = join(root, "scan");
     for (const directory of [repository, codexHome, scanDir])
       await mkdir(directory, { mode: 0o700 });
-    if (mode === "diff" || mode === "deep")
-      await writeFile(join(repository, "fixture.ts"), "export {};\n");
     if (mode === "diff") {
+      await writeFile(join(repository, "fixture.ts"), "export {};\n");
       for (const args of [
         ["init", "-q"],
         ["add", "fixture.ts"],
@@ -51,34 +40,14 @@ test.each(["standard", "diff", "deep", "custom"] as const)(
         execFileSync("git", args, { cwd: repository, stdio: "pipe" });
     }
     let prompt = "";
-    const environment: Record<string, string> = {
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    };
-    for (const key of ["PATH", "SystemRoot", "TEMP", "TMP"])
-      if (process.env[key]) environment[key] = process.env[key]!;
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      ...(mode === "deep"
-        ? {
-            environment,
-            prepareRuntime: async () => ({
-              ...preparedRuntime(codexHome),
-              environment,
-            }),
-            resolvePluginPython: async () => pythonExecutable()!,
-            prepareOutputDir,
-            prepareScanArtifactRestorer,
-            runWorkbench,
-          }
-        : {}),
       createCodex: () => ({
         startThread: () => ({
           id: null,
           async runStreamed(input: string) {
             prompt = input;
-            throw mode === "deep"
-              ? new ScanPermissionError("scan prompt captured")
-              : new Error("scan prompt captured");
+            throw new Error("scan prompt captured");
           },
         }),
       }),
@@ -86,7 +55,7 @@ test.each(["standard", "diff", "deep", "custom"] as const)(
     try {
       await expect(
         client.run(repository, {
-          ...(mode === "deep" ? { mode: "deep", outputDir: scanDir } : {}),
+          ...(mode === "deep" ? { mode: "deep" } : {}),
           ...(mode === "diff"
             ? { target: DiffTarget.refs({ base: "HEAD", head: "HEAD" }) }
             : {}),
@@ -157,14 +126,12 @@ test.each(["standard", "diff", "deep", "custom"] as const)(
     });
     const nativeHome = join(root, "native-home");
     await mkdir(nativeHome, { mode: 0o700 });
-    const nativeEnvironment: Record<string, string> = {
-      CODEX_HOME: nativeHome,
-    };
+    const environment: Record<string, string> = { CODEX_HOME: nativeHome };
     for (const key of ["PATH", "SystemRoot", "TEMP", "TMP"])
-      if (process.env[key]) nativeEnvironment[key] = process.env[key]!;
+      if (process.env[key]) environment[key] = process.env[key]!;
     const codex = new Codex({
       codexPathOverride: resolveCodexCommand({}).command,
-      env: nativeEnvironment,
+      env: environment,
       config: {
         model_provider: "synthetic",
         model_providers: {

@@ -168,7 +168,7 @@ def stage_write(
                     if matches:
                         yield lambda _directory=None: (opened, opened.st_ctime_ns)
                         return
-    candidate = f".codex-security-{secrets.token_hex(8)}.tmp"
+    candidate = f".{name}.{secrets.token_hex(8)}.tmp"
 
     with stage_file(parent_fd, candidate, payload, owner_read_write) as staged_fd:
         staged = os.fstat(staged_fd)

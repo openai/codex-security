@@ -24,7 +24,7 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     load_script,
-    mark_deep_aggregate_ready,
+    mark_deep_coordinator_succeeded,
     read_review_state,
     resume_deep_scan,
     run_workbench,
@@ -58,7 +58,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
         "thread-completion-binding",
         environment={"CODEX_HOME": str(tmp_path / "codex-home")},
     )
-    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
+    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     return state_dir, scan_id, scan_dir
 
@@ -382,7 +382,7 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
             (manifest["scan"]["completedAt"], "Scan stopped.", scan_id),
         )
 
-    recovered = run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    recovered = scan_command(state_dir, "recover-scan-results", scan_id)
 
     assert recovered["scan"]["progress"]["status"] == "failed"
     manifest = json.loads(manifest_path.read_text())
@@ -390,23 +390,22 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
     assert manifest["scan"]["preservedSources"]
     assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
     sealed_artifacts = _sealed_artifacts(scan_dir)
-    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    scan_command(state_dir, "recover-scan-results", scan_id)
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
     late_review = {"id": "late-review", "reason": "Review remains pending.", "paths": ["README.md"]}
-    for directory in ("checkpoints", "checkpoints/pending"):
-        write_checkpoint(
-            scan_dir / directory,
-            {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
-        )
-    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
+    )
+    scan_command(state_dir, "recover-scan-results", scan_id)
 
     manifest = json.loads(manifest_path.read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == legacy_digest
     assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
     assert late_review in read_review_state(state_dir, scan_dir)["deferred"]
     sealed_artifacts = _sealed_artifacts(scan_dir)
-    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    scan_command(state_dir, "recover-scan-results", scan_id)
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
 
@@ -839,7 +838,19 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
                 "thread-completion-binding",
                 environment={"CODEX_HOME": str(codex_home)},
             )
-            mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
+            coordinator_manifest = scan_dir / "coordinator-manifest.json"
+            coordinator_manifest.write_text("{}\n")
+            with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+                connection.execute(
+                    """
+                    UPDATE deep_scan_runs
+                    SET status = 'succeeded', phase = 'terminal',
+                        terminal_reason = 'capped', manifest_path = ?,
+                        completed_at = updated_at
+                    WHERE scan_id = ?
+                    """,
+                    (str(coordinator_manifest), scan_id),
+                )
         write_completed_contract(
             scan_dir,
             scan_id,
@@ -1168,51 +1179,6 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     assert preserved_coverage["inventoryStrategy"] == "repository"
 
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
-
-
-def test_deep_completion_preserves_running_scan_after_transient_report_failure(
-    tmp_path: Path,
-) -> None:
-    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
-    hook_dir = tmp_path / "report-failure-hook"
-    hook_dir.mkdir()
-    (hook_dir / "sitecustomize.py").write_text(
-        "import sys\n"
-        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'scripts')!r})\n"
-        "import report_projection\n"
-        "def unavailable(*args, **kwargs):\n"
-        "    raise OSError('fixture report projection temporarily unavailable')\n"
-        "report_projection.generate_report_markdown = unavailable\n"
-    )
-    before = {
-        name: (scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
-
-    failed = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        check=False,
-        environment={"PYTHONPATH": str(hook_dir)},
-    )
-
-    assert failed["returncode"] != 0
-    assert "fixture report projection temporarily unavailable" in str(failed["stderr"])
-    preserved = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert preserved["progress"]["status"] == "running"
-    checkpoint = json.loads((scan_dir / "artifacts/deep-scan/checkpoint.json").read_text())
-    assert checkpoint["terminalReason"] == "saturated"
-    assert {
-        name: (scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    } == before
-
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
-
-    assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["findingCount"] == 1
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])
@@ -1645,7 +1611,8 @@ def test_valid_checkpoint_survives_rejected_malformed_replacement_finding(tmp_pa
         "findings": copy.deepcopy(findings["findings"]),
         "coverage": read_review_state(state_dir, scan_dir),
     }
-    write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    (scan_dir / "checkpoints").mkdir()
+    (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
     findings["findings"][0]["summary"] = ""
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     original = {

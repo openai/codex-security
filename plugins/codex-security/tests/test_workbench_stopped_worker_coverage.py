@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from pathlib import Path
 
@@ -11,16 +10,17 @@ import pytest
 from test_workbench_standard_deep_results import (
     accepted_standard_worker,
     deep_scan_fixture,
+    standard_finding,
 )
 from workbench_test_support import (
     cancel_scan,
     fail_deep_scan,
-    finding_fixture,
     get_scan,
     preserve_scan_results,
     read_review_state,
     saved_draft,
     select_checkpoint,
+    upsert_deep_worker,
     worker_paths,
     write_checkpoint,
     write_result_draft,
@@ -34,14 +34,18 @@ def coverage_worker(
         return accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id, name=name)
     worker_id = str(uuid.uuid4())
     prompt, artifacts, result = worker_paths(scan_dir, name)
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            "INSERT INTO deep_scan_workers "
-            "(id,scan_id,kind,status,prompt_path,artifact_dir,attempt,created_at,started_at,updated_at) "
-            "SELECT ?,id,'discovery','running',?,?,1,started_at,started_at,updated_at "
-            "FROM scans WHERE id = ?",
-            (worker_id, str(prompt), str(artifacts), scan_id),
-        )
+    upsert_deep_worker(
+        state_dir,
+        scan_id,
+        worker_id,
+        "discovery",
+        "running",
+        str(prompt),
+        str(artifacts),
+        "--attempt",
+        "1",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
     return worker_id, result
 
 
@@ -50,9 +54,9 @@ def coverage_worker(
 def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     tmp_path: Path, termination: str, accepted: bool
 ) -> None:
-    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
     environment = {"CODEX_HOME": str(codex_home)}
-    finding = finding_fixture(relative_path="app.py")
+    finding = standard_finding(tmp_path, scan_id, target)
     workers = {}
     originals = {}
     for name in ("first", "second"):

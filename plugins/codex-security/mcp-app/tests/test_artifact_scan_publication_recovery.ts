@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdir, writeFile, readdir, utimes } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { importSource } from "./import-module.ts";
 import {
   draftFixture,
   interruptDraftWrite,
@@ -375,6 +376,112 @@ for (const authored of [false, true]) {
       });
     }
   }
+}
+
+for (const parentState of ["absent", "partial", "terminal"] as const) {
+  test(`a reducer preserves its claimed batch and unconsumed workers (${parentState} parent)`, async (t) => {
+    const { normal, recovered, recover } = await recoveryPair(t, "deep");
+    const parentFinding = finding("Parent review", {
+      locations: [{ path: "src/parent.py", startLine: 1 }],
+    });
+    if (parentState === "partial") {
+      await recovered.writeFindings([parentFinding]);
+      await dateDraftFiles(recovered.root, 100);
+    }
+    const rows = ["Assigned", "Unconsumed"].map((title) =>
+      finding(title, {
+        locations: [{ path: `src/${title.toLowerCase()}.py`, startLine: 1 }],
+      }),
+    );
+    const workers: Record<string, unknown>[] = [];
+    for (const [index, row] of rows.entries()) {
+      const id = `worker-${index + 1}`;
+      const root = path.join(
+        recovered.root,
+        "artifacts/deep_discovery/workers",
+        id,
+        "output",
+      );
+      await mkdir(root, { recursive: true });
+      const worker = draftFixture(root, "worker");
+      await worker.writeFindings([row], { complete: true });
+      await dateDraftFiles(root, 101 + index);
+      workers.push({
+        id,
+        kind: "discovery",
+        status: "succeeded",
+        completed_at: `2026-10-11T20:00:0${index}Z`,
+        artifact_dir: root,
+        result_manifest_path: path.join(root, "result.json"),
+        attempt: 1,
+      });
+    }
+    const root = path.join(
+      recovered.root,
+      "artifacts/deep_discovery/dedup/iteration-1",
+    );
+    await mkdir(root, { recursive: true });
+    const source = rows[0];
+    await writeFile(
+      path.join(root, "result.json"),
+      JSON.stringify({
+        scanId: recovered.context.scanId,
+        findings: [
+          {
+            ...source,
+            provenance: {
+              ...source.provenance,
+              sourceFindingIds: ["worker-1:0"],
+              sourceFindings: [{ id: "worker-1:0", finding: source }],
+            },
+          },
+        ],
+      }),
+    );
+    await dateDraftFiles(root, 103);
+    workers.push({
+      id: "reducer-1",
+      kind: "dedup",
+      status: "succeeded",
+      completed_at: "2026-10-11T20:00:02Z",
+      artifact_dir: root,
+      result_manifest_path: path.join(root, "result.json"),
+      attempt: 1,
+    });
+    const reduced = await readJson(root, "result.json");
+    const findings =
+      parentState === "terminal"
+        ? [parentFinding]
+        : [
+            ...(parentState === "partial" ? [parentFinding] : []),
+            ...reduced.findings,
+            {
+              ...rows[1],
+              provenance: { ...rows[1].provenance, workerId: "worker-2" },
+            },
+          ];
+    await normal.writeFindings(findings, { complete: true });
+    if (parentState === "terminal") {
+      await recovered.writeFindings(findings, { complete: true });
+      for (const name of [
+        "findings.json",
+        "coverage.json",
+        "scan-manifest.json",
+        "checkpoint-head.json",
+      ])
+        await utimes(path.join(recovered.root, name), 104, 104);
+      await dateDraftFiles(path.join(recovered.root, "checkpoints"), 104);
+    }
+    const result = await recover({ workers, ...replayWithProvenance });
+    const byEvidence = (rows: RecoveredFinding[]) =>
+      new Map(rows.map((row) => [row.title, row]));
+    assert.equal(
+      result.normal.length,
+      parentState === "terminal" ? 1 : parentState === "partial" ? 3 : 2,
+    );
+    assert.deepEqual(byEvidence(result.recovered), byEvidence(result.normal));
+    assert.deepEqual(result.warnings, []);
+  });
 }
 
 for (const abandonedTime of [99, 200, 300]) {

@@ -2,7 +2,6 @@ import { isSafeNonNegativeInteger, parseJson } from "./value.js";
 import type { JsonObject } from "./config.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { createHash } from "node:crypto";
-import type { Stats } from "node:fs";
 import {
   lstat,
   open,
@@ -12,6 +11,7 @@ import {
   stat,
 } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { isRecord } from "./record.js";
@@ -42,16 +42,10 @@ import {
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
-export async function readScanBudgetUsage(
-  workbench: (args: readonly string[]) => Promise<JsonObject>,
-  scanId: string,
-  threadId: string,
-  validationThreadId?: string,
-  requireWorkerUsage = false,
-) {
-  const result = await workbench(
-    workbenchArgs("read-scan-usage", { scanId, threadId, validationThreadId }),
-  );
+/** Token counts emitted by the workbench, without inferring a price or missing counters. */
+export function workbenchTokenUsage(
+  result: Readonly<Record<string, unknown>>,
+): ScanTokenUsage | null {
   const counts = {
     input_tokens: result["inputTokens"],
     cached_input_tokens: result["cachedInputTokens"],
@@ -62,6 +56,23 @@ export async function readScanBudgetUsage(
   const usage = Object.values(counts).every(Number.isSafeInteger)
     ? tokenUsage(counts)
     : null;
+  if (usage === null) return null;
+  return result["cacheWriteInputTokensReported"] === true
+    ? usage
+    : { ...usage, cache_write_input_tokens_reported: false };
+}
+
+export async function readScanBudgetUsage(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  scanId: string,
+  threadId: string,
+  validationThreadId?: string,
+  requireWorkerUsage = false,
+) {
+  const result = await workbench(
+    workbenchArgs("read-scan-usage", { scanId, threadId, validationThreadId }),
+  );
+  const usage = workbenchTokenUsage(result);
   const scope = result["coverageScope"];
   const warnings = result["warnings"];
   const ownership = {
@@ -97,11 +108,7 @@ export async function readScanBudgetUsage(
     workers["threadCount"] > 0;
   return {
     ...ownership,
-    // Older workbenches sum cache writes without tracking omitted counters.
-    usage:
-      result["cacheWriteInputTokensReported"] === true
-        ? usage
-        : { ...usage, cache_write_input_tokens_reported: false },
+    usage,
     complete: coverage === "complete" && (!requireWorkerUsage || hasWorkers),
     ...(requireWorkerUsage && !hasWorkers
       ? { missingThreadCount: Math.max(1, ownership.missingThreadCount ?? 0) }
@@ -316,7 +323,6 @@ interface StreamedProgressItem {
 }
 
 type SessionUsage = ReturnType<typeof createSessionUsage> & {
-  fileVersion?: Stats;
   events?: SessionObservation<Record<string, unknown>>[];
 };
 
@@ -355,7 +361,6 @@ interface ScanCostTrackerOptions {
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onError?: (error: unknown) => void;
-  workerNumber?: (threadId: string) => number;
   onObservationError?: (error: unknown) => void;
 }
 
@@ -384,9 +389,8 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage(observeUsage: boolean) {
   return {
     offset: 0,
-    deferred: false,
-    pendingLine: [] as Buffer[],
-    pendingLineBytes: 0,
+    decoder: new StringDecoder("utf8"),
+    pendingLine: [] as string[],
     unreadable: false,
     compressedRead: false,
     threadId: null as string | null,
@@ -504,9 +508,7 @@ export class ScanCostTracker {
   #threadId: string | null = null;
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
-  #activeRefresh: Promise<void> | null = null;
-  #queuedRefresh: Promise<void> | null = null;
-  #queuedPolling = true;
+  #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = {
     usage: null,
     cost: null,
@@ -542,17 +544,6 @@ export class ScanCostTracker {
     )
       this.#inventoryNeedsReconciliation = true;
     this.#expectedFilesTotal = filesTotal;
-  }
-
-  public workerNumber(threadId: string): number {
-    if (this.#options.workerNumber) return this.#options.workerNumber(threadId);
-    const existing = this.#workers.get(threadId);
-    if (existing !== undefined) return existing;
-    const worker = this.#workers.size + 1;
-    this.#workers.set(threadId, worker);
-    if (this.#observingWorkers)
-      this.#options.onWorkerEvent?.({ kind: "observed", worker });
-    return worker;
   }
 
   /** Called before launching a turn, after loading any resumed history. */
@@ -1996,7 +1987,7 @@ export class ScanCostTracker {
       // inventory establishes scope but cannot mask restored worker progress.
       const workerCoverage = Math.min(
         this.#expectedFilesTotal!,
-        this.#workerFilesCompleted(),
+        this.#workerProgress.values().reduce((sum, count) => sum + count, 0),
       );
       if (
         retainedWorker !== null &&
@@ -2014,7 +2005,7 @@ export class ScanCostTracker {
     }
     const workerCoverage = Math.min(
       this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-      this.#workerFilesCompleted(),
+      this.#workerProgress.values().reduce((sum, count) => sum + count, 0),
     );
     for (const currentCompletion of this.#liveParentItems) {
       if (
@@ -2396,61 +2387,25 @@ export class ScanCostTracker {
   }
 
   public async refresh(polling = false): Promise<ScanCostSnapshot> {
-    let update: Promise<void>;
-    if (this.#activeRefresh === null) {
-      update = this.#startRefresh(polling);
-    } else {
-      // A non-polling request must get a fresh budget observation after pending I/O.
-      this.#queuedPolling &&= polling;
-      update = this.#queuedRefresh ??= this.#activeRefresh
-        .catch(() => {})
-        .then(() => {
-          const queuedPolling = this.#queuedPolling;
-          this.#queuedPolling = true;
-          return this.#runRefresh(queuedPolling);
-        });
-    }
+    const update = this.#pending.then(async () => {
+      try {
+        await this.#refreshUsage(polling);
+      } catch (error) {
+        const previous = this.#snapshot.measurement;
+        this.#setSnapshot(
+          previous.usage,
+          previous.cost,
+          false,
+          previous.threadCount,
+          Math.max(1, previous.missingThreadCount),
+          previous,
+        );
+        throw error;
+      }
+    });
+    this.#pending = update.catch(() => {});
     await update;
     return this.#snapshot;
-  }
-
-  #startRefresh(polling: boolean): Promise<void> {
-    const update = Promise.resolve().then(() => this.#runRefresh(polling));
-    this.#activeRefresh = update;
-    void update.then(
-      () => this.#finishRefresh(update),
-      () => this.#finishRefresh(update),
-    );
-    return update;
-  }
-
-  #finishRefresh(finished: Promise<void>): void {
-    if (this.#activeRefresh !== finished) return;
-    const queued = this.#queuedRefresh;
-    this.#activeRefresh = queued;
-    this.#queuedRefresh = null;
-    if (queued !== null)
-      void queued.then(
-        () => this.#finishRefresh(queued),
-        () => this.#finishRefresh(queued),
-      );
-  }
-
-  async #runRefresh(polling: boolean): Promise<void> {
-    try {
-      await this.#refreshUsage(polling);
-    } catch (error) {
-      const previous = this.#snapshot.measurement;
-      this.#setSnapshot(
-        previous.usage,
-        previous.cost,
-        false,
-        previous.threadCount,
-        Math.max(1, previous.missingThreadCount),
-        previous,
-      );
-      throw error;
-    }
   }
 
   async #refreshUsage(polling: boolean): Promise<void> {
@@ -2528,26 +2483,7 @@ export class ScanCostTracker {
         this.#options.onSessionEvent !== undefined ||
         this.#options.onWorkerEvent !== undefined);
     const unreadable = new Map<SessionUsage, unknown>();
-    const workerReceipts = await readWorkerReceipts(
-      this.#options.workerReceipts,
-      this.#workerReceipts,
-    );
-    collectionErrors.push(...workerReceipts.errors);
-    const included = new Set([
-      this.#threadId,
-      ...this.#receipts.keys(),
-      ...workerReceipts.usages.keys(),
-    ]);
     let blockingReadError: unknown;
-    const includeNewSession = (session: SessionUsage): boolean =>
-      (session.threadId !== null && included.has(session.threadId)) ||
-      (session.parentThreadId !== null && included.has(session.parentThreadId));
-    const buffers: Buffer[] = [];
-    const pending: Promise<void>[] = [];
-    const drain = async () => {
-      await Promise.all(pending);
-      pending.length = 0;
-    };
     directories: for (const directory of ["sessions", "archived_sessions"]) {
       try {
         for await (const path of sessionFiles(
@@ -2559,50 +2495,47 @@ export class ScanCostTracker {
             session = createSessionUsage(observeUsage);
             this.#sessions.set(path, session);
           }
-          if (session.deferred) continue;
-          const tracked = session;
-          pending.push(
-            readSessionUsage(path, tracked, repository, progressThread, {
-              buffer: (buffers[pending.length] ??=
-                Buffer.alloc(SESSION_READ_SIZE)),
-              includeNewSession,
-              metadataOnly: true,
-            }).then(
-              () => {
-                if (tracked.threadId !== null && includeNewSession(tracked))
-                  included.add(tracked.threadId);
-              },
-              (error: unknown) => {
-                if (tracked.threadId !== null) unreadable.set(tracked, error);
-                else if (
-                  isRecord(error) &&
-                  typeof error["syscall"] === "string"
-                ) {
-                  blockingReadError ??= error;
-                } else if (
-                  directory !== "archived_sessions" ||
-                  !path.endsWith(".zst")
-                ) {
-                  collectionErrors.push(error);
-                }
-              },
-            ),
-          );
-          if (tracked.threadId === null || pending.length === 8) {
-            await drain();
-            if (
-              blockingReadError !== undefined &&
-              (!observeHealthySessions || !isBlockedLogRead(blockingReadError))
-            )
-              break directories;
+          try {
+            await readSessionUsage(
+              path,
+              session,
+              repository,
+              progressThread,
+              undefined,
+              true,
+            );
+          } catch (error) {
+            if (session.threadId !== null) unreadable.set(session, error);
+            else if (isRecord(error) && typeof error["syscall"] === "string") {
+              blockingReadError ??= error;
+              if (!observeHealthySessions || !isBlockedLogRead(error))
+                break directories;
+            } else if (
+              directory !== "archived_sessions" ||
+              !path.endsWith(".zst")
+            ) {
+              collectionErrors.push(error);
+            }
+            // A damaged cold archive with no readable identity cannot be
+            // attributed to this scan. Registered threads still require usage.
           }
         }
       } catch (error) {
-        await drain();
+        // Retain the blocking read if traversal also stops on a later entry.
         if (blockingReadError === undefined) collectionErrors.push(error);
       }
     }
-    await drain();
+
+    const workerReceipts = await readWorkerReceipts(
+      this.#options.workerReceipts,
+      this.#workerReceipts,
+    );
+    collectionErrors.push(...workerReceipts.errors);
+    const included = new Set([
+      this.#threadId,
+      ...this.#receipts.keys(),
+      ...workerReceipts.usages.keys(),
+    ]);
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
@@ -2642,22 +2575,6 @@ export class ScanCostTracker {
         }
       }
     } while (included.size !== previousSize);
-    for (const [path, session] of this.#sessions) {
-      if (
-        !session.deferred ||
-        session.threadId === null ||
-        !included.has(session.threadId)
-      )
-        continue;
-      session.deferred = false;
-      try {
-        await readSessionUsage(path, session, repository, progressThread, {
-          buffer: buffers[0],
-        });
-      } catch (error) {
-        unreadable.set(session, error);
-      }
-    }
     for (const [session, error] of unreadable) {
       if (session.threadId !== null && included.has(session.threadId)) {
         if (isBlockedLogRead(error)) blockingReadError ??= error;
@@ -2718,10 +2635,13 @@ export class ScanCostTracker {
         try {
           // Replay raw events only through the tracked snapshot. Keep its progress,
           // usage and decoder so a failed read cannot replace authoritative state.
-          await readSessionUsage(path, replay, undefined, undefined, {
-            throughOffset: session.offset,
-            buffer: buffers[0],
-          });
+          await readSessionUsage(
+            path,
+            replay,
+            undefined,
+            undefined,
+            session.offset,
+          );
           if (replay.offset === session.offset) {
             session.events = replay.events;
             if (this.#timer === null)
@@ -2730,7 +2650,7 @@ export class ScanCostTracker {
                 session,
                 repository,
                 progressThread,
-                { throughOffset: "file-size", buffer: buffers[0] },
+                "file-size",
               );
           }
         } catch (error) {
@@ -2759,10 +2679,16 @@ export class ScanCostTracker {
         usages.set(threadId, session.usage);
       }
       if (!observe) continue;
-      const worker =
-        threadId === this.#threadId
-          ? this.#options.workerNumber?.(threadId)
-          : this.workerNumber(threadId);
+      let worker: number | undefined;
+      if (threadId !== this.#threadId) {
+        worker = this.#workers.get(threadId);
+        if (worker === undefined) {
+          worker = this.#workers.size + 1;
+          this.#workers.set(threadId, worker);
+          if (this.#observingWorkers)
+            this.#options.onWorkerEvent?.({ kind: "observed", worker });
+        }
+      }
       // Archives and compressed copies retain the same append-only event order.
       // A new rollout for the same thread has a new initial metadata timestamp.
       const eventStream = JSON.stringify([threadId, session.startedAt]);
@@ -2785,7 +2711,7 @@ export class ScanCostTracker {
       // A failed replay can leave activity/progress available without raw events.
       if (session.events !== undefined)
         reported.events = Math.max(reported.events, session.eventPosition);
-      if (worker !== undefined && threadId !== this.#threadId) {
+      if (worker !== undefined) {
         for (const { position, value: activity } of session.activities.splice(
           0,
         )) {
@@ -3080,12 +3006,6 @@ export class ScanCostTracker {
     return "current";
   }
 
-  #workerFilesCompleted(): number {
-    let count = 0;
-    for (const reviewed of this.#workerProgress.values()) count += reviewed;
-    return count;
-  }
-
   #reportSessionProgress(
     session: SessionUsage,
     parent: boolean,
@@ -3226,7 +3146,9 @@ export class ScanCostTracker {
         ? progress.filesCompleted
         : Math.min(
             expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-            this.#workerFilesCompleted(),
+            this.#workerProgress
+              .values()
+              .reduce((total, reviewed) => total + reviewed, 0),
           );
       if (filesCompleted < this.#highestFilesCompleted) {
         // A provisional worker can exceed this global parent receipt, then
@@ -3442,21 +3364,17 @@ async function readSessionUsage(
   session: SessionUsage,
   repository?: string,
   progressThread?: string,
-  options: {
-    buffer?: Buffer;
-    throughOffset?: number | "file-size";
-    includeNewSession?: (session: SessionUsage) => boolean;
-    metadataOnly?: boolean;
-  } = {},
+  throughOffset?: number | "file-size",
+  metadataOnly = false,
 ): Promise<void> {
   if (session.unreadable) return;
   if (path.endsWith(".zst")) {
     if (session.compressedRead) return;
-    if (options.metadataOnly && session.threadId !== null) return;
+    if (metadataOnly && session.threadId !== null) return;
     try {
       for await (const line of sessionLines(path)) {
         readSessionEvent(line, session, repository, progressThread);
-        if (options.metadataOnly && session.threadId !== null) return;
+        if (metadataOnly && session.threadId !== null) return;
       }
     } catch (error) {
       if (isMissingFile(error)) return;
@@ -3466,25 +3384,9 @@ async function readSessionUsage(
     return;
   }
   let file;
-  const { buffer = Buffer.alloc(SESSION_READ_SIZE), includeNewSession } =
-    options;
-  let { throughOffset } = options;
-  let metadata: Stats;
   try {
-    metadata = await stat(path);
-    const previous = session.fileVersion;
-    if (
-      previous &&
-      session.offset === metadata.size &&
-      previous.dev === metadata.dev &&
-      previous.ino === metadata.ino &&
-      previous.size === metadata.size &&
-      previous.mtimeMs === metadata.mtimeMs &&
-      previous.ctimeMs === metadata.ctimeMs &&
-      previous.mode === metadata.mode
-    )
-      return;
-    session.fileVersion = undefined;
+    const metadata = await stat(path);
+    if (metadata.isFile() && metadata.size === session.offset) return;
     if (throughOffset === "file-size") throughOffset = metadata.size;
     file = await open(path, "r");
   } catch (error) {
@@ -3492,6 +3394,7 @@ async function readSessionUsage(
     throw error;
   }
   try {
+    const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (throughOffset === undefined || session.offset < throughOffset) {
       const { bytesRead } = await file.read(
         buffer,
@@ -3501,17 +3404,22 @@ async function readSessionUsage(
           : Math.min(buffer.length, throughOffset - session.offset),
         session.offset,
       );
-      if (bytesRead === 0) break;
+      if (bytesRead === 0) return;
       session.offset += bytesRead;
       try {
-        readSessionChunk(
-          buffer.subarray(0, bytesRead),
-          session,
-          repository,
-          progressThread,
-          session.threadId === null ? includeNewSession : undefined,
-        );
-        if (session.deferred) break;
+        const lines = session.decoder
+          .write(buffer.subarray(0, bytesRead))
+          .split("\n");
+        session.pendingLine.push(lines[0]!);
+        for (const line of lines.slice(1)) {
+          readSessionEvent(
+            session.pendingLine.join(""),
+            session,
+            repository,
+            progressThread,
+          );
+          session.pendingLine = [line];
+        }
       } catch (error) {
         session.unreadable = true;
         session.pendingLine = [];
@@ -3520,54 +3428,6 @@ async function readSessionUsage(
     }
   } finally {
     await file.close();
-  }
-  session.fileVersion = metadata;
-}
-
-function readSessionChunk(
-  contents: Buffer,
-  session: SessionUsage,
-  repository?: string,
-  progressThread?: string,
-  keepReading?: (session: SessionUsage) => boolean,
-): void {
-  let lineStart = 0;
-  while (lineStart < contents.length) {
-    const newline = contents.indexOf(0x0a, lineStart);
-    const lineEnd = newline === -1 ? contents.length : newline;
-    const fragment = contents.subarray(lineStart, lineEnd);
-    const lineBytes = session.pendingLineBytes + fragment.length;
-
-    if (newline === -1) {
-      if (fragment.length > 0) {
-        session.pendingLine.push(Buffer.from(fragment));
-        session.pendingLineBytes = lineBytes;
-      }
-      return;
-    }
-
-    let line = fragment;
-    if (session.pendingLineBytes > 0) {
-      session.pendingLine.push(fragment);
-      line = Buffer.concat(session.pendingLine, lineBytes);
-      session.pendingLine = [];
-      session.pendingLineBytes = 0;
-    }
-    readSessionEvent(
-      line.toString("utf8"),
-      session,
-      repository,
-      progressThread,
-    );
-    if (keepReading && session.threadId !== null) {
-      if (!keepReading(session)) {
-        session.offset -= contents.length - newline - 1;
-        session.deferred = true;
-        return;
-      }
-      keepReading = undefined;
-    }
-    lineStart = newline + 1;
   }
 }
 
@@ -3701,7 +3561,10 @@ function readSessionEvent(
           },
           repository,
         );
-        if (activity === null || session.prose.has(proseKey(activity))) {
+        if (
+          activity === null ||
+          session.prose.has(`${activity.kind}:${activity.description}`)
+        ) {
           continue;
         }
         session.reasoning = createSessionReasoning(
@@ -3732,12 +3595,12 @@ function readSessionEvent(
       session.reasoning = null;
       if (
         activity.kind === "message" &&
-        session.prose.has(proseKey(activity))
+        session.prose.has(`${activity.kind}:${activity.description}`)
       ) {
         return;
       }
       if (activity.kind === "message") {
-        session.prose.add(proseKey(activity));
+        session.prose.add(`${activity.kind}:${activity.description}`);
       }
       if (activity.status === "running") {
         session.calls.set(activity.id, activity);
@@ -3863,8 +3726,11 @@ function readSessionEvent(
     }
     session.reasoning = null;
     const activity = scanActivityFromSessionEvent(event, repository);
-    if (activity !== null && !session.prose.has(proseKey(activity))) {
-      session.prose.add(proseKey(activity));
+    if (
+      activity !== null &&
+      !session.prose.has(`${activity.kind}:${activity.description}`)
+    ) {
+      session.prose.add(`${activity.kind}:${activity.description}`);
       session.activities.push(sessionObservation(session, activity));
     }
     return;
@@ -3993,7 +3859,7 @@ function recordReasoningActivity(
     return;
   }
   reasoning.activity = activity;
-  session.prose.add(proseKey(activity));
+  session.prose.add(`${activity.kind}:${activity.description}`);
   session.activities.push(sessionObservation(session, activity));
 }
 
@@ -4011,17 +3877,6 @@ const PERSISTED_COMMAND_SUFFIX_BYTES =
   PERSISTED_COMMAND_OUTPUT_BYTES -
   PERSISTED_OUTPUT_GAP_BYTES -
   PERSISTED_COMMAND_PREFIX_BYTES;
-
-function proseKey(activity: ScanActivity): string {
-  // Deduplication needs an identity, not a retained copy of every transcript
-  // message and every expanding reasoning prefix.
-  // Hash UTF-16 code units to keep distinct lone surrogates distinct too.
-  return createHash("sha256")
-    .update(activity.kind)
-    .update(":")
-    .update(activity.description, "utf16le")
-    .digest("hex");
-}
 
 function digest(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -4342,52 +4197,4 @@ function isBlockedLogRead(error: unknown): boolean {
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
-}
-
-export function addScanCosts(
-  previous: Readonly<ScanCost> | null,
-  current: Readonly<ScanCost>,
-): ScanCost {
-  if (previous === null) return { ...current };
-  const { estimatedUsdRange: currentRange, ...currentCost } = current;
-  const previousRange = previous.estimatedUsdRange;
-  return {
-    ...currentCost,
-    inputTokens: previous.inputTokens + current.inputTokens,
-    cachedInputTokens: previous.cachedInputTokens + current.cachedInputTokens,
-    cacheWriteInputTokens:
-      previous.cacheWriteInputTokens + current.cacheWriteInputTokens,
-    outputTokens: previous.outputTokens + current.outputTokens,
-    estimatedUsd: previous.estimatedUsd + current.estimatedUsd,
-    ...(previous.cacheWriteInputTokensReported === false ||
-    current.cacheWriteInputTokensReported === false
-      ? { cacheWriteInputTokensReported: false }
-      : {}),
-    ...(previousRange === undefined || currentRange === undefined
-      ? {}
-      : {
-          estimatedUsdRange: {
-            context: "unknown" as const,
-            min: previousRange.min + currentRange.min,
-            max:
-              previousRange.max === null || currentRange.max === null
-                ? null
-                : previousRange.max + currentRange.max,
-          },
-        }),
-  };
-}
-
-export function scanCostUsage(
-  cost: Readonly<ScanCost>,
-): Record<string, number | boolean> {
-  return {
-    input_tokens: cost.inputTokens,
-    cached_input_tokens: cost.cachedInputTokens,
-    cache_write_input_tokens: cost.cacheWriteInputTokens,
-    output_tokens: cost.outputTokens,
-    ...(cost.cacheWriteInputTokensReported === false
-      ? { cache_write_input_tokens_reported: false }
-      : {}),
-  };
 }

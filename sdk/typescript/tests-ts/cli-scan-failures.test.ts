@@ -24,7 +24,7 @@ function scanDependencies() {
       recipe: {
         repository: "/original/repository",
         target: { kind: "repository", paths: [] },
-        mode: "deep",
+        mode: "standard",
         config: {},
       },
     }),

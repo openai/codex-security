@@ -867,7 +867,6 @@ async function createFixture(label: string) {
       "in_scope_files.txt",
     ),
     scan: {
-      scanId: "scan-fixture",
       root: scanRoot,
       repoRoot,
       layout: "scan",

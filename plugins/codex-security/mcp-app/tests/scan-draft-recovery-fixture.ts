@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
-import { existsSync, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { TestContext } from "node:test";
@@ -18,11 +18,10 @@ const {
   replaceArtifactJson,
   replaceArtifactText,
   saveThreatModelDocument,
-  semanticScanDraft,
 } = await importModule({
   stdin: {
     contents:
-      'export * from "./artifact-io.ts"; export * from "./threat-model-document.ts"; export { semanticScanDraft } from "../../../../sdk/typescript/src/scan-semantics.ts";',
+      'export * from "./artifact-io.ts"; export * from "./threat-model-document.ts";',
     resolveDir: path.join(import.meta.dirname, "../src"),
   },
 });
@@ -31,132 +30,84 @@ const {
 export async function recordCodexSecurityScanDraft(
   context: ArtifactContext,
   input: unknown,
-  workerIdentities?: Set<string>,
 ) {
-  return draftApi.recordCodexSecurityScanDraft(
+  return draftApi.recordCodexSecurityScanDraftViaWorkbench(
     context,
     input,
-    async (draft, _digest, checkpoint, reconciled) => {
-      const raw = await saveScanDraftCheckpoint(context, checkpoint);
+    async (args: string[]) => {
+      const draft = await readJson(args[args.indexOf("--draft-path") + 1]);
+      let rawContents = await fs.readFile(
+        args[args.indexOf("--checkpoint-path") + 1],
+        "utf8",
+      );
+      const checkpoint = JSON.parse(rawContents);
       const { complete, scope, threatModel } = draft.manifest.scan;
-      let projected: ScanDraftInput = {
-        scanId: context.scanId,
+      const projected = {
+        scanId: checkpoint.scanId,
         ...(complete === undefined ? {} : { complete }),
         ...(scope === undefined ? {} : { scope }),
         ...(threatModel === undefined ? {} : { threatModel }),
         findings: draft.findings.findings,
         reviewState: draft.reviewState,
       };
-      if (workerIdentities) {
-        // Saved coordinator workers emitted semantic findings before parent identities were allocated.
-        for (const finding of checkpoint.findings)
-          if (finding.identity)
-            workerIdentities.add(JSON.stringify(finding.identity));
-        projected = semanticScanDraft(
-          context.scanId,
-          draft.manifest.scan,
-          projected.findings,
-          projected.reviewState,
+      if (context.mode === "deep") {
+        const head = await readJson(context.root, "checkpoint-head.json").catch(
+          (error) => {
+            if (error.code !== "ENOENT") throw error;
+            return undefined;
+          },
         );
-        for (const finding of projected.findings)
-          if (!workerIdentities.has(JSON.stringify(finding.identity)))
-            delete finding.identity;
+        checkpoint.publication = {
+          previousCheckpoint: head?.checkpoint ?? null,
+          previousInputCheckpoint: head?.inputCheckpoint ?? null,
+        };
+        rawContents = JSON.stringify(checkpoint);
       }
-      const accepted = await saveScanDraftCheckpoint(
-        context,
+      const rawName =
+        createHash("sha256").update(rawContents).digest("hex") + ".json";
+      await replaceArtifactText(
+        await artifactDestination(
+          context,
+          ["checkpoints", rawName],
+          "raw checkpoint",
+        ),
+        rawContents,
+      );
+      await draftApi.saveScanDraftCheckpoint(
+        { ...context, layout: "worker" },
         projected,
-        false,
         false,
       );
       await replaceArtifactJson(
         await artifactDestination(
           context,
           ["checkpoint-head.json"],
-          "checkpoint head",
+          "scan checkpoint head",
         ),
         {
-          checkpoint: path.basename(accepted),
-          ...(context.mode === "deep"
-            ? { inputCheckpoint: path.basename(raw) }
-            : {}),
+          checkpoint:
+            createHash("sha256")
+              .update(JSON.stringify(projected))
+              .digest("hex") + ".json",
+          ...(checkpoint.publication ? { inputCheckpoint: rawName } : {}),
         },
       );
-      if (workerIdentities) {
+      // Retain the legacy file-authored layout for recovery compatibility tests.
+      draft.manifest.scan.coverageRef = "coverage.json";
+      for (const [key, name] of [
+        ["findings", "findings.json"],
+        ["reviewState", "coverage.json"],
+        ["manifest", "scan-manifest.json"],
+      ]) {
         await replaceArtifactJson(
-          await artifactDestination(
-            context,
-            ["result.json"],
-            "saved worker draft",
-          ),
-          projected,
+          await artifactDestination(context, [name], "scan draft"),
+          draft[key],
         );
-      } else {
-        // Exercise saved scans that retain the legacy separate coverage document.
-        draft.manifest.scan.coverageRef = "coverage.json";
-        for (const [key, name] of [
-          ["findings", "findings.json"],
-          ["reviewState", "coverage.json"],
-          ["manifest", "scan-manifest.json"],
-        ]) {
-          await replaceArtifactJson(
-            await artifactDestination(context, [name], "scan draft"),
-            draft[key],
-          );
-        }
       }
-      for (const name of [...reconciled, path.basename(raw)])
-        await rm(path.join(context.root, "checkpoints", "pending", name), {
-          force: true,
-        });
-      const warning = await saveThreatModelDocument(
-        context,
-        draft.manifest.scan.threatModel,
-      );
-      return warning === undefined ? undefined : [warning];
+      const warning = await saveThreatModelDocument(context, threatModel);
+      return warning === undefined ? {} : { warnings: [warning] };
     },
   );
-}
-
-export async function saveScanDraftCheckpoint(
-  context: ArtifactContext,
-  input: ScanDraftInput,
-  _validate = true,
-  pending = true,
-): Promise<string> {
-  const { handoffClaimToken: _claim, ...snapshot } = input;
-  if (pending && context.mode === "deep" && input.complete !== false) {
-    const head = await readJson(context.root, "checkpoint-head.json").catch(
-      (error) => {
-        if (error.code !== "ENOENT") throw error;
-        return undefined;
-      },
-    );
-    Object.assign(snapshot, {
-      publication: {
-        previousCheckpoint: head?.checkpoint ?? null,
-        previousInputCheckpoint: head?.inputCheckpoint ?? null,
-      },
-    });
-  }
-  const contents = JSON.stringify(snapshot);
-  const name = createHash("sha256").update(contents).digest("hex") + ".json";
-  const destination = await artifactDestination(
-    context,
-    ["checkpoints", name],
-    "checkpoint",
-  );
-  if (pending || !existsSync(destination))
-    await replaceArtifactText(destination, contents);
-  if (pending)
-    await replaceArtifactText(
-      await artifactDestination(
-        context,
-        ["checkpoints", "pending", name],
-        "pending checkpoint",
-      ),
-      "",
-    );
-  return destination;
 }
 
 export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
@@ -179,7 +130,8 @@ export function draftFixture(root: string, layout: Layout) {
     root,
     repoRoot: root,
     scanId,
-    mode: layout === "worker" ? "standard" : layout,
+    layout: layout === "worker" ? "worker" : "scan",
+    mode: layout,
     scope: ".",
     status: "running",
     ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
@@ -222,9 +174,10 @@ export function draftFixture(root: string, layout: Layout) {
     findings: DraftFixture["findings"],
     options: Pick<DraftFixture, "complete"> = {},
   ) => ({ ...draft({}, options.complete), findings });
-  const workerIdentities = layout === "worker" ? new Set<string>() : undefined;
   const write = (input: unknown) =>
-    recordCodexSecurityScanDraft(context, input, workerIdentities);
+    layout === "worker"
+      ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
+      : recordCodexSecurityScanDraft(context, input);
   return {
     root,
     context,
@@ -246,7 +199,7 @@ export function draftFixture(root: string, layout: Layout) {
       options?: Pick<DraftFixture, "complete">,
     ) => write(findingsDraft(findings, options)),
     checkpoint: (input: unknown) =>
-      saveScanDraftCheckpoint(context, input, false),
+      draftApi.saveScanDraftCheckpoint(context, input, false),
     read: async () =>
       layout === "worker"
         ? (await readJson(root, "result.json")).reviewState
@@ -291,6 +244,7 @@ export const surfaceDisposition = ({
   disposition: string;
 }) => ({ id, disposition });
 
+/** Stop after the admitted raw checkpoint and before the projected checkpoint. */
 export async function interruptDraftAfterRaw(action: () => Promise<unknown>) {
   const rename = fs.rename;
   let checkpoints = 0;

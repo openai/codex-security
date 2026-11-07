@@ -9,13 +9,13 @@ import os
 import sqlite3
 import subprocess
 import sys
+import uuid
 from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
+from test_workbench_standard_deep_results import deep_scan_fixture, worker_paths
 from workbench_test_support import (
-    fail_deep_scan,
     interrupt_publication,
     read_review_state,
     run_workbench,
@@ -74,6 +74,7 @@ def test_flat_retained_source_name_replays(workbench_db, publication_scan, sourc
 
 def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_path):
     state, home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
+    environment = {"CODEX_HOME": str(home)}
     contract = tmp_path / "contract"
     contract.mkdir()
     write_completed_contract(contract, scan_id, target, relative_path="app.py")
@@ -92,22 +93,41 @@ def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_p
     workers = []
     for accepted in (True, False):
         name = "accepted" if accepted else "interrupted"
-        worker_id, result = accepted_standard_worker(state, home, scan_dir, scan_id, name=name)
-        output = result.parent
+        prompt, output, result = worker_paths(scan_dir, name)
+        worker_id = str(uuid.uuid4())
+        worker_args = (
+            "upsert-deep-scan-worker",
+            "--scan-id",
+            scan_id,
+            "--worker-id",
+            worker_id,
+            "--kind",
+            "discovery",
+            "--prompt-path",
+            str(prompt),
+            "--artifact-dir",
+            str(output),
+            "--attempt",
+            "1",
+        )
+        run_workbench(state, *worker_args, "--status", "running", environment=environment)
         current = copy.deepcopy(finding)
         current["identity"]["anchor"] = name
         current["extensions"] = {"candidateId": name}
         draft = {"scanId": scan_id, "complete": True, "findings": [current], "coverage": coverage}
         result.write_text(json.dumps(draft))
         write_checkpoint(output / "checkpoints", draft)
-        if not accepted:
-            # This worker stopped before its final result was accepted.
-            with sqlite3.connect(state / "workbench.sqlite3") as connection:
-                connection.execute(
-                    "UPDATE deep_scan_workers SET status = 'canceled', result_manifest_path = NULL "
-                    "WHERE id = ?",
-                    (worker_id,),
-                )
+        if accepted:
+            run_workbench(
+                state,
+                *worker_args,
+                "--status",
+                "succeeded",
+                "--result-manifest-path",
+                str(result),
+                environment=environment,
+            )
+        else:
             rejected = {
                 **draft,
                 "complete": False,
@@ -130,19 +150,18 @@ def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_p
             os.utime(pointer, ns=(observed, observed))
         workers.append(worker_id)
 
-    fail_deep_scan(
-        state, home, scan_id, message="Original worker failure.", deep_status="interrupted"
-    )
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        status = connection.execute(
-            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
-        ).fetchone()[0]
-        worker_statuses = dict(
-            connection.execute(
-                "SELECT id, status FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
-            )
-        )
-    assert status == "interrupted"
+    stopped = run_workbench(
+        state,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Original worker failure.",
+        "--deep-status",
+        "interrupted",
+        environment=environment,
+    )["deepScan"]
+    assert stopped["status"] == "interrupted"
     scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
     assert scan["findingCount"] == 1
     findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
@@ -155,7 +174,7 @@ def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_p
         for item in retained_coverage["surfaces"]
     )
     assert scan["failureMessage"] == "Original worker failure."
-    assert worker_statuses == {
+    assert {worker["id"]: worker["status"] for worker in stopped["workers"]} == {
         workers[0]: "succeeded",
         workers[1]: "canceled",
     }
@@ -400,9 +419,11 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
         for name, contents in original_outputs.items()
     )
     original_sources = row["retained_source_digests_json"]
-    original_run = workbench_db.execute(
-        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
-    ).fetchone()
+    original_run = dict(
+        workbench_db.execute(
+            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+        ).fetchone()
+    )
     if head_change == "replaced":
         save_disposition(scan, result.parent, "reported")
     elif head_change == "removed":
@@ -423,9 +444,11 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["preservedCheckpointHeads"] == expected_heads
     assert (
-        workbench_db.execute(
-            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
-        ).fetchone()
+        dict(
+            workbench_db.execute(
+                "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+            ).fetchone()
+        )
         == original_run
     )
 
@@ -2649,7 +2672,9 @@ def test_legacy_retained_heads_survive_loss_after_terminal_output(
     child_program = """
 import json, os, runpy, sqlite3, sys
 from argparse import Namespace
+from types import SimpleNamespace
 api = runpy.run_path(sys.argv[1], run_name="legacy_stopped_publication_loss")
+api["deep_scan"].configure(SimpleNamespace(**{**api, "preserve_stopped_results": api["preserve_stopped_results_after_transition"]}))
 saved = api["saved_results"]
 write = saved._write_prepared_scan_finalization
 def lose_process(*args, **kwargs):

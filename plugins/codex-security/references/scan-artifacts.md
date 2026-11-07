@@ -30,11 +30,13 @@ Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in 
 
 ## Finding Discovery (Phase 2) Paths
 
-### Deep And Workbench-Backed Diff Discovery
+### Compact Deep And Workbench-Backed Diff Discovery
 
 Workbench-owned Standard scans submit findings and coverage through `record_codex_security_scan_draft`; SDK-owned Standard scans write unsealed canonical files directly. Workbench-backed diff scans use the compact artifacts described below.
 
-Deep child scans retain their sealed manifest and findings. The parent saves its merged manifest and findings, accepted child evidence, and checkpoints under its scan directory.
+Deep Scan runs Standard audits. Each worker saves findings and pending review work with `complete: false`, then submits its final result through `record_codex_security_scan_draft`. Worker checkpoints survive retries, cancellation and failure.
+
+After each batch the host compares the repairs described in the reports. It checks disputed pairs that share an assigned repair, or cite overlapping code when a repair could not be assigned. It merges such a pair only when one narrow edit covers both reports in full and each supplies supporting code. A finding with an additional faulty operation or insufficient evidence stays separate. Each original finding and its citations stay in the saved union. The host records comparison failures and keeps unresolved reports. It writes the parent’s unsealed `scan-manifest.json` and `findings.json` with the accepted results and their review state. If the deadline arrives before a worker finishes, the parent retains the reason and any saved findings or pending review. See `scan-contract.md` for field definitions.
 
 - A workbench-backed diff scan records all candidates once with `record_codex_security_discovery_candidates({ scanId, candidates })` and reads the canonical candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
   - The writer validates candidates against assigned source paths, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values.
@@ -105,7 +107,7 @@ The current manifest stores additional excluded paths in `scan.review.excludedPa
 
 ### Draft submission and retrieval
 
-Workbench-owned Standard scans and workbench-backed diff scans submit drafts through `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`. Deep child scans retain their sealed Standard artifacts. The shared runner merges their results and finalizes the parent artifacts. SDK-owned Standard scans write unsealed manifest and findings files in the SDK-provided scan directory.
+Workbench-owned Standard scans and workbench-backed diff scans submit drafts through `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`. Bound Deep workers submit their findings and review state through the same tool. The Deep coordinator writes the aggregated parent draft. SDK-owned Standard scans write unsealed manifest and findings files in the SDK-provided scan directory.
 
 For Deep, workbench-backed diff, or explicitly requested Standard completed results, call `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`.
 

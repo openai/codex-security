@@ -17,14 +17,15 @@ from typing import Any
 
 import pytest
 from test_workbench_db import HEAD_CHANGED_WARNING
+from test_workbench_deep_scan import begin_target_scan
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
-    begin_legacy_scan,
     fail_scan,
     get_scan,
     initialize_git_repository,
     load_script,
-    mark_deep_aggregate_ready,
+    mark_deep_coordinator_succeeded,
+    resume_deep_scan,
     run_workbench,
     scan_command,
     set_triage,
@@ -34,48 +35,7 @@ from workbench_test_support import (
 )
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
-
-
 FINALIZER = SCRIPT.with_name("finalize_scan_contract.py")
-
-
-def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_api) -> None:
-    timestamps = [f"2026-01-01T00:00:0{index}Z" for index in range(1, 4)]
-    with sqlite3.connect(":memory:") as connection:
-        connection.row_factory = sqlite3.Row
-        connection.executescript(
-            "CREATE TABLE scans (id TEXT, started_at TEXT, parent_scan_role TEXT);"
-            "CREATE TABLE finding_occurrences (id TEXT, scan_id TEXT, finding_id TEXT, title TEXT);"
-            "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, "
-            "before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);"
-        )
-        connection.executemany(
-            "INSERT INTO scans VALUES (?, ?, ?)",
-            [
-                ("parent", timestamps[0], None),
-                ("child", timestamps[1], "deep_pass"),
-                ("rerun", timestamps[2], None),
-            ],
-        )
-        connection.executemany(
-            "INSERT INTO finding_occurrences VALUES (?, ?, 'stable', 'Synthetic finding')",
-            [("p", "parent"), ("c", "child"), ("c2", "child"), ("r", "rerun")],
-        )
-        connection.executemany(
-            "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'Confirmed')",
-            [("parent", "child", "p", "c"), ("child", "rerun", "c", "r")],
-        )
-        matches = workbench_api["scan_history"].finding_matches
-        for occurrence, scan_id, started in (
-            ("p", "parent", timestamps[0]),
-            ("r", "rerun", timestamps[2]),
-        ):
-            rows, known_since, known_scans = matches(connection, occurrence, scan_id, started)
-            assert {row["scanId"] for row in rows} == ({"parent", "rerun"} - {scan_id})
-            assert known_since == timestamps[0]
-            assert known_scans == ["parent", "rerun"]
-        rows, _, _ = matches(connection, "c", "child", timestamps[1])
-        assert {row["occurrenceId"] for row in rows} == {"p", "c2", "r"}
 
 
 @pytest.mark.parametrize("complete", [False, True])
@@ -265,7 +225,8 @@ def create_cli_scan(
     if not complete:
         return launched
     if mode == "deep":
-        mark_deep_aggregate_ready(state_dir, launched["scanId"], scan_dir)
+        resume_deep_scan(state_dir, launched["scanId"], "thread-scan-history")
+        mark_deep_coordinator_succeeded(state_dir, launched["scanId"], scan_dir)
 
     coverage_mode = (
         "scoped_path" if paths else "deep_repository" if mode == "deep" else "repository"
@@ -318,129 +279,6 @@ def create_cli_scan(
         completion.extend(("--cost-json", json.dumps(cost)))
     run_workbench(state_dir, *completion)
     return launched
-
-
-def insert_scan(
-    connection: sqlite3.Connection,
-    *,
-    workspace_id: str,
-    scan_id: str,
-    mode: str,
-    status: str,
-    phase: str,
-    timestamp: str,
-    seal: str | None = None,
-    failure: str | None = None,
-    canceled: bool = False,
-) -> None:
-    connection.execute(
-        """
-        INSERT INTO scans (
-            id, workspace_id, target_path, target_revision, scope, mode,
-            scan_dir, status, phase, handoff_status, failure_message,
-            started_at, completed_at, created_at, updated_at, canceled_at,
-            seal_manifest_digest
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            scan_id,
-            workspace_id,
-            "/tmp/target",
-            "fixture-revision",
-            ".",
-            mode,
-            f"/tmp/scans/{scan_id}",
-            status,
-            phase,
-            "delivered",
-            failure,
-            timestamp,
-            timestamp if status != "running" else None,
-            timestamp,
-            timestamp,
-            timestamp if canceled else None,
-            seal,
-        ),
-    )
-
-
-def test_finding_history_work_does_not_grow_with_unrelated_scans(workbench_db, workbench_api):
-    timestamps = [f"2026-01-01T00:00:0{index}Z" for index in range(5)]
-    connection = workbench_db
-    connection.execute(
-        "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('history', '0', '0')"
-    )
-
-    def add_scan(scan_id, timestamp):
-        insert_scan(
-            connection,
-            workspace_id="history",
-            scan_id=scan_id,
-            mode="standard",
-            status="complete",
-            phase="reporting",
-            timestamp=timestamp,
-        )
-
-    connection.execute(
-        "INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) "
-        "VALUES ('shared', 'shared', 'synthetic', 'fixture', '0', '0')"
-    )
-    for index, scan_id in enumerate(("before", "selected", "after", "hidden")):
-        add_scan(scan_id, timestamps[index])
-        connection.execute(
-            "INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity, "
-            "confidence, remediation, created_at) "
-            "VALUES (?, 'shared', ?, 'Fixture', 'Synthetic evidence', 'high', 'high', 'Fix', '0')",
-            (scan_id, scan_id),
-        )
-    connection.execute(
-        "UPDATE scans SET parent_scan_id = 'before', parent_scan_role = 'deep_pass' "
-        "WHERE id IN ('selected', 'hidden')"
-    )
-    connection.execute("UPDATE scans SET parent_scan_id = 'before' WHERE id = 'after'")
-    for before, after in (("before", "selected"), ("selected", "after")):
-        connection.execute(
-            "INSERT INTO scan_comparisons "
-            "(before_scan_id, after_scan_id, result_json, created_at, updated_at) "
-            "VALUES (?, ?, '{}', '0', '0')",
-            (before, after),
-        )
-        connection.execute(
-            "INSERT INTO scan_comparison_matches "
-            "(before_scan_id, after_scan_id, before_occurrence_id, after_occurrence_id, reason) "
-            "VALUES (?, ?, ?, ?, 'Synthetic confirmed match')",
-            (before, after, before, after),
-        )
-
-    def measure():
-        instructions = 0
-
-        def step():
-            nonlocal instructions
-            instructions += 1
-            return 0
-
-        connection.set_progress_handler(step, 1)
-        try:
-            result = workbench_api["scan_history"].finding_matches(
-                connection, "selected", "selected", timestamps[1]
-            )
-        finally:
-            connection.set_progress_handler(None, 0)
-        return result, instructions
-
-    # Count executed SQLite instructions, independent of machine speed or load.
-    expected, original_work = measure()
-    matches, first, bounds = expected
-    assert [match["scanId"] for match in matches] == ["after", "before"]
-    assert first == timestamps[0]
-    assert bounds == ["before", "after"]
-    for index in range(1024):
-        add_scan(f"unrelated-{index}", timestamps[4])
-    observed, expanded_work = measure()
-    assert observed == expected
-    assert expanded_work <= original_work
 
 
 @pytest.mark.parametrize("artifact", ["findings.json", "coverage.json", "scan-manifest.json"])
@@ -673,10 +511,10 @@ def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_
     repository, other_repository = tmp_path / "repository", tmp_path / "other-repository"
     repository.mkdir()
     other_repository.mkdir()
-    scan = begin_legacy_scan(
+    scan = begin_target_scan(
         state_dir, codex_home, repository, tmp_path / "results", thread_id="desktop-owner"
     )["deepScan"]
-    other = begin_legacy_scan(
+    other = begin_target_scan(
         state_dir, codex_home, other_repository, tmp_path / "results", thread_id="other-owner"
     )["deepScan"]
     workers = [

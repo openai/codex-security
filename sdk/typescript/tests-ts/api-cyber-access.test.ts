@@ -79,19 +79,7 @@ test.each([
       profiles: { selected: { daybreak: true } },
     },
   ],
-  [
-    "daybreak_blue",
-    {
-      profile: "selected",
-      features: {
-        api_key_cyber_access_programs: true,
-        api_key_model_discovery: false,
-      },
-      profiles: {
-        selected: { features: { api_key_cyber_access_programs: false } },
-      },
-    },
-  ],
+  ["daybreak_blue", { features: { api_key_cyber_access_programs: false } }],
   [
     "daybreak_blue",
     {
@@ -108,7 +96,7 @@ test.each([
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
     await mkdir(repository);
-    await mkdir(codexHome, { mode: 0o700 });
+    await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const runtime = {
       ...preparedRuntime(codexHome),

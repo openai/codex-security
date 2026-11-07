@@ -15,11 +15,9 @@ from typing import Any
 
 from finalize_scan_contract import (
     ContractError,
-    MissingScanLocalFileError,
     _read_scan_local_json,
     _read_scan_local_json_with_metadata,
     manifest_is_sealed,
-    open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
 from review_state import review_state, uses_legacy_review
@@ -48,27 +46,6 @@ def _encoded(value: Any) -> bytes:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_encoded(value)).hexdigest()
-
-
-def capture_legacy_review(
-    scan_dir: Path, scan_id: str, created_paths: set[str] | None
-) -> tuple[str, str, dict[str, Any], int] | None:
-    # A stopped legacy writer may have published only its review sidecar.
-    try:
-        review, _, metadata = _read_scan_local_json_with_metadata(
-            scan_dir, "coverage.json", "Saved scan coverage"
-        )
-    except (ContractError, OSError, ValueError):
-        return None
-    if review.get("scanId", scan_id) != scan_id:
-        return None
-    draft = {"scanId": scan_id, "findings": [], "reviewState": review, "complete": False}
-    digest = _digest(draft)
-    relative = f"checkpoints/{digest}.json"
-    if created_paths is not None and not os.path.lexists(scan_dir / relative):
-        created_paths.add(relative)
-    write_scan_local_bytes(scan_dir, relative, _encoded(draft))
-    return relative, digest, draft, metadata.st_mtime_ns
 
 
 def _source_digests(value: Any, error: str) -> dict[str, str]:
@@ -150,11 +127,10 @@ def _children(scan_dir: Path, relative: str) -> list[str]:
 
 
 def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
-    names = set(_children(scan_dir, directory))
-    if directory == "checkpoints":
-        names.update(_children(scan_dir, "checkpoints/pending"))
     return [
-        f"{directory}/{name}" for name in sorted(names) if re.fullmatch(r"[0-9a-f]{64}\.json", name)
+        f"{directory}/{name}"
+        for name in _children(scan_dir, directory)
+        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
     ]
 
 
@@ -255,26 +231,9 @@ def _read_saved_result(
     kind: str | None = None,
     normalize_review: bool = True,
 ) -> tuple[dict[str, Any], str, int]:
-    try:
-        draft, _, metadata = _read_scan_local_json_with_metadata(
-            scan_dir, relative, "Saved scan checkpoint"
-        )
-    except MissingScanLocalFileError as exc:
-        if not re.fullmatch(r"checkpoints/[0-9a-f]{64}\.json", relative):
-            raise
-        name = Path(relative).name
-        descriptor = open_scan_local_file_descriptor(
-            scan_dir, f"checkpoints/pending/{name}", "Pending scan checkpoint"
-        )
-        with os.fdopen(descriptor, "rb") as handle:
-            staged = handle.read().decode("utf-8")
-        if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.checkpoint\.json", staged):
-            raise ContractError("Pending scan checkpoint does not name a staged draft") from exc
-        draft, contents, metadata = _read_scan_local_json_with_metadata(
-            scan_dir, staged, "Pending scan checkpoint"
-        )
-        if hashlib.sha256(contents).hexdigest() != Path(name).stem:
-            raise ContractError("Staged checkpoint changed after publication failed") from exc
+    draft, _, metadata = _read_scan_local_json_with_metadata(
+        scan_dir, relative, "Saved scan checkpoint"
+    )
     directory = _checkpoint_head_directory(relative)
     if directory is not None:
         checkpoint = draft.get("checkpoint")

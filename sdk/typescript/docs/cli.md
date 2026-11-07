@@ -159,7 +159,7 @@ In the SDK, use `new CodexSecurity({ codexOverrides: { daybreak: true } })`.
 In project files, set `daybreak: true` inside the `codex` mapping. Use `false`
 to explicitly turn it off.
 The setting carries through saved scan recipes, resumed scans, Deep Scan
-discovery and reducer workers, and `scan --patch`. Standalone `validate`,
+discovery workers, and `scan --patch`. Standalone `validate`,
 `patch`, and `verify-fix` accept the same `--codex daybreak=true` override.
 Threads created by these commands retain the setting when resumed in Codex.
 Scans use isolated configuration, so set it on the CLI, SDK client, or project
@@ -169,8 +169,7 @@ For the plugin inside Codex, use the desktop Daybreak toggle or `/daybreak` in
 an interactive CLI session. For headless Codex, use `codex exec -c daybreak=true`
 or set top-level `daybreak = true` in the configuration loaded by the runner.
 Deep Scan inherits the active turn's effective access program from its saved
-Codex session, including an explicit Standard selection. Discovery and reducer
-workers retain that selection when resumed. If the host does not supply a
+Codex session, including an explicit Standard selection. Discovery workers retain that selection when resumed. If the host does not supply a
 persisted turn context, workers use their runner configuration; CLI and SDK scans
 use the explicit scan settings above.
 
@@ -198,7 +197,7 @@ codex-security scan /path/to/repository \
 In the SDK, select your model through `codexOverrides.model` and pass
 `auth: "api-key"` and `cyberAccessProgram: "daybreak_blue"` in the scan options.
 Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan.
-The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
+The selection reaches discovery workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
 
 `access_programs.cyber` is a Responses API field. Use `--cyber-access-program`
@@ -906,11 +905,18 @@ codex-security scan . --mode deep --workers 2 --subagents 0 \
   --stop-after-no-new 3 --max-discovery-runs 10 --max-time 90
 ```
 
-For `scan --mode deep`, `--workers` controls discovery concurrency and
-`--subagents` controls subagents per worker. `--stop-after-no-new`,
-`--max-discovery-runs`, and `--max-time` stop discovery by novelty, count,
-or duration. At the deadline, discovery stops; the scan then combines and returns
-completed findings.
+Deep Scan repeats Standard scans in batches of up to `--workers`, with
+`--subagents` per scan. Workers can share what they are investigating, ask each
+other to check a source location, and reply while their audits are running. Each
+worker verifies the evidence it reports. Deep Scan merges each completed batch in launch order.
+It uses source locations, cited code and weakness descriptions to match repeated
+findings. Each group keeps its first description, all reported locations, and
+the original observations. Later batches receive the titles and primary
+locations of retained findings so workers can investigate other reachable paths.
+`--stop-after-no-new` counts consecutive
+completed scans that added no findings. `--max-discovery-runs` caps the total
+number started, including failures. `--max-time` stops discovery and returns
+the findings from completed scans.
 
 For TypeScript, see the [SDK Deep Scan example](../README.md#configure-deep-scans).
 
@@ -920,6 +926,8 @@ that `subagents` can be zero. Discovery time accepts positive fractional minutes
 its default and maximum are 5760 minutes (96 hours). Unlike Standard's
 advisory allowance, the Deep discovery limit is enforced. Resuming a
 Deep scan keeps its original deadline; rerunning starts a new scan.
+If the deadline expires before any source review completes, the saved report
+and scan manifest record that limitation.
 `--max-time-hours`, SDK `maxTimeHours`, project `scan.deep.max_time_hours`, and
 legacy TOML `deep_scan.max_time_hours` remain deprecated Deep-only aliases in
 hours. Explicit settings override lower-priority configuration across units.
@@ -1041,7 +1049,7 @@ starts, outcomes, duration, and usage coverage; see
 
 Disable Codex usage analytics and built-in metrics with
 `--codex analytics.enabled=false`. The setting carries into `scan --patch`,
-patch-risk assessment, and Deep Scan discovery and reducer workers, including
+patch-risk assessment, and Deep Scan discovery workers, including
 resumed workers. Selected-profile settings take precedence over root settings.
 Explicit OpenTelemetry settings also carry into scan patches and Deep Scan
 workers, including exporter choices and prompt-logging controls.
@@ -1095,14 +1103,7 @@ command shims such as `codex.cmd` fall back to the bundled executable.
 Python lookup: `--python` on commands that expose interpreter selection or SDK
 `pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
-works on Windows).
-
-`CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage. The native MCP
-host preserves the Python workbench's path selection: relative values resolve
-from the plugin directory, whitespace is part of the path, and an empty value
-uses the default. Home prefixes, including `~user` on POSIX, expand before
-physical path resolution. The host, scan workers, and execution locks share
-that selected location.
+works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
 
 ### Troubleshooting
 
@@ -2109,14 +2110,6 @@ identifier, and post-scan prompt; older records cannot reconstruct missing value
 A failed connection leaves the scan available for another resume attempt.
 Compatible scans can resume after plugin updates; sealed results keep their
 original producer version. Unsupported artifacts are rejected without rewriting them.
-
-Unsealed scans from the retired Deep Scan runtime cannot resume; start a fresh
-scan or use the prior release to finish them. Saved drafts must match the current
-schema. The current runtime reads parent drafts and ordinary scan checkpoints;
-legacy worker or reducer fragments and historical checkpoints without a pending
-checkpoint index are not imported automatically. Older unreleased database
-snapshots that identified child scans by artifact paths are no longer migrated.
-Existing reports remain readable, and rejection preserves saved state and files.
 
 For bulk scans, use [bulk recovery](#recovering-failed-or-interrupted-bulk-scans)
 to update campaign receipts. Individual resume does not update `results.jsonl`.

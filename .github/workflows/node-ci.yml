@@ -190,7 +190,7 @@ jobs:
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
     needs: &sdk-shard-needs [classify-changes, package, static-checks]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 30 || 22 }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -203,7 +203,7 @@ jobs:
         name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.4.4"
+          bun-version-file: .bun-version
       - *install-dependencies
       - &download-package-for-this-commit
         name: Download package for this commit
@@ -228,6 +228,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: ${{ needs.classify-changes.outputs.plugin-tests-required }}
         run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 --seed=${{ github.run_number }} ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()
@@ -313,9 +314,7 @@ jobs:
         with:
           cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Install dependencies
-        run: |
-          pnpm --dir sdk/typescript install --frozen-lockfile
-          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Install ripgrep
         run: .github/scripts/install-ripgrep.sh
       - *download-package-for-this-commit
@@ -348,19 +347,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - name: Checkout plugin and shared SDK source
+      - name: Checkout plugin source without the SDK
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: |
             plugins/codex-security
-            sdk/typescript
             .github/actions/setup-tools
       - *set-up-mcp-tools
       - name: Install plugin dependencies
-        run: |
-          pnpm --dir sdk/typescript install --frozen-lockfile
-          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Build and test the standalone host runtime
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
       - name: Test concurrent native wrapper publication on Windows
@@ -546,14 +542,14 @@ jobs:
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
         run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}
-      - name: Test Deep Scan preflight cleanup on Windows
+      - name: Test Deep Scan worker cleanup and discovery deadlines on Windows
         if: matrix.shard == 2
         working-directory: plugins/codex-security/mcp-app
         env: *windows-shard-env
         run: >-
           node --experimental-strip-types --test --test-reporter=tap
-          --test-name-pattern="^testAbortKillsPreflightChild$"
-          tests/test_deep_scan_permission_profile_preflight.ts
+          --test-name-pattern="^(testAbortKillsPreflightChild|testDiscoveryDeadlineReducesSingleBufferedFinding)$"
+          tests/test_deep_scan_permission_profile_preflight.ts tests/test_deep_scan_coordinator.ts
       - name: Test MCP helper paths on Windows
         if: matrix.shard == 1
         working-directory: plugins/codex-security/mcp-app

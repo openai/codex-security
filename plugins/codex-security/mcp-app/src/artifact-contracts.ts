@@ -231,7 +231,7 @@ const draft_finding = z.looseObject({
     .looseObject({
       reportPath: pattern(
         z.string(),
-        "^findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md$",
+        "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$",
       ),
     })
     .optional(),

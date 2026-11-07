@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parse } from "smol-toml";
-import { CodexSecurityError } from "./errors.js";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
+import { parse } from "smol-toml";
 import { configuredCodexHome } from "./auth.js";
-import { environmentEntry, expandHomePath } from "./codex-home.js";
+import { CodexSecurityError } from "./errors.js";
 import {
   resolveCodexProfile,
   deepMerge,
@@ -124,25 +123,11 @@ export async function createProviderProfile(
   return { name, path, cleanup: () => rm(path, { force: true }) };
 }
 
-/** Preserve credential-bearing replay tables outside readable scan history. */
-export async function createReplayProfile(
-  codexHome: string,
-  config: JsonObject,
-): Promise<ProviderProfile> {
-  const resolved = resolveCodexProfile(config);
-  const saved: JsonObject = {};
-  for (const key of ["model_providers", "mcp_servers"]) {
-    if (isRecord(resolved[key])) saved[key] = resolved[key] as JsonObject;
-  }
-  return createProviderProfile(codexHome, saved, { replay: true });
-}
-
 /** Restore private replay settings from the credential home, never scan artifacts. */
 export async function restoreProviderProfile(
   config: JsonObject,
   profile: unknown,
   environment: ProcessEnvironment,
-  kind: "provider" | "replay" = "provider",
 ): Promise<JsonObject> {
   if (profile === undefined) return config;
   if (
@@ -154,17 +139,12 @@ export async function restoreProviderProfile(
     )
   ) {
     throw new CodexSecurityError(
-      `The saved scan contains an invalid ${kind} profile.`,
+      "The saved scan contains an invalid provider profile.",
     );
   }
-  const requestedHome = environmentEntry(environment, "CODEX_HOME");
   const codexHome =
     profile["home"] === "ambient"
-      ? await realpath(
-          requestedHome?.trim()
-            ? expandHomePath(requestedHome, environment)
-            : configuredCodexHome(environment),
-        )
+      ? configuredCodexHome(environment)
       : codexSecurityCredentialHome(environment);
   if (profile["home"] === "managed")
     await requireSecureCredentialHome(codexHome);
@@ -197,14 +177,6 @@ export async function restoreProviderProfile(
       ? { model_providers: providers as JsonObject | null }
       : {}),
   };
-}
-
-export function restoreReplayProfile(
-  config: JsonObject,
-  profile: unknown,
-  environment: ProcessEnvironment,
-): Promise<JsonObject> {
-  return restoreProviderProfile(config, profile, environment, "replay");
 }
 
 /** The pinned SDK lacks the native CLI's private profile-file option. */
@@ -281,40 +253,6 @@ export async function preflightReadOnlyProfileCodex(
     });
   });
   return { permissionProfileId, configOverrides };
-}
-
-/** Older workers must inherit the same effective provider as the parent scan. */
-export async function legacyWorkerUsesScanProvider(
-  command: CodexCommand,
-  environment: Record<string, string>,
-  cwd: string,
-  modelProvider: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  const preflight = await nativePermissionPreflight();
-  const env = bundledCodexSdkEnvironment(command.command, environment);
-  return await withCodexPreflightLock(env, signal, async () => {
-    const options = {
-      codexPath: executablePathForSpawn(command.command),
-      commandArgs: command.args,
-      cwd,
-      env,
-      signal: signal ?? new AbortController().signal,
-      context: "helper",
-    };
-    const worker = await preflight.readDeepScanRuntimeConfig({
-      ...options,
-      configOverrides: [],
-    });
-    const parent = await preflight.readDeepScanRuntimeConfig({
-      ...options,
-      configOverrides: [`model_provider=${JSON.stringify(modelProvider)}`],
-    });
-    return (
-      (worker.model_provider ?? "openai") ===
-      (parent.model_provider ?? "openai")
-    );
-  });
 }
 
 export async function withCodexPreflightLock<T>(

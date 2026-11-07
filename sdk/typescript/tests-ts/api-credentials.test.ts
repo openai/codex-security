@@ -5,31 +5,33 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { rejecting } from "./support/errors.js";
+import { requestMetadata } from "./support/request-metadata.js";
 import { nodeCommand } from "./support/shell.js";
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod } from "node:fs/promises";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml, stringify } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { restoreProviderProfile } from "../src/provider-profile.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
-import { PLUGIN_ROOT, copyCredentialTestPlugin } from "./plugin-root.js";
-import { mockWorkbench, TestClient } from "./support/api-client.js";
-import { codexFactory } from "./support/api-events.js";
 import {
+  copyCompletedScan,
+  copyCredentialTestPlugin,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
+import { mockWorkbench, TestClient } from "./support/api-client.js";
+import {
+  codexFactory,
   completedEvents,
-  createApiTestFixtures,
   preparedRuntime,
 } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
@@ -303,104 +305,94 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => interpreter!,
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              const configPath = options.env?.["CODEX_SECURITY_CONFIG_PATH"];
-              const codexHome = options.env?.["CODEX_HOME"];
-              expect(typeof configPath).toBe("string");
-              expect(typeof codexHome).toBe("string");
-              capturedConfigPath = configPath;
-              capturedCodexHome = codexHome;
-              expect(configPath!.startsWith(`${codexHome!}/`)).toBe(false);
-              expect(
-                parseToml(
-                  await readFile(join(codexHome!, "config.toml"), "utf8"),
-                ),
-              ).toMatchObject({
-                approval_policy: "never",
-                permissions: {
-                  codex_security_scan: {
-                    filesystem: {
-                      ":root": "read",
-                      ":workspace_roots": "write",
-                      [join(
-                        ambientHome,
-                        "state",
-                        "plugins",
-                        "codex-security",
-                        "codex-home",
-                      )]: { ".": "deny" },
-                    },
+        createCodex: (options: CodexOptions) =>
+          codexFactory(async function runStreamed() {
+            const configPath = options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+            const codexHome = options.env?.["CODEX_HOME"];
+            expect(typeof configPath).toBe("string");
+            expect(typeof codexHome).toBe("string");
+            capturedConfigPath = configPath;
+            capturedCodexHome = codexHome;
+            expect(configPath!.startsWith(`${codexHome!}/`)).toBe(false);
+            expect(
+              parseToml(
+                await readFile(join(codexHome!, "config.toml"), "utf8"),
+              ),
+            ).toMatchObject({
+              approval_policy: "never",
+              permissions: {
+                codex_security_scan: {
+                  filesystem: {
+                    ":root": "read",
+                    ":workspace_roots": "write",
+                    [join(
+                      ambientHome,
+                      "state",
+                      "plugins",
+                      "codex-security",
+                      "codex-home",
+                    )]: { ".": "deny" },
                   },
                 },
-              });
-              const codexConfig = await readFile(
-                join(codexHome!, "config.toml"),
+              },
+            });
+            const codexConfig = await readFile(
+              join(codexHome!, "config.toml"),
+              "utf8",
+            );
+            expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
+            expect(codexConfig).not.toContain("model_reasoning_summary");
+            expect(codexConfig).not.toContain("show_raw_agent_reasoning");
+            expect(options.config).not.toHaveProperty("projects");
+            expect(options.config).not.toHaveProperty("permissions");
+            expect(options.config).toMatchObject({
+              default_permissions: "codex_security_scan",
+              allow_login_shell: false,
+              model_reasoning_summary: "detailed",
+              show_raw_agent_reasoning: true,
+              windows: { sandbox: "elevated" },
+              mcp_servers: {
+                private: {
+                  command: "echo",
+                  env: { PRIVATE_TOKEN: "RUNTIME_MCP_SECRET" },
+                },
+              },
+              shell_environment_policy: {
+                set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
+              },
+            });
+            expect(requestMetadata(options.configOverrides)).toMatchObject({
+              request_trace: "preserve-configured-metadata",
+              codex_security_surface: "sdk",
+            });
+            if (process.platform !== "win32") {
+              expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
+            }
+            const serialized = await readFile(configPath!, "utf8");
+            expect(serialized).not.toContain("RUNTIME_MCP_SECRET");
+            expect(serialized).not.toContain("RUNTIME_SHELL_SECRET");
+            expect(serialized).not.toContain("mcp_servers");
+            expect(serialized).not.toContain("shell_environment_policy");
+            expect(parseToml(serialized)).toMatchObject({
+              projects: {
+                [repository]: { trust_level: "trusted" },
+              },
+            });
+            await copyCompletedScan(root);
+            const manifestPath = join(scanDir, "scan-manifest.json");
+            const manifest = JSON.parse(
+              await readFile(manifestPath, "utf8"),
+            ) as { scan: { producer: { version: string } } };
+            const pluginManifest = JSON.parse(
+              await readFile(
+                join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
                 "utf8",
-              );
-              expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
-              expect(parseToml(codexConfig)).toMatchObject({
-                model_reasoning_summary: "detailed",
-                show_raw_agent_reasoning: true,
-              });
-              expect(options.config).not.toHaveProperty("projects");
-              expect(options.config).not.toHaveProperty("permissions");
-              expect(options.config).toMatchObject({
-                default_permissions: "codex_security_scan",
-                allow_login_shell: false,
-                model_reasoning_summary: "detailed",
-                show_raw_agent_reasoning: true,
-                windows: { sandbox: "elevated" },
-                mcp_servers: {
-                  private: {
-                    command: "echo",
-                    env: { PRIVATE_TOKEN: "RUNTIME_MCP_SECRET" },
-                  },
-                },
-                shell_environment_policy: {
-                  set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
-                },
-              });
-              expect(
-                parseToml(options.configOverrides!.join("\n")),
-              ).toMatchObject({
-                responses_api_metadata: {
-                  request_trace: "preserve-configured-metadata",
-                  codex_security_surface: "sdk",
-                },
-              });
-              if (process.platform !== "win32") {
-                expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
-              }
-              const serialized = await readFile(configPath!, "utf8");
-              expect(serialized).not.toContain("RUNTIME_MCP_SECRET");
-              expect(serialized).not.toContain("RUNTIME_SHELL_SECRET");
-              expect(serialized).not.toContain("mcp_servers");
-              expect(serialized).not.toContain("shell_environment_policy");
-              expect(parseToml(serialized)).toMatchObject({
-                projects: {
-                  [repository]: { trust_level: "trusted" },
-                },
-              });
-              await copyCompletedScan(root);
-              const manifestPath = join(scanDir, "scan-manifest.json");
-              const manifest = JSON.parse(
-                await readFile(manifestPath, "utf8"),
-              ) as { scan: { producer: { version: string } } };
-              const pluginManifest = JSON.parse(
-                await readFile(
-                  join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
-                  "utf8",
-                ),
-              ) as { version: string };
-              manifest.scan.producer.version = pluginManifest.version;
-              await writeFile(manifestPath, JSON.stringify(manifest));
-              return { events: completedEvents() };
-            },
-          }),
-        }),
+              ),
+            ) as { version: string };
+            manifest.scan.producer.version = pluginManifest.version;
+            await writeFile(manifestPath, JSON.stringify(manifest));
+            return { events: completedEvents() };
+          })(),
       },
     );
 
@@ -408,12 +400,6 @@ describe("CodexSecurity orchestration", () => {
       await client.run(repository);
       expect(capturedConfigPath).toBeDefined();
       expect(capturedCodexHome).toBeDefined();
-      const restored = await readFile(
-        join(capturedCodexHome!, "config.toml"),
-        "utf8",
-      );
-      expect(restored).not.toContain("RUNTIME_MCP_SECRET");
-      expect(restored).not.toContain("RUNTIME_SHELL_SECRET");
     } finally {
       await client.close();
     }
@@ -470,78 +456,7 @@ describe("CodexSecurity orchestration", () => {
     expect(runtimeHomes).toEqual([credentialHome, credentialHome]);
   });
 
-  test.each(["error", "empty", "cancel"])(
-    "releases native startup ownership before the first event on %s",
-    async (failure) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const ambientHome = join(root, "ambient-codex-home");
-      const stateDirectory = join(root, "state");
-      const credentialHome = join(stateDirectory, "codex-home");
-      const lock = join(credentialHome, ".codex-security-scan.lock");
-      await mkdir(repository);
-      await mkdir(ambientHome);
-      await writeFile(join(ambientHome, "auth.json"), "{}\n");
-      let startups = 0;
-      for (const index of [0, 1]) {
-        const controller = new AbortController();
-        const startupError = new Error("synthetic startup failure");
-        const client = new TestClient(
-          { pluginPath: PLUGIN_ROOT },
-          {
-            environment: {
-              CODEX_HOME: ambientHome,
-              CODEX_SECURITY_STATE_DIR: stateDirectory,
-            },
-            resolvePluginPython: async () => "/managed/python",
-            prepareOutputDir: async () => {
-              const directory = join(root, `scan-${index}`);
-              await mkdir(directory, { mode: 0o700 });
-              return directory;
-            },
-            repositoryRevision: async () => "deadbeef",
-            createCodex: () => ({
-              startThread: () => ({
-                id: null,
-                async runStreamed() {
-                  expect(existsSync(lock)).toBe(true);
-                  startups += 1;
-                  if (index === 0 && failure === "error") throw startupError;
-                  return {
-                    events: (async function* () {
-                      await Promise.resolve();
-                      if (index === 1)
-                        throw new Error("next native startup reached");
-                      if (failure === "empty") return;
-                      controller.abort(startupError);
-                      throw startupError;
-                    })(),
-                  };
-                },
-              }),
-            }),
-          },
-        );
-        try {
-          const run = client.run(repository, { signal: controller.signal });
-          if (index === 1)
-            await expect(run).rejects.toThrow("next native startup reached");
-          else if (failure === "error")
-            await expect(run).rejects.toBe(startupError);
-          else if (failure === "cancel") {
-            const error = await run.catch((error: unknown) => error);
-            expect(error).toMatchObject({ cause: startupError });
-          } else await expect(run).rejects.toThrow();
-          expect(existsSync(lock)).toBe(false);
-        } finally {
-          await client.close();
-        }
-      }
-      expect(startups).toBe(2);
-    },
-  );
-
-  test("runs parallel ChatGPT scans with isolated ordinary child settings", async () => {
+  test("runs parallel ChatGPT scans with isolated mutable configuration", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const ambientHome = join(root, "ambient-codex-home");
@@ -550,27 +465,14 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(repository);
     await mkdir(ambientHome);
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
-    const controllers = [new AbortController(), new AbortController()];
-    const launches: Array<{
-      index: number;
-      home: string | undefined;
-      directory: string | undefined;
-      before: CodexOptions["config"];
-      after: CodexOptions["config"];
-      sharedConfig: unknown;
-      credentialLockExists: boolean;
-    }> = [];
-    const recipes: Array<{ index: number; mode: string; deepScan?: unknown }> =
-      [];
     let scansStarted = 0;
-    let releaseScans!: () => void;
-    const concurrentScans = new Promise<void>((resolve) => {
-      releaseScans = resolve;
-    });
+    const deepScanConfigPaths = new Set<string>();
+    const concurrentScans = Promise.withResolvers<void>();
+
     const clients = await Promise.all(
       [0, 1].map(async (index) => {
         const scanDir = join(root, `parallel-scan-${index}`);
-        let registrations = 0;
+        await mkdir(scanDir, { mode: 0o700 });
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -584,67 +486,51 @@ describe("CodexSecurity orchestration", () => {
               CODEX_SECURITY_STATE_DIR: stateDirectory,
             },
             resolvePluginPython: async () => "/managed/python",
-            prepareOutputDir: async (requested) => {
-              const directory = requested ?? scanDir;
-              await mkdir(directory, { recursive: true, mode: 0o700 });
-              return directory;
-            },
+            prepareOutputDir: async () => scanDir,
             repositoryRevision: async () => "deadbeef",
-            runWorkbench: async (_options, args, input) => {
-              if (args[0] === "list-scans") return { scans: [] };
-              if (args[0] === "get-scan")
-                return { scan: { progress: { status: "running" } } };
-              const result = mockWorkbench(args, input);
-              if (args[0] === "get-scan-feedback")
-                result["scanId"] = args[args.indexOf("--scan-id") + 1]!;
-              if (args[0] === "register-cli-scan") {
-                recipes.push({ index, ...JSON.parse(input!).recipe });
-                result["scanId"] = `scan_parallel_${index}_${++registrations}`;
-              }
-              return result;
+            createCodex: (options: CodexOptions) => {
+              expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
+              const expectedModel =
+                index === 0 ? "gpt-5.6-sol" : "gpt-5.6-terra";
+              expect(options.config?.["model"]).toBe(expectedModel);
+              const deepScanConfigPath =
+                options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+              expect(typeof deepScanConfigPath).toBe("string");
+              deepScanConfigPaths.add(deepScanConfigPath!);
+              return codexFactory(async () => {
+                if (++scansStarted === 2) {
+                  expect(
+                    existsSync(
+                      join(credentialHome, ".codex-security-scan.lock"),
+                    ),
+                  ).toBe(false);
+                  concurrentScans.resolve();
+                }
+                const credentialConfig = parseToml(
+                  await readFile(join(credentialHome, "config.toml"), "utf8"),
+                );
+                expect(credentialConfig["model"]).toBeUndefined();
+                const before = parseToml(
+                  await readFile(deepScanConfigPath!, "utf8"),
+                );
+                expect(before["deep_scan"]).toMatchObject({
+                  workers: index + 2,
+                });
+                await concurrentScans.promise;
+                const after = parseToml(
+                  await readFile(deepScanConfigPath!, "utf8"),
+                );
+                expect(after["deep_scan"]).toMatchObject({
+                  workers: index + 2,
+                });
+                throw new Error("parallel managed scan reached");
+              })();
             },
-            createCodex: (options: CodexOptions) => ({
-              startThread: () => ({
-                id: null,
-                async runStreamed() {
-                  const before = structuredClone(options.config);
-                  const sharedConfig = parseToml(
-                    await readFile(join(credentialHome, "config.toml"), "utf8"),
-                  );
-                  const credentialLockExists = existsSync(
-                    join(credentialHome, ".codex-security-scan.lock"),
-                  );
-                  return {
-                    events: (async function* () {
-                      yield {
-                        type: "thread.started",
-                        thread_id: `parallel-${index}`,
-                      };
-                      if (++scansStarted === 2) releaseScans();
-                      await concurrentScans;
-                      launches.push({
-                        index,
-                        home: options.env?.["CODEX_HOME"],
-                        directory: options.env?.["CODEX_SECURITY_SCAN_DIR"],
-                        before,
-                        after: structuredClone(options.config),
-                        sharedConfig,
-                        credentialLockExists,
-                      });
-                      const interrupted = new Error(
-                        "parallel managed scan reached",
-                      );
-                      controllers[index]!.abort(interrupted);
-                      throw interrupted;
-                    })(),
-                  };
-                },
-              }),
-            }),
           },
         );
       }),
     );
+
     try {
       const results = await Promise.allSettled(
         clients.map((client, index) =>
@@ -652,70 +538,33 @@ describe("CodexSecurity orchestration", () => {
             .run(repository, {
               mode: "deep",
               workers: index + 2,
-              subagents: index,
-              maxDiscoveryRuns: 1,
-              signal: controllers[index]!.signal,
+              auth: index === 0 ? "chatgpt" : "auto",
             })
-            .finally(releaseScans),
+            .finally(concurrentScans.resolve),
         ),
       );
-      for (const result of results) expect(result.status).toBe("rejected");
-      expect(scansStarted).toBe(2);
-      expect(launches).toHaveLength(2);
-      for (const launch of launches) {
-        expect(launch.home).toBe(credentialHome);
-        expect(launch.directory).toBe(
-          join(
-            root,
-            `parallel-scan-${launch.index}`,
-            "artifacts",
-            "deep-scan",
-            "passes",
-            "pass-1",
-          ),
-        );
-        expect(launch.before).toMatchObject({
-          model: launch.index === 0 ? "gpt-5.6-sol" : "gpt-5.6-terra",
-          features: {
-            multi_agent_v2: {
-              max_concurrent_threads_per_session: launch.index + 1,
-            },
-          },
+      for (const result of results) {
+        expect(result).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({
+            message: "parallel managed scan reached",
+          }),
         });
-        expect(launch.after).toEqual(launch.before);
-        expect(launch.sharedConfig).toMatchObject({
-          model: launch.index === 0 ? "gpt-5.6-sol" : "gpt-5.6-terra",
-          default_permissions: "codex_security_scan",
-          features: {
-            multi_agent_v2: {
-              max_concurrent_threads_per_session: launch.index + 1,
-            },
-          },
-        });
-        expect(launch.credentialLockExists).toBe(true);
-        expect(
-          recipes.filter(({ index }) => index === launch.index),
-        ).toMatchObject([
-          {
-            mode: "deep",
-            deepScan: { workers: launch.index + 2, subagents: launch.index },
-          },
-          { mode: "standard" },
-        ]);
       }
-      const restored = parseToml(
-        await readFile(join(credentialHome, "config.toml"), "utf8"),
-      );
-      expect(restored).not.toHaveProperty("model");
-      expect(restored).not.toHaveProperty("features.multi_agent_v2");
       expect(existsSync(credentialHome)).toBe(true);
+      expect(scansStarted).toBe(2);
+      expect(deepScanConfigPaths.size).toBe(2);
+      const pluginConfiguration = JSON.parse(
+        await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+      ) as { mcpServers: Record<string, { env_vars: string[] }> };
       expect(
-        existsSync(join(credentialHome, ".codex-security-scan.lock")),
-      ).toBe(false);
+        pluginConfiguration.mcpServers["codex-security"]?.env_vars.includes(
+          "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+        ),
+      ).toBe(true);
     } finally {
-      releaseScans();
-      controllers.forEach((controller) => controller.abort());
-      await Promise.all(clients.map((client) => client.close()));
+      concurrentScans.resolve();
+      await Promise.all(clients.map(async (client) => await client.close()));
     }
   });
 
@@ -797,79 +646,6 @@ describe("CodexSecurity orchestration", () => {
     expect(existsSync(dedicatedHome)).toBe(true);
   });
 
-  test("keeps the current scan environment when reusing a prepared runtime", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const runtimeHome = join(root, "runtime");
-    await mkdir(repository);
-    await mkdir(runtimeHome, { mode: 0o700 });
-    const environment: Record<string, string | undefined> = {
-      CODEX_HOME: runtimeHome,
-      SYNTHETIC_REMOVED_INPUT: "initial input",
-    };
-    const launches: Array<CodexOptions["env"]> = [];
-    let preparations = 0;
-    let outputs = 0;
-    const runtimeNode = nodeCommand().command;
-    const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
-      {
-        environment,
-        prepareRuntime: async () => {
-          preparations += 1;
-          return {
-            ...preparedRuntime(runtimeHome),
-            environment: {
-              SYNTHETIC_SCAN_SETTING: "prepared default",
-              SYNTHETIC_PREPARATION_ONLY: "prepared setting",
-              SYNTHETIC_REMOVED_INPUT: "initial input",
-              CODEX_MCP_NODE_PATH: runtimeNode,
-            },
-          };
-        },
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => {
-          const directory = join(root, `scan-${++outputs}`);
-          await mkdir(directory, { mode: 0o700 });
-          return directory;
-        },
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options) => {
-          launches.push(structuredClone(options.env));
-          throw new Error("selected environment reached execution");
-        },
-      },
-    );
-    try {
-      await expect(client.run(repository)).rejects.toThrow(
-        "selected environment reached execution",
-      );
-      expect(launches[0]).toMatchObject({
-        SYNTHETIC_SCAN_SETTING: "prepared default",
-        SYNTHETIC_PREPARATION_ONLY: "prepared setting",
-        SYNTHETIC_REMOVED_INPUT: "initial input",
-        CODEX_MCP_NODE_PATH: runtimeNode,
-      });
-
-      environment["SYNTHETIC_SCAN_SETTING"] = "current scan selection";
-      environment["CODEX_MCP_NODE_PATH"] = join(root, "caller-node");
-      delete environment["SYNTHETIC_REMOVED_INPUT"];
-      await expect(client.run(repository)).rejects.toThrow(
-        "selected environment reached execution",
-      );
-      expect(preparations).toBe(1);
-      expect(launches[1]).toMatchObject({
-        SYNTHETIC_SCAN_SETTING: "current scan selection",
-        SYNTHETIC_PREPARATION_ONLY: "prepared setting",
-        CODEX_MCP_NODE_PATH: runtimeNode,
-      });
-      expect(launches[1]).not.toHaveProperty("SYNTHETIC_REMOVED_INPUT");
-      expect(launches[0]!["SYNTHETIC_SCAN_SETTING"]).toBe("prepared default");
-    } finally {
-      await client.close();
-    }
-  });
-
   test("does not reimport ambient credentials after an explicit logout", async () => {
     const root = await temporaryDirectory();
     const ambientHome = join(root, "ambient-home");
@@ -878,15 +654,12 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(credentialHome, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), '{"token":"ambient"}\n');
     await setCodexSecurityCredentialLogout(credentialHome, true);
-    let imported = false;
+    const imported = mock((Promise.resolve<boolean>).bind(Promise, true));
 
     await expect(
-      initialCredentialsAvailable({}, ambientHome, credentialHome, async () => {
-        imported = true;
-        return true;
-      }),
+      initialCredentialsAvailable({}, ambientHome, credentialHome, imported),
     ).resolves.toBe(false);
-    expect(imported).toBe(false);
+    expect(imported).not.toHaveBeenCalled();
 
     await setCodexSecurityCredentialLogout(credentialHome, false);
     await expect(
@@ -996,63 +769,6 @@ console.log("Logged in using ChatGPT");
       }
     },
   );
-
-  test("recognizes ambient credentials during account() on a fresh instance", async () => {
-    const root = await temporaryDirectory();
-    const ambientHome = join(root, "ambient-home");
-    const stateDir = join(root, "state");
-    const script = join(root, "codex.mjs");
-    await mkdir(ambientHome);
-    await mkdir(stateDir, { mode: 0o700 });
-    await writeFile(
-      join(ambientHome, "auth.json"),
-      '{"auth_mode":"chatgpt"}\n',
-    );
-    await writeFile(
-      script,
-      `
-import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
-
-const args = [basename(process.argv[1]), ...process.argv.slice(2)];
-if (args.join(" ") === "login status") {
-  const codexHome = process.env.CODEX_HOME;
-  if (codexHome && existsSync(join(codexHome, "auth.json"))) {
-    console.log("Logged in using ChatGPT");
-    process.exitCode = 0;
-  } else {
-    console.log("Not logged in");
-    process.exitCode = 1;
-  }
-}
-process.exit(process.exitCode ?? 0);
-`,
-    );
-    const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
-      {
-        environment: {
-          PATH: process.env["PATH"],
-          NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
-          CODEX_HOME: ambientHome,
-          CODEX_SECURITY_STATE_DIR: stateDir,
-        },
-        resolveCodexCommand: () => ({
-          command: execFileSync("node", ["-p", "process.execPath"], {
-            encoding: "utf8",
-          }).trim(),
-        }),
-      },
-    );
-    try {
-      const status = await client.account();
-      expect(status.authenticated).toBe(true);
-      expect(status.details).toContain("Logged in using ChatGPT");
-      expect(existsSync(join(stateDir, "codex-home", "auth.json"))).toBe(true);
-    } finally {
-      await client.close();
-    }
-  });
 
   test("respects another client's logout when switching from API-key to ChatGPT scans", async () => {
     const root = await temporaryDirectory();

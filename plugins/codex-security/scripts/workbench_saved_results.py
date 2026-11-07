@@ -19,32 +19,33 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    ScanLocalIOError,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
     _prepare_scan_finalization,
     _read_saved_threat_model,
     _read_scan_local_json,
     _read_scan_local_json_bytes,
+    _recover_unsealed_coverage,
+    _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _validate_completion_binding,
     _write_prepared_scan_finalization,
     finalize_scan,
     manifest_is_sealed,
     open_scan_local_file_descriptor,
-    parse_timestamp,
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
-from project_scan_artifacts import child_review_state, merge_coverage, project_scan_artifacts
-from report_projection import retained_findings
-from review_state import checkpoint_review_state, review_summary
+from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
 from workbench.saved_coverage import (
     _saved_coverage_id as _saved_coverage_id,
 )
 from workbench.saved_outputs import _restore_published_outputs, _snapshot_published_outputs
 from workbench.saved_sources import (
+    _admit_parent_checkpoint,
     _capture_saved_source,
     _checkpoint_paths,
     _CheckpointSnapshotError,
@@ -58,6 +59,7 @@ from workbench.saved_sources import (
     _parent_scan_draft,
     _read_saved_parent_result,
     _read_saved_result,
+    _require_current_deep_publication,
     _restore_checkpoint_head,
     _restore_frozen_model_capture,
     _retained_checkpoint_state,
@@ -69,13 +71,10 @@ from workbench.saved_sources import (
     _digest as _digest,
 )
 from workbench.storage import saved_deep_workers
-from workbench_composition import COMPOSITION_CHECKPOINT, CompositionView, load_composition
 from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
 )
-from workbench_scan_start import require_deep_pass_target, stored_scan_target_identity
-from workbench_scan_usage import merge_scan_cost
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
@@ -284,9 +283,6 @@ def _recovery_source_digests(
             else:
                 include_parent = True
 
-    if frozen_sources is None:
-        save_composed_checkpoint(db, connection, scan, scan_dir, load_composition(connection, scan))
-
     workers = saved_deep_workers(connection, scan)
     previous_heads = checkpoint_heads
     if previous_heads is None:
@@ -429,222 +425,139 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return prepared.coverage
 
 
-def _stopped_child_draft(
-    db: Any, connection: Any, child: Any, scan_dir: Path
-) -> dict[str, Any] | None:
-    """Read one ordinary saved scan through its normal validation and recovery path."""
-    child_dir = db.require_canonical_scan_directory(Path(child["scan_dir"]))
-    manifest_path = db.artifact_path(child_dir, "scan-manifest.json", required=False)
-    manifest_scan = db.read_json_object(manifest_path).get("scan", {}) if manifest_path else {}
-    if child["seal_manifest_digest"] is not None or (
-        manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
-    ):
-        db.require_recorded_manifest_digest(child, child_dir)
-        prepared = _prepare_scan_finalization(child_dir)
-    else:
-        binding = {**db.workbench_completion_binding(child, db.now()), "status": "interrupted"}
-        warnings: list[str] = []
+def preserve_deep_deadline_draft(
+    db: Any,
+    connection: Any,
+    scan: Any,
+    *,
+    preserve_reduction: bool = False,
+    allow_empty: bool = False,
+) -> tuple[Path, dict[str, tuple[bytes, os.stat_result] | None], set[str]] | None:
+    """Recover unfinished reviews at a settled Deep deadline without sealing the parent."""
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    warnings = json.loads(scan["completion_warnings_json"])
+    binding = db.workbench_completion_binding(scan, db.now())
+    workers = saved_deep_workers(connection, scan)
+    if preserve_reduction:
+        # Completed reviews already went through reduction. Only add evidence
+        # from unfinished reviews; raw accepted drafts must not undo that result.
+        workers = [
+            worker
+            for worker in workers
+            if worker["kind"] == "discovery" and worker["status"] == "canceled"
+        ]
+        if not workers:
+            return None
+        _prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            completion_binding=binding,
+            allow_missing_writeups=True,
+        )
+    snapshots = _snapshot_published_outputs(
+        scan_dir, ("findings.json", "coverage.json", "scan-manifest.json", "checkpoint-head.json")
+    )
+    created_paths: set[str] = set()
+    try:
         documents = merge_saved_results(
-            child_dir,
-            child["id"],
+            scan_dir,
+            scan["id"],
             binding,
-            [],
+            workers,
             warnings,
-            stopped=True,
-            scan_mode=child["mode"],
-            reason="Independent scan stopped before aggregation.",
-            finding_scope=db.requested_finding_scope(child) if child["mode"] == "deep" else None,
+            stopped=not preserve_reduction,
+            preserve_canonical_parent=preserve_reduction,
+            project_worker_coverage=True,
+            # Without reduction, the coordinator's empty draft cannot replace worker evidence.
+            scan_mode="deep" if preserve_reduction else None,
+            finding_scope=db.requested_finding_scope(scan),
+            created_paths=created_paths,
+            current_contract=True,
+            reason=(
+                "The configured discovery time limit elapsed before any source review completed. "
+                "Saved findings and pending review were preserved without a completed reduction."
+            ),
         )
         if documents is None:
+            if not allow_empty:
+                raise ContractError("Deep Scan deadline has no saved parent draft.")
+            _restore_published_outputs(scan_dir, snapshots, created_paths)
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
+            )
             return None
-        prepared = _prepare_scan_finalization(
-            child_dir,
-            completion_binding=binding,
-            recover_unsealed=True,
-            draft_documents=documents,
-            finding_scope=db.requested_finding_scope(child) if child["mode"] == "deep" else None,
-        )
-    manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
-    db.verify_manifest_binding(child, manifest)
-    coverage = child_review_state(db, connection, child, prepared)
-    projected = project_scan_artifacts(
-        child["parent_scan_id"], child["id"], child_dir, scan_dir, manifest, findings, coverage
-    )
-    draft = projected["draft"]
-    for index, finding in enumerate(draft["findings"]):
-        # No semantic merge has accepted these independent observations yet.
-        identity = finding["identity"]
-        identity["instance"] = f"{child['id']}-{identity.get('instance', 'saved')}"
-        provenance = finding["provenance"]
-        provenance.pop("preservedIdentity", None)
-        provenance["sourceFindings"] = [
-            {"id": f"{child['id']}:{index}", "finding": projected["sourceFindings"][index]}
-        ]
-    return draft
-
-
-def save_composed_checkpoint(
-    db: Any, connection: Any, scan: Any, scan_dir: Path, composition: CompositionView
-) -> dict[str, Any] | None:
-    """Retain accepted progress and unmerged ordinary child observations."""
-    checkpoint = composition.checkpoint
-    children = {child["scan_dir"]: child for child in composition.children}
-    if checkpoint is None and not children:
-        return None
-    merged_ids = set(checkpoint["mergedScanIds"]) if checkpoint is not None else set()
-    aggregate = copy.deepcopy(checkpoint["aggregate"]) if checkpoint is not None else None
-    if not isinstance(aggregate, dict):
-        aggregate = {"findings": [], "reviewState": {}}
-    elif "coverage" in aggregate and "reviewState" not in aggregate:
-        aggregate["reviewState"] = aggregate.pop("coverage")
-    represented = set()
-    for finding in aggregate["findings"]:
-        for _, retained in retained_findings(finding):
-            provenance = retained.get("provenance", {})
-            represented.update(provenance.get("sourceFindingIds", []))
-            represented.update(source["id"] for source in provenance.get("sourceFindings", []))
-    recovery_errors = {}
-    for child in children.values():
-        try:
-            require_deep_pass_target(scan, stored_scan_target_identity(child))
-            child = db.require_scan(connection, child["id"])
-            draft = _stopped_child_draft(db, connection, child, scan_dir)
-        except (ContractError, OSError, SystemExit, ValueError) as exc:
-            recovery_errors[child["id"]] = str(exc)
-            continue
-        if draft is None:
-            continue
-        closures = draft["reviewState"].get("resolvedDeferred")
-        if (
-            closures
-            and child["status"] == "complete"
-            and child["seal_manifest_digest"] is not None
-            and draft.get("complete") is not False
-        ):
-            # Preserve the child's original observation time so a later parent
-            # checkpoint can reopen its work. This does not select a parent head.
-            completed = parse_timestamp(child["completed_at"])
-            observed_ns = int(completed.timestamp()) * 1_000_000_000 + completed.microsecond * 1000
-            name = save_pending_checkpoint(
-                scan_dir,
-                _encoded(
-                    {
-                        "scanId": scan["id"],
-                        "findings": [],
-                        "reviewState": {"resolvedDeferred": closures},
-                    }
+        if preserve_reduction:
+            marker = {
+                "id": "scan-deadline",
+                "reason": (
+                    "The configured discovery time limit elapsed. Saved findings and "
+                    "pending work from unfinished source reviews were preserved."
                 ),
-            )
-            os.utime(scan_dir / "checkpoints" / name, ns=(observed_ns, observed_ns))
-        if child["id"] in merged_ids:
-            continue
-        aggregate["findings"].extend(
-            finding
-            for finding in draft["findings"]
-            if not represented.intersection(finding["provenance"]["sourceFindingIds"])
-        )
-        merge_coverage(aggregate.setdefault("reviewState", {}), draft["reviewState"])
-        if draft.get("scope") or draft.get("threatModel"):
-            scope = aggregate.setdefault("scope", {})
-            for key, value in draft.get("scope", {}).items():
-                if key != "sourceScans":
-                    scope.setdefault(key, copy.deepcopy(value))
-            context = {
-                "scanId": child["id"],
-                **{
-                    key: copy.deepcopy(draft[key])
-                    for key in ("scope", "threatModel")
-                    if key in draft
-                },
             }
-            source_scans = scope.setdefault("sourceScans", [])
-            if isinstance(source_scans, list) and context not in source_scans:
-                source_scans.append(context)
-        if "threatModel" in draft:
-            aggregate.setdefault("threatModel", copy.deepcopy(draft["threatModel"]))
-    aggregate["scanId"] = scan["id"]
-    aggregate["complete"] = False
-    coverage = aggregate.setdefault("reviewState", {})
-    coverage.pop("completeness", None)
-    deferred = coverage.setdefault("deferred", [])
-    directories = (
-        dict.fromkeys(Path(scan["scan_dir"]) / item["directory"] for item in checkpoint["passes"])
-        if checkpoint is not None
-        else {}
-    )
-    directories.update((Path(directory), None) for directory in children)
-    for directory in directories:
-        child = children.get(str(directory))
-        if child is not None and child["id"] in merged_ids:
-            continue
-        relative = directory.relative_to(scan_dir).as_posix()
-        note = {
-            "id": f"unmerged-{child['id']}"
-            if child is not None
-            else f"unmerged-{_digest(relative)[:16]}",
-            "reason": f"Independent scan did not complete and merge. Saved work: {relative}.",
-        }
-        if child is not None and child["id"] in recovery_errors:
-            note["reason"] += f" Recovery failed: {recovery_errors[child['id']]}"
-        if note not in deferred:
-            deferred.append(note)
-    payload = _encoded(aggregate)
-    save_pending_checkpoint(scan_dir, payload)
-    return aggregate
-
-
-def clear_legacy_publication_error(connection: Any, scan_id: str) -> None:
-    with connection:
-        connection.execute(
-            "UPDATE deep_scan_runs SET publication_error_message = NULL WHERE scan_id = ?",
-            (scan_id,),
+            if not any(
+                marker["id"] in (row.get("id"), row.get("candidateId"))
+                for key in ("deferred", "resolvedDeferred")
+                for row in documents[2].get(key, [])
+            ):
+                documents[2]["deferred"].append(marker)
+        documents[0]["scan"].pop("complete", None)
+        expected_coverage_mode = db.expected_coverage_mode(scan)
+        if not preserve_reduction:
+            # A capped deadline can retain interrupted records even though its
+            # completion binding requires strict validation of completed findings.
+            _populate_unsealed_manifest_envelope(documents[0], documents[0]["scan"], binding)
+            _populate_unsealed_artifact_envelope(*documents, binding)
+            if expected_coverage_mode == "deep_repository":
+                documents[2]["inventoryStrategy"] = "repository"
+            elif expected_coverage_mode == "scoped_path":
+                documents[2]["inventoryStrategy"] = "scoped_path"
+            schema_dir = Path(__file__).resolve().parent.parent / "schemas"
+            discarded_findings = _recover_unsealed_findings(
+                documents[0], documents[1], schema_dir, scan_dir, warnings, current_contract=True
+            )
+            _recover_unsealed_coverage(
+                documents[2], schema_dir, scan_dir, warnings, discarded_findings
+            )
+        # Reuse stopped-result recovery's per-record validation, scope checks,
+        # source lineage, and receipt validation before admitting this draft.
+        prepared = _prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=expected_coverage_mode,
+            completion_binding=binding,
+            recover_unsealed=not preserve_reduction,
+            allow_missing_writeups=preserve_reduction,
+            draft_documents=documents,
+            finding_scope=db.requested_finding_scope(scan),
         )
-
-
-def stop_composition_children(db: Any, connection: Any, composition: CompositionView) -> None:
-    merged = set(composition.checkpoint["mergedScanIds"]) if composition.checkpoint else set()
-    for child in composition.children:
-        if child["id"] not in merged and child["status"] == "running":
-            fail_scan(
-                db,
-                connection,
-                argparse.Namespace(
-                    scan_id=child["id"],
-                    claim_token=child["handoff_claim_token"],
-                    cost_json=None,
-                    message="Parent Deep Scan stopped.",
-                ),
-            )
-
-
-def save_pending_checkpoint(scan_dir: Path, payload: bytes, staged_path: str = "") -> str:
-    name = f"{hashlib.sha256(payload).hexdigest()}.json"
-    # Publish the index first so every saved checkpoint remains discoverable.
-    write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", staged_path.encode("utf-8"))
-    write_scan_local_bytes(scan_dir, f"checkpoints/{name}", payload)
-    return name
-
-
-def advance_scan_phase(db: Any, connection: Any, scan_id: str, phase: str) -> None:
-    earlier = PHASES[: PHASES.index(phase)]
-    placeholders = ",".join("?" for _ in earlier)
-    timestamp = db.now()
-    try:
-        with connection:
-            changed = connection.execute(
-                "UPDATE scans SET phase = ?, updated_at = ? "
-                f"WHERE id = ? AND status = 'running' AND phase IN ({placeholders})",
-                (phase, timestamp, scan_id, *earlier),
-            )
-            if changed.rowcount:
-                connection.execute(
-                    "UPDATE scan_progress SET phase_items_total = 0, "
-                    "phase_items_completed = 0, phase_progress_unit = NULL, updated_at = ? "
-                    "WHERE scan_id = ?",
-                    (timestamp, scan_id),
-                )
-    except sqlite3.Error as exc:
-        print(f"Could not save scan progress: {exc}", file=sys.stderr)
+        warnings.extend(prepared.warnings)
+        manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
+        manifest["scan"].pop("sealedAt", None)
+        manifest["scan"].pop("artifacts", None)
+        manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
+        checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
+        contents = _encoded(checkpoint)
+        name = f"{hashlib.sha256(contents).hexdigest()}.json"
+        checkpoint_path = f"checkpoints/{name}"
+        # This draft is recoverable parent evidence too. Restore its prior state
+        # on local publication failure or a later caller transaction rollback.
+        snapshots.update(_snapshot_published_outputs(scan_dir, (checkpoint_path,)))
+        write_scan_local_bytes(scan_dir, checkpoint_path, contents)
+        write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
+        for filename, document in (
+            ("findings.json", findings),
+            *([("coverage.json", coverage)] if "coverageRef" in manifest["scan"] else []),
+            ("scan-manifest.json", manifest),
+        ):
+            write_scan_local_bytes(scan_dir, filename, _encoded(document))
+        connection.execute(
+            "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+            (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
+        )
+    except BaseException:
+        _restore_published_outputs(scan_dir, snapshots, created_paths)
+        raise
+    return scan_dir, snapshots, created_paths
 
 
 def preserve_scan_results_locked(
@@ -656,7 +569,6 @@ def preserve_scan_results_locked(
     recovery_checkpoint_heads: dict[str, str | None] | None = None,
     include_parent_with_recovery: bool = False,
     recovery_snapshot_error: _CheckpointSnapshotError | None = None,
-    composition: CompositionView | None = None,
 ) -> bool:
     """Publish or verify retained terminal results through the workbench host."""
     scan = db.require_scan(connection, scan_id)
@@ -692,9 +604,6 @@ def preserve_scan_results_locked(
             frozen_source_times,
             retained.get("parentContext"),
         )
-    if frozen_source_digests is None:
-        composition = composition or load_composition(connection, scan)
-        save_composed_checkpoint(db, connection, scan, scan_dir, composition)
     deep_run = connection.execute(
         "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
@@ -834,14 +743,6 @@ def preserve_scan_results_locked(
     legacy_parent = (
         include_parent_with_recovery
         or (pending_recovery is not None and pending_recovery.get("legacyParent", True) is True)
-        or (
-            composition is not None
-            and composition.checkpoint is not None
-            and existing is not None
-            and existing_scan.get("status") == "completed"
-            and "coverageRef" in existing_scan
-            and frozen_source_digests is None
-        )
         or (
             recovery_source_digests is None
             and frozen_source_digests == {}
@@ -1024,50 +925,42 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             recovery_snapshot_error=recovery_snapshot_error,
         ):
             raise SystemExit("No saved stopped-scan results were available to recover.")
-        clear_legacy_publication_error(connection, scan_id)
+        db.deep_scan.clear_deep_scan_publication_failure(connection, scan_id)
     return db.scan_context(connection, scan_id)
 
 
 def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     """Publish results for a stopped scan under its completion lock and return the updated scan context."""
     scan_id = db.require_uuid(args.scan_id, "scan-id")
-    cost_json = db.parse_scan_cost(getattr(args, "cost_json", None))
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
-        if scan["status"] == "complete":
-            raise SystemExit("A completed scan cannot preserve new results.")
+        if scan["status"] != "failed":
+            raise SystemExit("Only a stopped scan can preserve terminal results.")
         workspace = db.require_workspace(connection, scan["workspace_id"])
-        owner = db.handoff.owning_thread(scan, workspace)
+        owner = (
+            scan["continuation_thread_id"]
+            or scan["deep_scan_owner_thread_id"]
+            or workspace["thread_id"]
+        )
         if args.thread_id is not None and args.thread_id != owner:
             raise SystemExit("Saved results can only be published from the owning Codex thread.")
-        # The app can cancel before a continuation has claimed the scan.
-        if not (
-            getattr(args, "after_stop", False)
-            and scan["canceled_at"] is not None
-            and scan["handoff_claim_token"] is None
-            and args.claim_token is None
-        ):
+        if args.coordinator_generation is not None:
+            if args.thread_id is None:
+                raise SystemExit("A coordinator result refresh requires its owning thread.")
+            db.deep_scan.require_current_coordinator(
+                db.deep_scan.require_deep_scan_run(connection, scan_id), args
+            )
+        else:
             db.handoff.require_current_continuation(
                 scan,
                 args.claim_token,
                 error_message="Saved results are owned by another continuation.",
             )
-        if cost_json is not None:
-            cost_json = merge_scan_cost(scan["cost_json"], cost_json)
-            with connection:
-                connection.execute(
-                    "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
-                )
-        if scan["status"] == "running":
-            return db.scan_context(connection, scan_id)
-        if getattr(args, "after_stop", False):
-            preserve_stopped_results_after_transition(db, connection, scan_id, stop_children=True)
-            return db.scan_context(connection, scan_id)
         published = preserve_scan_results_locked(db, connection, scan_id)
         if not published and scan["canceled_at"] is not None:
             raise SystemExit("Saved scan results could not be published or verified.")
         if published:
-            clear_legacy_publication_error(connection, scan_id)
+            db.deep_scan.clear_deep_scan_publication_failure(connection, scan_id)
     return db.scan_context(connection, scan_id)
 
 
@@ -1111,8 +1004,6 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         ):
             raise SystemExit("Use the typed scan tools for canonical artifacts and checkpoints.")
         write_scan_local_bytes(scan_dir, output, sys.stdin.buffer.read())
-        if scan["mode"] == "deep" and output == COMPOSITION_CHECKPOINT:
-            advance_scan_phase(db, connection, scan_id, "discovery")
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
@@ -1134,44 +1025,6 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 "The scan stopped; its saved checkpoint was retained without replacing sealed results."
             )
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-        acknowledged = set()
-        staged_checkpoint_relative = None
-        if args.checkpoint_path is not None:
-            try:
-                staged_checkpoint_relative = (
-                    Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
-                )
-            except ValueError as exc:
-                raise SystemExit(
-                    "Scan checkpoint must be inside the registered scan drafts directory."
-                ) from exc
-            if not re.fullmatch(
-                r"drafts/[0-9a-fA-F-]+\.checkpoint\.json", staged_checkpoint_relative
-            ):
-                raise SystemExit(
-                    "Scan checkpoint must be inside the registered scan drafts directory."
-                )
-            checkpoint, checkpoint_contents = _read_scan_local_json_bytes(
-                scan_dir, staged_checkpoint_relative, "Staged scan checkpoint"
-            )
-            if checkpoint.get("scanId") != scan_id:
-                raise SystemExit("Staged scan checkpoint belongs to another scan.")
-            # Keep the staged observation discoverable on a publication conflict,
-            # without archiving a new checkpoint before the draft is accepted.
-            checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
-            acknowledged.add(checkpoint_name)
-            write_scan_local_bytes(
-                scan_dir,
-                f"checkpoints/pending/{checkpoint_name}",
-                staged_checkpoint_relative.encode("utf-8"),
-            )
-        if (
-            args.expected_draft_digest is not None
-            and args.expected_draft_digest != _scan_draft_digest(scan_dir)
-        ):
-            raise SystemExit(
-                "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
-            )
         try:
             relative = Path(args.draft_path).relative_to(scan_dir).as_posix()
         except ValueError as exc:
@@ -1181,15 +1034,15 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
             raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
-        reconciled = draft.get("reconciledCheckpointIds", [])
-        if not isinstance(reconciled, list) or any(
-            not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", name)
-            for name in reconciled
-        ):
-            raise SystemExit("Reconciled checkpoint IDs must be saved checkpoint filenames.")
-        acknowledged.update(reconciled)
-        manifest, findings = draft["manifest"], draft["findings"]
-        coverage = draft["reviewState"] if "reviewState" in draft else draft["coverage"]
+        accepted_input = copy.deepcopy(draft)
+        accepted_checkpoint = None
+        manifest, findings, coverage = (
+            draft["manifest"],
+            draft["findings"],
+            draft.get("reviewState", draft.get("coverage")),
+        )
+        manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
+        manifest["scan"].pop("coverageRef", None)
         binding = db.workbench_completion_binding(scan, db.now())
         # Save scan IDs without sealing the draft.
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
@@ -1197,46 +1050,128 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _validate_completion_binding(manifest, findings, coverage, binding)
         manifest["scan"]["mode"] = coverage["mode"]
         manifest["scan"]["review"] = review_summary(coverage)
-        manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
-        manifest["scan"].pop("coverageRef", None)
+        projected = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         admitted_input = None
-        if staged_checkpoint_relative is not None:
-            if scan["mode"] == "deep" and checkpoint.get("complete") is not False:
-                previous = {}
-                if (scan_dir / "checkpoint-head.json").exists():
-                    previous, _, _ = _read_saved_result(scan_dir, "checkpoint-head.json", scan_id)
-                checkpoint["publication"] = {
-                    "previousCheckpoint": previous.get("checkpoint"),
-                    "previousInputCheckpoint": previous.get("inputCheckpoint"),
-                }
-                checkpoint_contents = _encoded(checkpoint)
-            raw_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
-            write_scan_local_bytes(scan_dir, f"checkpoints/{raw_name}", checkpoint_contents)
+        checkpoint = manifest["scan"]
+        checkpoint_contents = None
+        if args.checkpoint_path is not None:
+            try:
+                checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
+            except ValueError as exc:
+                raise SystemExit(
+                    "Scan checkpoint must be inside the registered scan drafts directory."
+                ) from exc
+            if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.checkpoint\.json", checkpoint_relative):
+                raise SystemExit(
+                    "Scan checkpoint must be inside the registered scan drafts directory."
+                )
+            checkpoint, checkpoint_contents = _read_scan_local_json_bytes(
+                scan_dir, checkpoint_relative, "Staged scan checkpoint"
+            )
+            accepted_checkpoint = checkpoint
+            if checkpoint.get("scanId") != scan_id:
+                raise SystemExit("Staged scan checkpoint belongs to another scan.")
             if scan["mode"] == "deep":
-                admitted_input = raw_name
-        checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
-        checkpoint_contents = _encoded(checkpoint)
-        checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
+                checkpoint_contents = _admit_parent_checkpoint(
+                    scan_dir, scan_id, checkpoint, projected
+                )
+        checkpoint_only = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is None
+            and checkpoint.get("complete") is False
+            and connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? "
+                "AND status = 'running' AND manifest_path = ?",
+                (scan_id, str(scan_dir / "scan-manifest.json")),
+            ).fetchone()
+            is not None
+        )
+        if scan["mode"] == "deep" and not checkpoint_only:
+            _require_current_deep_publication(db, connection, scan, draft)
+        acceptance_input = {**accepted_input, "checkpoint": accepted_checkpoint}
+        acceptance_relative = Path(relative).with_suffix(".accepted.json").as_posix()
+        acknowledge = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is not None
+            and db.deep_scan.require_deep_scan_run(connection, scan_id)["workflow_version"]
+            in {"deep-scan-mcp/v1", "deep-security-scan/v1"}
+        )
+        if acknowledge and (scan_dir / acceptance_relative).exists():
+            accepted = _read_scan_local_json(scan_dir, acceptance_relative, "Accepted scan draft")
+            if (
+                accepted.get("status") == "draft_written"
+                and accepted.get("input") == acceptance_input
+            ):
+                if accepted.get("draftDigest") != _scan_draft_digest(scan_dir):
+                    raise SystemExit(
+                        "scan_draft_conflict: canonical scan results changed after publication."
+                    )
+                return {
+                    "scanId": scan_id,
+                    "status": "draft_written",
+                    **({"warnings": accepted["warnings"]} if accepted.get("warnings") else {}),
+                }
+        if (
+            args.expected_draft_digest is not None
+            and args.expected_draft_digest != _scan_draft_digest(scan_dir)
+        ):
+            raise SystemExit(
+                "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
+            )
+        if checkpoint_contents is not None:
+            checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
+            if scan["mode"] == "deep":
+                admitted_input = f"{checkpoint_digest}.json"
+            write_scan_local_bytes(
+                scan_dir,
+                f"checkpoints/{checkpoint_digest}.json",
+                checkpoint_contents,
+            )
+            if checkpoint_only:
+                return {"scanId": scan_id, "status": "draft_written"}
+        projected_contents = _encoded(projected)
+        checkpoint_name = f"{hashlib.sha256(projected_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
-            write_scan_local_bytes(scan_dir, checkpoint_relative, checkpoint_contents)
+            write_scan_local_bytes(scan_dir, checkpoint_relative, projected_contents)
+        if checkpoint_only:
+            return {"scanId": scan_id, "status": "draft_written"}
         head = {"checkpoint": checkpoint_name}
         if admitted_input is not None:
             head["inputCheckpoint"] = admitted_input
         write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded(head))
-        for filename, document in (
-            ("findings.json", findings),
-            ("scan-manifest.json", manifest),
-        ):
-            write_scan_local_bytes(
-                scan_dir,
-                filename,
-                (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
+        documents = {
+            filename: (json.dumps(document, allow_nan=False, indent=2) + "\n").encode()
+            for filename, document in (
+                ("findings.json", findings),
+                ("scan-manifest.json", manifest),
             )
+        }
+        for filename, contents in documents.items():
+            write_scan_local_bytes(scan_dir, filename, contents)
         _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
-        for name in acknowledged:
-            _remove_scan_local_file_if_exists(scan_dir, f"checkpoints/pending/{name}")
+        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+            # Select the accepted final publication before releasing the write lock.
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET manifest_path = ? "
+                    "WHERE scan_id = ? AND status = 'running'",
+                    (str(scan_dir / "scan-manifest.json"), scan_id),
+                )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
+        if acknowledge:
+            # Optional recovery evidence is written only after the publication succeeds.
+            try:
+                acceptance = {
+                    "status": "draft_written",
+                    "input": acceptance_input,
+                    "draftDigest": _scan_draft_contents_digest(documents),
+                    **({"warnings": [model_warning]} if model_warning else {}),
+                }
+                write_scan_local_bytes(scan_dir, acceptance_relative, _encoded(acceptance))
+            except (OSError, ScanLocalIOError):
+                # A missing receipt prevents recovery but does not undo accepted results.
+                pass
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.
         model_only_checkpoint = (
@@ -1248,15 +1183,25 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if scan["mode"] == "standard" and not model_only_checkpoint:
             phase = "discovery" if manifest["scan"].get("complete") is False else "reporting"
-            advance_scan_phase(db, connection, scan_id, phase)
-        # Failed publication leaves its inputs available for retry/recovery. Only
-        # this acknowledged write can remove its own per-attempt stage paths.
-        for staged in (relative, staged_checkpoint_relative):
-            if staged is not None:
-                try:
-                    _remove_scan_local_file_if_exists(scan_dir, staged)
-                except (ContractError, OSError):
-                    pass  # Optional cleanup must not change publication's outcome.
+            earlier = PHASES[: PHASES.index(phase)]
+            placeholders = ",".join("?" for _ in earlier)
+            timestamp = db.now()
+            try:
+                with connection:
+                    changed = connection.execute(
+                        "UPDATE scans SET phase = ?, updated_at = ? "
+                        f"WHERE id = ? AND status = 'running' AND phase IN ({placeholders})",
+                        (phase, timestamp, scan_id, *earlier),
+                    )
+                    if changed.rowcount:
+                        connection.execute(
+                            "UPDATE scan_progress SET phase_items_total = 0, "
+                            "phase_items_completed = 0, phase_progress_unit = NULL, updated_at = ? "
+                            "WHERE scan_id = ?",
+                            (timestamp, scan_id),
+                        )
+            except sqlite3.Error as exc:
+                print(f"Could not save scan progress: {exc}", file=sys.stderr)
     return {
         "scanId": scan_id,
         "status": "draft_written",
@@ -1305,22 +1250,17 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     with connection:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
-        if scan["status"] == "complete":
-            raise SystemExit("A completed scan cannot be marked failed.")
-        if (
-            scan["status"] != "failed"
-            or getattr(args, "defer_publication", False)
-            or cost_json is not None
-        ):
-            db.handoff.require_current_continuation(
-                scan,
-                args.claim_token,
-                error_message="Scan failure is owned by another continuation.",
-            )
         if scan["status"] == "failed":
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return db.scan_context(connection, scan["id"])
+        if scan["status"] == "complete":
+            raise SystemExit("A completed scan cannot be marked failed.")
+        db.handoff.require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Scan failure is owned by another continuation.",
+        )
         message = db.optional_text(args.message)
         updated = connection.execute(
             """
@@ -1332,6 +1272,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
+        db.deep_scan.fail_from_parent_scan(connection, scan["id"], message, timestamp)
         progress_updated = connection.execute(
             "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
             (timestamp, scan["id"]),
@@ -1339,8 +1280,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
-    if not getattr(args, "defer_publication", False):
-        preserve_stopped_results_after_transition(db, connection, scan["id"])
+    preserve_stopped_results_after_transition(db, connection, scan["id"])
     return db.scan_context(connection, scan["id"])
 
 
@@ -1358,7 +1298,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
         workspace = db.require_workspace(connection, scan["workspace_id"])
-        owning_thread_id = db.handoff.owning_thread(scan, workspace)
+        owning_thread_id = scan["continuation_thread_id"] or workspace["thread_id"]
         if thread_id is not None and owning_thread_id != thread_id:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
@@ -1380,6 +1320,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be canceled.")
+        db.deep_scan.cancel_from_parent_scan(connection, scan["id"], timestamp)
         progress_updated = connection.execute(
             "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
             (timestamp, scan["id"]),
@@ -1387,8 +1328,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
-    if not getattr(args, "defer_publication", False):
-        preserve_stopped_results_after_transition(db, connection, scan["id"])
+    preserve_stopped_results_after_transition(db, connection, scan["id"])
     return {**db.workspace_state(connection, scan["workspace_id"]), "canceledScanId": scan["id"]}
 
 
@@ -1422,16 +1362,10 @@ def record_stopped_scan_usage(
             pass
 
 
-def preserve_stopped_results_after_transition(
-    db: Any, connection: Any, scan_id: str, *, stop_children: bool = False
-) -> None:
+def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id: str) -> None:
+    """Try to publish saved evidence after stopping a scan and record a warning if publication fails."""
     try:
-        scan = db.require_scan(connection, scan_id)
-        composition = load_composition(connection, scan)
-        if stop_children:
-            stop_composition_children(db, connection, composition)
-        if preserve_scan_results_locked(db, connection, scan_id, composition=composition):
-            clear_legacy_publication_error(connection, scan_id)
+        published = preserve_scan_results_locked(db, connection, scan_id)
     except (ContractError, OSError, SystemExit, ValueError) as exc:
         scan = db.require_scan(connection, scan_id)
         warnings = json.loads(scan["completion_warnings_json"])
@@ -1442,7 +1376,164 @@ def preserve_stopped_results_after_transition(
                 (json.dumps(list(dict.fromkeys([*warnings, warning]))), scan_id),
             )
         return
+    if published:
+        db.deep_scan.clear_deep_scan_publication_failure(connection, scan_id)
 
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
+
+
+def budget_exhausted_draft(
+    db: Any,
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    candidates: list[dict[str, Any]],
+    warning: str,
+) -> None:
+    documents: dict[str, dict[str, Any]] = {}
+    for name in ("scan-manifest.json", "findings.json"):
+        path = db.artifact_path(scan_dir, name, required=False)
+        if path is not None:
+            documents[name] = db.read_json_object(path)
+    if documents and len(documents) != 2:
+        raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
+
+    if documents:
+        manifest = documents["scan-manifest.json"]
+        findings = documents["findings.json"]
+        coverage = (
+            db.read_json_object(db.artifact_path(scan_dir, "coverage.json", required=True))
+            if uses_legacy_review(manifest["scan"])
+            else review_state(manifest["scan"])
+        )
+        if not isinstance(manifest.get("scan"), dict) or not isinstance(
+            findings.get("findings"), list
+        ):
+            raise SystemExit("Budget-exhausted scan contains an invalid canonical scan draft.")
+        for key in ("surfaces", "explicitExclusions", "deferred"):
+            if not isinstance(coverage.get(key), list):
+                raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
+        if manifest_is_sealed(manifest["scan"]):
+            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
+    else:
+        contract = db.scan_contract(scan)
+        target_contract = contract["target"]
+        target: dict[str, Any] = {
+            "kind": target_contract["allowedKinds"][0],
+            "targetId": target_contract["targetId"],
+            "displayName": target_contract["displayName"],
+        }
+        if scan["target_revision"] != "unversioned":
+            target["revision"] = scan["target_revision"]
+        if "requiredSnapshotDigest" in target_contract:
+            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
+        manifest = {
+            "scan": {
+                "target": target,
+                "scope": {"limitations": [warning]},
+            }
+        }
+        findings = {"findings": []}
+        coverage = {
+            "inventoryStrategy": (
+                "scoped_path" if db.expected_coverage_mode(scan) == "scoped_path" else "repository"
+            ),
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        }
+
+    findings_by_candidate = {
+        candidate_id
+        for finding in findings["findings"]
+        if isinstance(finding, dict)
+        and isinstance(candidate_id := finding_candidate_id(finding), str)
+    }
+    existing_deferred = {
+        item.get("candidateId", item.get("id"))
+        for item in coverage["deferred"]
+        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
+    }
+    existing_surfaces = {
+        item.get("id")
+        for item in coverage["surfaces"]
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for candidate in candidates:
+        candidate_id = candidate["candidate_id"]
+        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
+            continue
+        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
+        surface_id = f"candidate-{candidate_id}"
+        validation = candidate.get("validation")
+        validation = validation.get("disposition") if isinstance(validation, dict) else None
+        attack = candidate.get("attack_path")
+        attack = attack.get("decision") if isinstance(attack, dict) else None
+        disposition = (
+            "needs_follow_up"
+            if validation == "deferred" or attack == "deferred"
+            else "not_applicable"
+            if validation == "not_applicable"
+            else "rejected"
+            if validation == "suppressed" or attack == "ignore"
+            else "needs_follow_up"
+        )
+        if surface_id not in existing_surfaces:
+            coverage["surfaces"].append(
+                {
+                    "id": surface_id,
+                    "label": candidate["summary"],
+                    "disposition": disposition,
+                    "notes": candidate["evidence"],
+                    "receiptRefs": [],
+                }
+            )
+            existing_surfaces.add(surface_id)
+        if disposition != "needs_follow_up":
+            continue
+        coverage["deferred"].append(
+            {
+                "id": candidate_id,
+                "candidateId": candidate_id,
+                "reason": (
+                    "Validation was deferred because the scan reached its cost limit: "
+                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
+                ),
+                "paths": paths,
+                "surfaceIds": [surface_id],
+            }
+        )
+    if not any(
+        isinstance(item, dict)
+        and isinstance(reason := item.get("reason"), str)
+        and (
+            reason == "Validation was deferred because the scan reached its cost limit."
+            or reason.startswith(
+                "Validation was deferred because the scan reached its cost limit: "
+            )
+        )
+        for item in coverage["deferred"]
+    ):
+        coverage["deferred"].append(
+            {
+                "id": "scan-cost-limit",
+                "reason": "Validation was deferred because the scan reached its cost limit.",
+            }
+        )
+    coverage.pop("completeness", None)
+    manifest["scan"].pop("coverageRef", None)
+    manifest["scan"]["mode"] = db.expected_coverage_mode(scan)
+    manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
+    for name, payload in (
+        ("findings.json", findings),
+        ("scan-manifest.json", manifest),
+    ):
+        try:
+            write_scan_local_bytes(
+                scan_dir,
+                name,
+                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
+            )
+        except (ContractError, OSError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc

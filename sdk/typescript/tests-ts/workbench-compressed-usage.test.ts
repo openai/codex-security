@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
-import { cp, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pythonExecutable } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -38,10 +38,17 @@ const workerFrames = {
 async function fixture() {
   const root = await temporaryDirectory();
   const plugin = join(root, "plugin");
-  await cp(join(sourcePlugin, "scripts"), join(plugin, "scripts"), {
-    recursive: true,
-    filter: (source) => basename(source) !== "__pycache__",
-  });
+  const paths = [
+    "scripts/workbench_scan_usage.py",
+    "scripts/windows_scan_local_files.py",
+    "scripts/read_codex_session.mjs",
+    "scripts/workbench/__init__.py",
+    "scripts/workbench/storage.py",
+  ];
+  for (const path of paths) {
+    await mkdir(dirname(join(plugin, path)), { recursive: true });
+    await copyFile(join(sourcePlugin, path), join(plugin, path));
+  }
   await build({
     entryPoints: [join(sourcePlugin, "mcp-app/src/session-decompression.ts")],
     outfile: join(plugin, "mcp/session-decompression.mjs"),
@@ -85,7 +92,6 @@ with sqlite3.connect(os.environ["CODEX_STATE_DB"]) as native:
     native.executemany("INSERT INTO thread_spawn_edges VALUES (?, ?)", options.get("edges", []))
 with sqlite3.connect(":memory:") as db:
     db.row_factory = sqlite3.Row
-    db.execute("CREATE TABLE scans (id TEXT, parent_scan_id TEXT, parent_scan_role TEXT, started_at TEXT)")
     db.execute("CREATE TABLE workspaces (id TEXT, thread_id TEXT)")
     db.execute("INSERT INTO workspaces VALUES ('workspace', ?)", (options["owner"],))
     db.execute("CREATE TABLE deep_scan_worker_threads (scan_id TEXT, sdk_thread_id TEXT)")

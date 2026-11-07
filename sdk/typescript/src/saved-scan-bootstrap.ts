@@ -4,7 +4,7 @@ import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { sqliteFilename } from "./windows-path.js";
 import {
   gitHistoryIdentity,
@@ -15,9 +15,9 @@ import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
   codexSecurityStateDirectory,
-  requireModelSafeOutputDir,
   resolvePluginPython,
   runWorkbench,
+  workbenchEnvironment,
   type ProcessEnvironment,
 } from "./runtime.js";
 
@@ -41,9 +41,8 @@ export async function savedScanWorkbench(
   requestedId: string | { workflowId: string },
   options: {
     environment: ProcessEnvironment;
-    stateDirectory?: string;
     pluginRoot: string;
-    pythonPath?: string;
+    configuredPython?: string;
     currentDirectory: string;
     signal?: AbortSignal;
   },
@@ -51,21 +50,15 @@ export async function savedScanWorkbench(
   SavedScanDependencies["runWorkbench"] & {
     environment: ProcessEnvironment;
     readonly protectedRoots: readonly string[];
-    readonly targetPaths: readonly string[];
   }
 > {
   options.signal?.throwIfAborted();
-  const stateDirectory =
-    options.stateDirectory ?? codexSecurityStateDirectory(options.environment);
-  requireModelSafeOutputDir(stateDirectory);
-  const environment: ProcessEnvironment = {
-    ...options.environment,
-    CODEX_SECURITY_STATE_DIR: stateDirectory,
-  };
+  const environment: ProcessEnvironment = workbenchEnvironment(
+    options.environment,
+  );
   const targets = await readTargets(
     requestedId,
     environment,
-    stateDirectory,
     options.currentDirectory,
     options.signal,
   );
@@ -99,12 +92,28 @@ export async function savedScanWorkbench(
   );
   const protectedRoots = [
     ...callerRoots,
-    ...targets.map((row) => row.target_path),
     ...(
       await Promise.all(
-        targets.map((row) =>
-          gitProtectionRoots(row.target_path, options.signal),
-        ),
+        targets.map(async ({ target_path: target }) => {
+          let candidate = target;
+          for (;;) {
+            try {
+              return [
+                candidate,
+                ...(await gitProtectionRoots(candidate, options.signal)),
+              ];
+            } catch (error) {
+              const parent = dirname(candidate);
+              if (
+                (error as NodeJS.ErrnoException).code !== "ELOOP" ||
+                parent === candidate
+              )
+                throw error;
+              // The old target cannot resolve. Protect its containing directory before choosing Python.
+              candidate = parent;
+            }
+          }
+        }),
       )
     ).flat(),
   ];
@@ -130,7 +139,7 @@ export async function savedScanWorkbench(
       );
     // Pin the interpreter selected with every candidate and the caller checkout protected.
     python ??= await resolvePluginPython({
-      configuredPath: options.pythonPath,
+      configuredPath: options.configuredPython,
       environment,
       protectedRoot: protectedRoots,
       currentDirectory: options.currentDirectory,
@@ -140,7 +149,6 @@ export async function savedScanWorkbench(
     const result = await runWorkbench(
       {
         environment,
-        stateDirectory,
         pluginRoot: options.pluginRoot,
         python,
         signal,
@@ -175,13 +183,11 @@ export async function savedScanWorkbench(
   return Object.assign(workbench, {
     environment,
     protectedRoots: [options.currentDirectory, ...protectedRoots],
-    targetPaths: targets.map((row) => row.target_path),
   });
 }
 
 function openSavedScanDatabase(
   environment: ProcessEnvironment,
-  stateDirectory = codexSecurityStateDirectory(environment),
 ): BootstrapDatabase {
   const require = createRequire(import.meta.url);
   const bun = process.versions["bun"] !== undefined;
@@ -197,7 +203,9 @@ function openSavedScanDatabase(
     },
   ) => BootstrapDatabase;
   return new Database(
-    sqliteFilename(join(stateDirectory, "workbench.sqlite3")),
+    sqliteFilename(
+      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
+    ),
     // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
     // Open only an existing file there; query_only still prevents SQL data/schema writes.
     bun
@@ -213,9 +221,8 @@ function openSavedScanDatabase(
 export function readSavedScanLifecycle(
   environment: ProcessEnvironment,
   scanId: string,
-  stateDirectory?: string,
 ): unknown {
-  const database = openSavedScanDatabase(environment, stateDirectory);
+  const database = openSavedScanDatabase(environment);
   try {
     database.exec("PRAGMA busy_timeout = 0");
     database.exec("PRAGMA query_only = ON");
@@ -233,13 +240,12 @@ export function readSavedScanLifecycle(
 async function readTargets(
   requestedId: string | { workflowId: string },
   environment: ProcessEnvironment,
-  stateDirectory: string,
   currentDirectory: string,
   signal?: AbortSignal,
 ): Promise<ScanTarget[]> {
   let database: BootstrapDatabase | undefined;
   try {
-    database = openSavedScanDatabase(environment, stateDirectory);
+    database = openSavedScanDatabase(environment);
     database.exec("PRAGMA busy_timeout = 5000");
     database.exec("PRAGMA query_only = ON");
     if (typeof requestedId !== "string") {

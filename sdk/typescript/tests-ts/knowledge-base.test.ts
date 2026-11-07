@@ -3,21 +3,16 @@ import { fileURLToPath } from "node:url";
 import {
   chmod,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
-  realpath,
-  rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mock } from "bun:test";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { ConfigurationError } from "../src/errors.js";
 import {
@@ -25,48 +20,13 @@ import {
   readKnowledgeBaseSnapshot,
 } from "../src/knowledge-base.js";
 import { expandHome } from "../src/runtime.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup, temporaryDirectories } =
+  createApiTestFixtures("codex-security-knowledge-test-");
 const testPosix = process.platform === "win32" ? test.skip : test;
 
-test("ordinary passes share immutable extracted inputs while resume detects document changes", async () => {
-  const root = await temporaryDirectory();
-  const source = join(root, "policy.md");
-  await writeFile(source, "Original policy.");
-  const snapshot = await readKnowledgeBaseSnapshot([source]);
-  await writeFile(source, "Updated policy.");
-  const first = await prepareKnowledgeBase(snapshot);
-  const second = await prepareKnowledgeBase(snapshot);
-  const changed = await prepareKnowledgeBase([source]);
-  try {
-    expect(first.sha256).toBe(second.sha256);
-    expect(changed.sha256).not.toBe(first.sha256);
-    for (const prepared of [first, second]) {
-      const [document] = await readdir(prepared.path);
-      expect(await readFile(join(prepared.path, document!), "utf8")).toBe(
-        "Original policy.",
-      );
-    }
-  } finally {
-    await Promise.all([first.cleanup(), second.cleanup(), changed.cleanup()]);
-  }
-});
-
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(): Promise<string> {
-  const path = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-knowledge-test-")),
-  );
-  temporaryDirectories.push(path);
-  return path;
-}
+afterEach(cleanup);
 
 async function extractedDocuments(path: string): Promise<string[]> {
   return await Promise.all(
@@ -242,7 +202,7 @@ describe("scan knowledge bases", () => {
         }
       }
       const directory = await prepareKnowledgeBase([root]);
-      temporaryDirectories.push(directory.path);
+      temporaryDirectories.track(directory.path);
       expect((await extractedDocuments(directory.path)).sort()).toEqual(
         [
           "Documented application behavior.",
@@ -252,7 +212,7 @@ describe("scan knowledge bases", () => {
         ].sort(),
       );
       const explicit = await prepareKnowledgeBase([metadata]);
-      temporaryDirectories.push(explicit.path);
+      temporaryDirectories.track(explicit.path);
       expect(await extractedDocuments(explicit.path)).toEqual([
         await readFile(metadata, "utf8"),
       ]);
@@ -284,12 +244,12 @@ describe("scan knowledge bases", () => {
       );
       try {
         const directory = await prepareKnowledgeBase([root]);
-        temporaryDirectories.push(directory.path);
+        temporaryDirectories.track(directory.path);
         expect(await extractedDocuments(directory.path)).toEqual([
           "Documented application behavior.",
         ]);
         const explicit = await prepareKnowledgeBase([metadata]);
-        temporaryDirectories.push(explicit.path);
+        temporaryDirectories.track(explicit.path);
         expect(await extractedDocuments(explicit.path)).toEqual([
           await readFile(metadata, "utf8"),
         ]);
@@ -307,14 +267,21 @@ describe("scan knowledge bases", () => {
     await writeFile(scope, "Ignore local debug endpoints.");
     await writeFile(join(nested, "deployment.MARKDOWN"), "Public API gateway.");
     await writeFile(join(nested, "notes.txt"), "Prioritize SSRF.");
+    await mkdir(join(root, ".git"));
+    await writeFile(join(root, ".git", "config"), "Repository metadata.");
+    await writeFile(join(nested, ".git"), "gitdir: /synthetic/metadata");
     await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
     await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
 
-    const knowledgeBase = await prepareKnowledgeBase([root, scope, scope]);
-    temporaryDirectories.push(knowledgeBase.path);
+    const knowledgeBase = await prepareKnowledgeBase([scope, root, scope]);
+    temporaryDirectories.track(knowledgeBase.path);
 
-    expect(knowledgeBase.sources).toEqual([root, scope]);
-    expect((await readdir(knowledgeBase.path)).length).toBe(3);
+    expect(knowledgeBase.sources).toEqual([scope, root]);
+    expect((await readdir(knowledgeBase.path)).sort()).toEqual([
+      "0-scope.md.txt",
+      "1-deployment.MARKDOWN.txt",
+      "2-notes.txt.txt",
+    ]);
     const documents = await extractedDocuments(knowledgeBase.path);
     expect(documents).toContain("Ignore local debug endpoints.");
     expect(documents).toContain("Public API gateway.");
@@ -345,7 +312,7 @@ describe("scan knowledge bases", () => {
 
     for (const paths of [[source], [root], [root, source]]) {
       const knowledgeBase = await prepareKnowledgeBase(paths);
-      temporaryDirectories.push(knowledgeBase.path);
+      temporaryDirectories.track(knowledgeBase.path);
       expect(await extractedDocuments(knowledgeBase.path)).toEqual([text]);
       expect(knowledgeBase.sources).toEqual(paths);
     }
@@ -375,7 +342,7 @@ describe("scan knowledge bases", () => {
     contents.push("Review application boundaries.");
 
     const knowledgeBase = await prepareKnowledgeBase(paths);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
 
     expect(knowledgeBase.sources).toEqual(paths);
     expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual(
@@ -412,7 +379,7 @@ describe("scan knowledge bases", () => {
     try {
       const prepared = prepareKnowledgeBase([root], controller.signal).then(
         (knowledgeBase) => {
-          temporaryDirectories.push(knowledgeBase.path);
+          temporaryDirectories.track(knowledgeBase.path);
           return knowledgeBase;
         },
       );
@@ -440,7 +407,7 @@ describe("scan knowledge bases", () => {
     let knowledgeBase;
     try {
       knowledgeBase = await prepareKnowledgeBase([root]);
-      temporaryDirectories.push(knowledgeBase.path);
+      temporaryDirectories.track(knowledgeBase.path);
     } finally {
       listingSpy.mockRestore();
     }
@@ -493,15 +460,15 @@ describe("scan knowledge bases", () => {
     process.env["USERPROFILE"] = home;
     try {
       const expanded = await prepareKnowledgeBase(["~/docs"]);
-      temporaryDirectories.push(expanded.path);
+      temporaryDirectories.track(expanded.path);
       expect(expanded.sources).toEqual([documents]);
 
       const bare = await prepareKnowledgeBase(["~"]);
-      temporaryDirectories.push(bare.path);
+      temporaryDirectories.track(bare.path);
       expect(bare.sources).toEqual([home]);
 
       const absolute = await prepareKnowledgeBase([documents]);
-      temporaryDirectories.push(absolute.path);
+      temporaryDirectories.track(absolute.path);
       expect(absolute.sources).toEqual([documents]);
 
       expect(expandHome("~other/docs")).toBe("~other/docs");
@@ -575,7 +542,7 @@ describe("scan knowledge bases", () => {
     );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
     expect(documents).toContain("Policy guide\nRequire authentication");
@@ -587,284 +554,6 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("X-Frame-Options\n");
     expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
-    expect(documents).toContain("See the runbook\n");
-  });
-
-  test("prepares nested supported documents and retains requested source roots", async () => {
-    const root = await temporaryDirectory();
-    const nested = join(root, "architecture", "threats");
-    const scope = join(root, "scope.md");
-    await mkdir(nested, { recursive: true });
-    await writeFile(scope, "Ignore local debug endpoints.");
-    await writeFile(join(nested, "deployment.MARKDOWN"), "Public API gateway.");
-    await writeFile(join(nested, "notes.txt"), "Prioritize SSRF.");
-    await mkdir(join(root, ".git"));
-    await writeFile(join(root, ".git", "config"), "Repository metadata.");
-    await writeFile(join(nested, ".git"), "gitdir: /synthetic/metadata");
-    await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
-    await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
-
-    const knowledgeBase = await prepareKnowledgeBase([scope, root, scope]);
-    temporaryDirectories.push(knowledgeBase.path);
-
-    expect(knowledgeBase.sources).toEqual([scope, root]);
-    expect((await readdir(knowledgeBase.path)).sort()).toEqual([
-      "0-scope.md.txt",
-      "1-deployment.MARKDOWN.txt",
-      "2-notes.txt.txt",
-    ]);
-    const documents = await extractedDocuments(knowledgeBase.path);
-    expect(documents).toContain("Ignore local debug endpoints.");
-    expect(documents).toContain("Public API gateway.");
-    expect(documents).toContain("Prioritize SSRF.");
-    expect(knowledgeBase.path.startsWith(root)).toBe(false);
-    if (process.platform !== "win32") {
-      expect((await stat(knowledgeBase.path)).mode & 0o777).toBe(0o700);
-      for (const name of await readdir(knowledgeBase.path)) {
-        expect((await stat(join(knowledgeBase.path, name))).mode & 0o777).toBe(
-          0o600,
-        );
-      }
-    }
-  });
-
-  test.each([
-    ["context.json", '{"service":"Public API"}'],
-    ["results.sarif", '{"version":"2.1.0","runs":[]}'],
-    ["deployment.yaml", "service: public-api\n"],
-    ["context.custom", "Boundary: café → gateway\n"],
-    ["CONTEXT", "Public API gateway.\n"],
-  ])("accepts %s directly and in nested directories", async (name, text) => {
-    const root = await temporaryDirectory();
-    const nested = join(root, "nested");
-    await mkdir(nested);
-    const source = join(nested, name);
-    await writeFile(source, text);
-
-    for (const paths of [[source], [root], [root, source]]) {
-      const knowledgeBase = await prepareKnowledgeBase(paths);
-      temporaryDirectories.push(knowledgeBase.path);
-      expect(await extractedDocuments(knowledgeBase.path)).toEqual([text]);
-      expect(knowledgeBase.sources).toEqual(paths);
-    }
-  });
-
-  test.each([
-    ["ASCII at the staging boundary", `${"a".repeat(246)}.md`],
-    ["ASCII beyond the staging boundary", `${"a".repeat(247)}.md`],
-    ["ASCII at the source boundary", `${"a".repeat(252)}.md`],
-    ["multibyte UTF-8", `${"文".repeat(83)}.md`],
-  ])("stages long filenames: %s", async (_description, name) => {
-    const root = await temporaryDirectory();
-    const paths: string[] = [];
-    const contents: string[] = [];
-    for (let index = 0; index < 11; index++) {
-      const directory = join(root, String(index));
-      await mkdir(directory);
-      const source = join(directory, name);
-      const text = `Document ${index}.`;
-      await writeFile(source, text);
-      paths.push(source);
-      contents.push(text);
-    }
-    const scope = join(root, "scope.md");
-    await writeFile(scope, "Review application boundaries.");
-    paths.push(scope);
-    contents.push("Review application boundaries.");
-
-    const knowledgeBase = await prepareKnowledgeBase(paths);
-    temporaryDirectories.push(knowledgeBase.path);
-
-    expect(knowledgeBase.sources).toEqual(paths);
-    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual(
-      [...contents].sort(),
-    );
-    expect(
-      await readFile(join(knowledgeBase.path, "11-scope.md.txt"), "utf8"),
-    ).toBe("Review application boundaries.");
-    await knowledgeBase.cleanup();
-    await expect(stat(knowledgeBase.path)).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    expect(
-      await Promise.all(paths.map((path) => readFile(path, "utf8"))),
-    ).toEqual(contents);
-  });
-
-  test("cancels recursive discovery before staging knowledge-base documents", async () => {
-    const root = await temporaryDirectory();
-    const nested = join(root, "nested", "deeper");
-    await mkdir(nested, { recursive: true });
-    await writeFile(join(nested, "scope.md"), "Review application boundaries.");
-
-    const controller = new AbortController();
-    const reason = new Error("Knowledge-base discovery canceled.");
-    let checks = 0;
-    const signalSpy = spyOn(controller.signal, "throwIfAborted");
-    signalSpy.mockImplementation(() => {
-      if (++checks === 8) controller.abort(reason);
-      if (controller.signal.aborted) throw controller.signal.reason;
-    });
-    const temporarySpy = spyOn(os, "tmpdir");
-
-    try {
-      const prepared = prepareKnowledgeBase([root], controller.signal).then(
-        (knowledgeBase) => {
-          temporaryDirectories.push(knowledgeBase.path);
-          return knowledgeBase;
-        },
-      );
-      await expect(prepared).rejects.toBe(reason);
-      expect(temporarySpy).not.toHaveBeenCalled();
-    } finally {
-      signalSpy.mockRestore();
-      temporarySpy.mockRestore();
-    }
-  });
-
-  test("handles large nested document listings without argument overflow", async () => {
-    const root = await temporaryDirectory();
-    const nested = join(root, "nested");
-    await mkdir(nested);
-    await writeFile(join(nested, "scope.md"), "Review application boundaries.");
-    const originalReaddir = filesystem.readdir;
-    const listingSpy = spyOn(filesystem, "readdir").mockImplementation(
-      async (...args) => {
-        const entries = await Reflect.apply(originalReaddir, filesystem, args);
-        return args[0] === nested ? Array(700_000).fill(entries[0]) : entries;
-      },
-    );
-
-    let knowledgeBase;
-    try {
-      knowledgeBase = await prepareKnowledgeBase([root]);
-      temporaryDirectories.push(knowledgeBase.path);
-    } finally {
-      listingSpy.mockRestore();
-    }
-
-    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
-      "Review application boundaries.",
-    ]);
-  });
-
-  test("removes staged documents when knowledge-base preparation is canceled", async () => {
-    const root = await temporaryDirectory();
-    const staging = join(root, "staging");
-    await mkdir(staging);
-    const first = join(root, "first.md");
-    const second = join(root, "second.md");
-    await writeFile(first, "First document.");
-    await writeFile(second, "Second document.");
-
-    const controller = new AbortController();
-    const reason = new Error("Knowledge-base preparation canceled.");
-    const originalWriteFile = filesystem.writeFile;
-    let staged = false;
-    const writeSpy = spyOn(filesystem, "writeFile").mockImplementation(
-      async (...args) => {
-        await Reflect.apply(originalWriteFile, filesystem, args);
-        staged = true;
-        controller.abort(reason);
-      },
-    );
-
-    try {
-      await expect(
-        prepareKnowledgeBase([first, second], controller.signal, staging),
-      ).rejects.toBe(reason);
-      expect(staged).toBe(true);
-      expect(await readdir(staging)).toEqual([]);
-    } finally {
-      writeSpy.mockRestore();
-    }
-  });
-
-  test("expands ~ in requested paths and leaves absolute and ~user paths alone", async () => {
-    const home = await temporaryDirectory();
-    const documents = join(home, "docs");
-    await mkdir(documents, { recursive: true });
-    await writeFile(join(documents, "scope.md"), "Review the payment service.");
-    const previousHome = process.env["HOME"];
-    const previousUserProfile = process.env["USERPROFILE"];
-    process.env["HOME"] = home;
-    process.env["USERPROFILE"] = home;
-    try {
-      const expanded = await prepareKnowledgeBase(["~/docs"]);
-      temporaryDirectories.push(expanded.path);
-      expect(expanded.sources).toEqual([documents]);
-
-      const bare = await prepareKnowledgeBase(["~"]);
-      temporaryDirectories.push(bare.path);
-      expect(bare.sources).toEqual([home]);
-
-      const absolute = await prepareKnowledgeBase([documents]);
-      temporaryDirectories.push(absolute.path);
-      expect(absolute.sources).toEqual([documents]);
-
-      expect(expandHome("~other/docs")).toBe("~other/docs");
-    } finally {
-      if (previousHome === undefined) delete process.env["HOME"];
-      else process.env["HOME"] = previousHome;
-      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
-      else process.env["USERPROFILE"] = previousUserProfile;
-    }
-  });
-
-  test("extracts searchable text from PDFs and DOCX documents", async () => {
-    const root = await temporaryDirectory();
-    await writeFile(
-      join(root, "architecture.pdf"),
-      pdf("Payment service boundary"),
-    );
-    await writeFile(
-      join(root, "threat-model.docx"),
-      docx("SSRF &amp; IDOR", "Review authentication"),
-    );
-    await writeFile(
-      join(root, "paired-break.docx"),
-      docx("Authorization", "Review permissions", "<w:br></w:br>"),
-    );
-    await writeFile(
-      join(root, "carriage-return.docx"),
-      docx("Authentication", "Review sessions", "<w:cr/>"),
-    );
-    await writeFile(
-      join(root, "paired-tab.docx"),
-      docx("Role", "Capability", "<w:tab></w:tab>"),
-    );
-    await writeFile(
-      join(root, "self-closing-tab.docx"),
-      docx("User", "Permission", "<w:tab/>"),
-    );
-    await writeFile(
-      join(root, "tracked-change.docx"),
-      docxBody(
-        '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
-          '<w:del w:id="1" w:author="Example Author"><w:r><w:delText>public</w:delText></w:r></w:del>' +
-          "<w:r><w:t>internal only</w:t></w:r></w:p>",
-      ),
-    );
-    await writeFile(
-      join(root, "field-code.docx"),
-      docxBody(
-        '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
-          '<w:r><w:instrText xml:space="preserve"> HYPERLINK "https://example.com/runbook" </w:instrText></w:r>' +
-          '<w:r><w:fldChar w:fldCharType="separate"/><w:t>the runbook</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>',
-      ),
-    );
-
-    const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
-    const documents = await extractedDocuments(knowledgeBase.path);
-
-    expect(documents).toContain("Payment service boundary");
-    expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
-    expect(documents).toContain("Authorization\nReview permissions\n");
-    expect(documents).toContain("Authentication\nReview sessions\n");
-    expect(documents).toContain("Role\tCapability\n");
-    expect(documents).toContain("User\tPermission\n");
-    expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("See the runbook\n");
   });
 
@@ -1029,7 +718,7 @@ describe("scan knowledge bases", () => {
     await writeFile(source, docx(xml));
 
     const prepared = await prepareKnowledgeBase([source]);
-    temporaryDirectories.push(prepared.path);
+    temporaryDirectories.track(prepared.path);
     expect(await extractedDocuments(prepared.path)).toEqual([`${expected}\n`]);
   });
 
@@ -1042,7 +731,7 @@ describe("scan knowledge bases", () => {
     );
 
     const prepared = await prepareKnowledgeBase([source]);
-    temporaryDirectories.push(prepared.path);
+    temporaryDirectories.track(prepared.path);
     expect(await extractedDocuments(prepared.path)).toEqual([
       "Authorization\nReview permissions\n",
     ]);
@@ -1152,7 +841,7 @@ describe("scan knowledge bases", () => {
       const root = await temporaryDirectory();
       await writeFile(join(root, "reference.docx"), docx(`Text ${reference}.`));
       const knowledgeBase = await prepareKnowledgeBase([root]);
-      temporaryDirectories.push(knowledgeBase.path);
+      temporaryDirectories.track(knowledgeBase.path);
       const documents = await extractedDocuments(knowledgeBase.path);
       expect(documents).toEqual([`Text ${expected}.\n`]);
     },
@@ -1167,7 +856,7 @@ describe("scan knowledge bases", () => {
     );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
     expect(documents).toHaveLength(2);
@@ -1186,7 +875,7 @@ describe("scan knowledge bases", () => {
     await writeFile(join(root, ".~lock.#"), "Named document");
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
 
     expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
       "Access policy.\n",
@@ -1205,7 +894,7 @@ describe("scan knowledge bases", () => {
     await writeFile(join(root, "._policy.pdf"), appleDouble);
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
 
     expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
       "Access policy.",
@@ -1226,7 +915,7 @@ describe("scan knowledge bases", () => {
     await writeFile(source, "Updated scope");
     await writeFile(join(root, "priorities.txt"), "New attack priorities");
     const second = await prepareKnowledgeBase(first.sources);
-    temporaryDirectories.push(second.path);
+    temporaryDirectories.track(second.path);
     const documents = await extractedDocuments(second.path);
 
     expect(documents.sort()).toEqual([
@@ -1288,7 +977,7 @@ describe("scan knowledge bases", () => {
     await symlink(source, linked);
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
     expect(await extractedDocuments(knowledgeBase.path)).toEqual([
       "External APIs",
     ]);

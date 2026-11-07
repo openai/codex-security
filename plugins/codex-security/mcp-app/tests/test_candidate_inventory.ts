@@ -3,7 +3,6 @@ import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import { importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
