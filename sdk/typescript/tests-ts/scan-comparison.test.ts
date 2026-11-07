@@ -15,7 +15,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, win32 } from "node:path";
+import { delimiter, join, relative, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import {
@@ -26,6 +26,8 @@ import {
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import * as runtimeCommands from "../src/runtime.js";
+import * as auth from "../src/auth.js";
+import * as cyberAccess from "../src/scan-cyber-access.js";
 import {
   executablePathForSpawn,
   resolveCodexCommand,
@@ -170,6 +172,8 @@ describe("semantic scan comparison", () => {
   test.each([
     ["sdk", "matching"],
     ["cli", "matching"],
+    ["sdk", "component matching"],
+    ["cli", "component matching"],
     ["sdk", "planning"],
     ["cli", "planning"],
   ] as const)(
@@ -177,9 +181,13 @@ describe("semantic scan comparison", () => {
     async (surface, helper) => {
       const root = await temporaryDirectory();
       const home = join(root, "home");
-      const repository = join(root, "repository");
+      const checkout = join(root, "checkout");
+      const repository = join(checkout, "repository");
       await mkdir(home);
-      await mkdir(repository);
+      await mkdir(repository, { recursive: true });
+      childProcess.execFileSync("git", ["init", "-q", checkout]);
+      const repositoryBin = join(checkout, "node_modules", ".bin");
+      await mkdir(repositoryBin, { recursive: true });
       await writeFile(join(repository, "source.ts"), "export {};\n");
       await writeFile(
         join(home, "config.toml"),
@@ -200,7 +208,9 @@ describe("semantic scan comparison", () => {
           },
         },
         environment: {
-          PATH: process.env["PATH"],
+          PATH: [await realpath(repositoryBin), process.env["PATH"]].join(
+            delimiter,
+          ),
           SystemRoot: process.env["SystemRoot"],
           CODEX_HOME: home,
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
@@ -208,11 +218,15 @@ describe("semantic scan comparison", () => {
         },
       };
       let captured: CodexOptions | undefined;
-      const { codex } = fakeCodex(
-        helper === "matching"
-          ? { matches: [], uncertain: [] }
-          : { components: [{ name: "Source", paths: ["source.ts"] }] },
+      const { codex, calls } = fakeCodex(
+        helper === "planning"
+          ? { components: [{ name: "Source", paths: ["source.ts"] }] }
+          : { matches: [], uncertain: [] },
       );
+      const discovery = spyOn(
+        cyberAccess,
+        "resolveScanCyberAccessProgram",
+      ).mockResolvedValue("daybreak_blue");
       const startThread = observeCodexOptions(codex, (options) => {
         captured = options;
       });
@@ -227,26 +241,138 @@ describe("semantic scan comparison", () => {
             before: [finding("before")],
             after: [finding("after")],
           };
-          if (surface === "sdk") await matchScanFindings(input, options);
+          if (helper === "component matching") {
+            await matchScanFindingsInternal(input, options, {
+              surface,
+              componentRepository: repository,
+            });
+          } else if (surface === "sdk") await matchScanFindings(input, options);
           else await matchScanFindingsInternal(input, options, { surface });
         }
+        const requestMetadata = parse(captured!.configOverrides!.join("\n"))[
+          "responses_api_metadata"
+        ];
+        expect(discovery).toHaveBeenCalledTimes(helper === "matching" ? 0 : 1);
+        if (helper !== "matching") {
+          const probe = discovery.mock.calls[0]![0];
+          expect(probe.environment["CODEX_API_KEY"]).toBe("synthetic-key");
+          expect(probe.environment["PATH"]?.split(delimiter)).not.toContain(
+            await realpath(repositoryBin),
+          );
+          expect(probe.environment["PATH"]).toBe(captured?.env?.["PATH"]);
+          expect(probe.config).toHaveProperty(
+            "responses_api_metadata",
+            requestMetadata,
+          );
+        }
+        expect(calls.turnOptions?.cyberAccessProgram).toBe(
+          helper === "matching" ? undefined : "daybreak_blue",
+        );
         expect(startThread).toHaveBeenCalledTimes(1);
         expect(captured?.config).not.toHaveProperty("responses_api_metadata");
-        expect(
-          parse(captured!.configOverrides!.join("\n"))[
-            "responses_api_metadata"
-          ],
-        ).toEqual({
+        expect(requestMetadata).toEqual({
           synthetic_home: "preserved",
           synthetic_caller: "preserved",
           codex_security_surface: surface,
           codex_security_command:
-            helper === "matching" ? "compare" : "scan-components",
+            helper === "planning" ? "scan-components" : "compare",
           codex_security_package_version: VERSION,
         });
       } finally {
+        discovery.mockRestore();
         startThread.mockRestore();
       }
+    },
+  );
+
+  test("component catalog discovery uses the helper's credential home and execution overrides", async () => {
+    const root = await temporaryDirectory();
+    const ambientHome = join(root, "ambient");
+    const state = join(root, "state");
+    const privateHome = join(state, "codex-home");
+    const repository = join(root, "repo");
+    for (const directory of [ambientHome, privateHome, repository])
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(join(repository, "component.ts"), "");
+    await writeFile(
+      join(ambientHome, "config.toml"),
+      stringify({
+        openai_base_url: "http://127.0.0.1:1/ambient",
+        chatgpt_base_url: "http://127.0.0.1:1/ambient",
+      }),
+    );
+    const discovery = spyOn(
+      cyberAccess,
+      "resolveScanCyberAccessProgram",
+    ).mockResolvedValue("daybreak_blue");
+    const login = spyOn(auth, "accountStatus").mockResolvedValue({
+      authenticated: true,
+      details: "Logged in using ChatGPT",
+    });
+    const command = spyOn(runtimeCommands, "runCodexCommand").mockResolvedValue(
+      { success: true, exitCode: 0, stdout: "[]", stderr: "" },
+    );
+    const { codex, calls } = fakeCodex({
+      components: [{ name: "Component", paths: ["component.ts"] }],
+    });
+    const thread = observeCodexOptions(codex, () => {});
+    try {
+      await planComponents(repository, {
+        auth: "chatgpt",
+        config: {
+          codexOverrides: { model_catalog_json: "relative-catalog.json" },
+        },
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: state,
+        },
+      });
+      const [probe] = discovery.mock.calls[0]!;
+      expect(probe.credentialType).toBe("chatgpt");
+      expect(await realpath(probe.environment["CODEX_HOME"]!)).toBe(
+        await realpath(privateHome),
+      );
+      expect(probe.config).not.toHaveProperty("openai_base_url");
+      expect(probe.config).not.toHaveProperty("chatgpt_base_url");
+      expect(probe.config["model_catalog_json"]).toBe(
+        join(calls.threadOptions!.workingDirectory!, "relative-catalog.json"),
+      );
+      expect(calls.turnOptions?.cyberAccessProgram).toBe("daybreak_blue");
+    } finally {
+      thread.mockRestore();
+      command.mockRestore();
+      login.mockRestore();
+      discovery.mockRestore();
+    }
+  });
+
+  test.each([
+    ["chatgpt", "file", "chatgpt"],
+    ["apikey", "file", "api_key"],
+    ["chatgpt", "keyring", undefined],
+  ] as const)(
+    "classifies an ambient %s credential file with %s storage",
+    async (mode, store, expected) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "auth.json"),
+        JSON.stringify({ auth_mode: mode }),
+      );
+      let observed: string | undefined;
+      const selected = await comparisonEnvironment(
+        { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: join(home, "state") },
+        undefined,
+        undefined,
+        undefined,
+        { cli_auth_credentials_store: store },
+        undefined,
+        "auto",
+        (type) => {
+          observed = type;
+        },
+      );
+      expect(selected["CODEX_HOME"]).toBe(home);
+      expect(observed).toBe(expected);
     },
   );
 

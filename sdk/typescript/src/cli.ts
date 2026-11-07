@@ -5906,7 +5906,10 @@ export async function main(
             },
             createSecurity: dependencies.createSecurity,
             planComponents: dependencies.planComponents,
-            matchFindings: dependencies.matchFindings,
+            matchFindings:
+              dependencies.matchFindings === DEFAULT_DEPENDENCIES.matchFindings
+                ? undefined
+                : dependencies.matchFindings,
             onPlan: (components) => {
               for (const component of components)
                 componentNames.set(component.id, component.name);
@@ -10257,6 +10260,7 @@ async function executeScan(
   let patchOtel: JsonObject | undefined;
   let patchDaybreak: JsonValue = false;
   let patchDaybreakFeatures: JsonObject = {};
+  let followUpCyberAccessProgram = arguments_.cyberAccessProgram;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -10636,6 +10640,14 @@ async function executeScan(
       onScanRegistered: (scan) => {
         registeredScan = scan;
         scanDir = scan.scanDir;
+        if (
+          arguments_.cyberAccessProgram === undefined &&
+          scan.cyberAccessProgram === "daybreak_blue"
+        ) {
+          const message = "Requesting Daybreak Blue for this scan.";
+          if (dashboard !== null) dashboard.note(message);
+          else writeAboveProgress(() => progress?.stage(message));
+        }
       },
       onLifecycle: verbose
         ? (scan) =>
@@ -10903,6 +10915,9 @@ async function executeScan(
       preflight = await security.preflight(repository, options);
     } else {
       result = await security.run(repository, options);
+      followUpCyberAccessProgram ??=
+        result.requestedCyberAccessProgram ??
+        registeredScan?.cyberAccessProgram;
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
       if (arguments_.validate) {
@@ -10976,7 +10991,7 @@ async function executeScan(
                   knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
                   finding,
                   auth,
-                  cyberAccessProgram: arguments_.cyberAccessProgram,
+                  cyberAccessProgram: followUpCyberAccessProgram,
                   safetyIdentifier: arguments_.safetyIdentifier,
                   signal: preparationAbortController.signal,
                 });
@@ -11334,7 +11349,7 @@ async function executeScan(
           requestMetadata: patchRequestMetadata,
           otel: patchOtel,
           daybreakFeatures: patchDaybreakFeatures,
-          cyberAccessProgram: arguments_.cyberAccessProgram,
+          cyberAccessProgram: followUpCyberAccessProgram,
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,

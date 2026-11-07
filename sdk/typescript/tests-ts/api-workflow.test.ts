@@ -103,6 +103,13 @@ test.each([
       return TestClient.withDependencies({
         environment,
         ...scanRuntimeDependencies(codexHome, scanDir),
+        resolveScanCyberAccessProgram:
+          scenario === "completed"
+            ? async () => {
+                expect(attempt).toBe(1);
+                return "daybreak_blue";
+              }
+            : undefined,
         createOperationTelemetry: (options) => new OperationTelemetry(options),
         runWorkbench: async (options, args, input) => {
           if (args[0] === "finding-workflow") {
@@ -241,6 +248,7 @@ test.each([
           .status,
       ).toBe("completed");
       if (scenario === "completed") {
+        expect(result.requestedCyberAccessProgram).toBe("daybreak_blue");
         await expect(
           resumed.run(repository, { workflowId, mode: "deep" }),
         ).rejects.toThrow("already bound to a different");

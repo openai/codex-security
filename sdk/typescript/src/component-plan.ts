@@ -86,6 +86,7 @@ export async function planComponents(
       {
         surface: options.surface ?? "sdk",
         command: "scan-components",
+        componentRepository: repository,
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
       },
     );

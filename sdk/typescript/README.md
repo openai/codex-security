@@ -244,12 +244,12 @@ The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
 For a custom `pluginPath`, check [custom plugin compatibility](#custom-plugins).
 
-To enable Daybreak on Codex 0.163.0 or later, set `codexOverrides.daybreak: true`.
-The toggle defaults off; an explicit `false` keeps it off. The setting reaches
-Deep Scan discovery workers, including resumed workers. Scans use
-isolated configuration, so a desktop toggle or personal Codex configuration does
-not configure an SDK scan. See [Daybreak opt-in](docs/cli.md#daybreak-opt-in) for
-CLI, project-file, and direct plugin configuration.
+With the built-in OpenAI provider, `security.run()` requests Daybreak Blue
+when Codex advertises it for the selected model and credentials. To request
+Standard or opt in to Red, pass `cyberAccessProgram: "standard"` or
+`cyberAccessProgram: "daybreak_red"` in the scan options. See
+[Cyber access programs](docs/cli.md#select-a-cyber-access-program) for defaults
+and [Daybreak opt-in](docs/cli.md#daybreak-opt-in) for the native Codex toggle.
 
 Deep Scan workers, including resumed workers, inherit per-scan provider,
 authentication, environment, and executable settings with read-only permissions.

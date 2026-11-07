@@ -9,6 +9,7 @@ import {
   readdir,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -363,6 +364,8 @@ describe("CodexSecurity policy API", () => {
       for (const { f, sandbox } of sessions) {
         const configuration = f.configuration()!;
         expect(configuration.config?.["windows"]).toEqual({ sandbox });
+        // An absent deny-listed path can be created as a directory by the Windows sandbox.
+        expect((await stat(f.runtime.configPath!)).isFile()).toBe(true);
         const overrides = parseToml(configuration.configOverrides!.join("\n"));
         const filesystem = (
           overrides["permissions"] as Record<string, Record<string, unknown>>

@@ -1,15 +1,20 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, mock, test } from "bun:test";
 import type { TurnOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import type { ScanAuthentication, ScanOptions } from "../src/api.js";
 import type { DirectDeepScanOptions } from "../src/deep-scan.js";
+import { resolveScanCyberAccessProgram } from "../src/scan-cyber-access.js";
 import { TestClient } from "./support/api-client.js";
 import {
+  codexFactory,
   preparedRuntime,
   scanRuntimeDependencies,
 } from "./support/api-events.js";
+import { rejecting } from "./support/errors.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
@@ -235,5 +240,116 @@ test.each(cases)(
     } finally {
       await client.close();
     }
+  },
+);
+
+test.each([
+  {
+    programs: ["standard", "daybreak_red", "daybreak_blue"],
+    expected: "daybreak_blue",
+  },
+  { programs: ["standard", "daybreak_red"], expected: "standard" },
+])(
+  "fresh and resumed direct Deep Scan workers automatically request $expected",
+  async ({ programs, expected }) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    const scanDir = join(root, "scan");
+    for (const path of [repository, home, scanDir])
+      await mkdir(path, { mode: 0o700 });
+    const catalog = JSON.parse(
+      await readFile(
+        new URL("./fixtures/native-skill-model-catalog.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    catalog.models[0].available_access_programs.cyber = programs;
+    const catalogPath = join(root, "catalog.json");
+    await writeFile(catalogPath, JSON.stringify(catalog));
+    const environment = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([name]) =>
+          /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(name),
+        ),
+      ),
+      CODEX_HOME: home,
+      CODEX_API_KEY: "synthetic-worker-key",
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const runtime = {
+      ...preparedRuntime(home),
+      environment,
+      configPath: join(home, "scan.toml"),
+    };
+    const prompt = join(root, "prompt.md");
+    await writeFile(prompt, "Test scan.");
+    await using client = new TestClient(
+      {
+        codexOverrides: {
+          model: "gpt-test",
+          model_catalog_json: catalogPath,
+        },
+      },
+      {
+        ...scanRuntimeDependencies(home, scanDir),
+        environment,
+        prepareRuntime: async () => runtime,
+        canRunDirectDeepScan: () => true,
+        resolveScanCyberAccessProgram,
+        createCodex: codexFactory(rejecting("unexpected parent turn")),
+        runDeepScan: async function* ({ codexOptions, preflightCommand }) {
+          const output = execFileSync(
+            process.execPath,
+            [
+              fileURLToPath(
+                new URL(
+                  "./fixtures/stored-daybreak-workers.mjs",
+                  import.meta.url,
+                ),
+              ),
+              fileURLToPath(
+                new URL(
+                  "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
+                  import.meta.url,
+                ),
+              ),
+              prompt,
+              "--local-provider",
+            ],
+            {
+              cwd: repository,
+              env: {
+                ...codexOptions.env,
+                CODEX_CLI_PATH: preflightCommand.command,
+                CODEX_API_KEY: codexOptions.apiKey,
+              },
+              input:
+                '{"kind":"discovery"}\n{"kind":"discovery","resumePrevious":true}\n',
+              encoding: "utf8",
+            },
+          );
+          const [, fresh, resumed] = output
+            .trimEnd()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          expect(fresh).toMatchObject({
+            requestedProgram: expected,
+            program: expected,
+            resumed: false,
+          });
+          expect(resumed).toMatchObject({
+            requestedProgram: expected,
+            program: expected,
+            resumed: true,
+            threadId: fresh.threadId,
+          });
+          throw new Error("worker launches verified");
+        },
+      },
+    );
+    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+      "worker launches verified",
+    );
   },
 );

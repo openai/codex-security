@@ -49,6 +49,7 @@ import {
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
+import { resolveScanCyberAccessProgram } from "./scan-cyber-access.js";
 import { isRecord } from "./record.js";
 import {
   STATIC_VERIFICATION_INSTRUCTIONS,
@@ -71,6 +72,7 @@ import {
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
+  readStoredFileCredentialType,
   withoutOpenAiApiKeys,
   type AccountStatus,
 } from "./auth.js";
@@ -85,6 +87,7 @@ import {
   isExternalModelProvider,
   hasCommandAuth,
   mergedCodexConfig,
+  projectTrustKey,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   MODEL_FILE_SETTINGS,
@@ -423,6 +426,7 @@ export interface ScanOptions extends ScanSettings {
     scanId: string;
     scanDir: string;
     startedAt?: string;
+    cyberAccessProgram?: ScanSettings["cyberAccessProgram"];
   }) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -752,6 +756,7 @@ interface ClientDependencies {
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  resolveScanCyberAccessProgram?: typeof resolveScanCyberAccessProgram;
   probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
@@ -766,6 +771,7 @@ export const DEFAULT_DEPENDENCIES: ClientDependencies = {
     nativeProfile === undefined
       ? new Codex(options)
       : createProfileCodex(options, nativeProfile),
+  resolveScanCyberAccessProgram,
   environment: process.env,
 };
 
@@ -912,6 +918,7 @@ export class CodexSecurity {
       ScanResultOptions,
       | "threadId"
       | "turnResult"
+      | "requestedCyberAccessProgram"
       | "sarifPath"
       | "repositoryFindings"
       | "ownerSuggestionsPath"
@@ -930,6 +937,11 @@ export class CodexSecurity {
           metadata ??= {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
+            requestedCyberAccessProgram: isRecord(recipe)
+              ? ScanSettingsSchema.shape.cyberAccessProgram.parse(
+                  recipe["requestedCyberAccessProgram"],
+                )
+              : undefined,
           };
         else local.retryRecipe = isRecord(recipe) ? recipe : {};
       }
@@ -967,6 +979,7 @@ export class CodexSecurity {
       metadata = {
         threadId: result.threadId,
         turnResult: result.turnResult,
+        requestedCyberAccessProgram: result.requestedCyberAccessProgram,
         sarifPath: result.sarifPath,
         repositoryFindings: result.repositoryFindings,
         ownerSuggestionsPath: result.ownerSuggestionsPath,
@@ -1535,11 +1548,7 @@ export class CodexSecurity {
       );
       // Pin an untrusted root before --cd can trust it and load repository MCP
       // servers. An inline table keeps the path out of CLI dotted-key parsing.
-      // Codex prefers an exact ASCII-lowercase trust key on Windows.
-      const projectTrustKey =
-        process.platform === "win32"
-          ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
-          : repository;
+      const repositoryKey = projectTrustKey(repository);
       const configured = scanModelConfiguration(session.effectiveConfig);
       const { pricingContext } = session;
       const model = options.model ?? configured.model;
@@ -1563,7 +1572,7 @@ export class CodexSecurity {
         [
           `permissions.${SCAN_PERMISSION_PROFILE}.network.enabled=false`,
           "project_root_markers=[]",
-          `projects=${inlineToml({ [projectTrustKey]: { trust_level: "untrusted" } })}`,
+          `projects=${inlineToml({ [repositoryKey]: { trust_level: "untrusted" } })}`,
         ],
       );
       tracker = new ScanCostTracker({
@@ -2181,6 +2190,7 @@ export class CodexSecurity {
       signal,
       budgetAbortController.signal,
     ]);
+    let cyberAccessProgram = options.cyberAccessProgram;
     let maxCostUsd = options.maxCostUsd;
     let latestCost: Readonly<ScanCost> | null = null;
     let latestCostComplete = false;
@@ -2439,15 +2449,61 @@ export class CodexSecurity {
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
         typeof sqliteHome === "string" ? { CODEX_SQLITE_HOME: sqliteHome } : {};
+      const { model } = scanModelConfiguration(effectiveConfig);
+      const requestMetadata = codexSecurityRequestContext(effectiveConfig, {
+        ...this.#operationTelemetry?.context,
+        surface: this.#surface,
+        command: "scan",
+        pluginVersion: runtime.plugin.version,
+        mode,
+      }).metadata;
+      if (
+        options.resumeScanId === undefined &&
+        cyberAccessProgram === undefined &&
+        this.#dependencies.hostedScan === undefined &&
+        this.#dependencies.resolveScanCyberAccessProgram !== undefined &&
+        (modelProvider === undefined || modelProvider === "openai")
+      ) {
+        // An empty sibling inherits the replacement output's project layers.
+        const archiveWorkspace =
+          options.archiveExisting && (await readdir(scanDir)).length > 0
+            ? await prepareOutputDir(undefined, "catalog", dirname(scanDir))
+            : undefined;
+        try {
+          cyberAccessProgram =
+            await this.#dependencies.resolveScanCyberAccessProgram({
+              command: this.#codexCommand(),
+              cwd: archiveWorkspace ?? scanDir,
+              // auth.json identifies the stored account only when the scan uses it.
+              credentialType:
+                authentication.method === "stored_credentials" &&
+                workerRuntimeConfig["cli_auth_credentials_store"] === "file" &&
+                !environmentEntry(
+                  workerProviderEnvironment,
+                  "CODEX_ACCESS_TOKEN",
+                )?.trim()
+                  ? authentication.credentialType
+                  : undefined,
+              nativeProfile: runtime.providerProfile !== undefined,
+              environment: definedEnvironment({
+                ...environmentWithGit(workerProviderEnvironment, git),
+                CODEX_HOME: runtimeHome,
+              }),
+              config: {
+                ...workerRuntimeConfig,
+                responses_api_metadata: requestMetadata,
+              },
+              model,
+              signal,
+            });
+        } finally {
+          if (archiveWorkspace !== undefined)
+            await cleanupSdkDirectory(archiveWorkspace);
+        }
+      }
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
-        responses_api_metadata: codexSecurityRequestContext(effectiveConfig, {
-          ...this.#operationTelemetry?.context,
-          surface: this.#surface,
-          command: "scan",
-          pluginVersion: runtime.plugin.version,
-          mode,
-        }).metadata,
+        responses_api_metadata: requestMetadata,
         ...(workerEnvironment === undefined
           ? {}
           : { environment: workerEnvironment }),
@@ -2523,7 +2579,6 @@ export class CodexSecurity {
         mode,
         pluginVersion: runtime.plugin.version,
       };
-      const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model, pricingContext);
       if (mode === "deep" && options.maxCostUsd !== undefined) {
         budgetRecovery = {
@@ -2748,6 +2803,10 @@ export class CodexSecurity {
         cyberAccessProgram: options.cyberAccessProgram,
         ownerSuggestions: options.ownerSuggestions,
       });
+      if (cyberAccessProgram !== undefined) {
+        // A continuation uses the original program. A new rerun resolves the original intent.
+        recipe["requestedCyberAccessProgram"] = cyberAccessProgram;
+      }
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
           name: savedProviderProfile.name,
@@ -2780,13 +2839,34 @@ export class CodexSecurity {
         failureMessage: "Could not save the Codex Security scan",
       };
       checkOpen();
-      const registration =
+      const resumeRegistration =
         options.resumeScanId !== undefined
           ? await workbench(workbenchOptions, [
               "get-cli-scan-resume",
               "--scan-id",
               options.resumeScanId,
             ])
+          : undefined;
+      const resumeRecipe = resumeRegistration?.["recipe"];
+      if (cyberAccessProgram === undefined && isRecord(resumeRecipe)) {
+        cyberAccessProgram = ScanSettingsSchema.shape.cyberAccessProgram.parse(
+          resumeRecipe["cyberAccessProgram"] ??
+            resumeRecipe["requestedCyberAccessProgram"],
+        );
+      }
+      if (
+        runtime.configPath !== undefined &&
+        cyberAccessProgram !== undefined &&
+        cyberAccessProgram !== options.cyberAccessProgram
+      ) {
+        await writeCodexConfig(runtime.configPath, {
+          ...preflightConfig,
+          codex_security: { cyber_access_program: cyberAccessProgram },
+        });
+      }
+      const registration =
+        resumeRegistration !== undefined
+          ? resumeRegistration
           : await workbench(
               workbenchOptions,
               workbenchArgs("register-cli-scan", {
@@ -3133,6 +3213,7 @@ export class CodexSecurity {
       )({
         scanId,
         scanDir,
+        ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
         ...(typeof registration["startedAt"] === "string"
           ? { startedAt: registration["startedAt"] }
           : {}),
@@ -3347,10 +3428,7 @@ export class CodexSecurity {
         skipGitRepoCheck: true,
         approvalPolicy,
       };
-      const turnOptions: TurnOptions = {
-        signal,
-        cyberAccessProgram: options.cyberAccessProgram,
-      };
+      const turnOptions: TurnOptions = { signal, cyberAccessProgram };
       const postScanPrompt = options.postScanPrompt;
       const openThread = (client: CodexClientLike, id: unknown) => {
         if (typeof id !== "string") return client.startThread(threadOptions);
@@ -3846,7 +3924,7 @@ export class CodexSecurity {
           },
         },
         model,
-        cyberAccessProgram: options.cyberAccessProgram,
+        cyberAccessProgram,
         signal,
       };
       if (options.ownerSuggestions) {
@@ -3877,6 +3955,7 @@ export class CodexSecurity {
           )(`Could not generate owner suggestions: ${errorMessage(error)}`);
         }
       }
+      result.requestedCyberAccessProgram = cyberAccessProgram;
       if (this.#dependencies.hostedScan !== undefined) return result;
       try {
         const runWorkbench = (args: readonly string[], input?: string) =>
@@ -4019,6 +4098,7 @@ export class CodexSecurity {
             budgetRecovery.pythonPath,
             budgetRecovery.protectedRoot,
           );
+          result.requestedCyberAccessProgram = cyberAccessProgram;
           const completedScan = completion["scan"];
           const targetWarnings = new Set(
             Array.isArray(completion["targetWarnings"])
@@ -6529,24 +6609,10 @@ export async function runtimeScanAuthentication(
   );
   if (authentication.method !== "stored_credentials") return authentication;
 
-  try {
-    const stored = JSON.parse(
-      await readFile(join(codexHome, "auth.json"), "utf8"),
-    ) as unknown;
-    if (!isRecord(stored)) return authentication;
-
-    const mode = stored["auth_mode"];
-    if (mode === "apikey" || mode === "api_key") {
-      return { ...authentication, credentialType: "api_key" };
-    }
-    if (mode === "chatgpt") {
-      return { ...authentication, credentialType: "chatgpt" };
-    }
-  } catch {
-    return authentication;
-  }
-
-  return authentication;
+  const credentialType = await readStoredFileCredentialType(codexHome);
+  return credentialType === "chatgpt" || credentialType === "api_key"
+    ? { ...authentication, credentialType }
+    : authentication;
 }
 
 /** Local helpers do not authenticate model requests. */
