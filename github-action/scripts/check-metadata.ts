@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { parse } from 'yaml';
-import { INPUT_NAMES, parseInputs } from '../src/inputs.js';
-import { OUTPUT_NAMES } from '../src/main.js';
+import { INPUT_NAMES, parseInputs } from '../src/inputs.ts';
+import { OUTPUT_NAMES } from '../src/main.ts';
 const metadata = parse(await readFile(new URL('../../action.yml', import.meta.url), 'utf8'));
 assert.deepEqual(Object.keys(metadata.inputs).sort(), [...INPUT_NAMES].sort(), 'action.yml inputs must match the parser');
 assert.deepEqual(Object.keys(metadata.outputs).sort(), [...OUTPUT_NAMES].sort(), 'action.yml outputs must match implementation');

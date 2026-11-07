@@ -107,6 +107,7 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
+  withoutOpenAiApiKeys,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
 import type { DeepScanDiagnostic } from "./deep-scan.js";
@@ -126,10 +127,6 @@ import {
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
-import {
-  externalImportsDisabledMessage,
-  externalImportsEnabled,
-} from "./external-imports-feature.js";
 import { listLocalExternalFindings } from "./external-findings-local.js";
 import type { collectSonarIssues } from "./sonar-collector.js";
 import { prepareSonarImport } from "./sonar-import.js";
@@ -198,6 +195,7 @@ import {
   resolveCodexProfile,
   mergedCodexConfig,
   readCodexFileProfile,
+  scanPricingContext,
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
@@ -296,8 +294,11 @@ import {
   withCredentialHomeLock,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
+  codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
+  codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  logoutCredentialHome,
   executablePathForSpawn,
   environmentWithGit,
   expandHome,
@@ -426,13 +427,6 @@ const execFile = promisify(execFileCallback);
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
-const FRAMEWORK_ACTIONS = new Set([
-  "--llms",
-  "--llms-full",
-  "--mcp",
-  "--update",
-  "--incur-update-check",
-]);
 const FRAMEWORK_VALUE_OPTIONS = new Set([
   "--format",
   "--filter-output",
@@ -647,6 +641,10 @@ function publicationDestination(
   };
 }
 
+function formatItemCount(count: number, singular: string): string {
+  return count === 1 ? `1 ${singular}` : `${count} ${singular}s`;
+}
+
 function publicationScanAge(timestamp: string, now: number): string {
   const completedAt = Date.parse(timestamp);
   if (!Number.isFinite(completedAt)) return "unknown";
@@ -848,7 +846,7 @@ class PublicationProgressPresenter {
         this.#dashboard.setStage(`Publishing findings · 0/${event.total}`);
       } else {
         this.#write(
-          `Publishing ${event.total} finding${event.total === 1 ? "" : "s"} to Linear.`,
+          `Publishing ${formatItemCount(event.total, "finding")} to Linear.`,
         );
       }
       return;
@@ -917,7 +915,7 @@ class PublicationProgressPresenter {
       return;
     }
 
-    const summary = `Published ${event.created}/${event.total} finding${event.total === 1 ? "" : "s"}${event.failed === 0 ? "" : ` (${event.failed} failed)`}.`;
+    const summary = `Published ${event.created}/${formatItemCount(event.total, "finding")}${event.failed === 0 ? "" : ` (${event.failed} failed)`}.`;
     if (this.#dashboard !== null) {
       this.#dashboard.setPublicationProgress(
         event.created + event.failed,
@@ -989,7 +987,7 @@ class FindingProgressPresenter {
     }
 
     this.#write(
-      `Verifying ${this.#total} finding${this.#total === 1 ? "" : "s"} against the current checkout.`,
+      `Verifying ${formatItemCount(this.#total, "finding")} against the current checkout.`,
     );
   }
 
@@ -1397,6 +1395,38 @@ export const runRepositoryCommand: CliDependencies["runRepositoryCommand"] =
     return options?.trim === false ? stdout : stdout.trim();
   };
 
+/** @internal Inspect the sign-in that an interactive scan could actually select. */
+export async function hasStoredChatGPTSignIn(
+  environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  signal?.throwIfAborted();
+  const storedEnvironment = withoutOpenAiApiKeys(environment);
+  const command = resolveCodexCommand(storedEnvironment);
+  if (existsSync(codexSecurityCredentialHome(environment))) {
+    const home = await prepareCodexSecurityCredentialHome(environment);
+    const dedicated = await accountStatus(
+      command,
+      { ...storedEnvironment, CODEX_HOME: home },
+      signal,
+    );
+    if (dedicated.authenticated) return /\bchatgpt\b/iu.test(dedicated.details);
+    try {
+      if (
+        !(await codexSecurityCredentialAllowsAmbientImport(home)) ||
+        (await codexSecurityHasStoredFileCredentials(home))
+      ) {
+        return false;
+      }
+    } catch {
+      // An unusable credential file or logout marker does not prevent API-key scans.
+      return false;
+    }
+  }
+  const ambient = await accountStatus(command, storedEnvironment, signal);
+  return ambient.authenticated && /\bchatgpt\b/iu.test(ambient.details);
+}
+
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config, onDeepScanDiagnostic) =>
     new CodexSecurity(config, undefined, {
@@ -1406,37 +1436,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   environment: process.env,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
-  hasStoredChatGPTSignIn: async (signal) => {
-    signal?.throwIfAborted();
-    const environment = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([name]) =>
-          name.toUpperCase() !== "OPENAI_API_KEY" &&
-          name.toUpperCase() !== "CODEX_API_KEY",
-      ),
-    );
-    const command = resolveCodexCommand(environment);
-    if (existsSync(codexSecurityCredentialHome(process.env))) {
-      const dedicatedStatus = await accountStatus(
-        command,
-        {
-          ...environment,
-          CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
-        },
-        signal,
-      );
-      if (
-        dedicatedStatus.authenticated &&
-        /\bchatgpt\b/iu.test(dedicatedStatus.details)
-      ) {
-        return true;
-      }
-    }
-    const ambientStatus = await accountStatus(command, environment, signal);
-    return (
-      ambientStatus.authenticated && /\bchatgpt\b/iu.test(ambientStatus.details)
-    );
-  },
+  hasStoredChatGPTSignIn: (signal) =>
+    hasStoredChatGPTSignIn(process.env, signal),
   currentDirectory: cwd,
   now: Date.now,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -2182,7 +2183,6 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  const importsEnabled = externalImportsEnabled(dependencies.environment);
   const remediationOperation =
     argv[0] === "patch"
       ? "patch"
@@ -2622,60 +2622,56 @@ export async function main(
       );
     },
   });
-  if (importsEnabled) {
-    findingFeedback.command("imported", {
-      description: "List imported vendor evidence for a local repository.",
-      mcp: false,
-      args: z.object({
-        repository: z
-          .string()
-          .optional()
-          .describe(
-            "Local repository to inspect (default: current directory).",
-          ),
-      }),
-      output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, format, error: incurError }) {
-        const controller = new AbortController();
-        const removeSignals = listenForAbort(dependencies, controller);
-        try {
-          const repository = resolveCliPath(
-            dependencies.currentDirectory(),
-            args.repository ?? ".",
-          );
-          const findings = await (
-            dependencies.listLocalExternalFindings ?? listLocalExternalFindings
-          )(
-            { repository },
-            {
-              environment: dependencies.environment,
-              signal: controller.signal,
-            },
-          );
-          return { repository, findings };
-        } catch (error) {
-          if (controller.signal.aborted) {
-            exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
-            if (
-              argv.includes("--full-output") &&
-              (format === "json" || format === "jsonl")
-            ) {
-              structuredError = true;
-              return incurError({
-                code: "FINDINGS_READ_FAILED",
-                message: diagnosticValue(error),
-                exitCode,
-              });
-            }
-            return;
+  findingFeedback.command("imported", {
+    description: "List imported vendor evidence for a local repository.",
+    mcp: false,
+    args: z.object({
+      repository: z
+        .string()
+        .optional()
+        .describe("Local repository to inspect (default: current directory)."),
+    }),
+    output: z.record(z.string(), z.unknown()).optional(),
+    async run({ args, format, error: incurError }) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      try {
+        const repository = resolveCliPath(
+          dependencies.currentDirectory(),
+          args.repository ?? ".",
+        );
+        const findings = await (
+          dependencies.listLocalExternalFindings ?? listLocalExternalFindings
+        )(
+          { repository },
+          {
+            environment: dependencies.environment,
+            signal: controller.signal,
+          },
+        );
+        return { repository, findings };
+      } catch (error) {
+        if (controller.signal.aborted) {
+          exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+          if (
+            argv.includes("--full-output") &&
+            (format === "json" || format === "jsonl")
+          ) {
+            structuredError = true;
+            return incurError({
+              code: "FINDINGS_READ_FAILED",
+              message: diagnosticValue(error),
+              exitCode,
+            });
           }
-          throw error;
-        } finally {
-          removeSignals();
+          return;
         }
-      },
-    });
-  }
+        throw error;
+      } finally {
+        removeSignals();
+      }
+    },
+  });
   const scanHistory = Cli.create("scans", {
     description: "Review saved scans (default: list).",
   })
@@ -3553,7 +3549,7 @@ export async function main(
               const findingCount = scan["findingCount"];
               const findings =
                 typeof findingCount === "number"
-                  ? `${findingCount} finding${findingCount === 1 ? "" : "s"}`
+                  ? formatItemCount(findingCount, "finding")
                   : "unknown findings";
               const shortScanId = `...${stripVTControlCharacters(scanId)
                 .replaceAll(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
@@ -3824,9 +3820,8 @@ export async function main(
       });
     },
   });
-  let disabledImportInvocation = false;
-  function registerFindingPublication() {
-    publication.command("findings", {
+  publication
+    .command("findings", {
       description:
         "Preview and import a saved scanner report locally or to Cloud.",
       hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
@@ -3931,14 +3926,16 @@ export async function main(
                 `${local ? "Local import" : "Publication"} needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.`,
               );
             if (structured) showPreview();
-            const action = local
-              ? `Store these ${preview.findings.length} findings locally`
-              : `Publish these ${preview.findings.length} findings`;
-            return prompt.confirm(
-              `${action}${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
-              false,
-              controller.signal,
-            );
+            const count = preview.findings.length;
+            const findings =
+              count === 1 ? "this finding" : `these ${count} findings`;
+            let action = local
+              ? `Store ${findings} locally`
+              : `Publish ${findings}`;
+            const excluded = preview.excluded.length;
+            if (excluded)
+              action += ` and skip ${formatItemCount(excluded, "excluded record")}`;
+            return prompt.confirm(`${action}?`, false, controller.signal);
           };
           const showScannerReport = (preview: ExternalFindings) => {
             if (options.provider !== "opengrep") return;
@@ -3976,8 +3973,6 @@ export async function main(
             );
           };
           try {
-            if (!importsEnabled)
-              throw new CodexSecurityError(externalImportsDisabledMessage);
             const { inspectorProjectArn, ...readerOptions } = options;
             let inspectorProjectMap: Map<string, string> | undefined;
             if (inspectorProjectArn !== undefined) {
@@ -4180,47 +4175,44 @@ export async function main(
           }
         });
       },
+    })
+    .command("check", {
+      description:
+        "Check saved scan history and Linear access without creating issues.",
+      mcp: false,
+      args: z.object({
+        scanDir: z.string().describe("Completed scan directory."),
+      }),
+      options: PUBLICATION_DESTINATION_OPTIONS,
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options }) {
+        return await withTerminalErrorsHandled(errorOutput, async () => {
+          const controller = new AbortController();
+          const removeSignals = listenForAbort(dependencies, controller);
+          try {
+            const result = await (
+              dependencies.checkScanPublication ?? checkScanPublication
+            )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
+              ...publicationDestination(options, dependencies.environment),
+              signal: controller.signal,
+            });
+            controller.signal.throwIfAborted();
+            return { ...result };
+          } catch (error) {
+            reportPublicationError(error, controller.signal.reason);
+            throw error;
+          } finally {
+            removeSignals();
+          }
+        });
+      },
     });
-  }
-  if (importsEnabled) registerFindingPublication();
-  publication.command("check", {
-    description:
-      "Check saved scan history and Linear access without creating issues.",
-    mcp: false,
-    args: z.object({
-      scanDir: z.string().describe("Completed scan directory."),
-    }),
-    options: PUBLICATION_DESTINATION_OPTIONS,
-    output: z.record(z.string(), z.unknown()).optional(),
-    async run({ args, options }) {
-      return await withTerminalErrorsHandled(errorOutput, async () => {
-        const controller = new AbortController();
-        const removeSignals = listenForAbort(dependencies, controller);
-        try {
-          const result = await (
-            dependencies.checkScanPublication ?? checkScanPublication
-          )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
-            ...publicationDestination(options, dependencies.environment),
-            signal: controller.signal,
-          });
-          controller.signal.throwIfAborted();
-          return { ...result };
-        } catch (error) {
-          reportPublicationError(error, controller.signal.reason);
-          throw error;
-        } finally {
-          removeSignals();
-        }
-      });
-    },
-  });
   const imports = Cli.create("import", {
-    description: importsEnabled
-      ? "Import Sonar security issues or read hosted Semgrep, Snyk, and GitHub findings."
-      : "Read GitHub code scanning alerts.",
+    description:
+      "Import Sonar security issues or read hosted Semgrep, Snyk, and GitHub findings.",
   }).command("github", {
     description: "Read GitHub code scanning alerts without changing GitHub.",
-    hint: `${importsEnabled ? "Save complete --format json output for publish findings --provider github. " : ""}This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.`,
+    hint: "Save complete --format json output for publish findings --provider github. This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
     mcp: false,
     args: z.object({
@@ -4298,52 +4290,54 @@ export async function main(
       }
     },
   });
-  function registerOptInCollectors() {
-    async function collect<T>(
-      provider: "GitHub advisory" | "Semgrep" | "Snyk",
-      fail: (error: {
-        code: string;
-        message: string;
-        exitCode: number;
-      }) => never,
-      run: (signal: AbortSignal) => Promise<T>,
-    ) {
-      const controller = new AbortController();
-      const removeSignals = listenForAbort(dependencies, controller);
-      try {
-        if (!importsEnabled)
-          throw new CodexSecurityError(externalImportsDisabledMessage);
-        return await run(controller.signal);
-      } catch (error) {
-        const interrupted = interruptedExitCode(controller.signal);
-        exitCode = interrupted ?? 2;
-        const message = diagnosticValue(error);
-        const diagnostic = interrupted
-          ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
-          : message;
-        const terminalDiagnostic =
-          provider === "Semgrep" || provider === "Snyk"
-            ? escapeTerminalText(diagnostic)
-            : diagnostic;
-        errorOutput.write(`codex-security: ${terminalDiagnostic}\n`);
-        if (argv.includes("--full-output")) {
-          structuredError = true;
-          return fail({
-            code:
-              provider === "GitHub advisory"
-                ? "GITHUB_IMPORT_FAILED"
-                : "HOSTED_IMPORT_FAILED",
-            message:
-              provider === "GitHub advisory" ? message : errorMessage(error),
-            exitCode,
-          });
-        }
-        return undefined;
-      } finally {
-        removeSignals();
+  async function collectHostedFindings<T>(
+    provider: "GitHub advisory" | "Semgrep" | "Snyk",
+    fail: (error: { code: string; message: string; exitCode: number }) => never,
+    run: (signal: AbortSignal) => Promise<T>,
+  ) {
+    const controller = new AbortController();
+    const removeSignals = listenForAbort(dependencies, controller);
+    try {
+      return await run(controller.signal);
+    } catch (error) {
+      const interrupted = interruptedExitCode(controller.signal);
+      exitCode = interrupted ?? 2;
+      const message = diagnosticValue(error);
+      const diagnostic = interrupted
+        ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
+        : message;
+      const terminalDiagnostic =
+        provider === "Semgrep" || provider === "Snyk"
+          ? escapeTerminalText(diagnostic)
+          : diagnostic;
+      errorOutput.write(`codex-security: ${terminalDiagnostic}\n`);
+      if (argv.includes("--full-output")) {
+        structuredError = true;
+        return fail({
+          code:
+            provider === "GitHub advisory"
+              ? "GITHUB_IMPORT_FAILED"
+              : "HOSTED_IMPORT_FAILED",
+          message:
+            provider === "GitHub advisory" ? message : errorMessage(error),
+          exitCode,
+        });
       }
+      return undefined;
+    } finally {
+      removeSignals();
     }
-    imports.command("github-advisories", {
+  }
+  const hostedScannerDependencies = {
+    environment: dependencies.environment,
+    fetch: dependencies.hostedScannerFetch,
+  };
+  function setHostedOutputFormat(format?: string) {
+    escapeFrameworkOutput =
+      format === "md" || (format === "toon" && output.isTTY === true);
+  }
+  imports
+    .command("github-advisories", {
       description: "Read GitHub security advisories without changing GitHub.",
       hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
       destructive: false,
@@ -4395,7 +4389,7 @@ export async function main(
         )
         .optional(),
       run: ({ args, options, error }) =>
-        collect("GitHub advisory", error, (signal) =>
+        collectHostedFindings("GitHub advisory", error, (signal) =>
           (dependencies.importGitHubAdvisories ?? importGitHubAdvisories)(
             {
               repository: args.repository,
@@ -4410,36 +4404,8 @@ export async function main(
             },
           ),
         ),
-    });
-    const http = {
-      environment: dependencies.environment,
-      fetch: dependencies.hostedScannerFetch,
-    };
-    function setHostedOutputFormat(format?: string) {
-      escapeFrameworkOutput =
-        format === "md" || (format === "toon" && output.isTTY === true);
-    }
-    const semgrepReport = z
-      .object({
-        format: z.literal(semgrepPlatformFormat),
-        deployment: z.string(),
-        nativeProjectUrl: z.string().optional(),
-        sourceRepositoryUrl: z.string().optional(),
-        project: z.object({
-          id: z.string(),
-          name: z.string(),
-          url: z.string(),
-        }),
-        ref: z.string(),
-        product: z.enum(SEMGREP_PLATFORM_PRODUCTS),
-        repositoryAliases: z.array(z.string()),
-        findingCount: z.number().int().nonnegative(),
-        findings: z.array(
-          z.string().describe("JSON text of a native Semgrep finding."),
-        ),
-      })
-      .optional();
-    imports.command("snyk", {
+    })
+    .command("snyk", {
       description:
         "Read Snyk Open Source or Code issues for one monitored project.",
       hint: "Requires SNYK_TOKEN. Save the complete --format json output. Use publish findings --provider snyk with --to local or --to cloud.",
@@ -4485,7 +4451,7 @@ export async function main(
         .optional(),
       run: ({ args, options, error, format }) => {
         setHostedOutputFormat(format);
-        return collect("Snyk", error, (signal) =>
+        return collectHostedFindings("Snyk", error, (signal) =>
           collectSnykIssues(
             {
               projectId: args.project,
@@ -4495,12 +4461,12 @@ export async function main(
               sourceRepositoryUrl: options.sourceRepositoryUrl,
               signal,
             },
-            http,
+            hostedScannerDependencies,
           ),
         );
       },
-    });
-    imports.command("semgrep", {
+    })
+    .command("semgrep", {
       description:
         "Read a full Semgrep Platform project and ref through the Web API.",
       hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output with publish findings --provider semgrep and --to local or --to cloud. Use --to local for a selected Guardian MCP capture.",
@@ -4529,10 +4495,29 @@ export async function main(
             "Explicit mapping when the Semgrep project has no SCM URL.",
           ),
       }),
-      output: semgrepReport,
+      output: z
+        .object({
+          format: z.literal(semgrepPlatformFormat),
+          deployment: z.string(),
+          nativeProjectUrl: z.string().optional(),
+          sourceRepositoryUrl: z.string().optional(),
+          project: z.object({
+            id: z.string(),
+            name: z.string(),
+            url: z.string(),
+          }),
+          ref: z.string(),
+          product: z.enum(SEMGREP_PLATFORM_PRODUCTS),
+          repositoryAliases: z.array(z.string()),
+          findingCount: z.number().int().nonnegative(),
+          findings: z.array(
+            z.string().describe("JSON text of a native Semgrep finding."),
+          ),
+        })
+        .optional(),
       run: ({ args, options, error, format }) => {
         setHostedOutputFormat(format);
-        return collect("Semgrep", error, (signal) =>
+        return collectHostedFindings("Semgrep", error, (signal) =>
           collectSemgrepPlatformFindings(
             {
               project: args.project,
@@ -4542,14 +4527,12 @@ export async function main(
               sourceRepositoryUrl: options.sourceRepositoryUrl,
               signal,
             },
-            http,
+            hostedScannerDependencies,
           ),
         );
       },
-    });
-  }
-  function registerSonarImport() {
-    imports.command("sonar", {
+    })
+    .command("sonar", {
       description:
         "Collect Sonar security findings or replay a saved capture into the local workbench.",
       hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a live capture for review without importing findings.",
@@ -4629,7 +4612,6 @@ export async function main(
           };
           try {
             if (
-              importsEnabled &&
               argv.includes("--full-output") &&
               format !== "json" &&
               format !== "jsonl"
@@ -4788,11 +4770,6 @@ export async function main(
         });
       },
     });
-  }
-  if (importsEnabled) {
-    registerOptInCollectors();
-    registerSonarImport();
-  }
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
@@ -5887,14 +5864,17 @@ export async function main(
             dependencies.environment["CI"] === undefined &&
             dependencies.environment["TERM"] !== "dumb"
           ) {
+            const dashboardConfig = await mergedCodexConfig(
+              config,
+              scanCodexHome(dependencies.environment),
+            );
             const candidate = new ScanDashboard(errorOutput, {
               repository,
               presentation: "components",
-              model: scanModelConfiguration(
-                await mergedCodexConfig(
-                  config,
-                  scanCodexHome(dependencies.environment),
-                ),
+              model: scanModelConfiguration(dashboardConfig),
+              pricingContext: scanPricingContext(
+                dashboardConfig,
+                dependencies.environment,
               ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
@@ -7226,20 +7206,18 @@ export async function main(
         const credentialHome = await prepareCodexSecurityCredentialHome(
           dependencies.environment,
         );
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        await withCredentialHomeLock(credentialHome, async () => {
-          exitCode = await dependencies.runCodex(
-            ["logout"],
-            undefined,
-            authenticationEnvironment,
-          );
-          if (exitCode === 0) {
-            await setCodexSecurityCredentialLogout(credentialHome, true);
-          }
-        });
+        const runLogout = () =>
+          dependencies.runCodex(["logout"], undefined, {
+            ...dependencies.environment,
+            CODEX_HOME: credentialHome,
+          });
+        exitCode = await withCredentialHomeLock(credentialHome, () =>
+          logoutCredentialHome(
+            credentialHome,
+            scanCodexHome(dependencies.environment),
+            runLogout,
+          ),
+        );
       },
     })
     .command("init", {
@@ -7410,7 +7388,7 @@ export async function main(
     });
 
   const commands = Cli.toCommands.get(cli)!;
-  let valueOptions = cliValueOptions(commands);
+  const valueOptions = cliValueOptions(commands);
   function isScanImportCommand(argv: readonly string[]): boolean {
     const commandIndex = cliCommandIndex(argv);
     return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
@@ -7546,11 +7524,6 @@ export async function main(
       command === "publish" ||
       command === "import";
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
-    const optInCollector =
-      command === "import" &&
-      ["github-advisories", "semgrep", "snyk", "sonar"].includes(
-        subcommand ?? "",
-      );
     if (
       command === "import" &&
       subcommand !== "sonar" &&
@@ -7558,35 +7531,6 @@ export async function main(
     ) {
       // Incur's skill-sync notice turns a saved collector array into an object.
       cliOptions.sync = false;
-    }
-    if (
-      !importsEnabled &&
-      ((command === "publish" && subcommand === "findings") ||
-        (command === "findings" && subcommand === "imported") ||
-        optInCollector)
-    ) {
-      if (
-        process.env["COMPLETE"] ||
-        argv.some((value) => FRAMEWORK_ACTIONS.has(value))
-      ) {
-        return externalImportsDisabledMessage;
-      }
-      if (!argv.includes("--version")) {
-        if (
-          argv.includes("--schema") ||
-          (command !== "publish" &&
-            (command !== "import" || !argv.includes("--full-output")))
-        ) {
-          return externalImportsDisabledMessage;
-        }
-        disabledImportInvocation = true;
-        // This route only formats a disabled command; it is not an installed skill.
-        cliOptions.sync = false;
-        if (command === "publish") registerFindingPublication();
-        else if (subcommand === "sonar") registerSonarImport();
-        else registerOptInCollectors();
-        valueOptions = cliValueOptions(commands);
-      }
     }
     if (command === "info") {
       for (let index = 0; index < argv.length; index += 1) {
@@ -7664,8 +7608,6 @@ export async function main(
     ) {
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
     }
-    if (disabledImportInvocation && frameworkFlags.hideDisabledRoute)
-      return externalImportsDisabledMessage;
   }
   argv = normalizeScanImportArguments(defaultListCommand(argv));
   const frameworkArgv = argv.flatMap((argument) => {
@@ -7839,10 +7781,6 @@ export async function main(
   };
   if (deferredVerificationDiagnostic === undefined) writeUpdateNotice();
   if (frameworkExit !== undefined) {
-    if (disabledImportInvocation && exitCode === 0) {
-      reportPublicationError(externalImportsDisabledMessage, undefined);
-      return exitCode;
-    }
     if (policyFullOutput || structuredError) {
       if (exitCode === 0) exitCode = 2;
     } else {
@@ -7969,7 +7907,7 @@ async function runScanImport(
     if ("dryRun" in result) return { exitCode: 0, data: { ...result } };
     try {
       errorOutput.write(
-        `Imported ${result.findings.findings.length} findings as scan ${result.manifest.scan.id}.\n` +
+        `Imported ${formatItemCount(result.findings.findings.length, "finding")} as scan ${result.manifest.scan.id}.\n` +
           `Artifacts: ${result.scanDir}\n`,
       );
     } catch {}
@@ -8233,20 +8171,12 @@ async function prepareScanArgumentsFromRecipe(
 }
 
 function frameworkOutputFlags(argv: readonly string[]) {
-  let hideDisabledRoute = false;
   let fullOutput = false;
   let rawCollector = false;
   const tokenArguments: string[] = [];
   let filterOutput = false;
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index]!;
-    if (
-      FRAMEWORK_ACTIONS.has(value) ||
-      value === "--schema" ||
-      value === "--help" ||
-      value === "-h"
-    )
-      hideDisabledRoute = true;
     if (value === "--full-output") fullOutput = true;
     if (value === "--json") rawCollector = true;
     if (value === "--token-count") tokenArguments.push(value);
@@ -8264,7 +8194,6 @@ function frameworkOutputFlags(argv: readonly string[]) {
     }
   }
   return {
-    hideDisabledRoute,
     rawCollector: rawCollector && !fullOutput,
     filterOutput,
     tokenArguments,
@@ -9136,7 +9065,7 @@ async function runFindingPatches(
   }
 
   stderr.write(
-    `\nPatching ${selected.findings.length} confirmed finding${selected.findings.length === 1 ? "" : "s"}...\n`,
+    `\nPatching ${formatItemCount(selected.findings.length, "confirmed finding")}...\n`,
   );
   const patches: FindingPatch[] = [];
   for (const finding of selected.findings) {
@@ -9343,6 +9272,7 @@ async function runSkill(
           JSON.parse(await readRegularInputFile(schemaPath, directory)),
         );
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
+  let standaloneFileContents: string | undefined;
   for (const input of inputs) {
     if (typeof input !== "string") {
       contents.push(
@@ -9413,6 +9343,9 @@ async function runSkill(
           throw new CodexSecurityError(
             "Finding or issue inputs must not be empty.",
           );
+        }
+        if (inputs.length === 1 && contents.length === 0) {
+          standaloneFileContents = contentsOrLiteral;
         }
       }
     }
@@ -9490,6 +9423,7 @@ async function runSkill(
       }
       return prompt;
     },
+    standaloneFileContents,
   );
   try {
     const { prompt } = preparedPrompt;
@@ -10466,6 +10400,10 @@ async function executeScan(
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(effectiveConfiguration),
+        pricingContext: scanPricingContext(
+          effectiveConfiguration,
+          dependencies.environment,
+        ),
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),

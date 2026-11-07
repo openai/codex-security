@@ -657,25 +657,53 @@ and does not describe failed or unfinished scans as clean.
 
 ### Publish findings to Cloud
 
-`publish scan --to cloud` uploads selected findings to Codex Security Cloud.
-It requires ChatGPT credentials; inference API keys and AWS credentials do not
-grant Cloud access. See [Cloud publication](docs/cli.md#publish-completed-scans)
-for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
-for issue creation.
+Use `publish scan --to cloud` for completed Codex Security scans or a Codex
+Security findings CSV. Preview either input offline with `--dry-run`. Uploads
+require a file-backed ChatGPT login. [Cloud publication](docs/cli.md#publish-completed-scans)
+
+For a report exported by a scanner, see [Import external findings](#import-external-findings).
+For issue tracking, see [Linear publication](docs/cli.md#publish-completed-scans-to-linear).
 
 ### Import external findings
 
-External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
-to enable `publish findings`, `findings imported`, `import sonar`, `import github-advisories`, and
-the SDK's external publication, local import/readback, Sonar issue collection, and advisory acquisition
-APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
-SDK callers can supply the flag through the existing per-call
-`dependencies.environment`, or in `options.environment` for `collectSonarIssues(options)`.
-For an SDK import of selected Sonar issues, pass their keys in `options.issueKeys`.
+For a saved scanner report, call `prepareLocalExternalImport` for a checkout
+or `prepareExternalPublication` for a connected Cloud repository. Review the
+returned `preview`, then call `import()` to save locally or `publish()` to
+upload. The [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md)
+list the supported report formats and destinations for each provider.
+
+For normalized evidence, use `prepareNormalizedLocalImport(findings, options)`
+or `prepareNormalizedExternalPublication(findings, options)` and review the
+preview in the same way. Cloud file imports use `ExternalPublicationOptions`,
+and normalized Cloud imports use `NormalizedExternalPublicationOptions`. Keep
+Cloud receipts and saved requests when retrying an interrupted submission.
+
+Use `listLocalExternalFindings({ repository })` to read saved scanner evidence.
+It starts unassessed. Reimporting the same repository, provider, source key
+and finding ID updates that record. Records omitted from the export remain stored.
+
+A local SDK import with only excluded records returns the exclusions and zero
+writes. The CLI exits 2 in that case. When Cloud preparation throws
+`NoPublishableFindingsError`, inspect its `selection` for the read count,
+exclusions and scanner diagnostics. A clean empty report needs no upload.
+
+File imports forward repository references from the reader automatically. With
+`prepareNormalizedLocalImport()`, supply additional known references in the
+third argument's `sourceRepositories` when they are absent from
+`evidence.details.repository.url`. For a known GitHub custom host, include
+`platform: "github"`, for example `{ sourceRepositories: [{ url:
+"https://git.example.test/example/project", platform: "github" }] }`. Named Wiz
+reports carry this platform in their repository inventory. If you export only the
+normalized finding rows to JSONL, supply that metadata separately; the original
+finding evidence does not include the surrounding inventory.
+
+#### Collect and normalize scanner evidence
+
+To collect selected Sonar issues, pass their keys to `collectSonarIssues` in `options.issueKeys`.
 Omit `issueKeys` to collect the project's open security issues. An empty list is rejected.
 If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
 to check the Sonar binding before fetching issues.
-Pure normalizers and file readers remain available.
+
 For AWS Continuum code findings, use `readContinuumFindings(path, sourceRepositoryUrl)`
 with a saved list or detail response, or `normalizeContinuumFindings(input, sourceRepositoryUrl)`
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
@@ -694,24 +722,9 @@ Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from s
 Semgrep Web API responses. See the [Semgrep SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk).
 Use `selectSemgrepPlatformFindings` to [save a selection for the local CLI](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
 Use `collectSemgrepPlatformFindings` to [collect one project at an explicit ref](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch) for a single product (default `sast`).
-Use `import snyk` to [collect existing Open Source or Code issues](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk) for local import or Cloud publication.
+
+Use `collectSnykIssues` to [collect existing Open Source or Code issues](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk) for local import or Cloud publication.
 For a private repository with a verified SCM, pass its URL and `platform: "gitlab"` or `"github"` in `sourceRepositories` to match standard SSH clone URLs.
-This does not affect scan publishing or the existing GitHub alert collector.
-
-The SDK also exposes `prepareExternalPublication(file, options)` for supported
-vendor exports and `prepareNormalizedExternalPublication(findings, options)` for
-normalized external evidence from any provider in the Cloud import contract.
-The normalized API accepts `NormalizedExternalPublicationOptions`; file readers
-use `ExternalPublicationOptions` for their supported formats. Both resolve the Cloud repository and return a
-`preview` plus a separate `publish()` operation. Inspect the preview before
-calling `publish()`. Imported evidence remains not assessed by Codex, and saved
-requests and receipts support retries after interruption.
-
-When a parsed selection has no publishable findings, preparation throws
-`NoPublishableFindingsError`. Inspect its `selection` for the read count,
-exclusions and scanner diagnostics. A clean empty report needs no upload;
-failed scans and excluded records need attention. Previously imported findings
-remain open.
 
 To inspect dependency vulnerabilities in a saved Trivy schema-v2 repository or filesystem
 report, call `readTrivyFindings` with the JSON or gzip path. Use `normalizeTrivyFindings`
@@ -727,29 +740,6 @@ const { findings, excluded, report } = await readTrivyFindings(
   ".",
 );
 ```
-
-For CLI examples and supported input formats, see the
-[scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).
-
-The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
-separate `import()` operation. `prepareNormalizedLocalImport(findings,
-options)` accepts already normalized evidence, and
-`listLocalExternalFindings({ repository })` reads the stored records. Imports
-remain unassessed source evidence, separate from native scan findings. Repeated
-imports update the same repository/provider/source-key/source-ID record; omitted
-records remain stored, and unknown evidence fields are not inferred. A local
-SDK import with only excluded records returns the exclusions and zero write
-counts. The CLI exits 2 for that result so automation can detect it.
-
-File imports forward repository references from the reader automatically. With
-`prepareNormalizedLocalImport()`, supply additional known references in the
-third argument's `sourceRepositories` when they are absent from
-`evidence.details.repository.url`. For a known GitHub custom host, include
-`platform: "github"`, for example `{ sourceRepositories: [{ url:
-"https://git.example.test/example/project", platform: "github" }] }`. Named Wiz
-reports carry this platform in their repository inventory. If you export only the
-normalized finding rows to JSONL, supply that metadata separately; the original
-finding evidence does not include the surrounding inventory.
 
 ## Findings storage and deduplication
 
@@ -782,7 +772,7 @@ Local tools running under the same account are trusted.
 The scan profile allows reads across the local filesystem and writes to workspace
 roots. Execution approvals are reviewed automatically and may grant extra
 permissions for an operation. Set `codexOverrides.approval_policy: "never"`
-(or CLI `--codex 'approval_policy="never"'`) to deny permission requests.
+(or CLI `--codex "approval_policy='never'"`) to deny permission requests.
 If you select a Codex profile, its explicit `approval_policy` takes precedence
 over the root setting.
 Host and network restrictions still apply.

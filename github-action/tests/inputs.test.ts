@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseInputs, scanArguments } from '../src/inputs.js';
+import { parseInputs, scanArguments } from '../src/inputs.ts';
 const parse = (values: Record<string, string> = {}) => parseInputs(key => values[key] ?? '', '/checkout');
 
 test('defaults are stable across events', () => {

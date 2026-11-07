@@ -36,6 +36,35 @@ function csvReport(source: Record<string, string>): string {
     .join("\r\n");
 }
 
+test("Wiz package exports can identify GitHub Enterprise branches by cloudPlatform alone", async () => {
+  await using fixture = await localReportFixture(
+    "wiz.json",
+    { provider: "wiz", sourceKey: "example-project" },
+    { remote: "git@git.example.test:example/project.git" },
+  );
+  const asset = {
+    id: "branch",
+    type: "REPOSITORY_BRANCH",
+    cloudPlatform: "GitHub",
+    cloudProviderURL:
+      "https://git.example.test/Example/Project/tree/feature/ref",
+  };
+  const finding = {
+    id: "package-occurrence",
+    name: "CVE-2099-0001",
+    detailedName: "example-package",
+    severity: "HIGH",
+    vulnerableAsset: asset,
+  };
+  await writeFile(fixture.file, JSON.stringify(finding));
+  const imported = await (await fixture.prepare()).import();
+  expect(imported.counts.created).toBe(1);
+  expect(imported.findings[0]!.evidence.source_data).toEqual(finding);
+  asset.cloudProviderURL = "https://git.example.test/example/other/tree/main";
+  await writeFile(fixture.file, JSON.stringify(finding));
+  await expect(fixture.prepare()).rejects.toThrow("does not match");
+});
+
 test.each(["CSV", "CSV gzip", "normalized JSONL", "normalized JSONL gzip"])(
   "Wiz %s matches GitHub Enterprise repository names without changing evidence",
   async (format) => {

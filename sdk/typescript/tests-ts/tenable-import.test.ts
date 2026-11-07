@@ -182,12 +182,9 @@ test("file and normalized imports verify repository and finding identity, even f
   expect(runWorkbench).not.toHaveBeenCalled();
 });
 
-test("local opt-in and Cloud rejection precede file access or credentials", async () => {
+test("Cloud rejects local Tenable findings before file access or credential lookup", async () => {
   await using fixture = await checkout();
   const options = { ...source, repository: fixture.repository };
-  await expect(
-    prepareLocalExternalImport(fixture.file, options, { environment: {} }),
-  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
   const unexpected = mock(async () => {
     throw new Error("Unexpected Cloud call");
   });

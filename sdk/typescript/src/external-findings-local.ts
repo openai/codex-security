@@ -22,10 +22,6 @@ import {
 } from "./hosted-git-remotes.js";
 import { CodexSecurityError } from "./errors.js";
 import {
-  forwardExternalImportSetting,
-  requireExternalImports,
-} from "./external-imports-feature.js";
-import {
   externalImportDisposition,
   NoPublishableFindingsError,
   cloneImportPreview,
@@ -82,6 +78,7 @@ import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
+import { retainedGitHubRepository } from "./github-findings.js";
 import {
   type SnykIssuesFindings,
   snykRestImportRepository,
@@ -677,10 +674,9 @@ async function localContext(
   mode: "import" | "read" = "import",
 ) {
   dependencies.signal?.throwIfAborted();
-  const selected = dependencies.environment ?? process.env;
-  const environment = workbenchEnvironment(selected);
-  forwardExternalImportSetting(selected, environment);
-  requireExternalImports(environment);
+  const environment = workbenchEnvironment(
+    dependencies.environment ?? process.env,
+  );
   const path = expandHome(selectedRepository, environment);
   const repository =
     mode === "read"
@@ -725,7 +721,6 @@ export async function prepareNormalizedLocalImport(
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   return prepareLocalImport(
     input,
     snapshotImportOptions(options),
@@ -995,6 +990,13 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     }
     const { evidence } = finding;
+    if (options.provider === "github") {
+      const source = retainedGitHubRepository(
+        finding,
+        (url) => identify(url).key,
+      );
+      if (source) sources.set(source, { url: source, platform: "github" });
+    }
     const guardian = guardianFindingSourceData(finding);
     const url = evidence.details?.repository?.url;
     if (guardian) {
@@ -1443,7 +1445,6 @@ export async function listLocalExternalFindings(
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<StoredExternalFinding[]> {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
   const { repository, options } = await localContext(
     selection.repository,
