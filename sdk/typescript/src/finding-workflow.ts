@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, sep } from "node:path";
-import type { JsonObject } from "./config.js";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import type { CodexSecurityConfig, JsonObject } from "./config.js";
+import type { ScanOptions } from "./api.js";
+import { DEFAULT_SCAN_MODE } from "./scan-settings.js";
 import type { LoadedContract } from "./contract.js";
 import type { ScanCost } from "./cost-model.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
@@ -8,6 +10,7 @@ import { findingsBaseUrl } from "./findings-client.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
 import {
   bundledPluginRoot,
+  expandHome,
   canonicalizeModelSafePath,
   codexSecurityStateDirectory,
   workbenchEnvironment,
@@ -71,6 +74,62 @@ export function scanArtifactDigest({
   return workflowDigest({ manifest, findings, review });
 }
 
+/** Registered scans identify prepared knowledge by staged names and text. */
+export function scanRequestDigest(
+  config: CodexSecurityConfig,
+  options: ScanOptions,
+  repository?: string,
+  legacyTelemetryContext?: ScanOptions["telemetryContext"],
+): string {
+  // Registration identifies the scan inputs independently of attempt telemetry.
+  return requestDigest(
+    config,
+    { ...options, telemetryContext: legacyTelemetryContext },
+    repository,
+    options.knowledgeBaseSnapshot?.documents,
+  );
+}
+
+function requestDigest(
+  config: CodexSecurityConfig,
+  options: ScanOptions,
+  repository?: string,
+  stagedDocuments?: Readonly<Record<string, string>>,
+): string {
+  return workflowDigest({
+    config,
+    options: {
+      ...options,
+      target:
+        repository !== undefined && Array.isArray(options.target)
+          ? options.target.map(
+              (path) =>
+                relative(repository, resolve(repository, path))
+                  .split(sep)
+                  .join("/") || ".",
+            )
+          : (options.target ?? "repository"),
+      mode: options.mode ?? DEFAULT_SCAN_MODE,
+      ...(stagedDocuments === undefined
+        ? {}
+        : {
+            knowledgeBasePaths: undefined,
+            knowledgeBaseSnapshot: { documents: stagedDocuments },
+          }),
+      outputDir:
+        options.outputDir === undefined
+          ? undefined
+          : resolve(expandHome(options.outputDir)),
+      workflowId: undefined,
+      severityRubric: undefined,
+      rubricPath: undefined,
+      signal: undefined,
+      auth: undefined,
+      archiveExisting: undefined,
+    },
+  });
+}
+
 export function workflowDestination(url: string): string {
   const destination = findingsBaseUrl(url);
   destination.username = "";
@@ -121,6 +180,23 @@ export class FindingWorkflow {
 
   async bind(binding: WorkflowBinding): Promise<WorkflowState> {
     return (await this.command({ action: "bind", binding }))!;
+  }
+
+  async bindScan(
+    repositoryPath: string,
+    config: CodexSecurityConfig,
+    options: ScanOptions,
+  ): Promise<WorkflowState> {
+    // Preserve a stored documents-only digest when this request reproduces it.
+    const saved =
+      options.knowledgeBaseSnapshot && (await this.get())?.scanRequestDigest;
+    const digest =
+      saved &&
+      saved ===
+        scanRequestDigest(config, options, undefined, options.telemetryContext)
+        ? saved
+        : requestDigest(config, options);
+    return this.bind({ repositoryPath, scanRequestDigest: digest });
   }
 
   async begin(stage: WorkflowStage): Promise<WorkflowState> {

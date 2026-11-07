@@ -18,7 +18,7 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
@@ -26,23 +26,29 @@ import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { normalizeTarget } from "../src/targets.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting } from "./support/errors.js";
+
 import {
-  type SecurityClient,
   type MultiscanOptions,
+  type SecurityClient,
   createMultiscanFixtures,
   git,
   repository,
-  completedScan,
-  completeRun,
   client,
-  options,
   results,
 } from "./support/multiscan.js";
 
-const { temporaryDirectory, fixture, repositoryFixture, cleanup } =
-  createMultiscanFixtures();
-const testPosix = process.platform === "win32" ? test.skip : test;
+const {
+  temporaryDirectory,
+  cleanup,
+  fixture,
+  repositoryFixture,
+  completedScan,
+  completeRun,
+  reseal,
+  options,
+} = createMultiscanFixtures();
 
+const testPosix = process.platform === "win32" ? test.skip : test;
 afterEach(cleanup);
 
 test("keeps literal CSV scopes at the checked out repository", async () => {
@@ -51,7 +57,13 @@ test("keeps literal CSV scopes at the checked out repository", async () => {
   const { paths, source } = await repositoryFixture("literal-scopes");
   const os = { ...(await import("node:os")) };
   mock.module("node:os", () => ({ ...os, homedir: () => source.path }));
-  const literals = ["~/src", "$HOME/src", "%HOME%/src", "space name"];
+  const literals = [
+    "~/src",
+    "$HOME/src",
+    "%HOME%/src",
+    "space name",
+    "./relative scope",
+  ];
   for (const path of literals) {
     await mkdir(join(source.path, path), { recursive: true });
     await writeFile(join(source.path, path, "app.ts"), "export {};\n");
@@ -79,24 +91,46 @@ test("keeps literal CSV scopes at the checked out repository", async () => {
     ].join("\n"),
   );
   const observed: string[] = [];
-  const summary = await runMultiscan(
-    options(
-      paths,
-      client(async (repository, scanOptions = {}) => {
-        const target = await normalizeTarget(repository, scanOptions.target!);
-        observed.push(...target.paths);
-        expect(scanOptions.target).toEqual(
-          target.paths[0] === "src"
-            ? ["src"]
-            : target.paths.map((path) => join(repository, path)),
-        );
-        return await completedScan(scanOptions.outputDir!);
-      }),
-      { scanOptionsByMode: { standard: { target: ["src"] } } },
-    ),
+  const configured = options(
+    paths,
+    client(async (repository, scanOptions = {}) => {
+      const target = await normalizeTarget(repository, scanOptions.target!);
+      observed.push(...target.paths);
+      expect(scanOptions.target).toEqual(
+        target.paths[0] === "src"
+          ? ["src"]
+          : target.paths.map((path) => join(repository, path)),
+      );
+      const scanDir = scanOptions.outputDir!;
+      const result = await completedScan(scanDir);
+      result.manifest.scan.scope.includePaths = [...target.paths];
+      result.coverage.includePaths = [...target.paths];
+      result.coverage.mode = "scoped_path";
+      result.coverage.inventoryStrategy = "scoped_path";
+      await writeFile(
+        join(scanDir, "scan-manifest.json"),
+        JSON.stringify(result.manifest),
+      );
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        JSON.stringify(result.coverage),
+      );
+      await reseal(scanDir);
+      return result;
+    }),
+    { scanOptionsByMode: { standard: { target: ["src"] } } },
   );
+  const summary = await runMultiscan(configured);
   expect(summary).toMatchObject({ completed: literals.length + 1, failed: 0 });
-  expect(observed.sort()).toEqual([...literals, "src"].sort());
+  expect(observed.sort()).toEqual(
+    [...literals.map((path) => posix.normalize(path)), "src"].sort(),
+  );
+  expect(await runMultiscan(configured)).toMatchObject({
+    completed: literals.length + 1,
+    skipped: literals.length + 1,
+    failed: 0,
+  });
+  expect(observed).toHaveLength(literals.length + 1);
 });
 
 describe("multiscan", () => {
@@ -418,6 +452,10 @@ describe("multiscan", () => {
       removeSpy.mockRestore();
     }
 
+    await expect(lstat(checkout)).rejects.toMatchObject({ code: "ENOENT" });
+    await mkdir(checkout);
+    const marker = join(checkout, "user-edits.txt");
+    await writeFile(marker, "User edits in the replacement checkout.");
     expect(persistedBeforeRemoval).toBeDefined();
     await writeFile(ledger, persistedBeforeRemoval!);
     expect((await results(ledger)).at(-1)).toMatchObject({
@@ -431,9 +469,12 @@ describe("multiscan", () => {
       skipped: 1,
     });
     expect(run).toHaveBeenCalledTimes(1);
+    expect(await readFile(marker, "utf8")).toBe(
+      "User edits in the replacement checkout.",
+    );
   });
 
-  test("retries failed scans and continues later tasks when checkout cleanup fails", async () => {
+  test("continues later tasks when a failed scan leaves its checkout occupied", async () => {
     const { paths, source } = await repositoryFixture("cleanup-retry", "retry");
     await appendFile(paths.input, `next,${source.path},${source.revision}\n`);
     const checkout = join(paths.output, "checkouts", "retry");
@@ -462,8 +503,8 @@ describe("multiscan", () => {
     try {
       const summary = await runMultiscan(options(paths, client(run)));
 
-      expect(summary).toMatchObject({ total: 2, completed: 2, failed: 0 });
-      expect(run).toHaveBeenCalledTimes(3);
+      expect(summary).toMatchObject({ total: 2, completed: 1, failed: 1 });
+      expect(run).toHaveBeenCalledTimes(2);
       expect(await results(summary.resultsPath)).toMatchObject([
         {
           id: "retry",
@@ -472,13 +513,61 @@ describe("multiscan", () => {
           error:
             "ORIGINAL_SCAN_FAILURE; Multiscan checkout cleanup failed: EACCES: synthetic cleanup failure",
         },
-        { id: "retry", status: "completed", attempt: 2 },
+        {
+          id: "retry",
+          status: "failed",
+          attempt: 2,
+          error: expect.stringContaining("move the retained checkout"),
+        },
         { id: "next", status: "completed", attempt: 1 },
       ]);
     } finally {
       removeSpy.mockRestore();
     }
   });
+
+  test.each([false, true])(
+    "a forged cleanup kind preserves retained work (recovered=%p)",
+    async (recover) => {
+      const { paths } = await repositoryFixture("cleanup-kind", "done");
+      const scans = mock<SecurityClient["run"]>(completeRun);
+      const configured = options(paths, client(scans), { maxAttempts: 1 });
+      if (recover) {
+        scans.mockRejectedValueOnce(new Error("Interrupted"));
+        expect((await runMultiscan(configured)).failed).toBe(1);
+      }
+      const { resultsPath } = await runMultiscan(
+        recover
+          ? { ...configured, recoverScan: async () => undefined }
+          : configured,
+      );
+      const receipts = await results(resultsPath);
+      const receipt = receipts.at(-1)!;
+      expect(receipt["status"]).toBe("completed");
+      receipt["cleanupPending"] = recover ? "checkout" : "recovery-checkout";
+      await writeFile(
+        resultsPath,
+        receipts.map((row) => JSON.stringify(row) + "\n").join(""),
+      );
+      const other = recover
+        ? join(paths.output, "checkouts", "done")
+        : join(
+            paths.output,
+            "recovery-checkouts",
+            "done",
+            `attempt-${receipt["attempt"]}`,
+          );
+      await mkdir(other, { recursive: true, mode: 0o700 });
+      const retained = join(other, "retained.txt");
+      await writeFile(retained, "Keep this work.");
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+        failed: 0,
+      });
+      expect(await readFile(retained, "utf8")).toBe("Keep this work.");
+    },
+  );
 
   test.each(["root", "task"] as const)(
     "preserves completed scans and external files when the recovery checkout %s is linked",
@@ -616,7 +705,7 @@ describe("multiscan", () => {
   });
 
   test("rejects another supervisor and recovers a crashed owner's checkout", async () => {
-    const { paths } = await repositoryFixture("exclusive");
+    const { paths, source } = await repositoryFixture("exclusive");
     const running = Promise.withResolvers<void>();
     const finish = Promise.withResolvers<void>();
     const security = client(async (_repository, scanOptions = {}) => {
@@ -656,11 +745,29 @@ describe("multiscan", () => {
       JSON.stringify({ pid: 999_999_999 }),
     );
     const checkout = join(paths.output, "checkouts", "exclusive");
-    await mkdir(checkout);
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const marker = join(checkout, "retained.txt");
+    await writeFile(marker, "Preserved crashed-owner checkout data.\n");
+    const identity = await lstat(checkout);
 
     const recovered = await runMultiscan(options(paths, security));
-    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
-    expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
+    expect(recovered).toMatchObject({ completed: 0, failed: 1, skipped: 0 });
+    const receipts = await results(recovered.resultsPath);
+    expect(receipts).toHaveLength(2);
+    expect(receipts[0]).toEqual(receipt);
+    expect(receipts[1]).toMatchObject({
+      attempt: 2,
+      status: "failed",
+      error: expect.stringContaining("move the retained checkout"),
+    });
+    expect(await readdir(join(paths.output, "checkouts"))).toEqual([
+      "exclusive",
+    ]);
+    const retained = await lstat(checkout);
+    expect([retained.dev, retained.ino]).toEqual([identity.dev, identity.ino]);
+    expect(await readFile(marker, "utf8")).toBe(
+      "Preserved crashed-owner checkout data.\n",
+    );
     await expect(access(lock)).rejects.toThrow();
   });
 

@@ -1329,6 +1329,9 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
+If a fresh scan needs an occupied `checkouts/<id>` directory, the command
+preserves it and stops that row. Inspect and move the checkout, then rerun the
+campaign to start the next attempt.
 Completed results are skipped only when their saved contract and seal are valid
 and the manifest records a completed scan. Damaged or unsuccessful results get a
 new attempt, including with `--recover`, while the old artifacts remain available.
@@ -1338,6 +1341,11 @@ filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` select
 require a new output directory. Version 1 manifests also require a new directory
 because their original knowledge inputs and direct overrides cannot be verified.
 Worker and retry counts can change when resuming.
+
+Reusing a sealed result also requires its original private scan registration,
+complete request identity, and recorded manifest seal. Older artifacts remain
+readable, but campaigns without that authority start a fresh attempt. An editable
+campaign receipt alone cannot establish that a result used the requested settings.
 
 ### Recovering failed or interrupted bulk scans
 

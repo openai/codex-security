@@ -194,6 +194,7 @@ import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
 import {
   FindingWorkflow,
   scanArtifactDigest,
+  scanRequestDigest,
   workflowDigest,
 } from "./finding-workflow.js";
 import { reviewSqliteHome } from "./deduplication/codex-review.js";
@@ -878,27 +879,9 @@ export class CodexSecurity {
         await canonicalConfigPath(expandHome(options.outputDir)),
       );
     }
-    const state = await workflow.bind({
-      repositoryPath: local.repository,
-      scanRequestDigest: workflowDigest({
-        config: this.config,
-        options: {
-          ...options,
-          ...local.prompts,
-          target: options.target ?? "repository",
-          mode: options.mode ?? DEFAULT_SCAN_MODE,
-          outputDir:
-            options.outputDir === undefined
-              ? undefined
-              : resolve(expandHome(options.outputDir)),
-          workflowId: undefined,
-          severityRubric: undefined,
-          rubricPath: undefined,
-          signal: undefined,
-          auth: undefined,
-          archiveExisting: undefined,
-        },
-      }),
+    const state = await workflow.bindScan(local.repository, this.config, {
+      ...options,
+      ...local.prompts,
     });
     if (state.scanId && state.scanDir) {
       await workflow.protectArtifacts(state.scanDir);
@@ -2748,6 +2731,11 @@ export class CodexSecurity {
         cyberAccessProgram: options.cyberAccessProgram,
         ownerSuggestions: options.ownerSuggestions,
       });
+      recipe["scanRequestDigest"] = scanRequestDigest(
+        this.config,
+        options,
+        repo,
+      );
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
           name: savedProviderProfile.name,
