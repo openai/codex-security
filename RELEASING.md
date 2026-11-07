@@ -12,6 +12,12 @@ exact CLI version. The npm release contains the package archive and canonical
 changelog. The Action release contains its manifest and SBOM, links to that
 changelog, and lists the full distribution commit SHA for consumers to pin.
 
+## Release checklist
+
+1. Review the [rolling release PR](#rolling-release-prs). Verify the version, edit the [highlights and migration steps](#editing-the-release-notes), and complete the [pre-merge checks](#prepare-a-release). Squash-merge the reviewed revision.
+2. Wait for CI on the merged commit and the release verification jobs. Approve the **npm** deployment for the [package and container release](#publish). Follow the progress comment on the merged PR through the installation checks and applicable Action and container jobs.
+3. If the release includes the Action, [publish its companion release to Marketplace](#publish-to-github-marketplace). [Verify the public artifacts](#verify) before announcing the version. For a partial publication, use the [recovery procedure](#recover-or-repair-a-release) with the original tag.
+
 ## Pull request titles and categories
 
 Pull request titles must follow this form:
@@ -81,9 +87,6 @@ patch release. Breaking changes use a minor release and reset the patch to
 zero. For example, changes after `0.1.23` propose `0.1.24`, or `0.2.0` if any
 included change is breaking. The category of a feature remains **Features**;
 the category does not imply a minor version bump.
-
-[Release 0.8.3](https://github.com/openai/codex-security/pull/2144) uses a patch
-version as a one-time exception. Its upgrade notes list the compatibility changes.
 
 The release PR updater recognizes breaking changes from a `!` in a
 Conventional Commit title, a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer,
@@ -165,9 +168,7 @@ additional changes, then rerun the updater to resume.
 ### Editing the release notes
 
 The committed `.github/release-notes.md` is authoritative. The updater
-drafts highlights from merged titles and lists marked breaking changes for
-migration review; it does not infer migration instructions from source code.
-Review and refine these suggestions before releasing.
+collects candidate highlights from merged titles in a disclosure and puts marked breaking changes in a separate draft section. Before merging, select the changes users will notice. Replace each breaking title with the affected audience, previous behavior and required action. Link to the versioned procedure when the migration needs several steps.
 
 Keep the published notes easy to scan:
 

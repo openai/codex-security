@@ -5,6 +5,7 @@ import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { lstat, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
+import { sqliteFilename } from "./windows-path.js";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -184,7 +185,9 @@ function openSavedScanDatabase(
     },
   ) => BootstrapDatabase;
   return new Database(
-    join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
+    sqliteFilename(
+      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
+    ),
     // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
     // Open only an existing file there; query_only still prevents SQL data/schema writes.
     bun

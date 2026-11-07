@@ -16,12 +16,12 @@ import tempfile
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Callable
+from typing import Any, BinaryIO, Callable, cast
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from windows_scan_local_files import copy_directory_junction
+from windows_scan_local_files import copy_directory_junction, pinned_root_git_marker
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
@@ -338,7 +338,7 @@ def git_command(
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
-def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[str, str, str | None]]:
     """Return changed regular files from the selected side of each change."""
     result = git_command(
         repo,
@@ -357,25 +357,29 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     if fields and not fields[-1]:
         fields.pop()
 
-    changed: list[tuple[Path, str]] = []
+    changed: list[tuple[str, str, str | None]] = []
     index = 0
     while index < len(fields):
         metadata = fields[index].split()
         status = chr(metadata[-1][0])
         index += 1
+        rename_source = os.fsdecode(fields[index]) if status == "R" else None
         if status in {"C", "R"}:
             index += 1
-        path = repo / os.fsdecode(fields[index])
+        path = os.fsdecode(fields[index])
         index += 1
         selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
         if selected_mode.startswith(b"100"):
-            changed.append((path, status))
+            changed.append((path, status, rename_source))
     return changed
 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        return run_git_changed_paths(repo, [f"{base}..{head}"])
+        return [
+            (repo / name, status)
+            for name, status, _ in run_git_changed_paths(repo, [f"{base}..{head}"])
+        ]
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
@@ -389,26 +393,37 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             offline=True,
         )
         untracked.check_returncode()
-        combined = dict(staged)
-        combined.update(unstaged)
-        combined.update(
-            (repo / os.fsdecode(relative), "A")
-            for relative in untracked.stdout.split(b"\0")
-            if relative and not relative.endswith(b"/")
-        )
-        selected = []
+        combined = {name: (status, source) for name, status, source in [*staged, *unstaged]}
+        selected: dict[str, str] = {}
         linked_prefixes: dict[str, bool] = {}
-        for path, status in combined.items():
-            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts):
-                continue
+
+        def local_status(name: str, status: str) -> str | None:
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(PurePosixPath(name).parts):
+                return None
+            if status == "D":
+                return status
+            path = repo / name
             try:
-                if status == "M" and _directory_link_boundary(repo, path, linked_prefixes) != path:
-                    selected.append((path, "D"))
-                elif status == "D" or (not path.is_symlink() and path.is_file()):
-                    selected.append((path, status))
+                if (
+                    status in {"M", "R"}
+                    and _directory_link_boundary(repo, path, linked_prefixes) != path
+                ):
+                    return "D" if status == "M" else None
+                return status if stat.S_ISREG(path.lstat().st_mode) else None
             except (FileNotFoundError, NotADirectoryError):
-                continue
-        return sorted(selected)
+                return None
+
+        for name, (status, source) in combined.items():
+            if chosen := local_status(name, status):
+                selected[name] = chosen
+            elif source is not None and local_status(source, "D"):
+                selected.setdefault(source, "D")
+        for relative in untracked.stdout.split(b"\0"):
+            if relative and not relative.endswith(b"/"):
+                name = os.fsdecode(relative)
+                if local_status(name, "A"):
+                    selected[name] = "A"
+        return sorted((repo / name, status) for name, status in selected.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
@@ -846,6 +861,54 @@ def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str
     return path
 
 
+def _windows_inventory_query(
+    target: Path,
+    *args: str,
+    git_dir: Path,
+    work_tree: Path,
+    input_data: bytes | None = None,
+    environment_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Retry a root inventory's metadata length error with its verified literal marker."""
+
+    def query(
+        directory: Path, environment: dict[str, str] | None
+    ) -> subprocess.CompletedProcess[bytes]:
+        return cast(
+            subprocess.CompletedProcess[bytes],
+            git_command(
+                target,
+                *args,
+                text=False,
+                git_dir=directory,
+                work_tree=work_tree,
+                input_data=input_data,
+                environment_overrides=environment,
+            ),
+        )
+
+    result = query(git_dir, environment_overrides)
+    if (
+        result.returncode != 128
+        or result.stdout
+        or str(target) != str(work_tree)
+        or b"GIT_DIR" not in result.stderr
+    ):
+        return result
+    diagnostic = b"fatal: '$GIT_DIR' too big"
+    if diagnostic not in result.stderr.splitlines():
+        # Confirm translated diagnostics without changing the actual inventory's environment.
+        probe = query(git_dir, {**(environment_overrides or {}), "LC_ALL": "C", "LANGUAGE": "C"})
+        if probe.returncode != 128 or probe.stdout or diagnostic not in probe.stderr.splitlines():
+            return result
+    with pinned_root_git_marker(target, git_dir) as marker:
+        if marker is not None:
+            retry = query(marker, environment_overrides)
+            if retry.returncode == 0 or (retry.returncode == 1 and "check-ignore" in args):
+                return retry
+    return result
+
+
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
@@ -939,7 +1002,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         git_directory = git_output(target, "rev-parse", "--absolute-git-dir")
         if git_directory is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
-        directories = git_bytes(
+        directories = _windows_inventory_query(
             target,
             "--no-literal-pathspecs",
             "ls-files",
@@ -953,9 +1016,9 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             git_dir=Path(git_directory),
             work_tree=repository,
         )
-        if directories is None:
+        if directories.returncode != 0:
             raise SystemExit("Could not inspect directories in the selected Git working tree.")
-        pending = [target / os.fsdecode(path) for path in directories.split(b"\0") if path]
+        pending = [target / os.fsdecode(path) for path in directories.stdout.split(b"\0") if path]
         while pending:
             children: list[Path] = []
             for path in pending:
@@ -994,13 +1057,12 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             if not candidates:
                 break
             # Filter a directory level at once, retaining the outer repository context.
-            ignored = git_command(
+            ignored = _windows_inventory_query(
                 repository,
                 "--no-literal-pathspecs",
                 "check-ignore",
                 "-z",
                 "--stdin",
-                text=False,
                 input_data=b"\0".join(candidates) + b"\0",
                 git_dir=Path(git_directory),
                 work_tree=repository,
@@ -1216,7 +1278,12 @@ def copy_git_worktree_files(
         destination_path = destination / relative
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         if stat.S_ISLNK(metadata.st_mode):
-            destination_path.symlink_to(os.readlink(source_path))
+            directory_link = bool(
+                getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY
+            )
+            destination_path.symlink_to(
+                os.readlink(source_path), target_is_directory=directory_link
+            )
         elif stat.S_ISREG(metadata.st_mode):
             shutil.copy2(source_path, destination_path, follow_symlinks=False)
         elif stat.S_ISDIR(metadata.st_mode):

@@ -1246,19 +1246,14 @@ def running_standard_reducer(
     reducer_id = str(uuid.uuid4())
     prompt_path, artifact_dir, result_path = worker_paths(scan_dir, name)
     environment = {"CODEX_HOME": str(codex_home)}
-    input_worker_args = [
-        argument
-        for worker_id in (discovery_worker_id, *additional_worker_ids)
-        for argument in ("--input-worker-id", worker_id)
-    ]
     seed_legacy_reducer(
         state_dir,
         scan_id,
         reducer_id,
         str(prompt_path),
         str(artifact_dir),
-        *input_worker_args,
-        environment=environment,
+        discovery_worker_id,
+        *additional_worker_ids,
     )
     upsert_deep_worker(
         state_dir,
@@ -1296,7 +1291,7 @@ def committed_standard_reducer(
     environment = {"CODEX_HOME": str(codex_home)}
     result_path.write_text(discovery_result.read_text())
     committed = seal_legacy_reducer(
-        state_dir, scan_id, reducer_id, str(result_path), "0", environment=environment
+        state_dir, scan_id, reducer_id, str(result_path), 0, environment=environment
     )["deepScan"]
     return reducer_id, result_path, committed
 
@@ -1826,9 +1821,7 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
         reducer_id,
         str(prompt_path),
         str(artifact_dir),
-        "--input-worker-id",
         second_worker_id,
-        environment=environment,
     )
     base_args = (
         "upsert-deep-scan-worker",

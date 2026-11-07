@@ -1,8 +1,8 @@
 import { DefaultArtifactClient } from '@actions/artifact';
 import { mkdtemp, chmod, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { readReportFile, type ScanResults } from './results.js';
-import type { Inputs } from './inputs.js';
+import { readReportFile, type ScanResults } from './results.ts';
+import type { Inputs } from './inputs.ts';
 
 export async function collectReports(result: ScanResults): Promise<Map<string, Buffer>> {
   const reports = new Map<string, Buffer>();
