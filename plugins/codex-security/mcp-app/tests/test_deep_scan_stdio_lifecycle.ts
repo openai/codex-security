@@ -295,7 +295,17 @@ service_tier = "ultrafast"
       true,
     );
     const coverage = await readFixtureCoverage(expiredState.scanDir, stateDir);
-    assert.match(coverage.deferred[0].reason, /discovery time limit elapsed/);
+    const limitation = coverage.deferred[0].reason;
+    assert.match(limitation, /discovery time limit elapsed/);
+    const manifest = await readJson(
+      path.join(expiredState.scanDir, "scan-manifest.json"),
+    );
+    assert.ok(manifest.scan.scope.limitations?.includes(limitation));
+    const report = await readFile(
+      path.join(expiredState.scanDir, "report.md"),
+      "utf8",
+    );
+    assert.ok(report.includes(limitation));
     assert.deepEqual(await readLogLines(startLogPath), []);
 
     const targetRequest = {
