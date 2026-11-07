@@ -719,6 +719,7 @@ describe("one-shot scan events", () => {
         "Reconnecting... 3/5 (Rate limit reached. Please try again in 999999s.)",
         "Reconnecting... 4/5",
         "Reconnecting... 5/5 (429 rate limit reached org-private)",
+        "Reconnecting... 6/7 (Rate limit reached for org-private. Please try again in 28ms.)",
       ])
         yield { type: "error", message };
       yield* completedEvents();
@@ -730,6 +731,7 @@ describe("one-shot scan events", () => {
       [3, 5, { reason: "rate_limit" }],
       [4, 5, undefined],
       [5, 5, { reason: "rate_limit" }],
+      [6, 7, { reason: "rate_limit", retryAfterSeconds: 0.028 }],
     ]);
   });
 
