@@ -538,56 +538,51 @@ test("accepted patches restore ambient providers from a produced native-preserva
   const patchConfigurations: unknown[] = [];
   let runtimeStarts = 0;
   let prompted = false;
-  await main(
-    ["scans", "resume", parentId],
-    stdout.stream,
-    stderr.stream,
-    {
-      ...cliDependencies({
-        environment,
-        currentDirectory: h.root,
-        onCodex(_args, output) {
-          patchConfigurations.push(output?.codexOverrides);
-          return 1;
-        },
-      }),
-      runWorkbench: command,
-      confirmPatchReview: async () => {
-        prompted = true;
-        expect(
-          (await command(["get-scan", "--scan-id", parentId]))["scan"],
-        ).toMatchObject({ progress: { status: "complete" } });
-        return true;
+  await main(["scans", "resume", parentId], stdout.stream, stderr.stream, {
+    ...cliDependencies({
+      environment,
+      currentDirectory: h.root,
+      onCodex(_args, output) {
+        patchConfigurations.push(output?.codexOverrides);
+        return 1;
       },
-      patchEditor: async (_repository, findings) => ({
-        severity: "low",
-        occurrenceIds: [findings[0]!.occurrenceId],
-      }),
-      createSecurity(config) {
-        return new CodexSecurity(
-          {
-            ...config,
-            pluginPath: pluginRoot,
-            pythonPath: Bun.which("python3")!,
-          },
-          {
-            environment,
-            resolvePluginPython: async () => Bun.which("python3")!,
-            prepareRuntime: async () => {
-              runtimeStarts++;
-              throw new Error("Publication must not prepare a runtime");
-            },
-            createCodex: () => {
-              runtimeStarts++;
-              throw new Error("Publication must not create a model client");
-            },
-            runWorkbench,
-          },
-          { surface: "sdk" },
-        );
-      },
+    }),
+    runWorkbench: command,
+    confirmPatchReview: async () => {
+      prompted = true;
+      expect(
+        (await command(["get-scan", "--scan-id", parentId]))["scan"],
+      ).toMatchObject({ progress: { status: "complete" } });
+      return true;
     },
-  );
+    patchEditor: async (_repository, findings) => ({
+      severity: "low",
+      occurrenceIds: [findings[0]!.occurrenceId],
+    }),
+    createSecurity(config) {
+      return new CodexSecurity(
+        {
+          ...config,
+          pluginPath: pluginRoot,
+          pythonPath: Bun.which("python3")!,
+        },
+        {
+          environment,
+          resolvePluginPython: async () => Bun.which("python3")!,
+          prepareRuntime: async () => {
+            runtimeStarts++;
+            throw new Error("Publication must not prepare a runtime");
+          },
+          createCodex: () => {
+            runtimeStarts++;
+            throw new Error("Publication must not create a model client");
+          },
+          runWorkbench,
+        },
+        { surface: "sdk" },
+      );
+    },
+  });
   expect(prompted, stderr.text()).toBe(true);
   expect(runtimeStarts).toBe(0);
   expect(patchConfigurations).toHaveLength(1);
