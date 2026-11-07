@@ -1,16 +1,22 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
-import { ScanInterruptedError } from "../src/errors.js";
+import {
+  ScanInterruptedError,
+  ScanCostLimitExceededError,
+} from "../src/errors.js";
+import { estimateScanCost, formatUsd } from "../src/cost.js";
 import type {
   CodexSecurityConfig,
   DependencyScanOptions,
   ScaResult,
 } from "../src/index.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
-import { dependencies, FakeSignals } from "./cli-fixtures.js";
-import { createCliTest } from "./support/cli-run.js";
+import { dependencies, fakeInterval, FakeSignals } from "./cli-fixtures.js";
+import { createCliTest, selectionPrompt } from "./support/cli-run.js";
 import { throwing } from "./support/errors.js";
 import { runCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -19,6 +25,20 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "cli-scan-dependencies-",
 );
 afterEach(cleanup);
+
+function trackIntervals(deps: ReturnType<typeof dependencies>) {
+  const activeTimers = new Map<NodeJS.Timeout, () => void>();
+  const start = mock((callback: () => void) => {
+    const handle = fakeInterval(callback);
+    activeTimers.set(handle, callback);
+    return handle;
+  });
+  deps.setInterval = start;
+  deps.clearInterval = (handle) => {
+    activeTimers.delete(handle);
+  };
+  return { activeTimers, start };
+}
 
 function dependencyResult(
   status: ScaResult["status"] = "completed",
@@ -111,6 +131,525 @@ async function configFixture(config: ProjectConfigInput) {
 }
 
 describe("scan dependencies CLI", () => {
+  test.each([
+    "same signal",
+    "different signal",
+    "timer failure",
+    "cursor failure",
+  ])("restores dependency progress before forced exit: %s", async (mode) => {
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+    const signals = new FakeSignals();
+    const result = dependencyResult("partial");
+    const order: string[] = [];
+    const restored: string[] = [];
+    const forced: string[] = [];
+    let now = 0;
+    const repeated = mode === "different signal" ? "SIGTERM" : "SIGINT";
+    const deps = dependencies({
+      signals,
+      onScanDependencies: async ({ signal }) => {
+        signals.emit("SIGINT");
+        expect(signal?.aborted).toBe(true);
+        signals.emit("SIGINT");
+        expect(forced).toEqual([]);
+        now = mode === "different signal" ? 100 : 1_000;
+        signals.emit(repeated);
+        expect(order).toEqual(["stop", "restore", "force"]);
+        expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+        expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+        return result;
+      },
+    });
+    deps.now = () => now;
+    deps.clearInterval = () => {
+      order.push("stop");
+      if (mode === "timer failure") throw new Error("Synthetic timer failure");
+    };
+    deps.writeSynchronously = (_stream, value) => {
+      order.push("restore");
+      restored.push(value);
+      if (mode === "cursor failure")
+        throw new Error("Synthetic terminal failure");
+    };
+    deps.forceExit = (signal) => {
+      order.push("force");
+      forced.push(signal);
+    };
+    expect(await runCli(["scan", "dependencies", "--json"], deps)).toBe(130);
+    expect(forced).toEqual([repeated]);
+    expect(restored).toEqual(["\u001B[?25h"]);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(stderr.text()).toContain("\u001B[?25l");
+  });
+
+  test.skipIf(process.platform === "win32").each([
+    {
+      label: "SIGINT with graceful cleanup",
+      first: "SIGINT",
+      repeated: null,
+      exitCode: 130,
+    },
+    {
+      label: "SIGTERM with graceful cleanup",
+      first: "SIGTERM",
+      repeated: null,
+      exitCode: 143,
+    },
+    {
+      label: "repeated SIGINT",
+      first: "SIGINT",
+      repeated: "SIGINT",
+      exitCode: null,
+    },
+    {
+      label: "repeated SIGTERM",
+      first: "SIGTERM",
+      repeated: "SIGTERM",
+      exitCode: null,
+    },
+    {
+      label: "SIGTERM after SIGINT",
+      first: "SIGINT",
+      repeated: "SIGTERM",
+      exitCode: null,
+    },
+  ] as const)(
+    "handles real $label during dependency cancellation",
+    async ({ first, repeated, exitCode }) => {
+      const result = dependencyResult("partial");
+      const child = spawn(
+        process.execPath,
+        [
+          "--eval",
+          `
+            import { writeSync } from "node:fs";
+            import { main } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+            import { dependencies } from ${JSON.stringify(new URL("./cli-fixtures.ts", import.meta.url).href)};
+            const notice = (value) => writeSync(1, "SYNTHETIC_SIGNAL_NOTICE:" + value + "\\n");
+            const finish = Promise.withResolvers();
+            let now = 0;
+            const timers = new Set();
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (command) => {
+              if (command.trim() === "repeat") {
+                now = 1000;
+                notice("repeat ready");
+              } else finish.resolve();
+            });
+            process.stderr.isTTY = true;
+            process.stderr.columns = 160;
+            const deps = dependencies({
+              onScanDependencies: async ({ signal }) => {
+                const aborted = Promise.withResolvers();
+                signal.addEventListener("abort", () => {
+                  notice("aborted:" + signal.reason);
+                  aborted.resolve();
+                }, { once: true });
+                notice("ready");
+                await aborted.promise;
+                await finish.promise;
+                return ${JSON.stringify(result)};
+              },
+              onClose: () => notice("closed"),
+            });
+            Object.assign(deps, {
+              now: () => now,
+              addSignalListener: (signal, listener) => process.on(signal, listener),
+              removeSignalListener: (signal, listener) => process.off(signal, listener),
+              setInterval: (callback, delay) => {
+                const timer = setInterval(callback, delay);
+                timers.add(timer);
+                return timer;
+              },
+              clearInterval: (timer) => { timers.delete(timer); clearInterval(timer); },
+              writeSynchronously: (_stream, value) => {
+                writeSync(2, value);
+                notice("cursor restored synchronously");
+              },
+              forceExit: (signal) => {
+                notice("forcing:" + signal + ":timers:" + timers.size);
+                process.kill(process.pid, signal);
+              },
+            });
+            const status = await main(["scan", "dependencies", "--json"], process.stdout, process.stderr, deps);
+            process.stdin.destroy();
+            process.exitCode = status;
+          `,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
+      );
+      let stdout = "";
+      let stderr = "";
+      let notices = "";
+      const received = new Map<
+        string,
+        ReturnType<typeof Promise.withResolvers<void>>
+      >();
+      const notice = (name: string) => {
+        let entry = received.get(name);
+        if (entry === undefined) {
+          entry = Promise.withResolvers<void>();
+          received.set(name, entry);
+        }
+        return entry;
+      };
+      child.stdout!.on("data", (chunk) => {
+        stdout += chunk;
+        notices =
+          stdout
+            .split("\n")
+            .slice(0, -1)
+            .filter((line) => line.startsWith("SYNTHETIC_SIGNAL_NOTICE:"))
+            .map((line) => line.slice("SYNTHETIC_SIGNAL_NOTICE:".length))
+            .join("\n") + "\n";
+        for (const line of notices.split("\n").slice(0, -1))
+          notice(line).resolve();
+      });
+      child.stderr!.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const closed = new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+      }>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) => resolve({ code, signal }));
+      });
+      const waitFor = async (name: string) =>
+        await Promise.race([
+          notice(name).promise,
+          closed.then(() => {
+            throw new Error(`Child exited before ${name}: ${stderr}`);
+          }),
+        ]);
+      const timeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
+      try {
+        await waitFor("ready");
+        child.kill(first);
+        await waitFor(`aborted:${first}`);
+        if (repeated === null) child.stdin!.end("finish\n");
+        else {
+          child.stdin!.write("repeat\n");
+          await waitFor("repeat ready");
+          child.kill(repeated);
+        }
+        expect(await closed, stderr).toEqual({
+          code: exitCode,
+          signal: repeated,
+        });
+        expect(stderr).toContain("\u001B[?25l");
+        expect(stderr).toContain("\u001B[?25h");
+        const output = stdout
+          .split("\n")
+          .filter((line) => !line.startsWith("SYNTHETIC_SIGNAL_NOTICE:"))
+          .join("\n");
+        if (repeated === null) {
+          expect(JSON.parse(output)).toEqual(result);
+          expect(notices).toContain("closed\n");
+          expect(notices).not.toContain("forcing:");
+        } else {
+          expect(output).toBe("");
+          expect(notices).toContain(
+            `cursor restored synchronously\nforcing:${repeated}:timers:0\n`,
+          );
+          expect(notices).not.toContain("closed\n");
+        }
+      } finally {
+        clearTimeout(timeout);
+        child.kill("SIGKILL");
+        await closed;
+      }
+    },
+  );
+
+  test("TTY progress shows observed work, quiet time, activity, and requested cost without changing JSON", async () => {
+    const result = dependencyResult();
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+    Object.assign(stderr.stream, { columns: 240 });
+    let now = 0;
+    let redraw = () => {};
+    let captured: DependencyScanOptions | undefined;
+    let artifactReadyLine: string | undefined;
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      output_tokens: 1000,
+    })!;
+    const deps = dependencies({
+      onScanDependencies: async (options) => {
+        captured = options;
+        now = 1_500;
+        options.onOutputDirReady?.(result.outputDir);
+        artifactReadyLine = stripVTControlCharacters(
+          stderr
+            .text()
+            .split(/[\r\n]/)
+            .at(-1)!,
+        );
+        options.onProgress?.({
+          phase: "matching",
+          inputsTotal: 2,
+          inputsProcessed: 0,
+          inputsFailed: 0,
+          currentInput: "nested/package-lock.json",
+          components: 0,
+          matches: 0,
+        });
+        redraw();
+        expect(stderr.text()).toContain("Matching 0/2 inputs, 0 failed");
+        expect(stderr.text()).toContain("nested/package-lock.json");
+        now = 2_000;
+        options.onProgress?.({
+          phase: "assessing",
+          assessmentsTotal: 4,
+          assessmentsCompleted: 1,
+          assessmentsFailed: 1,
+          current: {
+            matchId: "match-3",
+            componentId: "component-1",
+            packageName: "synthetic-package",
+            packageVersion: "1.0.0",
+            advisoryIds: ["SYNTHETIC-3"],
+          },
+        });
+        redraw();
+        expect(stderr.text()).toContain("Assessing 1/4, 1 failed, 1 queued");
+        expect(stderr.text()).toContain(
+          "synthetic-package@1.0.0 (SYNTHETIC-3)",
+        );
+        now = 5_000;
+        redraw();
+        expect(stderr.text()).toContain("last event 3s");
+        options.onCost?.(cost);
+        options.onActivity?.({
+          id: "match-3:tool",
+          kind: "command",
+          status: "running",
+          description: "rg token=SYNTHETIC_VALUE . \u001b[31m",
+          paths: [],
+        });
+        now = 6_000;
+        redraw();
+        expect(stderr.text()).toContain("last event 1s");
+        expect(stderr.text()).toContain(`est. ${formatUsd(cost.estimatedUsd)}`);
+        expect(stderr.text()).toContain(
+          "Tool running: rg token=SYNTHETIC_VALUE",
+        );
+        expect(stderr.text()).not.toContain("\u001b[31m");
+        expect(stderr.text()).not.toContain("Dependency scan partial");
+        options.onProgress?.({ phase: "saving" });
+        redraw();
+        return result;
+      },
+    });
+    deps.now = () => now;
+    deps.setInterval = mock((callback) => {
+      redraw = callback;
+      return fakeInterval(callback);
+    });
+    deps.clearInterval = mock();
+    expect(
+      await runCli(["scan", "dependencies", "--json", "--show-cost"], deps),
+    ).toBe(0);
+    expect(artifactReadyLine).toContain("last event 0s");
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(stderr.text()).toContain("Saving dependency results");
+    expect(stderr.text()).toContain("\u001b[?25h");
+    expect(deps.clearInterval).toHaveBeenCalledTimes(
+      (deps.setInterval as ReturnType<typeof mock>).mock.calls.length,
+    );
+    const finished = stderr.text();
+    captured!.onProgress?.({ phase: "discovering" });
+    captured!.onActivity?.({
+      id: "late",
+      kind: "tool",
+      status: "running",
+      description: "late activity",
+      paths: [],
+    });
+    captured!.onOutputDirReady?.("late output");
+    expect(stderr.text()).toBe(finished);
+  });
+
+  test("80-column progress retains the quiet duration and requested cost limit", async () => {
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    Object.assign(stderr.stream, { columns: 80 });
+    let now = 0;
+    let redraw = () => {};
+    const deps = dependencies({
+      onScanDependencies: async (options) => {
+        options.onProgress?.({
+          phase: "assessing",
+          assessmentsTotal: 4,
+          assessmentsCompleted: 1,
+          assessmentsFailed: 1,
+          current: null,
+        });
+        const checkLine = (seconds: number, expectedCost: string) => {
+          now += seconds * 1000;
+          redraw();
+          const line = stripVTControlCharacters(
+            stderr.text().split("\r").at(-1)!,
+          );
+          expect(line).toContain(`last event ${seconds}s`);
+          expect(line).toContain(`est. ${expectedCost}/$5.00`);
+          expect(line.length).toBeLessThan(80);
+        };
+        checkLine(600, "n/a");
+        const cost = estimateScanCost("gpt-5.6-sol", {
+          input_tokens: 1000,
+          output_tokens: 1000,
+        })!;
+        options.onCost?.(cost, 5);
+        checkLine(600, formatUsd(cost.estimatedUsd));
+        return dependencyResult();
+      },
+    });
+    deps.now = () => now;
+    deps.setInterval = (callback) => {
+      redraw = callback;
+      return fakeInterval(callback);
+    };
+    expect(
+      await runCli(["scan", "dependencies", "--max-cost", "5"], deps),
+    ).toBe(0);
+  });
+
+  test.each([false, true])(
+    "redirected progress is opt-in with verbose=%p",
+    async (verbose) => {
+      const result = dependencyResult();
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies({
+        onScanDependencies: async (options) => {
+          options.onProgress?.({ phase: "discovering" });
+          options.onProgress?.({
+            phase: "matching",
+            inputsTotal: 2,
+            inputsProcessed: 1,
+            inputsFailed: 0,
+            currentInput: "nested/package-lock.json",
+            components: 12,
+            matches: 3,
+          });
+          options.onActivity?.({
+            id: "tool",
+            kind: "command",
+            status: "running",
+            description: "rg synthetic .",
+            paths: [],
+          });
+          options.onOutputDirReady?.(result.outputDir);
+          return result;
+        },
+      });
+      deps.now = () => 2_000;
+      deps.setInterval = mock(fakeInterval);
+      expect(
+        await runCli(
+          ["scan", "dependencies", "--json", ...(verbose ? ["--verbose"] : [])],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(result);
+      expect(stderr.text()).not.toContain("\u001b");
+      expect(deps.setInterval).not.toHaveBeenCalled();
+      if (verbose) {
+        expect(stderr.text()).toContain("[00:00] Discovering dependency files");
+        expect(stderr.text()).toContain(
+          "Matching 1/2 inputs, 0 failed · nested/package-lock.json",
+        );
+        expect(stderr.text()).toContain("Tool running: rg synthetic .");
+      } else {
+        expect(stderr.text()).not.toContain("Discovering");
+        expect(stderr.text()).not.toContain("Matching");
+        expect(stderr.text()).not.toContain("rg synthetic");
+      }
+    },
+  );
+
+  test.each([{ CI: "true" }, { TERM: "dumb" }])(
+    "disables live redraws for %j",
+    async (environment) => {
+      const { stderr, runCli } = createCliTest(main, { stderr: true });
+      const deps = dependencies({
+        environment,
+        onScanDependencies: async (options) => {
+          options.onProgress?.({ phase: "discovering" });
+          return dependencyResult();
+        },
+      });
+      deps.setInterval = mock(fakeInterval);
+      expect(await runCli(["scan", "dependencies"], deps)).toBe(0);
+      expect(deps.setInterval).not.toHaveBeenCalled();
+      expect(stderr.text()).not.toContain("\u001b");
+      expect(stderr.text()).not.toContain("Discovering");
+    },
+  );
+
+  test.each(["partial", "failed", "throw"] as const)(
+    "cleans up live progress after %s",
+    async (outcome) => {
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+      const close = mock();
+      const deps = dependencies({
+        onClose: close,
+        onScanDependencies: async (options) => {
+          options.onProgress?.({ phase: "discovering" });
+          if (outcome === "throw") throw new Error("Synthetic scanner failure");
+          return dependencyResult(outcome);
+        },
+      });
+      deps.clearInterval = mock();
+      expect(await runCli(["scan", "dependencies"], deps)).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(deps.clearInterval).toHaveBeenCalledTimes(1);
+      expect(stderr.text()).toContain("\u001b[?25h");
+      expect(close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("budget interruption stops live progress and preserves checkpointed JSON", async () => {
+    const result = dependencyResult("partial");
+    result.outputDir = await temporaryDirectory();
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      output_tokens: 1000,
+    })!;
+    result.model.costUsd = cost.estimatedUsd;
+    await writeFile(
+      join(result.outputDir, "sca-result.json"),
+      JSON.stringify(result),
+    );
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+    const deps = dependencies({
+      onScanDependencies: async (options) => {
+        options.onCost?.(cost, 0.001);
+        throw new ScanCostLimitExceededError(0.001, cost, result.outputDir);
+      },
+    });
+    deps.clearInterval = mock();
+    expect(
+      await runCli(
+        [
+          "scan",
+          "dependencies",
+          "--json",
+          "--full-output",
+          "--max-cost",
+          "0.001",
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      data: result,
+    });
+    expect(stderr.text()).toContain("Estimated cost:");
+    expect(stderr.text()).toContain("\u001b[?25h");
+    expect(deps.clearInterval).toHaveBeenCalledTimes(1);
+  });
+
   test.each([
     ["local JSON shortcut", ["scan", "dependencies", "--json"]],
     ["global JSON shortcut", ["--json", "scan", "dependencies"]],
@@ -378,26 +917,59 @@ describe("scan dependencies CLI", () => {
     },
   );
 
-  test("keeps completed JSON successful when optional diagnostics cannot be written", async () => {
-    const result = dependencyResult();
-    const { stdout, stderr, runCli } = createCliTest(main);
-    stderr.stream.write = throwing("Synthetic closed diagnostic stream");
+  test.each([false, true])(
+    "keeps completed JSON successful when optional diagnostics cannot be written (TTY=%p)",
+    async (interactive) => {
+      const result = dependencyResult();
+      const { stdout, stderr, runCli } = createCliTest(main, {
+        stderr: interactive,
+      });
+      stderr.stream.write = throwing("Synthetic closed diagnostic stream");
 
-    expect(
-      await runCli(
-        ["scan", "dependencies", "--json", "--verbose"],
-        dependencies({ onScanDependencies: async () => result }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(result);
-  });
+      expect(
+        await runCli(
+          ["scan", "dependencies", "--json", "--verbose"],
+          dependencies({
+            onScanDependencies: async (options) => {
+              options.onProgress?.({ phase: "discovering" });
+              options.onActivity?.({
+                id: "tool",
+                kind: "tool",
+                status: "running",
+                description: "Synthetic tool",
+                paths: [],
+              });
+              return result;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(result);
+    },
+  );
 
   test.each([
-    { phase: "verbose startup", flags: ["--verbose"], errorCode: "EPIPE" },
-    { phase: "completion summary", flags: [], errorCode: "ENOSPC" },
+    {
+      phase: "verbose startup",
+      flags: ["--verbose"],
+      errorCode: "EPIPE",
+      interactive: false,
+    },
+    {
+      phase: "completion summary",
+      flags: [],
+      errorCode: "ENOSPC",
+      interactive: false,
+    },
+    {
+      phase: "live progress",
+      flags: [],
+      errorCode: "EPIPE",
+      interactive: true,
+    },
   ])(
     "survives an asynchronous $errorCode during $phase without losing JSON or cleanup",
-    async ({ flags, errorCode }) => {
+    async ({ flags, errorCode, interactive }) => {
       const result = dependencyResult();
       const child = await runCommand(process.execPath, [
         "--eval",
@@ -418,6 +990,7 @@ describe("scan dependencies CLI", () => {
               )));
             },
           });
+          stderr.isTTY = ${interactive};
           const status = await main(
             ${JSON.stringify(["scan", "dependencies", "--json", ...flags])},
             stdout.stream,
@@ -463,12 +1036,12 @@ describe("scan dependencies CLI", () => {
       const result = dependencyResult("partial");
       const signals = new FakeSignals();
       const close = mock();
-      const { stdout, runCli } = createCliTest(main);
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+      const clearInterval = mock();
 
       expect(
-        await runCli(
-          ["scan", "dependencies", "--json", "--full-output"],
-          dependencies({
+        await runCli(["scan", "dependencies", "--json", "--full-output"], {
+          ...dependencies({
             signals,
             onClose: close,
             onScanDependencies: async ({ signal }) => {
@@ -478,13 +1051,16 @@ describe("scan dependencies CLI", () => {
               return result;
             },
           }),
-        ),
+          clearInterval,
+        }),
       ).toBe(code);
       expect(JSON.parse(stdout.text())).toMatchObject({
         ok: false,
         data: result,
       });
       expect(close).toHaveBeenCalledTimes(1);
+      expect(clearInterval).toHaveBeenCalledTimes(1);
+      expect(stderr.text()).toContain("\u001b[?25h");
       expect(signals.listeners.get("SIGINT")?.size).toBe(0);
       expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     },
@@ -736,3 +1312,191 @@ describe("scan dependencies CLI", () => {
     },
   );
 });
+
+test.each([
+  "selection",
+  "rejection",
+  "interruption",
+  "pause write failure",
+] as const)(
+  "dependency authentication prompt pauses live progress: %s",
+  async (ending) => {
+    const signals = new FakeSignals();
+    const result = dependencyResult();
+    addMatch(result);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    Object.assign(stderr.stream, { columns: 240 });
+    const started = Promise.withResolvers<void>();
+    const answer = Promise.withResolvers<"chatgpt" | "api-key">();
+    let now = 0;
+    let promptStarted = false;
+    let pauseFailures = 0;
+    let promptSignal: AbortSignal | undefined;
+    let closed = 0;
+    let afterSelectionTimers: number | undefined;
+    let afterSelectionOutput: string | undefined;
+    let selectedAuth: DependencyScanOptions["auth"];
+    const write = stderr.stream.write;
+    stderr.stream.write = (chunk) => {
+      if (
+        ending === "pause write failure" &&
+        !promptStarted &&
+        chunk === "\n"
+      ) {
+        pauseFailures++;
+        throw new Error("Synthetic progress write failure");
+      }
+      return write(chunk);
+    };
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "synthetic-progress-auth-key" },
+      signals,
+    });
+    deps.now = () => now;
+    const { activeTimers, start } = trackIntervals(deps);
+    deps.hasStoredChatGPTSignIn = async () => true;
+    deps.scanAuthenticationPrompt = selectionPrompt(
+      async (question, choices, _presentation, signal) => {
+        promptSignal = signal;
+        promptStarted = true;
+        stderr.stream.write(`${question}\n> ChatGPT subscription`);
+        started.resolve();
+        const selected = await answer.promise;
+        return choices.find((choice) => choice.value === selected)!.value;
+      },
+    );
+    // Exercise the real CLI chooser after the SDK's preparing-assessment event.
+    // Scanner checkpoint and auth propagation are covered by the SDK tests.
+    deps.createDependencySecurity = (_config, chooseAuthentication) => ({
+      scanDependencies: async (options) => {
+        options.onProgress?.({ phase: "preparing_assessment" });
+        selectedAuth = await chooseAuthentication!(
+          options.auth,
+          options.signal!,
+        );
+        afterSelectionTimers = activeTimers.size;
+        options.onProgress?.({ phase: "saving" });
+        const before = stderr.text();
+        now = 3_000;
+        for (const tick of activeTimers.values()) tick();
+        afterSelectionOutput = stderr.text().slice(before.length);
+        return result;
+      },
+      close: async () => {
+        closed++;
+      },
+    });
+    const run = runCli(["scan", "dependencies"], deps);
+    await started.promise;
+    const timersDuringPrompt = activeTimers.size;
+    const beforeTick = stderr.text();
+    now = 2_000;
+    for (const tick of activeTimers.values()) tick();
+    const writesDuringPrompt = stderr.text().slice(beforeTick.length);
+    if (ending === "rejection")
+      answer.reject(new Error("Synthetic prompt rejection"));
+    else if (ending === "interruption") signals.emit("SIGINT");
+    else answer.resolve("chatgpt");
+    const status = await run;
+    if (ending === "interruption") answer.resolve("chatgpt");
+    expect(status).toBe(
+      ending === "rejection" ? 2 : ending === "interruption" ? 130 : 0,
+    );
+    expect(closed).toBe(1);
+    expect(activeTimers.size).toBe(0);
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    expect(timersDuringPrompt).toBe(0);
+    expect(writesDuringPrompt).toBe("");
+    expect(start).toHaveBeenCalledTimes(ending === "selection" ? 2 : 1);
+    if (ending === "selection") {
+      expect(beforeTick).toContain("\n\u001b[?25hBoth a ChatGPT sign-in");
+      expect(afterSelectionTimers).toBe(1);
+      expect(afterSelectionOutput).toContain("Saving dependency results");
+      expect(selectedAuth).toBe("chatgpt");
+    } else if (ending === "pause write failure") {
+      expect(pauseFailures).toBe(1);
+      expect(afterSelectionTimers).toBe(0);
+      expect(afterSelectionOutput).toBe("");
+      expect(selectedAuth).toBe("chatgpt");
+    } else {
+      expect(afterSelectionTimers).toBeUndefined();
+      if (ending === "interruption") expect(promptSignal?.aborted).toBe(true);
+      else expect(stderr.text()).toContain("Synthetic prompt rejection");
+    }
+  },
+);
+
+test.each([
+  "explicit ChatGPT",
+  "explicit API key",
+  "no API key",
+  "no stored sign-in",
+  "non-TTY",
+  "noninteractive input",
+  "JSON",
+  "JSONL",
+  "external provider",
+  "zero matches",
+] as const)(
+  "dependency authentication leaves prompt-free progress unchanged: %s",
+  async (mode) => {
+    const terminal = mode !== "non-TTY";
+    const { stderr, runCli } = createCliTest(main, { stderr: terminal });
+    const result = dependencyResult();
+    if (mode !== "zero matches") addMatch(result);
+    let prompts = 0;
+    let probes = 0;
+    const deps = dependencies({
+      environment:
+        mode === "no API key"
+          ? {}
+          : { OPENAI_API_KEY: "synthetic-progress-auth-key" },
+    });
+    const { activeTimers, start } = trackIntervals(deps);
+    deps.hasStoredChatGPTSignIn = async () => {
+      probes++;
+      return false;
+    };
+    deps.scanAuthenticationPrompt = selectionPrompt(
+      async (_question, choices) => {
+        prompts++;
+        return choices[0]!.value;
+      },
+      () => mode !== "noninteractive input",
+    );
+    deps.createDependencySecurity = (_config, chooseAuthentication) => ({
+      scanDependencies: async (options) => {
+        options.onProgress?.({ phase: "preparing_assessment" });
+        if (result.matches.length > 0)
+          await chooseAuthentication?.(options.auth, options.signal!);
+        return result;
+      },
+      close: async () => {},
+    });
+    const flags =
+      mode === "explicit ChatGPT"
+        ? ["--auth", "chatgpt"]
+        : mode === "explicit API key"
+          ? ["--auth", "api-key"]
+          : mode === "JSON"
+            ? ["--json"]
+            : mode === "JSONL"
+              ? ["--format", "jsonl"]
+              : mode === "external provider"
+                ? ["--provider", "fireworks", "--model", "synthetic-model"]
+                : [];
+    expect(await runCli(["scan", "dependencies", ...flags], deps)).toBe(0);
+    expect(prompts).toBe(0);
+    expect(probes).toBe(mode === "no stored sign-in" ? 1 : 0);
+    expect(start).toHaveBeenCalledTimes(terminal ? 1 : 0);
+    expect(activeTimers.size).toBe(0);
+    expect(stderr.text().split("\u001b[?25l").length - 1).toBe(
+      terminal ? 1 : 0,
+    );
+    expect(stderr.text().split("\u001b[?25h").length - 1).toBe(
+      terminal ? 1 : 0,
+    );
+    expect(stderr.text()).not.toContain("Both a ChatGPT sign-in");
+  },
+);
