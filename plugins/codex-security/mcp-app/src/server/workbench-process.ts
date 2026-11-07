@@ -8,8 +8,11 @@ args = json.loads(sys.stdin.buffer.readline())
 sys.argv = [str(script), *args]
 if args and args[0] in {"inspect-target", "inspect-setup"}:
     from workbench_setup import main
+    main()
 else:
-    from workbench_db import main
-    options["framed_input"] = True
-main(**options)
+    import workbench_db
+    try:
+        workbench_db.main(framed_input=True, **options)
+    except workbench_db.ContractError as error:
+        raise SystemExit(str(error)) from None
 `;

@@ -1,3 +1,5 @@
+"""Exercise deep scan registration, coordinator claims, iteration ordering, and terminal state transitions."""
+
 from __future__ import annotations
 
 import hashlib
@@ -41,6 +43,7 @@ from workbench_test_support import (
     update_progress,
     upsert_deep_worker,
     worker_paths,
+    write_checkpoint,
     write_completed_contract,
 )
 
@@ -96,17 +99,21 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 
 @pytest.mark.cross_platform
-def test_target_admission_reads_one_entry_without_looking_up_its_type(
+def test_target_admission_stops_at_the_first_non_directory_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
     check_selected_targets = runpy.run_path(str(script))["check_selected_targets"]
     events = []
 
+    class FileEntry:
+        def is_dir(self, *, follow_symlinks):
+            assert not follow_symlinks
+            return False
+
     def entries():
         events.append("read")
-        # A filesystem can report DT_UNKNOWN. Any entry-type lookup here fails.
-        yield object()
+        yield FileEntry()
         pytest.fail("admission read a second directory entry")
 
     @contextmanager
@@ -124,6 +131,8 @@ def test_target_admission_reads_one_entry_without_looking_up_its_type(
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
+        connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
         connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
         connection.execute("DROP VIEW scan_lifecycles")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_kind")
@@ -201,6 +210,8 @@ def write_canonical_artifacts(scan_dir: Path) -> dict[str, Path]:
 
 @dataclass(frozen=True)
 class DeepScan:
+    """Keep a test scan ID, state directory, and Codex home together when issuing worker and coordinator commands."""
+
     state_dir: Path
     codex_home: Path
     id: str
@@ -298,15 +309,14 @@ class DeepScan:
         prompt_path: Path,
         artifact_dir: Path,
         input_worker_ids: list[str],
-    ) -> dict[str, object]:
-        return seed_legacy_reducer(
+    ) -> None:
+        seed_legacy_reducer(
             self.state_dir,
             self.id,
             worker_id,
             str(prompt_path),
             str(artifact_dir),
-            *(item for worker in input_worker_ids for item in ("--input-worker-id", worker)),
-            environment=deep_environment(self.codex_home),
+            *input_worker_ids,
         )
 
     def finish(
@@ -390,6 +400,103 @@ def test_iteration_commits_all_sources_once_in_launch_order(tmp_path: Path) -> N
         assert len([w for w in saved["workers"] if w["kind"] == "dedup"]) == 1
         assert [i["discoveryWorkerId"] for i in saved["dedupInputs"]] == list(reversed(sources))
     assert "other completed scans" in save(sources, check=False)["stderr"]
+
+
+@pytest.mark.parametrize("legacy_archive", [False, True])
+def test_archived_deep_scan_keeps_its_discovery_and_checkpoint_paths(
+    tmp_path: Path, legacy_archive: bool
+) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    worker, _, worker_output, _ = deep.dispatch_discovery_worker(name="discovery-0001")
+    deep.record_iteration(name="dedup-0001", input_worker_ids=[worker], new_findings_count=1)
+    manifest = deep.directory / "coordinator.json"
+    manifest.write_text("{}")
+    before = deep.command(
+        "fail-deep-scan", "--message", "Stopped", "--manifest-path", str(manifest)
+    )["deepScan"]
+
+    original_checkpoint = write_checkpoint(worker_output / "checkpoints", saved_draft(deep.id))
+    contents = original_checkpoint.read_bytes()
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "INSERT INTO deep_scan_attempts "
+            "(scan_id, worker_id, attempt, status, started_at, accepted_result_path, accepted_result_sha256) "
+            "SELECT scan_id, id, attempt, status, created_at, ?, ? FROM deep_scan_workers WHERE id = ? "
+            "ON CONFLICT (worker_id, attempt) DO UPDATE SET accepted_result_path = excluded.accepted_result_path, "
+            "accepted_result_sha256 = excluded.accepted_result_sha256",
+            (
+                str(original_checkpoint),
+                hashlib.sha256(contents).hexdigest(),
+                worker,
+            ),
+        )
+
+    target = tmp_path / "target"
+    registration = run_workbench(
+        deep.state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(deep.directory),
+        "--archive-existing",
+        "--recipe-json",
+        json.dumps(
+            {
+                "config": {},
+                "mode": "deep",
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+            }
+        ),
+        environment=deep_environment(deep.codex_home),
+    )
+    archived = Path(registration["archivedScanDir"])
+    if legacy_archive:
+        with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET manifest_path = ? WHERE scan_id = ?",
+                (str(manifest), deep.id),
+            )
+            connection.executemany(
+                "UPDATE deep_scan_workers SET prompt_path = ?, artifact_dir = ?, "
+                "result_manifest_path = ? WHERE id = ?",
+                [
+                    (row["promptPath"], row["artifactDir"], row["resultManifestPath"], row["id"])
+                    for row in before["workers"]
+                ],
+            )
+    after = deep.read("thread-deep-scan")
+    assert Path(after["manifestPath"]) == archived / manifest.name
+    for old, current in zip(before["workers"], after["workers"], strict=True):
+        assert old["id"] == current["id"]
+        for field in ("promptPath", "artifactDir", "resultManifestPath"):
+            path = Path(current[field])
+            assert path == archived / Path(old[field]).relative_to(deep.directory)
+            assert path.exists()
+    replay = deep.command(
+        "fail-deep-scan", "--message", "Stopped", "--manifest-path", after["manifestPath"]
+    )
+    assert replay["deepScan"]["manifestPath"] == after["manifestPath"]
+    worker_output = Path(
+        next(row["artifactDir"] for row in after["workers"] if row["id"] == worker)
+    )
+    checkpoint = worker_output / "checkpoints" / original_checkpoint.name
+    original_checkpoint.parent.mkdir(parents=True)
+    original_checkpoint.write_bytes(contents)
+    attempt = next(row for row in after["attempts"] if row["workerId"] == worker)
+    assert attempt["acceptedResultPath"] == str(checkpoint)
+    assert attempt["acceptedResultSha256"] == hashlib.sha256(contents).hexdigest()
+    # A semantically identical edit still breaks the accepted byte digest. The
+    # matching bytes in the fresh scan must not satisfy the archived receipt.
+    checkpoint.write_bytes(contents + b"\n")
+    assert not deep.command("get-scan")["scan"]["resultsRecoveryNeeded"]
+    checkpoint.write_bytes(contents)
+    assert deep.command("get-scan")["scan"]["resultsRecoveryNeeded"]
+    deep.command("recover-scan-results")
+    assert original_checkpoint.read_bytes() == contents
+    saved = json.loads((archived / "scan-manifest.json").read_text())
+    assert checkpoint.relative_to(archived).as_posix() in saved["scan"]["preservedSources"]
 
 
 def test_existing_generation_safely_claims_and_reclaims_without_schema_migration(
@@ -585,7 +692,7 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
         "completed": 1,
         "active": 0,
         "maximum": 2,
-        "consolidating": False,
+        "consolidating": True,
     }
     assert (paused["reportAvailable"], paused["findingCount"], paused["artifacts"]) == (
         False,
@@ -737,7 +844,7 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
             deep.id,
             reducer_id,
             str(result),
-            "1",
+            1,
             environment=deep_environment(deep.codex_home),
         )
 
@@ -986,6 +1093,9 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
 
     def independent_reviews() -> dict[str, int | bool]:
         context = get_scan(deep.state_dir, deep.id)
+        assert get_scan(deep.state_dir, deep.id, "--progress-only") == {
+            "scan": {"progress": context["scan"]["progress"]}
+        }
         return context["scan"]["progress"]["independentReviews"]
 
     assert independent_reviews() == {
@@ -1041,8 +1151,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         "active": 0,
         "completed": 1,
         "maximum": 40,
-        "consolidating": False,
+        "consolidating": True,
     }
+    deep.record_iteration(
+        name="dedup-0001", input_worker_ids=[first_worker_id], new_findings_count=0
+    )
+    assert independent_reviews()["consolidating"] is False
 
 
 @pytest.mark.parametrize(

@@ -3,9 +3,14 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import type { ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject } from "./config.js";
-import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "./config.js";
+import {
+  DEFAULT_CODEX_CONFIG,
+  scanModelConfiguration,
+  scanPricingContext,
+} from "./config.js";
 import type { ScanExpectation } from "./contract.js";
 import { ScanCostTracker, type ScanCost } from "./cost.js";
+import { measuredScanCost } from "./scan-measurement.js";
 import { resumeSelectedDeepScan } from "./deep-scan-finalization.js";
 import {
   CodexSecurityError,
@@ -214,10 +219,12 @@ export async function recoverSelectedScanStartup<T>(input: {
       throw new CodexSecurityError(
         "The saved Deep Scan selection is unavailable.",
       );
-    const model = scanModelConfiguration({
+    const savedConfig = {
       ...DEFAULT_CODEX_CONFIG,
       ...(isRecord(recipe["config"]) ? (recipe["config"] as JsonObject) : {}),
-    }).model;
+    };
+    const { model } = scanModelConfiguration(savedConfig);
+    const pricingContext = scanPricingContext(savedConfig, input.environment);
     input.registered(
       {
         scanId: options.resumeScanId,
@@ -233,6 +240,7 @@ export async function recoverSelectedScanStartup<T>(input: {
     const tracker = new ScanCostTracker({
       codexHome: codexSecurityCredentialHome(input.environment),
       model,
+      pricingContext,
       scanDirectory: scanDir,
       ...(options.maxCostUsd === undefined
         ? {}
@@ -257,7 +265,7 @@ export async function recoverSelectedScanStartup<T>(input: {
     const snapshot = await tracker.stop().catch((error: unknown) => {
       if (options.maxCostUsd !== undefined) throw error;
       input.warn(`Could not track scan cost: ${errorMessage(error)}`);
-      return { usage: null, cost: null };
+      return { usage: null, cost: null, measurement: null };
     });
     signal.throwIfAborted();
     if (snapshot.cost !== null) input.cost(snapshot.cost);
@@ -279,22 +287,28 @@ export async function recoverSelectedScanStartup<T>(input: {
             scanDir,
           )
         : null;
+    const completionCost =
+      measuredScanCost(snapshot.measurement) ?? snapshot.cost;
     const completionArgs =
       budgetError === null
         ? [
             "complete-scan",
             "--scan-id",
             options.resumeScanId,
-            ...(snapshot.cost === null
+            ...(completionCost === null
               ? []
-              : ["--cost-json", JSON.stringify(snapshot.cost)]),
+              : ["--cost-json", JSON.stringify(completionCost)]),
           ]
         : [
             "complete-budget-exhausted-scan",
             "--scan-id",
             options.resumeScanId,
             "--cost-json",
-            JSON.stringify(snapshot.cost ?? { lowerBound: budgetCost }),
+            JSON.stringify(
+              snapshot.cost && snapshot.cost.coverage !== "partial"
+                ? completionCost
+                : { lowerBound: budgetCost },
+            ),
             `--message=${budgetError.message}`,
           ];
     const preparation =
@@ -374,7 +388,12 @@ export async function recoverSelectedScanStartup<T>(input: {
             ? saved["sealedProducerVersion"]
             : plugin.version,
       },
-      turnResult: { status: "completed", model, usage: snapshot.usage },
+      turnResult: {
+        status: "completed",
+        model,
+        pricingContext,
+        usage: snapshot.usage,
+      },
     });
   } finally {
     await cleanupSdkDirectory(workspace).catch((error: unknown) =>

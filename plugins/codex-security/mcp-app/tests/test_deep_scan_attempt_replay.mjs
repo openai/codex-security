@@ -222,10 +222,10 @@ async function testResponseLoss(responseLosses) {
       [discovery.worker.resultPath, second.worker.resultPath],
     );
     const result = { scanId: run.scanId, findings: [] };
-    assert.deepEqual(
-      await coordinator.mergeAcceptedBatch(result, recovered),
-      [0, 0],
-    );
+    assert.deepEqual(await coordinator.mergeAcceptedBatch(result, recovered), {
+      counts: [0, 0],
+      stop: undefined,
+    });
     const refs = result.sourceCoverage.surfaces.map(
       (surface) => surface.receiptRefs[0],
     );

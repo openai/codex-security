@@ -54,6 +54,7 @@ export async function runCliDeepScan(): Promise<void> {
       model: string;
       reasoningEffort?: string;
       permissionProfile: unknown;
+      diagnosticsVersion?: number;
     };
     scanId = input.scanId;
     const pluginRoot = PLUGIN_ROOT;
@@ -97,6 +98,13 @@ export async function runCliDeepScan(): Promise<void> {
         runWorkbench,
         pluginRoot,
         pythonCommand: await resolvePythonCommand(),
+        ...(input.diagnosticsVersion === 1 &&
+          process.send && {
+            log: (event) => {
+              // A closing diagnostics channel must not interrupt durable cleanup.
+              process.send?.(event, () => {});
+            },
+          }),
         parentSandbox,
         threadId: input.threadId,
         model: input.model,

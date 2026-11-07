@@ -1,13 +1,12 @@
-import {
-  scanDraftInputSchema,
-  type ScanDraftInput,
-} from "../artifact-scan-draft.js";
+import { isDeepStrictEqual } from "node:util";
+import type { ScanDraftInput } from "../artifact-scan-draft.js";
+import { acceptedDeepScanDraftInputSchema } from "../artifact-contracts.js";
 import { z } from "zod";
-import { asRecord } from "../record.js";
+import { asRecord, canonicalJson } from "../record.js";
 import { addScanCoverage, type ScanUnion } from "./artifact-validation.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
-import { errorMessage } from "./errors.js";
-import { checkSameFix } from "./same-fix.js";
+import { errorMessage, exceedsContext } from "./errors.js";
+import { checkSameFix, sharesSource } from "./same-fix.js";
 
 type Finding = ScanDraftInput["findings"][number];
 export type ComparisonReport = ReturnType<typeof report>;
@@ -57,7 +56,7 @@ function report(finding: Finding, retained: boolean) {
     : undefined;
   const locations =
     first?.title === finding.title
-      ? scanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
+      ? acceptedDeepScanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
           first.locations,
         ).data
       : undefined;
@@ -70,6 +69,10 @@ function report(finding: Finding, retained: boolean) {
     identity: finding.identity,
     title: finding.title,
     fix: finding.remediation,
+    validation: finding.validation,
+    attackPath: finding.attackPath,
+    rootCause: finding.rootCause,
+    codeEvidenceIds: finding.codeEvidence?.map(({ id }) => id),
     locations: (locations ?? finding.locations).map(
       ({ path, startLine, endLine, role }) =>
         [path, startLine, endLine, role] as const,
@@ -123,6 +126,88 @@ function repairKeys(response: string, records: ReturnType<typeof report>[]) {
     }
   }
   return keys;
+}
+
+function equalRepairs(a?: number[], b?: number[]) {
+  return (
+    !!a && !!b && a.length === b.length && a.every((key, i) => key === b[i])
+  );
+}
+
+async function compareRecords(
+  records: ComparisonReport[],
+  compare: CompareReports,
+) {
+  const rows = records.map((record, id) => ({ id, ...record }));
+  return repairKeys(
+    await compare(
+      instructions + "\n" + JSON.stringify(rows),
+      duplicateResponseSchema,
+    ),
+    records,
+  );
+}
+
+// A repair must cite a file in both reports. After the model rejects the full
+// batch, compare new reports only with earlier reports that can share a repair.
+async function compareWithinContext(
+  records: ComparisonReport[],
+  exact: string[],
+  previous: number,
+  compare: CompareReports,
+  matches: Map<number, Set<number>>,
+  overlaps: Map<number, Set<number>>,
+) {
+  const byFile = new Map<string, number[]>();
+  const seen = new Set<string>();
+  for (const [id, record] of records.entries()) {
+    if (seen.has(exact[id]!)) continue;
+    seen.add(exact[id]!);
+    const files = new Set(
+      [...record.locations, ...record.evidence].flatMap(([path]) =>
+        path ? [path] : [],
+      ),
+    );
+    if (id >= previous) {
+      const candidates = [
+        ...new Set([...files].flatMap((path) => byFile.get(path) ?? [])),
+      ];
+      async function check(ids: number[]): Promise<void> {
+        try {
+          const keys = await compareRecords(
+            [record, ...ids.map((i) => records[i]!)],
+            compare,
+          );
+          for (const [i, other] of ids.entries()) {
+            const current = keys.get(0);
+            const prior = keys.get(i + 1);
+            const table = equalRepairs(current, prior) ? matches : overlaps;
+            if (
+              current && prior
+                ? current.some((key) => prior.includes(key))
+                : sharesSource(record, records[other]!)
+            ) {
+              const earlier = table.get(id) ?? new Set<number>();
+              earlier.add(other);
+              table.set(id, earlier);
+            }
+          }
+        } catch (error) {
+          if (!exceedsContext(error)) throw error;
+          if (ids.length === 1) return; // Even this pair cannot fit. Retain both reports.
+          const mid = Math.ceil(ids.length / 2);
+          await check(ids.slice(0, mid));
+          await check(ids.slice(mid));
+        }
+      }
+      if (candidates.length) await check(candidates);
+    }
+    for (const path of files) {
+      const ids = byFile.get(path) ?? [];
+      ids.push(id);
+      byFile.set(path, ids);
+    }
+  }
 }
 
 function hasAdditionalSink(
@@ -183,7 +268,7 @@ function differentWorkerSites(
 ) {
   const left = asRecord(a.identity)?.anchor;
   const right = asRecord(b.identity)?.anchor;
-  return Boolean(left && right && left !== right && a.ruleId !== b.ruleId);
+  return Boolean(left && right && left !== right);
 }
 
 // A source can identify a second missing control in a different file, such as
@@ -212,7 +297,7 @@ function sourcesNeedSeparateReports(a: Finding, b: Finding) {
     const source = left.finding as Finding;
     return b.provenance.sourceFindings?.some((right, j) => {
       const other = right.finding as Finding;
-      if (right.id.startsWith(worker) && differentWorkerSites(source, other))
+      if (distinctIdentity(source, other, right.id.startsWith(worker)))
         return true;
       return (
         separateControls(source, other) ||
@@ -249,18 +334,24 @@ function distinctIdentity(
   );
 }
 
+// JSON object field order has no meaning, including inside extension fields.
+function findingContent({ provenance, ...fields }: Record<string, unknown>) {
+  return canonicalJson(fields);
+}
+
 function addLocations(finding: Finding, source: Pick<Finding, "locations">) {
   for (const location of source.locations) {
-    if (
-      !finding.locations.some(
-        (l) =>
-          l.path === location.path &&
-          l.startLine === location.startLine &&
-          (l.endLine ?? l.startLine) ===
-            (location.endLine ?? location.startLine),
-      )
-    )
-      finding.locations.push(structuredClone(location));
+    const sameRange = finding.locations.filter(
+      (l) =>
+        l.path === location.path &&
+        l.startLine === location.startLine &&
+        (l.endLine ?? l.startLine) === (location.endLine ?? location.startLine),
+    );
+    if (sameRange.some((l) => !location.role || l.role === location.role))
+      continue;
+    const unclassified = sameRange.find((l) => !l.role);
+    if (unclassified) unclassified.role = location.role;
+    else finding.locations.push(structuredClone(location));
   }
 }
 
@@ -269,6 +360,8 @@ function addLocations(finding: Finding, source: Pick<Finding, "locations">) {
 const repairGroupSchema = z.strictObject({
   order: z.number().int().nonnegative(),
   sources: z.array(z.string()),
+  representative:
+    acceptedDeepScanDraftInputSchema.shape.findings.element.optional(),
 });
 const repairGroupsSchema = z.array(repairGroupSchema).min(1);
 type RepairGroup = z.infer<typeof repairGroupSchema>;
@@ -294,23 +387,61 @@ function hasCompleteSources(finding: Finding) {
     ids.every((id) => known.has(id)) &&
     sources.every(
       ({ finding }) =>
-        scanDraftInputSchema.shape.findings.element.safeParse(finding).success,
+        acceptedDeepScanDraftInputSchema.shape.findings.element.safeParse(
+          finding,
+        ).success,
     )
   );
 }
 
-function restoreRepairGroups(findings: Finding[]) {
+function withoutSourceHistory(finding: Finding): Finding {
+  const {
+    sourceFindingIds,
+    sourceFindings,
+    deepScanRepairGroups,
+    ...provenance
+  } = finding.provenance;
+  return { ...finding, provenance };
+}
+
+// The previous reducer could synthesize an accepted finding. Most modern
+// groups can be rebuilt directly from their first source and citations.
+function savedRepresentative(finding: Finding) {
+  const members = finding.provenance.sourceFindings;
+  if (!members?.length) return;
+  const accepted = withoutSourceHistory(finding);
+  const schema = acceptedDeepScanDraftInputSchema.shape.findings.element;
+  const primary = schema.safeParse(members[0]!.finding).data;
+  if (!primary) return accepted;
+  for (const member of members.slice(1)) {
+    const locations = schema.shape.locations.safeParse(
+      member.finding.locations,
+    ).data;
+    if (!locations) return accepted;
+    addLocations(primary, { locations });
+  }
+  if (!isDeepStrictEqual(withoutSourceHistory(primary), accepted))
+    return accepted;
+}
+
+type RestoredGroup = {
+  finding: Finding;
+  target: number;
+  representative?: Finding;
+  restoredWithoutGroups?: boolean;
+};
+function restoreRepairGroups(findings: Finding[]): RestoredGroup[] {
   function visibleGroups() {
     // Pre-rewrite reducers could write arbitrary fields in provenance.
     return findings.map((finding, target) => {
       delete finding.provenance.deepScanRepairGroups;
-      return { finding, target };
+      return { finding, target, restoredWithoutGroups: true };
     });
   }
   if (findings[0]?.provenance.deepScanRepairGroups === undefined)
     return visibleGroups();
 
-  const groups = new Map<number, { finding: Finding; target: number }>();
+  const groups = new Map<number, RestoredGroup>();
   let previousTarget = -1;
   for (const visible of findings) {
     const parts = repairGroupsSchema.safeParse(
@@ -331,13 +462,17 @@ function restoreRepairGroups(findings: Finding[]) {
       )
         return visibleGroups();
       delete visible.provenance.deepScanRepairGroups;
-      groups.set(target, { finding: visible, target });
+      groups.set(target, {
+        finding: visible,
+        target,
+        representative: parts[0]!.representative,
+      });
       continue;
     }
     const originals = new Map(
       visible.provenance.sourceFindings?.map((source) => [source.id, source]),
     );
-    for (const { order, sources } of parts) {
+    for (const { order, sources, representative } of parts) {
       if (!sources.length || order < target || groups.has(order))
         return visibleGroups();
       const members = [];
@@ -347,22 +482,23 @@ function restoreRepairGroups(findings: Finding[]) {
         originals.delete(id);
         members.push(source);
       }
-      const finding = scanDraftInputSchema.shape.findings.element.safeParse(
-        members[0]!.finding,
-      ).data;
+      const finding =
+        acceptedDeepScanDraftInputSchema.shape.findings.element.safeParse(
+          representative ?? members[0]!.finding,
+        ).data;
       if (!finding) return visibleGroups();
       delete finding.provenance.deepScanRepairGroups;
       finding.provenance.sourceFindingIds = sources;
       finding.provenance.sourceFindings = members;
       for (const member of members.slice(1)) {
         const locations =
-          scanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
+          acceptedDeepScanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
             member.finding.locations,
           ).data;
         if (!locations) return visibleGroups();
         addLocations(finding, { locations });
       }
-      groups.set(order, { finding, target });
+      groups.set(order, { finding, target, representative });
     }
     if (originals.size) return visibleGroups();
   }
@@ -394,9 +530,7 @@ export async function mergeBatch(
     ...retained.map(({ finding }) => finding),
     ...workers.flatMap((worker) => worker.result.findings),
   ];
-  const content = (finding: object) =>
-    JSON.stringify({ ...finding, provenance: undefined });
-  const exact = originals.map(content);
+  const exact = originals.map(findingContent);
   const copies = new Map<string, (typeof retained)[number]>();
   const incomplete = new Set<number>();
   for (const group of retained) {
@@ -408,9 +542,12 @@ export async function mergeBatch(
     // A legacy checkpoint can include all originals without the separate ID array.
     group.finding.provenance.sourceFindingIds ??= sourceIds(group.finding);
     for (const source of group.finding.provenance.sourceFindings ?? [])
-      copies.set(content(source.finding), group);
+      copies.set(findingContent(source.finding), group);
   }
   let repairs: Map<number, number[] | undefined> | undefined;
+  const fallbackMatches = new Map<number, Set<number>>();
+  const fallbackOverlaps = new Map<number, Set<number>>();
+  const joined = new Map<number, number[]>();
   let records: ComparisonReport[] = [];
   let limitation: string | undefined;
   const unseen = new Set(
@@ -419,20 +556,45 @@ export async function mergeBatch(
   if (unseen.size > (previous ? 0 : 1)) {
     try {
       records = originals.map((finding, id) => report(finding, id < previous));
-      const rows = records.map((record, id) => ({ id, ...record }));
-      repairs = repairKeys(
-        await compare(
-          instructions + "\n" + JSON.stringify(rows),
-          duplicateResponseSchema,
-        ),
-        records,
-      );
+      // Exact repeats share an assignment. Keep every original for provenance
+      // and counts without sending identical reports to the model again.
+      const unique = new Map<string, number>();
+      const distinct: ComparisonReport[] = [];
+      const assignments = exact.map((key, id) => {
+        const existing = unique.get(key);
+        if (existing !== undefined) return existing;
+        const index = distinct.length;
+        unique.set(key, index);
+        distinct.push(records[id]!);
+        return index;
+      });
+      const keys = await compareRecords(distinct, compare);
+      repairs = new Map();
+      for (const [id, assignment] of assignments.entries()) {
+        if (keys.has(assignment)) repairs.set(id, keys.get(assignment));
+      }
       if (repairs.size < records.length)
         limitation = `Deep Scan comparison omitted ${records.length - repairs.size} of ${records.length} reports from its repair assignments.`;
     } catch (error) {
-      // Failed comparisons preserve all findings except exact repeats.
       onError(error);
       limitation = `Deep Scan could not compare this batch for duplicates: ${errorMessage(error)}`;
+      if (exceedsContext(error) && records.length > 2) {
+        limitation +=
+          " Retried reports with shared files in smaller comparisons. Pairs that could not fit were kept separate.";
+        try {
+          await compareWithinContext(
+            records,
+            exact,
+            previous,
+            compare,
+            fallbackMatches,
+            fallbackOverlaps,
+          );
+        } catch (retryError) {
+          onError(retryError);
+          limitation += ` Smaller comparisons stopped: ${errorMessage(retryError)}`;
+        }
+      }
     }
   }
   const changed = new Map<number, number>();
@@ -445,14 +607,15 @@ export async function mergeBatch(
         copy ??
         retained.find((prior) => {
           const other = repairs?.get(prior.id);
-          if (
-            incomplete.has(prior.target) ||
-            !key ||
-            !other ||
-            key.length !== other.length ||
-            !key.every((v, i) => v === other[i])
-          )
-            return false;
+          if (incomplete.has(prior.target)) return false;
+          if (!equalRepairs(key, other)) {
+            const earlier = fallbackMatches.get(id);
+            if (
+              !earlier?.has(prior.id) ||
+              joined.get(prior.id)?.some((member) => !earlier.has(member))
+            )
+              return false;
+          }
           if (
             separateSinks(
               source,
@@ -482,9 +645,14 @@ export async function mergeBatch(
         group = { id, finding, worker: workerIndex, target: id };
         retained.push(group);
       } else {
+        // Pair-local repair IDs can yield non-transitive matches across retries.
+        if (!repairs && !copy) {
+          const members = joined.get(group.id) ?? [];
+          members.push(id);
+          joined.set(group.id, members);
+        }
         addLocations(group.finding, source);
-        if (!copy && group.id < previous && !changed.has(group.target))
-          changed.set(group.target, workerIndex);
+        if (!copy && group.id < previous) changed.set(group.id, workerIndex);
       }
       const sourceId = `${worker.id}:${index}`;
       copies.set(exact[id]!, group);
@@ -511,16 +679,23 @@ export async function mergeBatch(
       }
       aggregate.scope = merged;
     }
-    aggregate.threatModel ??= worker.result.threatModel;
   }
   // A later worker can add a separately fixable path to a previously merged group.
+  const lastChange = new Map<number, number>();
+  for (const [id, worker] of changed) {
+    const target = priorTargets[id]!;
+    lastChange.set(target, Math.max(lastChange.get(target) ?? -1, worker));
+  }
   for (const group of retained.slice(0, previous)) {
-    const worker = changed.get(group.target);
+    const worker = changed.get(group.id) ?? lastChange.get(group.target);
     if (worker === undefined || group.target === group.id) continue;
     group.target = group.id;
     group.worker = worker;
   }
-  if (repairs && retained.some((group) => group.worker >= 0)) {
+  if (
+    (repairs || fallbackOverlaps.size || fallbackMatches.size) &&
+    retained.some((group) => group.worker >= 0)
+  ) {
     const sources = new Map<number, Record<string, unknown>[]>();
     for (const group of retained) {
       if (incomplete.has(group.target)) continue;
@@ -537,13 +712,20 @@ export async function mergeBatch(
       ),
       priorTargets,
       records,
-      repairs,
+      repairs ?? new Map(),
       sources,
       compare,
       (error) => {
         onError(error);
         reviewFailures.add(errorMessage(error));
       },
+      repairs
+        ? undefined
+        : (left, right) =>
+            Boolean(
+              fallbackOverlaps.get(right)?.has(left) ||
+              fallbackMatches.get(right)?.has(left),
+            ),
     );
     if (reviewFailures.size) {
       limitation = [
@@ -597,9 +779,13 @@ export async function mergeBatch(
           ...group.finding.provenance.sourceFindings!,
         );
       }
+      const representative = group.restoredWithoutGroups
+        ? savedRepresentative(group.finding)
+        : group.representative;
       (target.provenance.deepScanRepairGroups as RepairGroup[]).push({
         order,
         sources: sourceIds(group.finding),
+        ...(representative && { representative }),
       });
     }
     aggregate.findings = [...visible.values()];

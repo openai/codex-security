@@ -1,13 +1,16 @@
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import {
+  DEFAULT_CLOUD_STRING_BYTES,
   type ExternalImportTarget,
-  validateExternalEvidence,
+  validateEnrichedExternalEvidence,
 } from "./external-import-contract.js";
-import type { Provider } from "./external-import-models.js";
+import type { ImportedPackage, Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
   array,
+  awsTimestampSeconds,
+  concreteVersion,
   normalizeRecords,
   readScannerJson,
   record,
@@ -146,16 +149,8 @@ function codeLocations(
   return { locations, code: { end_line: endLine, snippet } };
 }
 
-export function normalizeContinuumFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  const repository = declaredScannerRepositoryUrl(
-    sourceRepositoryUrl,
-    "Continuum",
-    target,
-  );
+function reportRows(input: unknown, previous: boolean) {
+  if (Array.isArray(input) && !previous) return { rows: input, summary: false };
   const document = record(input, "Continuum report");
   if (
     Object.hasOwn(document, "nextToken") ||
@@ -169,9 +164,72 @@ export function normalizeContinuumFindings(
       "Expected a Continuum ListCodeFindings or GetCodeFinding response.",
     );
   const summary = "items" in document;
-  const rows = summary
-    ? array(document["items"], "Continuum items")
-    : [document];
+  return {
+    rows: summary ? array(document["items"], "Continuum items") : [document],
+    summary,
+  };
+}
+
+function statusUpdatedAt(value: unknown) {
+  const seconds = Math.floor(awsTimestampSeconds(value));
+  return Number.isSafeInteger(seconds) && seconds >= 0 ? seconds : null;
+}
+
+const versionEcosystems = new Map([
+  ["gradle", "maven"],
+  ["pnpm", "npm"],
+  ["yarn", "npm"],
+]);
+
+function affectedPackages(
+  items: unknown[],
+  target: ExternalImportTarget,
+): ImportedPackage[] {
+  const unique = new Map<string, ImportedPackage>();
+  const field = (value: unknown) => {
+    const result = text(value);
+    return result &&
+      !result.includes("\0") &&
+      (target === "local" ||
+        Buffer.byteLength(result) <= DEFAULT_CLOUD_STRING_BYTES)
+      ? result
+      : null;
+  };
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    const name = field(item["name"]);
+    if (!name) continue;
+    const ecosystem = field(item["packageManager"]);
+    const manager = ecosystem?.toLowerCase();
+    const syntax = manager ? (versionEcosystems.get(manager) ?? manager) : null;
+    const version = (value: unknown) =>
+      concreteVersion(field(value), syntax, false);
+    const fixed = version(item["fixedInVersion"]);
+    const pkg = {
+      name,
+      ecosystem,
+      installed_version: version(item["version"]),
+      fixed_versions: fixed ? [fixed] : [],
+    };
+    unique.set(JSON.stringify(pkg), pkg);
+    // The Cloud contract accepts 100 structured packages. The native row keeps them all.
+    if (target === "cloud" && unique.size === 100) break;
+  }
+  return [...unique.values()];
+}
+
+function normalize(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget,
+  previous: boolean,
+): ExternalFindings {
+  const repository = declaredScannerRepositoryUrl(
+    sourceRepositoryUrl,
+    "Continuum",
+    target,
+  );
+  const { rows, summary } = reportRows(input, previous);
   const scopes = new Set<string>();
   const output = normalizeRecords(
     rows,
@@ -203,13 +261,10 @@ export function normalizeContinuumFindings(
       const advisoryIds = [
         ...new Set(strings(all.map((item) => item["cveId"]))),
       ];
-      const packageFinding =
-        advisoryIds.length > 0 ||
-        all.some(
-          (v) =>
-            Array.isArray(v["affectedPackages"]) &&
-            v["affectedPackages"].length > 0,
-        );
+      const packages = all.flatMap((item) =>
+        Array.isArray(item["affectedPackages"]) ? item["affectedPackages"] : [],
+      );
+      const packageFinding = advisoryIds.length > 0 || packages.length > 0;
       const posture =
         row["ocsfClass"] === "APPLICATION_SECURITY_POSTURE_FINDING" ||
         row["posture"] != null;
@@ -219,38 +274,52 @@ export function normalizeContinuumFindings(
         !packageFinding &&
         (code.snippet !== null ||
           locations.some((location) => location.line !== null));
-      return validateExternalEvidence(
-        {
-          title: requiredText(row["title"], "Continuum title"),
-          severity:
-            severity === "fatal"
-              ? "critical"
-              : severity === "other"
-                ? "unknown"
-                : severity,
-          description: text(row["detailedDescription"]) ?? text(row["summary"]),
-          locations,
-          advisory_ids: advisoryIds,
-          source_scan_id: text(row["scanRunId"]),
-          ...(codeFinding && {
-            details: {
-              kind: "sast",
-              repository: { url: repository },
-              scanner_origin: source,
-              scanner_verdict: text(validation["verdict"]),
-              source_status: status,
-              weakness_ids: strings(row["cweIds"]),
-              remediation_instructions: text(row["mitigation"]),
-              code,
-            },
-          }),
-          source_data: {
-            format,
-            sourceRepositoryUrl: repository,
-            finding: structuredClone(row),
+      const evidence = {
+        title: requiredText(row["title"], "Continuum title"),
+        severity:
+          severity === "fatal"
+            ? "critical"
+            : severity === "other"
+              ? "unknown"
+              : severity,
+        description: text(row["detailedDescription"]) ?? text(row["summary"]),
+        locations,
+        advisory_ids: advisoryIds,
+        source_scan_id: text(row["scanRunId"]),
+        ...(codeFinding && {
+          details: {
+            kind: "sast",
+            repository: { url: repository },
+            scanner_origin: source,
+            scanner_verdict: text(validation["verdict"]),
+            source_status: status,
+            weakness_ids: strings(row["cweIds"]),
+            remediation_instructions: text(row["mitigation"]),
+            code,
           },
+        }),
+        source_data: {
+          format,
+          sourceRepositoryUrl: repository,
+          finding: structuredClone(row),
         },
+      };
+      const updatedAt = previous
+        ? null
+        : statusUpdatedAt(row["statusUpdatedAt"]);
+      // Keep the status timestamp when structured packages exceed the Cloud budget.
+      return validateEnrichedExternalEvidence(
+        evidence,
         target,
+        previous
+          ? undefined
+          : {
+              packages: affectedPackages(packages, target),
+              source_updated_at: updatedAt,
+            },
+        packages.length && updatedAt !== null
+          ? { source_updated_at: updatedAt }
+          : undefined,
       );
     },
     (value) => {
@@ -263,6 +332,23 @@ export function normalizeContinuumFindings(
   if (scopes.size > 1)
     throw new Error("Continuum findings must belong to the same environment.");
   return output;
+}
+
+export function normalizeContinuumFindings(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  return normalize(input, sourceRepositoryUrl, target, false);
+}
+
+/** @internal Reconstruct the original evidence for an interrupted Cloud request. */
+export function normalizePreviousContinuumFindings(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  return normalize(input, sourceRepositoryUrl, target, true);
 }
 
 export async function readContinuumFindings(

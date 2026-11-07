@@ -127,8 +127,14 @@ class ProfileThread {
           );
         }
         if (event.type === "thread.started") this.id = event.thread_id;
-        if (event.type === "turn.completed" && event.usage != null)
+        if (event.type === "turn.completed" && event.usage != null) {
+          if (
+            event.usage.cache_write_input_tokens == null &&
+            event.usage.cache_write_tokens == null
+          )
+            event.usage.cache_write_input_tokens_reported = false;
           event.usage.cache_write_input_tokens ??= 0;
+        }
         yield event;
       }
     } finally {

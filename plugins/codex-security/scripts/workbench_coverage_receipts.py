@@ -10,6 +10,7 @@ from typing import Any
 
 from finalize_scan_contract import (
     ContractError,
+    MissingScanLocalFileError,
     _require_portable_relative_path,
     _require_str,
     _validate_schema_node,
@@ -113,6 +114,7 @@ def retain_recorded_receipt_ownership(
 def resolve_coverage_receipts(
     scan_dir: Path, item: dict[str, Any], worker: Any, relative: str
 ) -> Any:
+    """Qualify worker receipt references relative to their source checkpoint for use in parent coverage."""
     refs = item.get("receiptRefs", [])
     if not isinstance(refs, list):
         return refs
@@ -402,9 +404,7 @@ def _generic_surface_updates(
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
                             failure = receipt_error(ref) if repaired else None
-                            replaceable = failure is not None and isinstance(
-                                failure.__cause__, FileNotFoundError
-                            )
+                            replaceable = isinstance(failure, MissingScanLocalFileError)
                             if repaired and isinstance(ref, str):
                                 try:
                                     normalized = _require_portable_relative_path(

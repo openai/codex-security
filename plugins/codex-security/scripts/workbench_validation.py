@@ -16,6 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
+from workbench.storage import archived_deep_path
 from workbench_constants import optional_text as optional_text
 from workbench_scan_usage import TOKEN_FIELDS, valid_account_rate_limit
 from workbench_scan_usage import (
@@ -28,6 +29,7 @@ reject_non_finite_json = finalizer._reject_non_finite_json
 
 
 def read_json_object(path: Path) -> dict[str, Any]:
+    """Read a UTF-8 JSON object from path, raising SystemExit on read errors, malformed JSON, or another top-level type."""
     try:
         payload = json.loads(
             path.read_text(encoding="utf-8"),
@@ -54,6 +56,7 @@ def timestamp_key(value: str) -> datetime:
 
 
 def require_uuid(value: str, label: str) -> str:
+    """Return the standard hyphenated UUID text or raise SystemExit using label to identify the invalid argument."""
     try:
         return str(uuid.UUID(value))
     except ValueError as exc:
@@ -68,8 +71,10 @@ path_within_scope = finalizer.path_within_scope
 
 
 def latest_publication_reference(
-    db: Any, connection: Any, scan_id: str
+    db: Any, connection: Any, scan: Any
 ) -> tuple[str | None, str | None]:
+    scan_id = scan["id"]
+
     # Publication follows the durable reducer sequence, not completion timestamps.
     def reducer_order(worker: Any) -> tuple[int, str]:
         directory = Path(worker["prompt_path"]).parent
@@ -80,7 +85,7 @@ def latest_publication_reference(
     reducer = max(
         (
             worker
-            for worker in db.saved_results._saved_workers(connection, scan_id)
+            for worker in db.saved_results._saved_workers(connection, scan)
             if worker["kind"] == "dedup"
             and worker["status"] == "succeeded"
             and worker["result_manifest_path"]
@@ -100,7 +105,9 @@ def latest_publication_reference(
         "AND previous_result_path <> '' AND previous_result_sha256 <> '' ORDER BY rowid LIMIT 1",
         (scan_id, reducer["id"]),
     ).fetchone()
-    return (claim[0], claim[1]) if claim else (reducer["result_manifest_path"], None)
+    if claim:
+        return archived_deep_path(Path(scan["scan_dir"]), claim[0]), claim[1]
+    return reducer["result_manifest_path"], None
 
 
 def has_verified_selected_result(
@@ -118,7 +125,7 @@ def has_verified_selected_result(
                 "deep-security-scan/v1",
             }:
                 return False
-            path, digest = reference or latest_publication_reference(db, connection, scan["id"])
+            path, digest = reference or latest_publication_reference(db, connection, scan)
             if not path or not digest:
                 return False
             selection = {
@@ -147,6 +154,7 @@ def validate_completed_scan_artifacts(db: Any, scan: sqlite3.Row) -> None:
 
 
 def require_close_note(close_reason: str | None, note: str | None) -> None:
+    """Require a note when closing a finding as a false positive or when declining a fix."""
     if note is None and close_reason == "false_positive":
         raise SystemExit("Explain why this finding is a false positive.")
     if note is None and close_reason == "wont_fix":
@@ -185,7 +193,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     thread_count = usage.get("threadCount")
     if (
         coverage not in ("complete", "partial", "unavailable")
-        or usage.get("source") != "codex_rollout"
+        or usage.get("source") not in ("codex_rollout", "codex_runtime")
         or type(thread_count) is not int
         or thread_count < 0
     ):
@@ -227,6 +235,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 
     allowed_keys = {
         "coverage",
+        "coverageScope",
         "source",
         "threadCount",
         "missingThreadCount",
@@ -238,13 +247,24 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "observedAt",
         "tokensUpdatedAt",
         "accountRateLimits",
+        "cacheWriteInputTokensReported",
         *SCAN_USAGE_TOKEN_KEYS,
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
         return False
+    if "coverageScope" in usage:
+        scope = usage["coverageScope"]
+        if (
+            not isinstance(scope, list)
+            or any(not isinstance(identity, str) or not identity for identity in scope)
+            or len(set(scope)) != len(scope)
+        ):
+            return False
     if (
         not all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
         or usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
+        or "cacheWriteInputTokensReported" in usage
+        and type(usage["cacheWriteInputTokensReported"]) is not bool
     ):
         return False
     if "modelUsage" in usage:
@@ -266,7 +286,9 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
         return False
-    if coverage == "complete" and (warnings or missing):
+    if coverage == "complete" and (
+        any(warning != "cost_estimate_covers_earlier_usage" for warning in warnings) or missing
+    ):
         return False
     if coverage == "partial" and not (warnings or missing):
         return False
@@ -287,8 +309,11 @@ def _valid_measured_scan_usage(usage: object) -> bool:
             return False
         if any(
             not isinstance(role, dict)
-            or set(role) != keys
+            or not keys.issubset(role)
+            or not set(role).issubset({*keys, "cacheWriteInputTokensReported"})
             or any(type(role[key]) is not int or role[key] < 0 for key in keys)
+            or "cacheWriteInputTokensReported" in role
+            and type(role["cacheWriteInputTokensReported"]) is not bool
             for role in roles.values()
         ):
             return False
@@ -298,6 +323,11 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 
 
 def parse_scan_cost(value: str | None, *, allow_lower_bound: bool = False) -> str | None:
+    """Return compact JSON for valid measured usage or a legacy cost estimate.
+
+    None means cost data was omitted. Invalid JSON, nonfinite numbers, or an
+    unsupported cost record raise SystemExit.
+    """
     if value is None:
         return None
     try:
@@ -323,11 +353,13 @@ def parse_scan_cost(value: str | None, *, allow_lower_bound: bool = False) -> st
 
 
 def bounded_output_text(value: Any, maximum_bytes: int) -> str:
+    """Return the prefix of the stringified value that fits in maximum_bytes of UTF-8 without splitting a character."""
     encoded = str(value).encode("utf-8")[:maximum_bytes]
     return encoded.decode("utf-8", errors="ignore")
 
 
 def require_occurrence(connection: sqlite3.Connection, occurrence_id: str) -> sqlite3.Row:
+    """Return the finding occurrence row or raise SystemExit if its ID is missing or unknown."""
     occurrence_id = optional_text(occurrence_id, maximum=256)
     if occurrence_id is None:
         raise SystemExit("occurrence-id is required.")

@@ -127,7 +127,11 @@ async function executeWorkbench(
       signal,
       cwd: PLUGIN_ROOT,
       windowsHide: true,
-      env: process.env,
+      env: {
+        ...process.env,
+        CODEX_MCP_NODE_PATH:
+          process.env.CODEX_MCP_NODE_PATH || process.execPath,
+      },
       encoding: "utf8" as const,
       maxBuffer: Infinity,
       timeout,

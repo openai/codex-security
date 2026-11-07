@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { gitText } from "../scripts/git.mjs";
@@ -78,6 +79,8 @@ assert.deepEqual(
     "CODEX_HOME",
     "CODEX_SQLITE_HOME",
     "CODEX_API_KEY",
+    "CODEX_OSS_BASE_URL",
+    "CODEX_OSS_PORT",
     "CODEX_SAFETY_IDENTIFIER",
     "CODEX_BROWSER_USE_NODE_PATH",
     "CODEX_CLI_PATH",
@@ -88,6 +91,9 @@ assert.deepEqual(
     "OPENROUTER_API_KEY",
     "FIREWORKS_API_KEY",
     "CHEAPER_INFERENCE_API_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -108,7 +114,6 @@ assert.deepEqual(
     "PYTHONUTF8",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -126,7 +131,7 @@ assert.deepEqual(
     "NODE_EXTRA_CA_CERTS",
     "XDG_CACHE_HOME",
   ],
-  "The MCP process and SDK workers must inherit Codex, external-provider, and Bedrock authentication, AWS credential-chain settings, runtime paths, and enterprise proxy/certificate configuration.",
+  "The MCP process and SDK workers must inherit provider routing and authentication, runtime paths, and enterprise proxy/certificate configuration.",
 );
 const target = await temporaryDirectory("codex-security-target-");
 const replacementTarget = await temporaryDirectory(
@@ -495,7 +500,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       CODEX_SECURITY_STATE_DIR: headlessStateDir,
     },
   });
-  const ownerThread = "fixture-headless-standard-thread";
+  // Option-like metadata must reach the workbench as the literal owner ID.
+  const ownerThread = "--help";
   const headlessContext =
     `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`.trim();
   assert.ok(headlessContext.length > 1_000_000);
@@ -760,7 +766,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
         assert.equal(scan.progress.status, "running");
         const { deepScan } = JSON.parse(
           execFileSync(
-            process.env.PYTHON?.trim() || "python3",
+            fixturePython,
             [
               path.join(pluginRoot, "scripts", "workbench_db.py"),
               "get-deep-scan",
@@ -815,7 +821,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
 
     const publicationFailure =
       "Saved result publication failed: fixture retained result publication failure";
-    execFileSync(process.env.PYTHON?.trim() || "python3", [
+    execFileSync(fixturePython, [
       "-c",
       `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
@@ -1355,6 +1361,13 @@ try {
   await assert.rejects(readFile(path.join(stateDir, "workbench.sqlite3")), {
     code: "ENOENT",
   });
+
+  const dashQuery = await request(8999, "tools/call", {
+    name: "list_codex_security_scans",
+    arguments: { query: "--synthetic-query", limit: 50 },
+  });
+  assertNoError(dashQuery);
+  assert.deepEqual(dashQuery.result.structuredContent.scans, []);
 
   const findTool = (name: string) => {
     const tool = toolList.result.tools.find(
@@ -2481,9 +2494,13 @@ try {
       occurrenceId,
       status: "closed",
       closeReason: "false_positive",
-      note: "The archive path is normalized before the write.",
+      note: "--synthetic triage note",
     },
   });
+  assert.equal(
+    closedFinding.structuredContent.scan.findings[0].triage.note,
+    "--synthetic triage note",
+  );
   assert.equal(
     closedFinding.structuredContent.scan.findings[0].triage.status,
     "closed",
@@ -3064,7 +3081,7 @@ try {
     "delivered",
   );
   const rotatedFallbackClaimToken = `recovery_${randomUUID()}`;
-  execFileSync(process.env.PYTHON?.trim() || "python3", [
+  execFileSync(fixturePython, [
     "-c",
     `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:

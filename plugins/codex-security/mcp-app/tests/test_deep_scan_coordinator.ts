@@ -4,6 +4,14 @@ import {
 } from "./deep_scan_coverage_cases.ts";
 import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
+import {
+  assertNoArtifactUsage,
+  assertWorkerRetryReceipts,
+  assertCanceledWorkerReceipts,
+  testWorkerUsageWithoutHostDirectory,
+  withCumulativeUsage,
+  workerUsage,
+} from "./deep_scan_worker_usage_assertions.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { JsonObject } from "../src/types.js";
@@ -16,7 +24,7 @@ import type {
   CodexWorkerRequest,
   CodexWorkerResult,
 } from "../src/deep-scan/types.js";
-import { after, mock, test } from "node:test";
+import { after, mock, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { hash, randomUUID } from "node:crypto";
 import {
@@ -99,6 +107,48 @@ async function testStandardWorkersReceiveExistingFalsePositiveFeedback() {
     ),
     { code: "ENOENT" },
   );
+}
+
+async function testDiscoveryAllocatesUniqueLabelsAfterRecovery() {
+  const { fixture, store } = await coordinatorFixture({
+    maxDiscoveryRuns: 12,
+    stopAfterNoNew: 1,
+  });
+  const root = path.join(
+    fixture.run.scanDir,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+  );
+  Object.assign(store.run, {
+    dispatchedCount: 1,
+    persistedWorkers: [
+      {
+        id: randomUUID(),
+        kind: "discovery",
+        status: "canceled",
+        attempt: 1,
+        mergeState: "none",
+        artifactDir: path.join(root, "discovery-0010", "output"),
+        promptPath: path.join(root, "discovery-0010", "prompt.md"),
+      },
+    ],
+  });
+  // A stale coordinator writes its final prompt after the new coordinator's listing.
+  const occupied = path.join(root, "discovery-0011", "prompt.md");
+  const updateProgress = store.updateProgress.bind(store);
+  store.updateProgress = async (input) => {
+    await mkdir(path.dirname(occupied), { recursive: true });
+    await writeFile(occupied, "old coordinator");
+    await updateProgress(input);
+  };
+  const executor = new FakeExecutor();
+  const terminal = await runCoordinator(fixture, store, executor, {
+    run: store.run,
+  });
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.deepEqual([...executor.discoveryAttempts.keys()], ["discovery-0012"]);
+  assert.equal(await readFile(occupied, "utf8"), "old coordinator");
 }
 
 async function testConcurrentCheckpointKeepsExistingIteration() {
@@ -683,15 +733,15 @@ async function testCancellationClearsRetryWait() {
     failFirstDiscoveryAttempt: true,
     blockDiscoveryAfterCalls: 1,
   });
-  const sleepStarted = Promise.withResolvers<void>();
+  const sleepStarted = Promise.withResolvers<DeepScanLogEvent>();
   const coordinator = createCoordinator(fixture, store, executor, {
     clock: undefined,
     log: (event) => {
-      if (event.event === "worker_retry_scheduled") sleepStarted.resolve();
+      if (event.event === "worker_retry_scheduled") sleepStarted.resolve(event);
     },
   });
   coordinator.start();
-  await sleepStarted.promise;
+  assert.equal((await sleepStarted.promise).reason, "transient worker failure");
   const callsAtCancellation = executor.discoveryCalls;
   coordinator.cancel("cancel retry wait");
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -767,11 +817,17 @@ async function testMissingDiscoveryResultResumesExistingThread(
         }
       : {}),
   });
+  withCumulativeUsage(executor, fixture.run.workerUsageDirectory);
+  const events: DeepScanLogEvent[] = [];
   const sleeps: number[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
     clock: recordingClock(sleeps),
+    log: (event) => {
+      events.push(event);
+      if (withToolFailure) throw new Error("Synthetic log sink failure");
+    },
   });
 
   assert.equal(terminal?.status, "succeeded", terminal?.error);
@@ -781,6 +837,8 @@ async function testMissingDiscoveryResultResumesExistingThread(
     executor.discoveryThreadIds[0],
   ]);
   assert.equal(new Set(executor.discoveryThreadIds).size, 1);
+  await assertWorkerRetryReceipts(fixture.run.workerUsageDirectory!, events);
+  await assertNoArtifactUsage(fixture.run.scanDir);
   if (withToolFailure) {
     const message = executor.options.discoveryDiagnostics![0].message;
     assert.ok(
@@ -973,14 +1031,25 @@ async function testWaiterDetachAndCancellation() {
   );
 }
 
-async function testCancellationDropsUnvalidatedDiscoveryResult() {
+async function testCancellationDropsUnvalidatedDiscoveryResult(
+  usageReported = false,
+) {
   const { fixture, store } = await coordinatorFixture();
   const executor = new FakeExecutor({ blockDiscoveryAfterWrite: true });
+  let reportUsage: CodexWorkerRequest["onUsage"];
+  const originalRun = executor.run.bind(executor);
+  executor.run = (request) => {
+    reportUsage = request.onUsage;
+    return originalRun(request);
+  };
+  const events: DeepScanLogEvent[] = [];
   const coordinator = createCoordinator(fixture, store, executor, {
     threadId: "checkpoint-owner",
+    log: (event) => events.push(event),
   });
   coordinator.start();
   await executor.discoveryArtifactsWritten.promise;
+  if (usageReported) await reportUsage?.(workerUsage(1), "synthetic-turn");
   const worker = [...store.workers.values()].find(
     (candidate) => candidate.kind === "discovery",
   );
@@ -993,6 +1062,11 @@ async function testCancellationDropsUnvalidatedDiscoveryResult() {
   coordinator.cancel("fixture canceled before host validation");
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "canceled");
+  await assertCanceledWorkerReceipts(
+    fixture.run.workerUsageDirectory!,
+    events,
+    usageReported,
+  );
   await assert.rejects(
     readFile(path.join(worker!.artifactDir, "result.json")),
     {
@@ -1004,6 +1078,29 @@ async function testCancellationDropsUnvalidatedDiscoveryResult() {
     true,
     "host-written checkpoints must survive cancellation",
   );
+}
+
+async function testDiscoveryAcceptanceFailureFinishesWorkerAsFailed() {
+  const { fixture, store } = await coordinatorFixture();
+  const updateWorker = store.updateWorker.bind(store);
+  store.updateWorker = async (update) => {
+    if (update.kind === "discovery" && update.status === "succeeded") {
+      throw new Error("Synthetic acceptance write failed");
+    }
+    return updateWorker(update);
+  };
+  const events: DeepScanLogEvent[] = [];
+  const terminal = await runCoordinator(fixture, store, new FakeExecutor(), {
+    log: (event) => events.push(event),
+  });
+  assert.equal(terminal?.status, "failed");
+  const finished = events.filter((event) => event.event === "worker_finished");
+  assert.equal(finished.length, 1);
+  assert.equal(finished[0].outcome, "failed");
+  const directory = fixture.run.workerUsageDirectory!;
+  const names = await readdir(directory);
+  assert.equal(names.length, 1);
+  assert.equal((await readJson(directory, names[0])).outcome, "failed");
 }
 
 async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
@@ -1056,7 +1153,16 @@ async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
     events.some((event) => event.event === "coordinator_cleanup_settled"),
   );
   assert.equal(
-    events.some((event) => event.event === "discovery_accepted"),
+    events.some(
+      (event) =>
+        event.event === "discovery_accepted" ||
+        event.event === "worker_succeeded",
+    ),
+    false,
+  );
+  await assertCanceledWorkerReceipts(
+    fixture.run.workerUsageDirectory!,
+    events,
     false,
   );
   const worker = [...store.workers.values()].find(
@@ -1555,7 +1661,7 @@ async function testStoreConfirmedReplacementSurvivesReadFailure() {
       );
       if (replaced) {
         assert.equal(reads, confirmation === "mutation" ? 3 : 4);
-        assert.deepEqual(store.coordinatorLeaseArgs(run.scanId), []);
+        assert.equal(store.coordinatorGeneration(run.scanId), undefined);
       } else {
         assert.equal(
           reads,
@@ -2330,7 +2436,7 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
       async compareFindings(_prompt, _cwd, signal) {
         comparisons++;
         if (mode === "quota")
-          throw new DeepScanNonRetryableError(
+          throw codexWorkerTurnError(
             "Quota exceeded. Check your plan and billing details.",
           );
         await deadline.promise;
@@ -2369,28 +2475,36 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
   if (mode === "quota") assert.match(terminal.error ?? "", /Quota exceeded/);
 }
 
-async function testDiscoveryDeadlineReducesSingleBufferedFinding() {
+async function testDiscoveryDeadlineReducesSingleBufferedFinding(
+  t: TestContext,
+) {
   const { fixture, store } = await coordinatorFixture({
     stopAfterNoNew: 99,
     maxDiscoveryRuns: 8,
   });
-  const executor = new FakeExecutor({
-    blockDiscoveryAfterCalls: 1,
-    discoveryCandidateId: "candidate-1",
-  });
-  const coordinator = createCoordinator(fixture, store, executor, {
-    discoveryTimeoutMs: 500,
-  });
+  const first = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+  const blocked = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+  let dispatched = 0;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const coordinator = createCoordinator(
+    fixture,
+    store,
+    {
+      run(request) {
+        return (++dispatched === 1 ? first : blocked).run(request);
+      },
+    },
+    { discoveryTimeoutMs: 500 },
+  );
+  t.after(() => coordinator.cancel("fixture cleanup"));
   coordinator.start();
-
-  await eventually(
-    () =>
-      executor.discoveryCalls === 2 &&
-      executor.runningDiscovery === 1 &&
-      [...store.workers.values()].some(
-        (worker) =>
-          worker.kind === "discovery" && worker.status === "succeeded",
-      ),
+  await blocked.discoveryStarted.promise;
+  assert.equal(dispatched, 2);
+  assert.equal(blocked.runningDiscovery, 1);
+  assert.ok(
+    [...store.workers.values()].some(
+      (worker) => worker.kind === "discovery" && worker.status === "succeeded",
+    ),
   );
   assert.equal(
     store.iterations.length,
@@ -2398,6 +2512,8 @@ async function testDiscoveryDeadlineReducesSingleBufferedFinding() {
     "the completed scan is checkpointed before the next scan starts",
   );
 
+  t.mock.timers.tick(500);
+  t.mock.timers.reset();
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(terminal?.terminalReason, "capped");
@@ -2407,7 +2523,7 @@ async function testDiscoveryDeadlineReducesSingleBufferedFinding() {
     true,
   );
   assert.equal(store.failureMessages.length, 0);
-  assert.equal(executor.runningDiscovery, 0);
+  assert.equal(blocked.runningDiscovery, 0);
 
   const manifest = await readJson(terminal.manifestPath);
   assert.equal(store.iterations[0].workerIds.length, 1);
@@ -2798,6 +2914,7 @@ registerCases(testTerminalFailureStopsDispatchBeforeWorkerShutdown, [
 ]);
 test(testStandardWorkersReceiveExistingFalsePositiveFeedback);
 test(testConcurrentCheckpointKeepsExistingIteration);
+test(testDiscoveryAllocatesUniqueLabelsAfterRecovery);
 test(testDiscoveryWorkersKeepOneContextAfterPersistedUpdate);
 test(testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot);
 test(testWorkerScopedCandidateSourceAggregation);
@@ -2806,7 +2923,7 @@ test(testSandboxDiagnosticSurvivesArtifactRetries);
 test(testSuccessfulDeepCoveragePreservesWorkerReviewStatus);
 test(testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus);
 registerCases(testComparisonStopCondition, [["quota"], ["deadline"]]);
-test(testDiscoveryDeadlineReducesSingleBufferedFinding);
+test({ timeout: 30_000 }, testDiscoveryDeadlineReducesSingleBufferedFinding);
 test(testDiscoveryAcceptedAtDeadlineIsReduced);
 test(testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence);
 test(testDiscoveryDeadlineBeforeWorkerDispatchReturnsPartialEvidence);
@@ -2830,12 +2947,14 @@ test(testDiscoveryPhasePersistenceFailureStopsDispatch);
 test(testCancellationClearsRetryWait);
 test(testGenericDiagnosticsPreserveMissingResultRetries);
 registerCases(testMissingDiscoveryResultResumesExistingThread, [[], [true]]);
+test(testWorkerUsageWithoutHostDirectory);
 test(testInvalidArtifactsRetry);
 test(testSharedReceiptSurvivesWorkerRetry);
 test(testCancellationAfterCommittedAggregateRemainsCanceled);
 test(testRejectedFinishDoesNotOverwriteReplacementManifest);
 test(testWaiterDetachAndCancellation);
-test(testCancellationDropsUnvalidatedDiscoveryResult);
+registerCases(testCancellationDropsUnvalidatedDiscoveryResult, [[], [true]]);
+test(testDiscoveryAcceptanceFailureFinishesWorkerAsFailed);
 test(testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess);
 test(testRegistryEvictionAndExternalFailure);
 test(testStoppedPublicationFailurePreservesOriginalDiagnostic);

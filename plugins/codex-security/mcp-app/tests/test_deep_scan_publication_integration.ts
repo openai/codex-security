@@ -1,3 +1,4 @@
+import { fixturePython as python } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
@@ -19,6 +20,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { buildServer } from "./build-server.ts";
 import { importNativeModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
+import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import { finding as sourceFinding } from "./scan-draft-fixture.ts";
 import type { RunArtifactWorkbench } from "../src/artifact-context.ts";
 import type {
@@ -68,7 +70,6 @@ const testsRoot = path.dirname(fileURLToPath(import.meta.url));
 const mcpAppRoot = path.resolve(testsRoot, "..");
 const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
-const python = process.env.PYTHON?.trim() || "python3";
 const owner = "publication-test-owner";
 const reviewState: ScanDraftInput["reviewState"] = {
   surfaces: [],
@@ -603,6 +604,21 @@ for (const claimed of [false, true]) {
     );
     assert.deepEqual(completed.checkpoints, interrupted.checkpoints);
     assert.equal((await store.get(run.scanId, owner)).terminalReason, "capped");
+    const joined = await fixture.call(
+      "start_codex_security_deep_scan",
+      { scanId: run.scanId },
+      {
+        "codex/sandbox-state-meta": readOnlyParentSandboxState(run.targetPath),
+      },
+    );
+    assertSuccess(joined);
+    const receipt = joined.structuredContent as Record<string, unknown>;
+    assert.equal(receipt.completedAudits, 0);
+    assert.equal(receipt.terminalReason, "capped");
+    assert.match(
+      String(receipt.instructions),
+      /deadline.*before any Standard scan completed/i,
+    );
   });
 }
 
@@ -765,12 +781,13 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
   async function call(
     name: string,
     args: Record<string, unknown> | ScanDraftInput,
+    meta = {},
   ) {
     await (connected ??= client.connect(transport));
     return client.callTool({
       name,
       arguments: { ...args },
-      _meta: { "openai/threadId": owner },
+      _meta: { "openai/threadId": owner, ...meta },
     });
   }
   return {
@@ -783,6 +800,7 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
       now = new Date(Date.parse(instant) + offset * 1_000).toISOString();
       return now;
     },
+    call,
     recordDraft: (draft: ScanDraftInput | Record<string, unknown>) =>
       call("record_codex_security_scan_draft", draft),
     completeScan: () =>

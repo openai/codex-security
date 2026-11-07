@@ -27,6 +27,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from review_state import checkpoint_review_state, review_state, uses_legacy_review
+from workbench.storage import archived_deep_path, archived_worker_paths
 from workbench_coverage_receipts import capture_receipt_checkpoints, clear_scan_receipt_refs
 from workbench_validation import has_verified_selected_result, latest_publication_reference
 
@@ -64,6 +65,11 @@ def _source_digests(value: Any, error: str) -> dict[str, str]:
 
 
 def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
+    """Return the saved source digests and the optional path supplying the threat model.
+
+    Accept both a legacy path-to-digest map and an envelope containing sources.
+    Raise ContractError if the model points outside that envelope's source set.
+    """
     if isinstance(value, dict) and isinstance(value.get("sources"), dict):
         sources = _source_digests(
             value["sources"], "Saved stopped-scan source digests are malformed."
@@ -80,6 +86,11 @@ def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
 def _retained_checkpoint_state(
     scan: Any,
 ) -> tuple[dict[str, str | None] | None, dict[str, Any] | None]:
+    """Return selected checkpoint heads and any pending recovery record.
+
+    Older scans can store the head map directly. Recovery records also bind
+    the selection to a sealed manifest digest. A conflicting digest raises ContractError.
+    """
     raw = scan["retained_checkpoint_heads_json"]
     if raw is None:
         return None, None
@@ -132,6 +143,7 @@ def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
 
 
 def _checkpoint_head_directory(relative: str) -> Path | None:
+    """Return the owner directory of a current or archived checkpoint head path, or None for another file."""
     path = Path(relative)
     if path.name == "checkpoint-head.json":
         return path.parent
@@ -170,6 +182,7 @@ def _capture_saved_source(
     checkpoint_heads: dict[str, str | None] | None = None,
     expected_digest: str | None = None,
 ) -> dict[str, tuple[str, int]]:
+    """Capture digests and observation times for a saved source and its selected checkpoint or receipt inputs."""
     read = partial(
         _read_saved_result,
         scan_dir,
@@ -432,6 +445,7 @@ def _restore_checkpoint_head(
     sources: dict[str, str],
     relative: str,
 ) -> None:
+    """Restore the prior selection for a checkpoint directory, allowing legacy evidence with no selected head."""
     path = Path(relative)
     if path.name != "checkpoint-head.json":
         return
@@ -922,7 +936,7 @@ def _require_current_deep_publication(
                 raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
             return False
 
-        reference = latest_publication_reference(db, connection, scan_id)
+        reference = latest_publication_reference(db, connection, scan)
         selected_result = reference[0]
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
@@ -935,32 +949,36 @@ if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
 
 
-def _saved_workers(connection: Any, scan_id: str) -> list[dict[str, Any]]:
+def _saved_workers(connection: Any, scan: Any) -> list[dict[str, Any]]:
     rows = connection.execute(
         "SELECT worker.*, attempt.accepted_result_path, attempt.accepted_result_sha256 "
         "FROM deep_scan_workers AS worker "
         "LEFT JOIN deep_scan_attempts AS attempt "
         "ON attempt.worker_id = worker.id AND attempt.attempt = worker.attempt "
         "WHERE worker.scan_id = ? ORDER BY worker.created_at, worker.id",
-        (scan_id,),
+        (scan["id"],),
     ).fetchall()
-    return [
+    scan_dir = Path(scan["scan_dir"])
+    workers = [
         {
             **dict(row),
+            "accepted_result_path": archived_deep_path(scan_dir, row["accepted_result_path"]),
             "result_manifest_path": row["accepted_result_path"] or row["result_manifest_path"],
         }
         for row in rows
     ]
+    return archived_worker_paths(workers, scan_dir)
 
 
-def _accepted_source_digests(connection: Any, scan_id: str) -> dict[str, str]:
+def _accepted_source_digests(connection: Any, scan: Any) -> dict[str, str]:
+    scan_dir = Path(scan["scan_dir"])
     return {
-        row["accepted_result_path"]: row["accepted_result_sha256"]
+        archived_deep_path(scan_dir, row["accepted_result_path"]): row["accepted_result_sha256"]
         for row in connection.execute(
             "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts "
             "WHERE scan_id = ? AND accepted_result_path IS NOT NULL "
             "AND accepted_result_sha256 IS NOT NULL",
-            (scan_id,),
+            (scan["id"],),
         )
     }
 

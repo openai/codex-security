@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 import { dirname, join, posix, relative, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
-import { validateRetainedCoverage } from "../coverage-publication.js";
+import {
+  validateRetainedCoverage,
+  validateWorkerReport,
+} from "../coverage-publication.js";
 import {
   parseAcceptedDiscoveryDraft,
   parseAcceptedDeepScanDraft,
@@ -127,6 +131,7 @@ export async function readDiscoveryAuditDraft(
   if (result.complete === false) return result;
   if (options.validateWriteups !== false)
     await validateWriteupFiles(artifacts, result);
+  if (!options.accepted) validateWorkerReport(result);
   validateRetainedCoverage(result.reviewState);
   // Check the worker's own task IDs before qualifying active and closed tasks.
   const closures = result.reviewState.resolvedDeferred ?? [];
@@ -198,6 +203,7 @@ async function validateWriteupFiles(
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
+  additionalModel?: ScanDraftInput["threatModel"],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(
@@ -261,7 +267,11 @@ export function scanCoverage(
     };
   });
   return {
-    reviews: [provenance],
+    reviews: [
+      additionalModel
+        ? { ...provenance, threatModel: additionalModel }
+        : provenance,
+    ],
     surfaces,
     explicitExclusions: coverage.explicitExclusions.map(project),
     deferred: coverage.deferred.map((item, index) => ({
@@ -298,7 +308,13 @@ export function addScanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
 ): void {
-  const coverage = scanCoverage(worker, scanDir);
+  const model = worker.result.threatModel;
+  aggregate.threatModel ??= model;
+  const additionalModel =
+    model && !isDeepStrictEqual(model, aggregate.threatModel)
+      ? model
+      : undefined;
+  const coverage = scanCoverage(worker, scanDir, additionalModel);
   const previous = aggregate.sourceCoverage;
   if (!previous) {
     aggregate.sourceCoverage = coverage;

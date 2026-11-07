@@ -1,3 +1,5 @@
+"""Recover findings and checkpoint evidence when deep scans hit a stop condition."""
+
 from __future__ import annotations
 
 import copy

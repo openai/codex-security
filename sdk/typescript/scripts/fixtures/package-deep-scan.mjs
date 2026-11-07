@@ -402,6 +402,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   let threadCount = 0;
   let resumedThreads = 0;
   let manifestBeforeFollowUp;
+  f.env.PACKAGE_DEEP_PARENT_THREAD = owner;
   let scanId;
   const client = new sdk.CodexSecurity(
     { pythonPath: f.env.PYTHON },
@@ -474,6 +475,9 @@ async function runInstalledSdk(pluginRoot, executable) {
   try {
     const result = await client.run(f.target, {
       mode: "deep",
+      onScanRegistered: (scan) => {
+        scanId = scan.scanId;
+      },
       auth: "api-key",
       workers: 1,
       subagents: 0,
@@ -481,9 +485,6 @@ async function runInstalledSdk(pluginRoot, executable) {
       stopAfterNoNew: 2,
       postScanPrompt,
       outputDir: join(f.directory, "output"),
-      onScanRegistered(scan) {
-        scanId = scan.scanId;
-      },
     });
     assert.equal(threadCount, 1);
     assert.equal(resumedThreads, 1);

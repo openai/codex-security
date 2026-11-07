@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -105,11 +107,12 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "preserve original deep scan discovery context"),
+    (63, "retain unverified Deep Scan worker attempts"),
     (64, "retain deep scan attempts and exact merge inputs"),
     (65, "persist selected deep scan finalization input"),
     (66, "bind original deep scan parent usage turn"),
     (67, "bind original deep scan execution settings"),
+    (68, "preserve original deep scan discovery context"),
 ]
 
 
@@ -1302,6 +1305,25 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
     assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone()[0] == 2.5
     assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
+
+
+@pytest.mark.cross_platform
+def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
+    db, migrate = create_historical_database(63)
+    with closing(db):
+        timestamp = "2026-01-01T00:00:00Z"
+        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
+        record_migration(db, 63, "retain native investigation time allowances", timestamp)
+        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
+        migrate(db)
+        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
+        receipt = db.execute(query).fetchone()
+        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
+        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
+        migrate(db)
+        assert db.execute(query).fetchone() == receipt
+        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
@@ -2789,7 +2811,17 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
 
 
 @pytest.mark.parametrize(
-    "snapshot", ["early", "previous", "current", "before-refresh", "f57", "f58", "previous-head"]
+    "snapshot",
+    [
+        "early",
+        "previous",
+        "current",
+        "before-refresh",
+        "f57",
+        "f58",
+        "previous-head",
+        "before-worker-usage",
+    ],
 )
 def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
     snapshot: str,
@@ -2805,7 +2837,12 @@ def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
         "bind original deep scan parent usage turn": 48,
         "bind original deep scan execution settings": 51,
     }
-    if snapshot != "early":
+    if snapshot == "before-worker-usage":
+        original_versions = {
+            name: version for version, name, _ in SCHEMA.MIGRATIONS if 64 <= version <= 67
+        }
+        original_versions["preserve original deep scan discovery context"] = 63
+    elif snapshot != "early":
         original_versions = {
             name: version
             - {
@@ -2828,6 +2865,7 @@ def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
         if version
         <= (
             {
+                "before-worker-usage": 62,
                 "early": 43,
                 "previous": 46,
                 "current": 47,

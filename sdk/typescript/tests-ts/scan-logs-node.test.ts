@@ -1,12 +1,13 @@
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { execFile } from "node:child_process";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { copyFile, mkdir, symlink, writeFile } from "node:fs/promises";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { zstdCompressSync } from "node:zlib";
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-scan-logs-node-",
@@ -77,7 +78,16 @@ test.each(["native", "without zstd"])(
       ),
     );
 
-    const module = join(root, "scan-logs.mjs");
+    for (const relativePath of [
+      ".codex-plugin/plugin.json",
+      "mcp/session-decompression.mjs",
+    ]) {
+      const destination = join(root, "_bundled_plugin", relativePath);
+      await mkdir(dirname(destination), { recursive: true });
+      await copyFile(join(PLUGIN_ROOT, relativePath), destination);
+    }
+    const module = join(root, "dist", "scan-logs.mjs");
+    await mkdir(dirname(module), { recursive: true });
     await writeFile(module, moduleSource);
     const costModule = join(root, "cost.mjs");
     await writeFile(costModule, costModuleSource);
@@ -118,27 +128,16 @@ test.each(["native", "without zstd"])(
       threadId: "parent",
       workingDirectory: root,
     });
-    expect(result.worker).toEqual(
-      result.compressed
-        ? expect.objectContaining({
-            threadId: "worker",
-            workingDirectory: root,
-          })
-        : null,
-    );
-    expect(result.usage.usage.input_tokens).toBe(result.compressed ? 1000 : 0);
-    expect(result.usage.cost.estimatedUsd).toBeCloseTo(
-      result.compressed ? 0.004 : 0,
-      10,
-    );
+    expect(result.worker).toMatchObject({
+      threadId: "worker",
+      workingDirectory: root,
+    });
+    expect(result.usage.usage.input_tokens).toBe(1000);
+    expect(result.usage.cost.estimatedUsd).toBeCloseTo(0.004, 10);
     expect(result.logs.events).toEqual([
       { threadId: "parent", event: parent },
-      ...(result.compressed
-        ? [
-            { threadId: "worker", event: worker },
-            { threadId: "worker", event: receipt },
-          ]
-        : []),
+      { threadId: "worker", event: worker },
+      { threadId: "worker", event: receipt },
     ]);
   },
 );

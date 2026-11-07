@@ -42,11 +42,12 @@ export const emptyWorkerPermissionProfile = {
 
 export async function createFakeCodexFixture(
   temporaryDirectories: ReturnType<typeof createTemporaryDirectories>,
+  // null resolves the invocation's profile; explicit values exercise mismatches.
   preflightProfile: {
     extends: string;
     filesystem: Record<string, string | number | Record<string, string>>;
     network: { enabled: boolean };
-  } = emptyWorkerPermissionProfile,
+  } | null = emptyWorkerPermissionProfile,
   preflightAllowed = true,
   accountResult: {
     account: { type: string } | null;

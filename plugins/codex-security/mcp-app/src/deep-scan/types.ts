@@ -1,6 +1,7 @@
 import type { DiscoveryBoardContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
+import type { WorkerTokenUsage } from "./usage-receipt.js";
 import type {
   configSchema,
   finalizationInputSchema,
@@ -83,7 +84,7 @@ export type DeepScanStore = Omit<
   | "begin"
   | "cancel"
   | "releaseCoordinator"
-  | "coordinatorLeaseArgs"
+  | "coordinatorGeneration"
   | "selectFinalization"
 > & {
   selectFinalization?: WorkbenchDeepScanStore["selectFinalization"];
@@ -97,7 +98,7 @@ export interface CodexWorkerArtifactContext {
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
-export interface CodexWorkerRequest {
+export interface CodexWorkerRequest extends WorkerTelemetryOptions {
   kind: "discovery";
   promptPath: string;
   workingDirectory: string;
@@ -106,12 +107,31 @@ export interface CodexWorkerRequest {
   resumeThreadId?: string;
   continuationPrompt?: string;
   artifactContext?: CodexWorkerArtifactContext;
-  onThreadStarted?: (threadId: string) => Promise<void> | void;
   onNonRetryableError?: (error: Error) => void;
+}
+
+export interface WorkerTelemetryOptions {
+  attemptId?: string;
+  /** Host-bound receipt storage, excluded from model filesystem access. */
+  workerUsageDirectory?: string;
+  onThreadStarted?: (threadId: string) => Promise<void> | void;
+  onAttribution?: (attribution: WorkerAttribution) => void;
+  onUsage?: (
+    usage: WorkerTokenUsage | null,
+    turnId?: string,
+  ) => Promise<void> | void;
+}
+
+export interface WorkerAttribution {
+  operationId?: string;
+  attemptId: string;
+  parentAttemptId?: string;
 }
 
 export interface CodexWorkerResult {
   threadId?: string;
+  turnId?: string;
+  usage?: WorkerTokenUsage | null;
   diagnostics?: CodexWorkerDiagnostic[];
 }
 
@@ -132,6 +152,7 @@ export interface CodexWorkerExecutor {
     workingDirectory: string,
     signal: AbortSignal,
     schema: Record<string, unknown>,
+    telemetry?: WorkerTelemetryOptions,
   ): Promise<string>;
 }
 
@@ -154,6 +175,14 @@ export interface DeepScanLogEvent {
   pass?: number;
   reason?: string;
   total?: number;
+  timestamp?: string;
+  durationMs?: number;
+  outcome?: "succeeded" | "failed" | "canceled";
+  retry?: boolean;
+  resumed?: boolean;
+  attemptId?: string;
+  operationId?: string;
+  parentAttemptId?: string;
 }
 
 export type DeepScanLogger = (event: DeepScanLogEvent) => void;

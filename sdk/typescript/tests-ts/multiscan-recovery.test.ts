@@ -1476,11 +1476,14 @@ describe("multiscan", () => {
     const knowledgeBasePaths = [document];
 
     let attempts = 0;
+    const operationIds: string[] = [];
     const summary = await runMultiscan(
       options(
         paths,
         client(async (_repository, scanOptions = {}) => {
           expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
+          expect(scanOptions.telemetryContext?.operationId).toBeString();
+          operationIds.push(scanOptions.telemetryContext!.operationId);
           attempts += 1;
           if (attempts === 1) {
             scanOptions.onWarning?.("Warning from the failed attempt.");
@@ -1493,6 +1496,7 @@ describe("multiscan", () => {
     );
 
     expect(attempts).toBe(2);
+    expect(new Set(operationIds).size).toBe(1);
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(summary).not.toHaveProperty("warnings");
     expect(await results(summary.resultsPath)).toMatchObject([
@@ -1500,10 +1504,16 @@ describe("multiscan", () => {
         id: "retry",
         status: "failed",
         attempt: 1,
+        operationId: operationIds[0],
         error: failure,
         warnings: ["Warning from the failed attempt."],
       },
-      { id: "retry", status: "completed", attempt: 2 },
+      {
+        id: "retry",
+        status: "completed",
+        attempt: 2,
+        operationId: operationIds[0],
+      },
     ]);
   });
 

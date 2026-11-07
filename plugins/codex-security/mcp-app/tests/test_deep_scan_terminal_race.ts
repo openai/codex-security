@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -105,11 +106,10 @@ for (const ordering of [
               ...args,
             ]
           : [script, ...args];
-        const execution = execFileAsync(
-          process.env.PYTHON || "python3",
-          pythonArgs,
-          { cwd: pluginRoot, env: environment },
-        );
+        const execution = execFileAsync(fixturePython, pythonArgs, {
+          cwd: pluginRoot,
+          env: environment,
+        });
         if (input !== undefined) execution.child.stdin?.end(input);
         const { stdout } = await execution;
         return JSON.parse(stdout);

@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import {
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
@@ -41,7 +42,7 @@ export async function testDeepScanContextSnapshots() {
     DeepScanWorkerRunner: typeof Runner;
     createDeepScanArtifacts: typeof Artifacts;
   };
-  const fixture = await fakeCodexFixture();
+  const fixture = await fakeCodexFixture(null);
   // Concurrent children record their input in their own working directories.
   await writeFile(
     fixture.executablePath,
@@ -77,7 +78,7 @@ export async function testDeepScanContextSnapshots() {
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
           const command = async (args: string[], input?: string) => {
             const execution = promisify(execFile)(
-              process.env.PYTHON?.trim() || "python3",
+              fixturePython,
               [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
               {
                 env: {
@@ -162,6 +163,8 @@ export async function testDeepScanContextSnapshots() {
           });
           const createdAt = run.createdAt;
           assert.ok(createdAt);
+          const workerUsageDirectory = run.workerUsageDirectory;
+          assert.ok(workerUsageDirectory);
           assert.equal(run.config.maxTimeHours, maxTimeHours);
           assert.equal(run.config.subagents, index);
           const invocations: {
@@ -228,7 +231,10 @@ export async function testDeepScanContextSnapshots() {
             randomUUID(),
             "before-edit",
           );
-          assert.ok(first.status === "succeeded");
+          assert.ok(
+            first.status === "succeeded",
+            "error" in first ? String(first.error) : first.status,
+          );
           const editedContext = `Updated instructions for later phases ${index}.`;
           await command([
             "update-scan-context",
@@ -248,6 +254,7 @@ export async function testDeepScanContextSnapshots() {
           });
           assert.equal(run.config.maxTimeHours, maxTimeHours);
           assert.equal(run.createdAt, createdAt);
+          assert.equal(run.workerUsageDirectory, workerUsageDirectory);
           sdk = new CodexSdkWorkerExecutor({
             parentSandbox,
             deepScanConfig: run.config,
@@ -264,6 +271,25 @@ export async function testDeepScanContextSnapshots() {
             assert.equal(fresh.invocation.argv.includes("resume"), false);
             assert.equal(resumed.invocation.argv.includes("resume"), true);
             for (const { invocation } of [fresh, resumed]) {
+              const permissionOverride = invocation.argv.find((arg) =>
+                arg.startsWith("permissions.codex_security_deep_scan_worker="),
+              );
+              assert.ok(permissionOverride);
+              assert.deepEqual(
+                JSON.parse(
+                  JSON.stringify(parseToml(permissionOverride).permissions),
+                ),
+                {
+                  codex_security_deep_scan_worker: {
+                    extends: ":read-only",
+                    filesystem: {
+                      ":root": "read",
+                      [workerUsageDirectory]: { ".": "deny" },
+                    },
+                    network: { enabled: false },
+                  },
+                },
+              );
               assert.deepEqual(
                 { ...(parseToml(invocation.deepConfig).deep_scan as object) },
                 {

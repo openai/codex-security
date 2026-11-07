@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, snapshotScanDraft, writeJson } from "./support/json.ts";
 import { workerDraft, finding } from "./scan-draft-fixture.ts";
 import { gitText } from "../scripts/git.mjs";
@@ -1217,7 +1218,7 @@ async function testClaimedParentArtifactOperations(
       assert.equal(await readFile(inventoryPath, "utf8"), originalInventory);
     }
 
-    execFileSync(process.env.PYTHON ?? "python3", [
+    execFileSync(fixturePython, [
       "-c",
       "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); " +
         "c.execute('UPDATE scans SET handoff_claim_token = ? WHERE id = ?', " +
