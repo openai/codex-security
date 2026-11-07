@@ -188,7 +188,7 @@ function* trustedTools(
         !isRepositoryPath(protectedRoot, resolve(candidate))
       ) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === "EACCES") lookupDenied = true;
+        if (code === "EACCES" || code === "EPERM") lookupDenied = true;
         else if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
       }
       continue;
