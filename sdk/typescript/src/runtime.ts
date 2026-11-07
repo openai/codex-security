@@ -3438,7 +3438,7 @@ export async function runCodexCommand(
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
-  const childEnvironment = await campaignCommandEnvironment(environment);
+  const campaignEnvironment = campaignCommandEnvironment(environment);
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
@@ -3447,7 +3447,7 @@ export async function runCodexCommand(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {
-      env: childEnvironment,
+      env: campaignEnvironment ? await campaignEnvironment : environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,

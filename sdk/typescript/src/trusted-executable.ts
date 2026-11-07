@@ -42,17 +42,19 @@ export async function withProtectedExecutableRoots<T>(
 }
 
 /** Host launchers and the workbench inherit the same Git search path as checkout. */
-export async function campaignCommandEnvironment(
+export function campaignCommandEnvironment(
   environment: Record<string, string | undefined>,
-): Promise<Record<string, string | undefined>> {
+): Promise<Record<string, string | undefined>> | undefined {
   if (
     additionalRoots.getStore() === undefined ||
     !Object.entries(environment).some(
       ([name, value]) => name.toUpperCase() === "PATH" && value !== undefined,
     )
   )
-    return environment;
-  return (await inspectTrustedExecutable("git", environment, [])).environment;
+    return undefined;
+  return inspectTrustedExecutable("git", environment, []).then(
+    (command) => command.environment,
+  );
 }
 
 export async function resolveTrustedExecutable(
