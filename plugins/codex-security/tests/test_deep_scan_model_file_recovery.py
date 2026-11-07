@@ -12,10 +12,42 @@ from workbench_test_support import (
     mark_deep_coordinator_succeeded,
     run_workbench,
     scan_command,
+    windows_file_backend,
     write_completed_contract,
 )
 
 MODEL_FILES = ("model_instructions_file", "experimental_compact_prompt_file", "model_catalog_json")
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("error_code", "missing_root"), [(2, False), (3, False), (5, False), (3, True)]
+)
+def test_windows_preview_probe_distinguishes_missing_checkpoint_from_invalid_output(
+    tmp_path, workbench_db, monkeypatch, error_code, missing_root
+):
+    import finalize_scan_contract as finalizer
+    import windows_scan_local_files
+    from workbench.storage import require_host_deep_scan_output
+
+    directory = tmp_path / "scan"
+    directory.mkdir()
+    scan = workbench_db.execute(
+        "SELECT ? AS scan_dir, 'current' AS id", (str(directory),)
+    ).fetchone()
+    backend = windows_file_backend()
+    native_error = windows_scan_local_files.WindowsScanLocalFileError
+    backend.open_read_fd.side_effect = native_error(error_code, "native checkpoint probe")
+    if missing_root:
+        backend.scan_root_identity.side_effect = native_error(3, "scan directory unavailable")
+    monkeypatch.setattr(finalizer.os, "supports_dir_fd", set())
+    monkeypatch.setattr(finalizer, "_is_windows", lambda: True)
+    monkeypatch.setattr(finalizer, "_windows_scan_local_files", lambda: backend)
+    if error_code in (2, 3) and not missing_root:
+        require_host_deep_scan_output(workbench_db, scan)
+    else:
+        with pytest.raises(SystemExit, match="Cannot inspect the saved Deep Scan checkpoint"):
+            require_host_deep_scan_output(workbench_db, scan)
 
 
 def model_inputs(path: Path, key: str) -> dict:

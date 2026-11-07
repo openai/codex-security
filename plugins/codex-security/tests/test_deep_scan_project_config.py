@@ -7,7 +7,6 @@ import os
 import uuid
 
 import pytest
-
 from workbench_test_support import (
     begin_deep_scan,
     create_workspace,
