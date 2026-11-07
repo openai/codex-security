@@ -9601,7 +9601,7 @@ async function patchTransportEnvironment(
     return environment;
   // Git accumulates credential helpers until an empty helper resets them.
   const entries = await patchScopedConfig(
-    "^(http\\..*|credential(\\..*)?\\.helper|core\\.askpass)$",
+    "^((http|credential)\\..*|core\\.askpass)$",
     repository,
     dependencies,
   );
@@ -9627,12 +9627,20 @@ async function patchTransportEnvironment(
       entries[i + 1]!,
       repository,
     );
-    if (key.startsWith("http.")) {
-      if (!trusted)
-        throw new CodexSecurityError(
-          "Patch publication cannot use checkout-selected HTTP transport settings. Move the settings to your user Git configuration.",
-        );
-    } else if (!value || trusted) set(key, value);
+    if (
+      key === "core.askpass" ||
+      (key.startsWith("credential.") && key.endsWith(".helper"))
+    ) {
+      if (!value || trusted) set(key, value);
+    } else if (!trusted) {
+      // Keep matching rules in the operator's original URL scope and precedence.
+      const settings = key.startsWith("http.")
+        ? "HTTP transport"
+        : "Git credential";
+      throw new CodexSecurityError(
+        `Patch publication cannot use checkout-selected ${settings} settings. Move the settings to your user Git configuration.`,
+      );
+    }
   }
   pinned["GIT_CONFIG_COUNT"] = String(count);
   return pinned;
