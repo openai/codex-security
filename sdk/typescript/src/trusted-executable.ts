@@ -75,12 +75,33 @@ export async function withProtectedExecutableRoots<T>(
   }
 }
 
+/** Bind an actual host launcher and its environment within this campaign. */
+export function campaignExecutable(
+  candidate: string,
+  environment:
+    Readonly<NodeJS.ProcessEnv> | (() => Readonly<NodeJS.ProcessEnv>),
+): Promise<TrustedExecutable> | undefined {
+  if (!campaignScope.getStore()) return;
+  const env = typeof environment === "function" ? environment() : environment;
+  return resolveTrustedExecutable(candidate, env, []).then(async (command) => {
+    if (!command)
+      throw new Error(
+        `Campaign executable is unavailable on a trusted PATH: ${candidate}`,
+      );
+    // Windows drops PATH entries containing source-backed Git and ripgrep aliases.
+    if (process.platform === "win32" && candidate !== "git")
+      command.environment = (
+        await inspectTrustedExecutable("git", command.environment, [])
+      ).environment;
+    return command;
+  });
+}
+
 /** Host launchers and the workbench inherit the same Git search path as checkout. */
 export function campaignCommandEnvironment(
   environment: Record<string, string | undefined>,
 ): Promise<Record<string, string | undefined>> | undefined {
-  if (!campaignScope.getStore() || searchPath(environment) === undefined)
-    return undefined;
+  if (!campaignScope.getStore()) return undefined;
   return inspectTrustedExecutable("git", environment, []).then(
     (command) => command.environment,
   );
@@ -131,7 +152,13 @@ export async function inspectTrustedExecutable(
   const roots = campaign ? [...campaign.roots, ...extra] : selectedRoots;
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
-  const path = searchPath(environment);
+  const path =
+    searchPath(environment) ??
+    (campaign
+      ? process.platform === "win32"
+        ? searchPath(process.env)
+        : "/usr/bin:/bin"
+      : undefined);
   const entries: string[] = [];
   for (let entry of path?.split(delimiter) ?? []) {
     if (
@@ -212,7 +239,10 @@ export async function inspectTrustedExecutable(
     }
     const canonical = await realpath(current.path).catch(() => null);
     if (canonical === null) continue;
-    if (isProtected(canonical)) {
+    if (
+      isProtected(canonical) ||
+      (pathLike && view && crossesSource && !view.allows(canonical))
+    ) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }

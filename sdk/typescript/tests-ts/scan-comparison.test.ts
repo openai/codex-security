@@ -489,7 +489,8 @@ describe("semantic scan comparison", () => {
         runtimeCommands,
         "runCodexCommand",
       ).mockImplementation((...args) => {
-        if (args[1].includes("mcp")) startupCommands.push(args[0]);
+        if (Array.isArray(args[1]) && args[1].includes("mcp"))
+          startupCommands.push(args[0]);
         return runNativeCommand(...args);
       });
       const before = finding("before");

@@ -250,7 +250,10 @@ import {
 } from "./version.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import { readSavedScanLifecycle } from "./saved-scan-bootstrap.js";
-import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
+import {
+  bundledCodexSdkEnvironment,
+  definedEnvironment,
+} from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
@@ -312,6 +315,7 @@ import {
   validateMode,
 } from "./targets.js";
 import {
+  campaignExecutable,
   inspectTrustedExecutable,
   isWithin,
   type InspectedExecutable,
@@ -4694,6 +4698,22 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
+    const executable = codexPathOverride ?? environment["CODEX_CLI_PATH"]!;
+    const campaign = campaignExecutable(executable, () =>
+      codexPathOverride === undefined
+        ? bundledCodexSdkEnvironment(executable, sdkEnvironment)
+        : sdkEnvironment,
+    );
+    if (campaign) {
+      const selected = await campaign;
+      // Pin the SDK launch so it cannot prepend its unfiltered bundled tools again.
+      codexPathOverride = selected.executable;
+      environment["CODEX_CLI_PATH"] = selected.executable;
+      sdkEnvironment = definedEnvironment({
+        ...selected.environment,
+        CODEX_CLI_PATH: selected.executable,
+      });
+    }
     const codexOptions: CodexOptions & { nativeProfile?: string } = {
       ...(codexPathOverride === undefined
         ? {}
@@ -7382,16 +7402,7 @@ function standaloneFindingForPrompt(finding: string | object): string {
   return jsonForPrompt(finding);
 }
 
-/** @internal */
-export function definedEnvironment(
-  environment: ProcessEnvironment,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
-}
+export { definedEnvironment };
 
 function withoutCodexHome(
   environment: ProcessEnvironment,

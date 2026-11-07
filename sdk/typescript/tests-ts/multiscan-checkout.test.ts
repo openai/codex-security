@@ -1127,6 +1127,7 @@ describe("multiscan", () => {
       join(root, "node_modules", ".bin"),
     );
     const shimMarker = join(paths.root, "shim-ran");
+    const interpreterMarker = join(paths.root, "source-interpreter-ran");
     const gitMarker = join(paths.root, "operator-git-ran");
     for (const directory of shimDirectories) {
       await mkdir(directory, { recursive: true });
@@ -1145,12 +1146,24 @@ describe("multiscan", () => {
         { mode: 0o700 },
       );
       await symlink(join(second.path, "sh"), join(operatorBin, "sh"));
+      const wrapperBin = join(paths.root, "wrapper-bin");
+      await mkdir(wrapperBin);
+      const sourceInterpreter = join(second.path, "interpreter");
+      await symlink("/bin/sh", sourceInterpreter);
+      const interpreterAlias = join(operatorBin, "interpreter");
+      await symlink(sourceInterpreter, interpreterAlias);
+      const hostGit = Bun.which("git")!.replaceAll("'", "'\\''");
       await writeFile(
-        join(operatorBin, "git"),
-        `#!/usr/bin/env sh\nprintf called > "${gitMarker}"\nexec '${Bun.which("git")!.replaceAll("'", "'\\''")}' "$@"\n`,
+        join(wrapperBin, "git"),
+        `#!${interpreterAlias}\nprintf called > "${interpreterMarker}"\nexec '${hostGit}' "$@"\n`,
         { mode: 0o700 },
       );
-      shimDirectories.push(operatorBin);
+      await writeFile(
+        join(operatorBin, "git"),
+        `#!/usr/bin/env sh\nprintf called > "${gitMarker}"\nexec '${hostGit}' "$@"\n`,
+        { mode: 0o700 },
+      );
+      shimDirectories.push(wrapperBin, operatorBin);
     }
     const previousDirectory = process.cwd();
     const environment = new Map(
@@ -1187,7 +1200,10 @@ describe("multiscan", () => {
       );
 
       await expect(access(shimMarker)).rejects.toThrow();
-      if (process.platform !== "win32") await access(gitMarker);
+      if (process.platform !== "win32") {
+        await expect(access(interpreterMarker)).rejects.toThrow();
+        await access(gitMarker);
+      }
       expect(summary).toMatchObject({ completed: 2, failed: 0 });
     } finally {
       process.chdir(previousDirectory);

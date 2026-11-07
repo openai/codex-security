@@ -76,7 +76,7 @@ import {
 import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import {
-  campaignCommandEnvironment,
+  campaignExecutable,
   inspectTrustedExecutable,
   isWithin,
   resolveTrustedExecutable,
@@ -3456,23 +3456,26 @@ export function isDisconnectedChildStdin(
 
 export async function runCodexCommand(
   command: CodexCommand,
-  args: readonly string[],
+  args: readonly string[] | ((executable: string) => readonly string[]),
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
-  const campaignEnvironment = campaignCommandEnvironment(environment);
+  const campaign = campaignExecutable(command.command, environment);
+  const selected = campaign && (await campaign);
+  const executable = selected?.executable ?? command.command;
+  const commandArgs = typeof args === "function" ? args(executable) : args;
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
   let awaitingArchive = archiveHandshake;
   const child = spawn(
-    executablePathForSpawn(command.command),
-    [...(command.args ?? []), ...args],
+    executablePathForSpawn(executable),
+    [...(command.args ?? []), ...commandArgs],
     {
-      env: campaignEnvironment ? await campaignEnvironment : environment,
+      env: selected?.environment ?? environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
@@ -3551,7 +3554,12 @@ export async function probeCodexSandbox(
   // This preflight covers the Unix sandbox backends.
   if (process.platform === "win32") return;
   // Reuse the resolved Codex executable instead of looking up a probe on PATH.
-  const args = ["sandbox", "--", command.command, "--version"];
+  const args = (executable: string) => [
+    "sandbox",
+    "--",
+    executable,
+    "--version",
+  ];
   const timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
   let detail: string;
   try {
@@ -3581,7 +3589,7 @@ export async function probeCodexSandbox(
       ? "\nOn Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README."
       : "";
   throw new SandboxUnavailableError(
-    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args.join(" ")}'.${guidance}`,
+    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args(command.command).join(" ")}'.${guidance}`,
   );
 }
 
