@@ -67,15 +67,20 @@ function rawToolValue(value: string): boolean {
   return (windows ? /[\ud800-\udfff]/u : /[\udc80-\udcff]/u).test(value);
 }
 
-function selectedBundledRipgrep(candidate: string): boolean {
+function selectedBundledRipgrep(
+  candidate: string,
+  protectedRoot: string,
+): boolean {
   const codex = environmentValue("CODEX_CLI_PATH");
   if (!codex) return false;
   try {
+    const binary = canonical(codex);
+    if (!isRepositoryPath(protectedRoot, binary)) return false;
     return sameFile(
       candidate,
       append(
-        append(dirname(dirname(canonical(codex))), "codex-path"),
-        "rg.exe",
+        append(dirname(dirname(binary)), "codex-path"),
+        windows ? "rg.exe" : "rg",
       ),
     );
   } catch {
@@ -83,17 +88,53 @@ function selectedBundledRipgrep(candidate: string): boolean {
   }
 }
 
-function trustedTool(
+function protectedToolRoot(target: string): string {
+  let root = canonical(target);
+  for (const ancestor of ancestors(root))
+    if (exists(append(ancestor, ".git"))) root = ancestor;
+  return root;
+}
+
+function isRepositoryPath(root: string, path: string): boolean {
+  try {
+    inside(root, path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** An env-based interpreter or a wrapper can perform another PATH lookup. */
+function posixChildPath(path: string, cwd: string, root: string): string {
+  const directories = path.split(delimiter).flatMap((entry) => {
+    try {
+      const lookup = isAbsolute(entry) ? entry : append(cwd, entry);
+      const directory = canonical(lookup);
+      if (isRepositoryPath(root, directory)) return [];
+      // A directory containing ":" can be on PATH through an external alias.
+      if (directory.includes(delimiter))
+        return lookup.includes(delimiter) ||
+          isRepositoryPath(root, resolve(lookup))
+          ? []
+          : [lookup];
+      return [directory];
+    } catch {
+      return [];
+    }
+  });
+  // An empty POSIX PATH searches the current directory.
+  return directories.join(delimiter) || "/dev/null";
+}
+
+function* trustedTools(
   name: "git" | "rg",
   target: string,
+  protectedRoot: string,
   rawWindowsLookup = false,
-): string | undefined {
-  let protectedRoot = canonical(target);
-  for (const ancestor of ancestors(protectedRoot))
-    if (exists(append(ancestor, ".git"))) protectedRoot = ancestor;
+): Generator<string, undefined> {
   const configured =
     name === "git" ? environmentValue("CODEX_SECURITY_GIT") : undefined;
-  if (configured === "") return undefined;
+  if (configured === "") return;
   if (configured !== undefined && !isAbsolute(configured))
     throw new Error(
       "CODEX_SECURITY_GIT must name an absolute trusted executable.",
@@ -127,6 +168,7 @@ function trustedTool(
             : [name];
           return names.map((name) => append(directory, name));
         });
+  let lookupDenied = false;
   for (const selected of candidates) {
     const candidate =
       name === "rg" &&
@@ -139,35 +181,41 @@ function trustedTool(
     try {
       invocation = append(canonical(dirname(candidate)), basename(candidate));
       resolved = canonical(candidate);
-    } catch {
+    } catch (error) {
+      if (
+        !windows &&
+        name === "rg" &&
+        !isRepositoryPath(protectedRoot, resolve(candidate))
+      ) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EACCES") lookupDenied = true;
+        else if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      }
       continue;
     }
     if (
-      !executable(resolved) ||
+      ((windows || name === "git") && !executable(resolved)) ||
       (windows &&
         (!/\.(exe|com)$/iu.test(candidate) || /\.(bat|cmd)$/iu.test(resolved)))
     )
       continue;
     const inRepository = [resolve(candidate), invocation, resolved].some(
-      (path) => {
-        try {
-          inside(protectedRoot, path);
-          return true;
-        } catch {
-          return false;
-        }
-      },
+      (path) => isRepositoryPath(protectedRoot, path),
     );
-    if (inRepository && !(name === "rg" && selectedBundledRipgrep(resolved))) {
+    if (
+      inRepository &&
+      !(name === "rg" && selectedBundledRipgrep(resolved, protectedRoot))
+    ) {
       if (configured !== undefined)
         throw new Error(
           "CODEX_SECURITY_GIT must stay outside the protected repository.",
         );
       continue;
     }
-    return invocation;
+    yield inRepository ? resolved : invocation;
   }
-  return undefined;
+  if (lookupDenied)
+    throw Object.assign(new Error("spawn rg EACCES"), { code: "EACCES" });
 }
 
 function windowsToolPaths(searchPath: string): string[] {
@@ -323,10 +371,17 @@ function inheritedToolPaths(additional: string[] = []): Record<string, string> {
 }
 
 function gitProcess(repo: string, args: string[]) {
-  const command = trustedTool("git", repo);
+  const root = protectedToolRoot(repo);
+  const command = trustedTools("git", repo, root).next().value;
   if (!command) return undefined;
   const env: NodeJS.ProcessEnv = { ...process.env };
   const inherited = inheritedToolPaths();
+  if (!windows && inherited.PATH !== undefined)
+    env.PATH = inherited.PATH = posixChildPath(
+      inherited.PATH,
+      process.cwd(),
+      root,
+    );
   for (const name of Object.keys(env)) {
     const key = windows ? name.toUpperCase() : name;
     if (repositoryEnvironment.includes(key)) delete env[name];
@@ -354,18 +409,48 @@ export async function runRipgrep(
   args: string[],
   repo: string,
 ): Promise<ToolResult> {
-  if (!windows) return runTool("rg", args, repo);
+  const root = protectedToolRoot(repo);
   const inherited = inheritedToolPaths([
     "RIPGREP_CONFIG_PATH",
     "CODEX_SECURITY_GIT",
   ]);
-  const rawWindowsLookup = [repo, ...args, ...Object.values(inherited)].some(
-    rawToolValue,
+  const rawWindowsLookup =
+    windows && [repo, ...args, ...Object.values(inherited)].some(rawToolValue);
+  let env: NodeJS.ProcessEnv | undefined;
+  if (!windows && inherited.PATH !== undefined) {
+    inherited.PATH = posixChildPath(inherited.PATH, repo, root);
+    env = { ...process.env, PATH: inherited.PATH };
+  }
+  let denied: unknown;
+  for (const command of trustedTools("rg", repo, root, rawWindowsLookup)) {
+    try {
+      return await collect(
+        spawnTool(
+          command,
+          args,
+          {
+            cwd: repo,
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+          inherited,
+        ),
+      );
+    } catch (error) {
+      // POSIX PATH lookup continues if a candidate cannot be executed, including
+      // a script whose interpreter is missing. Preserve actual tool exit statuses.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        windows ||
+        (code !== "ENOENT" && code !== "EACCES" && code !== "ENOTDIR")
+      )
+        throw error;
+      if (code === "EACCES") denied = error;
+    }
+  }
+  throw (
+    denied ?? Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" })
   );
-  const command = trustedTool("rg", repo, rawWindowsLookup);
-  if (!command)
-    throw Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" });
-  return runTool(command, args, repo);
 }
 
 export async function runTool(

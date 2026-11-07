@@ -76,6 +76,7 @@ import {
 import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import {
+  campaignCommandEnvironment,
   isWithin,
   resolveTrustedExecutable,
   type InspectedExecutable,
@@ -3437,6 +3438,7 @@ export async function runCodexCommand(
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
+  const childEnvironment = await campaignCommandEnvironment(environment);
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
@@ -3445,7 +3447,7 @@ export async function runCodexCommand(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {
-      env: environment,
+      env: childEnvironment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,

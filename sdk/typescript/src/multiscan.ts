@@ -54,6 +54,7 @@ import {
 } from "./runtime.js";
 import {
   DiffTarget,
+  gitProtectionRoots,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanMode,
 } from "./targets.js";
@@ -64,7 +65,10 @@ import {
 } from "./scan-settings.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  withProtectedExecutableRoots,
+} from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = ["scan-manifest.json", "findings.json", "report.md"];
@@ -253,11 +257,20 @@ export async function runMultiscan(
       );
     })());
   try {
-    const result = await runCampaign(
-      resolvedOptions,
-      tasks,
-      output,
-      resumePluginRoot,
+    const localSources = [
+      ...new Set(tasks.map((task) => task.repository).filter(isAbsolute)),
+    ];
+    const worktrees = await Promise.all(
+      localSources.map((source) => gitProtectionRoots(source, options.signal)),
+    );
+    const result = await withProtectedExecutableRoots(
+      [
+        ...localSources,
+        ...worktrees.flat(),
+        join(output, "checkouts"),
+        join(output, "recovery-checkouts"),
+      ],
+      () => runCampaign(resolvedOptions, tasks, output, resumePluginRoot),
     );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }

@@ -27,9 +27,9 @@ const pathNameBytes =
   process.platform === "darwin" ? Buffer.from("雪") : Buffer.from([0xff]);
 afterEach(temporary.cleanup);
 
-function fixture() {
+function fixture(name = "repository") {
   const root = temporary.create("codex-security-inventory-"),
-    repo = join(root, "repository"),
+    repo = join(root, name),
     out = join(root, "output");
   mkdirSync(repo);
   git(repo, "init", "-q");
@@ -240,7 +240,7 @@ require("node:module").syncBuiltinESMExports();
 
 for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   for (const rawWindowsHome of [false, true]) {
-    test.skipIf(process.platform !== "win32")(
+    test.skipIf(rawWindowsHome && process.platform !== "win32")(
       `${command} uses the selected project-local Codex ripgrep${rawWindowsHome ? " through the UTF-16 bridge" : ""}`,
       () => {
         const f = fixture();
@@ -258,17 +258,18 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
           f.repo,
           "node_modules",
           "@openai",
-          `codex-win32-${process.arch}`,
+          `codex-${process.platform}-${process.arch}`,
           "vendor",
           "synthetic-target",
         );
-        const codex = join(runtime, "bin", "codex.exe");
+        const suffix = process.platform === "win32" ? ".exe" : "";
+        const codex = join(runtime, "bin", `codex${suffix}`);
         const tools = join(runtime, "codex-path");
         mkdirSync(dirname(codex), { recursive: true });
         mkdirSync(tools);
         copyFileSync(node, codex);
-        copyFileSync(ripgrep!, join(tools, "rg.exe"));
-        copyFileSync(node, join(f.repo, "rg.exe"));
+        copyFileSync(ripgrep!, join(tools, `rg${suffix}`));
+        copyFileSync(node, join(f.repo, `rg${suffix}`));
         env[pathKey] = [f.repo, tools].join(delimiter);
         env["CODEX_CLI_PATH"] = codex;
         env["CODEX_SECURITY_GIT"] = "";
@@ -435,6 +436,28 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   }
 }
 
+test.skipIf(process.platform === "win32")(
+  "a separately selected Codex launcher does not supply ripgrep from the scan target",
+  () => {
+    const f = fixture("codex-path");
+    const launcher = join(f.root, "bin", "codex");
+    mkdirSync(dirname(launcher));
+    writeFileSync(launcher, "fixture", { mode: 0o700 });
+    writeFileSync(
+      join(f.repo, "rg"),
+      "#!/bin/sh\nprintf called > rg-ran\nexit 73\n",
+      { mode: 0o700 },
+    );
+    const result = f.run("generate-in-scope-files", ["--scope", "."], {
+      ...f.toolEnvironment,
+      PATH: [f.repo, f.toolEnvironment["PATH"]].join(delimiter),
+      CODEX_CLI_PATH: launcher,
+    });
+    expect(readdirSync(f.repo)).not.toContain("rg-ran");
+    expect(result.status, result.stderr).toBe(0);
+  },
+);
+
 function runPathInventory(
   f: ReturnType<typeof fixture>,
   command: string,
@@ -468,7 +491,95 @@ function runPathInventory(
   );
 }
 
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "inventory reports access denied for an unsearchable ripgrep PATH directory",
+  () => {
+    const f = fixture();
+    const blocked = join(f.root, "blocked");
+    mkdirSync(blocked, { mode: 0o600 });
+    try {
+      f.write("scope/visible.py");
+      const result = runPathInventory(f, "generate-in-scope-files", {
+        ...f.toolEnvironment,
+        PATH: blocked,
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("EACCES");
+    } finally {
+      chmodSync(blocked, 0o700);
+    }
+  },
+);
+
 for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
+  test.skipIf(process.platform === "win32")(
+    `${command} skips repository ripgrep when PATH includes the checkout`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      chmodSync(
+        f.write("rg", "#!/bin/sh\nprintf called > rg-ran\nexit 73\n"),
+        0o700,
+      );
+      const result = runPathInventory(f, command, {
+        ...f.toolEnvironment,
+        PATH: `.${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(readdirSync(f.repo)).not.toContain("rg-ran");
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    `${command} runs a selected ripgrep wrapper with an external interpreter`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      const shim = f.write(
+        "sh",
+        "#!/bin/sh\nprintf called > sh-ran\nexit 73\n",
+      );
+      chmodSync(shim, 0o700);
+      const tools = join(f.root, "operator:tools");
+      const alias = join(f.root, "tools");
+      mkdirSync(tools);
+      symlinkSync(tools, alias, "dir");
+      const rg = Bun.which("rg", { PATH: f.toolEnvironment["PATH"] });
+      expect(rg).not.toBeNull();
+      symlinkSync(rg!, join(tools, "inventory-search"));
+      writeFileSync(
+        join(tools, "rg"),
+        '#!/usr/bin/env sh\nexec inventory-search "$@"\n',
+        { mode: 0o700 },
+      );
+      const result = runPathInventory(f, command, {
+        ...f.toolEnvironment,
+        PATH: ["", ".", alias, f.toolEnvironment["PATH"]].join(delimiter),
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(readdirSync(f.repo)).not.toContain("sh-ran");
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    `${command} preserves a failed tool lookup outside the checkout`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      f.write(".ignore", "ignored.py\n");
+      const cycle = join(f.root, "cycle");
+      symlinkSync(cycle, cycle);
+      const result = runPathInventory(f, command, {
+        ...f.toolEnvironment,
+        PATH: [cycle, f.toolEnvironment["PATH"]].join(delimiter),
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(result.status).not.toBe(0);
+    },
+  );
   test.skipIf(process.platform === "win32")(
     `${command} continues PATH lookup after a missing ripgrep interpreter`,
     () => {

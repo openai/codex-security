@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import {
@@ -22,6 +23,38 @@ export interface InspectedExecutable {
   environment: Record<string, string | undefined>;
 }
 
+const additionalRoots = new AsyncLocalStorage<readonly string[]>();
+
+function canonicalRoot(root: string): Promise<string> {
+  return realpath(root).catch(() => resolve(root));
+}
+
+/** Include every selected source when a campaign launches tools from a new checkout. */
+export async function withProtectedExecutableRoots<T>(
+  roots: readonly string[],
+  run: () => Promise<T>,
+): Promise<T> {
+  const canonical = await Promise.all(roots.map(canonicalRoot));
+  return additionalRoots.run(
+    [...new Set([...(additionalRoots.getStore() ?? []), ...canonical])],
+    run,
+  );
+}
+
+/** Host launchers and the workbench inherit the same Git search path as checkout. */
+export async function campaignCommandEnvironment(
+  environment: Record<string, string | undefined>,
+): Promise<Record<string, string | undefined>> {
+  if (
+    additionalRoots.getStore() === undefined ||
+    !Object.entries(environment).some(
+      ([name, value]) => name.toUpperCase() === "PATH" && value !== undefined,
+    )
+  )
+    return environment;
+  return (await inspectTrustedExecutable("git", environment, [])).environment;
+}
+
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
@@ -44,11 +77,13 @@ export async function inspectTrustedExecutable(
 ): Promise<InspectedExecutable> {
   const roots = await Promise.all(
     (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
-      (root) => realpath(root).catch(() => resolve(root)),
+      canonicalRoot,
     ),
   );
+  roots.push(...(additionalRoots.getStore() ?? []));
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
+  const campaign = additionalRoots.getStore() !== undefined;
   const path =
     environment["PATH"] ??
     Object.entries(environment).find(
@@ -66,7 +101,19 @@ export async function inspectTrustedExecutable(
     if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
     if (canonical === null || isProtected(canonical)) continue;
-    if (!entries.includes(canonical)) entries.push(canonical);
+    // A directory containing the separator can be on PATH through a safe alias.
+    // Keep that absolute spelling so joining the entries cannot split its name.
+    const directory = canonical.includes(delimiter)
+      ? isAbsolute(entry)
+        ? entry
+        : `${process.cwd()}${sep}${entry}`
+      : canonical;
+    if (
+      !directory.includes(delimiter) &&
+      !isProtected(directory) &&
+      !entries.includes(directory)
+    )
+      entries.push(directory);
   }
 
   const pathLike = candidate.includes("/") || candidate.includes("\\");
@@ -142,9 +189,14 @@ export async function inspectTrustedExecutable(
   for (const name of Object.keys(sanitizedEnvironment)) {
     if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
   }
-  sanitizedEnvironment["PATH"] = entries
+  const searchPath = entries
     .filter((entry) => !unsafeEntries.has(entry))
     .join(delimiter);
+  // An empty POSIX PATH searches the current directory.
+  sanitizedEnvironment["PATH"] =
+    campaign && process.platform !== "win32" && !searchPath
+      ? "/dev/null"
+      : searchPath;
   return { executable, environment: sanitizedEnvironment };
 }
 

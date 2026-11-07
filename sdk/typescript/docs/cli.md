@@ -1315,6 +1315,9 @@ codex-security bulk-scan repositories.csv \
 ```
 
 Bulk scans use clean shallow checkouts and support repository/path scopes.
+Git is resolved outside the selected local sources and campaign checkouts.
+Inventory uses a ripgrep executable outside the scanned checkout or the copy
+shipped with the selected Codex installation.
 CSV scopes are literal paths relative to each checkout, including names such
 as `~/src`.
 Configured diff or working-tree scopes are rejected unless every affected row

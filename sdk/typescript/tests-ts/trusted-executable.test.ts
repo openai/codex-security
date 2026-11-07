@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   inspectTrustedExecutable,
   resolveTrustedExecutable,
+  withProtectedExecutableRoots,
 } from "../src/trusted-executable.js";
 import { PYTHON } from "./support/security-policy.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -57,6 +58,23 @@ async function resolveWindowsExecutable(
 }
 
 describe("trusted executable resolution", () => {
+  test("keeps executable search boundaries isolated between concurrent campaigns", async () => {
+    const first = await temporaryDirectory();
+    const second = await temporaryDirectory();
+    const environment = { PATH: [first, second].join(delimiter) };
+    const inspectPath = async () =>
+      (await inspectTrustedExecutable("git", environment, [])).environment[
+        "PATH"
+      ];
+    expect(
+      await Promise.all([
+        withProtectedExecutableRoots([first], inspectPath),
+        withProtectedExecutableRoots([second], inspectPath),
+        inspectPath(),
+      ]),
+    ).toEqual([second, first, environment.PATH]);
+  });
+
   test("accepts safe relative PATH entries without trusting repository links", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
