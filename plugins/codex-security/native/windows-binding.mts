@@ -43,7 +43,8 @@ export interface WindowsBinding {
     flags: number,
   ): { error: number; handle?: WindowsHandle | null };
   createWindowsDirectories(path: Buffer): number;
-  createPrivateWindowsDirectory(path: Buffer): number;
+  createPrivateWindowsDirectory(path: Buffer, checkOutput?: boolean): number;
+  validateWindowsOutputPath(path: Buffer): number;
 }
 
 export { windowsFlags } from "./windows-flags.mjs";

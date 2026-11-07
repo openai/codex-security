@@ -25,6 +25,23 @@ public static class ScanOutputAccessProbe {
             catch (UnauthorizedAccessException) { return false; }
         });
     }
+
+    public static void ReplaceDirectory(SafeAccessTokenHandle token, string path) {
+        WindowsIdentity.RunImpersonated(token, () => {
+            Directory.Move(path, path + ".retained");
+            Directory.Move(path + ".replacement", path);
+            File.WriteAllText(Path.Combine(path, "marker.txt"), "replacement");
+        });
+    }
+
+    public static bool CanRename(SafeAccessTokenHandle token, string path) {
+        return WindowsIdentity.RunImpersonated(token, () => {
+            try { Directory.Move(path, path + ".moved"); }
+            catch (UnauthorizedAccessException) { return false; }
+            Directory.Move(path + ".moved", path);
+            return true;
+        });
+    }
 }
 '@
 
@@ -41,6 +58,22 @@ try {
     if (-not [ScanOutputAccessProbe]::LogonUser($name, '.', $password, 2, 0, [ref]$token)) {
         throw [System.ComponentModel.Win32Exception]::new([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }
+    [ScanOutputAccessProbe]::ReplaceDirectory($token, $env:CODEX_SECURITY_TEST_REPLACE_DIRECTORY)
+    $protected = $env:CODEX_SECURITY_TEST_DENIED_DIRECTORY
+    $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+    & $icacls $protected /grant "*$($user.SID.Value):(DE)" | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not [ScanOutputAccessProbe]::CanRename($token, $protected)) {
+        throw 'The named-user delete grant did not permit a directory rename.'
+    }
+    & $icacls $protected /deny '*S-1-5-11:(DE)' | Out-Null
+    if ($LASTEXITCODE -ne 0 -or [ScanOutputAccessProbe]::CanRename($token, $protected)) {
+        throw 'The Authenticated Users deny did not prevent the directory rename.'
+    }
+    # Exercise the SDK while the named account still exists for SID resolution.
+    $env:CODEX_SECURITY_TEST_DENIED_OUTPUT = Join-Path $protected 'scan'
+    $check = 'const { prepareOutputDir } = await import(process.env.CODEX_SECURITY_TEST_RUNTIME); await prepareOutputDir(process.env.CODEX_SECURITY_TEST_DENIED_OUTPUT, `fixture`);'
+    & $env:CODEX_SECURITY_TEST_BUN -e $check | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'The SDK rejected the protected output location.' }
     $results = @(
         foreach ($path in ($env:CODEX_SECURITY_TEST_ACCESS_PATHS | ConvertFrom-Json)) {
             [pscustomobject]@{

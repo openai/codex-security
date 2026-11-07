@@ -237,7 +237,7 @@ export async function runMultiscan(
       throw new Error("Bulk recovery requires an existing campaign manifest.");
   }
   const output = await ensureOutputDirectory(requestedOutput);
-  await requireSecureOutputAncestry(output);
+  if (process.platform !== "win32") await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   let pluginWorkspace: string | undefined;
   let pluginRoot: Promise<string> | undefined;
@@ -783,7 +783,10 @@ async function ensureOutputDirectory(path: string): Promise<string> {
   if (directory.dev !== metadata.dev || directory.ino !== metadata.ino) {
     throw new Error("Multiscan output directories changed during preparation.");
   }
-  if (process.platform === "win32") return canonical;
+  if (process.platform === "win32") {
+    await requireSecureOutputAncestry(canonical);
+    return canonical;
+  }
   if ((directory.mode & 0o022n) !== 0n) {
     throw new Error(
       "Multiscan output directories must not be group- or world-writable.",

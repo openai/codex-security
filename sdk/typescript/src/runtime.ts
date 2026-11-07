@@ -1977,8 +1977,8 @@ export async function validateOutputDir(
         throw new OutputDirectoryNotEmptyError(path);
       }
       requireOutputDirectoryOwnership(metadata, path);
-      await requireSecureOutputAncestry(path);
       const canonical = await realpath(path);
+      await requireSecureOutputAncestry(canonical);
       requireModelSafeOutputDir(canonical);
       return canonical;
     }
@@ -2234,7 +2234,7 @@ async function prepareOutputDirectory(
       // The SDK suffix is longer than the workbench's .previous-<tempname> suffix.
       const prefixLength = 255 - suffix.length - outputArchiveSuffix().length;
       created = join(
-        temporaryRoot,
+        await realpath(temporaryRoot),
         `${prefix.slice(0, prefixLength)}${suffix}`,
       );
       await createWindowsOutputDirectory(created, false);
@@ -2286,11 +2286,8 @@ async function prepareOutputDirectory(
   }
 }
 
-export async function createWindowsOutputDirectory(
-  path: string,
-  recursive: boolean,
-): Promise<string | undefined> {
-  const native = createRequire(import.meta.url)(
+async function windowsOutputBinding() {
+  return createRequire(import.meta.url)(
     join(
       await bundledPluginRoot(),
       "mcp",
@@ -2298,11 +2295,35 @@ export async function createWindowsOutputDirectory(
       `win32-${process.arch}`,
       "windows.node",
     ),
-  ) as { createPrivateWindowsDirectory(path: Buffer): number };
+  ) as {
+    createPrivateWindowsDirectory(path: Buffer, checkOutput: boolean): number;
+    validateWindowsOutputPath(path: Buffer): number;
+  };
+}
+
+function validateWindowsOutputPath(
+  native: Awaited<ReturnType<typeof windowsOutputBinding>>,
+  path: string,
+): void {
+  const error = native.validateWindowsOutputPath(
+    Buffer.from(win32.toNamespacedPath(path), "utf16le"),
+  );
+  if (error !== 0)
+    throw new OutputDirectoryError(
+      `Scan output directory or its parent could not be trusted (Windows error ${error}): ${path}`,
+    );
+}
+
+export async function createWindowsOutputDirectory(
+  path: string,
+  recursive: boolean,
+): Promise<string | undefined> {
+  const native = await windowsOutputBinding();
   const create = async (target: string): Promise<string | undefined> => {
     const createOne = () =>
       native.createPrivateWindowsDirectory(
         Buffer.from(win32.toNamespacedPath(target), "utf16le"),
+        true,
       );
     let error = createOne();
     let firstCreated: string | undefined;
@@ -2315,8 +2336,10 @@ export async function createWindowsOutputDirectory(
       error = createOne();
     }
     if (error === 0) return firstCreated ?? target;
-    if (recursive && error === 183 && (await stat(target)).isDirectory())
+    if (recursive && error === 183 && (await stat(target)).isDirectory()) {
+      validateWindowsOutputPath(native, target);
       return firstCreated;
+    }
     throw new OutputDirectoryError(
       `Unable to create private Windows output directory (Windows error ${error}): ${target}`,
     );
@@ -2378,7 +2401,8 @@ export async function requireSecureOutputAncestry(
   path: string,
   effectiveUid = process.geteuid?.(),
 ): Promise<void> {
-  if (process.platform === "win32") return;
+  if (process.platform === "win32")
+    return validateWindowsOutputPath(await windowsOutputBinding(), path);
   let current = dirname(resolve(path));
   while (true) {
     try {

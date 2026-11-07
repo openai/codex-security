@@ -66,12 +66,17 @@ def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> lis
     ]
 
 
-def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> Path:
+def _create_private_windows_directory(path: Path, *, exist_ok: bool, scan_output: bool) -> Path:
     """Create one Windows directory with a protected inheritable DACL."""
     import ctypes
     import ctypes.wintypes
 
-    from windows_scan_local_files import verify_private_scan_root
+    from windows_scan_local_files import (
+        create_windows_output_directory,
+        current_user_sid,
+        require_windows_output_path,
+        verify_private_scan_root,
+    )
 
     class SecurityAttributes(ctypes.Structure):
         _fields_ = [
@@ -94,27 +99,9 @@ def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> Path:
         raise ValueError("Select a directory on a Windows volume that supports ACLs.")
 
     security = ctypes.WinDLL("advapi32", use_last_error=True)
-    # GetCurrentProcessToken() is a Windows pseudo-handle and does not need closing.
-    token = ctypes.wintypes.HANDLE(-4)
-    token_user = 1  # TOKEN_INFORMATION_CLASS.TokenUser
-    size = ctypes.wintypes.DWORD()
-    security.GetTokenInformation(token, token_user, None, 0, ctypes.byref(size))
-    if ctypes.get_last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
-        raise ctypes.WinError(ctypes.get_last_error())
-    user = ctypes.create_string_buffer(size.value)
-    if not security.GetTokenInformation(token, token_user, user, size, ctypes.byref(size)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    # TOKEN_USER starts with SID_AND_ATTRIBUTES.Sid.
-    sid = ctypes.wintypes.LPWSTR()
-    if not security.ConvertSidToStringSidW(
-        ctypes.wintypes.LPVOID.from_buffer(user), ctypes.byref(sid)
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        owner = "" if exist_ok else f"O:{sid.value}"
-        dacl = f"{owner}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid.value})"
-    finally:
-        kernel.LocalFree(sid)
+    sid = current_user_sid()
+    owner = "" if exist_ok else f"O:{sid}"
+    dacl = f"{owner}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
 
     descriptor = ctypes.wintypes.LPVOID()
     if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -122,34 +109,47 @@ def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> Path:
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
-        if kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
-            if exist_ok:
-                return path
-            return verify_private_scan_root(path, descriptor)
-        error = ctypes.get_last_error()
+        if scan_output:
+            error = create_windows_output_directory(path, descriptor)
+        else:
+            attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+            error = (
+                0
+                if kernel.CreateDirectoryW(str(path), ctypes.byref(attributes))
+                else ctypes.get_last_error()
+            )
+        if not error:
+            return path if exist_ok else verify_private_scan_root(path, descriptor)
         if exist_ok and error == 183 and path.is_dir():  # ERROR_ALREADY_EXISTS
+            if scan_output:
+                require_windows_output_path(path)
             return path
         raise ctypes.WinError(error)
     finally:
         kernel.LocalFree(descriptor)
 
 
-def create_private_directory(path: Path) -> None:
+def create_private_directory(path: Path, *, scan_output: bool = False) -> None:
     """Create missing directories privately without changing existing permissions."""
     if os.name == "nt" and path.is_dir():
+        if scan_output:
+            from windows_scan_local_files import require_windows_output_path
+
+            require_windows_output_path(path)
         return
+    if os.name == "nt" and scan_output and not path.parent.is_dir():
+        create_private_directory(path.parent, scan_output=True)
     try:
         if os.name == "nt":
-            _create_private_windows_directory(path, exist_ok=True)
+            _create_private_windows_directory(path, exist_ok=True, scan_output=scan_output)
         else:
             path.mkdir(mode=0o700, exist_ok=True)
     except FileNotFoundError:
         if path.parent == path:
             raise
-        create_private_directory(path.parent)
+        create_private_directory(path.parent, scan_output=scan_output)
         if os.name == "nt":
-            _create_private_windows_directory(path, exist_ok=True)
+            _create_private_windows_directory(path, exist_ok=True, scan_output=scan_output)
         else:
             path.mkdir(mode=0o700, exist_ok=True)
 
@@ -164,7 +164,7 @@ def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
     for _ in range(100):
         path = parent / f"{prefix}{secrets.token_hex(4)}"
         try:
-            return _create_private_windows_directory(path, exist_ok=False)
+            return _create_private_windows_directory(path, exist_ok=False, scan_output=True)
         except FileExistsError:
             continue
     raise FileExistsError(f"Could not create a unique directory beneath {parent}.")

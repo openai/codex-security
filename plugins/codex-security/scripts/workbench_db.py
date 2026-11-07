@@ -639,7 +639,9 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
     root = resolve_scan_root(scan_root)
-    target_root = (root / safe_segment(target.name)).resolve()
+    target_root = root / safe_segment(target.name)
+    if os.name != "nt":
+        target_root = target_root.resolve()
     if target_root == target or target in target_root.parents:
         raise SystemExit("The scan artifact directory must be outside the selected target.")
     return target_root
@@ -719,7 +721,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target_kind=diff_target["kind"] if diff_target is not None else None,
         )
         target_root = scan_target_root(args.scan_root, target)
-        create_private_directory(target_root)
+        create_private_directory(target_root, scan_output=True)
         require_working_tree_unchanged(target, diff_target)
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
@@ -891,7 +893,7 @@ def _start_prompt_driven_scan(
                     **scan_context(connection, existing["id"]),
                     "startDisposition": "joined",
                 }
-            create_private_directory(target_root)
+            create_private_directory(target_root, scan_output=True)
             workspace_id = str(uuid.uuid4())
             scan_id = str(uuid.uuid4())
             timestamp = now()
@@ -3173,7 +3175,14 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
     ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
     # Re-check ownership and parents so the scan directory cannot be substituted.
-    if os.name != "nt":
+    if os.name == "nt":
+        from windows_scan_local_files import require_windows_output_path
+
+        try:
+            require_windows_output_path(scan_dir)
+        except OSError as exc:
+            raise SystemExit(str(exc)) from exc
+    else:
         geteuid = getattr(os, "geteuid", None)
         effective_uid = geteuid() if geteuid is not None else None
         if effective_uid is not None and metadata.st_uid != effective_uid:
