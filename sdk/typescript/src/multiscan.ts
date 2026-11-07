@@ -378,7 +378,7 @@ async function runCampaign(
       if (receipt.status === "completed") {
         try {
           if (receipt.cleanupPending === "checkout") {
-            await removeRecordedCheckout(
+            await removeCheckout(
               join(output, "checkouts", task.id),
               artifactOutput,
               options.signal,
@@ -390,7 +390,7 @@ async function runCampaign(
             const taskRoot = join(recoveryRoot, task.id);
             await lstat(taskRoot);
             await ensureOutputDirectory(taskRoot);
-            await removeRecordedCheckout(
+            await removeCheckout(
               join(taskRoot, `attempt-${receipt.attempt}`),
               artifactOutput,
               options.signal,
@@ -584,27 +584,18 @@ async function runCampaign(
               }
             }
             protectedRoot = checkout;
+            // Claim the fresh checkout before Git or the scanner can fail.
+            const marker = await checkoutMarker(checkout, scanDir);
+            await mkdir(join(checkout, ".git"), { mode: 0o700 });
+            await writeFile(join(checkout, CHECKOUT_MARKER), marker, {
+              flag: "wx",
+              mode: 0o600,
+            });
             await checkoutRevision(
               task,
               checkout,
               options.signal,
               options.githubHost,
-            );
-            const gitDir = join(checkout, ".git");
-            if (
-              relative(await realpath(gitDir), gitDir) !== "" ||
-              !(await lstat(gitDir)).isDirectory()
-            )
-              throw new Error(
-                "The campaign checkout must have a real Git directory.",
-              );
-            await writeFile(
-              join(checkout, CHECKOUT_MARKER),
-              await checkoutMarker(checkout, scanDir),
-              {
-                flag: "wx",
-                mode: 0o600,
-              },
             );
             if (task.scope !== undefined) {
               const scoped = await realpath(join(checkout, task.scope));
@@ -684,7 +675,7 @@ async function runCampaign(
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
-            cleanupFailure = await removeCheckout(checkout);
+            cleanupFailure = await removeCheckout(checkout, scanDir);
           }
         }
         const reportedErrors = [failure, cleanupFailure].filter(
@@ -732,7 +723,7 @@ async function runCampaign(
         await receiptTail;
         options.signal?.throwIfAborted();
         if (recoveryCheckout !== undefined) {
-          reportedError = await removeCheckout(recoveryCheckout);
+          reportedError = await removeCheckout(recoveryCheckout, scanDir);
         }
         notifyProgress(options, {
           repository: task.id,
@@ -801,37 +792,33 @@ async function checkoutMarker(
   ]);
 }
 
-async function removeRecordedCheckout(
+async function removeCheckout(
   checkout: string,
   scanDir: string,
   signal?: AbortSignal,
-) {
-  const expected = Buffer.from(await checkoutMarker(checkout, scanDir));
-  const marker = await lstat(join(checkout, CHECKOUT_MARKER)).catch(
-    undefinedIfMissingFile,
-  );
-  if (
-    marker?.isFile() &&
-    marker.size === expected.length &&
-    (
-      await readScanFile(
-        checkout,
-        CHECKOUT_MARKER,
-        "campaign checkout marker",
-        signal,
-      )
-    ).equals(expected)
-  ) {
-    await rm(checkout, { recursive: true, force: true });
+): Promise<string | undefined> {
+  try {
+    const marker = await lstat(join(checkout, CHECKOUT_MARKER)).catch(
+      undefinedIfMissingFile,
+    );
+    if (!marker?.isFile()) return undefined;
+    const expected = Buffer.from(await checkoutMarker(checkout, scanDir));
+    if (
+      marker.size === expected.length &&
+      (
+        await readScanFile(
+          checkout,
+          CHECKOUT_MARKER,
+          "campaign checkout marker",
+          signal,
+        )
+      ).equals(expected)
+    ) {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  } catch (error) {
+    return `Multiscan checkout cleanup failed: ${errorMessage(error)}`;
   }
-}
-
-async function removeCheckout(path: string): Promise<string | undefined> {
-  return rm(path, { recursive: true, force: true }).then(
-    () => undefined,
-    (error: unknown) =>
-      `Multiscan checkout cleanup failed: ${errorMessage(error)}`,
-  );
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {

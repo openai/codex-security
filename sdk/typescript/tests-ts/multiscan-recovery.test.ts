@@ -92,7 +92,7 @@ describe("multiscan", () => {
         const originalRm = filesystem.rm;
         const removeSpy = spyOn(filesystem, "rm").mockImplementation(
           async (...args) => {
-            if (String(args[0]) === checkout)
+            if (run.mock.calls.length > 0 && String(args[0]) === checkout)
               throw new Error("Checkout is busy");
             return originalRm(...args);
           },
@@ -119,6 +119,40 @@ describe("multiscan", () => {
       expect(run).toHaveBeenCalledTimes(1);
       expect(await readFile(ledger)).toEqual(before);
       expect(await readFile(note, "utf8")).toBe("Independent checkout.\n");
+      expect((await lstat(join(checkout, ".git"))).isDirectory()).toBe(true);
+    },
+  );
+
+  test.each(["ordinary", "recovery"] as const)(
+    "preserves a checkout replaced while its %s scan is running",
+    async (kind) => {
+      const { paths } = await repositoryFixture("replaced");
+      const recovery = kind === "recovery";
+      if (recovery) {
+        await runMultiscan(
+          options(paths, client(rejecting("Stopped")), { maxAttempts: 1 }),
+        );
+      }
+      const run = mock<SecurityClient["run"]>(async (checkout, scan = {}) => {
+        const result = await completedScan(scan.outputDir!);
+        await rename(checkout, join(paths.root, "old-checkout"));
+        await mkdir(checkout);
+        git(checkout, "init", "-q");
+        await writeFile(join(checkout, "note.txt"), "New work.\n");
+        return result;
+      });
+      const summary = await runMultiscan(
+        options(paths, client(run), {
+          maxAttempts: 1,
+          recoverScan: recovery ? async () => undefined : undefined,
+        }),
+      );
+      expect(summary).toMatchObject({ completed: 1, failed: 0 });
+      expect(run).toHaveBeenCalledTimes(1);
+      const checkout = run.mock.calls[0]![0];
+      expect(await readFile(join(checkout, "note.txt"), "utf8")).toBe(
+        "New work.\n",
+      );
       expect((await lstat(join(checkout, ".git"))).isDirectory()).toBe(true);
     },
   );
