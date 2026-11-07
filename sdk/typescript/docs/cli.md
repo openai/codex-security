@@ -1116,6 +1116,12 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
+If a scan reports that its state directory overlaps a protected root, choose a
+private directory in a separate tree, such as a sibling of the protected root.
+Set `CODEX_SECURITY_STATE_DIR` for local scans or `stateDirectory` on a hosted
+scan request. SDK callers handling `OutputInsideProtectedRootError.pathKind`
+can match `"state"` for this case.
+
 If credential-home preparation fails, the error includes the underlying
 filesystem diagnostic. For permission or read-only filesystem errors, check
 the reported path or set `CODEX_SECURITY_STATE_DIR` to a private, writable
