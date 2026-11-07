@@ -5915,9 +5915,10 @@ export async function main(
             onScanEvent:
               dashboard === null
                 ? (event) => {
-                    const componentName =
+                    const componentName = diagnosticValue(
                       componentNames.get(event.componentId) ??
-                      event.componentId;
+                        event.componentId,
+                    );
                     const line = componentScanEventLine(
                       componentName,
                       event,
@@ -5942,7 +5943,7 @@ export async function main(
               if (dashboard !== null) dashboard.updateComponent(component);
               else
                 errorOutput.write(
-                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
+                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
             },
             onComplete: (result) => {
