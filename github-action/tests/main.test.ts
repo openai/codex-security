@@ -768,6 +768,27 @@ test('valid empty findings publish zero counts', async (t) => {
   const result = await app.run();
   assert.equal(result.exitCode, 0);
   for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '0');
+  assert.doesNotMatch(result.summary, /Scope limitations/);
+});
+
+test('the job summary shows scope limitations from a completed scan with zero findings', async t => {
+  const app = await harness(t);
+  app.setInput('fail-on-severity', 'high');
+  app.configure({exitCode: 0, scanResult: value => {
+    value.findings.findings = [];
+    value.manifest.scan.scope.limitations = [
+      'Discovery stopped before any review completed.',
+      'Unreviewed directory: <example>.',
+    ];
+  }});
+  const result = await app.run();
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'passed');
+  assert.equal(result.outputs['sarif-upload-ready'], 'true');
+  assert.ok(result.summary.includes('**Scope limitations**'));
+  assert.ok(result.summary.includes('Discovery stopped before any review completed.'));
+  assert.ok(result.summary.includes('Unreviewed directory: &lt;example&gt;.'));
 });
 
 test('changed checkout during a committed diff scan fails', async (t) => {
