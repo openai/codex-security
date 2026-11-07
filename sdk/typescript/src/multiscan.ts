@@ -54,6 +54,7 @@ import {
 } from "./runtime.js";
 import {
   DiffTarget,
+  gitProtectionRoots,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanMode,
 } from "./targets.js";
@@ -64,7 +65,10 @@ import {
 } from "./scan-settings.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  withProtectedExecutableRoots,
+} from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = ["scan-manifest.json", "findings.json", "report.md"];
@@ -187,6 +191,9 @@ export async function runMultiscan(
       "Bulk scans do not support diff or working-tree scopes because their checkouts are clean, shallow snapshots. Use repository or path scopes instead.",
     );
   }
+  const localSources = [
+    ...new Set(tasks.map((task) => task.repository).filter(isAbsolute)),
+  ];
   const repositories: string[] = [];
   if (
     [
@@ -195,8 +202,7 @@ export async function runMultiscan(
       [options.postScanPrompt, options.postScanPromptFile],
     ].some(([inline, file]) => inline === undefined && file !== undefined)
   ) {
-    for (const repository of new Set(tasks.map((task) => task.repository))) {
-      if (!isAbsolute(repository)) continue;
+    for (const repository of localSources) {
       try {
         repositories.push(await realpath(repository));
       } catch (error) {
@@ -253,11 +259,17 @@ export async function runMultiscan(
       );
     })());
   try {
-    const result = await runCampaign(
-      resolvedOptions,
-      tasks,
-      output,
-      resumePluginRoot,
+    const worktrees = await Promise.all(
+      localSources.map((source) => gitProtectionRoots(source, options.signal)),
+    );
+    const result = await withProtectedExecutableRoots(
+      [
+        ...localSources,
+        ...worktrees.flat(),
+        join(output, "checkouts"),
+        join(output, "recovery-checkouts"),
+      ],
+      () => runCampaign(resolvedOptions, tasks, output, resumePluginRoot),
     );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }

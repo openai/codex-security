@@ -54,6 +54,7 @@
   "publishConfig": {
     "access": "public",
     "executableFiles": [
+      "_bundled_plugin/scripts/dispatch_inventory_tool",
       "_bundled_plugin/scripts/launch_codex_security_mcp"
     ]
   },

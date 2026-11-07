@@ -69,6 +69,7 @@
     "scripts/deep_scan_config.py",
     "scripts/deep_scan_defaults.json",
     "scripts/deep_scan_workbench.py",
+    "scripts/dispatch_inventory_tool",
     "scripts/filesystem_identity.py",
     "scripts/finalize_scan_contract.py",
     "scripts/finding_preview.py",

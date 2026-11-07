@@ -1,5 +1,10 @@
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
+import { bundledPluginRoot, hasPluginManifest } from "./bundled-plugin.js";
+export {
+  bundledPluginCandidates,
+  bundledPluginRoot,
+} from "./bundled-plugin.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
@@ -53,7 +58,6 @@ import {
   sep,
   win32,
 } from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
@@ -76,6 +80,8 @@ import {
 import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import {
+  campaignExecutable,
+  inspectTrustedExecutable,
   isWithin,
   resolveTrustedExecutable,
   type InspectedExecutable,
@@ -1937,25 +1943,6 @@ export async function runWorkbench(
   return result as JsonObject;
 }
 
-export function bundledPluginCandidates(moduleDirectory: string): string[] {
-  return [
-    resolve(moduleDirectory, "_bundled_plugin"),
-    resolve(moduleDirectory, "../_bundled_plugin"),
-  ];
-}
-
-export async function bundledPluginRoot(): Promise<string> {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  for (const candidate of bundledPluginCandidates(moduleDirectory)) {
-    if (await hasPluginManifest(candidate)) {
-      return await realpath(candidate);
-    }
-  }
-  throw new PluginBootstrapError(
-    "The bundled Codex Security plugin is missing.",
-  );
-}
-
 export async function validateOutputDir(
   outputDirectory?: string,
   archiveExisting = false,
@@ -2832,6 +2819,30 @@ type PluginRuntimeProjection = {
   files: Map<string, { contents: Buffer; mode?: number }>;
 };
 
+// Private handoff to the staged SDK launcher and shell-invoked helpers.
+export const SDK_NODE_SEARCH_PATH = "_CODEX_SECURITY_SDK_NODE_SEARCH_PATH";
+
+export async function sdkNodeSearchPath(
+  roots: readonly string[],
+): Promise<string> {
+  let fallback = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  const current = dirname(process.execPath);
+  if (
+    process.release.name === "node" &&
+    !process.versions["bun"] &&
+    !process.versions["electron"] &&
+    basename(process.execPath) === "node" &&
+    !current.includes(":")
+  )
+    fallback += `:${current}`;
+  const inspected = await inspectTrustedExecutable(
+    "node",
+    { PATH: fallback },
+    roots,
+  );
+  return inspected.environment["PATH"] ?? "";
+}
+
 async function pluginRuntimeProjection(
   root: string,
   signal?: AbortSignal,
@@ -2875,7 +2886,7 @@ async function pluginRuntimeProjection(
         'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
         '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
         "fi\n" +
-        'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+        'exec "$(command -p dirname "$0")/launch_codex_security_mcp" "$@"\n',
     ),
     mode: 0o755,
   });
@@ -3430,22 +3441,26 @@ export function isDisconnectedChildStdin(
 
 export async function runCodexCommand(
   command: CodexCommand,
-  args: readonly string[],
+  args: readonly string[] | ((executable: string) => readonly string[]),
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
+  const campaign = campaignExecutable(command.command, environment);
+  const selected = campaign && (await campaign);
+  const executable = selected?.executable ?? command.command;
+  const commandArgs = typeof args === "function" ? args(executable) : args;
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
   let awaitingArchive = archiveHandshake;
   const child = spawn(
-    executablePathForSpawn(command.command),
-    [...(command.args ?? []), ...args],
+    executablePathForSpawn(executable),
+    [...(command.args ?? []), ...commandArgs],
     {
-      env: environment,
+      env: selected?.environment ?? environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
@@ -3524,7 +3539,12 @@ export async function probeCodexSandbox(
   // This preflight covers the Unix sandbox backends.
   if (process.platform === "win32") return;
   // Reuse the resolved Codex executable instead of looking up a probe on PATH.
-  const args = ["sandbox", "--", command.command, "--version"];
+  const args = (executable: string) => [
+    "sandbox",
+    "--",
+    executable,
+    "--version",
+  ];
   const timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
   let detail: string;
   try {
@@ -3554,7 +3574,7 @@ export async function probeCodexSandbox(
       ? "\nOn Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README."
       : "";
   throw new SandboxUnavailableError(
-    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args.join(" ")}'.${guidance}`,
+    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args(command.command).join(" ")}'.${guidance}`,
   );
 }
 
@@ -3747,13 +3767,6 @@ async function usablePython(
 
 export function isPythonPathCandidate(candidate: string): boolean {
   return candidate.includes("/") || candidate.includes("\\");
-}
-
-async function hasPluginManifest(root: string): Promise<boolean> {
-  return await lstat(join(root, ".codex-plugin", "plugin.json")).then(
-    (metadata) => metadata.isFile(),
-    () => false,
-  );
 }
 
 /** @internal Compare filesystem identity without depending on path spelling. */

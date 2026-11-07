@@ -1,8 +1,9 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, spyOn } from "bun:test";
 import { SandboxUnavailableError } from "../src/index.js";
 import { probeCodexSandbox } from "../src/runtime.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -112,9 +113,8 @@ describe("Codex sandbox probe", () => {
       await expect(
         probeCodexSandbox({ command }, environment),
       ).resolves.toBeUndefined();
-      expect(await readFile(`${command}.args`, "utf8")).toBe(
-        ["sandbox", "--", command, "--version", ""].join("\n"),
-      );
+      const args = ["sandbox", "--", command, "--version", ""].join("\n");
+      expect(await readFile(`${command}.args`, "utf8")).toBe(args);
       expect(await readFile(`${command}.environment`, "utf8")).toBe(
         [
           environment.PATH,
@@ -123,6 +123,14 @@ describe("Codex sandbox probe", () => {
           "",
         ].join("\n"),
       );
+      const source = join(root, "repository");
+      await mkdir(source);
+      const alias = join(source, "codex");
+      await symlink(command, alias);
+      await withProtectedExecutableRoots([source], () =>
+        probeCodexSandbox({ command: alias }, environment),
+      );
+      expect(await readFile(`${command}.args`, "utf8")).toBe(args + args);
     },
   );
 

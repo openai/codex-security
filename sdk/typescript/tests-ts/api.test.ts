@@ -85,6 +85,7 @@ import {
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import {
   copyCompletedScan,
   copyCredentialTestPlugin,
@@ -1110,6 +1111,7 @@ describe("CodexSecurity orchestration", () => {
       const environment = {
         OPENAI_API_KEY: "synthetic-openai-key",
         [competingApiKey]: "synthetic-competing-provider-key",
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
         [apiKey]: `synthetic-${provider}-key`,
       };
       const client = new TestClient(
@@ -17303,6 +17305,59 @@ if __name__ == "__main__":
     }
   });
 
+  test.skipIf(process.platform === "win32")(
+    "rejects campaign Codex launches through a selected source interpreter",
+    async () => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const interpreter = join(root, "interpreter");
+      await symlink("/bin/sh", join(repository, "shell"));
+      await symlink(join(repository, "shell"), interpreter);
+      const executable = join(root, "codex");
+      const marker = join(root, "launched");
+      await writeFile(
+        executable,
+        `#!${interpreter}\nprintf ran > "${marker}"\n`,
+        { mode: 0o700 },
+      );
+      const environment = {
+        OPENAI_API_KEY: "ambient-key",
+        CODEX_CLI_PATH: executable,
+        PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+      };
+      const createCodex = mock(completedCodex(root));
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        environment,
+        prepareRuntime: runtimePreparer(codexHome, () => ({
+          environment: { ...environment, CODEX_HOME: codexHome },
+        })),
+        createCodex,
+      });
+      try {
+        const attempts = await withProtectedExecutableRoots([repository], () =>
+          Promise.allSettled([
+            runtime.probeCodexSandbox({ command: executable }, environment),
+            client.run(repository),
+          ]),
+        );
+        for (const attempt of attempts) {
+          expect(attempt).toMatchObject({
+            status: "rejected",
+            reason: {
+              message: expect.stringContaining(`trusted PATH: ${executable}`),
+            },
+          });
+        }
+        expect(existsSync(marker)).toBe(false);
+        expect(createCodex).not.toHaveBeenCalled();
+        await runtime.probeCodexSandbox({ command: executable }, environment);
+        expect(existsSync(marker)).toBe(true);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test.each(["native", "shim"])(
     "uses one spawnable Codex executable for scans and nested workers (%s)",
     async (kind) => {
@@ -17370,6 +17425,7 @@ if __name__ == "__main__":
     "missing tools",
     "non-directory tools",
     "blank override",
+    "bulk campaign",
   ])("preserves default SDK bundled tools for %s", async (scenario) => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const executable = join(
@@ -17381,7 +17437,7 @@ if __name__ == "__main__":
     );
     const toolsDirectory = join(dirname(dirname(executable)), "codex-path");
     const otherTools = join(root, "other tools");
-    const pathEnvironment: Record<string, string> =
+    let pathEnvironment: Record<string, string> =
       scenario === "no PATH"
         ? {}
         : scenario === "mixed-case alias"
@@ -17400,7 +17456,10 @@ if __name__ == "__main__":
       mkdir(otherTools),
       mkdir(dirname(executable), { recursive: true }),
     ]);
-    await writeFile(executable, "synthetic executable; never launched\n");
+    if (scenario === "bulk campaign") pathEnvironment = { PATH: otherTools };
+    await writeFile(executable, "synthetic executable; never launched\n", {
+      mode: 0o700,
+    });
     const hasTools =
       scenario !== "missing tools" && scenario !== "non-directory tools";
     if (hasTools) await mkdir(toolsDirectory);
@@ -17426,12 +17485,20 @@ if __name__ == "__main__":
       createCodex,
     });
     try {
-      await client.run(repository);
+      if (scenario === "bulk campaign") {
+        await withProtectedExecutableRoots([repository], () =>
+          client.run(repository),
+        );
+      } else {
+        await client.run(repository);
+      }
       const options = createCodex.mock.lastCall?.[0] ?? null;
       expect(options?.codexPathOverride).toBe(
         process.platform === "win32"
           ? win32.toNamespacedPath(executable)
-          : undefined,
+          : scenario === "bulk campaign"
+            ? executable
+            : undefined,
       );
       expect(options?.env?.["CODEX_CLI_PATH"]).toBe(executable);
       const pathValues = Object.fromEntries(

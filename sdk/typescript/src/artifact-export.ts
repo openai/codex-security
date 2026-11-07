@@ -10,6 +10,7 @@ import type { JsonObject } from "./config.js";
 import { resolveConfigPath } from "./config-path.js";
 import { CodexSecurityError } from "./errors.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
+import { campaignCommandEnvironment } from "./trusted-executable.js";
 import {
   type PluginPythonOptions,
   bundledPluginRoot,
@@ -138,7 +139,7 @@ export async function runArtifactHelper(
       ...args,
     ],
     {
-      env: environment,
+      env: (await campaignCommandEnvironment(environment)) ?? environment,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       signal: options.signal,
