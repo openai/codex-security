@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
@@ -28,10 +29,14 @@ const { workbenchArgs } = await importSource(
 );
 async function userSitePython(): Promise<string> {
   // A caller's virtualenv may intentionally disable user-site imports.
-  const { stdout } = await promisify(execFile)(
-    process.env.PYTHON?.trim() || "python3",
-    ["-I", "-X", "utf8", "-B", "-c", "import sys; print(sys._base_executable)"],
-  );
+  const { stdout } = await promisify(execFile)(fixturePython, [
+    "-I",
+    "-X",
+    "utf8",
+    "-B",
+    "-c",
+    "import sys; print(sys._base_executable)",
+  ]);
   return stdout.trim();
 }
 
@@ -66,7 +71,7 @@ def main(*, select_finalization=False, with_execution_settings=False):
       const args = [command, "--scan-id=fixture"];
       const input = '{"worker":"fixture"}';
       assert.deepEqual(
-        await execute(process.env.PYTHON?.trim() || "python3", args, input, {
+        await execute(fixturePython, args, input, {
           selectFinalization,
           withExecutionSettings,
         }),
@@ -79,6 +84,59 @@ def main(*, select_finalization=False, with_execution_settings=False):
       );
     }
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+await test("Python compressed-rollout reads inherit the plugin Node without Node on PATH", async () => {
+  const root = await temporaryDirectory("workbench-node-runtime-");
+  const python = await userSitePython();
+  const original = {
+    PATH: process.env.PATH,
+    CODEX_MCP_NODE_PATH: process.env.CODEX_MCP_NODE_PATH,
+  };
+  try {
+    const rollout = path.join(root, "rollout.jsonl.zst");
+    await writeFile(
+      rollout,
+      Buffer.from(
+        "KLUv/SA2sQEAeyJ0eXBlIjoic2Vzc2lvbl9tZXRhIiwicGF5bG9hZCI6eyJpZCI6ImNvbXByZXNzZWQifX0K",
+        "base64",
+      ),
+    );
+    const scripts = path.resolve(
+      import.meta.dirname,
+      "../../../../sdk/typescript/_bundled_plugin/scripts",
+    );
+    const execute = await fixtureWorkbench(
+      root,
+      `import json, os, sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(scripts)})
+from workbench_scan_usage import _rollout_lines
+def main():
+    with _rollout_lines(Path(sys.argv[1])) as source:
+        contents = b"".join(source).decode("utf-8")
+    print(json.dumps({"contents": contents, "node": os.environ["CODEX_MCP_NODE_PATH"]}))
+`,
+    );
+    process.env.PATH = "";
+    for (const configured of [undefined, ""]) {
+      if (configured === undefined) delete process.env.CODEX_MCP_NODE_PATH;
+      else process.env.CODEX_MCP_NODE_PATH = configured;
+      const result = await execute(python, [rollout]);
+      assert.equal(result.node, process.execPath);
+      assert.equal(
+        result.contents,
+        '{"type":"session_meta","payload":{"id":"compressed"}}\n',
+      );
+      assert.equal(process.env.CODEX_MCP_NODE_PATH, configured);
+    }
+  } finally {
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -107,7 +165,7 @@ def main(*, select_finalization=False, with_execution_settings=False):
       "--help",
     ];
     const result = await executeParser(
-      process.env.PYTHON?.trim() || "python3",
+      fixturePython,
       workbenchArgs("record-deep-scan-iteration", {
         scanId: randomUUID(),
         workerId: randomUUID(),
@@ -232,7 +290,7 @@ try {
   );
   for (const stdin of [true, false]) {
     const result = await executeWorkbench(
-      process.env.PYTHON?.trim() || "python3",
+      fixturePython,
       workbenchArgs("create-workspace", {
         workspaceId: randomUUID(),
         targetPath: target,
@@ -259,15 +317,33 @@ try {
     "raw.bin",
   ];
   await executeWorkbench(
-    process.env.PYTHON?.trim() || "python3",
+    fixturePython,
     ["save-artifact", ...artifactArgs],
     binary,
   );
-  const saved = await executeWorkbench(
-    process.env.PYTHON?.trim() || "python3",
-    ["read-artifact", ...artifactArgs],
-  );
+  const saved = await executeWorkbench(fixturePython, [
+    "read-artifact",
+    ...artifactArgs,
+  ]);
   assert.deepEqual(Buffer.from(saved.content, "base64"), binary);
+  await assert.rejects(
+    executeWorkbench(fixturePython, [
+      "read-artifact",
+      "--artifact-root",
+      artifactRoot,
+      "--artifact-path",
+      "missing.bin",
+    ]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error && "stderr" in error);
+      assert.match(
+        String(error.stderr),
+        /Saved artifact: expected a file inside the scan directory/,
+      );
+      assert.doesNotMatch(String(error.stderr), /Traceback/);
+      return true;
+    },
+  );
   const replacementTarget = path.join(root, "target-\ufffd");
   await mkdir(replacementTarget);
   for (const rawBytePath of [false, true]) {
@@ -283,10 +359,11 @@ try {
             ]),
           );
         }
-        const inspected = await executeWorkbench(
-          process.env.PYTHON?.trim() || "python3",
-          ["inspect-target", "--target-path", path.join(root, "target-\udcff")],
-        );
+        const inspected = await executeWorkbench(fixturePython, [
+          "inspect-target",
+          "--target-path",
+          path.join(root, "target-\udcff"),
+        ]);
         assert.equal(inspected.targetPath, replacementTarget);
       },
     );
@@ -307,10 +384,9 @@ await test("large saved context retains cancellation results and diagnostics", a
     await writeFile(path.join(target, "example.py"), "value = 1\n");
     const state = path.join(root, "state");
     process.env.CODEX_SECURITY_STATE_DIR = state;
-    const python = process.env.PYTHON || "python3";
     const userContext = "x".repeat(1_500_000);
     const begun = (await executeWorkbench(
-      python,
+      fixturePython,
       [
         "begin-deep-scan",
         "--target-path",
@@ -327,7 +403,11 @@ await test("large saved context retains cancellation results and diagnostics", a
     )) as { deepScan: { scanId: string } };
     const scanId = begun.deepScan.scanId;
     const readScan = async () =>
-      (await executeWorkbench(python, ["get-scan", "--scan-id", scanId])) as {
+      (await executeWorkbench(fixturePython, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ])) as {
         workspace: {
           results: { userContext: string; progress: { status: string } };
         };
@@ -335,7 +415,7 @@ await test("large saved context retains cancellation results and diagnostics", a
     const current = await readScan();
     assert.equal(current.workspace.results.userContext, userContext);
     assert.equal(current.workspace.results.progress.status, "running");
-    await executeWorkbench(python, ["cancel-scan", "--scan-id", scanId]);
+    await executeWorkbench(fixturePython, ["cancel-scan", "--scan-id", scanId]);
     assert.equal(
       (await readScan()).workspace.results.progress.status,
       "canceled",

@@ -67,7 +67,8 @@ test("Standard scan retries preserve the full validation error", async () => {
         return workerDraft([], { scanId: fixture.run.scanId });
       },
     });
-    assert.equal(outcome.status, "succeeded");
+    assert.equal(outcome.status, "validated");
+    await outcome.finish("succeeded");
     assert.equal(requests.length, 2);
     const retry = await readFile(requests[1].promptPath, "utf8");
     const data = JSON.parse(

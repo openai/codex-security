@@ -369,10 +369,7 @@ async function testOwnershipReadClearsStaleLease() {
       owned.updateProgress({ scanId, phase: "discovery" }),
       (error: unknown) => error === original,
     );
-    assert.deepEqual(owned.coordinatorLeaseArgs(scanId), [
-      "--coordinator-generation",
-      "2",
-    ]);
+    assert.equal(owned.coordinatorGeneration(scanId), 2);
   }
 }
 

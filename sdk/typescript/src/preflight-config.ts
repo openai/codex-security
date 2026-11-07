@@ -65,6 +65,12 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   };
   const executionConfig = (source: JsonObject): JsonObject => {
     const result: JsonObject = {};
+    // OTel exporters can contain credentials. Native runtime settings retain
+    // them; model-readable preflight files and saved recipes must not.
+    for (const key of ["analytics", "responses_api_metadata"]) {
+      if (Object.hasOwn(source, key))
+        result[key] = structuredClone(source[key]!);
+    }
     if (typeof source["daybreak"] === "boolean") {
       result["daybreak"] = source["daybreak"];
     }

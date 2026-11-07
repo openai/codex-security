@@ -1,3 +1,5 @@
+"""Replay the inputs selected before a publication crash while protecting newer canonical output."""
+
 from __future__ import annotations
 
 import json

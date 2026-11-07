@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 import { dirname, join, posix, relative, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
-import { validateRetainedCoverage } from "../coverage-publication.js";
+import {
+  validateRetainedCoverage,
+  validateWorkerReport,
+} from "../coverage-publication.js";
 import {
   parsePersistedScanDraft,
   scanDraftInputSchema,
@@ -73,12 +77,14 @@ export async function validateDiscoveryArtifacts(
   resultPath: string,
   expectedScanId: string,
   options: DiscoveryArtifactOptions = {},
+  admission: "new" | "previously-accepted" = "new",
 ): Promise<ScanDraftInput> {
   const result = await readDiscoveryAuditDraft(
     artifacts,
     resultPath,
     expectedScanId,
     options,
+    admission,
   );
   if (result.complete === false)
     throw new Error(
@@ -142,6 +148,7 @@ export async function readDiscoveryAuditDraft(
   resultPath: string,
   expectedScanId: string,
   options: DiscoveryArtifactOptions = {},
+  admission: "new" | "previously-accepted" = "new",
 ): Promise<ScanDraftInput> {
   const {
     artifactDir = dirname(resultPath),
@@ -174,8 +181,11 @@ export async function readDiscoveryAuditDraft(
     expectedScanId,
     parsePersistedScanDraft,
   );
-  if (result.complete !== false)
+  if (result.complete !== false) {
+    // Historical results retain their original display policy.
+    if (admission === "new") validateWorkerReport(result);
     await validateDiscoveryCoverage(artifacts.workersRoot, context, result);
+  }
   return result;
 }
 
@@ -183,6 +193,7 @@ export async function readDiscoveryAuditDraft(
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
+  additionalModel?: ScanDraftInput["threatModel"],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(
@@ -246,7 +257,11 @@ export function scanCoverage(
     };
   });
   return {
-    reviews: [provenance],
+    reviews: [
+      additionalModel
+        ? { ...provenance, threatModel: additionalModel }
+        : provenance,
+    ],
     surfaces,
     explicitExclusions: coverage.explicitExclusions.map(project),
     deferred: coverage.deferred.map((item, index) => ({
@@ -283,7 +298,13 @@ export function addScanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
 ): void {
-  const coverage = scanCoverage(worker, scanDir);
+  const model = worker.result.threatModel;
+  aggregate.threatModel ??= model;
+  const additionalModel =
+    model && !isDeepStrictEqual(model, aggregate.threatModel)
+      ? model
+      : undefined;
+  const coverage = scanCoverage(worker, scanDir, additionalModel);
   const previous = aggregate.sourceCoverage;
   if (!previous) {
     aggregate.sourceCoverage = coverage;

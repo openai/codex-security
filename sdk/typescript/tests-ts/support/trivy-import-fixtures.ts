@@ -1,3 +1,11 @@
+export function trivyRepositoryHeader(RepoURL: string) {
+  return {
+    SchemaVersion: 2,
+    ArtifactType: "repository",
+    Metadata: { RepoURL },
+  };
+}
+
 export function trivyReport() {
   const name = "@example/package";
   const version = "1.0.0";
@@ -58,4 +66,16 @@ export function trivyReport() {
       },
     ],
   };
+}
+
+export function trivyReportWithManyLocations() {
+  const report = trivyReport();
+  const repeated = structuredClone(report.Results[0]!);
+  repeated.Target = "workspace/package-lock.json";
+  repeated.Packages[0]!.Locations = Array.from({ length: 101 }, (_, i) => ({
+    StartLine: i * 5 + 1,
+    EndLine: i * 5 + 4,
+  }));
+  report.Results.push(repeated);
+  return report;
 }

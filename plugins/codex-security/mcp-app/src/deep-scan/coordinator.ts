@@ -3,6 +3,10 @@ import { publishSelectedDeepScan } from "./finalization.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
+import {
+  writeWorkerUsageReceipt,
+  type WorkerUsageReceipt,
+} from "./usage-receipt.js";
 import { mergeBatch } from "./iteration.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
@@ -784,10 +788,13 @@ export class DeepScanCoordinator {
     const scanLabel = await nextWorkerLabel(
       this.artifacts.workersRoot,
       "discovery",
+      persisted,
+      this.state.dispatchedCount,
     );
     const checkpointLabel = await nextWorkerLabel(
       this.artifacts.dedupRoot,
       "dedup",
+      persisted,
     );
     let pass = persisted.filter(
       (w) => w.kind === "dedup" && w.status === "succeeded",
@@ -847,7 +854,7 @@ export class DeepScanCoordinator {
           streak = count ? 0 : streak + 1;
         }
         resultPath = join(
-          await reserveCheckpointDirectory(
+          await reserveWorkerDirectory(
             this.artifacts.dedupRoot,
             checkpointLabel,
           ),
@@ -912,10 +919,11 @@ export class DeepScanCoordinator {
       );
       dispatched += count;
       this.state = { ...this.state, dispatchedCount: dispatched };
-      const previousFindings = result.findings.map(
-        ({ title, locations: [site] }) =>
-          `${site.path}:${site.startLine} ${title}`,
-      );
+      const previousFindings = result.findings.map(({ title, locations }) => {
+        const site =
+          locations.find(({ role }) => role === "root_control") ?? locations[0];
+        return `${site.path}:${site.startLine} ${title}`;
+      });
       const outcomes = await this.scanBatch(count, scanLabel, previousFindings);
       signal.throwIfAborted();
       batch = [];
@@ -956,16 +964,8 @@ export class DeepScanCoordinator {
       this.artifacts.scanDir,
       async (prompt, schema) => {
         if (stop) throw stop;
-        const { executor } = this.options;
-        if (!executor.compareFindings)
-          throw new Error("No Deep Scan finding comparison executor");
         try {
-          return await executor.compareFindings(
-            prompt,
-            this.artifacts.deepRoot,
-            this.abortController.signal,
-            schema,
-          );
+          return await this.compareReports(prompt, schema);
         } catch (error) {
           // Finish checkpointing accepted workers before stopping discovery.
           if (error instanceof DeepScanNonRetryableError) stop = error;
@@ -982,6 +982,77 @@ export class DeepScanCoordinator {
       },
     );
     return { counts, stop };
+  }
+
+  private async compareReports(
+    prompt: string,
+    schema: Record<string, unknown>,
+  ): Promise<string> {
+    const { executor } = this.options;
+    if (!executor.compareFindings)
+      throw new Error("No Deep Scan finding comparison executor");
+    const { scanId, workerUsageDirectory } = this.state;
+    const signal = this.abortController.signal;
+    const startedAt = new Date(this.clock.now()).toISOString();
+    const attemptId = randomUUID();
+    const receipt: WorkerUsageReceipt = {
+      schemaVersion: 1,
+      source: "codex_sdk",
+      usageScope: "thread_cumulative",
+      scanId,
+      workerId: attemptId,
+      kind: "compare",
+      attemptId,
+      attempt: 1,
+      resumed: false,
+      startedAt,
+      observedAt: startedAt,
+      outcome: "running",
+      usage: null,
+    };
+    const persist = async () => {
+      if (!workerUsageDirectory) return;
+      receipt.observedAt = new Date(this.clock.now()).toISOString();
+      try {
+        await writeWorkerUsageReceipt(workerUsageDirectory, receipt);
+      } catch (error) {
+        this.log({
+          event: "worker_usage_unavailable",
+          scanId,
+          attemptId,
+          reason: errorMessage(error),
+        });
+      }
+    };
+    await persist();
+    try {
+      const report = await executor.compareFindings(
+        prompt,
+        this.artifacts.deepRoot,
+        signal,
+        schema,
+        {
+          attemptId,
+          workerUsageDirectory,
+          onThreadStarted: async (id) => {
+            receipt.threadId = id;
+            await persist();
+          },
+          onUsage: async (usage, turnId) => {
+            receipt.usage = usage;
+            receipt.turnId = turnId;
+            await persist();
+          },
+        },
+      );
+      receipt.outcome = "succeeded";
+      return report;
+    } catch (error) {
+      receipt.outcome = signal.aborted ? "canceled" : "failed";
+      throw error;
+    } finally {
+      await persist();
+    }
   }
 
   private async restoreUnion(
@@ -1026,11 +1097,21 @@ export class DeepScanCoordinator {
     nextLabel: () => string,
     previousFindings: string[],
   ): Promise<DiscoveryOutcome[]> {
-    const scans = Array.from({ length: count }, async () => {
+    // Reserve in dispatch order. Another coordinator may create one of these
+    // labels after our directory listing but before we write its prompt.
+    const labels: string[] = [];
+    for (let i = 0; i < count; i++) {
+      labels.push(
+        basename(
+          await reserveWorkerDirectory(this.artifacts.workersRoot, nextLabel),
+        ),
+      );
+    }
+    const scans = labels.map(async (label) => {
       try {
         const outcome = await this.discoveryWorkers.runDiscoveryWorker(
           randomUUID(),
-          nextLabel(),
+          label,
           previousFindings,
         );
         if (outcome.status === "failed" && !outcome.replaceableFailureKind)
@@ -1093,6 +1174,7 @@ export class DeepScanCoordinator {
               ? claimedInput.resultManifestSha256
               : undefined),
         },
+        "previously-accepted",
       );
       recovered.push({
         id: worker.id,
@@ -1131,14 +1213,14 @@ const systemClock: DeepScanClock = {
   },
 };
 
-async function reserveCheckpointDirectory(
+async function reserveWorkerDirectory(
   root: string,
   nextLabel: () => string,
 ): Promise<string> {
   for (;;) {
     const directory = join(root, nextLabel());
     try {
-      // An old coordinator can finish a batch after its replacement checkpointed.
+      // A coordinator being replaced can still be reserving its last directory.
       await fs.mkdir(directory);
       return directory;
     } catch (error) {
@@ -1150,11 +1232,19 @@ async function reserveCheckpointDirectory(
 async function nextWorkerLabel(
   root: string,
   kind: "dedup" | "discovery",
+  persisted: PersistedDeepScanWorker[],
+  minimum = 0,
 ): Promise<() => string> {
-  let last = (await fs.readdir(root)).reduce((n, name) => {
+  const labels = [
+    ...(await fs.readdir(root)),
+    ...persisted
+      .filter((worker) => worker.kind === kind)
+      .map((worker) => basename(dirname(worker.artifactDir))),
+  ];
+  let last = labels.reduce((n, name) => {
     const sequence = workerLabelSequence(name, kind);
     return sequence > n ? sequence : n;
-  }, 0n);
+  }, BigInt(minimum));
   return () => `${kind}-${String(++last).padStart(4, "0")}`;
 }
 
@@ -1171,8 +1261,8 @@ function cloneState(state: DeepScanRunState): DeepScanRunState {
 }
 
 function isFreshRun(state: DeepScanRunState): boolean {
+  // A coordinator can persist the discovery phase before dispatching its first worker.
   return (
-    !state.discoveryStarted &&
     state.dispatchedCount === 0 &&
     !state.persistedWorkers?.some((worker) => worker.kind !== "setup") &&
     (state.persistedDedupInputs?.length ?? 0) === 0

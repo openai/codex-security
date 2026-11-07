@@ -47,6 +47,9 @@ export async function buildMcpApp({ output, native = "universal" }) {
   });
   await rm(mcpDir, { recursive: true, force: true });
   await mkdir(mcpDir, { recursive: true });
+  // A standalone plugin can live on a UNC share. End Node's package lookup
+  // here before it probes for package.json above the share root.
+  await writeFile(join(mcpDir, "package.json"), '{"private":true}\n');
 
   await writeRuntime("server", "main.ts");
   for (const file of nativeFiles) {
@@ -77,6 +80,18 @@ export async function buildMcpApp({ output, native = "universal" }) {
     }
   }
   await writeRuntime("helpers", "helpers-main.ts");
+  await build({
+    bundle: true,
+    entryPoints: [join(root, "src/session-decompression.ts")],
+    format: "esm",
+    outfile: join(mcpDir, "session-decompression.mjs"),
+    platform: "node",
+    target: "node20",
+  });
+  await copyFile(
+    join(root, "node_modules/fzstd/LICENSE"),
+    join(mcpDir, "fzstd-LICENSE.txt"),
+  );
   await build({
     bundle: true,
     entryPoints: [join(root, "src/deep-scan/permission-profile-preflight.ts")],

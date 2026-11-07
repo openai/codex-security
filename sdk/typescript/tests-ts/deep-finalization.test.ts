@@ -15,6 +15,7 @@ import zlib, { zstdCompressSync } from "node:zlib";
 import { afterEach, expect, test, spyOn } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
+  IncompleteScanError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "../src/errors.js";
@@ -30,6 +31,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 const threadId = "1af317a1-c9ed-4c73-b428-cb0d160cf8e8";
 const followUp = "Explain the selected finding.";
+const invalidArchive = /unknown frame descriptor|invalid zstd data/i;
 
 for (const boundary of ["registration", "stream-start"] as const) {
   test(`SDK cancels registered Deep Scan before first thread event: ${boundary}`, async () => {
@@ -884,7 +886,6 @@ for (const {
           onWarning: (message) => reportedWarnings.push(message),
         });
         if (
-          compressionRuntime === "without-decoder-budgeted" ||
           compressionRuntime === "corrupt-attributed-budgeted" ||
           compressionRuntime === "corrupt-unknown-budgeted" ||
           compressionRuntime === "corrupt-noncanonical-budgeted"
@@ -894,20 +895,10 @@ for (const {
           expect((error as ScanInterruptedError).cause).toBe(
             originalResumeSignal?.reason,
           );
-          if (corruptArchive) {
-            expect(originalResumeSignal?.reason).toBeInstanceOf(Error);
-            expect(originalResumeSignal?.reason).toMatchObject({
-              code: "ZSTD_error_prefix_unknown",
-              message: "Unknown frame descriptor",
-            });
-          } else {
-            expect(String(originalResumeSignal?.reason)).toContain(
-              "cannot decode compressed usage",
-            );
-            expect(String(originalResumeSignal?.reason)).toContain(
-              workerThreadId,
-            );
-          }
+          expect(originalResumeSignal?.reason).toBeInstanceOf(Error);
+          expect((originalResumeSignal?.reason as Error).message).toMatch(
+            invalidArchive,
+          );
           expect(modelInputs).toHaveLength(1);
           expect(commands.slice(commandsBeforeResume)).not.toContain(
             "write-scan-draft",
@@ -937,7 +928,10 @@ for (const {
             (deep["deepScan"] as { finalizationInput: unknown })
               .finalizationInput,
           ).toEqual(originalFinalizationInput);
-        } else if (compressionRuntime === "decoder-enabled") {
+        } else if (
+          compressionRuntime === "decoder-enabled" ||
+          compressionRuntime === "without-decoder-budgeted"
+        ) {
           const error = await resumed.catch((error: unknown) => error);
           expect(error).toBeInstanceOf(ScanCostLimitExceededError);
           expect(error).toBe(originalResumeSignal?.reason);
@@ -946,6 +940,20 @@ for (const {
             (error as ScanCostLimitExceededError).cost.estimatedUsd,
           ).toBeGreaterThan(0.004);
           expect(modelInputs).toHaveLength(1);
+        } else if (
+          compressionRuntime === "without-decoder-unrelated" ||
+          compressionRuntime === "corrupt-unrelated-budgeted"
+        ) {
+          // Unrelated worker usage cannot establish a cost for the resumed scan.
+          const error = await resumed.catch((error: unknown) => error);
+          expect(error).toBeInstanceOf(IncompleteScanError);
+          expect((error as Error).message).toContain(
+            "scan-owned token usage is incomplete",
+          );
+          expect(modelInputs).toHaveLength(1);
+          expect(
+            reportedWarnings.some((warning) => invalidArchive.test(warning)),
+          ).toBe(false);
         } else {
           const result = await resumed;
           expect(result.findings.findings[0]?.remediation).toBe(
@@ -954,18 +962,21 @@ for (const {
           expect(originalResumeSignal?.aborted).toBe(false);
           expect(modelInputs).toHaveLength(2);
           expect(modelInputs[1]).toBe(followUp);
-          expect(result.cost).toBeNull();
+          if (compressionRuntime === "without-decoder-optional") {
+            expect(result.cost).toMatchObject({
+              inputTokens: 1250,
+              cachedInputTokens: 200,
+              outputTokens: 30,
+              estimatedUsd: 0.00488,
+            });
+          } else expect(result.cost).toBeNull();
           expect(commands.slice(commandsBeforeResume)).toContain(
             "complete-scan",
           );
           if (compressionRuntime === "corrupt-attributed-optional")
-            expect(reportedWarnings).toContain(
-              "Could not track scan activity: Unknown frame descriptor",
-            );
-          if (compressionRuntime === "corrupt-unrelated-budgeted")
-            expect(reportedWarnings).not.toContain(
-              "Could not track scan activity: Unknown frame descriptor",
-            );
+            expect(
+              reportedWarnings.some((warning) => invalidArchive.test(warning)),
+            ).toBe(true);
         }
         expect(await readFile(selectedPath)).toEqual(selectedBytes!);
         return;

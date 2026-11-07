@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { zstdCompressSync } from "node:zlib";
 import { afterEach, beforeAll, expect, test } from "bun:test";
+import { bundledPluginRoot } from "../src/runtime.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -88,6 +89,15 @@ test.each([
       ),
     );
     const module = join(root, "cost.mjs");
+    const bundled = await bundledPluginRoot();
+    for (const [directory, file] of [
+      [".codex-plugin", "plugin.json"],
+      ["mcp", "session-decompression.mjs"],
+    ] as const) {
+      const destination = join(root, "_bundled_plugin", directory);
+      await mkdir(destination, { recursive: true });
+      await copyFile(join(bundled, directory, file), join(destination, file));
+    }
     await writeFile(module, moduleSource);
     const { stdout } = await promisify(execFile)(
       "node",
@@ -116,25 +126,20 @@ test.each([
         snapshots.push(await tracker.refresh());
       } catch (caught) { error = caught.message; }
       finally { await tracker.stop().catch(() => {}); }
-      console.log(JSON.stringify({ supported: typeof zlib.createZstdDecompress === "function", snapshots, error }));
+      console.log(JSON.stringify({ snapshots, error }));
     `,
       ],
       { encoding: "utf8" },
     );
     const result = JSON.parse(stdout);
-    if (result.supported) {
-      expect(result.error).toBeNull();
-      expect(
-        result.snapshots.map(
-          (snapshot: { cost: { inputTokens: number } }) =>
-            snapshot.cost.inputTokens,
-        ),
-      ).toEqual([1_100, 1_100, 1_600]);
-      expect(result.snapshots[0].cost.estimatedUsd).toBeGreaterThan(0.003);
-    } else {
-      expect(result.snapshots).toEqual([]);
-      expect(result.error).toContain("Cannot enforce the scan cost limit");
-      expect(result.error).toContain(filename);
-    }
+
+    expect(result.error).toBeNull();
+    expect(
+      result.snapshots.map(
+        (snapshot: { cost: { inputTokens: number } }) =>
+          snapshot.cost.inputTokens,
+      ),
+    ).toEqual([1_100, 1_100, 1_600]);
+    expect(result.snapshots[0].cost.estimatedUsd).toBeGreaterThan(0.003);
   },
 );

@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import type { TestContext } from "node:test";
 import { readJson, writeJson } from "./support/json.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
@@ -221,7 +222,7 @@ export async function testDeepScanLifecycle(context: TestContext) {
   async function lateCancellationWaitsForPersistence(context: TestContext) {
     const completedParentStatus: string = JSON.parse(
       execFileSync(
-        process.env.PYTHON || "python3",
+        fixturePython,
         [
           "-I",
           "-B",

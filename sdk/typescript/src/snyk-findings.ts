@@ -11,19 +11,23 @@ import {
   SNYK_REST_ISSUES_V1,
 } from "./snyk-rest-v1.js";
 import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
+import { normalizeHostedGitRepositoryUrl } from "./hosted-git-repository.js";
 import { isRecord } from "./record.js";
 import {
   array,
-  hasSarifExternalPropertyReferences,
   indexSarifRules,
   normalizeRecords,
+  optionalArray,
   readScannerJson,
   record,
   requiredText,
+  sarifRunRepositories,
   sarifRunContextSelector,
   stableId,
   strings,
+  readSarifRuns,
   text,
+  validateSarifRun,
   validateSarifRuleReference,
 } from "./scanner-import.js";
 
@@ -71,6 +75,13 @@ function pluginIdentity(value: unknown): string {
   ]);
 }
 
+function requireEmptyIssueCount(value: unknown, label: string): void {
+  if (value === undefined || value === 0) return;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error(`${label} must be a nonnegative integer.`);
+  throw new Error(`${label} reported issues but the findings array is empty.`);
+}
+
 /** Import the official Snyk Codex plugin's documented local SCA bundle. */
 export function normalizeSnykFindingsExport(
   input: unknown,
@@ -84,9 +95,9 @@ export function normalizeSnykFindingsExport(
     throw new Error("Expected a snyk-findings-export/v1 bundle from Snyk.");
   const collection = record(document["collection"], "Snyk collection");
   const sourceTarget = record(collection["target"], "Snyk target");
-  const { findings: _findings, ...context } = document;
-  return normalizeRecords(
-    array(document["findings"], "Snyk findings"),
+  const { findings, ...context } = document;
+  const parsed = normalizeRecords(
+    array(findings, "Snyk findings"),
     (value) => {
       const finding = record(value, "Snyk plugin finding");
       const observation = record(finding["observation"], "Snyk observation");
@@ -151,45 +162,74 @@ export function normalizeSnykFindingsExport(
     pluginIdentity,
     target,
   );
+  let successfulSca = false;
+  for (const entry of optionalArray(
+    collection["scans"],
+    "Snyk collection scans",
+  )) {
+    const scan = record(entry, "Snyk collection scan");
+    if (!parsed.read && scan["outcome"] === "succeeded")
+      requireEmptyIssueCount(scan["issueCount"], "Snyk plugin issueCount");
+    if (scan["category"] !== "sca") continue;
+    if (scan["outcome"] !== "succeeded") {
+      const failure = `Snyk plugin SCA scan did not succeed (outcome: ${String(scan["outcome"])}).${scan["error"] ? " " + JSON.stringify(scan["error"]) : ""}`;
+      if (parsed.read && !parsed.findings.length)
+        return {
+          ...parsed,
+          report: {
+            collection: structuredClone(collection),
+            errors: [failure],
+          },
+        };
+      throw new Error(failure);
+    }
+    successfulSca = true;
+  }
+  if (parsed.read) return parsed;
+  if (!successfulSca)
+    throw new Error(
+      "An empty Snyk plugin bundle must identify a successful SCA scan.",
+    );
+  return { ...parsed, report: { collection: structuredClone(collection) } };
 }
 
 function normalizeGitRepositoryUrl(
   repository: string,
   cloudRepositoryUrl?: string,
 ): string {
-  // Cloud's selected catalog repository supplies connected GitHub host context;
-  // imported evidence alone cannot establish an Enterprise host's SSH aliases.
-  const destination = cloudRepositoryUrl
-    ? new URL(cloudRepositoryUrl)
-    : undefined;
-  const connectedHost =
-    destination?.protocol === "https:"
-      ? destination.hostname.toLowerCase()
-      : undefined;
-  const connectedTenant = /^([^.]+)\.ghe\.com$/u.exec(connectedHost ?? "")?.[1];
-  const isGitHubSshUser = (username: string, hostname: string) =>
-    (username === "git" &&
-      (hostname === "github.com" || hostname === connectedHost)) ||
-    (username === connectedTenant && hostname === connectedHost);
-  const scp = /^([^@/:]+)@([^/:]+):(.+)$/u.exec(repository);
-  if (scp && isGitHubSshUser(scp[1]!, scp[2]!.toLowerCase()))
-    return `https://${scp[2]}/${scp[3]}`;
-  // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
-  const ssh = /^ssh:\/\/([^/]+)@/u.exec(repository);
-  if (ssh) {
-    // Git retains these bytes, but URL parsing would erase them from the alias.
-    if (/[\t\r\n]/u.test(repository)) return repository;
-    const url = new URL(repository);
-    const hostname = url.hostname.toLowerCase();
-    const githubSsh =
-      isGitHubSshUser(ssh[1]!, hostname) &&
-      (url.port === "" || url.port === "22");
-    const githubSshOverHttps =
-      ssh[1] === "git" && hostname === "ssh.github.com" && url.port === "443";
-    if (githubSshOverHttps) return `https://github.com${url.pathname}`;
-    if (githubSsh) return `https://${hostname}${url.pathname}`;
-  }
-  return repository;
+  // Without a selected Cloud repository, only the public GitHub host is established.
+  return normalizeHostedGitRepositoryUrl(
+    repository,
+    cloudRepositoryUrl ?? "https://github.com",
+    cloudRepositoryUrl !== undefined,
+  );
+}
+
+function snykJsonProjectRepository(
+  project: Record<string, unknown>,
+): string | undefined {
+  // A remote Snyk test puts its GitHub URL and optional ref in the same
+  // path field that local scans use for a directory or npm package name.
+  const repository = text(project["path"])?.split("#", 1)[0];
+  if (
+    repository &&
+    /^https?:\/\/github\.com(?::\d+)?\/[^/?#\\\s]+\/[^/?#\\\s]+\/?$/iu.test(
+      repository,
+    )
+  )
+    return repository;
+}
+
+/** Empty plugin and CLI JSON exports have no rows to carry their repository. */
+export function emptySnykReportRepositories(input: unknown): { url: string }[] {
+  if (isRecord(input) && input["format"] === "snyk-findings-export/v1")
+    return snykRepositoryUrls(input, { normalizeGitRemote: false }).map(
+      (url) => ({ url }),
+    );
+  return (Array.isArray(input) ? input : [input]).flatMap((project) => {
+    const url = isRecord(project) && snykJsonProjectRepository(project);
+    return url ? [{ url }] : [];
+  });
 }
 
 /** @internal Repository claims retained in original Snyk evidence. */
@@ -229,16 +269,8 @@ export function snykRepositoryUrls(
     text(project["packageManager"]) &&
     isRecord(source["vulnerability"])
   ) {
-    // A remote Snyk test puts its GitHub URL and optional ref in the same
-    // path field that local scans use for a directory or npm package name.
-    const repository = text(project["path"])?.split("#", 1)[0];
-    if (
-      repository &&
-      /^https?:\/\/github\.com(?::\d+)?\/[^/?#\\\s]+\/[^/?#\\\s]+\/?$/iu.test(
-        repository,
-      )
-    )
-      return [repository];
+    const repository = snykJsonProjectRepository(project);
+    if (repository) return [repository];
   }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
@@ -250,20 +282,12 @@ export function snykRepositoryUrls(
     driver["name"] !== "Snyk Open Source"
   )
     return [];
-  const run = source["run"];
-  if (run == null) return [];
-  return array(
-    record(run, "Snyk run context")["versionControlProvenance"] ?? [],
-    "Snyk version control provenance",
-  ).map((entry) => {
-    const repository = requiredText(
-      record(entry, "Snyk repository provenance")["repositoryUri"],
-      "Snyk repository URI",
-    );
-    return normalizeGitRemote
-      ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
-      : repository;
-  });
+  const urls = sarifRunRepositories(source["run"], "Snyk").map(
+    (ref) => ref.url,
+  );
+  return normalizeGitRemote
+    ? urls.map((url) => normalizeGitRepositoryUrl(url, cloudRepositoryUrl))
+    : urls;
 }
 
 /** Snyk Open Source's formatter groups all dependency paths for an advisory in a project. */
@@ -271,51 +295,39 @@ export function normalizeSnykSarif(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  const document = record(input, "Snyk SARIF");
-  if (document["version"] !== "2.1.0")
-    throw new Error("Expected Snyk Open Source SARIF 2.1.0.");
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
-    const run = record(value, "SARIF run");
-    const driver = record(
-      record(run["tool"], "SARIF tool")["driver"],
-      "SARIF driver",
-    );
-    if (driver["name"] !== "Snyk Open Source")
-      throw new Error(
-        "Only Snyk Open Source SARIF is supported; Code, Container, and IaC need separate mappings.",
+  const entries = readSarifRuns(
+    input,
+    "Snyk",
+    ({ document, run, tool, driver }) => {
+      if (driver["name"] !== "Snyk Open Source")
+        throw new Error(
+          "Only Snyk Open Source SARIF is supported; Code, Container, and IaC need separate mappings.",
+        );
+      validateSarifRun(run, "Snyk");
+      const rules = array(driver["rules"], "SARIF rules").map((rule) =>
+        record(rule, "SARIF rule"),
       );
-    if (
-      hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
-    )
-      throw new Error(
-        "External SARIF property files are unsupported; use a self-contained report.",
+      // SDK inputs can leave descriptor slots empty. Keep the original rule indexes.
+      const rulesById = indexSarifRules(
+        rules.entries().filter(([index]) => index in rules),
       );
-    const rules = array(driver["rules"], "SARIF rules").map((rule) =>
-      record(rule, "SARIF rule"),
-    );
-    // SDK inputs can leave descriptor slots empty. Keep the original rule indexes.
-    const rulesById = indexSarifRules(
-      rules.entries().filter(([index]) => index in rules),
-    );
-    const project = snykSarifProject(run);
-    const { results: _results, tool: _tool, ...runContext } = run;
-    const { rules: _rules, ...driverContext } = driver;
-    const { driver: _driver, ...toolContext } = record(
-      run["tool"],
-      "SARIF tool",
-    );
-    runContext["tool"] = toolContext;
-    const { runs: _runs, ...documentContext } = document;
-    const selectRunContext = sarifRunContextSelector(runContext);
-    return array(run["results"], "SARIF results").map((result) => ({
-      result,
-      rulesById,
-      project,
-      selectRunContext,
-      driverContext,
-      documentContext,
-    }));
-  });
+      const project = snykSarifProject(run);
+      const { results: _results, tool: _tool, ...runContext } = run;
+      const { rules: _rules, ...driverContext } = driver;
+      const { driver: _driver, ...toolContext } = tool;
+      runContext["tool"] = toolContext;
+      const { runs: _runs, ...documentContext } = document;
+      const selectRunContext = sarifRunContextSelector(runContext);
+      return optionalArray(run["results"], "SARIF results").map((result) => ({
+        result,
+        rulesById,
+        project,
+        selectRunContext,
+        driverContext,
+        documentContext,
+      }));
+    },
+  );
   return normalizeRecords(
     entries,
     ({
@@ -427,6 +439,8 @@ export function normalizeSnykJson(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const projects = Array.isArray(input) ? input : [input];
+  if (!projects.length)
+    throw new Error("The Snyk report contains no scanned projects.");
   const entries = projects.flatMap((value) => {
     const project = record(value, "Snyk Open Source project");
     if (project["error"])
@@ -444,7 +458,15 @@ export function normalizeSnykJson(
     const manifest =
       text(project["displayTargetFile"]) ?? text(project["targetFile"]);
     const { vulnerabilities, ...context } = project;
-    return array(vulnerabilities, "Snyk vulnerabilities").map((value) => ({
+    const records = array(vulnerabilities, "Snyk vulnerabilities");
+    if (!records.length) {
+      if (!project["ok"])
+        throw new Error(
+          "Snyk reported issues but the findings array is empty.",
+        );
+      requireEmptyIssueCount(project["uniqueCount"], "Snyk native uniqueCount");
+    }
+    return records.map((value) => ({
       value,
       context,
       manager,

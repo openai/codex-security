@@ -1350,12 +1350,33 @@ describe("CLI", () => {
         code: "ENOENT",
       });
       expect(trustedHook).not.toMatch(/^exec\s+npx(?:\s|$)/m);
-      expect(trustedHook).toContain(await realpath(process.execPath));
-      expect(trustedHook).toContain(
+      // Let Git invoke the declared /bin/sh, including its bundled shell on Windows.
+      const displayArgs = trustedHook.replace(/^exec /m, "printf '%s\\0' ");
+      expect(displayArgs).not.toBe(trustedHook);
+      const decoded = await runCommand(
+        "git",
+        [
+          "-C",
+          root,
+          "-c",
+          "alias.report-hook-argv=!/bin/sh -s",
+          "report-hook-argv",
+        ],
+        { input: displayArgs, windowsHide: true },
+      );
+      expect(decoded.status, decoded.stderr).toBe(0);
+      expect(decoded.stdout.split("\0")).toEqual([
+        await realpath(process.execPath),
         await realpath(
           fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
         ),
-      );
+        "scan",
+        ".",
+        "--working-tree",
+        "--fail-on-severity",
+        "medium",
+        "",
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2192,7 +2213,7 @@ describe("CLI", () => {
 
     expect(
       await runCli(
-        ["info", "--json", "--filter-output", "model,reasoningEffort,nextStep"],
+        ["info", "--json", "--filter-output=model,reasoningEffort,nextStep"],
         deps,
       ),
     ).toBe(0);
@@ -3201,6 +3222,7 @@ describe("CLI", () => {
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
       ],
       [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [["--codex", 'model = "gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
       [
         ["--codex", 'model_reasoning_effort="high"'],
         { model_reasoning_effort: "high" },
@@ -3906,6 +3928,44 @@ describe("CLI", () => {
     );
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_SECRET");
   });
+
+  test.each([true, false])(
+    "routes direct Deep Scan coordinator diagnostics in verbose mode (%p)",
+    async (verbose) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies();
+      deps.createSecurity = (_config, observe) =>
+        fakeSecurity(async () => {
+          expect(typeof observe).toBe(verbose ? "function" : "undefined");
+          observe?.({
+            event: "finding_comparison_failed",
+            reason: "first\nsecond",
+          });
+          return fakeResult();
+        });
+      expect(
+        await runCli(
+          [
+            "scan",
+            ".",
+            "--mode",
+            "deep",
+            "--json",
+            ...(verbose ? ["--verbose"] : []),
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const diagnostics = stderr
+        .text()
+        .split("\n")
+        .filter((line) => line.includes("deep_scan.coordinator"));
+      expect(diagnostics).toHaveLength(verbose ? 1 : 0);
+      if (verbose)
+        expect(diagnostics[0]).toContain('event="finding_comparison_failed"');
+    },
+  );
 
   test("reports the effective default model and reasoning effort in verbose scan diagnostics", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -5123,6 +5183,7 @@ describe("CLI", () => {
       ["--token-limit", "4"],
       ["--token-offset", "1"],
       ["--token-offset", "1", "--token-limit", "4"],
+      ["--token-offset=1", "--token-limit=4"],
     ] as const) {
       const stdout = captureCli(main, "stdout");
       expect(await stdout.run(["scan", ...arguments_], dependencies())).toBe(0);

@@ -1,3 +1,5 @@
+"""Check that upgrading the checkpoint-head schema preserves scans and lets current readers proceed during a write."""
+
 from __future__ import annotations
 
 import json
@@ -57,7 +59,8 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
                 if legacy_checkpoint and version == 57
                 else (version, name, sql)
                 for version, name, sql in migrations
-                if version not in omitted_versions
+                if version <= 57
+                and version not in omitted_versions
                 and not (legacy_checkpoint and version in (54, 55, 56))
                 and not (legacy_checkpoint in (47, 48, 50, 52, 53) and version in (52, 53))
                 and not (legacy_checkpoint in (47, 48, 50) and version in (50, 51))
@@ -118,12 +121,11 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
         migrate(connection, migrations)
         after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
         for original, updated in zip(before, after, strict=True):
-            retained_heads = updated.pop("retained_checkpoint_heads_json")
-            assert retained_heads == original.get("retained_checkpoint_heads_json")
-            original.pop("retained_checkpoint_heads_json", None)
-            if "source_scopes_json" not in original:
-                source_scopes = updated.pop("source_scopes_json")
-                assert source_scopes is None
+            # Existing scan values survive the upgrade. Later nullable columns
+            # have no launch or recovery metadata to backfill for these rows.
+            for column in updated.keys() - original.keys():
+                added_value = updated.pop(column)
+                assert added_value is None
             assert updated == original
 
         connection.execute(

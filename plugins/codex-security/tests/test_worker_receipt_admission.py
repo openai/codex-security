@@ -1,3 +1,5 @@
+"""Check which worker receipts and surface links a stopped scan may retain from saved checkpoints."""
+
 from __future__ import annotations
 
 import copy

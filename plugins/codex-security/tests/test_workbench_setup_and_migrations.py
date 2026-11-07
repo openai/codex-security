@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -105,10 +107,11 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "retain deep scan attempts and exact merge inputs"),
-    (64, "persist selected deep scan finalization input"),
-    (65, "bind original deep scan parent usage turn"),
-    (66, "bind original deep scan execution settings"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "retain deep scan attempts and exact merge inputs"),
+    (65, "persist selected deep scan finalization input"),
+    (66, "bind original deep scan parent usage turn"),
+    (67, "bind original deep scan execution settings"),
 ]
 
 
@@ -1301,6 +1304,25 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
     assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone()[0] == 2.5
     assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
+
+
+@pytest.mark.cross_platform
+def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
+    db, migrate = create_historical_database(63)
+    with closing(db):
+        timestamp = "2026-01-01T00:00:00Z"
+        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
+        record_migration(db, 63, "retain native investigation time allowances", timestamp)
+        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
+        migrate(db)
+        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
+        receipt = db.execute(query).fetchone()
+        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
+        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
+        migrate(db)
+        assert db.execute(query).fetchone() == receipt
+        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
@@ -2785,6 +2807,42 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
             ).fetchone()
             is not None
         ) is supported
+
+
+@pytest.mark.cross_platform
+def test_durable_recovery_preview_preserves_receipts_and_saved_input() -> None:
+    preview = tuple(
+        (version - 1, name, sql) for version, name, sql in SCHEMA.MIGRATIONS if 64 <= version <= 67
+    )
+    db, migrate = create_historical_database(63, preview)
+    with closing(db):
+        timestamp = "2026-10-01T00:00:00Z"
+        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(db, timestamp, mode="deep")
+        db.execute(
+            """
+            INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
+                workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at,
+                finalization_input_json, usage_owner_json, execution_settings_json)
+            VALUES ('legacy-scan', 1, 'legacy', 'running', 'discovery', 1, 0, 3, 10, ?, ?, ?, ?, ?)
+            """,
+            (timestamp, timestamp, '"selected input"', '"owner"', '"settings"'),
+        )
+        db.execute("UPDATE schema_migrations SET applied_at = ? WHERE version >= 63", (timestamp,))
+        for _ in range(2):
+            migrate(db)
+            assert [
+                tuple(row)
+                for row in db.execute(
+                    "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 64 ORDER BY version"
+                )
+            ] == [(version + 1, name, timestamp) for version, name, _ in preview]
+            assert tuple(
+                db.execute(
+                    "SELECT finalization_input_json, usage_owner_json, execution_settings_json, worker_usage_gap "
+                    "FROM deep_scan_runs WHERE scan_id = 'legacy-scan'"
+                ).fetchone()
+            ) == ('"selected input"', '"owner"', '"settings"', 0)
 
 
 @pytest.mark.parametrize(
