@@ -6,8 +6,7 @@ findings are excluded.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report) and open the matching
-checkout. Verify the repository's Git URL in your SCM integration. If
+Open the matching checkout. Verify the repository's Git URL in your SCM integration. If
 the report identifies the repository only by an Inspector project ARN, verify
 that full ARN against the same URL in the SCM integration before importing.
 
@@ -74,9 +73,9 @@ To save the selected findings in your local workbench, remove `--dry-run` and co
 
 ### Publish to your Cloud inbox
 
-Sign in to a workspace with the GitHub repository connected and private
-Inspector imports enabled. Preview the same file and source key, using your
-connected repository URL. If the local preview required a project ARN, add
+For an inbox import, sign in to a Cloud workspace with the GitHub repository
+connected and support for Inspector private import jobs. Preview the same file
+and source key using the connected repository URL. If the local preview required a project ARN, add
 `--inspector-project-arn` with the same verified ARN to the command below.
 
 ```sh

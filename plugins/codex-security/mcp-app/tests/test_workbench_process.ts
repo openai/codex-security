@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -32,10 +33,14 @@ const { workbenchArgs } = await importSource(
 );
 async function userSitePython(): Promise<string> {
   // A caller's virtualenv may intentionally disable user-site imports.
-  const { stdout } = await promisify(execFile)(
-    process.env.PYTHON?.trim() || "python3",
-    ["-I", "-X", "utf8", "-B", "-c", "import sys; print(sys._base_executable)"],
-  );
+  const { stdout } = await promisify(execFile)(fixturePython, [
+    "-I",
+    "-X",
+    "utf8",
+    "-B",
+    "-c",
+    "import sys; print(sys._base_executable)",
+  ]);
   return stdout.trim();
 }
 
@@ -204,7 +209,7 @@ def main():
       "--help",
     ];
     const result = await executeParser(
-      process.env.PYTHON?.trim() || "python3",
+      fixturePython,
       workbenchArgs("record-deep-scan-iteration", {
         scanId: randomUUID(),
         workerId: randomUUID(),
@@ -329,7 +334,7 @@ try {
   );
   for (const stdin of [true, false]) {
     const result = await executeWorkbench(
-      process.env.PYTHON?.trim() || "python3",
+      fixturePython,
       workbenchArgs("create-workspace", {
         workspaceId: randomUUID(),
         targetPath: target,
@@ -356,17 +361,17 @@ try {
     "raw.bin",
   ];
   await executeWorkbench(
-    process.env.PYTHON?.trim() || "python3",
+    fixturePython,
     ["save-artifact", ...artifactArgs],
     binary,
   );
-  const saved = await executeWorkbench(
-    process.env.PYTHON?.trim() || "python3",
-    ["read-artifact", ...artifactArgs],
-  );
+  const saved = await executeWorkbench(fixturePython, [
+    "read-artifact",
+    ...artifactArgs,
+  ]);
   assert.deepEqual(Buffer.from(saved.content, "base64"), binary);
   await assert.rejects(
-    executeWorkbench(process.env.PYTHON?.trim() || "python3", [
+    executeWorkbench(fixturePython, [
       "read-artifact",
       "--artifact-root",
       artifactRoot,
@@ -398,10 +403,11 @@ try {
             ]),
           );
         }
-        const inspected = await executeWorkbench(
-          process.env.PYTHON?.trim() || "python3",
-          ["inspect-target", "--target-path", path.join(root, "target-\udcff")],
-        );
+        const inspected = await executeWorkbench(fixturePython, [
+          "inspect-target",
+          "--target-path",
+          path.join(root, "target-\udcff"),
+        ]);
         assert.equal(inspected.targetPath, replacementTarget);
       },
     );
@@ -422,10 +428,9 @@ await test("large saved context retains cancellation results and diagnostics", a
     await writeFile(path.join(target, "example.py"), "value = 1\n");
     const state = path.join(root, "state");
     process.env.CODEX_SECURITY_STATE_DIR = state;
-    const python = process.env.PYTHON || "python3";
     const userContext = "x".repeat(1_500_000);
     const begun = (await executeWorkbench(
-      python,
+      fixturePython,
       [
         "begin-deep-scan",
         "--target-path",
@@ -442,7 +447,11 @@ await test("large saved context retains cancellation results and diagnostics", a
     )) as { deepScan: { scanId: string } };
     const scanId = begun.deepScan.scanId;
     const readScan = async () =>
-      (await executeWorkbench(python, ["get-scan", "--scan-id", scanId])) as {
+      (await executeWorkbench(fixturePython, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ])) as {
         workspace: {
           results: { userContext: string; progress: { status: string } };
         };
@@ -450,7 +459,7 @@ await test("large saved context retains cancellation results and diagnostics", a
     const current = await readScan();
     assert.equal(current.workspace.results.userContext, userContext);
     assert.equal(current.workspace.results.progress.status, "running");
-    await executeWorkbench(python, ["cancel-scan", "--scan-id", scanId]);
+    await executeWorkbench(fixturePython, ["cancel-scan", "--scan-id", scanId]);
     assert.equal(
       (await readScan()).workspace.results.progress.status,
       "canceled",

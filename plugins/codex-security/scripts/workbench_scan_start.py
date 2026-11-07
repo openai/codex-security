@@ -19,7 +19,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
-from workbench.storage import state_dir
+from workbench.storage import create_private_temporary_directory, state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -301,12 +301,10 @@ def insert_running_scan(
         # Missing version attribution must not prevent scan registration.
         plugin_version = None
     if scan_dir is None:
-        scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
-            )
-        ).resolve()
+        scan_dir = create_private_temporary_directory(
+            target_root,
+            prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
+        )
     connection.execute(
         """
         INSERT INTO scans (

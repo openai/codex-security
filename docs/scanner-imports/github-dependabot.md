@@ -5,9 +5,9 @@ dependency occurrence. Its advisory describes the vulnerability.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the matching
-checkout, set a private report path outside the checkout. Choose a source key
-for this host, repository and alert family, or reuse your existing Dependabot key.
+In the matching checkout, choose a private report path outside the repository.
+Use the same source key for repeat imports from this host, repository and alert
+family.
 
 ```sh
 report=/private/path/dependabot.jsonl

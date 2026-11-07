@@ -628,7 +628,9 @@ def _open_scan_local_file_with_path(
         except OSError as exc:
             # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
             if exc.errno in {2, 3}:
-                raise MissingScanLocalFileError(str(exc)) from exc
+                raise MissingScanLocalFileError(
+                    f"{context}: expected a file inside the scan directory"
+                ) from exc
             raise ContractError(str(exc)) from exc
     return _open_posix_file_with_path(
         scan_dir, PurePosixPath(relative_path), context, resolve_spelling

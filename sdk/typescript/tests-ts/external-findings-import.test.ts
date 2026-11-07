@@ -11,33 +11,7 @@ import {
   localReportFixture,
 } from "./external-findings-local-helpers.js";
 
-test("requires opt-in before reading the source file", async () => {
-  await using fixture = await localFindingsFixture();
-  const environment: NodeJS.ProcessEnv = { ...fixture.environment };
-  delete environment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"];
-  let workbenchCalls = 0;
-  await expect(
-    prepareLocalExternalImport(
-      join(fixture.root, "missing-findings.json"),
-      {
-        repository: fixture.repository,
-        provider: "wiz",
-        sourceKey: "example-project/main",
-      },
-      {
-        environment,
-        runWorkbench: async () => {
-          workbenchCalls++;
-          throw new Error("Disabled imports must not access the workbench");
-        },
-      },
-    ),
-  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
-  expect(workbenchCalls).toBe(0);
-  await expect(access(fixture.stateDirectory)).rejects.toThrow();
-});
-
-test("a file import rechecks the selected workbench opt-in after reading", async () => {
+test("a file import resolves the repository using the caller’s workbench environment", async () => {
   await using f = await localFindingsFixture();
   const file = join(f.root, "report.json");
   await writeFile(
@@ -66,19 +40,7 @@ test("a file import rechecks the selected workbench opt-in after reading", async
   );
   expect(prepared.preview.repository).toBe(f.repository);
 
-  const dependencies = { environment: { ...f.environment } };
-  const pending = prepareLocalExternalImport(file, selection, dependencies);
-  const disabledState = join(f.root, "disabled-state");
-  dependencies.environment = {
-    ...f.environment,
-    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
-    CODEX_SECURITY_STATE_DIR: disabledState,
-  };
-  await expect(pending).rejects.toThrow(
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
-  );
   await expect(access(f.stateDirectory)).rejects.toThrow();
-  await expect(access(disabledState)).rejects.toThrow();
 });
 
 test("cancels preparation while the source file read is pending", async () => {
