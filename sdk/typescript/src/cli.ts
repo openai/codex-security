@@ -77,6 +77,7 @@ import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   capturePatchGitControls,
+  ensureWindowsSnapshotConfigReadable,
   withPatchGitIndex,
 } from "./patch-git-controls.js";
 import {
@@ -1237,6 +1238,7 @@ interface SkillCommandOutput {
     readonly sandbox?: "read-only" | "workspace-write";
     readonly permissions?: SkillPermissions;
     readonly snapshotStoragePaths?: readonly string[];
+    readonly snapshotConfigPaths?: readonly string[];
     readonly externalSandbox?: boolean;
     readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
@@ -2562,6 +2564,8 @@ export async function main(
   let gitEnvironment: NodeJS.ProcessEnv | undefined;
   let gitRepository: string | undefined;
   let patchSandbox: PatchSnapshotSandbox | undefined;
+  let snapshotConfigPaths: readonly string[] | undefined;
+  let snapshotConfigReady: Promise<void> | undefined;
   let patchPreparationSignal: AbortSignal | undefined;
   dependencies = {
     ...parentDependencies,
@@ -2577,6 +2581,10 @@ export async function main(
               : {
                   onPermissions(context: PatchSnapshotSandbox) {
                     patchSandbox = context;
+                    if (process.platform === "win32") {
+                      snapshotConfigPaths = appServer.snapshotConfigPaths;
+                      snapshotConfigReady = undefined;
+                    }
                   },
                 }),
             async onBeforeTurn(signal) {
@@ -2721,6 +2729,29 @@ export async function main(
               },
             }),
       };
+      if (options.sandbox && snapshotConfigPaths?.length) {
+        const sandbox = options.sandbox;
+        snapshotConfigReady ??= ensureWindowsSnapshotConfigReadable(
+          snapshotConfigPaths,
+          (probeArgs, input) =>
+            parentDependencies.runRepositoryCommand(
+              "git",
+              probeArgs,
+              repository,
+              {
+                signal: options.signal,
+                environment: options.environment,
+                sandbox: {
+                  ...sandbox,
+                  gitEnvironment: { ...sandbox.gitEnvironment, LC_ALL: "C" },
+                },
+                input,
+              },
+            ),
+          options.signal,
+        );
+        await snapshotConfigReady;
+      }
       return parentDependencies.runRepositoryCommand(
         command,
         args,
@@ -12538,6 +12569,7 @@ async function runSkill(
                             }),
                       },
                       snapshotStoragePaths: gitControls!.snapshotStoragePaths,
+                      snapshotConfigPaths: gitControls!.snapshotConfigPaths,
                     }),
                 ...(options.onBeforeTurn === undefined &&
                 gitControls === undefined

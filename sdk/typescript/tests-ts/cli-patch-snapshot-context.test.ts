@@ -16,6 +16,7 @@ import { join, parse, resolve } from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
+import { ensureWindowsSnapshotConfigReadable } from "../src/patch-git-controls.js";
 import {
   repositoryGit,
   runGitRepositoryCommand,
@@ -480,6 +481,28 @@ test
   nativeSnapshotTimeout,
 );
 
+test("Windows snapshot config checks retry only a denied file read", async () => {
+  const selected = "C:/private config/selected.gitconfig";
+  const attempts: string[][] = [];
+  await ensureWindowsSnapshotConfigReadable([selected], async (args, input) => {
+    expect(input).toBe(selected + "\n");
+    attempts.push(args);
+    if (attempts.length === 1)
+      throw Object.assign(new Error(), { stderr: "Permission denied" });
+  });
+  expect(attempts).toEqual(
+    Array(2).fill(["hash-object", "--no-filters", "--stdin-paths"]),
+  );
+  const missing = Object.assign(new Error(), {
+    stderr: "No such file or directory",
+  });
+  await expect(
+    ensureWindowsSnapshotConfigReadable([selected], async () => {
+      throw missing;
+    }),
+  ).rejects.toBe(missing);
+});
+
 test.each([
   ...[
     "GIT_CONFIG_GLOBAL",
@@ -538,6 +561,9 @@ test.each([
     const cleanCommand = `node -e '${cleanSource.replaceAll("'", "'\\''")}'`;
     const filterSettings = `[filter "synthetic-selector"]\n clean = ${JSON.stringify(cleanCommand)}\n`;
     await writeFile(filterConfig, filterSettings);
+    const unselected = join(root, "unselected.gitconfig");
+    await writeFile(unselected, "[example]\n unselected = true\n");
+
     const environment = patchSnapshotEnvironment(
       await fixtures.create("patch-native-config-temp-"),
       {
@@ -660,6 +686,23 @@ test.each([
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {
         expect(trees).toEqual([]);
+        if (
+          environment["GIT_CONFIG_GLOBAL"] === filterConfig ||
+          (environment["GIT_CONFIG_SYSTEM"] === filterConfig &&
+            environment["GIT_CONFIG_NOSYSTEM"] !== "1")
+        ) {
+          const selected = await realpath(filterConfig);
+          expect(output!.appServer!.snapshotConfigPaths).toContain(selected);
+          expect(output!.appServer!.permissions!.readOnlyPaths).toContain(
+            selected,
+          );
+          const permissions = output!.appServer!.permissions!.readOnlyPaths;
+          expect(permissions).not.toContain(await realpath(root));
+          expect(permissions).not.toContain(await realpath(unselected));
+          expect(output!.appServer!.snapshotConfigPaths).not.toContain(
+            await realpath(unselected),
+          );
+        }
         if (selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES")
           expect(
             output!.appServer!.permissions!.readOnlyPaths.map((path) =>
