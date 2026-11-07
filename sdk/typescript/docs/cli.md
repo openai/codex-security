@@ -1803,11 +1803,14 @@ rubric is used. An explicit `--rubric` (SDK `rubricPath`) skips the lookup and
 uses your policy for every review. Rubrics and repeatable `--knowledge-base`
 context accept text, PDF, DOCX, and directories. Select external documents directly
 when a repository directory link points outside the selected source. Saved scans
-recognize the original checkout when its directory is moved, even when its
-old path no longer exists. Older scans use the current checkout when the target
+use filesystem identity to recognize the selected directory and its enclosing
+checkout after either is moved. Older scans use the current checkout when the target
 still matches. If a legacy target was replaced and its original checkout is
 ambiguous, select external documents directly instead of through the remaining
-checkout’s links.
+checkout’s links. With either a saved scan ID or a scan directory, an artifact-owned
+link must also stay inside the artifact directory, where the model can write
+files. An operator-owned alias outside the source and artifacts can select an
+external document.
 
 Each finding is classified three times by default. `--runs N` accepts
 an integer from 1 through 10; SDK options use `classificationRuns` with the same

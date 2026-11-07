@@ -284,19 +284,25 @@ def create_cli_scan(
 def test_get_scan_checks_document_link_owners_only_on_request(tmp_path: Path) -> None:
     state_dir, repository = tmp_path / "state", tmp_path / "repository"
     revision = initialize_git_repository(repository)
-    scan_id = create_cli_scan(state_dir, tmp_path / "scans", repository, target_revision=revision)[
+    selected = repository / "selected"
+    selected.mkdir()
+    scan_id = create_cli_scan(state_dir, tmp_path / "scans", selected, target_revision=revision)[
         "scanId"
     ]
     normal = get_scan(state_dir, scan_id, input_text="ignored")["scan"]
     assert "documentSourceRoots" not in normal
+    moved_target, moved_checkout = tmp_path / "moved-target", tmp_path / "moved-checkout"
+    selected.rename(moved_target)
+    repository.rename(moved_checkout)
+    repository.mkdir()
+    owners = [str(path.resolve()) for path in (moved_target, moved_checkout, repository)]
     mode = "--document-link-owners-stdin"
-    owner = str(repository.resolve())
-    assert get_scan(state_dir, scan_id, mode, input_text=json.dumps([owner, owner])) == {
+    assert get_scan(state_dir, scan_id, mode, input_text=json.dumps([*owners, *owners])) == {
         "scan": {
             "scanId": scan_id,
-            "targetPath": owner,
-            "documentSourceRoots": [owner],
-            "matchedDocumentSourceRoots": [owner],
+            "targetPath": str(selected.resolve()),
+            "documentSourceRoots": [],
+            "matchedDocumentSourceRoots": owners[:2],
         }
     }
     invalid = get_scan(state_dir, scan_id, mode, input_text='{"path": "."}', check=False)

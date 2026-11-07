@@ -9,7 +9,7 @@ import {
 } from "./classify-severity.js";
 import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
-import { savedDocumentSourceRoots } from "./knowledge-base.js";
+import { documentSourceRoots } from "./knowledge-base.js";
 import type { DocumentSourceSelection } from "./prompt-files.js";
 import { isRecord } from "./record.js";
 import type { Finding } from "./models.js";
@@ -33,6 +33,12 @@ export interface ClassifyScanSeverityOptions extends ClassifySeverityOptions {
   /** Reclassify selected findings even when their saved assessment matches the inputs. */
   reprocess?: boolean;
   expectedScanId?: string;
+}
+
+function isRootList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((root) => typeof root === "string")
+  );
 }
 
 /** Resolve a saved scan ID, unique prefix, or latest and save its classification. */
@@ -86,22 +92,21 @@ export async function classifyScanSeverityInternal(
     );
     const state = result["scan"];
     const saved = isRecord(state) ? state : {};
+    const recorded = saved["documentSourceRoots"];
     const matched = saved["matchedDocumentSourceRoots"];
     if (
       saved["scanId"] !== scan.scanId ||
-      !Array.isArray(matched) ||
-      !matched.every((root): root is string => typeof root === "string")
+      !isRootList(matched) ||
+      (recorded !== null && !isRootList(recorded))
     ) {
       throw new CodexSecurityError(
         "Could not identify the saved checkout for the selected document.",
       );
     }
+    // Only ambiguous legacy records need a boundary inferred from the surviving checkout.
     return [
-      ...(await savedDocumentSourceRoots(
-        target,
-        saved["documentSourceRoots"],
-        options.signal,
-      )),
+      ...(recorded ??
+        (await documentSourceRoots(target, options.signal, true))),
       ...matched,
     ];
   };

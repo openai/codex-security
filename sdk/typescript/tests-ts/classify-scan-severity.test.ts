@@ -342,6 +342,9 @@ test("saved classification checks document links against the selected repository
   await expect(classify(f.repository)).rejects.toThrow(
     "repository symbolic link",
   );
+  await expect(classify(f.scanDirectory)).rejects.toThrow(
+    "repository symbolic link",
+  );
   await expect(
     classifyScanDirectorySeverity(f.scanDirectory, {
       ...options,
@@ -396,6 +399,27 @@ test.each([
   },
 );
 
+test("saved classification follows the selected directory when it moves away from its checkout", async () => {
+  const f = await savedFixture("enclosing");
+  const checkout = dirname(f.repository);
+  await symlink(f.root, join(checkout, "docs"), "junction");
+  await symlink(f.root, join(f.repository, "docs"), "junction");
+  const moved = join(f.root, "moved-source");
+  await rename(f.repository, moved);
+  await symlink(join(moved, "docs"), join(f.caller, "via-source"), "junction");
+
+  for (const alias of [
+    join(moved, "docs"),
+    join(f.caller, "via-source"),
+    join(checkout, "docs"),
+  ]) {
+    await expect(savedRubric(f, join(alias, "policy.md"))).rejects.toThrow(
+      "repository symbolic link",
+    );
+  }
+  expect((await savedRubric(f, f.rubricPath)).assessments).toEqual([]);
+});
+
 test("saved classification recognizes its moved checkout and leaves an unrelated replacement independent", async () => {
   const f = await savedFixture("enclosing");
   const checkout = dirname(f.repository);
@@ -435,6 +459,15 @@ test("saved classification recognizes its moved checkout and leaves an unrelated
   await symlink(f.root, join(operator, "docs"), "junction");
   await symlink(operator, checkout, "junction");
   expect((await classify()).assessments).toEqual([]);
+
+  await rm(checkout);
+  await rename(operator, checkout);
+  await mkdir(join(checkout, ".git"));
+  await symlink(f.root, join(f.repository, "docs"), "junction");
+  expect((await classify()).assessments).toEqual([]);
+  expect(
+    (await savedRubric(f, join(f.repository, "docs", "policy.md"))).assessments,
+  ).toEqual([]);
 
   removeRecordedDocumentRoot(f.environment);
   await symlink(f.root, join(moved, "source", "docs"), "junction");
