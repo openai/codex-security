@@ -12,6 +12,9 @@ public static class ScanOutputAccessProbe {
     public static extern bool LogonUser(string user, string domain, string password,
         int logonType, int provider, out SafeAccessTokenHandle token);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool MoveFile(string existingName, string newName);
+
     public static bool Read(SafeAccessTokenHandle token, string path) {
         return WindowsIdentity.RunImpersonated(token, () => {
             try { File.ReadAllText(path); return true; }
@@ -36,8 +39,11 @@ public static class ScanOutputAccessProbe {
 
     public static bool CanRename(SafeAccessTokenHandle token, string path) {
         return WindowsIdentity.RunImpersonated(token, () => {
-            try { Directory.Move(path, path + ".moved"); }
-            catch (UnauthorizedAccessException) { return false; }
+            if (!MoveFile(path, path + ".moved")) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 5) return false; // ERROR_ACCESS_DENIED
+                throw new System.ComponentModel.Win32Exception(error);
+            }
             Directory.Move(path + ".moved", path);
             return true;
         });
