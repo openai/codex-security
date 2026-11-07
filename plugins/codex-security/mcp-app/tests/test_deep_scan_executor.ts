@@ -2845,6 +2845,8 @@ async function testBedrockCredentialsReachWorker(
 async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
+    ["azure", "AZURE_OPENAI_API_KEY"],
+    ["azure", "SYNTHETIC_AZURE_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
@@ -2898,6 +2900,8 @@ async function testExternalProviderCredentialsReachWorker() {
         CODEX_API_KEY: undefined,
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
+        AZURE_OPENAI_API_KEY: undefined,
+        SYNTHETIC_AZURE_KEY: undefined,
         SYNTHETIC_GATEWAY_KEY: undefined,
       };
       const saved = Object.keys(environment).map(

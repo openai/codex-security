@@ -73,7 +73,7 @@ import {
   errorMessage,
   abortReason,
 } from "./errors.js";
-import type { JsonObject } from "./config.js";
+import { EXTERNAL_PROVIDER_KEYS, type JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import {
   isWithin,
@@ -129,9 +129,7 @@ const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
-  "OPENROUTER_API_KEY",
-  "FIREWORKS_API_KEY",
-  "CHEAPER_INFERENCE_API_KEY",
+  ...EXTERNAL_PROVIDER_KEYS,
   "HF_TOKEN",
 ]);
 const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `
@@ -3728,7 +3726,7 @@ async function usablePython(
         "import importlib.util,sys\nif sys.version_info < (3, 10): raise SystemExit(1)\nif sys.version_info < (3, 11) and importlib.util.find_spec('tomli') is None: raise SystemExit(1)\nprint('codex-security-python-ok')",
       ],
       {
-        env: command.environment,
+        env: pluginHelperEnvironment(command.environment),
         encoding: "utf8",
         // Cold Python startup can exceed five seconds on busy Windows hosts.
         timeout: 30_000,

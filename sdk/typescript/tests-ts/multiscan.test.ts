@@ -242,6 +242,26 @@ describe("multiscan", () => {
     ]);
   });
 
+  test("rejects an Azure budget for a used inventory mode before creating a campaign", async () => {
+    const { paths } = await repositoryFixture("sample");
+    const run = mock(rejecting("unexpected scan"));
+    const campaign = options(paths, client(run), {
+      config: {
+        codexOverrides: { model_provider: "azure", model: "gpt-5.6-sol" },
+      },
+      scanOptionsByMode: { standard: { maxCostUsd: 1 } },
+    });
+    await expect(
+      runMultiscan(campaign, {
+        AZURE_OPENAI_ENDPOINT: "https://synthetic.openai.azure.com",
+      }),
+    ).rejects.toThrow("cost limit is not available");
+    expect(run).not.toHaveBeenCalled();
+    await expect(access(campaign.outputDir)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   test("forwards a bulk CLI cost limit and rejects zero", async () => {
     const { paths } = await repositoryFixture("sample");
     const { runCli } = createCliTest(main);

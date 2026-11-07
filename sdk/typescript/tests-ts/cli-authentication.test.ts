@@ -1433,6 +1433,71 @@ describe("CLI authentication", () => {
 
 describe("skill authentication", () => {
   test.each(["patch", "verify-fix"] as const)(
+    "%s preserves an ambient Azure endpoint and command authentication",
+    async (command) => {
+      const result = await runProviderSkill(stateDirectory, {
+        command,
+        overrides: [
+          'model_provider="azure"',
+          'model_providers.azure.name="Selected deployment"',
+        ],
+        ambientConfig: [
+          "[model_providers.azure]",
+          'name="Ambient deployment"',
+          'base_url="https://resource.example.test"',
+          'http_headers = { "X-Test" = "synthetic-private-header" }',
+          "[model_providers.azure.auth]",
+          'command="synthetic-private-command"',
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "synthetic-unrelated-key" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const providerArg = result.launch.args.find((arg: string) =>
+        arg.startsWith("model_providers="),
+      );
+      expect(parseToml(providerArg)).toMatchObject({
+        model_providers: {
+          azure: {
+            name: "Selected deployment",
+            base_url: "https://resource.example.test/openai/v1",
+          },
+        },
+      });
+      expect(providerArg).not.toContain("env_key");
+      expect(result.launch.args.join(" ")).not.toContain("synthetic-private");
+      expect(result.launch.environment).toEqual({});
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test("patch uses Azure endpoint and key defaults without an ambient table", async () => {
+    const result = await runProviderSkill(stateDirectory, {
+      overrides: ['model_provider="azure"'],
+      environment: {
+        AZURE_OPENAI_ENDPOINT: "https://env.example.test",
+        AZURE_OPENAI_API_KEY: "synthetic-resource-key",
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const providerArg = result.launch.args.find((arg: string) =>
+      arg.startsWith("model_providers="),
+    );
+    expect(parseToml(providerArg)).toMatchObject({
+      model_providers: {
+        azure: {
+          base_url: "https://env.example.test/openai/v1",
+          env_key: "AZURE_OPENAI_API_KEY",
+        },
+      },
+    });
+    expect(result.launch.environment).toEqual({
+      AZURE_OPENAI_API_KEY: "synthetic-resource-key",
+    });
+  });
+
+  test.each(["patch", "verify-fix"] as const)(
     "%s inherits ambient command authentication through a null optional override",
     async (command) => {
       const result = await runProviderSkill(stateDirectory, {
@@ -1444,12 +1509,16 @@ describe("skill authentication", () => {
           'name="Synthetic gateway"',
           'base_url="https://gateway.example.test/v1"',
           'wire_api="responses"',
+          'env_http_headers = { "X-Gateway-Token" = "AZURE_OPENAI_API_KEY" }',
           "[model_providers.gateway.auth]",
           'command="synthetic-auth"',
         ].join("\n"),
+        environment: { AZURE_OPENAI_API_KEY: "  SYNTHETIC_HEADER  " },
       });
       expect(result.status, result.stderr).toBe(0);
-      expect(result.launch).toBeDefined();
+      expect(result.launch.environment).toEqual({
+        AZURE_OPENAI_API_KEY: "  SYNTHETIC_HEADER  ",
+      });
       expect(result.requests.map((request) => request.method)).not.toContain(
         "account/login/start",
       );
@@ -1476,11 +1545,16 @@ describe("skill authentication", () => {
           `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
           `model_providers.${provider}.wire_api="responses"`,
           `model_providers.${provider}.env_key="GATEWAY_API_KEY"`,
+          `model_providers.${provider}.env_http_headers.X-Gateway-Token="AZURE_OPENAI_API_KEY"`,
         ],
-        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+        environment: {
+          GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+          AZURE_OPENAI_API_KEY: "  SYNTHETIC_HEADER  ",
+        },
       });
       expect(result.status, result.stderr).toBe(0);
       expect(result.launch.environment).toEqual({
+        AZURE_OPENAI_API_KEY: "  SYNTHETIC_HEADER  ",
         GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
       });
       expect(result.requests.map((request) => request.method)).not.toContain(
@@ -1630,6 +1704,7 @@ describe("skill authentication", () => {
           'base_url="https://gateway.example.test/v1"',
           'wire_api="responses"',
           "requires_openai_auth=true",
+          'env_http_headers = { "X-Gateway-Token" = "AZURE_OPENAI_API_KEY" }',
           ...(profile
             ? [
                 "[model_providers.other]",
@@ -1640,11 +1715,15 @@ describe("skill authentication", () => {
               ]
             : []),
         ].join("\n"),
-        environment: { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" },
+        environment: {
+          OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+          AZURE_OPENAI_API_KEY: "  SYNTHETIC_HEADER  ",
+        },
       });
       expect(result.status, result.stderr).toBe(0);
       expect(result.launch.environment).toEqual({
         CODEX_API_KEY: "SYNTHETIC_OPENAI_KEY",
+        AZURE_OPENAI_API_KEY: "  SYNTHETIC_HEADER  ",
       });
       expect(result.launch.args).toContain(
         'cli_auth_credentials_store="ephemeral"',
@@ -1702,8 +1781,13 @@ describe("skill authentication", () => {
           'base_url="https://ignored.example.test/v1"',
           'wire_api="responses"',
           'env_key="OPENAI_API_KEY"',
+          "[model_providers.other.env_http_headers]",
+          'X-Gateway-Token="AZURE_OPENAI_API_KEY"',
         ].join("\n"),
-        environment: { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" },
+        environment: {
+          OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+          AZURE_OPENAI_API_KEY: "SYNTHETIC_UNRELATED_KEY",
+        },
       });
       expect(result.status, result.stderr).toBe(0);
       expect(result.launch.environment).toEqual({

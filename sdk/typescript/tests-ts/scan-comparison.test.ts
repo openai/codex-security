@@ -1853,6 +1853,51 @@ describe("semantic scan comparison", () => {
     expect(account).not.toHaveBeenCalled();
   });
 
+  test("uses only the selected Azure credential for read-only inference", async () => {
+    const root = await temporaryDirectory("codex-security-comparison-");
+    const account = mock(async () => ({
+      authenticated: true,
+      details: "managed",
+    }));
+    const environment = {
+      CODEX_HOME: root,
+      AZURE_OPENAI_API_KEY: "synthetic-azure-key",
+      OPENAI_API_KEY: "synthetic-openai-key",
+      CODEX_API_KEY: "synthetic-codex-key",
+    };
+    const azure = { model_provider: "azure" };
+    const selected = await comparisonEnvironment(
+      environment,
+      account,
+      undefined,
+      undefined,
+      azure,
+    );
+    expect(selected).toEqual({
+      CODEX_HOME: root,
+      AZURE_OPENAI_API_KEY: "synthetic-azure-key",
+    });
+    await expect(
+      comparisonEnvironment(
+        { ...environment, AZURE_OPENAI_API_KEY: undefined },
+        account,
+        undefined,
+        undefined,
+        azure,
+      ),
+    ).rejects.toThrow("AZURE_OPENAI_API_KEY");
+    const openai = await comparisonEnvironment(
+      environment,
+      account,
+      undefined,
+      undefined,
+      { model_provider: "openai" },
+    );
+    expect(openai["AZURE_OPENAI_API_KEY"]).toBeUndefined();
+    expect(openai["OPENAI_API_KEY"]).toBe("synthetic-openai-key");
+    expect(account).not.toHaveBeenCalled();
+  });
+
   test.skipIf(process.platform !== "win32")(
     "recognizes provider scan variables regardless of Windows casing",
     async () => {

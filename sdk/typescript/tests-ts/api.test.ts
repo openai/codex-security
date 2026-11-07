@@ -13885,12 +13885,19 @@ if __name__ == "__main__":
       "OPENAI_API_KEY",
       undefined,
     ],
+    [
+      "post-scan inference needs a declared Azure header",
+      "AZURE_OPENAI_API_KEY",
+      undefined,
+    ],
     ["relative model files preserve scan origin", "model-files", undefined],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, variant, warning) => {
       const nativeHeader =
-        variant === "OPENAI_API_KEY" || variant === "CODEX_API_KEY"
+        variant === "OPENAI_API_KEY" ||
+        variant === "CODEX_API_KEY" ||
+        variant === "AZURE_OPENAI_API_KEY"
           ? variant
           : undefined;
       const failure = nativeHeader ? "managed" : variant;
@@ -13993,6 +14000,7 @@ if __name__ == "__main__":
           if (${Boolean(nativeHeader)}) {
             call.credentials = {
               GATEWAY_TOKEN: process.env.GATEWAY_TOKEN,
+              AZURE_OPENAI_API_KEY: process.env.AZURE_OPENAI_API_KEY,
               OPENAI_API_KEY: process.env.OPENAI_API_KEY,
               CODEX_API_KEY: process.env.CODEX_API_KEY,
             };
@@ -14408,6 +14416,9 @@ if __name__ == "__main__":
                 });
               } else {
                 expect(call.credentials).not.toHaveProperty("OPENAI_API_KEY");
+                expect(call.credentials, call.kind).not.toHaveProperty(
+                  "AZURE_OPENAI_API_KEY",
+                );
                 expect(call.credentials).not.toHaveProperty("CODEX_API_KEY");
               }
             }

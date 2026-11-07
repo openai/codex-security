@@ -81,6 +81,11 @@ import {
 } from "./codex-prompt.js";
 import {
   EXTERNAL_CODEX_PROVIDERS,
+  EXTERNAL_PROVIDER_KEYS,
+  AZURE_CODEX_PROVIDER,
+  azureBaseUrl,
+  azureProviderEnvironment,
+  codexFileProfileName,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -1720,6 +1725,7 @@ export class CodexSecurity {
     const configuration = await mergedCodexConfig(
       this.config,
       scanCodexHome(this.#dependencies.environment),
+      this.#dependencies.environment,
     );
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
@@ -2420,6 +2426,7 @@ export class CodexSecurity {
             options.auth,
             modelProvider,
             session.providerEnvKey,
+            effectiveConfig,
           ),
         ),
         ...(session.apiKey === null
@@ -2428,6 +2435,19 @@ export class CodexSecurity {
               [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
             }),
       };
+      if (
+        mode === "deep" &&
+        (options.auth !== "chatgpt" ||
+          authentication.method === "command" ||
+          authentication.method === "api_key" ||
+          authentication.method === "aws_credentials")
+      ) {
+        // A managed worker can select another declared native provider. Its
+        // private snapshot below retains only variables named by those tables.
+        const key = AZURE_CODEX_PROVIDER.env_key;
+        const azureKey = environmentEntry(this.#dependencies.environment, key);
+        if (azureKey !== undefined) workerProviderEnvironment[key] = azureKey;
+      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
@@ -2640,13 +2660,10 @@ export class CodexSecurity {
       };
       // Saved launches reload the native file; preflight uses resolved values.
       const profileName = effectiveConfig["profile"];
-      const inlineProfiles = effectiveConfig["profiles"];
-      const fileProfile =
-        typeof profileName === "string" &&
-        !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]));
+      const fileProfileName = codexFileProfileName(effectiveConfig);
       const overrides = this.config.codexOverrides ?? {};
       const recipeConfig: JsonObject = {
-        ...(fileProfile
+        ...(fileProfileName !== undefined
           ? scanPreflightCodexConfig(overrides)
           : preflightConfig),
         approval_policy: approvalPolicy,
@@ -2656,7 +2673,7 @@ export class CodexSecurity {
         const value = workerRuntimeConfig[key];
         if (
           typeof value !== "string" ||
-          (fileProfile && !(key in recipeConfig))
+          (fileProfileName !== undefined && !(key in recipeConfig))
         )
           continue;
         recipeConfig[key] = value;
@@ -2674,12 +2691,22 @@ export class CodexSecurity {
         }
       }
       let replayOverrides: JsonObject = {};
-      if (fileProfile) {
-        recipeConfig["profile"] = profileName;
+      if (fileProfileName !== undefined) {
+        recipeConfig["profile"] = fileProfileName;
         delete recipeConfig["skills"];
         // Reload inherited file settings, retaining explicit refinements omitted
         // from the readable recipe in the existing private replay snapshot.
         delete recipeConfig["model_providers"];
+        if (modelProvider === "azure") {
+          const tables = preflightConfig["model_providers"];
+          const azure = isRecord(tables) ? tables["azure"] : undefined;
+          if (isRecord(azure) && typeof azure["base_url"] === "string") {
+            recipeConfig["model_provider"] = modelProvider;
+            recipeConfig["model_providers"] = {
+              azure: { base_url: azure["base_url"] },
+            };
+          }
+        }
         replayOverrides = privateReplayOverrides(overrides, recipeConfig);
         resolveNestedConfigPaths(replayOverrides, scanDir);
       } else {
@@ -4629,6 +4656,8 @@ export class CodexSecurity {
               auth,
               modelProvider,
               providerEnvKey,
+              session.effectiveConfig,
+              "selected",
             ),
           ),
         ),
@@ -4787,6 +4816,7 @@ export class CodexSecurity {
         await mergedCodexConfig(
           this.config,
           scanCodexHome(this.#dependencies.environment),
+          this.#dependencies.environment,
         ),
         scanCodexHome(this.#dependencies.environment),
       );
@@ -4818,6 +4848,8 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         providerEnvKey,
+        requestedConfig,
+        "selected",
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -5040,6 +5072,7 @@ export class CodexSecurity {
         (await mergedCodexConfig(
           this.config,
           scanCodexHome(this.#dependencies.environment),
+          this.#dependencies.environment,
         )),
     );
   }
@@ -5097,6 +5130,7 @@ export class CodexSecurity {
       await mergedCodexConfig(
         this.config,
         scanCodexHome(this.#dependencies.environment),
+        this.#dependencies.environment,
       ),
     );
     const sources = await inspectSecurityPolicySources(target, signal);
@@ -5202,6 +5236,7 @@ export class CodexSecurity {
       const config = await mergedCodexConfig(
         this.config,
         scanCodexHome(this.#dependencies.environment),
+        this.#dependencies.environment,
       );
       const { model } = scanModelConfiguration(config);
       const pricingContext = scanPricingContext(
@@ -5519,6 +5554,8 @@ export class CodexSecurity {
       auth,
       modelProvider,
       providerEnvKey,
+      requestedConfig,
+      "selected",
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -6289,7 +6326,7 @@ function turnPricingMetadata(context?: ScanPricingContext) {
     : { pricingContext: context };
 }
 
-function validateScanCostLimit(
+export function validateScanCostLimit(
   maxCostUsd: number | undefined,
   model: string,
   pricingContext?: ScanPricingContext,
@@ -6569,11 +6606,27 @@ export function selectedScanEnvironment(
   modelProvider?: unknown,
   providerEnvKey?: string,
   config?: JsonObject,
+  providerKeys: "selected" | "declared" = "declared",
 ): ProcessEnvironment {
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
   const selectedProviderKey = providerEnvKey ?? standardProviderKey;
+  if (config !== undefined) {
+    environment = azureProviderEnvironment(
+      environment,
+      auth === "chatgpt" &&
+        !isExternalModelProvider(modelProvider) &&
+        !hasCommandAuth(config)
+        ? {}
+        : config,
+    );
+  } else if (
+    modelProvider !== "azure" &&
+    selectedProviderKey?.toUpperCase() !== AZURE_CODEX_PROVIDER.env_key
+  ) {
+    environment = azureProviderEnvironment(environment, {});
+  }
   const bedrockProvider = modelProvider === "amazon-bedrock";
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
@@ -6587,11 +6640,8 @@ export function selectedScanEnvironment(
           key === selectedProviderKey.toUpperCase()
         );
       }
-      if (
-        key === "OPENROUTER_API_KEY" ||
-        key === "FIREWORKS_API_KEY" ||
-        key === "CHEAPER_INFERENCE_API_KEY"
-      ) {
+      if (key === AZURE_CODEX_PROVIDER.env_key) return true;
+      if (EXTERNAL_PROVIDER_KEYS.has(key)) {
         return (
           !bedrockProvider &&
           (selectedProviderKey === null ||
@@ -6603,6 +6653,7 @@ export function selectedScanEnvironment(
     }),
   );
   if (
+    providerKeys === "declared" &&
     config !== undefined &&
     providerEnvKey !== undefined &&
     standardProviderKey === null &&
@@ -7141,8 +7192,19 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   }
   const modelProvider = scanModelProvider(result);
   if (isExternalModelProvider(modelProvider)) {
+    const providers = resolved["model_providers"];
+    const configured = isRecord(providers)
+      ? providers[modelProvider]
+      : undefined;
     result["model_providers"] = {
-      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
+      [modelProvider]: {
+        ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
+        ...(modelProvider === "azure" &&
+        isRecord(configured) &&
+        configured["base_url"] !== undefined
+          ? { base_url: azureBaseUrl({}, configured["base_url"]) }
+          : {}),
+      },
     };
   } else if (modelProvider === "amazon-bedrock") {
     const providers = resolved["model_providers"];

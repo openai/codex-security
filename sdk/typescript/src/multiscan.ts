@@ -29,8 +29,19 @@ import {
 } from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
-import type { CodexSecurity, ScanOptions } from "./api.js";
-import type { CodexSecurityConfig, JsonObject } from "./config.js";
+import {
+  scanCodexHome,
+  validateScanCostLimit,
+  type CodexSecurity,
+  type ScanOptions,
+} from "./api.js";
+import {
+  mergedCodexConfig,
+  scanModelConfiguration,
+  scanPricingContext,
+  type JsonObject,
+  type CodexSecurityConfig,
+} from "./config.js";
 import { ContractSchemaError, loadContract } from "./contract.js";
 import type { ScanCost, ScanUsageMeasurement } from "./cost.js";
 import { deepScanOptions } from "./deep-config.js";
@@ -160,6 +171,7 @@ export interface MultiscanResult {
 
 export async function runMultiscan(
   options: MultiscanOptions,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<MultiscanResult> {
   options.signal?.throwIfAborted();
   if (!Number.isSafeInteger(options.workers) || options.workers < 1) {
@@ -173,8 +185,26 @@ export async function runMultiscan(
     dirname(resolve(options.inputPath)),
     options.mode,
   );
-  for (const mode of new Set(tasks.map((task) => task.mode))) {
+  const modes = new Set(tasks.map((task) => task.mode));
+  for (const mode of modes) {
     deepScanOptions({ ...options.scanOptionsByMode?.[mode], mode });
+  }
+  const budget =
+    options.maxCostUsd ??
+    [...modes]
+      .map((mode) => options.scanOptionsByMode?.[mode]?.maxCostUsd)
+      .find((limit) => limit !== undefined);
+  if (budget !== undefined) {
+    const configuration = await mergedCodexConfig(
+      options.config,
+      scanCodexHome(environment),
+      environment,
+    );
+    validateScanCostLimit(
+      budget,
+      scanModelConfiguration(configuration).model,
+      scanPricingContext(configuration, environment),
+    );
   }
   if (
     tasks.some(

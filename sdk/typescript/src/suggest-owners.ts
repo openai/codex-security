@@ -93,15 +93,13 @@ export async function suggestOwnersInternal(
 ): Promise<OwnerSuggestions> {
   options.signal?.throwIfAborted();
   const inputs = z.array(findingSchema).parse(findings);
-  const git = await ownerRepository(
-    repository,
-    options.environment ?? process.env,
-    options.signal,
-  );
+  const environment = options.environment ?? process.env;
+  const git = await ownerRepository(repository, environment, options.signal);
   const configured = scanModelConfiguration(
     await mergedCodexConfig(
       options.config ?? {},
-      scanCodexHome(options.environment ?? process.env),
+      scanCodexHome(environment),
+      environment,
     ),
   );
   const model = options.model ?? configured.model;

@@ -733,6 +733,7 @@ describe("live scan dashboard", () => {
 
   test.each([
     ["unknown-model", undefined, false],
+    ["gpt-5.6-cyber", { provider: "azure" }, false],
     ["gpt-5.6-cyber", undefined, true],
     [
       "openai.gpt-5.6-cyber",

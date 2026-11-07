@@ -5,7 +5,7 @@ import {
   type ScanAuthMode,
   type ScanAuthentication,
 } from "./api.js";
-import { environmentEntry } from "./auth.js";
+import { environmentEntry, withoutOpenAiApiKeys } from "./auth.js";
 import {
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
@@ -87,9 +87,16 @@ export function resolveSkillAuthentication(
     );
   }
   let selected = selectedScanEnvironment(
-    processEnvironment,
-    authentication.method === "command" ? "chatgpt" : options.auth,
+    commandAuth ? withoutOpenAiApiKeys(processEnvironment) : processEnvironment,
+    commandAuth ? "auto" : options.auth,
     provider,
+    explicitChatgpt ? undefined : providerEnvKey,
+    typeof provider === "string"
+      ? {
+          model_provider: provider,
+          model_providers: { [provider]: providerConfiguration ?? {} },
+        }
+      : {},
   );
   if (
     explicitChatgpt &&

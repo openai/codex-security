@@ -78,6 +78,7 @@ import {
   fakeInterval,
 } from "./cli-fixtures.js";
 import { runCommand } from "./support/shell.js";
+import { TestClient } from "./support/api-client.js";
 import {
   scopedTemporaryDirectory,
   temporaryDirectory,
@@ -871,6 +872,7 @@ describe("CLI", () => {
               "openrouter",
               "fireworks",
               "cheaperinference",
+              "azure",
               "amazon-bedrock",
             ],
           },
@@ -3475,6 +3477,7 @@ describe("CLI", () => {
     for (const provider of [
       "openrouter",
       "fireworks",
+      "azure",
       "amazon-bedrock",
     ] as const) {
       expect(() =>
@@ -4161,13 +4164,13 @@ describe("CLI", () => {
     },
   );
 
-  test.each(["openrouter", "fireworks"])(
+  test.each(["openrouter", "fireworks", "azure"])(
     "keeps file-profile command authentication with --provider %s",
     async (provider) => {
       const home = await temporaryDirectory("codex-security-auth-profile-");
       await writeFile(
         join(home, "review.config.toml"),
-        `model="synthetic-model"\n[model_providers.${provider}]\nname="Synthetic"\nwire_api="responses"\nbase_url="http://127.0.0.1:1/v1"\n[model_providers.${provider}.auth]\ncommand="synthetic-auth"\n`,
+        `model="synthetic-model"\n[model_providers.${provider}]\nname="Synthetic"\nwire_api="responses"\nbase_url="http://127.0.0.1:1/openai/v1"\n[model_providers.${provider}.auth]\ncommand="synthetic-auth"\n`,
       );
       for (const explicit of [undefined, 4321]) {
         let selected: CodexSecurityConfig | undefined;
@@ -4206,7 +4209,7 @@ describe("CLI", () => {
           [provider]: {
             name: "Synthetic",
             wire_api: "responses",
-            base_url: "http://127.0.0.1:1/v1",
+            base_url: "http://127.0.0.1:1/openai/v1",
             auth: {
               command: "synthetic-auth",
               ...(explicit === undefined
@@ -4341,6 +4344,16 @@ describe("CLI", () => {
   });
 
   test.each([
+    [
+      "Azure OpenAI",
+      "azure",
+      "saved-deployment",
+      { base_url: "https://saved.example/openai/v1" },
+      {
+        AZURE_OPENAI_API_KEY: "synthetic-key",
+        AZURE_OPENAI_ENDPOINT: "https://other.example",
+      },
+    ],
     [
       "Amazon Bedrock",
       "amazon-bedrock",
@@ -5789,6 +5802,67 @@ describe("CLI", () => {
       ...fakePreflight("repo"),
     });
     expect(stderr.text()).not.toContain("Running scan");
+  });
+
+  test("previews the selected Azure endpoint and rejects --max-cost for a deployment with an OpenAI model name", async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "codex-security-azure-plan-",
+    );
+    const repository = join(temp.path, "repository");
+    await mkdir(repository);
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: join(temp.path, "state"),
+      AZURE_OPENAI_BASE_URL: "https://request.example",
+      AZURE_OPENAI_ENDPOINT: "https://resource.example",
+      AZURE_OPENAI_API_KEY: "synthetic-key",
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const args = [
+      "scan",
+      repository,
+      "--provider",
+      "azure",
+      "--model",
+      "gpt-5.4",
+      "--dry-run",
+      "--json",
+    ];
+    let selected: CodexSecurityConfig | undefined;
+    const deps = {
+      ...dependencies({ environment, currentDirectory: repository }),
+      createSecurity: (config: CodexSecurityConfig) => {
+        selected = config;
+        return new TestClient(config, { environment });
+      },
+    };
+    expect(await runCli(args, deps), stderr.text()).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      dryRun: true,
+      model: "gpt-5.4",
+      modelProvider: "azure",
+    });
+    expect(selected?.codexOverrides).toMatchObject({
+      model_providers: {
+        azure: { base_url: "https://request.example/openai/v1" },
+      },
+    });
+    expect(
+      await runCli(
+        [
+          ...args,
+          "--codex",
+          'model_providers.azure.base_url="https://explicit.example/"',
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    expect(selected?.codexOverrides).toMatchObject({
+      model_providers: {
+        azure: { base_url: "https://explicit.example/openai/v1" },
+      },
+    });
+    expect(await runCli([...args, "--max-cost", "1"], deps)).toBe(2);
+    expect(stderr.text()).toMatch(/cost limit.+gpt-5\.4/i);
   });
 
   test("explains the resolved cost limit in a dry-run plan", async () => {

@@ -1,11 +1,7 @@
 import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import {
-  OPENROUTER_CODEX_PROVIDER,
-  resolveCodexProfile,
-  type JsonObject,
-} from "../src/config.js";
+import { resolveCodexProfile, type JsonObject } from "../src/config.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -286,6 +282,7 @@ test.each([
   "profile only",
   "file custom only",
   "file default key",
+  "file Azure",
 ] as const)(
   "concurrent provider snapshots preserve %s credentials",
   async (selection) => {
@@ -299,7 +296,11 @@ test.each([
     await mkdir(sharedHome, { recursive: true, mode: 0o700 });
 
     const providerId =
-      selection === "file custom only" ? "synthetic.gateway" : "openrouter";
+      selection === "file custom only"
+        ? "synthetic.gateway"
+        : selection === "file Azure"
+          ? "azure"
+          : "openrouter";
     const ready = [
       Promise.withResolvers<void>(),
       Promise.withResolvers<void>(),
@@ -355,20 +356,27 @@ test.each([
           selection === "file default key"
             ? "OPENROUTER_API_KEY"
             : "SYNTHETIC_CUSTOM_API_KEY";
-        const canonicalHeader: Record<string, string> =
+        const canonicalKey =
           selection === "root"
-            ? { OPENROUTER_API_KEY: ` synthetic-canonical-header-${index} ` }
-            : {};
+            ? "OPENROUTER_API_KEY"
+            : providerId === "azure" && index === 0
+              ? "AZURE_OPENAI_API_KEY"
+              : undefined;
+        const canonicalHeader: Record<string, string> =
+          canonicalKey === undefined
+            ? {}
+            : { [canonicalKey]: ` synthetic-canonical-header-${index} ` };
+        const azureResource = `https://resource-${index}.example.test`;
         const provider = {
           name: `Synthetic ${index}`,
-          base_url: `https://provider-${index}.example.test/v1`,
+          ...(providerId === "azure"
+            ? {}
+            : { base_url: `https://provider-${index}.example.test/v1` }),
           wire_api: "responses",
           env_key: providerKey,
           env_http_headers: {
             "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
-            ...(selection === "root"
-              ? { "X-Synthetic-Canonical": "OPENROUTER_API_KEY" }
-              : {}),
+            ...(canonicalKey ? { "X-Synthetic-Canonical": canonicalKey } : {}),
             "X-Synthetic-Missing": "SYNTHETIC_UNSET",
           },
           ...(index === 1
@@ -498,6 +506,13 @@ test.each([
                   : "CODEX_HOME"]: sourceHome,
                 CODEX_SECURITY_STATE_DIR: state,
                 OPENAI_API_KEY: "synthetic-account-key",
+                ...(providerId === "azure"
+                  ? {
+                      AZURE_OPENAI_ENDPOINT: azureResource,
+                      AZURE_OPENAI_API_KEY: "synthetic-unrelated-azure-key",
+                      CODEX_API_KEY: "synthetic-unrelated-account-key",
+                    }
+                  : {}),
                 ...(selection === "file custom only"
                   ? {}
                   : { OPENROUTER_API_KEY: "synthetic-sdk-account-key" }),
@@ -623,6 +638,17 @@ test.each([
                     nativeConfig["model_providers"] as JsonObject
                   )[providerId] as JsonObject;
                   expect(actual).toMatchObject(provider);
+                  if (providerId === "azure") {
+                    expect(actual["base_url"]).toBe(
+                      `${azureResource}/openai/v1`,
+                    );
+                    expect(environment["AZURE_OPENAI_API_KEY"]).toBe(
+                      canonicalHeader["AZURE_OPENAI_API_KEY"],
+                    );
+                    expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+                    expect(environment["CODEX_API_KEY"]).toBeUndefined();
+                    expect(options.apiKey).toBeUndefined();
+                  }
                   expect(actual["http_headers"] ?? {}).toEqual(
                     provider.http_headers ?? {},
                   );
@@ -704,6 +730,7 @@ const fileProviderKeyCases = [
   ["fireworks", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "custom Codex key", "CODEX_API_KEY"],
   ["openrouter", "other external key", "FIREWORKS_API_KEY"],
+  ["openrouter", "managed Azure", "OPENROUTER_API_KEY"],
 ] as const;
 
 const gatewayHeaders = new Map<string, string>([
@@ -773,6 +800,7 @@ for (const mode of ["standard", "deep"] as const) {
         ? { [inactiveKey]: "synthetic-inactive-key" }
         : {};
       const inheritedEnvironment: Record<string, string> = {
+        AZURE_OPENAI_API_KEY: " synthetic-private-azure ",
         ...(_selection === "custom Codex key" ||
         _selection === "other external key" ||
         gatewayHeader
@@ -800,6 +828,12 @@ for (const mode of ["standard", "deep"] as const) {
         ...headerEnvironment,
         ...inactiveEnvironment,
         [providerKey]: "synthetic-file-key",
+        ...(_selection === "managed Azure"
+          ? {
+              AZURE_OPENAI_API_KEY:
+                inheritedEnvironment["AZURE_OPENAI_API_KEY"],
+            }
+          : {}),
       };
       const provider = {
         name: "Synthetic file provider",
@@ -819,6 +853,15 @@ for (const mode of ["standard", "deep"] as const) {
         model_providers: {
           [providerId]: provider,
           inactive: { ...provider, env_key: inactiveKey },
+          ...(_selection === "managed Azure"
+            ? {
+                azure: {
+                  ...provider,
+                  base_url: "https://resource.example.test/openai/v1",
+                  env_key: "AZURE_OPENAI_API_KEY",
+                },
+              }
+            : {}),
         },
         features: { shell_tool: false, unified_exec: false },
       });
@@ -854,6 +897,7 @@ for (const mode of ["standard", "deep"] as const) {
                   expect(options.apiKey).toBeUndefined();
                   const environment = options.env!;
                   expect(environment[providerKey]).toBe("synthetic-file-key");
+                  expect(environment["AZURE_OPENAI_API_KEY"]).toBeUndefined();
                   for (const name of [
                     "OPENAI_API_KEY",
                     "CODEX_API_KEY",
@@ -895,9 +939,13 @@ for (const mode of ["standard", "deep"] as const) {
                     expect(status.data[0].tools).toHaveProperty(
                       "synthetic_environment",
                     );
+                    const registration = JSON.parse(
+                      await readFile(report, "utf8"),
+                    );
                     expect(
-                      JSON.parse(await readFile(report, "utf8")).recovered,
-                    ).toEqual(workerEnvironment);
+                      registration.inherited.AZURE_OPENAI_API_KEY,
+                    ).toBeNull();
+                    expect(registration.recovered).toEqual(workerEnvironment);
                     const snapshot =
                       environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
                     if (process.platform !== "win32")
@@ -928,7 +976,13 @@ for (const mode of ["standard", "deep"] as const) {
         },
       );
       try {
-        const preflight = await client.preflight(repository, { mode });
+        const runOptions = {
+          mode,
+          ...(_selection === "managed Azure"
+            ? { auth: "chatgpt" as const }
+            : {}),
+        };
+        const preflight = await client.preflight(repository, runOptions);
         expect(preflight.authentication).toEqual({
           method: "api_key",
           source: providerKey,
@@ -960,7 +1014,7 @@ for (const mode of ["standard", "deep"] as const) {
           expect(launched).toBe(false);
           return;
         }
-        await expect(client.run(repository, { mode })).rejects.toThrow(
+        await expect(client.run(repository, runOptions)).rejects.toThrow(
           "synthetic file provider child checked",
         );
         expect(launched).toBe(true);
@@ -973,6 +1027,100 @@ for (const mode of ["standard", "deep"] as const) {
     },
   );
 }
+
+test.each([
+  ["gateway", "selected header", "command"],
+  ["gateway", "alternate header", "command"],
+  ["amazon-bedrock", "alternate key", "aws_credentials"],
+] as const)(
+  "Deep workers receive Azure credentials with parent %s, %s and resolved %s authentication",
+  async (parentProvider, azureCredential, authMethod) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scan, { mode: 0o700 });
+    const provider = {
+      name: "Synthetic gateway",
+      base_url: "https://gateway.example.test/v1",
+      wire_api: "responses",
+    };
+    const header = {
+      env_http_headers: { "x-api-key": "AZURE_OPENAI_API_KEY" },
+    };
+    const headerValue = "synthetic-header-value";
+    const report = join(root, "worker-environment.json");
+    const plugin = await createPluginProbe(root, report);
+    const client = new TestClient(
+      {
+        pluginPath: plugin,
+        codexOverrides: {
+          model_provider: parentProvider,
+          model_providers: {
+            gateway: {
+              ...provider,
+              auth: { command: process.execPath, args: ["--version"] },
+              ...(azureCredential === "selected header" ? header : {}),
+            },
+            azure: {
+              ...provider,
+              ...(azureCredential === "alternate header" ? header : {}),
+              ...(azureCredential === "alternate key"
+                ? { env_key: "AZURE_OPENAI_API_KEY" }
+                : {}),
+            },
+          },
+        },
+      },
+      {
+        environment: {
+          CODEX_HOME: join(root, "home"),
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          AZURE_OPENAI_API_KEY: headerValue,
+          OPENAI_API_KEY: "synthetic-unrelated-key",
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) =>
+          codexFactory(async () => {
+            const environment = options.env!;
+            expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+            expect(environment["AZURE_OPENAI_API_KEY"]).toBe(
+              azureCredential === "selected header" ? headerValue : undefined,
+            );
+            const status = await nativeRequest(
+              environment,
+              repository,
+              [],
+              "mcpServerStatus/list",
+              { serverName: "codex-security", detail: "toolsAndAuthOnly" },
+            );
+            expect(status.data[0].toolsError).toBeNull();
+            const worker = JSON.parse(await readFile(report, "utf8"));
+            expect(worker.inherited.AZURE_OPENAI_API_KEY).toBe(
+              azureCredential === "selected header" ? headerValue : null,
+            );
+            expect(worker.recovered).toEqual({
+              AZURE_OPENAI_API_KEY: headerValue,
+            });
+            throw new Error("synthetic worker credentials checked");
+          })(),
+      },
+    );
+    try {
+      const options = { mode: "deep", auth: "chatgpt" } as const;
+      const preflight = await client.preflight(repository, options);
+      expect(preflight.authentication.method).toBe(authMethod);
+      await expect(client.run(repository, options)).rejects.toThrow(
+        "synthetic worker credentials checked",
+      );
+    } finally {
+      await client.close();
+    }
+  },
+  30_000,
+);
 
 test("workers preserve native provider inheritance without an explicit selection", async () => {
   const root = await temporaryDirectory();
@@ -1136,13 +1284,15 @@ test("standard scans do not require Deep Scan plugin capabilities", async () => 
 });
 
 test.each([
-  ["root", "openai"],
-  ["profile", "openai"],
-  ["root", "openrouter"],
-  ["profile", "openrouter"],
+  ["root", "openai", false],
+  ["profile", "openai", false],
+  ["root", "openrouter", false],
+  ["profile", "openrouter", false],
+  ["root", "openrouter", true],
+  ["profile", "openrouter", true],
 ] as const)(
-  "Deep workers, rerun and resume inherit the %s %s endpoint",
-  async (selection, provider) => {
+  "Deep workers, rerun and resume inherit the %s %s endpoint (command auth: %p)",
+  async (selection, provider, commandAuth) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -1159,7 +1309,11 @@ test.each([
             model_provider: provider,
             model_providers: {
               [provider]: {
-                ...OPENROUTER_CODEX_PROVIDER,
+                name: "OpenRouter",
+                wire_api: "responses",
+                ...(commandAuth
+                  ? { auth: { command: "synthetic-auth" } }
+                  : { env_key: "OPENROUTER_API_KEY" }),
                 base_url: endpoint,
                 query_params: { version: "preview" },
               },
@@ -1232,9 +1386,12 @@ test.each([
             environment,
             onWorkbench: () => ({ scanId: "saved", scanDir: scan, recipe }),
             onConfig: ({ codexOverrides }) => {
-              expect(resolveCodexProfile(codexOverrides!)).toMatchObject(
-                routing,
-              );
+              const restored = resolveCodexProfile(codexOverrides!);
+              expect(restored).toMatchObject(routing);
+              if (commandAuth)
+                expect(restored).not.toHaveProperty(
+                  "model_providers.openrouter.env_key",
+                );
             },
           }),
         );
@@ -1266,7 +1423,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     await writeFile(process.argv[2], JSON.stringify({
       inherited: Object.fromEntries([
         "SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER",
-        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY",
+        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY", "AZURE_OPENAI_API_KEY",
       ].map((name) => [name, process.env[name] ?? null])),
       recovered: settings.environment,
     }));
@@ -1394,6 +1551,7 @@ test.each([
                   SYNTHETIC_CUSTOM_HEADER: null,
                   SYNTHETIC_REQUIRED_KEY: null,
                   SYNTHETIC_UNUSED_KEY: null,
+                  AZURE_OPENAI_API_KEY: null,
                 },
                 recovered: {
                   ...providerEnvironment,

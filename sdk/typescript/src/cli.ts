@@ -93,7 +93,7 @@ import {
   SCAN_AUTH_MODES,
   scanAuthentication,
   runtimeScanAuthentication,
-  selectedScanEnvironment,
+  validateScanCostLimit,
   type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
@@ -185,6 +185,8 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
+  azureBaseUrl,
+  externalProviderTable,
   isExternalModelProvider,
   mergeCodexOverrides,
   hasCommandAuth,
@@ -503,6 +505,7 @@ const PROVIDER_OPTION = z
     "openrouter",
     "fireworks",
     "cheaperinference",
+    "azure",
     "amazon-bedrock",
   ])
   .default("openai")
@@ -1773,7 +1776,7 @@ async function runCodexSkillProcess(
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
         selected = {
-          ...selectedScanEnvironment(selected, "chatgpt"),
+          ...withoutOpenAiApiKeys(selected),
           CODEX_API_KEY: apiKey,
         };
         if (output.appServer !== undefined) {
@@ -4884,6 +4887,7 @@ export async function main(
             options.provider,
             undefined,
             scanCodexHome(dependencies.environment),
+            dependencies.environment,
           );
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
@@ -4920,6 +4924,7 @@ export async function main(
                   const effectiveConfig = await mergedCodexConfig(
                     config,
                     scanCodexHome(dependencies.environment),
+                    dependencies.environment,
                   );
                   return await chooseInteractiveAuthentication(
                     {
@@ -5193,6 +5198,7 @@ export async function main(
                 options.provider,
                 project?.input.codex,
                 scanCodexHome(dependencies.environment),
+                dependencies.environment,
               ),
             },
             directory,
@@ -5829,6 +5835,7 @@ export async function main(
                 options.provider,
                 project?.input.codex,
                 scanCodexHome(dependencies.environment),
+                dependencies.environment,
               ),
             },
             directory,
@@ -5867,6 +5874,7 @@ export async function main(
             const dashboardConfig = await mergedCodexConfig(
               config,
               scanCodexHome(dependencies.environment),
+              dependencies.environment,
             );
             const candidate = new ScanDashboard(errorOutput, {
               repository,
@@ -6133,7 +6141,7 @@ export async function main(
                     ).options,
                   ]),
                 );
-          const result = await runMultiscan({
+          const bulkOptions: Parameters<typeof runMultiscan>[0] = {
             inputPath,
             outputDir,
             ...(githubHost === undefined ? {} : { githubHost }),
@@ -6158,6 +6166,7 @@ export async function main(
                   options.provider,
                   project?.input.codex,
                   scanCodexHome(dependencies.environment),
+                  dependencies.environment,
                 ),
               ),
               pluginPath: options.pluginPath,
@@ -6267,7 +6276,11 @@ export async function main(
                 `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
               );
             },
-          });
+          };
+          const result = await runMultiscan(
+            bulkOptions,
+            dependencies.environment,
+          );
           exitCode =
             interruptedExitCode(controller.signal) ??
             (result.failed > 0 ? 2 : result.policyFailed ? 1 : 0);
@@ -7353,6 +7366,7 @@ export async function main(
         const codex = await mergedCodexConfig(
           resolved.config,
           scanCodexHome(dependencies.environment),
+          dependencies.environment,
         );
         const deep =
           resolved.options.mode === "deep"
@@ -9221,21 +9235,44 @@ async function runSkill(
   }
   if (options.serviceTier !== undefined)
     overrides["service_tier"] = options.serviceTier;
-  const { model, reasoningEffort } = scanModelConfiguration(
-    await mergedCodexConfig({ codexOverrides: overrides }),
-  );
+  const environment = options.environment ?? dependencies.environment;
   const provider =
     options.provider ?? (overrides["model_provider"] as string | undefined);
-  const providerConfiguration =
+  const configuredProvider =
     options.providerConfiguration ??
     (provider === undefined
       ? undefined
-      : ((
+      : (
           overrides["model_providers"] as Record<string, JsonObject> | undefined
-        )?.[provider] ??
-        (isExternalModelProvider(provider)
-          ? EXTERNAL_CODEX_PROVIDERS[provider]
-          : undefined)));
+        )?.[provider]);
+  let providerConfiguration = configuredProvider;
+  if (provider === "azure") {
+    const ambientProviders =
+      skill !== "validation" && options.providerConfiguration === undefined
+        ? resolveCodexProfile(await readCodexHomeConfig(environment))[
+            "model_providers"
+          ]
+        : undefined;
+    const inherited =
+      isJsonObject(ambientProviders) && isJsonObject(ambientProviders["azure"])
+        ? ambientProviders["azure"]
+        : {};
+    const generated = externalProviderTable(
+      provider,
+      environment,
+      deepMerge({ ...inherited }, configuredProvider ?? {}),
+    );
+    // Native app-server reads inherited fields from disk. Forward explicit
+    // overrides, missing preset fields and the normalized endpoint only.
+    for (const key of Object.keys(inherited))
+      if (key !== "base_url") delete generated[key];
+    providerConfiguration = { ...configuredProvider, ...generated };
+  } else if (
+    providerConfiguration === undefined &&
+    isExternalModelProvider(provider)
+  ) {
+    providerConfiguration = EXTERNAL_CODEX_PROVIDERS[provider];
+  }
   const effectiveOverrides = resolveCommandAuthConfig(
     mergeCodexOverrides(
       overrides,
@@ -9248,7 +9285,14 @@ async function runSkill(
               : { model_providers: { [provider]: providerConfiguration } }),
           },
     ),
-    scanCodexHome(options.environment ?? dependencies.environment),
+    scanCodexHome(environment),
+  );
+  const { model, reasoningEffort } = scanModelConfiguration(
+    await mergedCodexConfig(
+      { codexOverrides: effectiveOverrides },
+      scanCodexHome(environment),
+      environment,
+    ),
   );
   const directory = options.directory ?? dependencies.currentDirectory();
   const contextFile =
@@ -10284,18 +10328,19 @@ async function executeScan(
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
     const inlineProfiles = config.codexOverrides?.["profiles"];
-    // Saved recipes keep their existing validation path; file profiles need
-    // an early merge so CLI reporting reflects the selected file.
-    const effectiveConfiguration =
+    const nativeProfile =
       typeof selectedProfileName === "string" &&
-      (inlineProfiles === undefined ||
-        !isJsonObject(inlineProfiles) ||
-        !isJsonObject(inlineProfiles[selectedProfileName] ?? null))
+      (!isJsonObject(inlineProfiles) ||
+        !isJsonObject(inlineProfiles[selectedProfileName]));
+    const requested = { ...DEFAULT_CODEX_CONFIG, ...config.codexOverrides };
+    const effectiveConfiguration =
+      nativeProfile || scanModelProvider(requested) === "azure"
         ? await mergedCodexConfig(
             config,
             scanCodexHome(dependencies.environment),
+            dependencies.environment,
           )
-        : { ...DEFAULT_CODEX_CONFIG, ...config.codexOverrides };
+        : requested;
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
     const resolvedConfiguration = resolveCodexProfile(effectiveConfiguration);
@@ -10313,6 +10358,11 @@ async function executeScan(
       ]),
     );
     const provider = scanModelProvider(effectiveConfiguration);
+    validateScanCostLimit(
+      arguments_.maxCostUsd,
+      effectiveModel,
+      scanPricingContext(effectiveConfiguration, dependencies.environment),
+    );
     const analytics = resolvedConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
@@ -10346,9 +10396,13 @@ async function executeScan(
       )?.[provider];
       providerOptions = {
         provider,
-        providerConfiguration: isExternalModelProvider(provider)
-          ? { ...EXTERNAL_CODEX_PROVIDERS[provider], ...providerConfiguration }
-          : providerConfiguration,
+        providerConfiguration:
+          isExternalModelProvider(provider) && provider !== "azure"
+            ? {
+                ...EXTERNAL_CODEX_PROVIDERS[provider],
+                ...providerConfiguration,
+              }
+            : providerConfiguration,
       };
     }
     selectedAuthentication = arguments_.mock
@@ -10693,9 +10747,10 @@ async function executeScan(
           progress?.stage(
             `Authentication: API key from ${authentication.source}.`,
           );
-          progress?.stage(
-            "To use your ChatGPT sign-in, retry with --auth chatgpt.",
-          );
+          if (!isExternalModelProvider(provider))
+            progress?.stage(
+              "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+            );
         } else if (authentication.method === "aws_credentials") {
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
@@ -11559,6 +11614,12 @@ function scanFailureMessage(
         return `${detail}The configured Codex provider denied access. Check the command credentials and provider permissions.`;
       }
       if (
+        authentication?.method === "api_key" &&
+        isExternalModelProvider(provider)
+      ) {
+        return `${detail}The API key from ${authentication.source} cannot access the configured model. Confirm the deployment or model name and the credential's permissions.`;
+      }
+      if (
         authentication?.method === "stored_credentials" &&
         authentication.credentialType === "api_key"
       )
@@ -12045,9 +12106,17 @@ async function parseScanCodexOverrides(
   provider: "openai" | "amazon-bedrock" | ExternalModelProvider | undefined,
   defaults: JsonObject | undefined,
   profileHome: string,
+  environment: NodeJS.ProcessEnv,
 ): Promise<JsonObject> {
   if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
-    return parseCodexOverrides(values, model, effort, provider, defaults);
+    return parseCodexOverrides(
+      values,
+      model,
+      effort,
+      provider,
+      defaults,
+      environment,
+    );
   }
   const explicit = parseCodexOverrides(values, model, effort);
   const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
@@ -12058,10 +12127,12 @@ async function parseScanCodexOverrides(
     effort,
     provider,
     mergeCodexOverrides(profile, defaults ?? {}),
+    environment,
   );
   const providers = profile["model_providers"];
   if (
     isExternalModelProvider(provider) &&
+    provider !== "azure" &&
     isJsonObject(providers) &&
     isJsonObject(providers[provider])
   ) {
@@ -12090,15 +12161,18 @@ export function parseCodexOverrides(
   effort?: ModelCliOptions["effort"],
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
   defaults?: JsonObject,
+  environment: NodeJS.ProcessEnv = process.env,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
   if (isExternalModelProvider(provider)) {
     result["model_provider"] = provider;
-    result["model_providers"] = {
-      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
-    };
+    if (provider !== "azure") {
+      result["model_providers"] = {
+        [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+      };
+    }
   } else if (provider === "amazon-bedrock") {
     result["model_provider"] = provider;
   }
@@ -12163,14 +12237,28 @@ export function parseCodexOverrides(
     cursor[final] = parsed;
   }
   if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
-    const selectedModel = scanModel(
-      mergeCodexOverrides(defaults ?? {}, result),
-    );
+    const configured = mergeCodexOverrides(defaults ?? {}, result);
+    const selectedModel = scanModel(configured);
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
       throw new CodexSecurityError(
         selectedModel === undefined
           ? `--model is required when using --provider ${provider}`
           : `--model must be a nonempty string when using --provider ${provider}`,
+      );
+    }
+    if (provider === "azure") {
+      const providers = resolveCodexProfile(configured)["model_providers"];
+      const azure = isJsonObject(providers) ? providers["azure"] : undefined;
+      const baseUrl = azureBaseUrl(
+        environment,
+        isJsonObject(azure) ? azure["base_url"] : undefined,
+      );
+      // Save the resource alongside explicit overrides so reruns can reload the file profile.
+      result["model_providers"] = mergeCodexOverrides(
+        isJsonObject(result["model_providers"])
+          ? result["model_providers"]
+          : {},
+        { azure: { base_url: baseUrl } },
       );
     }
   }

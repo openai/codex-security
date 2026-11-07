@@ -9,6 +9,7 @@ import {
   scanAuthentication,
   scanCodexHome,
   selectedScanEnvironment,
+  validateScanCostLimit,
   type CodexSecuritySurface,
   type ScanAuthentication,
   type ScanLifecycle,
@@ -23,7 +24,9 @@ import {
 import {
   hasCommandAuth,
   mergedCodexConfig,
+  scanModelConfiguration,
   scanModelProvider,
+  scanPricingContext,
   scanProviderEnvKey,
   type CodexSecurityConfig,
 } from "./config.js";
@@ -154,30 +157,40 @@ export async function runComponentScans(
   if (Boolean(options.auto) === (options.components !== undefined))
     throw new Error("Choose exactly one of components or automatic planning.");
   const auth = options.scanOptions?.auth;
+  const maxCostUsd = options.scanOptions?.maxCostUsd;
   let environment = options.environment;
-  if (auth !== undefined && auth !== "auto") {
+  if ((auth !== undefined && auth !== "auto") || maxCostUsd !== undefined) {
     const source = environment ?? process.env;
     const configuration = await mergedCodexConfig(
       options.config ?? {},
       scanCodexHome(source),
+      source,
     );
     const provider = scanModelProvider(configuration);
-    const providerEnvKey = scanProviderEnvKey(configuration);
-    scanAuthentication(
-      source,
-      auth,
-      provider,
-      hasCommandAuth(configuration),
-      false,
-      providerEnvKey,
-    );
-    environment = selectedScanEnvironment(
-      source,
-      auth,
-      provider,
-      providerEnvKey,
-      configuration,
-    );
+    if (maxCostUsd !== undefined)
+      validateScanCostLimit(
+        maxCostUsd,
+        scanModelConfiguration(configuration).model,
+        scanPricingContext(configuration, source),
+      );
+    if (auth !== undefined && auth !== "auto") {
+      const providerEnvKey = scanProviderEnvKey(configuration);
+      scanAuthentication(
+        source,
+        auth,
+        provider,
+        hasCommandAuth(configuration),
+        false,
+        providerEnvKey,
+      );
+      environment = selectedScanEnvironment(
+        source,
+        auth,
+        provider,
+        providerEnvKey,
+        configuration,
+      );
+    }
   }
   const repository = await normalizeRepository(
     options.repository,

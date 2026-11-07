@@ -17,21 +17,12 @@ import {
   type CodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
-
-const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
+import { environmentEntry } from "./value.js";
 
 /** @internal */
-export function environmentEntry(
-  environment: ProcessEnvironment,
-  requested: string,
-): string | undefined {
-  const exact = environment[requested];
-  if (exact !== undefined || process.platform !== "win32") return exact;
-  const upper = requested.toUpperCase();
-  return Object.entries(environment).find(
-    ([name]) => name.toUpperCase() === upper,
-  )?.[1];
-}
+export { environmentEntry } from "./value.js";
+
+const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 
 /** @internal */
 export function withoutOpenAiApiKeys<Value>(

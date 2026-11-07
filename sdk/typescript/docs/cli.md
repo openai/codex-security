@@ -252,6 +252,20 @@ export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
+For Azure OpenAI, use the deployment name as the model. Supply its resource key
+or a current Microsoft Entra access token in `AZURE_OPENAI_API_KEY`.
+
+```bash
+export AZURE_OPENAI_ENDPOINT="https://YOUR-RESOURCE-NAME.openai.azure.com"
+codex-security scan . --provider azure --model YOUR-DEPLOYMENT-NAME
+```
+
+`AZURE_OPENAI_BASE_URL` takes precedence over `AZURE_OPENAI_ENDPOINT`. The
+provider uses the resource’s HTTPS `/openai/v1` Responses endpoint. The saved
+recipe retains the endpoint and deployment, and reads the credential again for
+each run. Azure deployment names do not identify a price. Scans report token
+usage and reject `--max-cost` for this provider. [Azure Responses API guide](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/responses)
+
 ### Hugging Face compatibility
 
 In compatibility testing, Codex 0.166.0 sent its scan-completion tool inside a

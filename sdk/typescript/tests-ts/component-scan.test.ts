@@ -2006,6 +2006,26 @@ command = "synthetic-auth-helper"
   },
 );
 
+test("rejects an Azure budget before automatic planning even for a priced-looking deployment", async () => {
+  const paths = await fixture();
+  const plan = mock(async () => ({ components }));
+  await expect(
+    scan(paths, {
+      components: undefined,
+      auto: true,
+      planComponents: plan,
+      config: {
+        codexOverrides: { model_provider: "azure", model: "gpt-5.6-sol" },
+      },
+      environment: {
+        AZURE_OPENAI_ENDPOINT: "https://synthetic.openai.azure.com",
+      },
+      scanOptions: { maxCostUsd: 1 },
+    }),
+  ).rejects.toThrow("cost limit is not available");
+  expect(plan).not.toHaveBeenCalled();
+});
+
 test("default scan clients use the component scan environment", async () => {
   const paths = await fixture();
   const summary = await scan(paths, {
