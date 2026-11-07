@@ -514,34 +514,17 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 
 for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   test.skipIf(process.platform === "win32")(
-    `${command} skips repository ripgrep when PATH includes the checkout`,
+    `${command} selects both ripgrep and its wrapper interpreter outside the checkout`,
     () => {
       const f = fixture();
       f.write("scope/visible.py");
-      chmodSync(
-        f.write("rg", "#!/bin/sh\nprintf called > rg-ran\nexit 73\n"),
-        0o700,
-      );
-      const result = runPathInventory(f, command, {
-        ...f.toolEnvironment,
-        PATH: `.${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
-        CODEX_SECURITY_GIT: "",
-      });
-      expect(readdirSync(f.repo)).not.toContain("rg-ran");
-      expect(result.status, result.stderr).toBe(0);
-      expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
-    },
-  );
-  test.skipIf(process.platform === "win32")(
-    `${command} runs a selected ripgrep wrapper with an external interpreter`,
-    () => {
-      const f = fixture();
-      f.write("scope/visible.py");
-      const shim = f.write(
-        "sh",
-        "#!/bin/sh\nprintf called > sh-ran\nexit 73\n",
-      );
-      chmodSync(shim, 0o700);
+      for (const name of ["rg", "sh"]) {
+        const shim = f.write(
+          name,
+          "#!/bin/sh\nprintf called > shim-ran\nexit 73\n",
+        );
+        chmodSync(shim, 0o700);
+      }
       const tools = join(f.root, "operator:tools");
       const alias = join(f.root, "tools");
       mkdirSync(tools);
@@ -559,7 +542,7 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
         PATH: ["", ".", alias, f.toolEnvironment["PATH"]].join(delimiter),
         CODEX_SECURITY_GIT: "",
       });
-      expect(readdirSync(f.repo)).not.toContain("sh-ran");
+      expect(readdirSync(f.repo)).not.toContain("shim-ran");
       expect(result.status, result.stderr).toBe(0);
       expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
     },

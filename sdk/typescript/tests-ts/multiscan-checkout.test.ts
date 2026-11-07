@@ -1057,13 +1057,16 @@ describe("multiscan", () => {
       await writeFile(join(source.path, "node"), "#!/bin/sh\nexit 72\n", {
         mode: 0o700,
       });
+      const aliases = join(paths.root, "aliases");
+      await mkdir(aliases);
+      await symlink(join(source.path, "node"), join(aliases, "node"));
       const summary = await runMultiscan(
         options(
           paths,
           client(async (checkout, settings) => {
             await probeCodexSandbox(
               { command: launcher },
-              { PATH: [source.path, tools].join(delimiter) },
+              { PATH: [source.path, aliases, tools].join(delimiter) },
             );
             return completeRun(checkout, settings);
           }),

@@ -115,7 +115,11 @@ describe("trusted executable resolution", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const repositoryTools = join(repository, "tools");
-    const linkedExecutable = join(root, "linked-executable");
+    const windows = process.platform === "win32";
+    const linkedExecutable = join(
+      root,
+      windows ? "linked-executable" : "tool:installation",
+    );
     const safe = join(root, "safe");
     const executable = process.platform === "win32" ? "git.exe" : "git";
     await Promise.all([
@@ -123,26 +127,40 @@ describe("trusted executable resolution", () => {
       mkdir(linkedExecutable),
       mkdir(safe),
     ]);
-    await writeFile(join(repositoryTools, executable), "untrusted executable");
+    await writeFile(join(repositoryTools, executable), "#!/bin/sh\nexit 72\n", {
+      mode: 0o700,
+    });
     await symlink(
       join(repositoryTools, executable),
       join(linkedExecutable, executable),
       "file",
     );
 
-    await expect(
-      inspectTrustedExecutable(
-        "git",
-        {
-          PATH: [linkedExecutable, safe].join(delimiter),
-          KEEP: "ok",
-        },
-        repository,
-      ),
-    ).resolves.toEqual({
+    let entry = linkedExecutable;
+    if (!windows) {
+      const alias = join(root, "current");
+      const version = join(linkedExecutable, "version");
+      await mkdir(version);
+      await symlink(version, alias);
+      entry = alias + "/..";
+    }
+    const result = await inspectTrustedExecutable(
+      "git",
+      { PATH: [entry, safe].join(delimiter), KEEP: "ok" },
+      repository,
+    );
+    expect(result).toEqual({
       executable: null,
       environment: { KEEP: "ok", PATH: safe },
     });
+    if (!windows) {
+      await writeFile(join(safe, executable), "#!/bin/sh\nexit 0\n", {
+        mode: 0o700,
+      });
+      expect(
+        spawnSync("/usr/bin/env", ["git"], { env: result.environment }).status,
+      ).toBe(0);
+    }
   });
 
   test.skipIf(process.platform === "win32")(

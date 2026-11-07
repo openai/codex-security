@@ -893,6 +893,19 @@ export async function gitOutput(
   );
 }
 
+function unavailableGitMarkerPath(
+  error: unknown,
+  search: "nearest" | "outermost",
+): boolean {
+  const { code } = error as NodeJS.ErrnoException;
+  return (
+    code === "ENOENT" ||
+    code === "ENOTDIR" ||
+    (search === "outermost" &&
+      ["EACCES", "EPERM", "ELOOP", "ENAMETOOLONG"].includes(code ?? ""))
+  );
+}
+
 export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
@@ -910,18 +923,7 @@ export async function gitMarkerRoot(
     } catch (error) {
       // Stale or inaccessible descendants still belong to their accessible checkout ancestors.
       throwIfAborted(signal);
-      const code = (error as NodeJS.ErrnoException).code;
-      if (
-        search !== "outermost" ||
-        ![
-          "ENOENT",
-          "ENOTDIR",
-          "EACCES",
-          "EPERM",
-          "ELOOP",
-          "ENAMETOOLONG",
-        ].includes(code ?? "")
-      )
+      if (search !== "outermost" || !unavailableGitMarkerPath(error, search))
         throw error;
       const parent = dirname(candidate);
       if (parent === candidate) throw error;
@@ -957,14 +959,7 @@ async function walkGitMarkers(
       root = current;
     } catch (error) {
       throwIfAborted(signal);
-      const code = (error as NodeJS.ErrnoException).code;
-      if (
-        code !== "ENOENT" &&
-        code !== "ENOTDIR" &&
-        (search !== "outermost" ||
-          !["EACCES", "EPERM", "ELOOP", "ENAMETOOLONG"].includes(code ?? ""))
-      )
-        throw error;
+      if (!unavailableGitMarkerPath(error, search)) throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;

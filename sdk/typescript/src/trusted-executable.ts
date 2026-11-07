@@ -45,15 +45,21 @@ export async function withProtectedExecutableRoots<T>(
 export function campaignCommandEnvironment(
   environment: Record<string, string | undefined>,
 ): Promise<Record<string, string | undefined>> | undefined {
-  if (
-    additionalRoots.getStore() === undefined ||
-    !Object.entries(environment).some(
-      ([name, value]) => name.toUpperCase() === "PATH" && value !== undefined,
-    )
-  )
+  if (!additionalRoots.getStore() || searchPath(environment) === undefined)
     return undefined;
   return inspectTrustedExecutable("git", environment, []).then(
     (command) => command.environment,
+  );
+}
+
+function searchPath(
+  environment: Readonly<NodeJS.ProcessEnv>,
+): string | undefined {
+  return (
+    environment["PATH"] ??
+    Object.entries(environment).find(
+      ([name, value]) => value !== undefined && name.toUpperCase() === "PATH",
+    )?.[1]
   );
 }
 
@@ -82,15 +88,11 @@ export async function inspectTrustedExecutable(
       canonicalRoot,
     ),
   );
-  roots.push(...(additionalRoots.getStore() ?? []));
+  const campaign = additionalRoots.getStore();
+  if (campaign) roots.push(...campaign);
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
-  const campaign = additionalRoots.getStore() !== undefined;
-  const path =
-    environment["PATH"] ??
-    Object.entries(environment).find(
-      ([name]) => name.toUpperCase() === "PATH",
-    )?.[1];
+  const path = searchPath(environment);
   const entries: string[] = [];
   for (let entry of path?.split(delimiter) ?? []) {
     if (
@@ -122,38 +124,27 @@ export async function inspectTrustedExecutable(
   // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
   // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
   // will actually run instead of rejecting an otherwise valid Windows configuration.
-  const extensions =
-    process.platform === "win32"
-      ? /\.(?:exe|com)$/iu.test(candidate)
-        ? [{ suffix: "", runnable: true }]
-        : pathLike
-          ? extname(candidate) === ""
-            ? [{ suffix: ".exe", runnable: true }]
-            : [{ suffix: "", runnable: false }]
-          : [
-              { suffix: ".exe", runnable: true },
-              { suffix: ".com", runnable: true },
-              { suffix: ".bat", runnable: false },
-              { suffix: ".cmd", runnable: false },
-              { suffix: "", runnable: false },
-            ]
-      : [{ suffix: "", runnable: true }];
-  const candidates = pathLike
-    ? extensions.map((extension) => ({
-        entry: null,
-        path:
-          process.platform === "win32"
-            ? resolve(`${candidate}${extension.suffix}`)
-            : candidate,
-        runnable: extension.runnable,
-      }))
-    : entries.flatMap((entry) =>
-        extensions.map((extension) => ({
-          entry,
-          path: join(entry, `${candidate}${extension.suffix}`),
-          runnable: extension.runnable,
-        })),
-      );
+  const windows = process.platform === "win32";
+  const suffixes =
+    !windows || /\.(?:exe|com)$/iu.test(candidate)
+      ? [""]
+      : pathLike
+        ? [extname(candidate) === "" ? ".exe" : ""]
+        : [".exe", ".com", ".bat", ".cmd", ""];
+  const names = suffixes.map((suffix) => candidate + suffix);
+  // The POSIX npm Codex launcher also searches the campaign PATH for Node.
+  if (campaign && !windows && candidate === "git") names.push("node");
+  const candidates = (pathLike ? [null] : entries).flatMap((entry) => {
+    // PATH lookup traverses links before "..". join() would collapse it first.
+    const directory = entry ?? "";
+    const prefix =
+      directory && !directory.endsWith(sep) ? directory + sep : directory;
+    return names.map((name) => ({
+      entry,
+      path: entry === null && windows ? resolve(name) : prefix + name,
+      runnable: windows ? /\.(?:exe|com)$/iu.test(name) : name === candidate,
+    }));
+  });
   const unsafeEntries = new Set<string>();
   let executable: string | null = null;
   for (const current of candidates) {
@@ -191,14 +182,14 @@ export async function inspectTrustedExecutable(
   for (const name of Object.keys(sanitizedEnvironment)) {
     if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
   }
-  const searchPath = entries
+  const filteredPath = entries
     .filter((entry) => !unsafeEntries.has(entry))
     .join(delimiter);
   // An empty POSIX PATH searches the current directory.
   sanitizedEnvironment["PATH"] =
-    campaign && process.platform !== "win32" && !searchPath
+    campaign && process.platform !== "win32" && !filteredPath
       ? "/dev/null"
-      : searchPath;
+      : filteredPath;
   return { executable, environment: sanitizedEnvironment };
 }
 
