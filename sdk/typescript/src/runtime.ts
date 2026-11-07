@@ -2410,8 +2410,9 @@ async function checkedOutputPath(
       `Scan output directory changed during preparation: ${path}`,
     );
   }
+  await requireSecureOutputAncestry(path);
   const canonical = await realpath(path);
-  await requireSecureOutputAncestry(canonical);
+  if (canonical !== path) await requireSecureOutputAncestry(canonical);
   return canonical;
 }
 
