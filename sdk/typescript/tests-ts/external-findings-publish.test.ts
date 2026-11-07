@@ -86,6 +86,10 @@ import {
   privateReport,
   selectPrivateReport,
 } from "../src/private-finding-import.js";
+import {
+  EXTERNAL_FINDINGS_READERS,
+  type ExternalFindingsReader,
+} from "../src/external-findings-read.js";
 import { readTenableFindings } from "../src/tenable-findings.js";
 import { tenableReport } from "./support/tenable-import-fixtures.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
@@ -1266,7 +1270,7 @@ test("a projected Snyk issue resumes its approved private repository after a ren
 
 async function privateUploadFixture(
   raw: unknown,
-  provider: "endor" | "semgrep" | "snyk" | "tenable" | "wiz",
+  provider: FindingImportRequest["source"]["provider"],
   repositoryUrl?: string,
 ) {
   const f = await fixture(raw, repositoryUrl);
@@ -1276,6 +1280,7 @@ async function privateUploadFixture(
     version: "original-inbox",
     formats: ["security.findings.v1"],
     recoverUpload: false,
+    interruptUpload: true,
   };
   const uploads: { id: string; bytes: string }[] = [];
   const jobs: unknown[] = [];
@@ -1304,11 +1309,11 @@ async function privateUploadFixture(
       }
       if (pathname.endsWith("/finding-imports/files")) {
         const form = init.body as FormData;
-        uploads.push({
-          id: String(form.get("request_id")),
-          bytes: await (form.get("file") as Blob).text(),
-        });
-        throw new Error("Interrupted private upload");
+        const bytes = await (form.get("file") as Blob).text();
+        uploads.push({ id: String(form.get("request_id")), bytes });
+        if (inbox.interruptUpload)
+          throw new Error("Interrupted private upload");
+        return Response.json(privateFileMetadata(fileId, bytes));
       }
       return f.deps.fetch(url, init);
     },
@@ -12148,13 +12153,121 @@ test("an interrupted native Endor checkpoint retains its original bytes and IDs 
   });
 });
 
-const versionThreeReports = [
-  ["blackduck", blackDuckBomReport(), { row: blackDuckBomRow() }],
-  [
-    "checkmarx",
+// Pair a native report with the private job route it requires; omitted versions
+// use the unversioned jobs endpoint even when the catalog acknowledges v2.
+const readerReports = {
+  blackduck: [blackDuckBomReport(), 3],
+  checkmarx: [
     { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
-    { row: checkmarxSastRow() },
+    3,
   ],
+  continuum: [continuumDetail(), 2],
+  endor: [[endorSource]],
+  github: [[importedAlert()]],
+  inspector: [inspectorReport(), 2],
+  opengrep: [opengrepJson()],
+  semgrep: [nativeSemgrep],
+  snyk: [snykJson()],
+  sonar: [sonarReport, 3],
+  tenable: [tenableReport, 3],
+  trivy: [trivy, 3],
+  veracode: [veracodePolicyPage(), 3],
+  wiz: [
+    [
+      {
+        id: "occurrence-1",
+        name: "CVE-2099-0001",
+        detailedName: "example-package",
+        vendorSeverity: "HIGH",
+        vulnerableAsset: { id: "asset-1" },
+      },
+    ],
+  ],
+} satisfies Record<ExternalFindingsReader, [unknown, (2 | 3)?]>;
+
+test.each(EXTERNAL_FINDINGS_READERS)(
+  "the SDK sends the reviewed %s source identity and evidence to either Cloud destination",
+  async (reader) => {
+    const [report, jobVersion] = readerReports[reader];
+    const provider = reader === "opengrep" ? "semgrep" : reader;
+    const url =
+      reader === "tenable" ? tenableReport.repository_url : exampleRepository;
+    const { f, deps, inbox, uploads, jobs, fileId } =
+      await privateUploadFixture(report, provider, url);
+    const versionHeader = "Codex-Security-Private-Import-Job-Version";
+    const prepare = () =>
+      prepareExternalPublication(
+        f.file,
+        {
+          ...options,
+          provider: reader,
+          ...(reader === "trivy"
+            ? { trivyScanRoot: "." }
+            : { sourceRepositoryUrl: url }),
+        },
+        {
+          ...deps,
+          fetch(url, init) {
+            const path = new URL(url).pathname;
+            if (path.endsWith("/external/repositories"))
+              expect(new Headers(init.headers).get(versionHeader)).toBe(
+                String(jobVersion ?? 2),
+              );
+            if (path.endsWith("/finding-imports/jobs"))
+              expect(path).toBe(
+                `/backend-api/aardvark${jobVersion ? `/v${jobVersion}` : ""}/finding-imports/jobs`,
+              );
+            return deps.fetch(url, init);
+          },
+        },
+      );
+    const capability = "Codex-Security-Private-Import-Providers";
+    delete f.state.catalogHeaders[capability];
+    const repository = await prepare();
+    expect(repository.preview.findings).toHaveLength(1);
+    // Reader-specific tests cover native ID generation. Here the reviewed ID
+    // and original source evidence must survive either transport.
+    const { source_finding_id, evidence } = structuredClone(
+      repository.preview.findings[0]!,
+    );
+    const reviewed = { source_finding_id, evidence: { title: evidence.title } };
+    const source = { provider, source_key: options.sourceKey };
+    expect(f.posts).toHaveLength(0);
+    expect((await repository.publish()).verified).toBe(1);
+    const stored = f.reports.get(source_finding_id);
+    expect(stored).toMatchObject({ source, ...reviewed });
+    expect(stored?.evidence.source_data).toEqual(evidence.source_data);
+
+    // An unsupported inbox format must not silently switch back to the still
+    // connected repository publisher.
+    f.state.catalogHeaders[capability] = provider;
+    f.state.catalogHeaders[versionHeader] = String(jobVersion ?? 2);
+    inbox.formats = [];
+    await expect(prepare()).rejects.toThrow(/format|security\.findings\.v1/i);
+    expect(f.posts).toHaveLength(1);
+    expect(uploads).toHaveLength(0);
+    expect(jobs).toHaveLength(0);
+
+    inbox.formats = ["security.findings.v1"];
+    inbox.interruptUpload = false;
+    const prepared = await prepare();
+    expect(prepared.preview.privateImport?.format).toBe("security.findings.v1");
+    expect(uploads).toHaveLength(0);
+    expect((await prepared.publish()).privateJob?.status).toBe("completed");
+    expect(uploads).toHaveLength(1);
+    const uploaded = JSON.parse(uploads[0]!.bytes).findings;
+    expect(uploaded).toMatchObject([reviewed]);
+    expect(uploaded[0].evidence.source_data).toEqual(evidence.source_data);
+    expect(jobs).toMatchObject([
+      privateJobFields(provider, fileId, "security.findings.v1"),
+    ]);
+    expect(f.posts).toHaveLength(1);
+  },
+);
+
+const versionThreeReports = [
+  ["blackduck", readerReports.blackduck[0], { row: blackDuckBomRow() }],
+  ["checkmarx", readerReports.checkmarx[0], { row: checkmarxSastRow() }],
   ["sonar", sonarReport, { issue: sonarReport.pages[0]!.issues[0]! }],
   ["trivy", trivy, { vulnerability: trivy.Results[0]!.Vulnerabilities[0]! }],
   ["veracode", veracodePolicyPage(), { row: veracodePolicyRow() }],
@@ -12213,15 +12326,7 @@ test.each([
   {
     provider: "wiz",
     format: "wiz.vulnerability_json.v1",
-    raw: [
-      {
-        id: "occurrence-1",
-        name: "CVE-2099-0001",
-        detailedName: "example-package",
-        vendorSeverity: "HIGH",
-        vulnerableAsset: { id: "asset-1" },
-      },
-    ],
+    raw: readerReports.wiz[0],
   },
 ] as const)(
   "a signed-in $provider private import resumes lost upload and job responses",
