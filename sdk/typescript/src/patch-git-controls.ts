@@ -147,16 +147,25 @@ export interface PatchGitControls {
 // files explicitly before a snapshot can silently ignore an inaccessible config.
 export async function ensureWindowsSnapshotConfigReadable(
   paths: readonly string[],
-  probe: (args: string[], input: string) => Promise<unknown>,
+  probe: (
+    args: string[],
+    input: string,
+    refreshReadGrants: boolean,
+  ) => Promise<unknown>,
   signal?: AbortSignal,
 ): Promise<void> {
   const input =
     paths.map((path) => path.replaceAll("\\", "/")).join("\n") + "\n";
   const deadline = Date.now() + 30_000;
+  let refreshReadGrants = false;
   for (;;) {
     signal?.throwIfAborted();
     try {
-      await probe(["hash-object", "--no-filters", "--stdin-paths"], input);
+      await probe(
+        ["hash-object", "--no-filters", "--stdin-paths"],
+        input,
+        refreshReadGrants,
+      );
       return;
     } catch (error) {
       const stderr = (error as { stderr?: string } | null)?.stderr;
@@ -167,6 +176,7 @@ export async function ensureWindowsSnapshotConfigReadable(
       )
         throw error;
       // A fresh sandbox launch can schedule an ACL refresh skipped by a busy helper.
+      refreshReadGrants = true;
       await delay(250, undefined, { signal });
     }
   }

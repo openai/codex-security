@@ -13,7 +13,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, parse, resolve } from "node:path";
-import { stringify as stringifyToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { pathToFileURL } from "node:url";
+import { nodeCommand } from "./support/shell.js";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import { ensureWindowsSnapshotConfigReadable } from "../src/patch-git-controls.js";
@@ -481,18 +483,77 @@ test
   nativeSnapshotTimeout,
 );
 
+test.each([false, true])(
+  "native snapshot profile preserves file grants on Windows refresh=%p",
+  async (refresh) => {
+    const root = await fixtures.create("patch-read-probe-");
+    const home = join(root, "home");
+    await mkdir(home, { mode: 0o700 });
+    const selected = join(root, "selected.gitconfig");
+    const sibling = join(root, "private-sibling");
+    const filesystem = {
+      [selected]: { ".": "read" },
+      [sibling]: { ".": "deny" },
+    };
+    const inspect = join(root, "profile.mjs");
+    await writeFile(
+      inspect,
+      `
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+const name = process.argv[process.argv.indexOf("--permission-profile") + 1];
+const path = join(process.env.CODEX_HOME, name + ".config.toml");
+process.stdout.write(JSON.stringify({ name, path, contents: readFileSync(path, "utf8") }));
+process.exit(0);
+`,
+    );
+    const environment = {
+      ...process.env,
+      CODEX_HOME: home,
+      CODEX_CLI_PATH: nodeCommand().command,
+      NODE_OPTIONS: `--import=${pathToFileURL(inspect).href}`,
+    };
+    const output = await runRepositoryCommand("git", ["--version"], root, {
+      sandbox: {
+        directory: root,
+        environment,
+        profile: {
+          extends: ":workspace",
+          filesystem,
+          network: { enabled: false },
+        },
+        refreshWindowsReadGrants: refresh,
+      },
+    });
+    const { name, path, contents } = JSON.parse(output);
+    expect(parseToml(contents)["permissions"]).toEqual({
+      [name]: {
+        extends: ":workspace",
+        network: { enabled: false },
+        filesystem: {
+          ...filesystem,
+          ...(refresh && { [path]: { ".": "deny" } }),
+        },
+      },
+    });
+    await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
+
 test("Windows snapshot config checks retry only a denied file read", async () => {
   const selected = "C:/private config/selected.gitconfig";
-  const attempts: string[][] = [];
-  await ensureWindowsSnapshotConfigReadable([selected], async (args, input) => {
-    expect(input).toBe(selected + "\n");
-    attempts.push(args);
-    if (attempts.length === 1)
-      throw Object.assign(new Error(), { stderr: "Permission denied" });
-  });
-  expect(attempts).toEqual(
-    Array(2).fill(["hash-object", "--no-filters", "--stdin-paths"]),
+  const refreshes: boolean[] = [];
+  await ensureWindowsSnapshotConfigReadable(
+    [selected],
+    async (args, input, refreshReadGrants) => {
+      expect(input).toBe(selected + "\n");
+      expect(args).toEqual(["hash-object", "--no-filters", "--stdin-paths"]);
+      refreshes.push(refreshReadGrants);
+      if (!refreshReadGrants)
+        throw Object.assign(new Error(), { stderr: "Permission denied" });
+    },
   );
+  expect(refreshes).toEqual([false, true]);
   const missing = Object.assign(new Error(), {
     stderr: "No such file or directory",
   });
