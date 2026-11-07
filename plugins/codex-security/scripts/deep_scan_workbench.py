@@ -395,7 +395,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
 
 
 def independent_review_progress(
-    connection: sqlite3.Connection, scan_id: str
+    connection: sqlite3.Connection, scan_id: str, *, parent_running: bool
 ) -> dict[str, int | str] | None:
     """Return completed and allowed review counts and the consolidation state, or None for a missing run."""
     run = connection.execute(
@@ -417,11 +417,12 @@ def independent_review_progress(
         """,
         (scan_id,),
     ).fetchone()
+    consolidating = run["phase"] in {"reducing", "terminal"} or (active == 0 and buffered > 0)
     return {
         "active": int(active),
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": run["phase"] in {"reducing", "terminal"} or (active == 0 and buffered > 0),
+        "consolidating": parent_running and consolidating,
         "updatedAt": str(run["updated_at"]),
     }
 
