@@ -579,7 +579,7 @@ async function runCampaign(
                   throw error;
                 checkoutOccupied = true;
                 throw new Error(
-                  `Bulk checkout is already occupied: ${destination}. Inspect and move the retained checkout before retrying.`,
+                  `Bulk checkout is already occupied: ${destination}. Retry with --recover to use a fresh checkout, or inspect and move the retained checkout before an ordinary retry.`,
                 );
               }
             }

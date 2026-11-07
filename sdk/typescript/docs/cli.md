@@ -1332,7 +1332,8 @@ attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
 If an ordinary attempt finds its checkout path already occupied, it stops before
-fetching. Inspect the existing checkout and move it aside before retrying.
+fetching. Use `--recover` to scan in a fresh checkout, or inspect and move the
+existing checkout before an ordinary retry.
 If checkout cleanup previously failed, the next invocation removes it only when
 its marker still identifies the same directory and scan attempt. Older or
 replacement checkouts without a matching marker are preserved.

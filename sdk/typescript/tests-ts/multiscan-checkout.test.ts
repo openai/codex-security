@@ -453,16 +453,13 @@ describe("multiscan", () => {
       { attempt: 1, status: "failed", checkoutOccupied: true },
     ]);
 
-    const saved = join(paths.root, "moved-checkout");
-    await rename(checkout, saved);
-    expect(await runMultiscan(configured)).toMatchObject({
-      completed: 1,
-      failed: 0,
+    const recovered = await runMultiscan({
+      ...configured,
+      recoverScan: async () => undefined,
     });
+    expect(recovered).toMatchObject({ completed: 1, failed: 0 });
     expect(run).toHaveBeenCalledTimes(1);
-    expect(await readFile(join(saved, "local-notes.txt"), "utf8")).toBe(
-      "Local work.\n",
-    );
+    expect(await readFile(note, "utf8")).toBe("Local work.\n");
   });
 
   test("continues later tasks when a failed scan leaves its checkout occupied", async () => {
