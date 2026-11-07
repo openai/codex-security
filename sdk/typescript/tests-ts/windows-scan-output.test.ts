@@ -668,13 +668,12 @@ test.skipIf(
       join(intermediate, "src"),
       "fixture",
     );
-    const retainedChild = join(writableParent, "retained private child");
-    await icacls(intermediate, "/grant", "*S-1-1-0:(RD,RA,REA,RC,S,DC,WA)");
+    await icacls(child, "/grant", "*S-1-1-0:RX");
+    await icacls(intermediate, "/grant", "*S-1-1-0:(RD,RA,REA,RC,S,X,DC,WA)");
     const acceptedChild = await admitted(
       runtime.prepareOutputDir(child, "fixture"),
     );
     const result = await runPowerShell(script, {
-      CODEX_SECURITY_TEST_RETAINED_CHILD: retainedChild,
       CODEX_SECURITY_TEST_REPARSE_PARENT: reparseParent,
       CODEX_SECURITY_TEST_BUN: process.execPath,
       CODEX_SECURITY_TEST_RUNTIME: new URL("../src/runtime.ts", import.meta.url)
@@ -725,18 +724,9 @@ test.skipIf(
       stage: "complete",
       win32: 0,
     });
-    expect((await lstat(retainedChild)).isDirectory()).toBe(true);
-    if (observed.intermediate.stage === "complete") {
-      expect(acceptedChild).toBe(false);
-      expect(observed.intermediate.win32).toBe(0);
-      expect(await realpath(child)).toBe(
-        await realpath(join(repository, "src")),
-      );
-    } else {
-      expect(["open", "set"]).toContain(observed.intermediate.stage);
-      expect(observed.intermediate.win32).toBe(5);
-      await expect(lstat(child)).rejects.toMatchObject({ code: "ENOENT" });
-    }
+    expect(observed.intermediate).toEqual({ stage: "complete", win32: 0 });
+    expect(acceptedChild).toBe(false);
+    expect(await realpath(child)).toBe(await realpath(join(repository, "src")));
     expect(await readFile(join(selected, "marker.txt"), "utf8")).toBe(
       "replacement",
     );

@@ -84,6 +84,7 @@ def test_native_directory_write_rights_for_setting_reparse_data(tmp_path: Path) 
     grant(tmp_path, "(OI)(CI)RX")
     target = tmp_path / "synthetic target"
     target.mkdir()
+    (target / "src").mkdir()
     subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(tmp_path / "source junction"), str(target)],
         check=True,
@@ -98,6 +99,14 @@ def test_native_directory_write_rights_for_setting_reparse_data(tmp_path: Path) 
         leaf = tmp_path / name
         leaf.mkdir()
         grant(leaf, rights)
+
+    intermediate = tmp_path / "intermediate"
+    child = intermediate / "src"
+    storage.create_private_directory(child)
+    grant(child, "RX")
+    grant(intermediate, "(RD,RA,REA,RC,S,X,DC,WA)")
+    with pytest.raises(SystemExit, match="can be replaced"):
+        workbench_db.require_canonical_scan_directory(child)
 
     script = Path(__file__).with_name("windows-other-user-access.ps1")
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -120,10 +129,13 @@ def test_native_directory_write_rights_for_setting_reparse_data(tmp_path: Path) 
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    rows = json.loads(result.stdout)
+    observed = json.loads(result.stdout)
+    rows = observed["reparse"]
     assert len(rows) == 4 and all(row["stage"] == "complete" for row in rows), json.dumps(rows)
     for row in rows:
         assert (tmp_path / row["name"]).resolve() == target
+    assert observed["intermediate"] == {"stage": "complete", "win32": 0}, observed
+    assert child.resolve() == target / "src"
 
 
 def test_delete_child_and_parent_reparse_rights_require_no_create_grant(tmp_path: Path) -> None:

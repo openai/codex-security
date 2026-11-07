@@ -16,6 +16,9 @@ public static class ScanOutputAccessProbe {
     private static extern bool MoveFile(string existingName, string newName);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool RemoveDirectory(string path);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(string path, uint access, uint share,
         IntPtr security, uint disposition, uint flags, IntPtr template);
 
@@ -86,10 +89,9 @@ public static class ScanOutputAccessProbe {
         throw new System.ComponentModel.Win32Exception(error);
     }
 
-    public static void MoveDirectory(SafeAccessTokenHandle token, string source, string destination) {
-        WindowsIdentity.RunImpersonated(token, () => {
-            if (!MoveFile(source, destination)) throw new System.ComponentModel.Win32Exception();
-        });
+    public static int RemoveEmptyDirectory(SafeAccessTokenHandle token, string path) {
+        return WindowsIdentity.RunImpersonated(token, () =>
+            RemoveDirectory(path) ? 0 : Marshal.GetLastWin32Error());
     }
 }
 '@
@@ -123,14 +125,18 @@ try {
             rename = $renameError -eq 0; renameWin32 = $renameError
         }
     })
+    $intermediate = Join-Path $reparseParent 'intermediate'
+    $removeError = [ScanOutputAccessProbe]::RemoveEmptyDirectory($token, (Join-Path $intermediate 'src'))
+    $observed = @{ reparse = $reparse; intermediate = @{ stage = 'remove'; win32 = $removeError } }
+    if ($removeError -eq 0) {
+        $retag = [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, $intermediate, 0x100)
+        $observed.intermediate = @{ stage = $retag.Item1; win32 = $retag.Item2 }
+    }
     if ($env:CODEX_SECURITY_TEST_REPARSE_ONLY -eq '1') {
-        ConvertTo-Json -InputObject $reparse -Compress
+        ConvertTo-Json -InputObject $observed -Depth 4 -Compress
         return
     }
     [ScanOutputAccessProbe]::ReplaceDirectory($token, $env:CODEX_SECURITY_TEST_REPLACE_DIRECTORY)
-    $intermediate = Join-Path $reparseParent 'intermediate'
-    [ScanOutputAccessProbe]::MoveDirectory($token, (Join-Path $intermediate 'src'), $env:CODEX_SECURITY_TEST_RETAINED_CHILD)
-    $intermediateResult = [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, $intermediate, 0x100)
     $protected = $env:CODEX_SECURITY_TEST_DENIED_DIRECTORY
     $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
     & $icacls $protected /grant "*$($user.SID.Value):(DE)" | Out-Null
@@ -154,10 +160,8 @@ try {
             }
         }
     )
-    ConvertTo-Json -InputObject @{
-        access = $results; reparse = $reparse
-        intermediate = @{ stage = $intermediateResult.Item1; win32 = $intermediateResult.Item2 }
-    } -Depth 4 -Compress
+    $observed.access = $results
+    ConvertTo-Json -InputObject $observed -Depth 4 -Compress
 } finally {
     if ($null -ne $token) { $token.Dispose() }
     if ($created) { Remove-LocalUser -Name $name }
