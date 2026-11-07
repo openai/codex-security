@@ -13,6 +13,7 @@ import {
   symlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   basename,
   delimiter,
@@ -147,7 +148,37 @@ export interface PatchGitControls {
   readonly modelOnlyReadOnlyPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
+  readonly snapshotConfigPaths: readonly string[];
   validate(): Promise<void>;
+}
+
+// Windows provisions read ACLs in the background. Ask Git to read the same
+// files explicitly before a snapshot can silently ignore an inaccessible config.
+export async function ensureWindowsSnapshotConfigReadable(
+  paths: readonly string[],
+  probe: (args: string[], input: string) => Promise<unknown>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const input =
+    paths.map((path) => path.replaceAll("\\", "/")).join("\n") + "\n";
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    signal?.throwIfAborted();
+    try {
+      await probe(["hash-object", "--no-filters", "--stdin-paths"], input);
+      return;
+    } catch (error) {
+      const stderr = (error as { stderr?: string } | null)?.stderr;
+      if (
+        typeof stderr !== "string" ||
+        !/permission denied|access is denied/iu.test(stderr) ||
+        Date.now() >= deadline
+      )
+        throw error;
+      // A fresh sandbox launch can schedule an ACL refresh skipped by a busy helper.
+      await delay(250, undefined, { signal });
+    }
+  }
 }
 
 const missing = (error: unknown): undefined => {
@@ -657,6 +688,7 @@ export async function capturePatchGitControls(
     }
   >();
   const snapshotStoragePaths = new Set<string>();
+  const snapshotConfigPaths = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
   const externalCachePaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
@@ -1118,11 +1150,16 @@ export async function capturePatchGitControls(
       }
       checkoutCleanFilter = [...drivers.values()].includes(true);
     }
-    for (const path of globalConfigurationPaths)
-      await rememberSelectedConfiguration(
-        relativeFile(configurationDirectory, path),
-        true,
-      );
+    for (const path of globalConfigurationPaths) {
+      const selected = relativeFile(configurationDirectory, path);
+      await rememberSelectedConfiguration(selected, true);
+      activeConfigurations.add(selected);
+    }
+    for (const path of activeConfigurations) {
+      const control = controlPaths.get(path);
+      if (control && Buffer.isBuffer(control.contents))
+        snapshotConfigPaths.add(control.canonical);
+    }
     const localConfig = (
       await runControl(root, checkout, [
         "rev-parse",
@@ -1833,6 +1870,7 @@ export async function capturePatchGitControls(
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
+    snapshotConfigPaths: [...snapshotConfigPaths],
     validate: () => discover(false),
   };
 }
