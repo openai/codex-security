@@ -1,3 +1,4 @@
+import { completedFindingEvidence } from "./scan-draft-fixture.ts";
 import { fixturePython } from "./support/python.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
@@ -58,6 +59,11 @@ const findingFor = (candidateId: string): FixtureFinding => ({
   locations: [{ path: "src/example.py", startLine: 1 }],
   remediation: "Complete the review.",
   provenance: { source: "local_plugin", candidateId },
+});
+
+const withCompletedEvidence = (finding: FixtureFinding) => ({
+  ...finding,
+  ...completedFindingEvidence(finding.locations[0]!.path),
 });
 
 async function finalizeParentFindings({
@@ -261,7 +267,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   test(`${layout}: distinct candidates at one location survive draft merging`, async (t) => {
     const f = await fixture(t, layout);
     for (const candidate of ["first", "second", "third"])
-      await f.writeFindings([findingFor(candidate)]);
+      await f.writeFindings([withCompletedEvidence(findingFor(candidate))]);
     await f.writeReviewState({}, true);
     const saved = await readJson(f.findingsPath);
     assert.equal(saved.findings.length, 3);
@@ -2323,7 +2329,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         ],
       });
       const reported = {
-        ...old,
+        ...withCompletedEvidence(old),
         provenance: { source: "local_plugin", candidateId: "review" },
       };
       const input = f.findingsDraft([reported], { complete: true });
@@ -2375,7 +2381,10 @@ for (const additional of ["none", "surface", "task", "completed-surface"]) {
       ],
     });
     await f.write(progress);
-    await f.writeFindings([findingFor("candidate-review")], { complete: true });
+    await f.writeFindings(
+      [withCompletedEvidence(findingFor("candidate-review"))],
+      { complete: true },
+    );
     const { importSource } = await import("./import-module.ts");
     const { validateDiscoveryArtifacts } = await importSource(
       "../src/deep-scan/artifact-validation.ts",

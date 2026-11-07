@@ -27,7 +27,11 @@ import type { JsonObject } from "../src/config.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.js";
 import { git } from "./git-fixture.js";
-import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScanFixture,
+  PLUGIN_ROOT,
+  readCompletedFindingsFixture,
+} from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -190,11 +194,9 @@ async function fixture(versioned = false, separateSetupCommands = false) {
       join(scanDir, "scan-manifest.json"),
       JSON.stringify(manifest),
     );
-    const document = JSON.parse(
-      await readFile(join(scanDir, "findings.json"), "utf8"),
-    );
+    const document = await readCompletedFindingsFixture();
     document.scanId = scanId;
-    const finding = document.findings[0];
+    const finding = document.findings[0]!;
     finding.identity = { anchor: `synthetic-${name}` };
     finding.locations = [
       {

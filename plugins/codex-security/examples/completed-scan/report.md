@@ -60,11 +60,21 @@ No explicit canonical threat-model summary was recorded.
 
 Archive extraction can overwrite files outside the directory chosen for the import.
 
+#### Root Cause
+
+The extractor joins the entry name to the output directory without checking whether the destination stays inside it.
+
 #### Validation
 
 The extractor combines the output directory with the entry name and passes the resulting path to the writer. It never checks that the destination stays inside the output directory.
 
 Validation method: Static source review
+
+Evidence:
+- The untrusted entry name reaches the filesystem write without normalization or a containment check.
+
+Limitations:
+- The extraction route was not exercised dynamically.
 
 #### Dataflow
 

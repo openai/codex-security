@@ -656,12 +656,15 @@ def _require_current_deep_publication(
             raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
         return
 
+    if publication["resultPath"] != selected_iteration_result_path(connection, scan_id):
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+
+
+def selected_iteration_result_path(connection: Any, scan_id: str) -> str | None:
     iteration = _latest_iteration(
         connection.execute("SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,))
     )
-    selected_result = iteration["result_manifest_path"] if iteration is not None else None
-    if publication["resultPath"] != selected_result:
-        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+    return iteration["result_manifest_path"] if iteration is not None else None
 
 
 if __name__ == "__main__":

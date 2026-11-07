@@ -38,6 +38,13 @@ from posix_scan_local_files import (
 )
 from posix_scan_local_files import managed_fd, stage_write
 from review_state import checkpoint_review_state, review_state, review_summary
+from scan_contract_fields import (
+    ContractError,
+    _require_dict,
+    _require_list,
+    _require_str,
+    _validate_finding_evidence,
+)
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -103,10 +110,6 @@ WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
     r'[<>:"|?*\x00-\x1f]|[ .]$|^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$',
     re.IGNORECASE,
 )
-
-
-class ContractError(ValueError):
-    """Raised when a completed scan does not satisfy the additive contract."""
 
 
 class ScanLocalIOError(ContractError):
@@ -406,27 +409,6 @@ def _require_safe_json_string(value: str, context: str) -> None:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ContractError(f"{context}: expected well-formed Unicode JSON strings") from exc
-
-
-def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
-    value = payload.get(key)
-    if not isinstance(value, dict):
-        raise ContractError(f"{context}.{key}: expected an object")
-    return value
-
-
-def _require_list(payload: dict[str, Any], key: str, context: str) -> list[Any]:
-    value = payload.get(key)
-    if not isinstance(value, list):
-        raise ContractError(f"{context}.{key}: expected an array")
-    return value
-
-
-def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ContractError(f"{context}.{key}: expected a non-empty string")
-    return value
 
 
 def _require_safe_relative_path(value: object, context: str, *, allow_dot: bool = False) -> str:
@@ -3101,6 +3083,7 @@ def _prepare_scan_finalization(
     completion_binding: dict[str, Any] | None = None,
     recover_unsealed: bool = False,
     allow_missing_writeups: bool = False,
+    require_complete_evidence: bool = True,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
@@ -3186,6 +3169,9 @@ def _prepare_scan_finalization(
             _populate_unsealed_finding_identities(manifest, findings)
             _validate_findings(manifest, findings)
             _validate_current_findings(findings, schema_dir)
+            if require_complete_evidence and not (completion_binding or {}).get("imported"):
+                for index, finding in enumerate(findings["findings"]):
+                    _validate_finding_evidence(finding, index)
         except ContractError as exc:
             raise RecoverableContractError(
                 "Scan result contains invalid findings; repair the finding records "

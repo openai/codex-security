@@ -1,7 +1,10 @@
 import { fixturePython } from "./support/python.ts";
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
-import { finding } from "./scan-draft-fixture.ts";
+import {
+  completedFinding as finding,
+  finding as checkpointFinding,
+} from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
@@ -1283,7 +1286,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
           "pending-review",
           "Worker did not finish reviewing this source.",
         ),
-        findings: [finding(label, "fixture.py")],
+        findings: [checkpointFinding(label, "fixture.py")],
       };
       if (label === "valid" || label === "second-valid") {
         if (label === "valid") {
@@ -1550,7 +1553,15 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
       beforeReplay,
     );
-    await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+    // An unfinished checkpoint retains its original proof and cannot seal the scan.
+    await assert.rejects(
+      runWorkbench(["complete-scan", "--scan-id", run.scanId]),
+      /repair the finding records.*codeEvidence/,
+    );
+    assert.equal(
+      await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
+      beforeReplay,
+    );
     assert.deepEqual(
       (await readFixtureCoverage(run.scanDir)).surfaces,
       coverage.surfaces,
@@ -1559,8 +1570,6 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       (await readFixtureCoverage(run.scanDir)).deferred,
       coverage.deferred,
     );
-    const sealed = await readJson(run.scanDir, "scan-manifest.json");
-    assert.equal(typeof sealed.scan.sealedAt, "string");
     assert.deepEqual(
       (await readJson(run.scanDir, "findings.json")).findings,
       recovered.findings,

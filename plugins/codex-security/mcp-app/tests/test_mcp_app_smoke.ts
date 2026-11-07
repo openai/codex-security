@@ -956,6 +956,29 @@ async function writeCompletedContract(
         confidence: { level: "high", rationale: "Direct source trace." },
         taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
         locations: [{ path: "src/a.py", startLine: 1 }],
+        codeEvidence: [
+          {
+            id: "fixture-path-proof",
+            label: "Synthetic path proof",
+            path: "src/a.py",
+            startLine: 1,
+            code: "vulnerable",
+            explanation:
+              "Synthetic source marker for the path-traversal report fixture.",
+          },
+        ],
+        rootCause:
+          "The synthetic path-traversal fixture models missing containment.",
+        attackPath: {
+          dataflow:
+            "Synthetic archive entry path reaches the modeled filesystem write.",
+        },
+        validation: {
+          method: "Synthetic source fixture",
+          summary:
+            "Exercises completed-report handling; no runtime reproduction was performed.",
+          evidenceRefs: ["fixture-path-proof"],
+        },
         remediation: "Reject archive entries that escape the extraction root.",
         provenance: { source: "local_plugin" },
       },
@@ -967,7 +990,30 @@ async function writeCompletedContract(
         severity: { level: "informational" },
         confidence: { level: "high", rationale: "Direct source inspection." },
         taxonomy: { category: "hardening", cwe: [] },
-        locations: [{ path: "src/info.py", startLine: 2 }],
+        locations: [{ path: "src/a.py", startLine: 1 }],
+        codeEvidence: [
+          {
+            id: "fixture-info-proof",
+            label: "Synthetic informational proof",
+            path: "src/a.py",
+            startLine: 1,
+            code: "vulnerable",
+            explanation:
+              "Synthetic source marker for the informational report fixture.",
+          },
+        ],
+        rootCause:
+          "The synthetic informational fixture models a missing optional control.",
+        attackPath: {
+          dataflow:
+            "Synthetic input reaches the modeled operation without the optional control.",
+        },
+        validation: {
+          method: "Synthetic source fixture",
+          summary:
+            "Exercises informational finding handling; no runtime reproduction was performed.",
+          evidenceRefs: ["fixture-info-proof"],
+        },
         remediation: "Consider hardening this implementation detail.",
         provenance: { source: "local_plugin" },
       },
@@ -1771,10 +1817,6 @@ try {
   assert.match(
     complete.description,
     /does not create missing artifacts or run skipped phases/,
-  );
-  assert.match(
-    complete.description,
-    /If it fails, surface the exact error and stop the current response/,
   );
   assert.deepEqual(setFindingTriage._meta.ui.visibility, ["app"]);
   assert.deepEqual(requestFindingRemediation._meta.ui.visibility, ["app"]);
@@ -3327,6 +3369,10 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   });
   assert.equal(prematureCompletion.result.isError, true);
+  assert.match(
+    prematureCompletion.result.content[0].text,
+    /Do not retry completion/,
+  );
   assert.match(
     prematureCompletion.result.content[0].text,
     /scan-manifest\.json/,

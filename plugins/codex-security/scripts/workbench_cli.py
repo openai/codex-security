@@ -164,7 +164,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     iteration = add_command(
         "record-deep-scan-iteration", "--scan-id", "--worker-id", "--result-manifest-path"
     )
-    iteration.add_argument("--input-worker-id", action="append", required=True)
+    iteration.add_argument("--input-worker-id", action="append", default=[])
     iteration.add_argument("--no-new-streak", type=non_negative_int, required=True)
     iteration.add_argument("--consecutive-errors", type=non_negative_int, required=True)
     iteration.add_argument("--coordinator-generation", type=positive_int)

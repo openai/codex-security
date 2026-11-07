@@ -18,7 +18,11 @@ import {
   type ScanMatchingBatch,
 } from "../src/scan-comparison.js";
 import { dependencies } from "./cli-fixtures.js";
-import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  readCompletedFindingsFixture,
+  copyCompletedScanFixture,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { fail } from "./support/errors.js";
@@ -99,9 +103,7 @@ test("matches sealed scan history end to end without merging related findings", 
       delete draftScan.sealedAt;
       delete draftScan.artifacts;
       await writeJson(join(scanDir, "scan-manifest.json"), manifest);
-      const document = await readJson<FindingsDocument>(
-        join(scanDir, "findings.json"),
-      );
+      const document = await readCompletedFindingsFixture();
       const example = document.findings[0]!;
       document.scanId = scanId;
       document.findings = names.map((name) => ({

@@ -156,9 +156,11 @@ function mockFindings(scanId: string): DraftFinding[] {
         status: "mock",
         method: "synthetic",
         summary: "Fixture only; no code was analyzed or executed.",
+        evidenceRefs: ["example-sink"],
       },
       attackPath: {
         summary: example.summary,
+        dataflow: example.summary,
         assumptions: [
           "The fictional example exposes this operation to untrusted input.",
         ],

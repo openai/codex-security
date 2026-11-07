@@ -1,6 +1,10 @@
 import { fixturePython } from "./support/python.ts";
 import { readJson, snapshotScanDraft, writeJson } from "./support/json.ts";
-import { workerDraft, finding } from "./scan-draft-fixture.ts";
+import {
+  completedFindingEvidence,
+  workerDraft,
+  finding,
+} from "./scan-draft-fixture.ts";
 import { gitText } from "../scripts/git.mjs";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { TextContent, Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -44,6 +48,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -88,6 +93,8 @@ try {
     await test(`${label}: discovery workers share peer notes within their scan`, () =>
       testDiscoveryPeerNotes(bundle));
   }
+  await test("shipped: plugin-owned drafts require validation evidence", () =>
+    testPluginDraftEvidence(shipped));
   await test("shipped: claimed parent operations", () =>
     testClaimedParentArtifactOperations(shipped, "shipped"));
   await test("shipped: semantic scan draft completion", () =>
@@ -211,6 +218,21 @@ async function testLargeScanDraftCheckpoints(
   }
 }
 
+function commitFixture(repoRoot: string, message: string) {
+  const git = (...args: string[]) => gitText(args, { cwd: repoRoot }).trim();
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.com",
+    "commit",
+    "-qm",
+    message,
+  );
+  return git("rev-parse", "HEAD");
+}
+
 async function testCompactDiffScanCompletion(
   bundle: string,
   runtimeLabel: string,
@@ -218,28 +240,13 @@ async function testCompactDiffScanCompletion(
   const { repoRoot, environment } = await createScanFixture(
     `compact-diff-${runtimeLabel}`,
   );
-  const git = (...arguments_: string[]) =>
-    gitText(
-      [
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.com",
-        ...arguments_,
-      ],
-      { cwd: repoRoot },
-    ).trim();
-  git("init", "-q");
+  gitText(["init", "-q"], { cwd: repoRoot });
   await writeFile(path.join(repoRoot, "src", "guard.py"), "allowed = True\n");
   await writeFile(path.join(repoRoot, "src", "handler.py"), "value = 1\n");
-  git("add", ".");
-  git("commit", "-qm", "base");
-  const baseRevision = git("rev-parse", "HEAD");
+  const baseRevision = commitFixture(repoRoot, "base");
   await rm(path.join(repoRoot, "src", "guard.py"));
   await writeFile(path.join(repoRoot, "src", "handler.py"), "value = 2\n");
-  git("add", ".");
-  git("commit", "-qm", "selected changes");
-  const headRevision = git("rev-parse", "HEAD");
+  const headRevision = commitFixture(repoRoot, "selected changes");
 
   const client = await startClient(bundle, environment);
   const ownerThread = `compact-diff-owner-${runtimeLabel}`;
@@ -455,6 +462,113 @@ async function testCompactDiffScanCompletion(
   }
 }
 
+async function testPluginDraftEvidence(bundle: string) {
+  for (const mode of ["standard", "diff"] as const) {
+    const label = `plugin-draft-evidence-${mode}`;
+    const { repoRoot, environment } = await createScanFixture(label);
+    const sourceLine = "return request.value";
+    await writeFile(path.join(repoRoot, "src", "fixture.py"), sourceLine);
+    const selection: Record<string, unknown> = {
+      targetPath: repoRoot,
+      scope: ".",
+      mode,
+    };
+    if (mode === "diff") {
+      gitText(["init", "-q"], { cwd: repoRoot });
+      const baseRevision = commitFixture(repoRoot, "base");
+      await writeFile(
+        path.join(repoRoot, "src", "fixture.py"),
+        `${sourceLine}\n`,
+      );
+      selection.diffTarget = {
+        kind: "range",
+        baseRevision,
+        headRevision: commitFixture(repoRoot, "selected changes"),
+      };
+    }
+    const client = await startClient(bundle, environment);
+    const ownerThread = `${label}-owner`;
+    const call = toolCaller(client, ownerThread);
+    try {
+      const { scanId, scanDir, handoffClaimToken } = await startScan(
+        call,
+        ownerThread,
+        selection,
+        {
+          workspace: `${label}: open workspace`,
+          setup: `${label}: submit setup`,
+          scan: `${label}: start scan`,
+          claim: `${label}: claim scan`,
+          owner: `${label}: attach owner`,
+        },
+      );
+      const { validation, ...sourceEvidence } =
+        completedFindingEvidence("src/fixture.py");
+      const provisional = {
+        ...finding("custom-discovery", "src/fixture.py"),
+        ...sourceEvidence,
+      };
+      const draft = {
+        scanId,
+        handoffClaimToken,
+        scope: { validationMode: "custom_pending" },
+        findings: [provisional],
+        reviewState: {
+          surfaces: [
+            {
+              id: "surface-custom",
+              label: "Request output",
+              disposition: "reported",
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      };
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...draft,
+          complete: false,
+        }),
+        `${label}: retain incomplete source discovery`,
+      );
+      const before = await snapshotScanDraft(scanDir);
+      const checkpointPath = path.join(scanDir, "checkpoint-head.json");
+      const checkpoint = await readFile(checkpointPath, "utf8");
+      const directory = path.join(scanDir, "checkpoints");
+      const checkpoints = await readdir(directory);
+      for (const completion of [{ complete: true }, {}]) {
+        requireToolError(
+          await call("record_codex_security_scan_draft", {
+            ...draft,
+            ...completion,
+          }),
+          /validation/,
+          `${label}: an authored marker cannot defer validation`,
+        );
+      }
+      assert.deepEqual(await snapshotScanDraft(scanDir), before);
+      assert.equal(await readFile(checkpointPath, "utf8"), checkpoint);
+      assert.deepEqual(await readdir(directory), checkpoints);
+
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...draft,
+          scope: {},
+          findings: [{ ...provisional, validation }],
+        }),
+        `${label}: repair the rejected finding`,
+      );
+      assert.deepEqual(
+        (await readJson(scanDir, "findings.json")).findings[0].validation,
+        validation,
+      );
+    } finally {
+      await client.close();
+    }
+  }
+}
+
 async function testSemanticScanDraftCompletion(
   bundle: string,
   runtimeLabel: string,
@@ -557,6 +671,16 @@ async function testSemanticScanDraftCompletion(
       codeEvidence: [codeEvidence],
       rootCause: {
         summary: "The query is not parameterized before SQL execution.",
+        evidenceRefs: [codeEvidence.id],
+      },
+      attackPath: {
+        dataflow:
+          "The execute(query) argument flows directly into connection.execute(query).",
+      },
+      validation: {
+        method: "Static source inspection",
+        summary:
+          "The fixture passes the query argument to SQL execution without parameter binding.",
         evidenceRefs: [codeEvidence.id],
       },
       remediation: "Use a parameterized SQL statement.",
@@ -879,9 +1003,47 @@ async function testSemanticScanDraftCompletion(
       unit: null,
     });
 
+    // Reject missing evidence before the SDK-owned agent turn ends.
+    const { validation: _validation, ...incompleteFinding } = finding;
+    const beforeRejectedDraft = await snapshotScanDraft(scanDirectory);
+    requireToolError(
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        complete: true,
+        findings: [incompleteFinding],
+        reviewState,
+      }),
+      /validation/,
+      `${runtimeLabel}: require validation proof before accepting a final draft`,
+    );
+    assert.deepEqual(
+      await snapshotScanDraft(scanDirectory),
+      beforeRejectedDraft,
+    );
+    assert.equal((await progress()).status, "running");
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [finding],
+        reviewState,
+      }),
+    );
+
+    const correctedDraft = await readJson(scanDirectory, "findings.json");
+    assert.equal(
+      correctedDraft.findings[0].provenance.source,
+      finding.provenance.source,
+    );
+    assert.equal(
+      correctedDraft.findings[0].provenance.candidateId,
+      candidate.candidate_id,
+    );
+    assert.deepEqual(correctedDraft.findings[0].validation, finding.validation);
     const completed = requireSuccessfulTool<ScanResult>(
       await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
-      `${runtimeLabel}: finalize the accepted draft exactly once`,
+      `${runtimeLabel}: finalize the corrected draft exactly once`,
     );
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
@@ -903,11 +1065,14 @@ async function testSemanticScanDraftCompletion(
     assert.equal(savedFinding.remediation, finding.remediation);
     for (const field of [
       "taxonomy",
-      "provenance",
       "remediationTests",
       "preventiveControls",
     ] as const)
       assert.deepEqual(savedFinding[field], finding[field]);
+    assert.deepEqual(
+      savedFinding.provenance,
+      correctedDraft.findings[0].provenance,
+    );
     assert.equal(savedFinding.extensions.candidateId, candidate.candidate_id);
     assert.ok(savedFinding.findingId);
     assert.ok(savedFinding.occurrenceId);

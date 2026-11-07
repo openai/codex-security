@@ -79,6 +79,7 @@
     "scripts/read_codex_session.mjs",
     "scripts/report_projection.py",
     "scripts/review_state.py",
+    "scripts/scan_contract_fields.py",
     "scripts/reserved_artifact_paths.json",
     "scripts/servicenow_avit.py",
     "scripts/snapshot_sqlite.py",

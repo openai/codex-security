@@ -8,7 +8,11 @@ import {
   workbenchCommand,
 } from "./support/workbench-command.js";
 import { runNodePython } from "./support/python-probe.js";
-import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScanFixture,
+  PLUGIN_ROOT,
+  readCompletedFindingsFixture,
+} from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { main } from "../src/cli.js";
@@ -171,7 +175,10 @@ async function startDraftScan(
 
   for (const name of ["findings.json", "coverage.json"] as const) {
     const path = join(scanDir, name);
-    const document = await readJson<{ scanId: string }>(path);
+    const document =
+      name === "findings.json"
+        ? await readCompletedFindingsFixture()
+        : await readJson<{ scanId: string }>(path);
     document.scanId = fixture.scanId;
     await writeJson(path, document);
   }

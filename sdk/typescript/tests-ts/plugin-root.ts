@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { chmod, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { FindingsDocument } from "../src/models.js";
+import { readJson } from "./support/json.js";
 
 const bundledPlugin = new URL("../_bundled_plugin/", import.meta.url);
 const hasMonorepoSdk = existsSync(
@@ -38,6 +40,12 @@ export async function copyCredentialTestPlugin(root: string): Promise<string> {
 export const INTEGRATION_TARGET = hasMonorepoSdk
   ? "project/codex-security-sdk/src"
   : "sdk/typescript/src";
+
+export function readCompletedFindingsFixture(): Promise<FindingsDocument> {
+  return readJson(
+    join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+  );
+}
 
 export const copyCompletedScanFixture = (destination: string) =>
   cp(new URL("examples/legacy-completed-scan/", bundledPlugin), destination, {

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { asRecord } from "../record.js";
+import { asRecord, isNonEmptyString } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
 import {
@@ -91,8 +91,11 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
-  // Preserve the existing publication of previously accepted historical payloads.
-  if (admission === "new") validateWorkerReport(result);
+  // Historical worker inputs are immutable. The host repairs their evidence on resume.
+  if (admission === "new") {
+    validateWorkerReport(result);
+    validateCompletedFindingEvidence(result.findings);
+  }
   validateRetainedCoverage(result.reviewState);
   // Check the worker's own task IDs before qualifying active and closed tasks.
   const closures = result.reviewState.resolvedDeferred ?? [];
@@ -295,4 +298,49 @@ export function parseStoredScanDraft<Result extends ScanUnion>(
     throw new Error(`${label} returned a result for a different scan.`);
   }
   return parsed;
+}
+
+/** Match the finalizer's evidence gate while worker validation can still retry. */
+export function validateCompletedFindingEvidence(findings: JsonObject[]): void {
+  for (const [index, finding] of findings.entries()) {
+    const requireText = (value: unknown, field: string) => {
+      if (!isNonEmptyString(value))
+        throw new Error(
+          `findings[${index}].${field}: include the supporting analysis before completing the worker.`,
+        );
+    };
+    if (
+      !Array.isArray(finding.codeEvidence) ||
+      finding.codeEvidence.length === 0
+    )
+      throw new Error(
+        `findings[${index}].codeEvidence: include the source snippets used as proof.`,
+      );
+    requireText(
+      asRecord(finding.rootCause)?.summary ?? finding.rootCause,
+      "rootCause",
+    );
+    const dataflow = asRecord(finding.attackPath)?.dataflow;
+    const flow = asRecord(dataflow);
+    if (flow) {
+      if (!flow.summary) {
+        requireText(flow.source, "attackPath.dataflow.source");
+        requireText(flow.sink, "attackPath.dataflow.sink");
+      }
+    } else {
+      requireText(dataflow, "attackPath.dataflow");
+    }
+    const validation = asRecord(finding.validation);
+    requireText(validation?.method, "validation.method");
+    if (!validation?.result)
+      requireText(validation?.summary, "validation.summary");
+    const hasEvidence = [validation?.evidence, validation?.evidenceRefs].some(
+      (value) =>
+        Array.isArray(value) ? value.length > 0 : isNonEmptyString(value),
+    );
+    if (!hasEvidence)
+      throw new Error(
+        `findings[${index}].validation: include observed evidence or evidenceRefs to the source proof.`,
+      );
+  }
 }
