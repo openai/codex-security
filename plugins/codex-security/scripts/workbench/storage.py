@@ -51,7 +51,10 @@ def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> lis
         "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
         (scan["id"],),
     ).fetchall()
-    scan_dir = Path(scan["scan_dir"])
+    return archived_worker_paths(workers, Path(scan["scan_dir"]))
+
+
+def archived_worker_paths(workers: list[Any], scan_dir: Path) -> list[Any]:
     if ".previous-" not in scan_dir.name:
         return workers
     return [

@@ -31,6 +31,8 @@ type WorkspaceResult = {
 type ScanResult = {
   scan: {
     progress: Record<string, unknown>;
+    scanDir: string;
+    usage: unknown;
     reportAvailable: boolean;
     continuationThreadId?: string;
     handoffClaimToken?: string;
@@ -425,8 +427,12 @@ async function testCompactDiffScanCompletion(
       await call("save_codex_security_artifact", { ...note, content }),
       `${runtimeLabel}: save supplemental note`,
     );
+    const completion = await call("complete_codex_security_scan", {
+      scanId,
+      handoffClaimToken,
+    });
     requireSuccessfulTool<ScanResult>(
-      await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
+      completion,
       `${runtimeLabel}: complete compact diff scan`,
     );
     await rename(repoRoot, repoRoot + "-moved");
@@ -450,6 +456,11 @@ async function testCompactDiffScanCompletion(
     );
     assert.equal(completed.manifest.scan.mode, "branch_diff");
     assert.equal(completed.findings.findings.length, 0);
+    await assertCompletionCoverageAndReplay(
+      call,
+      { scanId, handoffClaimToken },
+      completion,
+    );
   } finally {
     await client.close();
   }
@@ -879,8 +890,12 @@ async function testSemanticScanDraftCompletion(
       unit: null,
     });
 
+    const completion = await call("complete_codex_security_scan", {
+      scanId,
+      handoffClaimToken,
+    });
     const completed = requireSuccessfulTool<ScanResult>(
-      await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
+      completion,
       `${runtimeLabel}: finalize the accepted draft exactly once`,
     );
     assert.equal(completed.scan.progress.status, "complete");
@@ -921,6 +936,11 @@ async function testSemanticScanDraftCompletion(
     const retained = (
       await readJson(scanDirectory, "checkpoints", head.checkpoint)
     ).reviewState;
+    await assertCompletionCoverageAndReplay(
+      call,
+      { scanId, handoffClaimToken },
+      completion,
+    );
     assert.equal(retained.surfaces[0].disposition, "reported");
     const withId = (row: Record<string, unknown>, id: string) => ({
       ...row,
@@ -1221,6 +1241,54 @@ async function testClaimedParentArtifactOperations(
   }
 }
 
+async function assertCompletionCoverageAndReplay(
+  call: ReturnType<typeof toolCaller>,
+  identity: { scanId: string; handoffClaimToken?: string },
+  completion: ToolResponse,
+) {
+  const scan = requireSuccessfulTool<ScanResult>(completion).scan;
+  const head = JSON.parse(
+    await readFile(path.join(scan.scanDir, "checkpoint-head.json"), "utf8"),
+  );
+  const checkpoint = path.join(scan.scanDir, "checkpoints", head.checkpoint);
+  const { reviewState } = JSON.parse(await readFile(checkpoint, "utf8"));
+  const expected = {
+    surfaceCount: reviewState.surfaces.length,
+    deferredCount: reviewState.deferred.length,
+    explicitExclusionCount: (reviewState.explicitExclusions ?? []).length,
+  };
+  type Completion = ScanResult & { coverageSummary: typeof expected };
+  const snapshot = () =>
+    Promise.all(
+      [
+        "scan-manifest.json",
+        "findings.json",
+        "checkpoint-head.json",
+        path.join("checkpoints", head.checkpoint),
+        "report.md",
+      ].map((name) => readFile(path.join(scan.scanDir, name), "utf8")),
+    );
+  const sealed = await snapshot();
+  const replay = await call("complete_codex_security_scan", identity);
+  for (const result of [completion, replay]) {
+    const structured = requireSuccessfulTool<Completion>(result);
+    assert.equal(structured.scan.progress.status, "complete");
+    const content = (result.content as TextContent[])[0];
+    assert.equal(content.type, "text");
+    assert.equal(
+      content.text,
+      "Validated and indexed the completed Codex Security scan.",
+    );
+    assert.deepEqual(structured.coverageSummary, expected);
+    assert.deepEqual(structured.scan.usage, scan.usage);
+  }
+  assert.deepEqual(
+    await snapshot(),
+    sealed,
+    "completion replay preserves sealed artifacts",
+  );
+}
+
 function requireSuccessfulTool<Result = Record<string, unknown>>(
   result: ToolResponse,
   label?: string,
@@ -1519,6 +1587,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     for (const forbiddenInput of [
       { ...input, scope: { includePaths: ["src"] } },
       { ...input, reviewState: { ...input.reviewState, mode: "repository" } },
+      { ...input, reviewState: { ...input.reviewState, scanId } },
       {
         ...input,
         findings: [
@@ -1702,6 +1771,7 @@ async function startClient(
     cwd: applicationRoot,
     env: {
       ...process.env,
+      CODEX_HOME: temporaryRoot,
       ...environment,
     } as Record<string, string>,
   });

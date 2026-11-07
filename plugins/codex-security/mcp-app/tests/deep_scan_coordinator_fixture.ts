@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { importModule } from "./import-module.ts";
+import { importNativeModule as importModule } from "./import-module.ts";
 
 export const {
   DeepScanCoordinator,
@@ -100,7 +100,7 @@ export async function fixtureRun(
 export type TestWorker = PersistedDeepScanWorker &
   Pick<DeepScanWorkerMutation, "replaceableFailureKind">;
 export type StoreInput<Method extends keyof DeepScanStore> = Parameters<
-  DeepScanStore[Method]
+  NonNullable<DeepScanStore[Method]>
 >[0];
 
 export function pausePoint() {
@@ -117,6 +117,7 @@ export function pausePoint() {
 }
 
 export class FakeStore {
+  declare selectFinalization: DeepScanStore["selectFinalization"];
   run: DeepScanRunState;
   declare failProgressAt: number | undefined;
   constructor(run: DeepScanRunState) {
@@ -201,6 +202,8 @@ export class FakeStore {
       update.status === "succeeded" &&
       !persisted.completionSequence
     ) {
+      persisted.acceptedResultPath = update.resultManifestPath;
+      persisted.acceptedResultSha256 = update.validatedResultSha256;
       persisted.completionSequence = ++this.completionSequence;
       persisted.mergeState = "buffered";
       this.run.consecutiveErrors = 0;
@@ -230,6 +233,8 @@ export class FakeStore {
       promptPath: input.resultPath,
       artifactDir: path.dirname(input.resultPath),
       resultManifestPath: input.resultPath,
+      acceptedResultPath: input.resultPath,
+      acceptedResultSha256: input.validatedResultSha256,
     });
     this.iterations.push(structuredClone(input));
     this.run.noNewStreak = input.noNewStreak;

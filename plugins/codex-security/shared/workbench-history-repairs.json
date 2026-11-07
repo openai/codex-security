@@ -1,5 +1,23 @@
 [
   [
+    "-- Relocate known Deep Scan preview histories before applying released migrations.",
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS destination, json_extract(value, '$.name') AS name",
+    "    FROM json_each(:history)",
+    ")",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination || ' WHERE version = ' || version AS value",
+    "FROM schema_migrations JOIN history USING (name)",
+    "WHERE (destination = 68 AND version IN (44, 47, 48, 50, 52, 53, 54, 61, 63))",
+    "    OR (destination = 67 AND version IN (51, 52, 53, 55, 57, 58, 59, 65))",
+    "    OR (destination = 66 AND version IN (48, 51, 52, 54, 56, 57, 58, 64))",
+    "    OR (destination = 65 AND version IN (46, 49, 50, 52, 54, 55, 56, 63))",
+    "    OR (destination = 64 AND version IN (45, 48, 49, 51, 53, 54, 55, 62))",
+    "    OR (destination = 57 AND version IN (47, 50, 51, 53, 55, 56))",
+    "-- Vacate higher preview numbers before moving another receipt into their slots.",
+    "ORDER BY destination DESC;"
+  ],
+  [
     "WITH input AS (SELECT :history AS history),",
     "previews AS (",
     "    SELECT version, CASE",

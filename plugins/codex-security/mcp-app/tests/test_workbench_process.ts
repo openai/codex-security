@@ -74,7 +74,7 @@ await test("Python compressed-rollout reads inherit the plugin Node without Node
 from pathlib import Path
 sys.path.insert(0, ${JSON.stringify(scripts)})
 from workbench_scan_usage import _rollout_lines
-def main():
+def main(*, framed_input):
     with _rollout_lines(Path(sys.argv[1])) as source:
         contents = b"".join(source).decode("utf-8")
     print(json.dumps({"contents": contents, "node": os.environ["CODEX_MCP_NODE_PATH"]}))
@@ -110,7 +110,7 @@ await test("workbench scalar arguments reach the Python parser literally", async
       `import json, sys
 sys.path.insert(0, ${JSON.stringify(scripts)})
 from workbench_cli import parse_args
-def main():
+def main(*, framed_input):
     print(json.dumps(vars(parse_args("argument transport"))))
 `,
     );
@@ -177,7 +177,7 @@ for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
 
       const executeFixture = await fixtureWorkbench(
         root,
-        'import json, sys\nassert sys.dont_write_bytecode\ndef main():\n    print(json.dumps({"scans": []}))\n',
+        'import json, sys\nassert sys.dont_write_bytecode\ndef main(*, framed_input):\n    print(json.dumps({"scans": []}))\n',
       );
       const result = await executeFixture(
         python,
@@ -225,7 +225,7 @@ await test("workbench can import dependencies installed in the Python user site"
     assert.equal(imported.trim(), "user-site dependency");
     const executeFixture = await fixtureWorkbench(
       root,
-      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main():\n    print(json.dumps({"dependency": VALUE}))\n',
+      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main(*, framed_input):\n    print(json.dumps({"dependency": VALUE}))\n',
     );
     assert.deepEqual(await executeFixture(python, ["list-scans"]), {
       dependency: "user-site dependency",

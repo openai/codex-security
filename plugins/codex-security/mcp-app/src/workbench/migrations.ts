@@ -233,11 +233,26 @@ export function applyMigrations(
       else if (applied.has(item.version)) {
         if (
           [
-            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61,
+            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 57, 58, 59, 60, 61,
           ].includes(item.version)
         )
           repairAdditive(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
+        else if (item.version >= 63 && item.version <= 68) {
+          // Restore recorded extensions when the base Deep tables were recreated.
+          // Data updates from an already applied migration must not run again.
+          for (const statement of item.statements) {
+            if (statement.startsWith("ALTER TABLE "))
+              addColumn(database, statement);
+            else if (statement.startsWith("CREATE TABLE "))
+              database.exec(
+                statement.replace(
+                  "CREATE TABLE ",
+                  "CREATE TABLE IF NOT EXISTS ",
+                ),
+              );
+          }
+        }
       } else {
         database.exec(item.statements.join("\n"));
         if (item.version === 38) migrateWorkflowResults(database);

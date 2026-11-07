@@ -90,9 +90,16 @@ def _coverage_comparison_row(row: Any, field: str) -> Any:
             row["receiptRefs"] = refs
         return row
     if field == "openQuestions":
-        coverage = {"openQuestions": [copy.deepcopy(row)]}
+        coverage = {"openQuestions": [row]}
         _normalize_unsealed_open_questions(coverage)
-        return next(iter(coverage["openQuestions"]), row)
+        normalized = next(iter(coverage["openQuestions"]), row)
+        if (
+            isinstance(normalized, dict)
+            and isinstance(provenance := normalized.get("provenance"), dict)
+            and normalized.get("workerId") == provenance.get("workerId")
+        ):
+            return {key: value for key, value in normalized.items() if key != "workerId"}
+        return normalized
     return row
 
 
@@ -135,6 +142,7 @@ def prepare_saved_coverage_projection(
     project_worker_coverage: bool,
     receipt_resolver,
     preserve_canonical_parent=False,
+    preserve_workers: set[str] | None = None,
 ) -> tuple[bool, list[_LegacySurfaceLink]]:
     """Put bound worker evidence in parent coordinates without changing source files."""
     if preserve_canonical_parent:
@@ -187,6 +195,8 @@ def prepare_saved_coverage_projection(
                 row["workerId"] = owner
                 if field == "surfaces":
                     row["receiptRefs"] = receipt_resolver(relative, row, owner)
+            if preserve_workers and owner in preserve_workers:
+                continue  # The reducer already published this review.
             projected[field].extend(_worker_coverage_sources(rows, owner, field))
 
     def originals(field: str, row: Any):
@@ -256,6 +266,7 @@ class SavedCoverageProjection:
         self.project_worker_coverage = project_worker_coverage
         self.legacy_surface_links = legacy_surface_links
         self.legacy_source_outputs: dict[int, dict[str, Any]] = {}
+        self.repaired_surface_refs: dict[str, list[str]] = {}
         self.worker_row_owners: dict[int, str] = {}
         self.worker_surface_outputs: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
         self.projection_origins = projection_origins
@@ -288,6 +299,13 @@ class SavedCoverageProjection:
         )
         return retained
 
+    def restore_repaired_receipts(self, surface):
+        if self.repaired_surface_refs and isinstance(surface, dict):
+            refs = self.repaired_surface_refs.get(json.dumps(surface, sort_keys=True))
+            if refs is not None:
+                return {**surface, "receiptRefs": refs}
+        return surface
+
     def retained_record(self, coverage, field, item, canonical_record):
         item = canonical_record(field, item)
         if field == "surfaces":
@@ -301,11 +319,9 @@ class SavedCoverageProjection:
                 original.pop("id", None)  # Canonical publication can assign an ID.
             if field == "openQuestions":
                 # Compare the same canonical form that publication writes.
-                previous_question = {"openQuestions": [original]}
-                source_question = {"openQuestions": [item]}
-                _normalize_unsealed_open_questions(previous_question)
-                _normalize_unsealed_open_questions(source_question)
-                if previous_question == source_question:
+                if _coverage_comparison_row(original, field) == _coverage_comparison_row(
+                    item, field
+                ):
                     return record
             elif original == item:
                 return record
@@ -335,7 +351,9 @@ class SavedCoverageProjection:
             for review in _coverage_rows(canonical, "reviews")
         )
 
-    def repair_reviewed_surface(self, coverage, canonical, worker, source, surface):
+    def repair_reviewed_surface(
+        self, coverage, canonical, worker, source, surface, *, merge_receipts=False
+    ):
         if not self.is_reviewed_worker(canonical, worker):
             return None
         published = next(
@@ -366,7 +384,20 @@ class SavedCoverageProjection:
             retained = copy.deepcopy(published)
         # Receipt repair can recover earlier evidence without replacing the
         # accepted surface's identity, disposition, or host-owned provenance.
-        retained["receiptRefs"] = surface["receiptRefs"]
+        refs = surface["receiptRefs"]
+        if merge_receipts:
+            accepted = published.get("receiptRefs", [])
+            if not isinstance(accepted, list):
+                return None
+            if any(ref not in accepted for ref in refs):
+                # Parent and reducer checkpoints can repeat the exact pre-repair row.
+                self.repaired_surface_refs[json.dumps(published, sort_keys=True)] = accepted
+            published["receiptRefs"] = accepted
+            for ref in refs:
+                if ref not in accepted:
+                    accepted.append(ref)
+            refs = accepted
+        retained["receiptRefs"] = refs
         return self.retain_coverage_row(
             coverage["surfaces"], retained, worker["id"], "surfaces", source, True
         )

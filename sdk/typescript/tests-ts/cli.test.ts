@@ -4385,7 +4385,7 @@ describe("CLI", () => {
         ),
       ).toBe(0);
       expect(rerunConfig?.codexOverrides).toMatchObject({
-        model_provider: "openai",
+        model_provider: provider,
         profile: "selected",
         profiles: { selected: { model, model_provider: provider } },
         model_providers: { [provider]: providerConfig },

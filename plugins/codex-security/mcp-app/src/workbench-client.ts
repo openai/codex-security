@@ -31,12 +31,25 @@ interface WorkbenchOptions {
 export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
-  options: WorkbenchOptions = {},
+  selectFinalization: boolean | WorkbenchOptions = false,
+  withExecutionSettings = false,
+  signal?: AbortSignal,
+  releaseCoordinator = false,
+  isolatedPython = false,
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbench(pythonCommand, args, input, options);
+    return await executeWorkbench(
+      pythonCommand,
+      args,
+      input,
+      selectFinalization,
+      withExecutionSettings,
+      signal,
+      releaseCoordinator,
+      isolatedPython,
+    );
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -55,8 +68,23 @@ async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   input?: string | Buffer,
-  options: WorkbenchOptions = {},
+  selectFinalization: boolean | WorkbenchOptions = false,
+  withExecutionSettings = false,
+  signal?: AbortSignal,
+  releaseCoordinator = false,
+  isolatedPython = false,
 ): Promise<JsonObject> {
+  if (typeof selectFinalization === "object") {
+    isolatedPython = selectFinalization.isolatedPython ?? isolatedPython;
+    selectFinalization = false;
+  }
+  const internalOption = releaseCoordinator
+    ? "release_coordinator"
+    : selectFinalization
+      ? "select_finalization"
+      : withExecutionSettings
+        ? "with_execution_settings"
+        : undefined;
   const timeout = [
     "begin-deep-scan",
     "cancel-scan",
@@ -88,13 +116,15 @@ async function executeWorkbench(
   const execution = execFileAsync(
     pythonCommand,
     [
-      ...(options.isolatedPython ? ["-I", "-X", "utf8"] : []),
+      ...(isolatedPython ? ["-I", "-X", "utf8"] : []),
       "-B",
       "-c",
       WORKBENCH_PYTHON,
       workbenchScriptPath(),
+      ...(internalOption === undefined ? [] : [internalOption]),
     ],
     {
+      signal,
       cwd: PLUGIN_ROOT,
       windowsHide: true,
       env: {

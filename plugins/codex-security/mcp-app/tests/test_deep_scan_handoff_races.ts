@@ -247,7 +247,9 @@ try {
         } else {
           assert.equal(
             reads,
-            scenario === "terminal state" || userCanceled ? 1 : 3,
+            // A replacement observer re-reads terminal state, including the
+            // injected transient failure, before releasing the old coordinator.
+            userCanceled ? 1 : 3,
           );
           if (acceptance) assert.equal(executions, 2);
           if (concurrent) {

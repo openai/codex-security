@@ -125,6 +125,7 @@ for (const mode of [
         },
         undefined,
         controller.signal,
+        undefined,
         mode.startsWith("archive-"),
       );
     } finally {

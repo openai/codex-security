@@ -2,6 +2,7 @@
 import { realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
@@ -112,12 +113,17 @@ export async function buildMcpApp({ output, native = "universal" }) {
       loader: { ".md": "text" },
       logLevel: "info",
       logOverride: { "empty-import-meta": "silent" },
+      nodePaths: [join(root, "node_modules")],
       outfile: bundle,
       platform: "node",
       plugins: [
         {
-          name: "native-typescript-source",
+          name: "plugin-runtime-modules",
           setup(builder) {
+            // The standalone typecheck maps Zod to its declarations. Bundle its ESM export once.
+            builder.onResolve({ filter: /^zod$/ }, () => ({
+              path: fileURLToPath(import.meta.resolve("zod")),
+            }));
             builder.onResolve({ filter: /\.mjs$/ }, (args) => {
               const source = resolve(args.resolveDir, args.path);
               if (dirname(source) === resolve(root, "../native")) {

@@ -13,6 +13,8 @@ export type RunArtifactWorkbench = (
 export interface ScanArtifactContextOptions {
   requireRunning?: boolean;
   requireClaim?: boolean;
+  /** Selected publication only uses the saved target contract, without reading its checkout. */
+  requireCurrentTarget?: boolean;
   handoffClaimToken?: string;
   pluginRoot?: string;
   pythonCommand?: string;
@@ -80,11 +82,14 @@ export async function createScanArtifactContext(
       rawRoot,
       "Codex Security scan artifact root",
     ),
-    repoRoot: await canonicalDirectory(
-      rawRepoRoot,
-      "Codex Security scan target root",
-      options.requireRunning === false && status === "complete",
-    ),
+    repoRoot:
+      options.requireCurrentTarget === false
+        ? absoluteDirectory(rawRepoRoot, "Codex Security scan target root")
+        : await canonicalDirectory(
+            rawRepoRoot,
+            "Codex Security scan target root",
+            options.requireRunning === false && status === "complete",
+          ),
     layout: "scan",
     scanId,
     ...defined("scope", optionalString(scan.scope)),
@@ -118,10 +123,7 @@ export async function canonicalDirectory(
   label: string,
   allowMissing = false,
 ): Promise<string> {
-  if (!value || !isAbsolute(value)) {
-    throw new Error(label + " must be an absolute directory.");
-  }
-  const requested = resolve(value);
+  const requested = absoluteDirectory(value, label);
   let entry;
   try {
     entry = await fs.lstat(requested);
@@ -139,6 +141,12 @@ export async function canonicalDirectory(
   } catch {
     throw new Error(label + " cannot be resolved.");
   }
+}
+
+function absoluteDirectory(value: string, label: string): string {
+  if (!value || !isAbsolute(value))
+    throw new Error(label + " must be an absolute directory.");
+  return resolve(value);
 }
 
 function requireString(value: unknown, message: string): string {

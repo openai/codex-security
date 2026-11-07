@@ -1,6 +1,10 @@
 import {
   CodexSdkWorkerExecutor,
   resolveCodexPath,
+  WorkbenchDeepScanStore,
+  captureDeepScanExecutionSettings,
+  loadDeepScanExecutionSettings,
+  restoredDeepScanWorkerSettings,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
   parseDeepScan,
@@ -23,6 +27,10 @@ import {
   expectedGitEnvironment,
   restoreEnv,
 } from "./support/fake-codex-source.ts";
+import { testRestoredPrivateProfileHomes } from "./deep_scan_private_profile_cases.ts";
+import { testDurableWorkerRuntimeSnapshots } from "./deep_scan_runtime_snapshot_cases.ts";
+import { testHome } from "./deep_scan_home_case.ts";
+import { testReconstructedWorkers } from "./deep_scan_reconstructed_cases.ts";
 import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
   deniedWorkerPermissionProfile,
@@ -121,6 +129,47 @@ try {
         }),
       "selected profile files",
     );
+    await check(
+      t,
+      () =>
+        testDurableWorkerRuntimeSnapshots({
+          CodexSdkWorkerExecutor,
+          captureDeepScanExecutionSettings,
+          restoredDeepScanWorkerSettings,
+          fakeCodexFixture,
+          parentSandbox: trustedParentSandbox,
+        }),
+      testDurableWorkerRuntimeSnapshots.name,
+    );
+    await check(
+      t,
+      () =>
+        testReconstructedWorkers({
+          CodexSdkWorkerExecutor,
+          WorkbenchDeepScanStore,
+          captureDeepScanExecutionSettings,
+          loadDeepScanExecutionSettings,
+          restoredDeepScanWorkerSettings,
+          fakeCodexFixture,
+          trustedParentSandboxWithDenials,
+          deniedWorkerPermissionProfile,
+          restoreEnv,
+        }),
+      testReconstructedWorkers.name,
+    );
+    await check(
+      t,
+      () =>
+        testRestoredPrivateProfileHomes({
+          CodexSdkWorkerExecutor,
+          captureDeepScanExecutionSettings,
+          restoredDeepScanWorkerSettings,
+          fakeCodexFixture,
+          workerRequest,
+          emptyWorkerPermissionProfile,
+        }),
+      testRestoredPrivateProfileHomes.name,
+    );
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
@@ -168,6 +217,19 @@ try {
     if (process.platform !== "win32") {
       await check(t, testWorkerLaunchesWithoutGlobalCodex);
       await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
+      await check(
+        t,
+        () =>
+          testHome(
+            CodexSdkWorkerExecutor,
+            captureDeepScanExecutionSettings,
+            restoredDeepScanWorkerSettings,
+            loadDeepScanExecutionSettings,
+            withWorkerFixture,
+            trustedParentSandbox,
+          ),
+        "saved Codex home",
+      );
       await check(
         t,
         testConcurrentWorkerExecutableAliases,

@@ -30,6 +30,24 @@ _FINDING_IDENTITY_SCHEMA = _read_json(
 )["properties"]["findings"]["items"]["properties"]["identity"]
 
 
+def _reviewed_worker_ids(workers: list[Any], accepted_coverage: dict[str, Any]) -> set[str]:
+    reducer_reviews = {
+        (review.get("workerId"), review.get("attempt"))
+        for review in _coverage_rows(accepted_coverage, "reviews")
+        if isinstance(review, dict)
+        and isinstance(review.get("workerId"), str)
+        and isinstance(review.get("attempt"), int)
+    }
+    return {
+        worker["id"]
+        for worker in workers
+        if {"status", "merge_state", "attempt"}.issubset(worker.keys())
+        and worker["status"] == "succeeded"
+        and worker["merge_state"] == "merged"
+        and (worker["id"], worker["attempt"]) in reducer_reviews
+    }
+
+
 def _finding_identity(finding: dict[str, Any]) -> Any:
     provenance = finding.get("provenance")
     if isinstance(provenance, dict) and "preservedIdentity" in provenance:
@@ -109,6 +127,46 @@ def _identity_candidate(finding: dict[str, Any]) -> str | None:
         ),
         None,
     )
+
+
+def _legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
+    content = _finding_content(finding)
+    locations = content.get("locations")
+    if isinstance(locations, list):
+        content["locations"] = sorted(
+            [
+                {**row, "endLine": row.get("endLine", row.get("startLine"))}
+                if isinstance(row, dict)
+                else row
+                for row in locations
+            ],
+            key=_encoded,
+        )
+    return _digest([owner, _identity_candidate(finding), content])
+
+
+def _restore_legacy_identity(
+    legacy_identities: dict[str, dict[str, Any] | None],
+    legacy_identity_sources: set[str],
+    finding: Any,
+    normalized: Any = None,
+    *,
+    allow_synthesis: bool = True,
+) -> None:
+    if isinstance(finding, dict) and "identity" not in finding:
+        provenance = finding.get("provenance")
+        owner = provenance.get("workerId") if isinstance(provenance, dict) else None
+        key = _legacy_identity_key(finding, owner)
+        identity = legacy_identities.get(key)
+        if identity is not None:
+            finding["identity"] = copy.deepcopy(identity)
+        allow_synthesis = allow_synthesis or key in legacy_identity_sources
+    if not allow_synthesis:
+        return
+    if isinstance(finding, dict) and isinstance(normalized, dict):
+        finding.setdefault("identity", normalized["identity"])
+    else:
+        _ensure_finding_identity(finding)
 
 
 def _ensure_finding_identity(finding: Any) -> None:
@@ -613,3 +671,48 @@ def _competing_rejection_receipts(outcomes, all_sources, source_surface_receipts
     ):
         return {ref for spellings in receipt_spellings.values() for ref in spellings}
     return set()
+
+
+def _disambiguate_retained_findings(findings, finding_positions, identity_order, valid_finding):
+    identities: dict[bytes, list[tuple[str, dict[str, Any] | None, str | None]]] = {}
+    retained_groups = {
+        position: group for position, group in finding_positions.values() if group is not None
+    }
+    reserved_identities = {_semantic_identity_key(finding) for finding in identity_order}
+    for position, finding in enumerate(findings):
+        if not valid_finding(finding):
+            continue
+        identity = finding.get("identity")
+        if not isinstance(identity, dict):
+            continue
+        key = _semantic_identity_key(finding)
+        variant = _finding_key(finding)
+        group = retained_groups.get(position)
+        previous = next(
+            (
+                entry
+                for entry in identities.get(key, [])
+                if entry[0] == variant and not distinct_reports(group, entry[1])
+            ),
+            None,
+        )
+        if previous is not None and previous[2] is not None:
+            if identity.get("instance") != previous[2]:
+                finding.setdefault("provenance", {}).setdefault(
+                    "preservedIdentity", copy.deepcopy(identity)
+                )
+                identity["instance"] = previous[2]
+        elif previous is None and key in identities:
+            finding.setdefault("provenance", {}).setdefault(
+                "preservedIdentity", copy.deepcopy(identity)
+            )
+            base_instance = identity.get("instance", "saved")
+            suffix = 2
+            while True:
+                identity["instance"] = f"{base_instance}-{suffix}"
+                distinct = _semantic_identity_key(finding)
+                if distinct not in reserved_identities:
+                    reserved_identities.add(distinct)
+                    break
+                suffix += 1
+        identities.setdefault(key, []).append((variant, group, identity.get("instance")))

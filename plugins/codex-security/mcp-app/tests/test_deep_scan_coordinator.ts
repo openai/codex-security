@@ -1,3 +1,7 @@
+import {
+  testSuccessfulDeepCoveragePreservesWorkerReviewStatus,
+  testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
+} from "./deep_scan_coverage_cases.ts";
 import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import {
@@ -22,7 +26,7 @@ import type {
 } from "../src/deep-scan/types.js";
 import { after, mock, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -32,12 +36,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import {
-  testDeepScanLifecycle,
-  testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
-} from "./deep_scan_lifecycle_cases.ts";
+import { testDeepScanLifecycle } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
+  DeepScanNonRetryableError,
   WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
   AsyncLock,
@@ -2380,6 +2382,11 @@ async function testRestartRestoresDispatchOrderAfterMixedResults(
     second.resultManifestPath,
     standardScanDraft(fixture.run.scanId, "issue", "discovery-0002"),
   );
+  second.acceptedResultPath = second.resultManifestPath;
+  second.acceptedResultSha256 = hash(
+    "sha256",
+    await readFile(second.acceptedResultPath),
+  );
   for (const worker of persisted) store.workers.set(worker.id, worker);
   Object.assign(store.run, {
     persistedWorkers: persisted,
@@ -2913,6 +2920,7 @@ test(testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot);
 test(testWorkerScopedCandidateSourceAggregation);
 test(testRetryKeepsLogicalWorker);
 test(testSandboxDiagnosticSurvivesArtifactRetries);
+test(testSuccessfulDeepCoveragePreservesWorkerReviewStatus);
 test(testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus);
 registerCases(testComparisonStopCondition, [["quota"], ["deadline"]]);
 test({ timeout: 30_000 }, testDiscoveryDeadlineReducesSingleBufferedFinding);

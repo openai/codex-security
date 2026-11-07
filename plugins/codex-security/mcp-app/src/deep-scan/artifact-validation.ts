@@ -9,8 +9,9 @@ import {
   validateWorkerReport,
 } from "../coverage-publication.js";
 import {
+  parseAcceptedDiscoveryDraft,
+  parseAcceptedDeepScanDraft,
   parsePersistedScanDraft,
-  scanDraftInputSchema,
   retainRecordedReceiptOwnership,
   workerCoverageReceiptLocation,
   validateFindingSemantics,
@@ -25,7 +26,6 @@ export type ScanUnion = Omit<ScanDraftInput, "reviewState"> & {
   /** Host-owned accepted coverage, omitted from the legacy persisted reducer format. */
   sourceCoverage?: ScanDraftInput["reviewState"];
 };
-const aggregateSchema = scanDraftInputSchema.omit({ reviewState: true });
 
 export function scanUnionToDraft(result: ScanUnion): ScanDraftInput {
   const { sourceCoverage, ...draft } = structuredClone(result);
@@ -50,11 +50,32 @@ export function persistedScanUnion(
 }
 
 export function parseScanUnion(input: unknown): ScanUnion {
-  const parsed = aggregateSchema.parse(input);
-  validateFindingSemantics(parsed.findings);
-  if (parsed.complete === false)
+  const { sourceCoverage, ...stored } = asRecord(input) ?? {};
+  const { reviewState, ...result } = parseAcceptedDeepScanDraft({
+    ...stored,
+    reviewState: sourceCoverage ?? {
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  });
+  validateFindingSemantics(result.findings, true);
+  if (result.complete === false)
     throw new Error("Saved Deep Scan iteration is incomplete.");
-  return parsed;
+  return sourceCoverage === undefined
+    ? result
+    : { ...result, sourceCoverage: reviewState };
+}
+
+interface DiscoveryAuditOptions extends Pick<
+  ArtifactContext,
+  "scope" | "includePaths" | "filePaths"
+> {
+  accepted?: boolean;
+  validateWriteups?: boolean;
+  artifactDir?: string;
+  resultSha256?: string;
+  onDigest?: (digest: string) => void;
 }
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
@@ -62,37 +83,55 @@ export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
-  boundScope: Pick<
-    ArtifactContext,
-    "scope" | "includePaths" | "filePaths"
-  > = {},
-  admission: "new" | "previously-accepted" = "new",
+  options: DiscoveryAuditOptions = {},
 ): Promise<ScanDraftInput> {
-  await requireRegularFile(resultPath, artifacts.workersRoot);
-  const root = dirname(resultPath);
-  const context = {
-    root,
-    repoRoot: root,
-    layout: "worker" as const,
-    scanId: expectedScanId,
-    scope: boundScope.scope,
-    includePaths: boundScope.includePaths,
-    filePaths: boundScope.filePaths,
-  };
-  const stored = await readJsonObject(resultPath);
-  await retainRecordedReceiptOwnership(context, stored);
-  const result = parseStoredScanDraft(
-    stored,
-    "Standard scan worker",
+  const result = await readDiscoveryAuditDraft(
+    artifacts,
+    resultPath,
     expectedScanId,
-    parsePersistedScanDraft,
+    options,
   );
   if (result.complete === false)
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
-  // Preserve the existing publication of previously accepted historical payloads.
-  if (admission === "new") validateWorkerReport(result);
+  return result;
+}
+
+export async function readDiscoveryAuditDraft(
+  artifacts: DeepScanArtifacts,
+  resultPath: string,
+  expectedScanId: string,
+  options: DiscoveryAuditOptions = {},
+): Promise<ScanDraftInput> {
+  await requireRegularFile(resultPath, artifacts.workersRoot);
+  const root = options.artifactDir ?? dirname(resultPath);
+  const context = {
+    root,
+    repoRoot: root,
+    layout: "worker" as const,
+    scanId: expectedScanId,
+    scope: options.scope,
+    includePaths: options.includePaths,
+    filePaths: options.filePaths,
+  };
+  const stored = await readJsonObject(resultPath, {
+    scanRoot: artifacts.scanDir,
+    sha256: options.resultSha256,
+    onDigest: options.onDigest,
+  });
+  await retainRecordedReceiptOwnership(context, stored);
+  const result = parseStoredScanDraft(
+    stored,
+    "Standard scan worker",
+    expectedScanId,
+    options.accepted ? parseAcceptedDiscoveryDraft : parsePersistedScanDraft,
+  );
+  // Unfinished drafts remain resumable; complete drafts must retain their evidence.
+  if (result.complete === false) return result;
+  if (options.validateWriteups !== false)
+    await validateWriteupFiles(artifacts, result);
+  if (!options.accepted) validateWorkerReport(result);
   validateRetainedCoverage(result.reviewState);
   // Check the worker's own task IDs before qualifying active and closed tasks.
   const closures = result.reviewState.resolvedDeferred ?? [];
@@ -139,14 +178,38 @@ export async function validateDiscoveryArtifacts(
   return result;
 }
 
-/** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
+async function validateWriteupFiles(
+  artifacts: DeepScanArtifacts,
+  result: Pick<ScanDraftInput, "findings">,
+): Promise<void> {
+  for (const [index, finding] of result.findings.entries()) {
+    const reportPath = (finding.writeup as { reportPath: string } | undefined)
+      ?.reportPath;
+    if (!reportPath) continue;
+    try {
+      await requireRegularFile(
+        join(artifacts.scanDir, reportPath),
+        artifacts.scanDir,
+      );
+    } catch (cause) {
+      throw new Error(
+        `findings[${index}].writeup.reportPath: expected a file inside the scan directory: ${reportPath}`,
+        { cause },
+      );
+    }
+  }
+}
+
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
   additionalModel?: ScanDraftInput["threatModel"],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
-  const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
+  const artifactPrefix = relative(
+    scanDir,
+    worker.artifactDir ?? dirname(worker.resultPath),
+  )
     .split(sep)
     .join("/");
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;

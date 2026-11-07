@@ -22,7 +22,7 @@ export async function* sessionLines(path: string): AsyncGenerator<string> {
   }
 }
 
-async function sessionDecompressor(): Promise<Transform> {
+export async function sessionDecompressor(): Promise<Transform> {
   // Decode every concatenated frame and reject truncated tails. Native Node
   // Zstandard streams can finish successfully after only the first frame.
   const decoder = (await import(

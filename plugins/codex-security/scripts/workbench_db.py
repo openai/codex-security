@@ -46,14 +46,17 @@ import workbench_scan_usage as scan_usage
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
+    PreparedScanFinalization,
     RecoverableContractError,
     _prepare_scan_finalization,
+    _write_prepared_review_checkpoint,
     _write_prepared_scan_finalization,
     finalize_scan,
     manifest_is_sealed,
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
+from review_state import review_state, uses_legacy_review
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -143,6 +146,7 @@ from workbench_validation import (
     bounded_output_text,
     optional_text,
     parse_scan_cost,
+    parse_scan_recipe,
     path_within_scope,
     read_json_object,
     reject_non_finite_json,
@@ -151,6 +155,7 @@ from workbench_validation import (
     require_uuid,
     sqlite_busy,
     user_context_argument,
+    validate_completed_scan_artifacts,
 )
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
@@ -1089,18 +1094,22 @@ def complete_budget_exhausted_scan(
 ) -> dict[str, Any]:
     """Complete a running CLI Deep Scan using the measured cost and saved results after its budget is exhausted."""
     scan_id = require_uuid(args.scan_id, "scan-id")
-    cost_json = parse_scan_cost(args.cost_json)
+    cost_json = parse_scan_cost(args.cost_json, allow_lower_bound=True)
     if cost_json is None:
         raise SystemExit("Budget-exhausted scan completion requires the measured scan cost.")
     with scan_completion_lock(scan_id):
         scan = require_scan(connection, scan_id)
         if scan["status"] != "running" or scan["mode"] != "deep" or scan["recipe_json"] is None:
             raise SystemExit("Only a running CLI Deep Scan can complete after its cost limit.")
+        handoff.require_current_continuation(
+            scan, None, error_message="Scan completion is owned by another continuation."
+        )
         recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
         if not isinstance(recipe, dict) or recipe.get("mode") != "deep":
             raise SystemExit("Budget-exhausted scan completion requires a Deep Scan launch recipe.")
         cost = json.loads(cost_json)
-        measured = cost.get("cost", cost)
+        lower_bound = set(cost) == {"lowerBound"}
+        measured = cost["lowerBound"] if lower_bound else cost.get("cost", cost)
         limit = recipe.get("maxCostUsd")
         if (
             not isinstance(limit, (int, float))
@@ -1109,11 +1118,13 @@ def complete_budget_exhausted_scan(
             or measured.get("estimatedUsd", 0) <= limit
         ):
             raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
-        run = connection.execute(
-            "SELECT status, terminal_reason, manifest_path FROM deep_scan_runs WHERE scan_id = ?",
-            (scan_id,),
-        ).fetchone()
-        if (
+        run = deep_scan.find_supported_deep_scan_run(connection, scan_id)
+        before_selection = (
+            run is not None
+            and run["status"] == "running"
+            and run["workflow_version"] == "deep-security-scan/v2"
+        )
+        if not before_selection and (
             run is None
             or run["status"] != "succeeded"
             or run["terminal_reason"] not in {"saturated", "capped"}
@@ -1126,16 +1137,95 @@ def complete_budget_exhausted_scan(
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         candidates = (
             []
-            if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
+            if before_selection or run["manifest_path"] == str(scan_dir / "scan-manifest.json")
             else budget_exhausted_candidates(scan, scan_dir)
         )
         warning = optional_text(args.message)
         if warning is None:
+            retained = (
+                "saved work was retained"
+                if before_selection
+                else "completed discovery was preserved"
+            )
             warning = (
                 f"Deep Scan reached its cost limit after an estimated "
-                f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
+                f"${measured['estimatedUsd']:.6g}; {retained}."
             )
-        budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        selection = deep_scan.deep_scan_finalization_input(run)
+        draft_documents = None
+        sealed_replay = False
+        try:
+            accepted_findings = saved_results.has_verified_selected_result(
+                _WORKBENCH_DB_CONTEXT, connection, scan
+            )
+            if selection is not None:
+                if "publicationSha256" in selection:
+                    manifest = saved_results._read_scan_local_json(
+                        scan_dir, "scan-manifest.json", "scan-manifest.json"
+                    )
+                    findings = saved_results._read_scan_local_json(
+                        scan_dir, "findings.json", "findings.json"
+                    )
+                    coverage = (
+                        saved_results._read_scan_local_json(
+                            scan_dir, "coverage.json", "coverage.json"
+                        )
+                        if uses_legacy_review(manifest["scan"])
+                        else review_state(manifest["scan"])
+                    )
+                    draft_documents = manifest, findings, coverage
+                    sealed = manifest_is_sealed(manifest["scan"])
+                    validated = _prepare_scan_finalization(
+                        scan_dir,
+                        expected_coverage_mode=expected_coverage_mode(scan),
+                        completion_binding=workbench_completion_binding(scan, now(), manifest),
+                        draft_documents=None if sealed else draft_documents,
+                        accepted_findings=accepted_findings,
+                    )
+                    saved_results.require_selected_publication(
+                        _WORKBENCH_DB_CONTEXT, connection, scan, validated
+                    )
+                    sealed_replay = validated.was_sealed
+            if before_selection:
+                prepared = deep_scan.prepare_budget_exhausted_deep_scan(
+                    connection,
+                    scan,
+                    scan_dir,
+                    warning,
+                    lambda accepted, unmerged: budget_exhausted_draft(
+                        scan,
+                        scan_dir,
+                        [],
+                        warning,
+                        before_selection=True,
+                        accepted_result=accepted,
+                        unmerged_workers=unmerged,
+                        draft_documents=draft_documents,
+                        accepted_findings=accepted_findings or accepted is not None,
+                    ),
+                )
+            else:
+                prepared = budget_exhausted_draft(
+                    scan,
+                    scan_dir,
+                    candidates,
+                    warning,
+                    unmerged_workers=deep_scan.budget_unmerged_workers(connection, scan_id),
+                    draft_documents=draft_documents,
+                    accepted_findings=accepted_findings,
+                )
+                if selection is not None:
+                    if sealed_replay:
+                        # Bind replay to the validated snapshot, even if disk lost its seal.
+                        saved_results.require_selected_publication(
+                            _WORKBENCH_DB_CONTEXT, connection, scan, prepared
+                        )
+                    else:
+                        saved_results.record_selected_publication(
+                            _WORKBENCH_DB_CONTEXT, connection, scan, prepared
+                        )
+        except ContractError as exc:
+            raise SystemExit(str(exc)) from exc
         warnings = json.loads(scan["completion_warnings_json"])
         if warning not in warnings:
             connection.execute(
@@ -1143,7 +1233,19 @@ def complete_budget_exhausted_scan(
                 (json.dumps([*warnings, warning]), scan_id),
             )
             connection.commit()
-        return complete_scan_locked(connection, scan_id, None, cost_json)
+        # The compact seal keeps only the public summary. Its latest checkpoint
+        # must include the cost-limited projection, even after a reducer published.
+        if not prepared.was_sealed and not uses_legacy_review(prepared.manifest["scan"]):
+            _write_prepared_review_checkpoint(prepared)
+        # A priced subtotal proves the stop but is not the saved total estimate.
+        # Sealed replay must verify current disk bytes again at completion.
+        return complete_scan_locked(
+            connection,
+            scan_id,
+            None,
+            None if lower_bound else cost_json,
+            prepared=None if prepared.was_sealed else prepared,
+        )
 
 
 def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
@@ -1219,9 +1321,62 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
 
 
 def budget_exhausted_draft(
-    scan: sqlite3.Row, scan_dir: Path, candidates: list[dict[str, Any]], warning: str
-) -> None:
-    saved_results.budget_exhausted_draft(sys.modules[__name__], scan, scan_dir, candidates, warning)
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    candidates: list[dict[str, Any]],
+    warning: str,
+    *,
+    before_selection: bool = False,
+    accepted_result: dict[str, Any] | None = None,
+    unmerged_workers: list[sqlite3.Row] = (),
+    draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    accepted_findings: bool = False,
+) -> PreparedScanFinalization:
+    documents = saved_results.budget_exhausted_draft(
+        _WORKBENCH_DB_CONTEXT,
+        scan,
+        scan_dir,
+        candidates,
+        warning,
+        scan_contract(scan),
+        before_selection=before_selection,
+        accepted_result=accepted_result,
+        unmerged_workers=unmerged_workers,
+        draft_documents=draft_documents,
+    )
+    manifest = documents[0]
+    sealed = manifest_is_sealed(manifest["scan"])
+    return _prepare_scan_finalization(
+        scan_dir,
+        expected_coverage_mode=expected_coverage_mode(scan),
+        completion_binding=workbench_completion_binding(scan, now(), manifest),
+        draft_documents=None if sealed else documents,
+        finding_scope=requested_finding_scope(scan),
+        accepted_findings=accepted_findings,
+    )
+
+
+def completed_scan_context(
+    connection: sqlite3.Connection,
+    scan_id: str,
+    coverage: dict[str, Any],
+    *,
+    manifest_scan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if (
+        manifest_scan is not None
+        and "review" in manifest_scan
+        and "coverageRef" not in manifest_scan
+    ):
+        scan = require_scan(connection, scan_id)
+        coverage = deep_scan.saved_parent_review(Path(scan["scan_dir"]), scan_id, manifest_scan)
+    context = scan_context(connection, scan_id)
+    context["coverageSummary"] = {
+        "surfaceCount": len(coverage["surfaces"]),
+        "deferredCount": len(coverage.get("deferred", [])),
+        "explicitExclusionCount": len(coverage.get("explicitExclusions", [])),
+    }
+    return context
 
 
 def complete_scan_locked(
@@ -1232,12 +1387,14 @@ def complete_scan_locked(
     *,
     prepare_only: bool = False,
     thread_id: str | None = None,
+    prepared: PreparedScanFinalization | None = None,
     turn_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
+        deep_scan.find_supported_deep_scan_run(connection, scan_id)
         return saved_results.refresh_completed_scan(
-            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
+            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json, prepare_only=prepare_only
         )
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
@@ -1260,13 +1417,17 @@ def complete_scan_locked(
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    current_manifest = None
-    if current_manifest_path is not None:
+    current_manifest = prepared.manifest if prepared else None
+    if current_manifest_path is not None and prepared is None:
         current_manifest = read_json_object(current_manifest_path)
     already_sealed = (
-        current_manifest_path is not None
-        and isinstance(current_manifest.get("scan"), dict)
-        and manifest_is_sealed(current_manifest["scan"])
+        prepared.was_sealed
+        if prepared
+        else (
+            current_manifest_path is not None
+            and isinstance(current_manifest.get("scan"), dict)
+            and manifest_is_sealed(current_manifest["scan"])
+        )
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
     if scan["recipe_json"] is not None:
@@ -1291,46 +1452,51 @@ def complete_scan_locked(
         scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
     )
     wrote = False
+    accepted = False
     try:
         with (
             saved_results.preserve_parent_head_on_error(scan_dir)
             if merge_parent_draft
             else nullcontext()
         ):
-            draft_documents = (
-                saved_results.merge_saved_results(
-                    scan_dir,
-                    scan["id"],
-                    completion_binding,
-                    saved_deep_workers(connection, scan),
-                    warnings,
-                    stopped=False,
-                    scan_mode=scan["mode"],
-                    reason="",
+            if prepared is None:
+                draft_documents = (
+                    saved_results.merge_saved_results(
+                        scan_dir,
+                        scan["id"],
+                        completion_binding,
+                        saved_deep_workers(connection, scan),
+                        warnings,
+                        stopped=False,
+                        scan_mode=scan["mode"],
+                        reason="",
+                    )
+                    if merge_parent_draft
+                    else None
                 )
-                if merge_parent_draft
-                else None
-            )
-            completion_manifest = draft_documents[0] if draft_documents else current_manifest
-            if (
-                completion_manifest is not None
-                and isinstance(completion_manifest.get("scan"), dict)
-                and completion_manifest["scan"].get("complete") is False
-            ):
+                accepted = saved_results.has_verified_selected_result(
+                    _WORKBENCH_DB_CONTEXT, connection, scan
+                )
+                prepared = _prepare_scan_finalization(
+                    scan_dir,
+                    expected_coverage_mode=expected_coverage_mode(scan),
+                    completion_binding=completion_binding,
+                    recover_unsealed=scan["mode"] != "deep",
+                    allow_missing_writeups=True,
+                    draft_documents=draft_documents,
+                    finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+                    require_complete=True,
+                    accepted_findings=accepted,
+                )
+            if prepared.manifest["scan"].get("complete") is False:
                 raise RecoverableContractError(
                     "The latest saved scan draft is incomplete; continue the scan before completing it."
                 )
-            prepared = _prepare_scan_finalization(
-                scan_dir,
-                expected_coverage_mode=expected_coverage_mode(scan),
-                completion_binding=completion_binding,
-                recover_unsealed=scan["mode"] != "deep",
-                allow_missing_writeups=True,
-                draft_documents=draft_documents,
-                finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
-            )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
+        saved_results.require_selected_publication(
+            _WORKBENCH_DB_CONTEXT, connection, scan, prepared, sealing_warnings=warnings
+        )
         with connection:
             if warnings != json.loads(scan["completion_warnings_json"]):
                 # Retain pre-publication diagnostics even if output writes fail.
@@ -1350,14 +1516,18 @@ def complete_scan_locked(
                     (len(prepared.coverage["surfaces"]), scan_id),
                 )
         wrote = True
-        manifest, findings, _ = _write_prepared_scan_finalization(
+        manifest, findings, coverage = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings
         )
     except ContractError as exc:
-        # Only a coordinator-selected parent is fenced for output-write replay.
-        selected_deep_parent = scan["mode"] == "deep" and deep_scan.require_deep_scan_run(
-            connection, scan_id
-        )["manifest_path"] == str(scan_dir / ARTIFACTS["manifest"])
+        # A canonical parent or committed selection remains fenced for replay.
+        run = (
+            deep_scan.require_deep_scan_run(connection, scan_id) if scan["mode"] == "deep" else None
+        )
+        selected_deep_parent = run is not None and (
+            run["manifest_path"] == str(scan_dir / ARTIFACTS["manifest"])
+            or deep_scan.deep_scan_finalization_input(run) is not None
+        )
         if (wrote and not selected_deep_parent) or (
             scan["mode"] == "deep"
             and not wrote
@@ -1384,6 +1554,7 @@ def complete_scan_locked(
                 raise SystemExit("Only a running scan can be prepared for completion.")
         context = scan_context(connection, scan["id"])
         context["targetWarnings"] = target_warnings
+        context["acceptedFindings"] = accepted
         return context
 
     measured_usage = scan_usage.collect_scan_usage_safely(
@@ -1414,7 +1585,7 @@ def complete_scan_locked(
         scan = require_scan(connection, scan["id"])
         if scan["status"] == "complete":
             connection.commit()
-            return scan_context(connection, scan["id"])
+            return completed_scan_context(connection, scan["id"], coverage)
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
@@ -1461,7 +1632,7 @@ def complete_scan_locked(
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be completed.")
-    context = scan_context(connection, scan["id"])
+    context = completed_scan_context(connection, scan["id"], coverage)
     context["targetWarnings"] = target_warnings
     return context
 
@@ -1711,55 +1882,6 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
             (json.dumps(recipe, allow_nan=False), now(), scan["id"]),
         )
     return {"scanId": scan["id"], "maxCostUsd": limit}
-
-
-def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
-    try:
-        recipe = json.loads(value, parse_constant=reject_non_finite_json)
-    except (TypeError, UnicodeError, ValueError) as exc:
-        raise SystemExit("Scan launch recipe must be a valid JSON object.") from exc
-    if not isinstance(recipe, dict):
-        raise SystemExit("Scan launch recipe must be a JSON object.")
-    requested_repository = recipe.get("repository")
-    if (
-        not isinstance(requested_repository, str)
-        or require_target(requested_repository) != repository
-    ):
-        raise SystemExit("Scan launch recipe repository must match the scanned repository.")
-    if recipe.get("mode") not in {"standard", "deep"}:
-        raise SystemExit("Scan launch recipe mode must be standard or deep.")
-    if not isinstance(recipe.get("config"), dict):
-        raise SystemExit("Scan launch recipe config must be a JSON object.")
-    target = recipe.get("target")
-    if not isinstance(target, dict) or target.get("kind") not in {
-        "repository",
-        "paths",
-        "refs",
-        "working_tree",
-    }:
-        raise SystemExit("Scan launch recipe target must identify a supported scan target.")
-    paths = target.get("paths")
-    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
-        raise SystemExit("Scan launch recipe target paths must be an array of strings.")
-    if target["kind"] == "paths" and not paths:
-        raise SystemExit("A scoped scan launch recipe must include at least one target path.")
-    if target["kind"] != "paths" and paths:
-        raise SystemExit("Only scoped scan launch recipes can include target paths.")
-    for path in paths:
-        candidate = PurePosixPath(path)
-        if (
-            not path
-            or candidate.is_absolute()
-            or ".." in candidate.parts
-            or "\\" in path
-            or not (repository / candidate).exists()
-            or not (repository / candidate).resolve().is_relative_to(repository)
-        ):
-            raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
-    if target["kind"] in {"refs", "working_tree"}:
-        if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
-            raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
-    return recipe
 
 
 def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
@@ -2695,8 +2817,7 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
-        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
-        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
+        **scan_usage.scan_execution_fields(connection, scan),
         "failureMessage": scan["failure_message"],
         "lifecycle": json.loads(scan["lifecycle_json"]),
         "findings": [
@@ -3205,10 +3326,24 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
 _WORKBENCH_PUBLICATION_CONTEXT = _WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
-def main(*, before_archive: Callable[[], None] | None = None) -> None:
+def main(
+    *,
+    select_finalization: bool = False,
+    with_execution_settings: bool = False,
+    release_coordinator: bool = False,
+    framed_input: bool = False,
+    before_archive: Callable[[], None] | None = None,
+) -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
-    args = parse_args(__doc__)
+    args = parse_args(__doc__, execution_settings=with_execution_settings)
+    # The MCP process closes this private pipe after its argv frame and optional digest.
+    if framed_input and args.command in {
+        "upsert-deep-scan-worker",
+        "record-deep-scan-iteration",
+        "write-scan-draft",
+    }:
+        args.validated_input_sha256 = sys.stdin.read() or None
     command_context = SimpleNamespace(
         **globals(),
         preserve_stopped_results=preserve_stopped_results_after_transition,
@@ -3245,13 +3380,13 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "create-workspace": create_workspace,
             "save-workspace": save_workspace,
             "start-scan": start_scan,
-            "begin-deep-scan": deep_scan.begin_deep_scan,
             "acknowledge-deep-scan-result": deep_scan.acknowledge_deep_scan_result,
             "get-deep-scan": deep_scan.get_deep_scan,
-            "claim-deep-scan-coordinator": deep_scan.claim_deep_scan_coordinator,
             "upsert-deep-scan-worker": deep_scan.upsert_deep_scan_worker,
             "record-deep-scan-iteration": deep_scan.record_deep_scan_iteration,
-            "finish-deep-scan": deep_scan.finish_deep_scan,
+            "finish-deep-scan": partial(
+                deep_scan.finish_deep_scan, select_finalization=select_finalization
+            ),
             "fail-deep-scan": deep_scan.fail_deep_scan,
             "record-deep-scan-publication-failure": deep_scan.record_deep_scan_publication_failure,
             "list-scans": scan_history.list_scans,
@@ -3303,6 +3438,23 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             result = _start_prompt_driven_scan(connection, args, headless_standard=False)
         elif args.command == "start-headless-standard-scan":
             result = _start_prompt_driven_scan(connection, args, headless_standard=True)
+        elif args.command == "begin-deep-scan":
+            result = deep_scan.begin_deep_scan(connection, args)
+            deep_run = result.get("deepScan")
+            if (
+                deep_run
+                and deep_run["status"] == "succeeded"
+                and deep_run["finalizationInput"] is not None
+            ):
+                scan = require_scan(connection, deep_run["scanId"])
+                if scan["status"] == "complete":
+                    validate_completed_scan_artifacts(_WORKBENCH_DB_CONTEXT, scan)
+        elif args.command == "claim-deep-scan-coordinator":
+            result = (
+                deep_scan.release_deep_scan_coordinator(connection, args)
+                if release_coordinator
+                else deep_scan.claim_deep_scan_coordinator(connection, args)
+            )
         elif args.command == "get-scan":
             if args.check_target:
                 require_scan_target_unchanged(require_scan(connection, args.scan_id))
@@ -3368,6 +3520,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             result = finding_workflow(connection, json.load(sys.stdin), now())
         else:
             raise SystemExit(f"Unknown command: {args.command}")
+        if with_execution_settings:
+            deep_scan.include_execution_settings(connection, result)
     print(json.dumps(result, allow_nan=False, sort_keys=True))
 
 

@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { errorMessage } from "./errors.js";
+import { readSealedScanFile as readScanFile } from "../sealed-contract.js";
 export type DeepScanArtifacts = ReturnType<typeof createDeepScanArtifacts>;
 
 export function createDeepScanArtifacts(scanDir: string) {
@@ -43,22 +44,44 @@ export async function writePrivateFile(
 export async function writeJsonAtomic(
   path: string,
   payload: unknown,
-): Promise<void> {
+): Promise<string> {
   await fs.mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
-  await fs.writeFile(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, {
+  const contents = `${JSON.stringify(payload, null, 2)}\n`;
+  await fs.writeFile(temporaryPath, contents, {
     encoding: "utf8",
     mode: 0o600,
   });
   await fs.rename(temporaryPath, path);
+  return contents;
 }
 
 export async function readJsonObject(
   path: string,
+  accepted?: {
+    scanRoot: string;
+    sha256?: string;
+    onDigest?: (digest: string) => void;
+  },
 ): Promise<Record<string, unknown>> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await fs.readFile(path, "utf8"));
+    let contents: Buffer;
+    if (accepted && (accepted.sha256 !== undefined || accepted.onDigest)) {
+      contents = await readScanFile(
+        accepted.scanRoot,
+        relative(accepted.scanRoot, path).split(sep).join("/"),
+        "Accepted Deep Scan input",
+      );
+      const digest = createHash("sha256").update(contents).digest("hex");
+      if (accepted.sha256 !== undefined && digest !== accepted.sha256) {
+        throw new Error("Deep Scan input changed after acceptance.");
+      }
+      accepted.onDigest?.(digest);
+    } else {
+      contents = await fs.readFile(path);
+    }
+    parsed = JSON.parse(contents.toString("utf8"));
   } catch (error) {
     throw new Error(
       `Invalid Deep Scan JSON artifact ${path}: ${errorMessage(error)}`,

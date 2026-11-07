@@ -1,5 +1,10 @@
 const distModules = [
   "api",
+  "reasoning-summary",
+  "preflight-config",
+  "deep-scan-finalization",
+  "codex-session",
+  "accepted-audit",
   "scan-executor",
   "host-protocol",
   "hosted-remediation",
@@ -147,6 +152,7 @@ const distModules = [
   "validation-records",
   "suggest-owners",
   "scan-sessions",
+  "selected-scan-recovery",
   "server/api",
   "deduplication/codex-review",
   "deduplication/checkpointed-review",

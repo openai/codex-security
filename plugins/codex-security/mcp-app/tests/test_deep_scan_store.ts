@@ -86,7 +86,7 @@ async function testBeginProtocolAndParsing() {
   );
   assert.equal(
     flagValue(calls[0].args, "--workflow-version"),
-    "deep-scan-mcp/v1",
+    "deep-security-scan/v2",
   );
 
   const claimToken = randomUUID();
