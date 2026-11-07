@@ -287,6 +287,7 @@ import {
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
+  resolveScanOutputPath,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -873,10 +874,14 @@ export class CodexSecurity {
     );
     const artifactRoots: string[] = [];
     if (options.outputDir !== undefined) {
-      await workflow.protectArtifacts(options.outputDir);
-      artifactRoots.push(
-        await canonicalConfigPath(expandHome(options.outputDir)),
+      options.outputDir = await resolveScanOutputPath(
+        options.outputDir,
+        (path) => requireOutputOutsideRepositories(local.protectedRoots, path),
       );
+      const canonicalOutput = await canonicalConfigPath(options.outputDir);
+      requireOutputOutsideRepositories(local.protectedRoots, canonicalOutput);
+      await workflow.protectArtifacts(options.outputDir);
+      artifactRoots.push(canonicalOutput);
     }
     const state = await workflow.bind({
       repositoryPath: local.repository,
@@ -887,10 +892,6 @@ export class CodexSecurity {
           ...local.prompts,
           target: options.target ?? "repository",
           mode: options.mode ?? DEFAULT_SCAN_MODE,
-          outputDir:
-            options.outputDir === undefined
-              ? undefined
-              : resolve(expandHome(options.outputDir)),
           workflowId: undefined,
           severityRubric: undefined,
           rubricPath: undefined,
@@ -6271,13 +6272,16 @@ async function prepareScanOutputDir(
   protectedRoots: readonly string[],
   allowExistingOutput = false,
 ): Promise<string | null> {
+  const validateLocation = (path: string) =>
+    requireOutputOutsideRepositories(protectedRoots, path);
   const output = await validateOutputDir(
     options.outputDir,
     allowExistingOutput ||
       options.resumeScanId !== undefined ||
       options.archiveExisting,
+    validateLocation,
   );
-  if (output !== null) requireOutputOutsideRepositories(protectedRoots, output);
+  if (output !== null) validateLocation(output);
   return output;
 }
 

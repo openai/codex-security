@@ -153,9 +153,28 @@ export async function normalizeRepository(
   return canonical;
 }
 
-export function resolveRepositoryPath(repository: string): string {
+export function resolveRepositoryPath(
+  repository: string,
+  directory = process.cwd(),
+): string {
   requireUtf8Path("Repository path", repository);
-  return resolve(expandHome(repository));
+  return resolveTargetPath(expandHome(repository), directory);
+}
+
+/** Preserve filesystem resolution of symlink/.. paths on POSIX. */
+export function resolveTargetPath(
+  value: string,
+  directory = process.cwd(),
+): string {
+  if (sep === "\\") return resolve(directory, value);
+  const base = isAbsolute(directory)
+    ? directory
+    : `${process.cwd()}/${directory}`;
+  const absolute = isAbsolute(value) ? value : `${base}/${value}`;
+  const parts = absolute
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  return `/${parts.join("/")}`;
 }
 
 function requireUtf8Path(
@@ -592,9 +611,7 @@ export async function normalizeTarget(
       );
     }
     requireUtf8Path("Path target", value);
-    const candidate = isAbsolute(expandHome(value))
-      ? resolve(expandHome(value))
-      : resolve(root, expandHome(value));
+    const candidate = resolveTargetPath(expandHome(value), root);
     let canonical: string;
     try {
       // Some runtimes cannot canonicalize special files to filesystem paths.
@@ -1016,7 +1033,10 @@ function expandHome(value: string): string {
     return homedir();
   }
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
+    const suffix = value.slice(2).replace(/^[/\\]+/, "");
+    const home = homedir();
+    if (process.platform === "win32") return resolve(home, suffix);
+    return home === "" ? resolveTargetPath(suffix) : `${home}${sep}${suffix}`;
   }
   return value;
 }

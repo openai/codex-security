@@ -969,6 +969,25 @@ describe("scan knowledge bases", () => {
     );
   });
 
+  testPosix(
+    "a directory link before a parent traversal cannot select outside documents",
+    async () => {
+      const repository = await temporaryDirectory();
+      const outside = await temporaryDirectory();
+      await mkdir(join(outside, "child"));
+      await symlink(join(outside, "child"), join(repository, "context"));
+      await writeFile(join(outside, "guide.md"), "External data");
+      const requested = `${repository}/context/../guide.md`;
+      await expect(prepareKnowledgeBase([requested])).rejects.toThrow();
+      await writeFile(join(repository, "guide.md"), "Repository guide");
+      const prepared = await prepareKnowledgeBase([requested]);
+      temporaryDirectories.track(prepared.path);
+      expect(await extractedDocuments(prepared.path)).toEqual([
+        "Repository guide",
+      ]);
+    },
+  );
+
   testPosix("does not follow symbolic links", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "scope.md");
