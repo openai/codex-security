@@ -23,6 +23,47 @@ const { temporaryDirectory, cleanup } =
   createApiTestFixtures("project-config-");
 afterEach(cleanup);
 
+test.skipIf(process.platform === "win32")(
+  "project config resolves relative settings from its symlink-traversed parent",
+  async () => {
+    const root = await temporaryDirectory();
+    const selected = join(root, "selected");
+    const documents = join(root, "documents");
+    await mkdir(documents);
+    const physical = join(root, "physical");
+    await mkdir(selected);
+    await mkdir(join(physical, "nested"), { recursive: true });
+    await symlink(join(physical, "nested"), join(selected, "link"));
+    const file = "scan.json";
+    await writeFile(
+      join(selected, file),
+      JSON.stringify({ scan: { instructions_file: "unrelated.md" } }),
+    );
+    await writeFile(
+      join(documents, file),
+      JSON.stringify({
+        scan: {
+          instructions_file: "instructions.md",
+          knowledge_base: ["context.md"],
+        },
+      }),
+    );
+    await symlink(join(documents, file), join(physical, file));
+    const loaded = await loadProjectConfig(`link/../${file}`, selected);
+    expect<string | undefined>(loaded.options.scanPromptFile).toBe(
+      join(physical, "instructions.md"),
+    );
+    expect<readonly string[] | undefined>(
+      loaded.options.knowledgeBasePaths,
+    ).toEqual([join(physical, "context.md")]);
+    expect(loaded.config.executableSourcePaths).toEqual([
+      join(selected, file),
+      join(physical, file),
+      join(documents, file),
+    ]);
+  },
+);
+
 test("Deep preflight excludes executables from each checkout supplying its config", async () => {
   const root = await temporaryDirectory();
   const repo = join(root, "target");

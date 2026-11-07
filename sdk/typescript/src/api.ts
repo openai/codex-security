@@ -2184,7 +2184,7 @@ export class CodexSecurity {
     options: ScanOptions,
     signal: AbortSignal,
   ): Promise<ScanResult | undefined> {
-    const scanDir = resolve(
+    const selectedScanDir = resolve(
       expandHome(outputDir, this.#dependencies.environment),
     );
     // A manifest is only a hint. The workbench verifies the host ledger, producer,
@@ -2193,7 +2193,7 @@ export class CodexSecurity {
       const manifest: unknown = JSON.parse(
         (
           await readScanFile(
-            scanDir,
+            selectedScanDir,
             "scan-manifest.json",
             "scan-manifest.json",
             signal,
@@ -2216,6 +2216,12 @@ export class CodexSecurity {
         return undefined;
       throw error;
     }
+    // The reader checked the directory itself. Resolve only its parent so an
+    // aliased output path matches the canonical scan registration.
+    const scanDir = join(
+      await realpath(dirname(selectedScanDir)),
+      basename(selectedScanDir),
+    );
     const requestedRepository = resolve(
       expandHome(repository, this.#dependencies.environment),
     );
@@ -2302,26 +2308,31 @@ export class CodexSecurity {
       config,
       this.#dependencies.environment,
     );
-    let cost: ScanCost | null = null;
-    let usage: ScanTokenUsage | null = null;
     if (limit !== undefined) {
       if (!model)
         throw new IncompleteScanError(
           "The saved model is unavailable; the scan cost limit cannot be verified.",
         );
       validateScanCostLimit(limit, model, pricingContext);
-      const measurement = await readScanBudgetUsage(
-        saved,
-        scanId,
-        threadId,
-        undefined,
-        true,
-      );
-      if (measurement.complete) {
-        usage = measurement.usage;
-        cost = estimateScanCost(model, usage, pricingContext);
-      }
-      if (cost === null)
+    }
+    const measurement = await readScanBudgetUsage(
+      saved,
+      scanId,
+      threadId,
+      undefined,
+      limit !== undefined,
+    ).catch((error: unknown) => {
+      if (limit !== undefined || signal.aborted) throw error;
+      notifyObserver(
+        options,
+        "onWarning",
+      )(`Could not track scan activity: ${errorMessage(error)}`);
+      return null;
+    });
+    const usage = measurement?.usage ?? null;
+    const cost = estimateScanCost(model, usage, pricingContext);
+    if (limit !== undefined) {
+      if (!measurement?.complete || cost === null)
         throw new IncompleteScanError(
           "Could not verify the requested scan cost limit because scan-owned token usage is incomplete.",
         );
