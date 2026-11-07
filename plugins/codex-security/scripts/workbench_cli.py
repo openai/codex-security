@@ -400,6 +400,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     set_finding_remediation.add_argument(
         "--state", choices=REMEDIATION_UPDATE_STATES, required=True
     )
+    set_finding_remediation.add_argument("--assigned-finding", action="store_true")
     set_finding_remediation.add_argument("--summary")
     set_finding_remediation.add_argument("--patch-stdin", action="store_true")
     set_finding_remediation.add_argument("--patch-path")

@@ -853,7 +853,8 @@ def _start_prompt_driven_scan(
                 """
                 SELECT scans.* FROM scans
                 JOIN workspaces ON workspaces.active_scan_id = scans.id
-                WHERE workspaces.thread_id = ? AND workspaces.target_path = ?
+                WHERE COALESCE(scans.continuation_thread_id, workspaces.thread_id) = ?
+                    AND scans.recipe_json IS NULL AND workspaces.target_path = ?
                     AND workspaces.default_scope = ? AND workspaces.default_mode = ?
                     AND workspaces.user_context IS ? AND workspaces.target_summary IS ?
                     AND workspaces.diff_target_kind IS ? AND workspaces.diff_base_revision IS ?
@@ -866,7 +867,7 @@ def _start_prompt_driven_scan(
                         (? = 0 AND scans.handoff_claim_token IS NULL)
                         OR (
                             ? = 1 AND scans.handoff_claim_token IS NOT NULL
-                            AND scans.continuation_thread_id = ?
+                            AND scans.continuation_thread_id = workspaces.thread_id
                         )
                     )
                 ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id LIMIT 1
@@ -882,13 +883,12 @@ def _start_prompt_driven_scan(
                     *target_identity,
                     int(headless_standard),
                     int(headless_standard),
-                    thread_id,
                 ),
             ).fetchone()
             if existing is not None:
                 connection.commit()
                 return {
-                    **scan_context(connection, existing["id"]),
+                    **scan_context(connection, existing["id"], model_thread_id=thread_id),
                     "startDisposition": "joined",
                 }
             create_private_directory(target_root)
@@ -2268,7 +2268,62 @@ def set_finding_remediation(
                 )
             except (ContractError, OSError, SystemExit) as exc:
                 raise SystemExit(f"Could not save the remediation patch: {exc}") from exc
+    if getattr(args, "assigned_finding", False):
+        return assigned_remediation_context(
+            connection,
+            occurrence["scan_id"],
+            occurrence["id"],
+            request_id,
+            action_token,
+            written_version=args.expected_version + 1,
+        )
     return scan_context(connection, occurrence["scan_id"], occurrence["id"])
+
+
+def assigned_remediation_context(
+    connection: sqlite3.Connection,
+    scan_id: str,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+    *,
+    written_version: int | None = None,
+) -> dict[str, Any]:
+    """After authorization, project only the assigned finding and check the returned action state."""
+    occurrence = require_occurrence(connection, occurrence_id)
+    if occurrence["details_json"] == "{}":
+        backfill_legacy_finding_details(connection, require_scan(connection, scan_id))
+        occurrence = require_occurrence(connection, occurrence_id)
+    if occurrence["scan_id"] != scan_id:
+        raise SystemExit("This finding does not belong to the selected scan.")
+    scan = require_scan(connection, scan_id)
+    finding = finding_result(connection, scan, occurrence, related=None)
+    state = finding["remediationState"]
+    if written_version is None:
+        if not (
+            state.get("requestId") == request_id
+            and state.get("actionClaimToken") == action_token
+            and state.get("pendingAction")
+        ):
+            raise SystemExit(
+                "This remediation action is no longer owned by the supplied request and action token."
+            )
+    elif (
+        state.get("requestId") != request_id
+        or state.get("version") != written_version
+        or state.get("actionClaimToken") not in (None, action_token)
+    ):
+        # The next action may already have started since this write committed.
+        return {"occurrenceId": occurrence_id, "requestId": request_id, "version": written_version}
+    return {
+        "scan": {
+            "scanId": scan["id"],
+            "targetPath": scan["target_path"],
+            "targetRevision": scan["target_revision"],
+            "scanDir": scan["scan_dir"],
+            "findings": [finding],
+        }
+    }
 
 
 def require_reviewed_patch_applied(
@@ -2549,6 +2604,9 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
     request_id = getattr(args, "request_id", None)
     action_token = getattr(args, "action_token", None)
     if request_id is not None or action_token is not None:
+        scan_id = require_uuid(args.scan_id, "scan-id")
+        request_id = require_uuid(request_id or "", "request-id")
+        action_token = require_uuid(action_token or "", "action-token")
         authorized = connection.execute(
             """
             SELECT 1 FROM finding_remediation_attempts AS action
@@ -2556,12 +2614,15 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
             WHERE finding.scan_id = ? AND finding.id = ? AND action.request_id = ?
                 AND action.pending_action_claim_token = ? AND action.pending_action IS NOT NULL
             """,
-            (require_uuid(args.scan_id, "scan-id"), args.occurrence_id, request_id, action_token),
+            (scan_id, args.occurrence_id, request_id, action_token),
         ).fetchone()
         if authorized is None:
             raise SystemExit(
                 "This remediation action is no longer owned by the supplied request and action token."
             )
+        return assigned_remediation_context(
+            connection, scan_id, args.occurrence_id, request_id, action_token
+        )
     context_claim = getattr(args, "context_claim_token", None)
     model_thread = getattr(args, "model_thread_id", None)
     if context_claim is not None:
@@ -2904,7 +2965,7 @@ def finding_result(
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
     *,
-    related: list[dict[str, Any]],
+    related: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
     confidence = details.get("confidence")
@@ -2973,15 +3034,16 @@ def finding_result(
         "title": bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES),
         "triage": finding_triage_result(connection, occurrence["id"]),
     }
-    matches, known_since, known_scan_ids = scan_history.finding_matches(
-        connection, occurrence["id"], scan["id"], scan["started_at"]
-    )
-    if matches:
-        result["matches"] = matches
-        result["knownSince"] = known_since
-        result["knownScanIds"] = known_scan_ids
-    if related:
-        result["related"] = related
+    if related is not None:
+        matches, known_since, known_scan_ids = scan_history.finding_matches(
+            connection, occurrence["id"], scan["id"], scan["started_at"]
+        )
+        if matches:
+            result["matches"] = matches
+            result["knownSince"] = known_since
+            result["knownScanIds"] = known_scan_ids
+        if related:
+            result["related"] = related
     source_excerpt = finding_source_excerpt(
         scan, target, excerpt_locations, requested_scan_paths(scan)
     )

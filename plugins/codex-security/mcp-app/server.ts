@@ -668,7 +668,7 @@ export function createCodexSecurityServer(): McpServer {
       });
       return scanActionResult(
         {
-          ...omitModelContextClaims(started),
+          ...modelScanContext(started, { omitHandoffClaim: true }),
           scanId,
           scanDir,
           handoffClaimToken,
@@ -1259,7 +1259,7 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const canceled = await cancelSecurityScan(scanId, threadId);
-      omitRemediationActionTokens(canceled.structuredContent);
+      modelScanContext(canceled.structuredContent);
       return canceled;
     },
   );
@@ -1410,19 +1410,13 @@ export function createCodexSecurityServer(): McpServer {
             "Remediation context requires occurrenceId, requestId and actionToken.",
           );
         }
-        const context = await workbench("get-scan", {
-          scanId,
-          occurrenceId,
-          requestId,
-          actionToken,
-        });
         return scanActionResult(
-          remediationFindingContext(
-            context,
+          await workbench("get-scan", {
+            scanId,
             occurrenceId,
             requestId,
             actionToken,
-          ),
+          }),
           "Loaded the assigned remediation finding.",
         );
       }
@@ -1460,7 +1454,7 @@ export function createCodexSecurityServer(): McpServer {
         });
       }
       return scanActionResult(
-        omitModelContextClaims(scanContext),
+        modelScanContext(scanContext, { omitHandoffClaim: true }),
         "Loaded Codex Security scan context.",
       );
     },
@@ -1501,7 +1495,7 @@ export function createCodexSecurityServer(): McpServer {
       input.userContext,
     );
     return scanActionResult(
-      input.threadId ? omitRemediationActionTokens(updated) : updated,
+      input.threadId ? modelScanContext(updated) : updated,
       "Updated Codex Security scan context.",
     );
   };
@@ -1606,12 +1600,12 @@ export function createCodexSecurityServer(): McpServer {
         progress.status === "running"
       ) {
         return scanActionResult(
-          omitModelContextClaims(current),
+          modelScanContext(current, { omitHandoffClaim: true }),
           "Deep Scan is still preparing. Discovery progress begins after its setup worker succeeds.",
         );
       }
       return scanActionResult(
-        omitRemediationActionTokens(
+        modelScanContext(
           await workbench("update-progress", {
             scanId,
             modelThreadId,
@@ -1657,7 +1651,7 @@ export function createCodexSecurityServer(): McpServer {
           turnId: securityScanTurnId(extra),
         });
         return scanActionResult(
-          omitRemediationActionTokens(completed),
+          modelScanContext(completed),
           "Validated and indexed the completed Codex Security scan.",
           isJsonObject(completed.scan) ? completed.scan.scanId : undefined,
         );
@@ -1716,7 +1710,7 @@ export function createCodexSecurityServer(): McpServer {
       if (isJsonObject(progress) && progress["status"] === "failed")
         deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
       return scanActionResult(
-        omitRemediationActionTokens(failed),
+        modelScanContext(failed),
         "Recorded the Codex Security scan failure.",
         isJsonObject(scan) ? scan.scanId : undefined,
       );
@@ -1855,25 +1849,17 @@ export function createCodexSecurityServer(): McpServer {
       annotations: nonIdempotentWritingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ patch, ...fields }) => {
-      const updated = await workbench(
-        "set-finding-remediation",
-        { ...fields, patchStdin: patch !== undefined },
-        typeof patch === "object"
-          ? Buffer.from(patch.content, patch.encoding)
-          : patch,
-      );
-      return scanActionResult(
-        remediationFindingContext(
-          updated,
-          fields.occurrenceId,
-          fields.requestId,
-          fields.actionToken,
-          fields.expectedVersion + 1,
+    async ({ patch, ...fields }) =>
+      scanActionResult(
+        await workbench(
+          "set-finding-remediation",
+          { ...fields, patchStdin: patch !== undefined, assignedFinding: true },
+          typeof patch === "object"
+            ? Buffer.from(patch.content, patch.encoding)
+            : patch,
         ),
         "Updated the local Codex Security finding remediation state.",
-      );
-    },
+      ),
   );
 
   server.registerTool(
@@ -2087,70 +2073,18 @@ function openWorkspaceResult(workspace: WorkspaceState) {
   return result;
 }
 
-function remediationFindingContext(
-  context: JsonObject,
-  occurrenceId: string,
-  requestId: string,
-  actionToken: string,
-  updatedVersion?: number,
-) {
-  const scan = context.scan;
-  const finding =
-    isJsonObject(scan) && Array.isArray(scan.findings)
-      ? scan.findings.find(
-          (item: unknown) =>
-            isJsonObject(item) && item.occurrenceId === occurrenceId,
-        )
-      : undefined;
-  if (
-    !isJsonObject(scan) ||
-    !isJsonObject(finding) ||
-    !isJsonObject(finding.remediationState)
-  ) {
-    throw new Error("Remediation finding not found.");
-  }
-  const state = finding.remediationState;
-  if (updatedVersion === undefined) {
-    if (
-      state.requestId !== requestId ||
-      state.actionClaimToken !== actionToken ||
-      !state.pendingAction
-    ) {
-      throw new Error(
-        "This remediation action is no longer owned by the supplied request and action token.",
-      );
-    }
-  } else if (
-    state.requestId !== requestId ||
-    state.version !== updatedVersion ||
-    (state.actionClaimToken !== null && state.actionClaimToken !== actionToken)
-  ) {
-    // Another action can start before the workbench returns the write's result.
-    return { occurrenceId, requestId, version: updatedVersion };
-  }
-  const assigned = { ...finding };
-  delete assigned.related;
-  delete assigned.matches;
-  delete assigned.knownSince;
-  delete assigned.knownScanIds;
-  return {
-    scan: {
-      scanId: scan.scanId,
-      targetPath: scan.targetPath,
-      targetRevision: scan.targetRevision,
-      scanDir: scan.scanDir,
-      findings: [assigned],
-    },
-  };
-}
-
-function omitRemediationActionTokens<T extends JsonObject>(context: T): T {
+function modelScanContext<T extends JsonObject>(
+  context: T,
+  options?: { omitHandoffClaim: boolean },
+): T {
   const workspace = isJsonObject(context.workspace)
     ? context.workspace
     : undefined;
   // Only a workbench action handoff authorizes a model to act on a finding.
   for (const scan of [context.scan, workspace?.results]) {
-    if (!isJsonObject(scan) || !Array.isArray(scan.findings)) continue;
+    if (!isJsonObject(scan)) continue;
+    if (options?.omitHandoffClaim) delete scan.handoffClaimToken;
+    if (!Array.isArray(scan.findings)) continue;
     for (const finding of scan.findings) {
       if (isJsonObject(finding) && isJsonObject(finding.remediationState)) {
         delete finding.remediationState.actionClaimToken;
@@ -2158,24 +2092,6 @@ function omitRemediationActionTokens<T extends JsonObject>(context: T): T {
     }
   }
   return context;
-}
-
-function omitModelContextClaims(result: JsonObject) {
-  const scan = isJsonObject(result.scan) ? result.scan : undefined;
-  if (scan) {
-    delete scan.handoffClaimToken;
-  }
-  const workspace = isJsonObject(result.workspace)
-    ? result.workspace
-    : undefined;
-  const workspaceResults =
-    workspace && isJsonObject(workspace.results)
-      ? workspace.results
-      : undefined;
-  if (workspaceResults) {
-    delete workspaceResults.handoffClaimToken;
-  }
-  return omitRemediationActionTokens(result);
 }
 
 function workspaceResult(workspace: WorkspaceState, scanId?: unknown) {
@@ -2218,7 +2134,7 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
     );
   }
   return scanActionResult(
-    omitRemediationActionTokens(promptOnly),
+    modelScanContext(promptOnly),
     `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
     scanId,
   );
