@@ -24,11 +24,6 @@ import {
   type SeverityRubricSnapshot,
 } from "./severity-rubric.js";
 import type { NormalizedTarget } from "./targets.js";
-import type { ScanPublicationContext } from "./scan-publication.js";
-import {
-  writePreparedScanDraft,
-  type ScanDraftPublicationOptions,
-} from "./scan-draft-publication.js";
 
 type Finding = Pick<
   FindingsDocument["findings"][number],
@@ -78,7 +73,6 @@ interface Schema {
 interface DraftManifest {
   scan: {
     id: string;
-    complete?: boolean;
     threatModel?: unknown;
     reviewState?: CoverageDocument;
     scope: { validationMode?: string };
@@ -207,8 +201,6 @@ export async function runCustomValidation(options: {
   severityRubric?: SeverityRubricSnapshot;
   falsePositives?: readonly unknown[];
   signal: AbortSignal;
-  workbench: ScanPublicationContext["workbench"];
-  writer: ScanDraftPublicationOptions["writer"];
   run(prompt: string, outputSchema: unknown): Promise<string>;
 }): Promise<void> {
   const { scanDir, scanId, signal } = options;
@@ -220,7 +212,7 @@ export async function runCustomValidation(options: {
       ),
     ),
   );
-  const [manifest, findingsDocument] = structuredClone(documents) as [
+  const [manifest, findingsDocument] = documents as [
     DraftManifest,
     { scanId: string; findings: Finding[] },
   ];
@@ -238,7 +230,7 @@ export async function runCustomValidation(options: {
       ).toString("utf8"),
     );
   const documentNames = legacy ? [...DOCUMENTS, "coverage.json"] : DOCUMENTS;
-  if (legacy) documents.push(structuredClone(coverage));
+  if (legacy) documents.push(coverage);
   if (
     manifest.scan?.scope?.validationMode !== "custom_pending" ||
     manifest.scan.sealedAt != null ||
@@ -516,20 +508,7 @@ export async function runCustomValidation(options: {
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
   // Rewrite the captured draft, not any canonical-file edits made during validation.
-  try {
-    await writePreparedScanDraft(
-      { scanDir, workbench: options.workbench, writer: options.writer },
-      scanId,
-      {
-        manifest,
-        findings: findingsDocument,
-        coverage,
-      },
-    );
-  } catch (error) {
-    for (const [index, name] of documentNames.entries())
-      await writeJson(scanDir, name, documents[index]);
-    throw error;
-  }
+  for (const [index, name] of documentNames.entries())
+    await writeJson(scanDir, name, documents[index], signal);
   await writeCustomValidationStatus(scanDir, { scanId, ...result }, signal);
 }

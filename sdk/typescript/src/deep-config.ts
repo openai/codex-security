@@ -1,6 +1,20 @@
 import { isRecord } from "./record.js";
-import { readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
+import {
+  MODEL_FILE_SETTINGS,
+  resolveCodexProfile,
+  writeCodexConfig,
+  type JsonObject,
+} from "./config.js";
+import { gitProtectionRoots } from "./targets.js";
+import { isWithin } from "./trusted-executable.js";
+import {
+  canonicalConfigPath,
+  expandHome,
+  type ProcessEnvironment,
+} from "./runtime.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -19,7 +33,49 @@ export type DeepScanSources = Record<
 export interface ResolvedDeepScanConfig {
   settings: Required<DeepScanOptions>;
   sources: DeepScanSources;
-  legacyConfigPaths?: string[];
+  source: string;
+  sourcePaths?: readonly string[];
+  document: TomlTable;
+  overrides: DeepScanOptions;
+}
+
+export function absoluteModelFilePaths(
+  config: JsonObject,
+  environment: ProcessEnvironment,
+): string[] {
+  const selected = resolveCodexProfile(config);
+  return MODEL_FILE_SETTINGS.flatMap((key) => {
+    const value = selected[key];
+    if (typeof value !== "string" || !value) return [];
+    const path = expandHome(value, environment);
+    return isAbsolute(path) ? [path] : [];
+  });
+}
+
+export async function requireDeepScanExecutable(
+  command: string,
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const canonical = await realpath(command).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return canonicalConfigPath(command);
+  });
+  for (const path of paths) {
+    const directory = dirname(path);
+    const roots = [
+      directory,
+      await canonicalConfigPath(directory),
+      ...(await gitProtectionRoots(path, signal)),
+    ];
+    if (
+      roots.some((root) => isWithin(root, command) || isWithin(root, canonical))
+    ) {
+      throw new CodexSecurityError(
+        "The selected Codex executable is inside a protected configuration checkout.",
+      );
+    }
+  }
 }
 
 export function deepScanOptions(
@@ -91,13 +147,22 @@ export async function resolveDeepScanConfig(
   signal?: AbortSignal,
 ): Promise<ResolvedDeepScanConfig> {
   const explicit = deepScanOptions({ ...options, mode: "deep" });
+  let document: TomlTable = {};
+  let sourcePaths: string[] | undefined;
   // Complete saved settings do not depend on today's ambient configuration.
-  const legacy = DEEP_SCAN_SETTINGS.every(
-    ([name]) => explicit[name] !== undefined,
-  )
-    ? undefined
-    : await readDeepScanDocument(source, signal);
-  const existing = legacy?.document["deep_scan"];
+  if (!DEEP_SCAN_SETTINGS.every(([name]) => explicit[name] !== undefined)) {
+    let destination: string | undefined;
+    try {
+      destination = await realpath(source);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (destination !== undefined) {
+      sourcePaths = source === destination ? [source] : [source, destination];
+      document = await readDeepScanDocument(destination, signal);
+    }
+  }
+  const existing = document["deep_scan"];
   if (
     existing !== undefined &&
     (!isRecord(existing) ||
@@ -141,29 +206,78 @@ export async function resolveDeepScanConfig(
   return {
     settings,
     sources,
-    ...(legacy && { legacyConfigPaths: [source, legacy.destination] }),
+    source,
+    ...(sourcePaths ? { sourcePaths } : {}),
+    document,
+    overrides: explicit,
   };
+}
+
+export async function writeDeepScanConfig(
+  destination: string,
+  resolved: ResolvedDeepScanConfig,
+  workerRuntime?: JsonObject,
+): Promise<void> {
+  const [source, target] = await Promise.all([
+    canonicalConfigPath(resolved.source),
+    runtimeConfigPath(destination),
+  ]);
+  let document = resolved.document;
+  const sameFile = source === target;
+  if (sameFile) {
+    if (Object.keys(resolved.overrides).length === 0) return;
+    document = await readDeepScanDocument(destination);
+  }
+  // An isolated runtime needs a complete snapshot. An ambient file keeps
+  // inherited defaults unset so future releases can still update them.
+  const settings = sameFile ? resolved.overrides : resolved.settings;
+  const retainAmbientSettings =
+    sameFile &&
+    DEEP_SCAN_SETTINGS.some(([name]) => settings[name] === undefined);
+  await writeCodexConfig(destination, {
+    ...document,
+    ...(workerRuntime === undefined ? {} : { worker_runtime: workerRuntime }),
+    deep_scan: {
+      ...(retainAmbientSettings
+        ? (document["deep_scan"] as TomlTable | undefined)
+        : {}),
+      ...Object.fromEntries(
+        DEEP_SCAN_SETTINGS.filter(([name]) => settings[name] !== undefined).map(
+          ([name, key]) => [key, settings[name]],
+        ),
+      ),
+    },
+  } as JsonObject);
+}
+
+async function runtimeConfigPath(path: string): Promise<string> {
+  try {
+    return await canonicalConfigPath(path);
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code !== "ELOOP" ||
+      !(await lstat(path)).isSymbolicLink()
+    )
+      throw error;
+    // A stale cyclic file link is replaced by writeCodexConfig's atomic rename.
+    // Errors resolving its parent (or the ambient source) still fail the write.
+    return join(await canonicalConfigPath(dirname(path)), basename(path));
+  }
 }
 
 async function readDeepScanDocument(
   source: string,
   signal?: AbortSignal,
-): Promise<{ document: TomlTable; destination: string } | undefined> {
-  let destination: string | undefined;
+): Promise<TomlTable> {
   try {
-    destination = await realpath(source);
-    const contents = await readFile(destination, { encoding: "utf8", signal });
-    return { document: parseToml(contents), destination };
+    return parseToml(await readFile(source, { encoding: "utf8", signal }));
   } catch (error) {
-    // A missing optional config is fine until its destination has been selected.
-    if (
-      destination === undefined &&
-      (error as NodeJS.ErrnoException).code === "ENOENT"
-    )
-      return undefined;
-    throw new CodexSecurityError(
-      `Cannot read Codex Security configuration at ${source}.`,
-      { cause: error },
-    );
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new CodexSecurityError(
+        `Cannot read Codex Security configuration at ${source}.`,
+        { cause: error },
+      );
+    }
+    return {};
   }
 }

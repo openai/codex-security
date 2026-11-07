@@ -9,7 +9,6 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from publication_fixtures import historical_publication_scan
 from workbench_test_support import (
     interrupt_publication,
     read_review_state,
@@ -18,8 +17,6 @@ from workbench_test_support import (
     write_checkpoint,
     write_result_draft,
 )
-
-publication_scan = historical_publication_scan
 
 
 @pytest.mark.parametrize(
@@ -40,7 +37,7 @@ def test_published_raw_head_compatibility_converts_before_later_selection(
     initial["coverage"] = {**scan.coverage, **initial["coverage"]}
     checkpoint = write_checkpoint(directory / "checkpoints", initial)
     head = select_checkpoint(directory, checkpoint, mtime_ns=100)
-    capture = saved.checkpoint_publication._capture_saved_source
+    capture = saved._capture_saved_source
 
     def legacy_capture(root, relative, scan_id, *, checkpoint_heads=None, **kwargs):
         if Path(relative).name == "checkpoint-head.json" and checkpoint_heads is not None:
@@ -55,15 +52,13 @@ def test_published_raw_head_compatibility_converts_before_later_selection(
         head.relative_to(scan.scan_dir).as_posix()
         in json.loads(original)["scan"]["preservedSources"]
     )
-    args = Namespace(scan_id=scan.scan_id, claim_token=None, thread_id=None, cost_json=None)
+    args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
 
     with monkeypatch.context() as patch:
         if interrupted:
-            patch.setattr(
-                saved.checkpoint_publication,
-                "_write_prepared_scan_finalization",
-                interrupt_publication,
-            )
+            patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
             with pytest.raises(OSError, match="Synthetic publication interruption"):
                 saved.preserve_scan_results(context, workbench_db, args)
             assert (scan.scan_dir / "scan-manifest.json").read_bytes() == original
@@ -131,7 +126,9 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
         patch.setattr("workbench.saved_sources.write_scan_local_bytes", capture_sibling)
         scan.fail()
     assert changed
-    args = Namespace(scan_id=scan.scan_id, claim_token=None, thread_id=None, cost_json=None)
+    args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
     with pytest.raises(
         saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
     ):
@@ -154,8 +151,6 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
 def test_frozen_model_capture_keeps_earlier_worker_finding(
     workbench_api, workbench_db, publication_scan, monkeypatch, restore_capture
 ):
-    from workbench import saved_sources
-
     scan = publication_scan()
     saved = workbench_api["saved_results"]
     model = {"summary": "Retained scan model."}
@@ -172,7 +167,7 @@ def test_frozen_model_capture_keeps_earlier_worker_finding(
     head = select_checkpoint(scan.scan_dir, checkpoint)
     for path, timestamp in ((result, 100_000), (manifest_path, 150_000), (head, 200_000)):
         os.utime(path, ns=(timestamp, timestamp))
-    model_draft = saved_sources._parent_scan_draft(
+    model_draft = saved._parent_scan_draft(
         scan.scan_id, {"threatModel": model}, {"findings": []}, {}
     )
     model_path = f"checkpoints/{saved._digest(model_draft)}.json"
@@ -192,9 +187,7 @@ def test_frozen_model_capture_keeps_earlier_worker_finding(
         if restore_capture:
             patch.setattr("workbench.retained_coverage.write_scan_local_bytes", interrupt_capture)
         else:
-            patch.setattr(
-                saved.checkpoint_publication, "_write_prepared_scan_finalization", interrupt
-            )
+            patch.setattr(saved, "_write_prepared_scan_finalization", interrupt)
         scan.fail()
     if not restore_capture:
         assert len(initial) == len(initial[0]) == 1
@@ -213,7 +206,7 @@ def test_frozen_model_capture_keeps_earlier_worker_finding(
     assert findings["findings"][0]["identity"] == scan.findings[0]["identity"]
     if not restore_capture:
         assert findings["findings"] == initial[0]
-    assert capture.read_bytes() == saved_sources._encoded(model_draft)
+    assert capture.read_bytes() == saved._encoded(model_draft)
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])
@@ -232,9 +225,7 @@ def test_frozen_model_ignores_unselected_live_manifest_changes(
     manifest_path.write_text(json.dumps(manifest))
     for name in ("findings.json", "coverage.json", "scan-manifest.json"):
         os.utime(scan.scan_dir / name, ns=(150, 150))
-    _, canonical = saved.checkpoint_publication._read_saved_parent_result(
-        scan.scan_dir, scan.scan_id
-    )
+    _, canonical = saved._read_saved_parent_result(scan.scan_dir, scan.scan_id)
     selected = write_checkpoint(
         scan.scan_dir / "checkpoints",
         {k: v for k, v in canonical.items() if k != "threatModel"},
@@ -252,15 +243,11 @@ def test_frozen_model_ignores_unselected_live_manifest_changes(
         if failure == "source-order":
             patch.setattr("workbench.saved_sources.write_scan_local_bytes", fail_order)
         else:
-            patch.setattr(
-                saved.checkpoint_publication,
-                "_write_prepared_scan_finalization",
-                interrupt_publication,
-            )
+            patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
         saved.cancel_scan(
             context,
             workbench_db,
-            Namespace(scan_id=scan.scan_id, thread_id=None, claim_token=None, cost_json=None),
+            Namespace(scan_id=scan.scan_id, thread_id=None, claim_token=None),
         )
     retained = json.loads(
         workbench_db.execute(
@@ -323,16 +310,14 @@ def test_resumed_head_snapshot_allows_later_recovery(
         if snapshot_failure:
             patch.setattr("workbench.saved_sources.write_scan_local_bytes", fail_head)
         scan.fail()
-    args = Namespace(scan_id=scan.scan_id, claim_token=None, thread_id=None, cost_json=None)
+    args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
     retry = saved.preserve_scan_results if resume == "preserve" else saved.recover_scan_results
 
     with monkeypatch.context() as patch:
         if interrupted and snapshot_failure:
-            patch.setattr(
-                saved.checkpoint_publication,
-                "_write_prepared_scan_finalization",
-                interrupt_publication,
-            )
+            patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
             with pytest.raises(OSError, match="Synthetic publication interruption"):
                 retry(context, workbench_db, args)
         else:
@@ -399,9 +384,7 @@ def test_early_head_failure_keeps_frozen_model_choice(
         checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", payload, mtime_ns=50)
         select_checkpoint(scan.scan_dir, checkpoint, mtime_ns=observed)
         if label == "Accepted model":
-            saved.checkpoint_publication._capture_saved_source(
-                scan.scan_dir, "checkpoint-head.json", scan.scan_id
-            )
+            saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     if failure == "worker-head":
         directory = scan.add_worker(status="canceled").parent
         worker_checkpoint = write_checkpoint(
@@ -493,7 +476,9 @@ def test_failed_head_fallback_rejects_changes_before_resume(
         os.utime(head, ns=(200, 200))
     else:
         checkpoint.write_text(json.dumps({**initial, "findings": scan.findings}))
-    args = Namespace(scan_id=scan.scan_id, claim_token=None, thread_id=None, cost_json=None)
+    args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
     retry = saved.preserve_scan_results if resume == "preserve" else saved.recover_scan_results
     with pytest.raises(
         saved.ContractError,
@@ -549,14 +534,10 @@ def test_rejected_historical_model_does_not_poison_recovery(
         select_checkpoint(scan.scan_dir, path, mtime_ns=observed)
         return path.relative_to(scan.scan_dir).as_posix()
 
-    _, canonical = saved.checkpoint_publication._read_saved_parent_result(
-        scan.scan_dir, scan.scan_id
-    )
+    _, canonical = saved._read_saved_parent_result(scan.scan_dir, scan.scan_id)
     canonical_source = f"checkpoints/{saved._digest(canonical)}.json"
     select({**draft, "threatModel": {"summary": "Older accepted model"}}, 100)
-    saved.checkpoint_publication._capture_saved_source(
-        scan.scan_dir, "checkpoint-head.json", scan.scan_id
-    )
+    saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     invalid_source = select({**draft, "threatModel": invalid}, 200)
     stopped = scan.fail()
     assert stopped["findingCount"] == 1
@@ -577,11 +558,7 @@ def test_rejected_historical_model_does_not_poison_recovery(
 
     with monkeypatch.context() as patch:
         if interrupted:
-            patch.setattr(
-                saved.checkpoint_publication,
-                "_write_prepared_scan_finalization",
-                interrupt_publication,
-            )
+            patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
             with pytest.raises(OSError, match="Synthetic publication interruption"):
                 saved.recover_scan_results(context, workbench_db, args)
         else:
@@ -670,17 +647,13 @@ def test_partial_head_retains_previous_terminal_coverage_boundary(
             scan.recover()
             if repeated_terminal:
                 os.utime(head, ns=(400, 400))
-                saved.checkpoint_publication._capture_saved_source(
+                saved._capture_saved_source(
                     scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
                 )
         else:
             with monkeypatch.context() as patch:
                 if interrupted:
-                    patch.setattr(
-                        saved.checkpoint_publication,
-                        "_write_prepared_scan_finalization",
-                        interrupt_publication,
-                    )
+                    patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
                     with pytest.raises(OSError, match="Synthetic publication interruption"):
                         scan.recover()
                 else:
@@ -710,9 +683,7 @@ def test_retry_keeps_canonical_finding_when_its_checkpoint_copy_is_unreadable(
     manifest_path.write_text(json.dumps(manifest))
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         os.utime(scan.scan_dir / name, ns=(200_000, 200_000))
-    _, canonical = saved.checkpoint_publication._read_saved_parent_result(
-        scan.scan_dir, scan.scan_id
-    )
+    _, canonical = saved._read_saved_parent_result(scan.scan_dir, scan.scan_id)
     empty = {key: value for key, value in canonical.items() if key != "threatModel"}
     checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", {**empty, "findings": []})
     broken = checkpoint.parent / f"{saved._digest(canonical)}.json"
@@ -728,7 +699,7 @@ def test_retry_keeps_canonical_finding_when_its_checkpoint_copy_is_unreadable(
         raise OSError("Synthetic publication interruption")
 
     with monkeypatch.context() as patch:
-        patch.setattr(saved.checkpoint_publication, "_write_prepared_scan_finalization", interrupt)
+        patch.setattr(saved, "_write_prepared_scan_finalization", interrupt)
         scan.fail()
     assert attempted == [(scan.findings[0]["title"], model)]
     with pytest.raises(
@@ -753,8 +724,6 @@ def test_inherited_model_capture_is_bound_before_publication_retry(
     late_model,
     replay,
 ):
-    from workbench import saved_sources
-
     scan = publication_scan(mode=mode)
     saved = workbench_api["saved_results"]
     context = workbench_api["_WORKBENCH_DB_CONTEXT"]
@@ -765,9 +734,7 @@ def test_inherited_model_capture_is_bound_before_publication_retry(
     manifest_path.write_text(json.dumps(manifest))
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         os.utime(scan.scan_dir / name, ns=(150, 150))
-    _, canonical = saved.checkpoint_publication._read_saved_parent_result(
-        scan.scan_dir, scan.scan_id
-    )
+    _, canonical = saved._read_saved_parent_result(scan.scan_dir, scan.scan_id)
     selected = write_checkpoint(
         scan.scan_dir / "checkpoints",
         {k: v for k, v in canonical.items() if k != "threatModel"},
@@ -776,7 +743,7 @@ def test_inherited_model_capture_is_bound_before_publication_retry(
     broken = scan.scan_dir / f"checkpoints/{saved._digest(canonical)}.json"
     broken.write_text("{")
     select_checkpoint(scan.scan_dir, selected, mtime_ns=200)
-    model_draft = saved_sources._parent_scan_draft(
+    model_draft = saved._parent_scan_draft(
         scan.scan_id, {"threatModel": model}, {"findings": []}, {}
     )
     model_source = f"checkpoints/{saved._digest(model_draft)}.json"
@@ -791,11 +758,7 @@ def test_inherited_model_capture_is_bound_before_publication_retry(
         if failed_capture:
             patch.setattr("workbench.retained_coverage.write_scan_local_bytes", fail_capture)
         else:
-            patch.setattr(
-                saved.checkpoint_publication,
-                "_write_prepared_scan_finalization",
-                interrupt_publication,
-            )
+            patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
         scan.fail()
     row = workbench_db.execute(
         "SELECT retained_source_digests_json, completion_warnings_json FROM scans WHERE id = ?",
@@ -805,7 +768,9 @@ def test_inherited_model_capture_is_bound_before_publication_retry(
     assert retained["sources"][model_source] == saved._digest(model_draft)
     assert (scan.scan_dir / model_source).exists() is not failed_capture
     assert any("Preserved unreadable checkpoint" in warning for warning in json.loads(row[1]))
-    args = Namespace(scan_id=scan.scan_id, claim_token=None, thread_id=None, cost_json=None)
+    args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
     retry = saved.preserve_scan_results if replay == "preserve" else saved.recover_scan_results
     if late_model:
         late = copy.deepcopy(manifest)
@@ -825,7 +790,7 @@ def test_inherited_model_capture_is_bound_before_publication_retry(
     assert not result["resultsRecoveryNeeded"]
     assert broken.read_text() == "{"
     assert (
-        saved.checkpoint_publication._frozen_source_times(
+        saved._frozen_source_times(
             scan.scan_dir, scan.scan_id, published["scan"]["preservedSources"]
         )[model_source]
         == 150
@@ -881,11 +846,7 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
         else:
             with monkeypatch.context() as patch:
                 if interrupted and index == len(sequence) - 1:
-                    patch.setattr(
-                        saved.checkpoint_publication,
-                        "_write_prepared_scan_finalization",
-                        interrupt_publication,
-                    )
+                    patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
                     with pytest.raises(OSError, match="Synthetic publication interruption"):
                         scan.recover()
                 else:
@@ -916,7 +877,7 @@ def test_source_order_failure_retains_accepted_parent_input(
     contents = json.loads(manifest.read_text())
     contents["scan"]["complete"] = True
     manifest.write_text(json.dumps(contents))
-    _, projected = saved.checkpoint_publication._read_saved_parent_result(scan_dir, scan.scan_id)
+    _, projected = saved._read_saved_parent_result(scan_dir, scan.scan_id)
     checkpoints = scan_dir / "checkpoints"
     publication = {"previousCheckpoint": None, "previousInputCheckpoint": None}
     accepted = write_checkpoint(
@@ -1011,7 +972,9 @@ def test_interrupted_recovery_keeps_frozen_parent_reconciliation(
     scan = publication_scan(mode="deep")
     saved = workbench_api["saved_results"]
     context = workbench_api["_WORKBENCH_DB_CONTEXT"]
-    args = Namespace(scan_id=scan.scan_id, claim_token=None, thread_id=None, cost_json=None)
+    args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
     with workbench_db:
         workbench_db.execute(
             "UPDATE scans SET status = 'failed', completed_at = started_at WHERE id = ?",
@@ -1037,7 +1000,7 @@ def test_interrupted_recovery_keeps_frozen_parent_reconciliation(
         interrupt_publication()
 
     with monkeypatch.context() as patch:
-        patch.setattr(saved.checkpoint_publication, "_write_prepared_scan_finalization", interrupt)
+        patch.setattr(saved, "_write_prepared_scan_finalization", interrupt)
         if selection == "frozen":
             with pytest.raises(OSError, match="Synthetic publication interruption"):
                 saved.preserve_scan_results(context, workbench_db, args)

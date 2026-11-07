@@ -5,12 +5,19 @@ import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+export interface DiscoveryBoardContext {
+  root: string;
+  author: string;
+}
+
 /**
  * Host-bound artifact state. Never construct this object from model tool input.
  */
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
+  layout: "scan" | "worker";
+  discoveryBoard?: DiscoveryBoardContext;
   scanId?: string;
   scope?: string;
   includePaths?: readonly string[];
@@ -94,13 +101,8 @@ export async function artifactSourcePath(
     }
   }
 
-  const canonical = await fs.realpath(current).catch((cause: unknown) => {
-    throw new Error(
-      label + ": the requested artifact escaped its bound context.",
-      { cause },
-    );
-  });
-  if (!canonical.startsWith(root + sep)) {
+  const canonical = await fs.realpath(current).catch(() => undefined);
+  if (!canonical || !canonical.startsWith(root + sep)) {
     throw new Error(
       label + ": the requested artifact escaped its bound context.",
     );
@@ -183,7 +185,7 @@ export function paginateArtifactRows<Row>(
 }
 
 /**
- * Resolve one operation-owned destination inside its bound scan root.
+ * Resolve one operation-owned destination inside its bound scan or worker root.
  */
 export async function artifactDestination(
   context: ArtifactContext,
@@ -281,6 +283,13 @@ export async function replaceArtifactText(
     await fs.rm(temporary, { force: true });
     throw error;
   }
+}
+
+export async function replaceArtifactJson(
+  path: string,
+  value: unknown,
+): Promise<void> {
+  await replaceArtifactText(path, JSON.stringify(value, null, 2) + "\n");
 }
 
 export async function replaceArtifactJsonl(

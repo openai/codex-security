@@ -13,42 +13,13 @@ function modelSchema(value, root = value) {
     return value.map((child) => modelSchema(child, root));
   if (value === null || typeof value !== "object") return value;
   if (typeof value.$ref === "string") {
-    return modelSchema(
-      value.$ref
-        .slice(2)
-        .split("/")
-        .reduce(
-          (node, key) => node[key.replaceAll("~1", "/").replaceAll("~0", "~")],
-          root,
-        ),
-      root,
-    );
+    return modelSchema(root.$defs[value.$ref.slice("#/$defs/".length)], root);
   }
   return Object.fromEntries(
     Object.entries(value)
       .filter(([key]) => key !== "allOf" && key !== "$defs")
       .map(([key, child]) => [key, modelSchema(child, root)]),
   );
-}
-
-function withoutAllOf(value) {
-  if (Array.isArray(value)) return value.map(withoutAllOf);
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) => key !== "allOf")
-      .map(([key, child]) => [key, withoutAllOf(child)]),
-  );
-}
-
-function compileModel(schema, name) {
-  // allOf with contains or if/then hides object fields from the compiler.
-  return compile({ ...withoutAllOf(schema), title: name }, name, {
-    bannerComment: "",
-    format: false,
-    ignoreMinAndMaxItems: true,
-    unknownAny: true,
-  });
 }
 
 async function generate() {
@@ -59,8 +30,17 @@ async function generate() {
   ];
   const models = await Promise.all(
     documents.map(async ([filename, name]) => {
-      const schema = JSON.parse(readFileSync(join(schemas, filename), "utf8"));
-      return compileModel(modelSchema(schema), name);
+      // json-schema-to-typescript drops object fields when allOf uses contains or if/then.
+      const input = modelSchema(
+        JSON.parse(readFileSync(join(schemas, filename), "utf8")),
+      );
+      input.title = name;
+      return compile(input, name, {
+        bannerComment: "",
+        format: false,
+        ignoreMinAndMaxItems: true,
+        unknownAny: true,
+      });
     }),
   );
 
@@ -106,74 +86,30 @@ async function generate() {
   );
 }
 
-async function generateSemanticModels() {
-  const schema = JSON.parse(
-    readFileSync(join(schemas, "tools/scan-draft.schema.json"), "utf8"),
-  );
-  const common = JSON.parse(
-    readFileSync(
-      join(schemas, "definitions/artifact-common.schema.json"),
-      "utf8",
-    ),
-  );
-  // Resolve the plugin's URI references locally, using the same source schema as
-  // runtime draft validation. Common definitions contain no further references.
-  const input = JSON.parse(
-    JSON.stringify(schema)
-      .replaceAll(`${schema.$id}#/`, "#/")
-      .replaceAll(
-        "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/",
-        "#/$defs/common/$defs/",
-      ),
-  );
-  input.$defs.common = common;
-  const model = await compileModel(input, "ScanDraftInput");
-  return format(
-    [
-      "/* Generated from the plugin semantic draft schema. Run `pnpm generate:models`. */",
-      model.trim(),
-      // Persisted checkpoints and the internal composer use the original field name.
-      'export type SemanticScan = Omit<ScanDraftInput, "reviewState"> & { coverage: ScanDraftInput["reviewState"] };',
-      'export type SemanticFinding = SemanticScan["findings"][number];',
-      'export type SemanticCoverage = SemanticScan["coverage"];',
-      'export type SemanticScope = NonNullable<SemanticScan["scope"]>;',
-      'export type SemanticThreatModel = NonNullable<SemanticScan["threatModel"]>;',
-    ].join("\n\n"),
-    { parser: "typescript", printWidth: 80 },
-  );
-}
-
-Promise.all([generate(), generateSemanticModels()]).then(
-  ([models, semanticModels]) => {
-    const pluginSource = "../../plugins/codex-security/mcp-app/src";
-    const shared = [
-      "workbench-arguments",
-      "executable-path",
-      "contract-values",
-      "windows-path",
-    ].map((name) => [
-      `src/${name}.ts`,
-      `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
-        readFileSync(join(packageRoot, pluginSource, `${name}.ts`), "utf8"),
-    ]);
-    const outputs = [
-      [`${pluginSource}/models.ts`, models],
-      ["src/models.ts", models],
-      ["src/semantic-models.ts", semanticModels],
-      ...shared,
-    ];
-    for (const [name, content] of outputs) {
-      const output = join(packageRoot, name);
-      if (process.argv.includes("--check")) {
-        if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== content) {
-          console.error(
-            `${name} is out of date. Run \`pnpm generate:models\`.`,
-          );
-          process.exitCode = 1;
-        }
-        continue;
+generate().then((models) => {
+  const pluginSource = "../../plugins/codex-security/mcp-app/src";
+  const shared = [
+    "workbench-arguments",
+    "executable-path",
+    "contract-values",
+    "windows-path",
+  ].map((name) => [
+    `src/${name}.ts`,
+    `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
+      readFileSync(join(packageRoot, pluginSource, `${name}.ts`), "utf8"),
+  ]);
+  const outputs = [
+    [`${pluginSource}/models.ts`, models],
+    ["src/models.ts", models],
+    ...shared,
+  ];
+  for (const [name, content] of outputs) {
+    const output = join(packageRoot, name);
+    if (process.argv.includes("--check")) {
+      if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== content) {
+        console.error(`${name} is out of date. Run \`pnpm generate:models\`.`);
+        process.exitCode = 1;
       }
-      writeFileSync(output, content);
-    }
-  },
-);
+    } else writeFileSync(output, content);
+  }
+});

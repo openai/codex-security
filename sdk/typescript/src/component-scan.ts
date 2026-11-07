@@ -163,9 +163,14 @@ export async function runComponentScans(
     );
     const provider = scanModelProvider(configuration);
     const providerEnvKey = scanProviderEnvKey(configuration);
-    scanAuthentication(source, auth, provider, hasCommandAuth(configuration), {
+    scanAuthentication(
+      source,
+      auth,
+      provider,
+      hasCommandAuth(configuration),
+      false,
       providerEnvKey,
-    });
+    );
     environment = selectedScanEnvironment(
       source,
       auth,

@@ -7,24 +7,12 @@ import sys
 from pathlib import Path
 
 import pytest
-from workbench_test_support import (
-    saved_binding,
-    saved_discovery_worker,
-    saved_draft,
-    write_result_draft,
-)
+from test_deep_coverage_recovery import worker
+from workbench_test_support import saved_binding, saved_draft
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import finalize_scan_contract as finalizer
-from workbench import retained_coverage as saved
-
-
-def worker(root: Path, name: str, draft: dict):
-    output = root / "artifacts" / "deep_discovery" / "workers" / name / "output"
-    (output / "artifacts").mkdir(parents=True)
-    (output / "artifacts/review.md").write_text(f"{name} source review\n")
-    write_result_draft(output / "result.json", draft, mtime_ns=100)
-    return saved_discovery_worker(output, name, 1)
+import workbench_saved_results as saved
 
 
 @pytest.mark.parametrize(

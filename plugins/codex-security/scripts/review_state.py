@@ -70,35 +70,5 @@ def checkpoint_review_state(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _normalize_unsealed_open_questions(coverage: dict[str, Any]) -> None:
-    """Keep only schema-valid optional open-question rows without inventing content."""
-
-    open_questions = coverage.get("openQuestions")
-    if not isinstance(open_questions, list):
-        coverage.pop("openQuestions", None)
-        return
-
-    normalized: list[Any] = []
-    for item in open_questions:
-        if isinstance(item, str):
-            question = item.strip()
-            if question:
-                normalized.append({"question": question})
-            continue
-        if not isinstance(item, dict):
-            continue
-
-        question = item.get("question")
-        if not isinstance(question, str) or not question.strip():
-            continue
-        row = dict(item)
-        row["question"] = question.strip()
-        follow_up = row.get("followUpPrompt")
-        if not isinstance(follow_up, str) or not follow_up.strip():
-            row.pop("followUpPrompt", None)
-        normalized.append(row)
-    coverage["openQuestions"] = normalized
-
-
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()

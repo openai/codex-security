@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { candidateSchemaV1 } from "../deep-scan/artifact-contracts.js";
 import { artifactSchemaDocuments } from "../artifact-contracts.js";
 import { discoveryLocationRoles } from "../discovery-location-roles.js";
 import { isRecord as object } from "../record.js";
@@ -33,10 +34,7 @@ const fields = new Set(Object.keys(discoveryCandidate.shape));
 const locationFields = new Set(Object.keys(rawDiscoveryLocation.shape));
 const jsonFields = [...fields, ...locationFields].sort();
 type Row = Record<string, unknown>;
-type Candidate = Omit<
-  z.infer<ReturnType<typeof discoveryCandidate.strict>>,
-  "candidate_id"
->;
+type Candidate = Omit<z.infer<typeof candidateSchemaV1>, "candidate_id">;
 type Location = Candidate["locations"][number];
 
 function compare(left: string, right: string): number {

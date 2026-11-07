@@ -17,7 +17,7 @@ import {
   type Variant,
 } from "./experiment.mts";
 
-const { CodexSecurity, scanAuthentication } =
+const { CodexSecurity, DEFAULT_DEPENDENCIES, scanAuthentication } =
   sdk as unknown as typeof import("../../sdk/typescript/src/api.js");
 type Dependencies = NonNullable<ConstructorParameters<typeof CodexSecurity>[1]>;
 
@@ -67,7 +67,7 @@ export function createStandardRunner({
   environment = process.env,
   createClient = (config, dependencies) =>
     new CodexSecurity(config, dependencies, { surface: "sdk" }),
-  createCodex,
+  createCodex = DEFAULT_DEPENDENCIES.createCodex,
 }: {
   stateRoot: string;
   outputRoot: string;
@@ -100,9 +100,22 @@ export function createStandardRunner({
           ...environment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
-        createCodex,
-        onScanPrompt: (prompt) => {
-          options.observation.prompt ??= prompt;
+        createCodex: async (settings) => {
+          const codex = await createCodex(settings);
+          return {
+            startThread: (threadOptions) => {
+              const thread = codex.startThread(threadOptions);
+              return {
+                get id() {
+                  return thread.id;
+                },
+                runStreamed: (prompt, turnOptions) => {
+                  options.observation.prompt ??= prompt;
+                  return thread.runStreamed(prompt, turnOptions);
+                },
+              };
+            },
+          };
         },
       },
     );

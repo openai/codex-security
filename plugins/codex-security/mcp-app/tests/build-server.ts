@@ -1,12 +1,12 @@
 import path from "node:path";
 import { build, type BuildOptions } from "esbuild";
-import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 export const applicationRoot = path.resolve(import.meta.dirname, "..");
 
 export function buildServer(outfile: string, options: BuildOptions = {}) {
   return build({
-    ...mcpBundleOptions,
+    bundle: true,
+    define: { "import.meta.url": "__filename" },
     entryPoints: [path.join(applicationRoot, "main.ts")],
     external: ["fsevents"],
     format: "cjs",
@@ -15,11 +15,5 @@ export function buildServer(outfile: string, options: BuildOptions = {}) {
     outfile,
     platform: "node",
     ...options,
-    banner: {
-      ...options.banner,
-      js: [mcpBundleOptions.banner?.js, options.banner?.js]
-        .filter(Boolean)
-        .join("\n"),
-    },
   });
 }

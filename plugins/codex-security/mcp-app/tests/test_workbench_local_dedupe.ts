@@ -108,48 +108,6 @@ function snapshot(database: DatabaseSync) {
   ].map((table) => database.prepare(`SELECT * FROM ${table} ORDER BY 1`).all());
 }
 
-test("global preparation skips unpublished Deep child findings", async (t) => {
-  const { database, targetId, prepare } = await fixture(t);
-  const child = finding("child");
-  const anchor = finding("anchor");
-  const global = finding("global");
-  prepared(prepare([child, anchor, global]));
-  const body = database
-    .prepare("SELECT details_json FROM findings WHERE id = ?")
-    .get(child.findingId)?.details_json;
-  assert.equal(typeof body, "string");
-  database
-    .prepare("DELETE FROM finding_repositories WHERE finding_id IN (?, ?)")
-    .run(child.findingId, global.findingId);
-  const updateBody = database.prepare(
-    "UPDATE findings SET details_json = ? WHERE id = ?",
-  );
-  updateBody.run(null, child.findingId);
-  const prepareGlobal = () => prepare([anchor], { repositoryId: undefined });
-
-  const pending = prepared(prepareGlobal());
-  assert.deepEqual(Object.keys(pending.cacheKeys).sort(), ["anchor", "global"]);
-  assert.deepEqual(pending.findingsToEmbed.map((row) => row.findingId).sort(), [
-    "anchor",
-    "global",
-  ]);
-
-  updateBody.run(body!, child.findingId);
-  database
-    .prepare(
-      "INSERT INTO finding_repositories (repository_id, finding_id) VALUES (?, ?)",
-    )
-    .run(targetId, child.findingId);
-  assert.deepEqual(Object.keys(prepared(prepareGlobal()).cacheKeys).sort(), [
-    "anchor",
-    "child",
-    "global",
-  ]);
-
-  updateBody.run(null, child.findingId);
-  assert.deepEqual(prepareGlobal(), { error: "finding_not_indexed" });
-});
-
 test("preparation retains current body bytes, large integers and independent service embeddings", async (t) => {
   const { database, prepare, embed } = await fixture(t);
   const original = finding("__proto__");

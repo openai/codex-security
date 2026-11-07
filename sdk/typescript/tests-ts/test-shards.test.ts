@@ -163,19 +163,31 @@ test("rejects an empty shard while allowing a nonempty shard with the same count
     await mkdir(join(root, "scripts"), { recursive: true });
     await mkdir(join(root, "tests-ts"));
     await copyRunner(root);
-    const worker = "sample.test.ts";
-    const executed = join(root, "sample-ran");
-    await writeFile(
+    const worker = "deep-scan-worker-shutdown.test.ts";
+    await copyFile(
+      new URL(worker, import.meta.url),
       join(root, "tests-ts", worker),
+    );
+    const mcpApp = join(fixture, "plugins", "codex-security", "mcp-app");
+    const executor = join(mcpApp, "tests", "test_deep_scan_executor.ts");
+    const executed = join(root, "worker-ran");
+    await mkdir(dirname(executor), { recursive: true });
+    await writeFile(join(mcpApp, "package.json"), '{"type":"module"}\n');
+    await writeFile(
+      executor,
       `import { writeFileSync } from "node:fs";
-import { test } from "bun:test";
-test("selected test runs", () => writeFileSync(${JSON.stringify(executed)}, "ran"));\n`,
+import { test } from "node:test";
+test("Deep worker lifecycle", () => writeFileSync(${JSON.stringify(executed)}, "ran"));\n`,
     );
     await writeFile(
       join(root, "tests-ts", "windows-machine-policy.test.ts"),
       'throw new Error("Machine policy test must run separately");\n',
     );
-    for (const shard of [1, 2]) {
+    for (const [shard, separateMcp, runsWorker] of [
+      [1, false, true],
+      [2, false, false],
+      [1, true, process.platform !== "linux"],
+    ] as const) {
       await rm(executed, { force: true });
       const child = Bun.spawn({
         cmd: [
@@ -184,10 +196,11 @@ test("selected test runs", () => writeFileSync(${JSON.stringify(executed)}, "ran
           join(root, "scripts", "run-ci-tests.mts"),
           `${shard}/2`,
           "-t",
-          "selected test runs",
+          "Deep worker lifecycle",
         ],
         env: {
           ...process.env,
+          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: String(separateMcp),
           PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
         },
         stdin: "ignore",
@@ -198,7 +211,7 @@ test("selected test runs", () => writeFileSync(${JSON.stringify(executed)}, "ran
       });
       const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(shard === 1 ? 0 : 1);
-      expect(await Bun.file(executed).exists()).toBe(shard === 1);
+      expect(await Bun.file(executed).exists()).toBe(runsWorker);
       if (shard === 1) {
         expect(stdout).toContain(`Test shard 1/2: ${worker}`);
       } else {

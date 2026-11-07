@@ -1,4 +1,3 @@
-import { mcpSmokeInput, mcpSmokeResponses } from "./fixtures/mcp-smoke.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -137,7 +136,7 @@ async function pluginFiles(directory) {
   return files.sort();
 }
 
-async function smokeSharedScanRuntime(installedRoot, consumer) {
+async function smokeNestedDeepScanWorker(installedRoot, consumer) {
   const sdk = await import(
     pathToFileURL(join(installedRoot, "dist", "index.js")).href
   );
@@ -148,13 +147,13 @@ async function smokeSharedScanRuntime(installedRoot, consumer) {
     "The bundled Codex executable must resolve to an absolute path.",
   );
 
-  const scanHome = join(consumer, "shared-scan-home");
-  await mkdir(scanHome, { recursive: true, mode: 0o700 });
+  const workerHome = join(consumer, "nested-worker-home");
+  await mkdir(workerHome, { recursive: true, mode: 0o700 });
   const parentEnvironment = sdk.pluginExecutionEnvironment(process.execPath, {
     PATH: "",
-    HOME: scanHome,
-    USERPROFILE: scanHome,
-    CODEX_HOME: scanHome,
+    HOME: workerHome,
+    USERPROFILE: workerHome,
+    CODEX_HOME: workerHome,
     ...(process.env.SystemRoot === undefined
       ? {}
       : { SystemRoot: process.env.SystemRoot }),
@@ -171,15 +170,15 @@ async function smokeSharedScanRuntime(installedRoot, consumer) {
     "WINDIR",
     ...mcpConfiguration.mcpServers["codex-security"].env_vars,
   ]);
-  const scanEnvironment = Object.fromEntries(
+  const workerEnvironment = Object.fromEntries(
     Object.entries(parentEnvironment).filter(
       ([name, value]) => value !== undefined && inherited.has(name),
     ),
   );
   assert.equal(
-    scanEnvironment.CODEX_CLI_PATH,
+    workerEnvironment.CODEX_CLI_PATH,
     codexCommand.command,
-    "The installed plugin must propagate the bundled Codex path into ordinary scans.",
+    "The installed plugin must propagate the bundled Codex path into nested workers.",
   );
 
   const pluginRoot = join(installedRoot, "_bundled_plugin");
@@ -196,8 +195,20 @@ async function smokeSharedScanRuntime(installedRoot, consumer) {
     {
       cwd: pluginRoot,
       encoding: "utf8",
-      env: { ...scanEnvironment, CODEX_MCP_NODE_PATH: process.execPath },
-      input: mcpSmokeInput,
+      env: { ...workerEnvironment, CODEX_MCP_NODE_PATH: process.execPath },
+      input: `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: {
+            name: "codex-security-package-smoke",
+            version: "0.1.0",
+          },
+        },
+      })}\n`,
       timeout: PACKAGE_SMOKE_TIMEOUT_MS,
       windowsHide: true,
     },
@@ -208,67 +219,57 @@ async function smokeSharedScanRuntime(installedRoot, consumer) {
     });
   }
   assert.equal(initialized.status, 0, initialized.stderr);
-  const mcpResponses = mcpSmokeResponses(initialized.stdout);
   assert.equal(
-    mcpResponses.find((response) => response.id === 1)?.result.serverInfo.name,
+    JSON.parse(initialized.stdout.trim()).result.serverInfo.name,
     "codex-security",
     "The installed MCP launcher must initialize the bundled security server.",
-  );
-  assert.ok(
-    mcpResponses
-      .find((response) => response.id === 2)
-      ?.result.tools.some(
-        (tool) => tool.name === "start_codex_security_deep_scan",
-      ),
-    "The standalone installed MCP server must expose the shared Deep scan entry point.",
   );
 
   const globalCodex = spawnSync("codex", ["--version"], {
     cwd: consumer,
     encoding: "utf8",
-    env: scanEnvironment,
+    env: workerEnvironment,
     windowsHide: true,
   });
   assert.equal(
     globalCodex.error?.code,
     "ENOENT",
-    "Shared-runtime smoke must not depend on a globally installed codex executable.",
+    "Nested-worker smoke must not depend on a globally installed codex executable.",
   );
   const codexVersion = run(codexCommand.command, ["--version"], {
     cwd: consumer,
-    env: scanEnvironment,
+    env: workerEnvironment,
     capture: true,
   });
   assert.match(codexVersion, /^codex-cli\s+\d/u);
 
-  const codexSdkBridge = join(consumer, "shared-scan-sdk.mjs");
+  const workerSdkBridge = join(consumer, "nested-worker-sdk.mjs");
   await writeFile(
-    codexSdkBridge,
+    workerSdkBridge,
     'export { Codex } from "@openai/codex-sdk";\n',
   );
-  const { Codex } = await import(pathToFileURL(codexSdkBridge).href);
+  const { Codex } = await import(pathToFileURL(workerSdkBridge).href);
   const controller = new AbortController();
   const timeout = setTimeout(
-    () =>
-      controller.abort(new Error("The shared Codex runtime did not start.")),
+    () => controller.abort(new Error("The nested Codex worker did not start.")),
     15_000,
   );
   let started = false;
   try {
     const codex = new Codex({
-      codexPathOverride: scanEnvironment.CODEX_CLI_PATH,
-      env: scanEnvironment,
+      codexPathOverride: workerEnvironment.CODEX_CLI_PATH,
+      env: workerEnvironment,
       baseUrl: "http://127.0.0.1:1/v1",
       apiKey: "synthetic-codex-security-package-smoke",
     });
     const { events } = await codex
       .startThread({
         threadSource: "security_scan",
-        workingDirectory: scanHome,
+        workingDirectory: workerHome,
         skipGitRepoCheck: true,
         sandboxMode: "read-only",
       })
-      .runStreamed("Validate packaged shared scan runtime startup.", {
+      .runStreamed("Validate packaged nested worker startup.", {
         signal: controller.signal,
       });
     for await (const event of events) {
@@ -285,7 +286,7 @@ async function smokeSharedScanRuntime(installedRoot, consumer) {
   assert.equal(
     started,
     true,
-    "The installed package must launch the shared Codex runtime without codex on PATH.",
+    "The installed package must launch an actual nested Codex worker without codex on PATH.",
   );
 }
 
@@ -416,7 +417,8 @@ try {
        await writeFile("scan.json", JSON.stringify(input));
        const loaded = await sdk.loadProjectConfig("scan.json");
        const resolved = sdk.resolveProjectConfig(input);
-       assert.deepEqual(loaded.config, resolved.config);
+       const { resolve } = await import("node:path");
+       assert.deepEqual(loaded.config, { ...resolved.config, executableSourcePaths: [resolve("scan.json")] });
        assert.deepEqual(loaded.options, resolved.options);
        assert.equal(loaded.options.subagents, 0);
        assert.equal(loaded.options.failureSeverity, "high");
@@ -899,25 +901,19 @@ try {
     ],
     { cwd: consumer },
   );
-  await smokeSharedScanRuntime(installedRoot, consumer);
+  await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   run(
     process.execPath,
     [
-      join(
-        packageRoot,
-        "scripts",
-        "fixtures",
-        "package-composed-deep-scan.mjs",
-      ),
+      join(packageRoot, "scripts", "fixtures", "package-deep-scan.mjs"),
       installedRoot,
-      consumer,
     ],
     { cwd: consumer, timeout: PACKAGE_SMOKE_DEEP_SCAN_TIMEOUT_MS },
   );
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, hosted scans, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and the shared scan runtime without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, hosted scans, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
   );
 } catch (error) {
   // A timed-out child can leave Windows handles open. Report the smoke failure

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import importlib.util
-import io
 import json
 import os
 import shlex
@@ -16,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from contextlib import nullcontext, redirect_stdout
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -48,39 +46,6 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     return module
 
 
-def published_artifacts(scan_dir: Path) -> dict[str, bytes]:
-    scan = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
-    names = ["scan-manifest.json", "findings.json", "report.md"]
-    if "coverageRef" in scan:
-        names.append("coverage.json")
-    return {name: (scan_dir / name).read_bytes() for name in names}
-
-
-def run_workbench_with_review(state: Path, command: str, *arguments: str) -> tuple[dict, dict]:
-    """Run the workbench command and inspect the review passed to its compact publisher."""
-    db = load_script("workbench_db")
-    publisher = db.saved_results if command in {"cancel-scan", "fail-scan"} else db
-    publish = publisher._write_prepared_scan_finalization
-    reviews = []
-
-    def capture(prepared, **kwargs):
-        reviews.append(prepared.coverage)
-        return publish(prepared, **kwargs)
-
-    output = io.StringIO()
-    with (
-        io.TextIOWrapper(io.BytesIO()) as stdin,
-        mock.patch.object(sys, "stdin", stdin),
-        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state)}),
-        mock.patch.object(sys, "argv", [str(SCRIPT), command, *arguments]),
-        mock.patch.object(publisher, "_write_prepared_scan_finalization", capture),
-        redirect_stdout(output),
-    ):
-        db.main()
-    (review,) = reviews
-    return json.loads(output.getvalue()), review
-
-
 def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> dict[str, Any]:
     """Reconstruct internal review state from the retained publication inputs."""
     review = load_script("review_state")
@@ -94,12 +59,7 @@ def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> d
     if "preservedSources" not in summary:
         head = json.loads((scan_dir / "checkpoint-head.json").read_text())
         checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
-        return review.review_state(
-            {
-                **summary,
-                "reviewState": checkpoint.get("reviewState", checkpoint.get("coverage", {})),
-            }
-        )
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
     db = load_script("workbench_db")
     saved = load_script("workbench_saved_results")
     with (
@@ -109,51 +69,37 @@ def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> d
     ) as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (summary["id"],)).fetchone()
-        checkpoint_publication = saved.checkpoint_publication
-        historical = checkpoint_publication.uses_checkpoint_history(connection, scan, scan_dir)
-        if historical:
-            workers = connection.execute(
-                "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                (scan["id"],),
-            ).fetchall()
-        else:
-            composition = load_script("workbench_composition").load_composition(
-                connection, scan, checkpoint=False
-            )
+        workers = connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+            (summary["id"],),
+        ).fetchall()
+    if summary["status"] == "completed" and scan["mode"] == "deep":
+        # Deep completion saves the accepted parent aggregate before sealing,
+        # including deadline recovery's validated records and pending tasks.
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
     binding = db.workbench_completion_binding(scan, summary["completedAt"], manifest)
-    options = dict(
+    # This read-only helper reconstructs bookkeeping rather than reusing a sealed publication.
+    binding["status"] = "inspect-retained-review"
+    documents = saved.merge_saved_results(
+        scan_dir,
+        summary["id"],
+        binding,
+        workers,
+        [],
         stopped=summary["status"] != "completed",
         reason=(
             f"Scan {summary['status']}; saved findings and pending review were preserved. {scan['failure_message'] or ''}"
         ).strip(),
         frozen_source_digests=summary["preservedSources"],
+        checkpoint_heads=summary.get("preservedCheckpointHeads", {}).copy(),
+        scan_mode=scan["mode"],
         finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+        project_worker_coverage=scan["mode"] == "deep",
     )
-    if historical:
-        # Reconstruct the historical bookkeeping behind a summary-only public seal.
-        documents = checkpoint_publication.merge_saved_results(
-            scan_dir,
-            scan["id"],
-            {**binding, "status": "inspect-retained-review"},
-            workers,
-            [],
-            checkpoint_heads=summary.get("preservedCheckpointHeads", {}).copy(),
-            scan_mode=scan["mode"],
-            project_worker_coverage=scan["mode"] == "deep",
-            **options,
-        )
-    else:
-        documents = saved.merge_saved_results(
-            scan_dir,
-            scan["id"],
-            binding,
-            [],
-            composed_child_ids=tuple(child["id"] for child in composition.children),
-            write_snapshots=False,
-            reuse_sealed_result=False,
-            **options,
-        )
     assert documents is not None
+    binding["status"] = summary["status"]
     return (
         load_script("finalize_scan_contract")
         ._prepare_scan_finalization(
@@ -860,59 +806,30 @@ def create_saved_git_workspace(
     return save_workspace(state_dir, workspace_id, str(target), ".", mode)
 
 
-def mark_deep_aggregate_ready(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
-    checkpoint = scan_dir / "artifacts" / "deep-scan" / "checkpoint.json"
-    checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    document = (
-        json.loads(checkpoint.read_text())
-        if checkpoint.exists()
-        else {
-            "version": 3,
-            "startedAt": "2026-01-01T00:00:00Z",
-            "passes": [],
-            "mergedScanIds": [],
-            "aggregate": None,
-            "noNewStreak": 4,
-            "consecutiveErrors": 0,
-        }
-    )
-    document["terminalReason"] = "saturated"
-    checkpoint.write_text(json.dumps(document))
-    return checkpoint
+def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
+    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
+    artifact_dir.mkdir(parents=True)
+    prompt_path = artifact_dir / "prompt.md"
+    prompt_path.write_text(f"Prompt for {name}\n")
+    result_path = artifact_dir / "result.json"
+    return prompt_path, artifact_dir, result_path
 
 
-def begin_legacy_scan(
-    state_dir: Path, codex_home: Path, target: Path, scan_root: Path, *, thread_id: str
-) -> dict[str, object]:
-    """Seed a v1 saved scan to test historical artifact/usage readers without its retired engine."""
-    started = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--thread-id",
-        thread_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--scan-root",
-        str(scan_root),
-        environment={"CODEX_HOME": str(codex_home)},
-    )
-    scan = started["scan"]
+def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
+    manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"status":"succeeded"}\n')
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
-            "UPDATE scans SET handoff_claim_token = NULL, continuation_thread_id = NULL WHERE id = ?",
-            (scan["scanId"],),
+            """
+            UPDATE deep_scan_runs
+            SET status = 'succeeded', phase = 'terminal', terminal_reason = 'saturated',
+                manifest_path = ?, completed_at = updated_at
+            WHERE scan_id = ?
+            """,
+            (str(manifest), scan_id),
         )
-        connection.execute(
-            "INSERT INTO deep_scan_runs (scan_id,schema_version,workflow_version,status,phase,workers,"
-            "subagents,stop_after_no_new,max_discovery_runs,created_at,updated_at) "
-            "SELECT id,1,'deep-security-scan/v1','running','discovery',4,3,4,8,started_at,updated_at "
-            "FROM scans WHERE id = ?",
-            (scan["scanId"],),
-        )
-    scan["createdAt"] = scan["updatedAt"]
-    return {"deepScan": scan}
+    return manifest
 
 
 def read_draft_documents(scan_dir: Path) -> dict:
@@ -1065,7 +982,7 @@ def write_completed_contract(
 
 
 def windows_file_backend() -> mock.Mock:
-    backend = mock.Mock(_MISSING_ERRORS={errno.ENOENT, errno.ENOTDIR})
+    backend = mock.Mock()
 
     def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
         return os.open(scan_dir / relative_path, os.O_RDONLY)
@@ -1083,12 +1000,7 @@ def windows_file_backend() -> mock.Mock:
         with path.open("wb" if replace_existing else "xb") as handle:
             handle.write(payload)
 
-    def unlink_if_exists(
-        scan_dir: Path,
-        relative_path: str,
-        *,
-        expected_root_identity: tuple[int, int] | None = None,
-    ) -> None:
+    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
         (scan_dir / relative_path).unlink(missing_ok=True)
 
     backend.open_read_fd.side_effect = open_read_fd
@@ -1137,87 +1049,10 @@ class ScanFixtureTestCase(TestCase):
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()
 
 
-def recipe(target: Path, mode: str = "standard") -> dict:
-    return {
-        "repository": str(target),
-        "target": {"kind": "repository", "paths": []},
-        "mode": mode,
-        "config": {"model": "synthetic-model", "model_reasoning_effort": "high"},
-        **({"deepScan": {"maxDiscoveryRuns": 8}} if mode == "deep" else {}),
-    }
-
-
-def private_directory(directory: Path) -> None:
-    missing = []
-    current = directory
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    for path in reversed(missing):
-        path.mkdir(mode=0o700)
-
-
-def register(
-    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
-) -> dict:
-    private_directory(directory)
-    saved_recipe = recipe(target, mode)
-    if paths:
-        saved_recipe["target"] = {"kind": "paths", "paths": list(paths)}
-    return run_workbench(
-        state,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(directory),
-        "--registration-json-stdin",
-        *(("--parent-scan-id", parent) if parent else ()),
-        input_text=json.dumps({"recipe": saved_recipe, "parentScanRole": role}),
-    )
-
-
-def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
-    value = {
-        "version": 3,
-        "startedAt": "2026-01-01T00:00:00Z",
-        "passes": list(passes),
-        "mergedScanIds": list(merged),
-        "aggregate": None,
-        "noNewStreak": 0,
-        "consecutiveErrors": 0,
-        **({"terminalReason": terminal} if terminal else {}),
-    }
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        "artifacts/deep-scan/checkpoint.json",
-        input_text=composition_payload(Path(scan["scanDir"]), value),
-    )
-    return value
-
-
-def composition_payload(scan_dir: Path, value: dict) -> str:
-    aggregate = value.get("aggregate")
-    value["aggregatePath"] = None
-    if aggregate is not None:
-        contents = json.dumps(aggregate).encode()
-        relative = f"artifacts/deep-scan/aggregates/{hashlib.sha256(contents).hexdigest()}.json"
-        path = scan_dir / relative
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.write_bytes(contents)
-        value["aggregatePath"] = relative
-    return json.dumps({key: item for key, item in value.items() if key != "aggregate"})
-
-
 def usage_counts(
     input_tokens: int,
     cached_input_tokens: int,
     output_tokens: int,
-    reasoning_output_tokens: int = 0,
     *,
     cache_write_input_tokens: int = 0,
 ) -> dict[str, int]:
@@ -1226,6 +1061,6 @@ def usage_counts(
         "cachedInputTokens": cached_input_tokens,
         "cacheWriteInputTokens": cache_write_input_tokens,
         "outputTokens": output_tokens,
-        "reasoningOutputTokens": reasoning_output_tokens,
+        "reasoningOutputTokens": 0,
         "totalTokens": input_tokens + output_tokens,
     }

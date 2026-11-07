@@ -11,18 +11,18 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
 import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
+
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const temporaryDirectories = createTemporaryDirectories(false);
-
 const execFileAsync = promisify(execFile);
 
 const temporaryDirectory = () =>
@@ -112,29 +112,7 @@ describe("bundled plugin build", () => {
     const plugin = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
     );
-    const source = join(root, "plugins", "codex-security");
-    const packageRoot = join(root, "sdk", "typescript");
-    await cp(new URL("../src/", import.meta.url), join(packageRoot, "src"), {
-      recursive: true,
-    });
-    await cp(
-      new URL("../package.json", import.meta.url),
-      join(packageRoot, "package.json"),
-    );
-    for (const fixture of [
-      "helpers/semantic-scan.ts",
-      "support/model-catalog.ts",
-    ]) {
-      await cp(
-        new URL(`./${fixture}`, import.meta.url),
-        join(packageRoot, "tests-ts", fixture),
-      );
-    }
-    await symlink(
-      fileURLToPath(new URL("../node_modules/", import.meta.url)),
-      join(packageRoot, "node_modules"),
-      "junction",
-    );
+    const source = join(root, "plugin");
     await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
       recursive: true,
       filter: (path) => !["node_modules", ".preview"].includes(basename(path)),
@@ -375,6 +353,26 @@ describe("bundled plugin build", () => {
     );
     expect(workerImport.stdout).toBe("");
     expect(workerImport.stderr).toBe("");
+    const preflight = await execFileAsync(
+      "node",
+      [
+        "--input-type=module",
+        "--eval",
+        `const runtime = await import(process.argv[1]);
+         console.log(JSON.stringify({
+           preflight: typeof runtime.preflightDeepScanWorkerPermissionProfile,
+           profileId: runtime.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+         }));`,
+        pathToFileURL(join(destination, "permission-profile-preflight.mjs"))
+          .href,
+      ],
+      { cwd: root },
+    );
+    expect(JSON.parse(preflight.stdout)).toEqual({
+      preflight: "function",
+      profileId: "codex_security_deep_scan_worker",
+    });
+    expect(preflight.stderr).toBe("");
   });
 
   test

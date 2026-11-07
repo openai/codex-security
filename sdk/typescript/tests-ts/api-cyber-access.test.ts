@@ -84,18 +84,8 @@ test.each([
     "daybreak_blue",
     {
       profile: "selected",
-      features: {
-        api_key_cyber_access_programs: true,
-        api_key_model_discovery: true,
-      },
-      profiles: {
-        selected: {
-          features: {
-            api_key_cyber_access_programs: false,
-            api_key_model_discovery: false,
-          },
-        },
-      },
+      features: { api_key_model_discovery: true },
+      profiles: { selected: { features: { api_key_model_discovery: false } } },
     },
   ],
 ] as const)(
@@ -106,7 +96,7 @@ test.each([
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
     await mkdir(repository);
-    await mkdir(codexHome, { mode: 0o700 });
+    await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const runtime = {
       ...preparedRuntime(codexHome),
@@ -177,10 +167,10 @@ test.each([
         );
       } else {
         const expected = {
-          api_key_cyber_access_programs:
-            (resolved["features"] as JsonObject | undefined)?.[
-              "api_key_cyber_access_programs"
-            ] ?? true,
+          api_key_cyber_access_programs: !(
+            "features" in overrides &&
+            "api_key_cyber_access_programs" in overrides.features
+          ),
           ...("profile" in overrides ? { api_key_model_discovery: false } : {}),
         };
         expect(config["codex_security"]).toEqual({

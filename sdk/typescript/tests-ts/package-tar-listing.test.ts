@@ -32,11 +32,9 @@ const { assertTarListingSizes, regularTarListingLines } = (await import(
   regularTarListingLines: (listing: string) => string[];
   assertTarListingSizes: (lines: string[], maximum: number) => number[];
 };
-
 const { packageDistFiles } = (await import(
   new URL("../scripts/package-dist-files.mjs", import.meta.url).href
 )) as { packageDistFiles: readonly string[] };
-
 // Avoid Bun 1.3.14's stale Windows spawnSync timeout.
 // https://github.com/oven-sh/bun/issues/33932
 const execFileAsync = promisify(execFile);
@@ -202,9 +200,7 @@ function commandPath(command: string): string {
 }
 
 let cachedNode: string | undefined;
-
 const node = () => (cachedNode ??= commandPath("node"));
-
 let fixtureNpm: ReturnType<typeof resolveFixtureNpm> | undefined;
 
 // All consumers use the same Node/npm installation and keep independent npm configs and caches.

@@ -5,12 +5,10 @@ import { ScanResult } from "../src/result.js";
 import { writeScanOwnerSuggestions } from "../src/scan-owner-suggestions.js";
 import { fakeResult } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
-import { rejecting } from "./support/errors.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures("scan-owners-");
 afterEach(cleanup);
-const restoreMany = rejecting("Unexpected bulk artifact restore");
 
 async function fixture() {
   const repository = await temporaryDirectory();
@@ -70,7 +68,7 @@ test.each(["git_revision", "git_diff"] as const)(
     const path = await writeScanOwnerSuggestions(
       repository,
       result,
-      { restore, restoreMany },
+      { restore },
       {
         codex: { startThread: inference },
       },
@@ -104,12 +102,7 @@ test.each(["directory_snapshot", "git_worktree"] as const)(
     result.manifest.scan.target.kind = kind;
     const restore = mock(async () => {});
     await expect(
-      writeScanOwnerSuggestions(
-        repository,
-        result,
-        { restore, restoreMany },
-        {},
-      ),
+      writeScanOwnerSuggestions(repository, result, { restore }, {}),
     ).rejects.toThrow("committed Git content");
     expect(restore).not.toHaveBeenCalled();
   },
@@ -126,7 +119,7 @@ test("rejects a changed checkout before starting owner inference", async () => {
     writeScanOwnerSuggestions(
       repository,
       result,
-      { restore, restoreMany },
+      { restore },
       {
         codex: { startThread: inference },
       },
@@ -158,7 +151,6 @@ test.each([true, false])(
       service,
       result,
       {
-        restoreMany,
         restore: async (name, bytes) => {
           await writeFile(join(result.scanDir, name), bytes);
         },
@@ -224,7 +216,6 @@ test.each([
         restore: async (name, bytes) => {
           await writeFile(join(result.scanDir, name), bytes);
         },
-        restoreMany,
       },
       { codex: { startThread: inference } },
     );

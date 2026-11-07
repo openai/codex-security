@@ -23,7 +23,6 @@ import {
   replaceArtifactText,
 } from "./artifact-io.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
-import { candidateLedgerRowSchema } from "./artifact-candidate.js";
 
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";
@@ -36,7 +35,7 @@ export type RawDiscoveryLocation = z.infer<
 export type RawDiscoveryCandidate = z.infer<
   typeof definitions.rawDiscoveryCandidate
 >;
-export const compactDiscoveryCandidateSchema = candidateLedgerRowSchema;
+export const compactDiscoveryCandidateSchema = definitions.discoveryCandidate;
 export type CompactDiscoveryCandidate = z.infer<
   typeof compactDiscoveryCandidateSchema
 >;

@@ -37,12 +37,7 @@ from posix_scan_local_files import (
     descriptor_relative_writes_available as _descriptor_relative_writes_available,
 )
 from posix_scan_local_files import managed_fd, stage_write
-from review_state import (
-    _normalize_unsealed_open_questions,
-    checkpoint_review_state,
-    review_state,
-    review_summary,
-)
+from review_state import checkpoint_review_state, review_state, review_summary
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -625,8 +620,8 @@ def _open_scan_local_file_with_path(
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
-        backend = _windows_scan_local_files()
         try:
+            backend = _windows_scan_local_files()
             if resolve_spelling:
                 return backend.open_read_fd_with_path(scan_dir, relative_path, context)
             return backend.open_read_fd(scan_dir, relative_path, context), relative_path
@@ -931,79 +926,21 @@ def stage_scan_local_bytes(
                 yield publish
 
 
-def reserve_scan_local_directory(
-    scan_dir: Path,
-    relative_path: str,
-    *,
-    expected_root_identity: tuple[int, int] | None = None,
-) -> bool:
-    scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_portable_relative_path(relative_path, "scan-local directory path")
-    if not _descriptor_relative_writes_available():
-        if not _is_windows():
-            raise ContractError("scan-local output requires descriptor-relative file operations")
-        return _windows_scan_local_files().reserve_directory(
-            scan_dir, relative_path, expected_root_identity=expected_root_identity
-        )
-    parts = PurePosixPath(relative_path).parts
-    with (
-        managed_fd(_open_verified_scan_directory(scan_dir, expected_root_identity)) as root,
-        managed_fd(_open_scan_local_directory(root, parts[:-1], create=True)) as parent,
-    ):
-        try:
-            os.mkdir(parts[-1], mode=0o700, dir_fd=parent)
-        except FileExistsError:
-            return False
-    return True
-
-
-def prepare_scan_local_directory(
-    scan_dir: Path,
-    relative_path: str,
-    *,
-    expected_root_identity: tuple[int, int] | None = None,
-) -> None:
-    scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_portable_relative_path(relative_path, "scan-local directory path")
-    if not _descriptor_relative_writes_available():
-        if not _is_windows():
-            raise ContractError("scan-local output requires descriptor-relative file operations")
-        _windows_scan_local_files().prepare_directory(
-            scan_dir, relative_path, expected_root_identity=expected_root_identity
-        )
-        return
-    root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
-    try:
-        directory_fd = _open_scan_local_directory(
-            root_fd, PurePosixPath(relative_path).parts, create=True
-        )
-        os.close(directory_fd)
-    finally:
-        os.close(root_fd)
-
-
-def _remove_scan_local_file_if_exists(
-    scan_dir: Path,
-    relative_path: str,
-    *,
-    expected_root_identity: tuple[int, int] | None = None,
-) -> None:
+def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:
     scan_dir = _require_scan_directory(scan_dir)
     relative_path = _require_portable_relative_path(relative_path, "scan-local cleanup path")
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local cleanup requires descriptor-relative file operations")
         try:
-            _windows_scan_local_files().unlink_if_exists(
-                scan_dir, relative_path, expected_root_identity=expected_root_identity
-            )
+            _windows_scan_local_files().unlink_if_exists(scan_dir, relative_path)
         except OSError as exc:
             raise ContractError(f"{relative_path}: {exc}") from exc
         return
     root_fd: int | None = None
     parent_fd: int | None = None
     try:
-        root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
+        root_fd = _open_verified_scan_directory(scan_dir)
         parts = PurePosixPath(relative_path).parts
         parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=False)
         try:
@@ -1247,10 +1184,8 @@ def _recover_unsealed_findings(
     warnings: list[str],
     *,
     current_contract: bool = False,
-    schema: dict[str, Any] | None = None,
 ) -> list[str]:
-    if schema is None:
-        schema = _read_json(schema_dir / "findings.schema.json")
+    schema = _read_json(schema_dir / "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
     finding_array = _require_dict(properties, "findings", "findings.schema.properties")
     finding_schema = _require_dict(finding_array, "items", "findings.schema.properties.findings")
@@ -1275,7 +1210,6 @@ def _recover_unsealed_findings(
     discarded: list[str] = []
     finding_positions: dict[str, int] = {}
     writeup_paths: set[str] = set()
-    writeup_directories: set[str] = set()
     evidence_schema = None
     for index, finding in enumerate(_require_list(findings, "findings", "findings")):
         context = f"findings.findings[{index}]"
@@ -1364,14 +1298,6 @@ def _recover_unsealed_findings(
                         previous_writeup is None or previous_writeup["reportPath"] != report_path
                     ):
                         raise ContractError(f"{context}.writeup.reportPath: duplicate report path")
-                    directory = report_path.rsplit("/", 1)[0]
-                    if directory in writeup_directories and (
-                        previous_writeup is None
-                        or previous_writeup["reportPath"].rsplit("/", 1)[0] != directory
-                    ):
-                        raise ContractError(
-                            f"{context}.writeup.reportPath: shared evidence directory"
-                        )
                     _require_scan_local_file(scan_dir, report_path, f"{context}.writeup.reportPath")
                 except ContractError as exc:
                     finding.pop("writeup")
@@ -1422,7 +1348,6 @@ def _recover_unsealed_findings(
             previous_writeup = previous.get("writeup")
             if previous_writeup is not None:
                 writeup_paths.discard(previous_writeup["reportPath"])
-                writeup_directories.discard(previous_writeup["reportPath"].rsplit("/", 1)[0])
             recovered[previous_position] = finding
             warnings.append(
                 f"Recovered finding {index + 1}: retained stronger duplicate logical finding."
@@ -1433,7 +1358,6 @@ def _recover_unsealed_findings(
 
         if "writeup" in finding:
             writeup_paths.add(finding["writeup"]["reportPath"])
-            writeup_directories.add(finding["writeup"]["reportPath"].rsplit("/", 1)[0])
         warnings.extend(evidence_warnings)
         if normalized_fields:
             warnings.append(
@@ -1758,6 +1682,36 @@ def _populate_unsealed_artifact_envelope(
         coverage["includePaths"] = copy.deepcopy(scope["includePaths"])
     if "excludePaths" in scope:
         coverage["excludePaths"] = copy.deepcopy(scope["excludePaths"])
+
+
+def _normalize_unsealed_open_questions(coverage: dict[str, Any]) -> None:
+    """Keep only schema-valid optional open-question rows without inventing content."""
+
+    open_questions = coverage.get("openQuestions")
+    if not isinstance(open_questions, list):
+        coverage.pop("openQuestions", None)
+        return
+
+    normalized: list[Any] = []
+    for item in open_questions:
+        if isinstance(item, str):
+            question = item.strip()
+            if question:
+                normalized.append({"question": question})
+            continue
+        if not isinstance(item, dict):
+            continue
+
+        question = item.get("question")
+        if not isinstance(question, str) or not question.strip():
+            continue
+        row = dict(item)
+        row["question"] = question.strip()
+        follow_up = row.get("followUpPrompt")
+        if not isinstance(follow_up, str) or not follow_up.strip():
+            row.pop("followUpPrompt", None)
+        normalized.append(row)
+    coverage["openQuestions"] = normalized
 
 
 def _validate_completion_binding(

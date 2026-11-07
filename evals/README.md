@@ -7,8 +7,6 @@ Start with the [deterministic triage checks](triage-finding/README.md#check-the-
 - [Secret discovery](secret-discovery/README.md): checks whether the production
   core audit finds synthetic credentials in source and keeps them in its final
   findings, with deterministic grading and harness checks.
-- [Completed-report merge](../sdk/typescript/scripts/merge-eval/README.md):
-  synthetic grouping quality checks and negative controls.
 - [Standard time budget](standard-time-budget/README.md): paired comparison of
   production Standard scans with and without an advisory time allowance on
   synthetic vulnerabilities and safe controls, with source-evidence grading.
@@ -18,7 +16,7 @@ Start with the [deterministic triage checks](triage-finding/README.md#check-the-
 - The [skill review fixtures](check-skills/README.md) cover pre-install decisions
   for individual skill files and bundles, including cross-file behavior.
 
-CI runs the deterministic triage, [secret-discovery](secret-discovery/README.md#deterministic-checks), [time-budget](standard-time-budget/README.md#interpretation-and-checks), and [workflow-routing](workflow-routing/README.md#deterministic-checks) checks. The [SDK composition tests](../sdk/typescript/tests-ts/deep-scan-composition.test.ts) cover Deep Scan batches and recovery.
+CI runs the deterministic triage, [secret-discovery](secret-discovery/README.md#deterministic-checks), [time-budget](standard-time-budget/README.md#interpretation-and-checks), and [workflow-routing](workflow-routing/README.md#deterministic-checks) checks. The [MCP suite](../plugins/codex-security/mcp-app/TESTING.md) covers Deep Scan iterations, recovery, and publication.
 
 ## Build the evaluation tools
 

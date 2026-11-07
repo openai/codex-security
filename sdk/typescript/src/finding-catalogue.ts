@@ -42,15 +42,11 @@ export function groupFindings(
     }
   }
 
-  const groups = new Map<string, ComparisonFinding[]>();
-  for (const finding of findings) {
-    const key = root(`occurrence:${finding.occurrenceId}`);
-    const group = groups.get(key);
-    if (group === undefined) groups.set(key, [finding]);
-    else group.push(finding);
-  }
-
-  return [...groups.values()];
+  return [
+    ...Map.groupBy(findings, (finding) =>
+      root(`occurrence:${finding.occurrenceId}`),
+    ).values(),
+  ];
 }
 
 export function findingCatalogue(

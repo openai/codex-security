@@ -104,18 +104,10 @@ for (const field of ["writeup", "remediationTests", "preventiveControls"]) {
     ),
     true,
   );
-  if (field === "writeup")
-    assert.equal(
-      validate({
-        reportPath:
-          "artifacts/deep-scan/passes/pass-1/findings/example/example.md",
-      }),
-      true,
-    );
   assert.equal(
     validate(
       field === "writeup"
-        ? { reportPath: "../findings/example/example.md" }
+        ? { reportPath: "findings/example/different.md" }
         : [""],
     ),
     false,

@@ -117,13 +117,7 @@ If the ambient home is unavailable, the configured credential store handles
 logout normally.
 
 Codex carries credential-storage, forced-login, and workspace settings from the
-ambient configuration into this home. Managed scan launches install their complete configuration under the same
-lock and release it on the first runtime event. Discovery, reducer, and resumed
-workers use the captured settings; execution proceeds concurrently after startup.
-A reused client restores its selected plugin and refreshes edited local plugin
-files before its next operation.
-
-Managed-device policies still apply;
+ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
 Without an overriding environment API key, scans and status checks import
 existing file-based Codex credentials when this home is empty. Import errors make
@@ -911,45 +905,18 @@ codex-security scan . --mode deep --workers 2 --subagents 0 \
   --stop-after-no-new 3 --max-discovery-runs 10 --max-time 90
 ```
 
-Native scans use `CODEX_CLI_PATH` when supplied, or discover a real executable
-from `PATH`. Windows also supports managed-package installations, npm package
-binaries beside `PATH` entries, and desktop package caches; WindowsApps aliases
-are skipped. Set `CODEX_CLI_PATH` to select an installed executable explicitly.
-
-For `scan --mode deep`, `--workers` sets the number of independent Standard scans
-in each batch, and `--subagents` sets subagents per scan. Each batch finishes and
-merges before the next starts. With `--workers 1`, each scan is merged immediately.
-
-`--stop-after-no-new` stops after that many successfully merged scans without new
-issues. Within each batch, scans count in their original order, and each new
-issue is credited to the first scan that found it. A scan credited with a new
-issue resets the count; other successful scans increase it. The scan checks this
-threshold after each batch merge, so a batch can pass the threshold. Failures do not
-count as no-new results. Each reserved pass executes once; failed passes consume
-a discovery run and contribute to the consecutive-error limit. Publication errors
-do not rerun completed passes.
-`--max-discovery-runs` and `--max-time` cap discovery runs and duration.
-If the deadline expires before any child starts, the result is an empty sealed
-report with partial coverage and a `null` `threadId`; no model turn is needed.
-Failed or canceled checkpoints are terminal and cannot be resumed as running work.
-
-Knowledge documents are extracted and materialized once for a Deep Scan. Children
-share read-only access to that snapshot, which remains available until they finish.
-Resume checks its saved digest before starting work.
-
-The merger reuses the finding matcher used by scan history and component scans.
-Within each batch, it compares completed child scans in order and combines only
-confirmed matches. Uncertain or related findings stay separate; duplicates
-confined to one child remain that Standard scan's responsibility. Matching uses
-the parent's existing session, settings, cancellation, and cost tracking.
-The host retains accepted
-identities, combines distinct repairs and locations, and keeps the highest source
-severity. Original observations and accepted presentations are stored once and
-referenced by subsequent checkpoints. Before combining groups, the merger reads
-their complete source evidence. A first single report and compatible empty batches
-need no model merge. Differing scope or threat-model descriptions are reconciled
-separately before the batch is accepted. See the
-[completed-report evaluation](../scripts/merge-eval/README.md).
+Deep Scan repeats Standard scans in batches of up to `--workers`, with
+`--subagents` per scan. Workers can share what they are investigating, ask each
+other to check a source location, and reply while their audits are running. Each
+worker verifies the evidence it reports. Deep Scan merges each completed batch in launch order.
+It uses source locations, cited code and weakness descriptions to match repeated
+findings. Each group keeps its first description, all reported locations, and
+the original observations. Later batches receive the titles and primary
+locations of retained findings so workers can investigate other reachable paths.
+`--stop-after-no-new` counts consecutive
+completed scans that added no findings. `--max-discovery-runs` caps the total
+number started, including failures. `--max-time` stops discovery and returns
+the findings from completed scans.
 
 For TypeScript, see the [SDK Deep Scan example](../README.md#configure-deep-scans).
 
@@ -959,6 +926,8 @@ that `subagents` can be zero. Discovery time accepts positive fractional minutes
 its default and maximum are 5760 minutes (96 hours). Unlike Standard's
 advisory allowance, the Deep discovery limit is enforced. Resuming a
 Deep scan keeps its original deadline; rerunning starts a new scan.
+If the deadline expires before any source review completes, the saved report
+and scan manifest record that limitation.
 `--max-time-hours`, SDK `maxTimeHours`, project `scan.deep.max_time_hours`, and
 legacy TOML `deep_scan.max_time_hours` remain deprecated Deep-only aliases in
 hours. Explicit settings override lower-priority configuration across units.
@@ -1355,10 +1324,8 @@ overrides them with a path scope. `--output-dir` requires CSV input.
 
 Use `-c FILE` for shared settings; CSV mode/scope override file values.
 `--scan-prompt-file` adds shared instructions before each row's prompt.
-`--post-scan-prompt-file` runs a follow-up in a new thread with the same
-authentication even after failure or incomplete coverage, but not after
-cancellation or a cost stop. Sealed report files remain read-only; requested
-repository changes use the scan's existing permissions.
+`--post-scan-prompt-file` runs a follow-up even after failure, but not after
+cancellation or a cost stop.
 
 Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
@@ -1388,8 +1355,8 @@ Recovery requires a matching campaign manifest. It skips completed results
 failed or interrupted attempt:
 
 - A sealed scan is recorded in `results.jsonl` without scanning again.
-- An eligible running Deep Scan resumes saved work in its original output
-  directory, keeping its ID, workers, artifacts, settings, and accumulated cost.
+- An eligible running Deep Scan resumes its original session, keeping its ID,
+  workers, artifacts, settings, and accumulated cost.
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
@@ -2045,19 +2012,19 @@ attach only their owner's session. Unrecorded earlier retry sessions may be abse
 Commands default to the current repository. IDs accept unique prefixes of at
 least eight characters.
 
-| Command                                               | Purpose                                                       |
-| ----------------------------------------------------- | ------------------------------------------------------------- |
-| `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.         |
-| `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                    |
-| `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active.    |
-| `scans resume SCAN_ID`                                | Resume saved Deep Scan work in its original output directory. |
-| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                               |
-| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                       |
-| `scans match --all`                                   | Match completed scans across worktrees/clones.                |
-| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.              |
-| `findings list [REPOSITORY]`                          | List open findings.                                           |
-| `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.            |
-| `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                   |
+| Command                                               | Purpose                                                    |
+| ----------------------------------------------------- | ---------------------------------------------------------- |
+| `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.      |
+| `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                 |
+| `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active. |
+| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                         |
+| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                            |
+| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                    |
+| `scans match --all`                                   | Match completed scans across worktrees/clones.             |
+| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
+| `findings list [REPOSITORY]`                          | List open findings.                                        |
+| `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.         |
+| `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
 selects the latest scan of any status. After a successful scan followed by a
@@ -2127,12 +2094,8 @@ codex-security scans resume SCAN_ID
 ```
 
 The scan must still be `running`, with its original checkout, output directory,
-and Codex Security state directory available. Once a merge session has started,
-its logs must remain available in the original Codex home until completion.
-Unsealed continuation requires unchanged checkout identity, revision, and contents.
-Completing an already-sealed result verifies its original checkout/artifact binding,
-keeps the original snapshot, and warns if checkout contents have changed.
-Completed, failed, and canceled scans need a rerun instead.
+and Codex session in the same state directory. Checkout identity, revision, and
+contents must match. Completed, failed, and canceled scans need a rerun instead.
 
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
 settings/instructions. Knowledge-bearing scans save their extracted documents in
@@ -2145,24 +2108,6 @@ bulk campaigns with an already-bound snapshot retain their existing resume path.
 New records save the authentication mode, explicit safety
 identifier, and post-scan prompt; older records cannot reconstruct missing values.
 A failed connection leaves the scan available for another resume attempt.
-
-Live Deep Scan checkpoints use format version 3. Unsealed scans from the old
-coordinator or version 2 composition engine require their original version to
-finish, or a new scan. Older sealed Deep Scans without a finalized cost receipt
-also require their original version when completion requires cost tracking.
-Historical files are preserved. An accepted version 3 merge can retry publication
-after an I/O failure without repeating completed children.
-Successful completion of an unfinished scan with a committed draft imports only
-pending checkpoints, not unindexed historical checkpoint files. Use the prior
-release to finish older scans, or start a fresh scan; completed reports remain
-readable.
-
-When a saved recipe is already bound and no post-scan prompt is requested,
-completing a sealed result reads its artifacts and verified accounting without
-Codex authentication or a model client. A native registration without a saved
-recipe still prepares and binds its configuration before completion. Native
-resumptions validate the saved owner, continuation claim, and recipe.
-
 Compatible scans can resume after plugin updates; sealed results keep their
 original producer version. Unsupported artifacts are rejected without rewriting them.
 

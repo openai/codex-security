@@ -28,15 +28,11 @@ export function adaptTrackingSchema(
             before: "^[a-z0-9][a-z0-9._/-]*$",
             after: "^[a-z0-9][a-z0-9._/-]*(?:\\n)?$",
           },
-          ...[
-            "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md",
-            "^findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md",
-            "^(?:artifacts/deep-scan/passes/[a-zA-Z0-9][a-zA-Z0-9._-]*/)?findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md",
-          ].map((writeupPath) => ({
+          {
             path: [...findingProperties, "writeup", "properties", "reportPath"],
-            before: `${writeupPath}$`,
-            after: `${writeupPath}(?:\\n)?$`,
-          })),
+            before: "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$",
+            after: "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md(?:\\n)?$",
+          },
         ]
       : filename === "scan-manifest.json"
         ? [

@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
-import { cp, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pythonExecutable } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -38,10 +38,17 @@ const workerFrames = {
 async function fixture() {
   const root = await temporaryDirectory();
   const plugin = join(root, "plugin");
-  await cp(join(sourcePlugin, "scripts"), join(plugin, "scripts"), {
-    recursive: true,
-    filter: (source) => basename(source) !== "__pycache__",
-  });
+  const paths = [
+    "scripts/workbench_scan_usage.py",
+    "scripts/windows_scan_local_files.py",
+    "scripts/read_codex_session.mjs",
+    "scripts/workbench/__init__.py",
+    "scripts/workbench/storage.py",
+  ];
+  for (const path of paths) {
+    await mkdir(dirname(join(plugin, path)), { recursive: true });
+    await copyFile(join(sourcePlugin, path), join(plugin, path));
+  }
   await build({
     entryPoints: [join(sourcePlugin, "mcp-app/src/session-decompression.ts")],
     outfile: join(plugin, "mcp/session-decompression.mjs"),
@@ -85,20 +92,17 @@ with sqlite3.connect(os.environ["CODEX_STATE_DB"]) as native:
     native.executemany("INSERT INTO thread_spawn_edges VALUES (?, ?)", options.get("edges", []))
 with sqlite3.connect(":memory:") as db:
     db.row_factory = sqlite3.Row
-    scan_id = "00000000-0000-4000-8000-000000000001"
-    db.execute("CREATE TABLE scans (id TEXT, parent_scan_id TEXT, parent_scan_role TEXT, started_at TEXT)")
     db.execute("CREATE TABLE workspaces (id TEXT, thread_id TEXT)")
     db.execute("INSERT INTO workspaces VALUES ('workspace', ?)", (options["owner"],))
-    db.execute("CREATE TABLE scan_execution_threads (scan_id TEXT, thread_id TEXT)")
     db.execute("CREATE TABLE deep_scan_worker_threads (scan_id TEXT, sdk_thread_id TEXT)")
-    db.execute("CREATE TABLE deep_scan_runs (scan_id TEXT, worker_usage_gap INTEGER, completion_sequence INTEGER, max_discovery_runs INTEGER)")
+    db.execute("CREATE TABLE deep_scan_runs (scan_id TEXT, worker_usage_gap INTEGER)")
     db.execute("CREATE TABLE deep_scan_workers (scan_id TEXT, kind TEXT, artifact_dir TEXT, started_at TEXT, sdk_thread_id TEXT, attempt INTEGER)")
     mode = "deep" if options.get("workerKind") else "standard"
     if mode == "deep":
-        db.execute("INSERT INTO deep_scan_runs VALUES (?, 0, 0, 2)", (scan_id,))
-        db.execute("INSERT INTO deep_scan_workers VALUES (?, ?, ?, '2026-01-01T00:00:01Z', 'current-worker', 2)", (scan_id, options["workerKind"], str(root / "artifacts" / "worker")))
-        db.execute("INSERT INTO deep_scan_worker_threads VALUES (?, 'current-worker')", (scan_id,))
-    scan = db.execute("SELECT ? AS id, 'workspace' AS workspace_id, ? AS mode, ? AS scan_dir, '2026-01-01T00:00:00.500123Z' AS started_at, '2026-01-01T00:00:05Z' AS completed_at, NULL AS deep_scan_owner_thread_id", (scan_id, mode, str(root))).fetchone()
+        db.execute("INSERT INTO deep_scan_runs VALUES ('scan', 0)")
+        db.execute("INSERT INTO deep_scan_workers VALUES ('scan', ?, ?, '2026-01-01T00:00:01Z', 'current-worker', 2)", (options["workerKind"], str(root / "artifacts" / "worker")))
+        db.execute("INSERT INTO deep_scan_worker_threads VALUES ('scan', 'current-worker')")
+    scan = db.execute("SELECT 'scan' AS id, 'workspace' AS workspace_id, ? AS mode, ? AS scan_dir, '2026-01-01T00:00:00.500123Z' AS started_at, '2026-01-01T00:00:05Z' AS completed_at, NULL AS deep_scan_owner_thread_id", (mode, str(root))).fetchone()
     print(json.dumps(collect_scan_usage(db, scan)))
 `;
   return JSON.parse(

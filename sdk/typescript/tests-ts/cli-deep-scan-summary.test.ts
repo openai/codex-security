@@ -1,8 +1,4 @@
 import { describe, expect, test, mock } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { ScanResult } from "../src/result.js";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import { dependencies, fakeResult } from "./cli-fixtures.js";
@@ -12,10 +8,12 @@ import { createCliTest } from "./support/cli-run.js";
 
 const cappedState: JsonObject = {
   terminalReason: "capped",
-  passes: Array.from({ length: 40 }, () => ({})),
-  mergedScanIds: ["child"],
+  dispatchedCount: 40,
+  completionSequence: 40,
   noNewStreak: 0,
-  startedAt: "2026-01-01T00:00:00Z",
+  config: { maxDiscoveryRuns: 40, maxTimeHours: 96 },
+  createdAt: "2026-01-01T00:00:00Z",
+  completedAt: "2026-01-01T01:00:00Z",
 };
 
 async function summary(
@@ -44,14 +42,21 @@ describe("deep scan completion summary", () => {
       "--max-discovery-runs greater than 40",
     ],
     [
-      "saved reviews before current passes",
+      "completed review limit even if finalization outlasts the deadline",
+      { completedAt: "2026-01-05T00:01:00Z" },
+      "40 review rounds. The latest review still found new issues",
+      "--max-discovery-runs greater than 40",
+    ],
+    [
+      "time limit before any dispatched review completed",
       {
-        legacy: { discoveryRuns: 3, coverage: { completeness: "complete" } },
-        passes: [{}],
-        config: { maxDiscoveryRuns: 4, maxTimeHours: 96 },
+        dispatchedCount: 1,
+        completionSequence: 0,
+        config: { maxDiscoveryRuns: 1, maxTimeHours: 5 / 60 },
+        completedAt: "2026-01-01T00:05:01Z",
       },
-      "4 review rounds. The latest review still found new issues",
-      "--max-discovery-runs greater than 4",
+      "5-minute time limit. No source review completed.",
+      "--max-time greater than 5",
     ],
     [
       "quiet round",
@@ -68,7 +73,7 @@ describe("deep scan completion summary", () => {
     [
       "time limit",
       {
-        passes: [{}, {}, {}],
+        dispatchedCount: 3,
         config: { maxDiscoveryRuns: 40, maxTimeHours: 0.119 / 60 },
       },
       "0.119-minute time limit",
@@ -76,56 +81,33 @@ describe("deep scan completion summary", () => {
     ],
     [
       "maximum time limit",
-      { passes: [{}, {}, {}], completedAt: "2026-01-05T00:00:00Z" },
+      { dispatchedCount: 3, completedAt: "2026-01-05T00:00:00Z" },
       "5760-minute time limit",
       "rerun with --path",
     ],
     [
       "another early stop",
-      { passes: [{}, {}, {}] },
+      { dispatchedCount: 3 },
       "Stopped before the review finished",
       null,
     ],
   ] as const)("explains %s", async (_name, overrides, reason, next) => {
-    const directory = await mkdtemp(join(tmpdir(), "deep-summary-"));
-    const result = new ScanResult({
-      ...fakeResult(["high"], "partial"),
-      scanDir: directory,
-    });
-    const { completedAt, ...checkpointOverrides } = {
-      completedAt: "2026-01-01T01:00:00Z",
-      ...overrides,
-    };
-    await mkdir(join(directory, "artifacts/deep-scan"), { recursive: true });
-    await writeFile(
-      join(directory, "artifacts/deep-scan/checkpoint.json"),
-      JSON.stringify({
-        version: 3,
-        aggregate: null,
-        ...cappedState,
-        ...checkpointOverrides,
-      }),
-    );
-    result.manifest.scan.completedAt = completedAt;
     const text = await summary({
-      result,
       onWorkbench: (args) => {
-        expect(args).toEqual(["get-scan", "--scan-id", "scan"]);
-        return {
-          recipe: {
-            deepScan:
-              "config" in overrides
-                ? overrides.config
-                : { maxDiscoveryRuns: 40, maxTimeHours: 96 },
-          },
-        };
+        expect(args).toEqual([
+          "get-deep-scan",
+          "--scan-id",
+          "scan",
+          "--thread-id",
+          "thread-1",
+        ]);
+        return { deepScan: { ...cappedState, ...overrides } };
       },
     });
     expect(text).toContain("STOPPED");
     expect(text).toContain(reason);
     if (next !== null) expect(text).toContain(next);
     expect(text).not.toMatch(/saturat|merged|reducer/i);
-    await rm(directory, { recursive: true, force: true });
   });
 
   test("uses the overall cost limit even if discovery stopped earlier", async () => {

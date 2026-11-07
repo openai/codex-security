@@ -1,13 +1,14 @@
 import { runNodePython } from "./support/python-probe.js";
 import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
-import { createApiTestFixtures } from "./support/temporary-directories.js";
+import {
+  createApiTestFixtures,
+  removeTemporaryDirectory,
+} from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
-import { semanticCoverage } from "./helpers/semantic-scan.js";
-import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import { execFile, spawnSync } from "node:child_process";
-import * as childProcess from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
+import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
@@ -105,7 +106,6 @@ import {
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { prepareSemanticScanDraft } from "../src/scan-semantics.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -118,9 +118,7 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const { temporaryDirectory, cleanup, temporaryDirectories } =
   createApiTestFixtures("codex-security-runtime-");
-
 const testPosix = process.platform === "win32" ? test.skip : test;
-
 const restoreSpawn = (spawn: typeof childProcess.spawn) =>
   mock.module("node:child_process", () => ({ ...childProcess, spawn }));
 
@@ -171,11 +169,7 @@ function instrumentCredentialAcl(
       return originalSpawn(command, instrumented, options);
     },
   }));
-  return () =>
-    mock.module("node:child_process", () => ({
-      ...childProcess,
-      spawn: originalSpawn,
-    }));
+  return () => restoreSpawn(originalSpawn);
 }
 
 function windowsTestCommand(
@@ -375,7 +369,6 @@ describe("plugin runtime preparation", () => {
     expect(candidates).toEqual([
       join(packageRoot, "dist", "_bundled_plugin"),
       join(packageRoot, "_bundled_plugin"),
-      packageRoot,
     ]);
     expect(
       candidates.every((candidate) => {
@@ -385,9 +378,6 @@ describe("plugin runtime preparation", () => {
         );
       }),
     ).toBe(true);
-    expect(bundledPluginCandidates(join(packageRoot, "mcp"))).toContain(
-      packageRoot,
-    );
   });
 
   test("rejects control characters in bundled artifact paths and candidate IDs", async () => {
@@ -410,82 +400,6 @@ describe("plugin runtime preparation", () => {
         expect(pattern.test(`safe${control}path`)).toBe(false);
       }
     }
-  });
-
-  test("disambiguates duplicate coverage surface identities without losing evidence", () => {
-    const coverage = semanticCoverage({
-      completeness: "partial",
-      surfaces: [
-        {
-          id: "surface-web",
-          label: "Primary",
-          disposition: "reported",
-          receiptRefs: ["artifacts/primary.json"],
-        },
-        { id: "surface-web", label: "Secondary", disposition: "reported" },
-        {
-          id: "surface-web-2",
-          label: "Reserved suffix",
-          disposition: "no_issue_found",
-        },
-        { label: "Uploads", disposition: "reported" },
-        {
-          id: "surface_uploads",
-          label: "Owned uploads",
-          disposition: "reported",
-        },
-        { label: "Archive", disposition: "reported" },
-        { label: "Archive", disposition: "no_issue_found" },
-      ],
-      deferred: [
-        {
-          id: "deferred-review",
-          reason: "Environment unavailable",
-          surfaceIds: ["surface-web", "surface_uploads"],
-        },
-      ],
-    });
-    const original = structuredClone(coverage);
-    const canonical = prepareSemanticScanDraft(
-      {
-        mode: "deep",
-        targetContract: {
-          target: {
-            allowedKinds: ["directory_snapshot"],
-            targetId: "target_example",
-            displayName: "example",
-          },
-          scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
-        },
-      },
-      {
-        scanId: "7b95abf2-dc04-47a9-9950-53b5c2057f49",
-        findings: [],
-        coverage,
-      },
-    ).coverage;
-
-    expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
-      "surface-web",
-      "surface-web-3",
-      "surface-web-2",
-      expect.any(String),
-      "surface_uploads",
-      expect.any(String),
-      expect.any(String),
-    ]);
-    expect(new Set(canonical.surfaces.map((surface) => surface.id)).size).toBe(
-      coverage.surfaces.length,
-    );
-    expect(canonical.surfaces.map((surface) => surface.label)).toEqual(
-      coverage.surfaces.map((surface) => surface.label),
-    );
-    expect(canonical.surfaces[0]!.receiptRefs).toEqual([
-      "artifacts/primary.json",
-    ]);
-    expect(canonical.surfaces[1]!.receiptRefs).toEqual([]);
-    expect<unknown>(canonical.deferred).toEqual(coverage.deferred);
-    expect(coverage).toEqual(original);
   });
 
   test("generates canonical scoped security inventory paths", async () => {
@@ -2203,8 +2117,8 @@ for await (const line of createInterface({ input: process.stdin })) {
         }
       }
       await mkdir(home);
-      const bootstrap = (source = selected) =>
-        bootstrapPlugin(home, source, {
+      const bootstrap = (pluginRoot = selected) =>
+        bootstrapPlugin(home, pluginRoot, {
           codexCommand: { command: "/codex" },
           runCodex: async (_command, args) => {
             calls.push([...args]);
@@ -2325,17 +2239,6 @@ for await (const line of createInterface({ input: process.stdin })) {
       expect(await readFile(generated, "utf8")).toBe("generated cache");
     });
 
-    test("reuses unchanged source after relocation", async () => {
-      const { installed, calls, bootstrap } = await fixture();
-      const relocated = await plugin(await temporaryDirectory());
-
-      const result = await bootstrap(relocated);
-
-      expect(result.installedRoot).toBe(installed);
-      expect(result.pluginRoot).toBe(relocated);
-      expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
-    });
-
     test.each(["changed", "added", "removed"] as const)(
       "refreshes %s same-version source files",
       async (change) => {
@@ -2376,7 +2279,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     });
 
     test.each([
-      "missing installed directory",
       "missing file",
       "changed file",
       "missing record",
@@ -2387,7 +2289,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       "incomplete marketplace manifest",
       "extra staged file",
     ])("repairs %s before reusing the installation", async (damage) => {
-      const { selected, home, staged, installed, record, calls, bootstrap } =
+      const { home, staged, installed, record, calls, bootstrap } =
         await fixture();
       const helper = join(installed, "scripts", "helper.py");
       const manifest = join(
@@ -2399,9 +2301,6 @@ for await (const line of createInterface({ input: process.stdin })) {
       );
       const expectedManifest = await readFile(manifest, "utf8");
       switch (damage) {
-        case "missing installed directory":
-          await rm(installed, { recursive: true });
-          break;
         case "missing file":
           await rm(helper);
           break;
@@ -2468,7 +2367,6 @@ for await (const line of createInterface({ input: process.stdin })) {
       expect(JSON.parse(await readFile(record, "utf8"))).toEqual({
         installedPath: installed,
         version: "1.2.3",
-        pluginRoot: selected,
       });
       await bootstrap();
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(
@@ -2476,58 +2374,6 @@ for await (const line of createInterface({ input: process.stdin })) {
       );
     });
   });
-
-  test.each(["unchanged", "different source", "edited source"])(
-    "preserves installed plugin contents across %s selections",
-    async (selection) => {
-      const root = await temporaryDirectory();
-      const selected = await plugin(root);
-      const home = join(root, "home");
-      await mkdir(home);
-      const environment = {
-        PATH: process.env["PATH"],
-        SystemRoot: process.env["SystemRoot"],
-        WINDIR: process.env["WINDIR"],
-        HOME: home,
-        USERPROFILE: home,
-        CODEX_HOME: home,
-        TMPDIR: root,
-        TMP: root,
-        TEMP: root,
-      };
-      const codexCommand = resolveCodexCommand(environment);
-      const options = { codexCommand, environment, isolateSelection: true };
-      const first = await bootstrapPlugin(home, selected, options);
-      const identity = await stat(first.installedRoot, { bigint: true });
-      const secondSource =
-        selection === "different source"
-          ? await plugin(join(root, "another-source"))
-          : selected;
-      if (selection !== "unchanged")
-        await writeFile(
-          join(secondSource, "scripts", "helper.py"),
-          "print('new selection')\n",
-        );
-      const second = await bootstrapPlugin(home, secondSource, options);
-      expect(second.installedRoot === first.installedRoot).toBe(
-        selection === "unchanged",
-      );
-      const restored = await bootstrapPlugin(
-        home,
-        join(first.marketplaceRoot, "plugins", "codex-security"),
-        options,
-      );
-      expect(restored.installedRoot).toBe(first.installedRoot);
-      const current = await stat(first.installedRoot, { bigint: true });
-      expect([current.dev, current.ino]).toEqual([identity.dev, identity.ino]);
-      expect(
-        await readFile(
-          join(first.installedRoot, "scripts", "helper.py"),
-          "utf8",
-        ),
-      ).toBe("print('ok')\n");
-    },
-  );
 
   test("does not preserve a different marketplace when numeric identities collide", async () => {
     const root = await temporaryDirectory();
@@ -2959,22 +2805,6 @@ for await (const line of createInterface({ input: process.stdin })) {
       restorationSignal.abort();
       await restorer.restore(artifact, expected);
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
-      await restorer.restoreMany([
-        { path: artifact, contents: Buffer.from([9, 0, 8]) },
-        { path: "artifacts/second.bin", contents: expected },
-        { path: artifact, contents: expected },
-      ]);
-      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
-      expect(await readFile(join(scanDir, "artifacts/second.bin"))).toEqual(
-        expected,
-      );
-      await expect(
-        restorer.restoreMany([
-          { path: "../outside.bin", contents: expected },
-          { path: artifact, contents: Buffer.from([7]) },
-        ]),
-      ).rejects.toThrow("safely restore");
-      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
 
       const rolloutPath = join(root, "cached-rollout.jsonl");
       await writeFile(
@@ -2989,62 +2819,6 @@ for await (const line of createInterface({ input: process.stdin })) {
       });
     },
   );
-
-  test("keeps scan artifact directories, staging and cleanup inside the checked root", async () => {
-    const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
-    const sibling = join(root, "sibling");
-    await Promise.all([
-      mkdir(scanDir, { mode: 0o700 }),
-      mkdir(sibling, { mode: 0o700 }),
-    ]);
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const writer = await prepareScanArtifactRestorer(
-      { python: python!, pluginRoot: PLUGIN_ROOT, environment: {} },
-      scanDir,
-    );
-    const pass = "artifacts/deep-scan/passes/pass-1";
-    const reservations = await Promise.all([
-      writer.reserveDirectory!(pass),
-      writer.reserveDirectory!(pass),
-    ]);
-    expect(reservations.sort()).toEqual([false, true]);
-    await writer.prepareDirectory("artifacts/deep-scan/merge");
-    await writer.restore(
-      "artifacts/deep-scan/merge/retained.json",
-      Buffer.from("{}"),
-    );
-    await writer.prepareDirectory("artifacts/deep-scan/merge");
-    expect(
-      await readFile(
-        join(scanDir, "artifacts/deep-scan/merge/retained.json"),
-        "utf8",
-      ),
-    ).toBe("{}");
-    await writer.restore("drafts/staged.json", Buffer.from("{}"));
-    await writer.remove("drafts/staged.json");
-    expect(await readdir(join(scanDir, "drafts"))).toEqual([]);
-
-    await writeFile(join(sibling, "retained.json"), "preserved");
-    await symlink(
-      sibling,
-      join(scanDir, "linked"),
-      process.platform === "win32" ? "junction" : "dir",
-    );
-    for (const operation of [
-      () => writer.prepareDirectory("linked/merge"),
-      () => writer.reserveDirectory!("linked/pass-2"),
-      () => writer.restore("linked/staged.json", Buffer.from("{}")),
-      () => writer.remove("linked/retained.json"),
-    ]) {
-      await expect(operation()).rejects.toThrow("Could not safely");
-      expect(await readdir(sibling)).toEqual(["retained.json"]);
-      expect(await readFile(join(sibling, "retained.json"), "utf8")).toBe(
-        "preserved",
-      );
-    }
-  });
 
   test("resolves the exact npm Codex executable", () => {
     const command = resolveCodexCommand();
@@ -5838,18 +5612,6 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "explicit-state"),
       }),
     ).toBe(join(root, "explicit-state"));
-    expect(
-      codexSecurityStateDirectory({
-        CODEX_HOME: root,
-        CODEX_SECURITY_STATE_DIR: `  ${join(root, "ambient-state")}  `,
-      }),
-    ).toBe(join(root, "ambient-state"));
-    expect(
-      codexSecurityStateDirectory({
-        CODEX_HOME: root,
-        CODEX_SECURITY_STATE_DIR: "   ",
-      }),
-    ).toBe(join(root, "state", "plugins", "codex-security"));
     if (process.platform === "win32") {
       expect(() =>
         codexSecurityStateDirectory({
@@ -5929,10 +5691,9 @@ describe("runtime directories and plugin Python boundary", () => {
       await writeFile(
         script,
         [
-          "import json, sys",
-          `sys.path.insert(0, ${JSON.stringify(join(PLUGIN_ROOT, "scripts"))})`,
-          "from workbench import storage",
-          "print(json.dumps({'stateDir': str(storage.state_dir())}))",
+          "import json, runpy",
+          `storage = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench", "storage.py"))})`,
+          "print(json.dumps({'stateDir': str(storage['state_dir']())}))",
         ].join("\n"),
       );
       const python = await resolvePluginPython();
@@ -6364,94 +6125,6 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await readlink(join(scanDir, "scan-manifest.json"))).toBe(
       join(root, "missing-manifest.json"),
     );
-  });
-
-  test("preserves recorded artifact paths when archiving a completed scan", async () => {
-    const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
-    const archivedScanDir = `${scanDir}.previous-20260729T000000Z`;
-    await mkdir(scanDir, { mode: 0o700 });
-    await mkdir(archivedScanDir, { mode: 0o700 });
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const result = runNodePython(python!, [
-      "-c",
-      [
-        "import argparse, json, sqlite3, sys",
-        "from pathlib import Path",
-        "sys.path.insert(0, sys.argv[1])",
-        "from workbench_scan_start import archive_scan",
-        "from workbench_db import apply_migrations",
-        "scan_dir = Path(sys.argv[2])",
-        "archived_scan_dir = Path(sys.argv[3])",
-        "connection = sqlite3.connect(':memory:')",
-        "connection.row_factory = sqlite3.Row",
-        "connection.execute('PRAGMA foreign_keys = ON')",
-        "apply_migrations(connection)",
-        "connection.execute(\"INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', 'before', 'before')\")",
-        "connection.execute(\"INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) VALUES ('previous-scan', 'workspace', ?, 'revision', '.', 'standard', ?, 'complete', 'reporting', 'before', 'before', 'before')\", (str(scan_dir.parent), str(scan_dir)))",
-        "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
-        "connection.executemany(\"INSERT INTO scan_artifacts (scan_id, kind, path, created_at) VALUES (?, ?, ?, 'before')\", [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
-        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
-        "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
-        "    pass",
-        "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
-        "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
-        "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
-      ].join("\n"),
-      join(PLUGIN_ROOT, "scripts"),
-      scanDir,
-      archivedScanDir,
-    ]);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toEqual({
-      scanDir: archivedScanDir,
-      artifacts: [
-        { kind: "coverage", path: join(archivedScanDir, "coverage.json") },
-        { kind: "findings", path: join(archivedScanDir, "findings.json") },
-        { kind: "manifest", path: join(archivedScanDir, "scan-manifest.json") },
-        { kind: "markdownReport", path: join(archivedScanDir, "report.md") },
-      ],
-    });
-  });
-
-  test("does not strand completed scan artifacts without an archive path", async () => {
-    const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
-    await mkdir(scanDir, { mode: 0o700 });
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const result = runNodePython(python!, [
-      "-c",
-      [
-        "import argparse, sqlite3, sys",
-        "from pathlib import Path",
-        "sys.path.insert(0, sys.argv[1])",
-        "from workbench_scan_start import archive_scan",
-        "scan_dir = Path(sys.argv[2])",
-        "connection = sqlite3.connect(':memory:')",
-        "connection.row_factory = sqlite3.Row",
-        "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL)')",
-        "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-        "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
-        "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
-        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
-        "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
-        "    pass",
-      ].join("\n"),
-      join(PLUGIN_ROOT, "scripts"),
-      scanDir,
-    ]);
-
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      "The archived scan directory is required to preserve existing scan artifacts.",
-    );
-    expect(await readdir(root)).toEqual(["scan"]);
   });
 
   for (const readonly of [false, true]) {

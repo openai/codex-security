@@ -153,7 +153,6 @@ test.each(plainProgressModes)(
     const { stderr, runCli } = createCliTest(main, { stderr: mode.tty });
     const unpriced = new ScanResult({
       ...result,
-      cost: null,
       turnResult: {
         ...result.turnResult,
         model: "synthetic-unpriced-model",

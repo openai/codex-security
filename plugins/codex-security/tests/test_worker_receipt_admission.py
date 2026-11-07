@@ -10,7 +10,6 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from publication_fixtures import historical_publication_scan
 from test_partial_coverage_projection import stop_and_recover_projection
 from test_partial_coverage_projection import stop_scan as stop_scan
 from test_saved_deferred_identity import recover, save_worker
@@ -21,15 +20,13 @@ from workbench_test_support import (
     write_checkpoint,
 )
 
-publication_scan = historical_publication_scan
-
 
 @pytest.mark.parametrize("reordered", [False, True])
 @pytest.mark.parametrize("changed_notes", [False, True])
 def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
     tmp_path: Path, reordered, changed_notes
 ):
-    from workbench import retained_coverage as saved
+    import workbench_saved_results as saved
 
     surface = {
         "id": "api",
@@ -165,7 +162,7 @@ JAVASCRIPT_CANDIDATE_HASHES = [
 
 @pytest.mark.parametrize("index", range(len(CANDIDATE_IDS)))
 def test_saved_candidate_projection_matches_javascript_utf8(tmp_path: Path, index: int):
-    from workbench import retained_coverage as saved
+    import workbench_saved_results as saved
     from workbench_validation import javascript_utf8
 
     candidate = CANDIDATE_IDS[index]

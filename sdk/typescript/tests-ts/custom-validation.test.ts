@@ -1,11 +1,7 @@
 import { execFileSync } from "node:child_process";
-
 import { resolveCodexProfile } from "../src/config.js";
-
-import { createHash, hash, randomUUID } from "node:crypto";
-
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-
 import {
   appendFile,
   chmod,
@@ -17,72 +13,44 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-
 import { join, resolve } from "node:path";
-
 import type { ScanReadFile } from "../../../plugins/codex-security/native/scan-read-binding.mjs";
-
-import { fileURLToPath } from "node:url";
-
 import type { ThreadEvent } from "@openai/codex-sdk";
-
 import type { ScanActivity } from "../src/scan-activity.js";
-
 import type { ScanSessionEvent } from "../src/cost.js";
-
 import { progressMarker, writeSession } from "./support/usage-rollout.js";
-
 import Ajv2020 from "ajv/dist/2020.js";
-
-import { spyOn } from "bun:test";
-import { afterEach, describe, expect, test, mock } from "bun:test";
-
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   runCustomValidation,
   type CustomValidationResult,
 } from "../src/custom-validation.js";
-
 import {
   customDiscoveryPrompt,
   customValidationConfig,
 } from "../src/custom-validation-prompt.js";
-
 import {
   ContractValidationError,
-  type CoverageDocument,
   DiffTarget,
+  type CoverageDocument,
   type FindingsDocument,
   type ScanManifest,
   type ScanProgress,
 } from "../src/index.js";
-
 import { createMarketplace, resolveCodexCommand } from "../src/runtime.js";
-import { runWorkbench, prepareScanArtifactRestorer } from "../src/runtime.js";
-
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
-
-import { writePreparedScanDraft } from "../src/scan-publication.js";
-
+import { runWorkbench } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
-
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
-
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-
 import { readJson as json, jsonLines } from "./support/json.js";
-
 import { rejecting } from "./support/errors.js";
-
 import { runTestInSubprocess } from "./support/test-subprocess.js";
-
 import { scanReadBinding } from "./support/scan-read-binding.js";
-
 import { readReviewState } from "./support/review-state.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
-
 const resultName = "artifacts/custom-validation/results.json";
-
 afterEach(cleanup);
 
 async function save(path: string, value: unknown) {
@@ -98,7 +66,6 @@ async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
   scan.id = scanId;
   scan.target.kind = diff ? "git_diff" : "directory_snapshot";
   scan.scope.validationMode = "custom_pending";
-  if (!diff) scan["complete"] = false;
   await save(join(scanDir, "scan-manifest.json"), { ...manifest, scan });
   const findings = await json<FindingsDocument>(join(scanDir, "findings.json"));
   const original = findings.findings[0]!;
@@ -135,18 +102,51 @@ async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
 async function publishDraft(
   scanDir: string,
   scanId: string,
-  workbench: (args: readonly string[], input?: string) => Promise<unknown>,
+  workbench: (args: readonly string[]) => Promise<Record<string, unknown>>,
   complete?: boolean,
 ) {
   const manifest = await json<ScanManifest>(
     join(scanDir, "scan-manifest.json"),
   );
-  if (complete !== undefined) manifest.scan["complete"] = complete;
-  await writePreparedScanDraft(workbench, scanId, {
-    manifest,
-    findings: await json<FindingsDocument>(join(scanDir, "findings.json")),
-    coverage: await json<CoverageDocument>(join(scanDir, "coverage.json")),
-  });
+  const findings = await json<FindingsDocument>(join(scanDir, "findings.json"));
+  const coverage = await json<CoverageDocument>(join(scanDir, "coverage.json"));
+  const staged = {
+    manifest: {
+      scan: {
+        target: manifest.scan.target,
+        scope: manifest.scan.scope,
+        ...(complete === undefined ? {} : { complete }),
+      },
+    },
+    findings: {
+      findings: findings.findings.map(
+        ({
+          findingId: _id,
+          occurrenceId: _occurrence,
+          fingerprints: _fingerprints,
+          ...finding
+        }) => finding,
+      ),
+    },
+    coverage: {
+      inventoryStrategy: coverage.inventoryStrategy,
+      surfaces: coverage.surfaces,
+      explicitExclusions: coverage.explicitExclusions,
+      deferred: coverage.deferred,
+    },
+  };
+  await mkdir(join(scanDir, "drafts"), { recursive: true });
+  const draftPath = join(scanDir, "drafts", `${scanId}.json`);
+  await save(draftPath, staged);
+  expect(
+    await workbench([
+      "write-scan-draft",
+      "--scan-id",
+      scanId,
+      "--draft-path",
+      draftPath,
+    ]),
+  ).toMatchObject({ scanId, status: "draft_written" });
 }
 
 function result(
@@ -179,57 +179,20 @@ function result(
 
 async function fixture(count = 1) {
   const root = await temporaryDirectory();
-  const repository = join(root, "repository");
   const scanDir = join(root, "scan");
-  await mkdir(repository);
-  await writeFile(join(repository, "source.txt"), "Synthetic source.\n");
   await mkdir(scanDir, { mode: 0o700 });
-  const target = { kind: "repository" as const, paths: [] };
-  const python = Bun.which("python3") ?? Bun.which("python");
-  if (python === null) throw new Error("Python is required for this test.");
-  const pluginRoot = fileURLToPath(
-    new URL("../../../plugins/codex-security/", import.meta.url),
-  );
-  const signal = new AbortController().signal;
-  const workbenchOptions = {
-    python,
-    pluginRoot,
-    signal,
-    environment: {
-      PATH: process.env["PATH"],
-      SystemRoot: process.env["SystemRoot"],
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    },
-  };
-  const workbench = (args: readonly string[], input?: string) =>
-    runWorkbench(workbenchOptions, args, input);
-  const registration = await workbench(
-    [
-      "register-cli-scan",
-      "--repository",
-      repository,
-      "--scan-dir",
-      scanDir,
-      "--registration-json-stdin",
-    ],
-    JSON.stringify({
-      recipe: { repository, target, mode: "standard", config: {} },
-    }),
-  );
-  const scanId = registration["scanId"] as string;
+  const scanId = randomUUID();
   const findings = await draft(scanDir, scanId, count);
   return {
     root,
-    repository,
-    target,
+    repository: root,
+    target: { kind: "repository" as const, paths: [] },
     scanDir,
     scanId,
     findings,
-    pluginRoot,
-    writer: await prepareScanArtifactRestorer(workbenchOptions, scanDir),
+    pluginRoot: PLUGIN_ROOT,
     prompt: "Run the selected fixture workflow.",
-    signal,
-    workbench,
+    signal: new AbortController().signal,
   };
 }
 
@@ -536,247 +499,6 @@ describe("custom validation", () => {
     },
   );
 
-  test.each([false, true])(
-    "applies dispositions without changing source identity or completion: %p",
-    async (complete) => {
-      const f = await fixture(4);
-      const sourceManifest = await json<ScanManifest>(
-        join(f.scanDir, "scan-manifest.json"),
-      );
-      sourceManifest.scan["complete"] = complete;
-      await save(join(f.scanDir, "scan-manifest.json"), sourceManifest);
-      const output = result(
-        "reportable",
-        "suppressed",
-        "not_applicable",
-        "deferred",
-      );
-      const counterEvidence =
-        "The protected caller checks a separate precondition.";
-      const limitations = "The alternate configuration was not exercised.";
-      output.validations[0]!.validation.counterevidence_or_proof_gap =
-        counterEvidence;
-      output.validations[0]!.validation.remaining_uncertainty = limitations;
-      output.validations[0]!.severity = {
-        level: "medium",
-        rationale: "Requires an uncommon configuration.",
-      };
-      output.validations[0]!.impact = {
-        level: "high",
-        rationale: "Can modify protected files.",
-      };
-      output.validations[0]!.validation.artifact_paths = [
-        "artifacts/custom-validation/proof.txt",
-      ];
-      await runCustomValidation({
-        ...f,
-        run: async (prompt, schema) => {
-          expect(prompt).toContain(JSON.stringify(f.target));
-          await writeFile(
-            join(f.scanDir, "artifacts/custom-validation/proof.txt"),
-            "Synthetic proof.\n",
-          );
-          expect(prompt).toContain(f.prompt);
-          // Structured outputs cannot resolve plugin URIs or use regex lookaround.
-          expect(JSON.stringify(schema)).not.toContain("codex-security://");
-          expect(JSON.stringify(schema)).not.toMatch(/\(\?[=!<]/);
-          const common = await json<object>(
-            join(
-              PLUGIN_ROOT,
-              "schemas/definitions/artifact-common.schema.json",
-            ),
-          );
-          const existing = await json<object>(
-            join(
-              PLUGIN_ROOT,
-              "schemas/tools/candidate-validations.schema.json",
-            ),
-          );
-          const ajv = new Ajv2020({ strict: false, validateFormats: false });
-          ajv.addSchema(common);
-          expect(
-            ajv.validate(existing, {
-              scanId: f.scanId,
-              validations: output.validations.map(
-                ({ candidateId, validation }) => ({ candidateId, validation }),
-              ),
-            }),
-          ).toBe(true);
-          return JSON.stringify(output);
-        },
-      });
-      const findings = await json<FindingsDocument>(
-        join(f.scanDir, "findings.json"),
-      );
-      expect(findings.findings).toHaveLength(1);
-      expect(findings.findings[0]).toMatchObject({
-        identity: f.findings.findings[0]!.identity,
-        locations: f.findings.findings[0]!.locations,
-        severity: output.validations[0]!.severity,
-        confidence: { level: "medium" },
-        attackPath: { impact: output.validations[0]!.impact },
-        validation: {
-          disposition: "reportable",
-          counterEvidence: [counterEvidence],
-          limitations: [limitations],
-        },
-      });
-      const coverage = await json<CoverageDocument>(
-        join(f.scanDir, "coverage.json"),
-      );
-      expect(coverage.surfaces.map((surface) => surface.disposition)).toEqual([
-        "reported",
-        "rejected",
-        "not_applicable",
-        "needs_follow_up",
-      ]);
-      expect(coverage).not.toHaveProperty("completeness");
-      expect(coverage.surfaces[0]!.receiptRefs).toContain(
-        "artifacts/custom-validation/proof.txt",
-      );
-      expect(coverage.deferred).toHaveLength(1);
-      expect(
-        await json<{
-          manifest: ScanManifest;
-          findings: FindingsDocument;
-          coverage: CoverageDocument;
-        }>(join(f.scanDir, "artifacts/scan-draft.json")),
-      ).toMatchObject({
-        manifest: await json<ScanManifest>(
-          join(f.scanDir, "scan-manifest.json"),
-        ),
-        findings,
-        coverage,
-      });
-      expect(
-        (await json<ScanManifest>(join(f.scanDir, "scan-manifest.json"))).scan[
-          "complete"
-        ],
-      ).toBe(complete);
-      expect(await json(join(f.scanDir, resultName))).toMatchObject({
-        scanId: f.scanId,
-        ...output,
-      });
-      expect(
-        await json(
-          join(f.scanDir, "artifacts/custom-validation/candidates.json"),
-        ),
-      ).toMatchObject({
-        target: f.target,
-        candidates: f.findings.findings.map((finding, index) => ({
-          candidateId: `candidate-${index + 1}`,
-          finding,
-        })),
-      });
-    },
-  );
-
-  test("publishes captured validation through the legacy file protocol while retiring accepted checkpoints", async () => {
-    const f = await fixture();
-    const snapshotPath = join(f.scanDir, "artifacts/scan-draft.json");
-    const documents = {
-      manifest: await json<ScanManifest>(join(f.scanDir, "scan-manifest.json")),
-      findings: f.findings,
-      coverage: await json<CoverageDocument>(join(f.scanDir, "coverage.json")),
-    };
-    const checkpoint = JSON.stringify({
-      scanId: f.scanId,
-      complete: false,
-      findings: documents.findings.findings,
-      coverage: documents.coverage,
-    });
-    const checkpointId = `${hash("sha256", checkpoint)}.json`;
-    const marker = join(f.scanDir, "checkpoints/pending", checkpointId);
-    await mkdir(join(f.scanDir, "checkpoints/pending"), { recursive: true });
-    await writeFile(join(f.scanDir, "checkpoints", checkpointId), checkpoint);
-    await writeFile(marker, "");
-    await mkdir(join(f.scanDir, "artifacts"), { recursive: true });
-    await save(snapshotPath, {
-      ...documents,
-      reconciledCheckpointIds: [checkpointId],
-    });
-    const evidence = "artifacts/custom-validation/proof.txt";
-    const output = result("reportable");
-    output.validations[0]!.validation.artifact_paths = [evidence];
-    let publications = 0;
-    await runCustomValidation({
-      ...f,
-      workbench: async (args, input) => {
-        publications += 1;
-        expect(args.slice(0, 4)).toEqual([
-          "write-scan-draft",
-          "--scan-id",
-          f.scanId,
-          "--draft-path",
-        ]);
-        expect(input).toBeUndefined();
-        expect(args).not.toContain("--checkpoint-path");
-        const staged = await json<Record<string, unknown>>(args[4]!);
-        expect(Object.keys(staged).sort()).toEqual([
-          "coverage",
-          "findings",
-          "manifest",
-          "reconciledCheckpointIds",
-        ]);
-        expect(await json(snapshotPath)).toMatchObject({
-          reconciledCheckpointIds: [checkpointId],
-        });
-        return f.workbench(args, input);
-      },
-      run: async () => {
-        await writeFile(join(f.scanDir, evidence), "Synthetic proof.\n");
-        for (const name of [
-          "scan-manifest.json",
-          "findings.json",
-          "coverage.json",
-        ])
-          await writeFile(join(f.scanDir, name), "{}");
-        return JSON.stringify(output);
-      },
-    });
-    expect(publications).toBe(1);
-    expect(await json(snapshotPath)).toMatchObject({
-      manifest: { scan: { scope: { validationMode: "custom" } } },
-      findings: { findings: [{ identity: f.findings.findings[0]!.identity }] },
-      coverage: {
-        surfaces: [{ label: documents.coverage.surfaces[0]!.label }],
-      },
-      reconciledCheckpointIds: [checkpointId],
-    });
-    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(
-      await readFile(join(f.scanDir, "checkpoints", checkpointId), "utf8"),
-    ).toBe(checkpoint);
-    expect(await readFile(join(f.scanDir, evidence), "utf8")).toBe(
-      "Synthetic proof.\n",
-    );
-    expect(await json(join(f.scanDir, resultName))).toMatchObject(output);
-  });
-
-  test("restores discovery documents when validation publication fails", async () => {
-    const f = await fixture();
-    const names = ["scan-manifest.json", "findings.json", "coverage.json"];
-    const original = await Promise.all(
-      names.map((name) => json(join(f.scanDir, name))),
-    );
-    await expect(
-      runCustomValidation({
-        ...f,
-        workbench: async () => {
-          throw new Error("Synthetic publication interruption");
-        },
-        run: async () => {
-          for (const name of names)
-            await writeFile(join(f.scanDir, name), "{}");
-          return JSON.stringify(result("suppressed"));
-        },
-      }),
-    ).rejects.toThrow("Synthetic publication interruption");
-    expect(
-      await Promise.all(names.map((name) => json(join(f.scanDir, name)))),
-    ).toEqual(original);
-  });
-
   test.each([
     "sealedAt",
     "artifacts",
@@ -812,6 +534,28 @@ describe("custom validation", () => {
       }),
     ).rejects.toThrow("unsealed custom-validation draft");
   });
+
+  test.each([
+    ["empty title", { title: "" }],
+    ["empty optional detail", { attackPath: { dataflow: { sink: "" } } }],
+    ["legacy field", { root_cause: "Synthetic legacy detail." }],
+  ])(
+    "rejects %s before validation without changing the draft",
+    async (_name, fields) => {
+      const f = await fixture(2);
+      Object.assign(f.findings.findings[1]!, fields);
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      await expect(
+        runCustomValidation({
+          ...f,
+          run: unexpectedValidation,
+        }),
+      ).rejects.toThrow(/valid provisional finding set.*findings\[1\]/);
+      expect(
+        await json<FindingsDocument>(join(f.scanDir, "findings.json")),
+      ).toEqual(f.findings);
+    },
+  );
 
   test.each([
     ["bundled", ""],
@@ -906,98 +650,6 @@ describe("custom validation", () => {
     },
   );
 
-  test("preserves optional details and nested write-up paths during validation", async () => {
-    const f = await fixture(3);
-    const reportPath = "findings/retained/nested/details.md";
-    f.findings.findings[0]!.writeup = { reportPath };
-    await mkdir(join(f.scanDir, "findings/retained/nested"), {
-      recursive: true,
-    });
-    await writeFile(
-      join(f.scanDir, reportPath),
-      "Synthetic original write-up.\n",
-    );
-    for (const [index, finding] of f.findings.findings.entries()) {
-      finding.attackPath = {
-        dataflow: {
-          source: "Synthetic request input",
-          ...(index < 2 ? {} : { sink: "Synthetic output operation" }),
-        },
-      };
-    }
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    const run = mock(async () => {
-      const candidates = await json<{
-        candidates: Array<{ finding: unknown }>;
-      }>(join(f.scanDir, "artifacts/custom-validation/candidates.json"));
-      expect(candidates.candidates).toHaveLength(3);
-      expect(candidates.candidates[0]!.finding).toHaveProperty(
-        "attackPath.dataflow",
-        { source: "Synthetic request input" },
-      );
-      return JSON.stringify(result("reportable", "reportable", "reportable"));
-    });
-    await runCustomValidation({
-      ...f,
-      run,
-    });
-    expect(run).toHaveBeenCalled();
-    const saved = await json<FindingsDocument>(
-      join(f.scanDir, "findings.json"),
-    );
-    expect(saved.findings).toHaveLength(3);
-    expect(saved.findings[0]!.writeup).toEqual({ reportPath });
-    expect(await readFile(join(f.scanDir, reportPath), "utf8")).toBe(
-      "Synthetic original write-up.\n",
-    );
-    for (const [index, finding] of saved.findings.entries()) {
-      expect(finding.validation).toMatchObject({
-        counterEvidence: [],
-        limitations: [],
-      });
-      expect(finding.identity).toEqual(f.findings.findings[index]!.identity);
-      expect(finding.locations).toEqual(f.findings.findings[index]!.locations);
-      expect(finding.attackPath).toEqual({
-        dataflow: {
-          source: "Synthetic request input",
-          ...(index < 2 ? {} : { sink: "Synthetic output operation" }),
-        },
-      });
-    }
-  });
-
-  test("retains original optional details when custom validation fails", async () => {
-    const f = await fixture();
-    f.findings.findings[0]!.attackPath = {
-      dataflow: { source: "Synthetic request input" },
-    };
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    await expect(
-      runCustomValidation({
-        ...f,
-        run: rejecting("Synthetic validation failure"),
-      }),
-    ).rejects.toThrow("Synthetic validation failure");
-    expect(
-      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-    ).toEqual(f.findings);
-  });
-
-  test("identifies an invalid provisional finding and field before validation", async () => {
-    const f = await fixture(2);
-    f.findings.findings[1]!.title = "";
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    await expect(
-      runCustomValidation({
-        ...f,
-        run: unexpectedValidation,
-      }),
-    ).rejects.toThrow(/findings\[1\].*title/);
-    expect(
-      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-    ).toEqual(f.findings);
-  });
-
   test("identifies invalid provisional coverage before validation", async () => {
     const f = await fixture();
     const path = join(f.scanDir, "coverage.json");
@@ -1023,8 +675,6 @@ describe("custom validation", () => {
   ])("rejects %s results without losing the draft", async (kind) => {
     const f = await fixture();
     const original = await readFile(join(f.scanDir, "findings.json"), "utf8");
-    const manifestPath = join(f.scanDir, "scan-manifest.json");
-    const manifest = await json<ScanManifest>(manifestPath);
     const output = result("reportable");
     if (kind === "missing") output.validations = [];
     if (kind === "duplicate") output.validations.push(output.validations[0]!);
@@ -1047,8 +697,6 @@ describe("custom validation", () => {
     expect(await json(join(f.scanDir, "findings.json"))).toEqual(
       JSON.parse(original),
     );
-    expect(await json<ScanManifest>(manifestPath)).toEqual(manifest);
-    expect(manifest.scan["complete"]).toBe(false);
   });
 
   test("rejects output directories linked outside the scan", async () => {
@@ -1072,6 +720,7 @@ describe("custom validation", () => {
 
   const completionScenarios = [
     "standard",
+    "progress",
     "diff",
     "empty",
     "incomplete",
@@ -1081,11 +730,11 @@ describe("custom validation", () => {
     "late-progress-observer-error",
     "unfinished-source",
   ];
-
   test.each(completionScenarios)(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
       const diff = scenario === "diff";
+      const maxTimeMinutes = scenario === "standard" || diff ? 5 : undefined;
       const count = scenario === "empty" ? 0 : 1;
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -1202,6 +851,7 @@ describe("custom validation", () => {
             },
         {
           environment: { CODEX_SECURITY_STATE_DIR: stateDir },
+          now: () => Date.UTC(2026, 0, 1),
           prepareRuntime: async () => {
             const runtime = preparedRuntime(codexHome);
             runtime.plugin.version = (
@@ -1212,7 +862,6 @@ describe("custom validation", () => {
             return runtime;
           },
           resolvePluginPython: async () => python!,
-          prepareScanArtifactRestorer,
           prepareOutputDir: async () => scanDir,
           createCodex: (options) => {
             expect(options.config?.["mcp_servers"]).toMatchObject({
@@ -1246,6 +895,9 @@ describe("custom validation", () => {
                       JSON.stringify({ severityRubric }),
                     );
                     if (turns === 1) {
+                      expect(prompt.includes("2026-01-01T00:05:00.000Z")).toBe(
+                        maxTimeMinutes !== undefined,
+                      );
                       expect(prompt).not.toContain(workflow);
                       expect(prompt).toContain("SDK-owned discovery workflow");
                       expect(prompt).not.toContain(
@@ -1330,16 +982,21 @@ describe("custom validation", () => {
                       }
                       return { events: completedEvents() };
                     }
+                    if (scenario === "progress") {
+                      await Promise.resolve();
+                      expect(
+                        progress.some(({ phase }) => phase === "reporting"),
+                      ).toBe(true);
+                      expect(progress.at(-1)?.phase).toBe("validation");
+                    }
                     expect(prompt).toContain(workflow);
+                    expect(prompt).not.toContain("2026-01-01T00:05:00.000Z");
                     const pendingManifest = await json<ScanManifest>(
                       join(scanDir, "scan-manifest.json"),
                     );
                     expect(pendingManifest.scan.id).toBe(scanId);
                     expect(pendingManifest.scan.scope.validationMode).toBe(
                       "custom_pending",
-                    );
-                    expect(pendingManifest.scan["complete"]).toBe(
-                      scenario !== "unfinished-source",
                     );
                     expect(pendingManifest.scan).not.toHaveProperty("sealedAt");
                     expect(pendingManifest.scan).not.toHaveProperty(
@@ -1469,6 +1126,7 @@ describe("custom validation", () => {
         const pending = client.run(repository, {
           severityRubric,
           cyberAccessProgram: "daybreak_blue",
+          maxTimeMinutes,
           ...(scenario === "standard"
             ? { validationPromptFile: workflowFile }
             : { validationPrompt: workflow }),
@@ -1514,9 +1172,6 @@ describe("custom validation", () => {
               expect.objectContaining({ id: "unfinished-source" }),
             ]),
           });
-          expect(await readReviewState(scanDir)).not.toHaveProperty(
-            "completeness",
-          );
           return;
         }
         if (scenario === "incomplete") {
@@ -1592,7 +1247,6 @@ describe("custom validation", () => {
             "reportable",
           );
         expect(completed.manifest.scan.scope.validationMode).toBe("custom");
-        expect(completed.manifest.scan["complete"]).not.toBe(false);
         expect(
           completed.manifest.scan.artifacts.map((artifact) => artifact.path),
         ).toContain(resultName);
@@ -1726,25 +1380,3 @@ describe("custom validation", () => {
 });
 
 const unexpectedValidation = rejecting("unexpected validation");
-
-test.each([
-  ["empty title", { title: "" }],
-  ["empty optional detail", { attackPath: { dataflow: { sink: "" } } }],
-  ["legacy field", { root_cause: "Synthetic legacy detail." }],
-])(
-  "rejects %s before validation without changing the draft",
-  async (_name, fields) => {
-    const f = await fixture(2);
-    Object.assign(f.findings.findings[1]!, fields);
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    await expect(
-      runCustomValidation({
-        ...f,
-        run: unexpectedValidation,
-      }),
-    ).rejects.toThrow(/valid provisional finding set.*findings\[1\]/);
-    expect(
-      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-    ).toEqual(f.findings);
-  },
-);

@@ -22,7 +22,7 @@ import { parse as parseToml } from "smol-toml";
 import {
   hasStoredChatGPTSignIn,
   main,
-  runCodexSkillCommand as executeSkillCommand,
+  runCodexSkillCommand,
 } from "../src/cli.js";
 import {
   CodexSecurityError,
@@ -78,22 +78,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(stateDirectory, { recursive: true, force: true });
 });
-
-function runCodexSkillCommand(
-  ...[args, output, ...rest]: Parameters<typeof executeSkillCommand>
-) {
-  return executeSkillCommand(
-    args,
-    output === undefined
-      ? undefined
-      : {
-          ...output,
-          directory:
-            output.directory ?? output.appServer?.directory ?? skillDirectory,
-        },
-    ...rest,
-  );
-}
 
 function dependencies(
   options: Parameters<typeof cliDependencies>[0] = {},

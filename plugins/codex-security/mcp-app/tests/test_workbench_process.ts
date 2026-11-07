@@ -1,11 +1,11 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { importSource } from "./import-module.ts";
@@ -114,7 +114,7 @@ def main():
     print(json.dumps(vars(parse_args("argument transport"))))
 `,
     );
-    const values = [
+    const workerIds = [
       "ordinary",
       "--help",
       "-",
@@ -124,20 +124,19 @@ def main():
       "x".repeat(200_000),
       "--help",
     ];
-    for (const value of values) {
-      const result = await executeParser(
-        fixturePython,
-        workbenchArgs("create-workspace", {
-          workspaceId: randomUUID(),
-          targetPath: "--target",
-          targetSummary: "",
-          targetTitle: value,
-        }),
-      );
-      assert.equal(result.target_path, "--target");
-      assert.equal(result.target_summary, "");
-      assert.equal(result.target_title, value);
-    }
+    const result = await executeParser(
+      fixturePython,
+      workbenchArgs("record-deep-scan-iteration", {
+        scanId: randomUUID(),
+        workerId: randomUUID(),
+        resultManifestPath: "--result.json",
+        noNewStreak: 1,
+        consecutiveErrors: 0,
+        inputWorkerId: workerIds,
+      }),
+    );
+    assert.equal(result.result_manifest_path, "--result.json");
+    assert.deepEqual(result.input_worker_id, workerIds);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -361,8 +360,8 @@ await test("large saved context retains cancellation results and diagnostics", a
         "--user-context-stdin",
       ],
       userContext,
-    )) as { scan: { scanId: string } };
-    const scanId = begun.scan.scanId;
+    )) as { deepScan: { scanId: string } };
+    const scanId = begun.deepScan.scanId;
     const readScan = async () =>
       (await executeWorkbench(fixturePython, [
         "get-scan",

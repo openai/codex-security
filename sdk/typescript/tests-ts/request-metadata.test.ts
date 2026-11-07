@@ -108,11 +108,11 @@ test("native table overrides preserve inherited literal metadata and opt-outs", 
     { responses_api_metadata: { "caller.tag": "synthetic" } },
     { surface: "cli", command: "publish", providerResolved: false },
   );
-  const { readCodexRuntimeConfigWithOrigins } = await import(
-    pathToFileURL(join(PLUGIN_ROOT, "scripts", "codex_profile.mjs")).href
+  const { readDeepScanRuntimeConfig } = await import(
+    pathToFileURL(join(PLUGIN_ROOT, "mcp", "permission-profile-preflight.mjs"))
+      .href
   );
-  const { config } = await readCodexRuntimeConfigWithOrigins({
-    clientVersion: VERSION,
+  const config = await readDeepScanRuntimeConfig({
     codexPath: resolveCodexCommand({}).command,
     // Native descendants can hold their working directory open on Windows.
     cwd: dirname(home),

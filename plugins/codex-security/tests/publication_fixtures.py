@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import sqlite3
 import uuid
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from workbench_test_support import (
-    mark_deep_aggregate_ready,
-    write_completed_contract,
-)
+from deep_deadline_crash import interrupt_finish_before_commit
+from workbench_test_support import read_review_state, write_completed_contract
 
 
 class PublicationScan(SimpleNamespace):
@@ -28,7 +28,7 @@ class PublicationScan(SimpleNamespace):
         }
 
     def add_worker(self, connection=None, *, status="succeeded") -> Path:
-        """Seed a worker row and artifact directory from a persisted coordinator database."""
+        """Register a discovery worker and return the path where the test can write its result manifest."""
         worker_id = str(uuid.uuid4())
         output = self.scan_dir / "workers" / worker_id
         output.mkdir(parents=True)
@@ -54,6 +54,33 @@ class PublicationScan(SimpleNamespace):
             )
         return result
 
+    def canceled_discovery_output(self, connection=None, *, attempt=1):
+        connection = self.connection if connection is None else connection
+        result = self.add_worker(connection, status="canceled")
+        worker_id = result.parent.name
+        output = self.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
+        output.parent.mkdir(parents=True)
+        result.parent.rename(output)
+        with connection:
+            connection.execute(
+                "UPDATE deep_scan_workers SET artifact_dir = ?, prompt_path = ?, "
+                "result_manifest_path = NULL, attempt = ? WHERE id = ?",
+                (str(output), str(output.parent / "prompt.md"), attempt, worker_id),
+            )
+        return worker_id, output
+
+    def finish(self, connection=None, *, terminal_reason="saturated"):
+        return self.api["deep_scan"].finish_deep_scan(
+            self.connection if connection is None else connection,
+            Namespace(
+                scan_id=self.scan_id,
+                terminal_reason=terminal_reason,
+                manifest_path=str(self.scan_dir / "scan-manifest.json"),
+                staged_manifest_path=None,
+                omitted_worker_id=[],
+            ),
+        )["deepScan"]
+
     def complete(self, connection=None, *, prepare_only=False):
         return self.api["complete_scan"](
             self.connection if connection is None else connection,
@@ -72,7 +99,9 @@ class PublicationScan(SimpleNamespace):
         return self.api["saved_results"].preserve_scan_results(
             self.api["_WORKBENCH_DB_CONTEXT"],
             self.connection if connection is None else connection,
-            Namespace(scan_id=self.scan_id, claim_token=None, thread_id=None, cost_json=None),
+            Namespace(
+                scan_id=self.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+            ),
         )["scan"]
 
     def recover(self):
@@ -83,17 +112,17 @@ class PublicationScan(SimpleNamespace):
 
 @pytest.fixture
 def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
-    return _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, historical=False)
-
-
-@pytest.fixture
-def historical_publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
-    return _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, historical=True)
-
-
-def _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, *, historical):
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    deep = workbench_api["deep_scan"]
+    monkeypatch.setattr(
+        deep,
+        "_dependencies",
+        SimpleNamespace(
+            **workbench_api,
+            preserve_stopped_results=workbench_api["preserve_stopped_results_after_transition"],
+        ),
+    )
 
     def create(*, mode="deep", scope=".", paths=None):
         target = tmp_path / "target"
@@ -135,8 +164,8 @@ def _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, *, his
         timestamp = workbench_db.execute(
             "SELECT started_at FROM scans WHERE id = ?", (scan_id,)
         ).fetchone()[0]
-        if mode == "deep" and historical:
-            # Historical deep runs keep their original coordinator row when reopened.
+        if mode == "deep":
+            # Start with a finished Deep result so these tests only need to save it.
             with workbench_db:
                 workbench_db.execute(
                     "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
@@ -152,8 +181,6 @@ def _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, *, his
                         timestamp,
                     ),
                 )
-        elif mode == "deep":
-            mark_deep_aggregate_ready(tmp_path / "state", scan_id, scan_dir)
         coverage_mode = (
             "scoped_path"
             if paths is not None or scope != "."
@@ -194,14 +221,86 @@ def _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, *, his
         return PublicationScan(
             api=workbench_api,
             connection=workbench_db,
-            timestamp=timestamp,
             scan_id=scan_id,
             scan_dir=scan_dir,
+            timestamp=timestamp,
             findings=findings,
             coverage=coverage,
         )
 
     return create
+
+
+@pytest.fixture
+def saturated_scan(publication_scan):
+    scan = publication_scan()
+    completed_result = scan.add_worker()
+    completed_result.write_text(json.dumps(scan.worker_draft(scan.findings)))
+    reducer_result = scan.add_worker()
+    reducer_result.write_bytes(completed_result.read_bytes())
+    with scan.connection:
+        scan.connection.execute(
+            "UPDATE deep_scan_workers SET completion_sequence = 1 WHERE id = ?",
+            (completed_result.parent.name,),
+        )
+        scan.connection.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
+            (reducer_result.parent.name,),
+        )
+        scan.connection.execute(
+            "INSERT INTO deep_scan_dedup_inputs "
+            "(scan_id, dedup_worker_id, discovery_worker_id, input_order) VALUES (?, ?, ?, 0)",
+            (scan.scan_id, reducer_result.parent.name, completed_result.parent.name),
+        )
+        scan.connection.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "consecutive_no_new = stop_after_no_new, completion_sequence = 1, "
+            "max_discovery_runs = 3, discovery_runs_dispatched = 1, "
+            "manifest_path = NULL, terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    scan.completed_worker_id = completed_result.parent.name
+    scan.reducer_id = reducer_result.parent.name
+    return scan
+
+
+@pytest.fixture
+def deadline_scan(saturated_scan):
+    with saturated_scan.connection:
+        saturated_scan.connection.execute(
+            "UPDATE deep_scan_runs SET created_at = '2000-01-01T00:00:00+00:00' WHERE scan_id = ?",
+            (saturated_scan.scan_id,),
+        )
+    return saturated_scan
+
+
+@pytest.fixture
+def finish_after_crashes(deadline_scan, tmp_path):
+    def run():
+        scan = deadline_scan
+        database = tmp_path / "crash-recovery.db"
+        with sqlite3.connect(database) as connection:
+            scan.connection.backup(connection)
+
+        publications = []
+        for hash_seed in (1, 17, 83):
+            interrupt_finish_before_commit(database, scan, hash_seed)
+            publications.append(read_review_state(scan.connection, scan.scan_dir))
+            with sqlite3.connect(database) as connection:
+                status = connection.execute(
+                    "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+                ).fetchone()[0]
+                assert status == "running"
+        with sqlite3.connect(database) as connection:
+            connection.row_factory = sqlite3.Row
+            scan.finish(connection, terminal_reason="capped")
+            completed = scan.complete(connection)
+        coverage = read_review_state(scan.connection, scan.scan_dir)
+        assert completed["progress"]["status"] == "complete"
+        assert all(publication == coverage for publication in publications)
+        return completed, coverage
+
+    return run
 
 
 def assert_published_aggregate(scan):
@@ -216,12 +315,18 @@ def assert_published_aggregate(scan):
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         for field in ("documentType", "schemaVersion", "scanId"):
             coverage.pop(field)
-        assert coverage == {
-            key: value for key, value in scan.coverage.items() if key != "completeness"
-        }
+        assert coverage == scan.coverage
     else:
         assert manifest["scan"]["review"] == {
-            "excludedPaths": [item["pattern"] for item in scan.coverage["explicitExclusions"]]
+            "excludedPaths": [item["pattern"] for item in scan.coverage["explicitExclusions"]],
         }
         assert not (scan.scan_dir / "coverage.json").exists()
     assert (scan.scan_dir / "report.md").is_file()
+
+
+def worker_finding(scan, anchor):
+    finding = copy.deepcopy(scan.findings[0])
+    finding["identity"] = {"anchor": anchor}
+    finding["title"] = anchor
+    finding["provenance"] = {"source": "local_plugin"}
+    return finding

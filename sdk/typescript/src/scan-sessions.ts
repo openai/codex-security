@@ -1,6 +1,5 @@
 import { isAbsolute, join, relative, sep } from "node:path";
 import { isRecord } from "./record.js";
-import { sessionLines } from "./session-lines.js";
 
 export function sessionStartedAt(timestamp: unknown): number | null {
   const startedAt =
@@ -69,22 +68,4 @@ export function isScanArtifactDirectory(
     components[0] !== ".." &&
     relative(join(workers, components[0]!, "output"), workingDirectory) === ""
   );
-}
-
-export async function* sessionEvents(
-  path: string,
-): AsyncGenerator<Record<string, unknown>> {
-  try {
-    for await (const line of sessionLines(path)) {
-      if (line.trim() === "") continue;
-      try {
-        const event: unknown = JSON.parse(line);
-        if (isRecord(event)) yield event;
-      } catch {
-        continue;
-      }
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
 }

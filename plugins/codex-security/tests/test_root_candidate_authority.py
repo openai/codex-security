@@ -6,9 +6,9 @@ import copy
 import hashlib
 import json
 import os
+from argparse import Namespace
 
 import pytest
-from publication_fixtures import historical_publication_scan
 from workbench_test_support import (
     read_review_state,
     saved_draft,
@@ -17,8 +17,6 @@ from workbench_test_support import (
     write_checkpoint,
     write_result_draft,
 )
-
-publication_scan = historical_publication_scan
 
 
 def canonical_disposition(scan, disposition, complete_marker):
@@ -76,7 +74,7 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
     checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", pending, mtime_ns=pending_time)
     canonical_disposition(scan, disposition, complete_marker)
     original = checkpoint.read_bytes()
-    saved = workbench_api["saved_results"].checkpoint_publication
+    saved = workbench_api["saved_results"]
     prepared_coverage = []
     write = saved._write_prepared_scan_finalization
 
@@ -135,7 +133,7 @@ def test_accepted_pending_root_tie_survives_canonical_disposition(
     )
     checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", pending, mtime_ns=100)
     select_checkpoint(scan.scan_dir, checkpoint, mtime_ns=200)
-    saved = workbench_api["saved_results"].checkpoint_publication
+    saved = workbench_api["saved_results"]
     saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     canonical_disposition(scan, disposition, True)
     scan.fail()
@@ -160,7 +158,7 @@ def test_restored_root_observation_keeps_tied_pending_payload(
 ):
     scan = publication_scan(mode="standard")
     canonical_disposition(scan, disposition, True)
-    saved = workbench_api["saved_results"].checkpoint_publication
+    saved = workbench_api["saved_results"]
     _, terminal = saved._read_saved_parent_result(scan.scan_dir, scan.scan_id)
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         os.utime(scan.scan_dir / name, ns=(0, 0))
@@ -217,7 +215,8 @@ def test_root_outcome_uses_its_own_completion_marker(
     interrupted,
 ):
     scan = publication_scan()
-    saved = workbench_api["saved_results"].checkpoint_publication
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     canonical_disposition(scan, disposition, True)
     _, root_draft = saved._read_saved_parent_result(scan.scan_dir, scan.scan_id)
     if root_complete is None:
@@ -254,8 +253,11 @@ def test_root_outcome_uses_its_own_completion_marker(
             (scan.scan_id,),
         )
     ] == [str(result) for result in results]
+    stop_args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."
+    )
     if flow == "recover":
-        scan.fail()
+        saved.fail_scan(context, workbench_db, stop_args)
     selected = write_checkpoint(scan.scan_dir / "checkpoints", root_draft, mtime_ns=100)
     select_checkpoint(scan.scan_dir, selected, mtime_ns=200)
     pending = write_checkpoint(
@@ -279,7 +281,7 @@ def test_root_outcome_uses_its_own_completion_marker(
     with monkeypatch.context() as patch:
         patch.setattr(saved, "_write_prepared_scan_finalization", publish)
         if flow == "stop":
-            scan.fail()
+            saved.fail_scan(context, workbench_db, stop_args)
         elif interrupted:
             with pytest.raises(OSError, match="Synthetic mixed-source publication interruption"):
                 scan.recover()
@@ -323,7 +325,8 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
     later_selection,
 ):
     scan = publication_scan(mode=mode)
-    saved = workbench_api["saved_results"].checkpoint_publication
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     finding = copy.deepcopy(scan.findings[0])
     finding["extensions"] = {"candidateId": "candidate-review"}
     reported = saved_draft(scan.scan_id, complete=True, findings=[finding])
@@ -388,14 +391,17 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
             raise OSError("Synthetic legacy-root publication interruption")
         return write(prepared, **kwargs)
 
+    preserve_args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
     with monkeypatch.context() as patch:
         patch.setattr(saved, "_write_prepared_scan_finalization", publish)
         if interrupted:
             with pytest.raises(OSError, match="Synthetic legacy-root publication interruption"):
-                scan.preserve()
+                saved.preserve_scan_results(context, workbench_db, preserve_args)
         else:
-            scan.preserve()
-    published = scan.preserve()
+            saved.preserve_scan_results(context, workbench_db, preserve_args)
+    published = saved.preserve_scan_results(context, workbench_db, preserve_args)["scan"]
     assert published["findingCount"] == 1
     assert not published["resultsRecoveryNeeded"]
     manifest_path = scan.scan_dir / "scan-manifest.json"
@@ -469,7 +475,8 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
     identity,
 ):
     scan = publication_scan(mode="standard")
-    saved = workbench_api["saved_results"].checkpoint_publication
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     finding = copy.deepcopy(scan.findings[0])
     finding["extensions"] = {"candidateId": "candidate-review"}
     pending = {"candidateId": "candidate-review", "reason": "Accepted pending review."}
@@ -547,15 +554,18 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
             raise OSError("Synthetic tied-pending publication interruption")
         return write(prepared, **kwargs)
 
-    action = scan.preserve if flow == "preserve" else scan.recover
+    args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
+    action = saved.preserve_scan_results if flow == "preserve" else saved.recover_scan_results
     with monkeypatch.context() as patch:
         patch.setattr(saved, "_write_prepared_scan_finalization", publish)
         if interrupted:
             with pytest.raises(OSError, match="Synthetic tied-pending publication interruption"):
-                action()
+                action(context, workbench_db, args)
         else:
-            action()
-    published = scan.preserve()
+            action(context, workbench_db, args)
+    published = saved.preserve_scan_results(context, workbench_db, args)["scan"]
     retained_pending = accepted_time >= 100
     assert published["findingCount"] == int(retained_pending)
     assert not published["resultsRecoveryNeeded"]
@@ -573,14 +583,14 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
         if retained_pending:
             assert pending["reason"] in {row["reason"] for row in candidate_rows}
         assert any(row["id"] == "independent-review" for row in current_coverage["deferred"])
-    recovered = scan.recover()
+    recovered = saved.recover_scan_results(context, workbench_db, args)["scan"]
     assert recovered["findingCount"] == int(retained_pending)
     assert not recovered["resultsRecoveryNeeded"]
     assert json.loads((scan.scan_dir / "findings.json").read_text()) == findings
     assert read_review_state(workbench_db, scan.scan_dir) == coverage
     manifest_path = scan.scan_dir / "scan-manifest.json"
     manifest = manifest_path.read_bytes()
-    scan.recover()
+    saved.recover_scan_results(context, workbench_db, args)
     assert manifest_path.read_bytes() == manifest
     assert all(
         (scan.scan_dir / path).read_bytes() == contents for path, contents in originals.items()

@@ -19,9 +19,6 @@ describe("environmentValue", () => {
     expect(environmentValue({ Home: "/shell-home" }, "HOME")).toBe(
       "/shell-home",
     );
-    expect(environmentValue({ TOKEN: "  synthetic-value  " }, "TOKEN")).toBe(
-      "  synthetic-value  ",
-    );
   });
 });
 

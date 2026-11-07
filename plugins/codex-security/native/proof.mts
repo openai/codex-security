@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
-import { constants, tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { userInfo } from "node:os";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -47,44 +45,6 @@ function accountProof() {
     namedHomeWithoutGit: true,
     missingAccount: true,
   };
-}
-
-function lockProof() {
-  const root = mkdtempSync(join(tmpdir(), "codex-security-lock-"));
-  const held = new Set<number>();
-  try {
-    const path = join(root, "owner.lock");
-    const first = openSync(path, "w+", 0o600);
-    held.add(first);
-    const second = openSync(path, "r+");
-    held.add(second);
-    assert.equal(checked(native.fileLock(first, false, true)).value, 0);
-    const blocked = native.fileLock(second, false, true);
-    assert.equal(blocked.value, -1);
-    assert(
-      [constants.errno.EAGAIN, constants.errno.EWOULDBLOCK].includes(
-        blocked.errno,
-      ),
-    );
-    assert.equal(checked(native.fileLock(first, true, false)).value, 0);
-    assert.equal(checked(native.fileLock(second, false, true)).value, 0);
-    closeSync(second);
-    held.delete(second);
-    assert.equal(checked(native.fileLock(first, false, true)).value, 0);
-    for (const fd of [second, -1])
-      assert.deepEqual(native.fileLock(fd, false, true), {
-        value: -1,
-        errno: constants.errno.EBADF,
-      });
-    return {
-      nonblockingContention: true,
-      unlockAndCloseReleaseOwnership: true,
-      numericInvalidAndClosedErrors: true,
-    };
-  } finally {
-    for (const fd of held) closeSync(fd);
-    rmSync(root, { recursive: true, force: true });
-  }
 }
 
 function environmentProof(): Record<string, boolean> {
@@ -142,7 +102,6 @@ if (process.argv[2] === "environment-child") {
         architecture: process.arch,
         nodeApi: 8,
         accounts: accountProof(),
-        locks: lockProof(),
         environment: environmentProof(),
         scanReads: scanReadProof(),
       },

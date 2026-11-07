@@ -42,8 +42,7 @@ async function failedCommand(
         currentDirectory: ${JSON.stringify(root)},
         onWorkbench: () => ({ ...scan, recipe: {
           repository: ${JSON.stringify(root)},
-          target: { kind: "repository", paths: [] },
-          mode: ${JSON.stringify(command === "resume" ? "deep" : "standard")}, config: {},
+          target: { kind: "repository", paths: [] }, mode: "standard", config: {},
         }}),
         onTurn: (_repository, options) => options.onScanRegistered?.(scan),
         onRun: () => { throw new Error(${JSON.stringify(message)}); },

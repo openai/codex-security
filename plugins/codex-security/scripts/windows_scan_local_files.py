@@ -66,23 +66,17 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 # GetFileInformationByHandleEx / SetFileInformationByHandle classes.
 _FILE_RENAME_INFO_CLASS = 3
-_FILE_RENAME_INFO_EX_CLASS = 22
 _FILE_DISPOSITION_INFO_CLASS = 4
 _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
-_FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001
-_FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 
 _FILE_TYPE_DISK = 0x0001
 _FILE_NAME_OPENED = 0x00000008
-_ERROR_INVALID_FUNCTION = 1
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_PATH_NOT_FOUND = 3
 _ERROR_ACCESS_DENIED = 5
 _ERROR_SHARING_VIOLATION = 32
 _ERROR_LOCK_VIOLATION = 33
-_ERROR_NOT_SUPPORTED = 50
 _ERROR_FILE_EXISTS = 80
-_ERROR_INVALID_PARAMETER = 87
 _ERROR_INSUFFICIENT_BUFFER = 122
 _ERROR_ALREADY_EXISTS = 183
 _ERROR_DIRECTORY = 267
@@ -694,7 +688,7 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
             handle = _create_file(
                 path,
                 access=_GENERIC_READ | _FILE_READ_ATTRIBUTES,
-                # Keep the leaf fixed until its type and resolved name are verified.
+                # Denying write/delete sharing keeps the opened contents stable.
                 share=_FILE_SHARE_READ,
                 disposition=_OPEN_EXISTING,
                 flags=_FILE_FLAG_OPEN_REPARSE_POINT,
@@ -704,34 +698,15 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
                 _verify_regular_file(handle.value, path)
                 filename = Path(_final_path(handle.value)).name
                 resolved_path = PurePosixPath(relative_path).with_name(filename).as_posix()
-                # Reopen the same verified object, not its path. Denying write
-                # sharing keeps this snapshot immutable while allowing a writer
-                # to atomically replace the directory entry.
-                snapshot = _ReOpenFile(
-                    handle.value,
-                    _GENERIC_READ | _FILE_READ_ATTRIBUTES,
-                    _FILE_SHARE_READ | _FILE_SHARE_DELETE,
-                    _FILE_FLAG_OPEN_REPARSE_POINT,
-                )
-                if snapshot == _INVALID_HANDLE_VALUE:
-                    _raise_last_error("ReOpenFile", path)
-                with _OwnedHandle(int(snapshot)) as snapshot_handle:
-                    handle.close()
-                    raw_handle = snapshot_handle.detach()
-                    try:
-                        assert _msvcrt is not None
-                        descriptor = _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
-                        return descriptor, resolved_path
-                    except BaseException:
-                        _close_handle(raw_handle)
-                        raise
+                raw_handle = handle.detach()
+                try:
+                    assert _msvcrt is not None
+                    descriptor = _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
+                    return descriptor, resolved_path
+                except BaseException:
+                    _close_handle(raw_handle)
+                    raise
     except WindowsScanLocalFileError as exc:
-        if exc.errno in _MISSING_ERRORS:
-            raise FileNotFoundError(
-                errno.ENOENT,
-                f"{context}: {exc.strerror}",
-                exc.filename,
-            ) from exc
         raise WindowsScanLocalFileError(
             exc.errno,
             f"{context}: {exc.strerror}",
@@ -786,34 +761,21 @@ def _rename_handle(handle: int, destination_path: Path, replace_existing: bool) 
     )
     buffer = ctypes.create_string_buffer(buffer_size)
     info = ctypes.cast(buffer, ctypes.POINTER(_FileRenameInfo)).contents
-    replace_flag = _FILE_RENAME_REPLACE_IF_EXISTS if replace_existing else 0
-    info.FlagsOrReplaceIfExists = replace_flag | _FILE_RENAME_POSIX_SEMANTICS
+    info.FlagsOrReplaceIfExists = int(replace_existing)
     # The fully qualified destination uses a null RootDirectory. Verified
     # directory handles remain open to prevent ancestor replacement.
     info.RootDirectory = None
     info.FileNameLength = len(encoded_name)
     ctypes.memmove(ctypes.addressof(buffer) + file_name_offset, encoded_name, len(encoded_name))
-    if _SetFileInformationByHandle(
+    if not _SetFileInformationByHandle(
         handle,
-        _FILE_RENAME_INFO_EX_CLASS,
+        _FILE_RENAME_INFO_CLASS,
         buffer,
         buffer_size,
     ):
-        return
-    operation = "FileRenameInfoEx"
-    if ctypes.get_last_error() in {
-        _ERROR_INVALID_FUNCTION,
-        _ERROR_NOT_SUPPORTED,
-        _ERROR_INVALID_PARAMETER,
-    }:
-        # Older Windows/filesystem implementations only support FileRenameInfo.
-        operation = "FileRenameInfo"
-        info.FlagsOrReplaceIfExists = replace_flag
-        if _SetFileInformationByHandle(handle, _FILE_RENAME_INFO_CLASS, buffer, buffer_size):
-            return
-    if not replace_existing and ctypes.get_last_error() in _COLLISION_ERRORS:
-        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination_path))
-    _raise_last_error(f"SetFileInformationByHandle({operation})")
+        if not replace_existing and ctypes.get_last_error() in _COLLISION_ERRORS:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination_path))
+        _raise_last_error("SetFileInformationByHandle(FileRenameInfo)")
 
 
 def _mark_handle_for_deletion(handle: int) -> None:
@@ -887,7 +849,7 @@ def _existing_output_matches(path: Path, payload: bytes) -> bool:
 @contextlib.contextmanager
 def _written_temp(destination: Path, payload: bytes) -> Iterator[tuple[Path, _OwnedHandle]]:
     for _ in range(16):
-        path = destination.with_name(f".codex-security-{secrets.token_hex(8)}.tmp")
+        path = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
         try:
             handle = _create_file(
                 path,
@@ -1069,49 +1031,10 @@ def atomic_write(
             _verify_regular_file(handle.value, destination)
 
 
-def reserve_directory(
-    scan_dir: Path,
-    relative_path: str,
-    *,
-    expected_root_identity: tuple[int, int] | None = None,
-) -> bool:
-    with _locked_parent(
-        scan_dir, relative_path, create=True, expected_root_identity=expected_root_identity
-    ) as (parent, leaf):
-        path = parent / leaf
-        if _CreateDirectoryW(_extended_path(path), None):
-            return True
-        if ctypes.get_last_error() in _COLLISION_ERRORS:
-            return False
-        _raise_last_error("CreateDirectoryW", path)
-
-
-def prepare_directory(
-    scan_dir: Path,
-    relative_path: str,
-    *,
-    expected_root_identity: tuple[int, int] | None = None,
-) -> None:
-    with _locked_parent(
-        scan_dir,
-        relative_path + "/.directory",
-        create=True,
-        expected_root_identity=expected_root_identity,
-    ):
-        pass
-
-
-def unlink_if_exists(
-    scan_dir: Path,
-    relative_path: str,
-    *,
-    expected_root_identity: tuple[int, int] | None = None,
-) -> None:
+def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
     """Delete a scan-local regular file or reparse-point leaf without following it."""
 
-    with _locked_parent(
-        scan_dir, relative_path, create=False, expected_root_identity=expected_root_identity
-    ) as (parent_path, leaf_name):
+    with _locked_parent(scan_dir, relative_path, create=False) as (parent_path, leaf_name):
         path = parent_path / leaf_name
         handle = _create_file(
             path,

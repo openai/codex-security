@@ -153,7 +153,7 @@ def test_scan_context_stdin_preserves_newlines(tmp_path: Path, command: str) -> 
         environment={"CODEX_HOME": str(tmp_path / "codex-home")},
     )
 
-    assert result["scan"]["userContext"] == context
+    assert result["deepScan" if command == "begin-deep-scan" else "scan"]["userContext"] == context
 
 
 def test_workspace_context_stdin_survives_save_and_update(tmp_path: Path) -> None:

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { constants, open, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
-import type { JsonObject } from "./config.js";
+import { MODEL_FILE_SETTINGS, type JsonObject } from "./config.js";
+import { isRecord } from "./record.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { KnowledgeBaseSnapshot } from "./knowledge-base.js";
@@ -12,7 +13,7 @@ const KNOWLEDGE_SNAPSHOT_FILE = ".scan-knowledge.json";
 
 const knowledgeSnapshotSchema = z.object({
   sources: z.array(z.string()),
-  protectedRoots: z.array(z.string()),
+  protectedRoots: z.array(z.string()).optional(),
   documents: z.record(z.string(), z.string()),
 });
 
@@ -41,31 +42,91 @@ export function scanInputIdentity(
   };
 }
 
-export async function promptFileDigest(
-  path: string | undefined,
-  signal?: AbortSignal,
-): Promise<string | null> {
-  return path === undefined
-    ? null
-    : createHash("sha256")
-        .update(await readFile(path, { signal }))
-        .digest("hex");
-}
+const legacyModelFileDigests = {
+  model_instructions_file: "modelInstructionsFileSha256",
+  experimental_compact_prompt_file: "compactPromptFileSha256",
+  model_catalog_json: "modelCatalogFileSha256",
+} as const;
 
-export async function modelFileDigests(
+async function modelFileInput(
   config: JsonObject,
+  setting: (typeof MODEL_FILE_SETTINGS)[number],
   signal?: AbortSignal,
 ) {
-  const digest = (setting: string) =>
-    promptFileDigest(
-      typeof config[setting] === "string" ? config[setting] : undefined,
-      signal,
+  const path = config[setting];
+  if (typeof path !== "string" || !path) return null;
+  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!(await file.stat()).isFile())
+      throw new CodexSecurityError(
+        `Expected a regular file for ${setting}: ${path}`,
+      );
+    return {
+      path,
+      sha256: createHash("sha256")
+        .update(await file.readFile({ signal }))
+        .digest("hex"),
+    };
+  } finally {
+    await file.close();
+  }
+}
+
+export async function deepModelFileInputs(
+  config: JsonObject,
+  signal?: AbortSignal,
+): Promise<JsonObject> {
+  const inputs: JsonObject = {};
+  for (const setting of MODEL_FILE_SETTINGS)
+    inputs[setting] = await modelFileInput(config, setting, signal);
+  return inputs;
+}
+
+export async function validateDeepModelFileInputs(
+  original: unknown,
+  config: JsonObject,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!isRecord(original)) return;
+  const inputs = original["modelFileInputs"];
+  if (inputs !== undefined && !isRecord(inputs))
+    throw new CodexSecurityError(
+      "Invalid model-file input receipt for the saved Deep Scan.",
     );
-  return {
-    modelInstructionsFileSha256: await digest("model_instructions_file"),
-    compactPromptFileSha256: await digest("experimental_compact_prompt_file"),
-    modelCatalogFileSha256: await digest("model_catalog_json"),
-  };
+  for (const setting of MODEL_FILE_SETTINGS) {
+    const saved = inputs?.[setting];
+    const priorDigest = original[legacyModelFileDigests[setting]];
+    if (saved === undefined && priorDigest === undefined) continue;
+    if (
+      saved !== undefined &&
+      saved !== null &&
+      (!isRecord(saved) ||
+        typeof saved["path"] !== "string" ||
+        typeof saved["sha256"] !== "string")
+    )
+      throw new CodexSecurityError(
+        `Invalid saved Deep Scan input for ${setting}.`,
+      );
+    let current;
+    try {
+      current = await modelFileInput(config, setting, signal);
+    } catch (cause) {
+      signal?.throwIfAborted();
+      throw new CodexSecurityError(
+        `Could not read the saved Deep Scan's ${setting}: ${errorMessage(cause)}. Restore the original file and resume the scan.`,
+        { cause },
+      );
+    }
+    const expected =
+      saved === undefined ? priorDigest : (saved?.["sha256"] ?? null);
+    if (
+      (current?.sha256 ?? null) !== expected ||
+      (isRecord(saved) && current?.path !== saved["path"])
+    )
+      throw new CodexSecurityError(
+        `The saved Deep Scan's ${setting} changed. Restore the original input and resume the scan, or start a new scan.`,
+      );
+  }
 }
 
 export async function saveScanKnowledge(

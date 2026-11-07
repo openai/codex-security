@@ -1786,14 +1786,6 @@ describe("canonical scan contract", () => {
   });
 
   test("binds requested path scope, mode, and plugin version", async () => {
-    if (
-      runTestInSubprocess(
-        import.meta.path,
-        "binds requested path scope, mode, and plugin version",
-      )
-    )
-      return;
-    Reflect.deleteProperty(Set.prototype, "isSubsetOf");
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);

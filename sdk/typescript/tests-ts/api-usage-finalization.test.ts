@@ -1,3 +1,4 @@
+import { hash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
@@ -11,12 +12,20 @@ import {
   scanRuntimeDependencies,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
-test.each(["pending", "finalized", "unavailable", "standard"] as const)(
-  "finalizes saved completion-turn usage in an ordinary composed child when accounting is %s",
+test.each([
+  "pending",
+  "finalized",
+  "unavailable",
+  "standard",
+  "lost-reply",
+  "uncommitted",
+] as const)(
+  "finalizes saved completion-turn usage when accounting is %s",
   async (scenario) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -31,11 +40,41 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
     const accountingFailure = "Synthetic usage storage failure: token=fixture";
     const completionWarning = "Synthetic saved scan warning";
     let turnFinished = false;
+    let committed = false;
+    const writeFailure = new Error("Host completion did not commit");
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (_options, args, input) => {
+      canRunDirectDeepScan: () => false,
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         commands.push(args);
+        if (scenario === "lost-reply" && args[0] === "get-scan" && committed) {
+          return {
+            scan: {
+              scanId: "scan_example_001",
+              progress: { status: "complete" },
+            },
+          };
+        }
+        if (scenario === "uncommitted" && args[0] === "get-scan")
+          return {
+            scan: {
+              scanId: "scan_example_001",
+              progress: { status: "running" },
+            },
+          };
         if (args[0] === "complete-scan") {
+          if (scenario === "uncommitted") throw writeFailure;
+          if (scenario === "lost-reply") {
+            if (!committed) {
+              committed = true;
+              throw new Error("Lost completion acknowledgement");
+            }
+            expect(args).toEqual([
+              "complete-scan",
+              "--scan-id",
+              "scan_example_001",
+            ]);
+          }
           return {
             scan: {
               warnings: [completionWarning],
@@ -62,6 +101,19 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
       },
       createCodex: codexFactory(async () => {
         await copyCompletedScan(root);
+        if (scenario !== "standard") {
+          const coveragePath = join(scanDir, "coverage.json");
+          const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+          coverage.mode = "deep_repository";
+          const coverageBytes = `${JSON.stringify(coverage)}\n`;
+          await writeFile(coveragePath, coverageBytes);
+          const manifestPath = join(scanDir, "scan-manifest.json");
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          manifest.scan.artifacts.find(
+            (artifact: { path: string }) => artifact.path === "coverage.json",
+          ).sha256 = hash("sha256", coverageBytes);
+          await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+        }
         async function* events() {
           yield* completedEvents();
           turnFinished = true;
@@ -70,8 +122,8 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
       }),
     });
     try {
-      const result = await client.run(repository, {
-        mode: "standard",
+      const pending = client.run(repository, {
+        mode: scenario === "standard" ? "standard" : "deep",
         onWarning: (warning) => {
           warnings.push(warning);
           if (warning.includes(accountingFailure))
@@ -79,11 +131,23 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
         },
         onObserverError: (observer) => observerErrors.push(observer),
       });
+      if (scenario === "uncommitted") {
+        await expect(pending).rejects.toBe(writeFailure);
+        expect(
+          commands.filter(([command]) => command === "complete-scan"),
+        ).toHaveLength(1);
+        return;
+      }
+      const result = await pending;
       expect(result).toMatchObject({ scanDir, threadId: "thread-1" });
       const finalization = commands.filter(
         (args) => args[0] === "finalize-scan-usage",
       );
-      if (scenario === "pending" || scenario === "unavailable") {
+      if (
+        scenario === "pending" ||
+        scenario === "unavailable" ||
+        scenario === "lost-reply"
+      ) {
         expect(finalization).toEqual([
           [
             "finalize-scan-usage",
@@ -125,6 +189,7 @@ test.each([
   "post-turn-error",
   "post-turn-cancel",
   "transport-error",
+  "resumed",
   "accounting-error",
 ] as const)(
   "preserves a sealed scan and its %s outcome while finalizing usage",
@@ -138,9 +203,10 @@ test.each([
         mkdir(path, { mode: 0o700 }),
       ),
     );
-    if (scenario === "post-turn-error") await copyCompletedScan(root);
     const report = "# Sealed scan report\n";
     await writeFile(join(scanDir, "report.md"), report);
+    if (scenario === "resumed")
+      await writeSession(codexHome, "thread-1", {}, { cwd: scanDir });
     const controller = new AbortController();
     const commands: Array<readonly string[]> = [];
     const warnings: string[] = [];
@@ -172,6 +238,7 @@ test.each([
     }
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
+      canRunDirectDeepScan: () => false,
       createCodex: () => ({
         startThread: () => ({
           id: null,
@@ -225,7 +292,10 @@ test.each([
     try {
       const failure = await client
         .run(repository, {
-          mode: "standard",
+          mode: "deep",
+          ...(scenario === "resumed"
+            ? { resumeScanId: "scan_example_001", outputDir: scanDir }
+            : {}),
           signal: controller.signal,
           onWarning: (warning) => {
             warnings.push(warning);

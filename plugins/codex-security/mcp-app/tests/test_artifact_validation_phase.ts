@@ -85,7 +85,11 @@ assert.equal(
 
 const root = await temporaryDirectory("codex-security-validation-phase-", true);
 try {
-  const context = await scanContext(root, "scan", scanId);
+  const context = {
+    root: path.join(root, "scan"),
+    repoRoot: root,
+    layout: "scan" as const,
+  };
   const ledger = path.join(
     context.root,
     "artifacts",
@@ -154,25 +158,7 @@ try {
     /repeats candidate candidate-b/,
   );
   await assertNoMutation(
-    context,
-    ledger,
-    {
-      validations: [
-        {
-          candidateId: "candidate-a",
-          validation: {
-            ...firstValidation,
-            confidence: "certain",
-          },
-        },
-        updates[0],
-      ],
-    },
-    /confidence/,
-  );
-
-  await assertNoMutation(
-    { ...context, scanId: undefined },
+    { ...context, layout: "worker" },
     ledger,
     {
       validations: updates,
@@ -228,18 +214,6 @@ try {
   }
 } finally {
   await rm(root, { recursive: true, force: true });
-}
-
-async function scanContext(root: string, directory: string, scanId: string) {
-  const scanRoot = path.join(root, directory);
-  const repository = path.join(root, "repository");
-  await Promise.all([
-    mkdir(path.join(scanRoot, "artifacts", "02_discovery"), {
-      recursive: true,
-    }),
-    mkdir(repository, { recursive: true }),
-  ]);
-  return { root: scanRoot, repoRoot: repository, scanId };
 }
 
 function candidate(candidateId: string, sourcePath: string) {

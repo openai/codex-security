@@ -93,8 +93,6 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
         WHERE before_scans.target_id = after_scans.target_id
-            AND before_scans.parent_scan_role IS NOT 'deep_pass'
-            AND after_scans.parent_scan_role IS NOT 'deep_pass'
         """
     ):
         before = group((match["target_id"], match["before_finding_id"]))
@@ -102,13 +100,11 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         if before != after:
             parents[after] = before
 
-    latest_scan_by_target = {
-        row["target_id"]: row["id"]
-        for row in connection.execute(
-            "SELECT target_id, id FROM scans WHERE status = 'complete' "
-            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY julianday(upper(started_at)), id"
+    latest_scan_by_target = dict(
+        connection.execute(
+            "SELECT target_id, id FROM scans WHERE status = 'complete' ORDER BY julianday(upper(started_at)), id"
         )
-    }
+    )
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
@@ -142,7 +138,6 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         JOIN scans ON scans.id = occurrences.scan_id
         JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
-        WHERE scans.parent_scan_role IS NOT 'deep_pass'
         """,
     ):
         grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
@@ -216,7 +211,7 @@ def list_repositories(
         SELECT targets.id AS repository_id, targets.display_name, targets.current_path,
                {scan_history.SCAN_SUMMARY_COLUMNS}
         FROM security_targets AS targets
-        LEFT JOIN scans ON scans.target_id = targets.id AND scans.parent_scan_role IS NOT 'deep_pass'
+        LEFT JOIN scans ON scans.target_id = targets.id
             AND scans.id IN (SELECT scan_id FROM scan_progress)
         LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
         LEFT JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id

@@ -43,7 +43,8 @@ const saveJson = (path: string, value: unknown) =>
   writeFile(path, JSON.stringify(value, null, 2) + "\n");
 console.log(`Eval artifacts: ${reportDirectory}`);
 await withEvalState(
-  async () => ({ home: await createIsolatedHome() }),
+  createIsolatedHome,
+  undefined,
   async ({ root, home, signal }) => {
     const prepared = await prepareStandardEval(root, pluginRoot);
     await saveJson(join(reportDirectory, "experiment.json"), {

@@ -264,7 +264,7 @@ function prepare(
     LEFT JOIN local_finding_embeddings AS embeddings ON findings.id = embeddings.finding_id
     ${
       payload.repositoryId === undefined
-        ? "WHERE findings.details_json IS NOT NULL OR EXISTS (SELECT 1 FROM finding_repositories WHERE finding_id = findings.id)"
+        ? ""
         : "WHERE EXISTS (SELECT 1 FROM finding_repositories WHERE finding_id = findings.id AND repository_id = ?)"
     }
     ORDER BY findings.created_at, findings.id`,

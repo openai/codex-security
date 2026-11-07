@@ -1,5 +1,5 @@
 import { afterEach, expect, onTestFinished, test } from "bun:test";
-import { checkReplayWorkerSettings } from "./support/replay-worker-boundary.js";
+import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
   cp,
@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { stringify } from "smol-toml";
 import { main } from "../src/cli.js";
 import {
@@ -334,7 +335,6 @@ test.each(
     const scanDir = join(root, "scan");
     for (const path of [repository, home, runtimeHome, scanDir])
       await mkdir(path, { mode: 0o700 });
-    await writeFile(join(root, "caller-catalog.json"), '{"models":[]}\n');
     const profilePath = join(home, "review.config.toml");
     const fileProfile = (version: string) => ({
       model: version === "first" ? "initial-model" : "updated-model",
@@ -359,7 +359,6 @@ test.each(
     await writeFile(profilePath, stringify(fileProfile("first")));
     const explicit: JsonObject = {
       profile: "review",
-      approval_policy: "never",
       analytics: { enabled: false },
       shell_environment_policy: {
         inherit: "none",
@@ -400,9 +399,12 @@ test.each(
             recipe = JSON.parse(input!).recipe;
           return mockWorkbench(args, input);
         },
-        createCodex: () => {
-          throw new Error("synthetic stop after registration");
-        },
+        createCodex: async () => ({
+          startThread: () => ({
+            id: null,
+            runStreamed: rejecting("synthetic stop after registration"),
+          }),
+        }),
       },
     );
     try {
@@ -464,7 +466,18 @@ test.each(
               : undefined,
       );
       expect(restored).not.toHaveProperty("model_instructions_file");
-      await checkReplayWorkerSettings(root, restored);
+      const workerResult = execFileSync(
+        Bun.which("node")!,
+        [
+          "--experimental-strip-types",
+          fileURLToPath(
+            new URL("./support/replay-worker-boundary.ts", import.meta.url),
+          ),
+          root,
+        ],
+        { input: JSON.stringify(restored), encoding: "utf8" },
+      );
+      expect(JSON.parse(workerResult)).toEqual({ launches: 3 });
       const profile = recipe!["providerProfile"] as JsonObject;
       const privatePath = join(
         codexSecurityCredentialHome(environment),

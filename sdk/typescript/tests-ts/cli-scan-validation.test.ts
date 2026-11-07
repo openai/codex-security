@@ -295,7 +295,6 @@ test("cached empty scan validation rechecks an unchanged, edited, and committed 
         prepareOutputDir: async () => scanDir,
         resolvePluginPython: async () => python,
         runWorkbench: workbench,
-        prepareScanArtifactRestorer: runtime.prepareScanArtifactRestorer,
         createCodex: codexFactory(async () => {
           modelCalls++;
           await copyCompletedScan(root);

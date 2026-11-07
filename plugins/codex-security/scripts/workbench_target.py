@@ -202,7 +202,7 @@ def _stream_is_binary(output: BinaryIO, size: int, *, drain: bool = False) -> bo
     return binary
 
 
-def protected_repository_root(target: Path) -> Path:
+def _protected_repository_root(target: Path) -> Path:
     root = target.resolve()
     if root.is_file():
         root = root.parent
@@ -236,7 +236,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         candidates = iter((candidate,))
 
     try:
-        repository = protected_repository_root(protected_root)
+        repository = _protected_repository_root(protected_root)
     except (OSError, RuntimeError):
         return None
 
@@ -1369,7 +1369,7 @@ def require_remediation_target(value: str) -> Path:
         raise SystemExit("Remediation target must be an absolute local directory path.")
     try:
         resolved = stored.resolve(strict=True)
-    except (FileNotFoundError, OSError) as exc:
+    except (OSError, RuntimeError) as exc:
         raise SystemExit(
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc

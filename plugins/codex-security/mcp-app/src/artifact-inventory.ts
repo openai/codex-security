@@ -17,10 +17,6 @@ import { decodePosixBytes, encodePosixPath } from "./helpers/posix-path";
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const label = "review_items";
 
-export interface PreparedReviewItems {
-  reviewItemsTotal: number;
-}
-
 const definitions = artifactSchemaDocuments["tools/review-items"].$defs;
 export type ReviewItem = z.infer<typeof definitions.reviewItem>;
 export const {
@@ -32,8 +28,8 @@ export const {
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
-): Promise<PreparedReviewItems> {
-  if (!context.scanId) {
+) {
+  if (context.layout !== "scan") {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
     );

@@ -18,23 +18,19 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    _prepare_scan_finalization,
     _read_scan_local_json_bytes,
     _read_sealed_scan,
+    manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
 from review_state import review_state
-from workbench.handoff import require_current_continuation
-from workbench_composition import CompositionView
+from workbench.storage import require_host_deep_scan_output
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
-from workbench_scan_start import scan_target_identity, stored_diff_target
+from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
-from workbench_target import (
-    git_output,
-    git_revision,
-    require_scan_target_identity,
-    worktree_content_digest,
-)
+from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import timestamp_key
 
 
@@ -77,162 +73,89 @@ def cli_scan_resume(
     wb: Any,
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
-    *,
-    sealed_producer_version: Callable[[sqlite3.Row], str | None],
-    claim_token: str | None = None,
+    workspace: sqlite3.Row,
 ) -> dict[str, Any]:
     scan = scan_with_progress(connection, scan["id"])
-    if scan["recipe_json"] is None:
-        raise SystemExit("Resume requires a scan with a saved launch recipe.")
+    if scan["mode"] != "deep" or scan["recipe_json"] is None:
+        raise SystemExit("Resume requires a Deep Scan with a saved CLI launch recipe.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
         raise SystemExit(
             "Resume requires a running scan; completed, failed, and canceled scans cannot resume."
         )
-    require_current_continuation(
-        scan, claim_token, error_message="Resume requires the original owning CLI session."
-    )
-    producer_version = sealed_producer_version(scan)
-    if producer_version is not None:
-        repository = Path(scan["target_path"])
-    else:
+    thread_id = scan["continuation_thread_id"]
+    owner = scan["deep_scan_owner_thread_id"] or workspace["thread_id"]
+    if (
+        not thread_id
+        or (owner is not None and owner != thread_id)
+        or scan["handoff_status"] != "delivered"
+        or scan["handoff_claim_token"] is not None
+    ):
+        raise SystemExit("Resume requires the original owning CLI session.")
+    run = connection.execute(
+        "SELECT status, cancel_requested FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+    ).fetchone()
+    if run is not None and (
+        run["status"] not in {"running", "succeeded"} or run["cancel_requested"]
+    ):
+        raise SystemExit("This Deep Scan has stopped and cannot resume.")
+    scan_dir = wb.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    if run is None:
+        require_host_deep_scan_output(connection, scan)
+    sealed_version = None
+    # Active coordinators may still be writing drafts. Validate sealed results
+    # before attaching to a coordinator that has finished.
+    if run is not None and run["status"] == "succeeded":
+        manifest_path = wb.artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+        if manifest_path is not None:
+            manifest = wb.read_json_object(manifest_path)
+            manifest_scan = manifest.get("scan")
+            if isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan):
+                try:
+                    binding = wb.workbench_completion_binding(scan, scan["started_at"], manifest)
+                    _prepare_scan_finalization(
+                        scan_dir,
+                        expected_coverage_mode=binding["coverageMode"],
+                        completion_binding=binding,
+                    )
+                    sealed_version = manifest_scan["producer"]["version"]
+                except ContractError as exc:
+                    raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
+    if sealed_version is None:
         try:
             repository = require_scan_target_identity(scan)
         except SystemExit as exc:
             raise SystemExit(
                 "Cannot resume: the original checkout is missing or was replaced."
             ) from exc
-        diff_target = stored_diff_target(scan)
-        if scan_target_identity(repository, diff_target) != (
+        if scan_target_identity(repository, None) != (
             scan["target_revision"],
             scan["target_snapshot_digest"],
             scan["target_device"],
             scan["target_inode"],
         ):
             raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
-        if diff_target is not None and diff_target["kind"] == "working_tree":
-            if (
-                git_revision(repository) != diff_target["headRevision"]
-                or worktree_content_digest(repository) != diff_target["contentDigest"]
-            ):
-                raise SystemExit(
-                    "Cannot resume: the original checkout revision or contents changed."
-                )
+    else:
+        repository = Path(scan["target_path"])
     recipe = wb.parse_scan_recipe(
-        scan["recipe_json"], repository, require_existing_paths=producer_version is None
+        scan["recipe_json"], repository, sealed=sealed_version is not None
     )
-    result = scan_registration(scan, wb.scan_contract)
-    result["recipe"] = recipe
-    if producer_version is not None:
-        result["sealedProducerVersion"] = producer_version
-    return result
-
-
-def scan_registration(
-    scan: sqlite3.Row,
-    scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "contract": scan_contract(scan),
+    result = {
+        "contract": wb.scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),
-        "recipe": json.loads(scan["recipe_json"]),
-        "scanDir": scan["scan_dir"],
+        "recipe": recipe,
+        "scanDir": str(scan_dir),
         "scanId": scan["id"],
         "scopeFileCount": scan["scope_file_count"],
         "startedAt": scan["started_at"],
         "targetId": scan["target_id"],
         "targetRevision": scan["target_revision"],
-        "threadId": scan["continuation_thread_id"],
-        "claimToken": scan["handoff_claim_token"],
+        "threadId": thread_id,
         "userContext": scan["user_context"],
     }
-
-
-def require_composition_complete(scan: sqlite3.Row, composition: CompositionView) -> None:
-    if scan["mode"] != "deep":
-        return
-    checkpoint = composition.checkpoint
-    if checkpoint is not None:
-        if checkpoint.get("terminalReason") in {"saturated", "capped"}:
-            return
-    raise SystemExit("Deep Scan must finish and save its aggregate before the parent can complete.")
-
-
-def independent_review_progress(
-    scan: sqlite3.Row,
-    composition: CompositionView,
-) -> dict[str, Any] | None:
-    children = composition.children
-    if children or scan["recipe_json"] is not None or composition.saved_review_count:
-        recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else {}
-        active = sum(child["status"] == "running" for child in children)
-        return {
-            "active": active,
-            "completed": sum(child["status"] == "complete" for child in children)
-            + composition.saved_review_count,
-            "maximum": recipe.get("deepScan", {}).get(
-                "maxDiscoveryRuns", composition.saved_review_maximum or len(children)
-            ),
-            "consolidating": scan["status"] == "running"
-            and not active
-            and scan["phase"] in {"validation", "reporting"},
-            "updatedAt": max([scan["updated_at"], *(child["updated_at"] for child in children)]),
-        }
-    return None
-
-
-def completed_scan_inputs_match(scan: sqlite3.Row, requested: dict[str, Any]) -> bool:
-    recipe = json.loads(scan["recipe_json"] or "{}")
-    inputs = recipe.get("scanInputs") or {}
-    config = recipe.get("config") or {}
-    return (
-        scan["id"] == requested.get("completedScanId", scan["id"])
-        and "knowledgeBase" in inputs
-        and inputs["knowledgeBase"] == requested["knowledgeBase"]
-        and recipe.get("deepScan") == requested["deepScan"]
-        and config.get("model") == requested["model"]
-        and config.get("model_reasoning_effort") == requested["reasoningEffort"]
-        and config.get("service_tier") == requested.get("serviceTier")
-        and config.get("developer_instructions") == requested.get("developerInstructions")
-        and config.get("model_instructions_file") == requested.get("modelInstructionsFile")
-        and inputs.get("modelInstructionsFileSha256")
-        == requested.get("modelInstructionsFileSha256")
-        and config.get("experimental_compact_prompt_file") == requested.get("compactPromptFile")
-        and inputs.get("compactPromptFileSha256") == requested.get("compactPromptFileSha256")
-        and config.get("model_catalog_json") == requested.get("modelCatalogFile")
-        and inputs.get("modelCatalogFileSha256") == requested.get("modelCatalogFileSha256")
-    )
-
-
-def existing_deep_scan_for_target(
-    connection: sqlite3.Connection, thread_id: str, target_path: str, scope: str
-) -> sqlite3.Row | None:
-    return connection.execute(
-        "SELECT scans.* FROM scans JOIN workspaces ON workspaces.id = scans.workspace_id "
-        "WHERE COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id) = ? "
-        "AND scans.target_path = ? AND scans.scope = ? AND scans.mode = 'deep' "
-        "AND scans.status = 'running' ORDER BY scans.updated_at DESC LIMIT 1",
-        (thread_id, target_path, scope),
-    ).fetchone()
-
-
-def other_running_deep_scans(
-    connection: sqlite3.Connection, current_scan_id: str
-) -> list[dict[str, str]]:
-    return [
-        {
-            "scanId": row["id"],
-            "targetPath": row["target_path"],
-            "phase": row["phase"],
-            "startedAt": row["started_at"],
-            "updatedAt": row["updated_at"],
-        }
-        for row in connection.execute(
-            "SELECT id, target_path, phase, started_at, updated_at FROM scans "
-            "WHERE mode = 'deep' AND status = 'running' AND id != ? "
-            "ORDER BY updated_at DESC, started_at DESC, id",
-            (current_scan_id,),
-        )
-    ]
+    if sealed_version is not None:
+        result["sealedProducerVersion"] = sealed_version
+        result["targetPath"] = str(repository)
+    return result
 
 
 def coverage_summary_for_history(
@@ -409,7 +332,6 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
         "model": row["model"],
         "name": row["name"],
         "parentScanId": row["parent_scan_id"],
-        "parentScanRole": row["parent_scan_role"],
         "progress": {
             "candidates": {"reportable": row["reportable_findings_count"]},
             "coverage": {
@@ -452,8 +374,6 @@ def list_scans(
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
-    if args is None or not args.scan_root:
-        clauses.append("scans.parent_scan_role IS NOT 'deep_pass'")
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
         requested_repository = connection.execute(
@@ -618,9 +538,7 @@ def list_unmatched_scan_pairs(
     selected = []
     requested_git = cache(git_output)
     membership: dict[tuple[str | None, str], bool] = {}
-    for scan in connection.execute(
-        "SELECT * FROM scans WHERE status = 'complete' AND parent_scan_role IS NOT 'deep_pass'"
-    ):
+    for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'"):
         target = (scan["target_id"], scan["target_path"])
         if target not in membership:
             membership[target] = _same_repository(scan, requested, after_git=requested_git)
@@ -898,10 +816,7 @@ def compare_scans(
         known_scan_ids = {
             scan["id"]
             for scan in connection.execute(
-                "SELECT id, started_at, target_id, target_path FROM scans "
-                "WHERE status = 'complete' "
-                "AND (parent_scan_role IS NOT 'deep_pass' OR id IN (?, ?))",
-                (before["id"], after["id"]),
+                "SELECT id, started_at, target_id, target_path FROM scans WHERE status = 'complete'"
             )
             if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
             and _same_repository(scan, after)
@@ -1079,26 +994,18 @@ _FINDING_NEIGHBORS_SQL = """
     FROM linked
     CROSS JOIN finding_occurrences AS source
         ON source.finding_id = linked.finding_id
-    CROSS JOIN scans AS source_scan ON source_scan.id = source.scan_id
     CROSS JOIN scan_comparison_matches AS matches
         ON matches.before_occurrence_id = source.id OR matches.after_occurrence_id = source.id
     CROSS JOIN finding_occurrences AS neighbor ON neighbor.id = CASE
         WHEN matches.before_occurrence_id = source.id THEN matches.after_occurrence_id
         ELSE matches.before_occurrence_id END
-    CROSS JOIN scans AS neighbor_scan ON neighbor_scan.id = neighbor.scan_id
-    WHERE (source_scan.parent_scan_role IS NOT 'deep_pass'
-        OR source_scan.id IN (SELECT scan_id FROM selected_findings))
-        AND (neighbor_scan.parent_scan_role IS NOT 'deep_pass'
-            OR neighbor_scan.id IN (SELECT scan_id FROM selected_findings))
 """
 # Traverse only the selected findings' components, including recurring stable IDs.
 _LINKED_FINDINGS_SQL = f"""
-    WITH RECURSIVE selected_findings(finding_id, scan_id) AS (
-        SELECT occurrences.finding_id, occurrences.scan_id
+    WITH RECURSIVE linked(finding_id) AS (
+        SELECT occurrences.finding_id
         FROM finding_occurrences AS occurrences
         WHERE occurrences.id IN (SELECT value FROM json_each(?))
-    ), linked(finding_id) AS (
-        SELECT finding_id FROM selected_findings
         UNION
         SELECT neighbor.finding_id
         {_FINDING_NEIGHBORS_SQL}
@@ -1146,13 +1053,9 @@ def finding_relations(
     pairs = []
     for comparison in connection.execute(
         "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons "
-        "JOIN scans AS before_scan ON before_scan.id = before_scan_id "
-        "JOIN scans AS after_scan ON after_scan.id = after_scan_id "
-        "WHERE (before_scan_id = ? OR after_scan_id = ?) "
-        "AND (before_scan.parent_scan_role IS NOT 'deep_pass' OR before_scan.id = ?) "
-        "AND (after_scan.parent_scan_role IS NOT 'deep_pass' OR after_scan.id = ?) "
+        "WHERE before_scan_id = ? OR after_scan_id = ? "
         "ORDER BY before_scan_id, after_scan_id",
-        (scan_id, scan_id, scan_id, scan_id),
+        (scan_id, scan_id),
     ):
         side = "before" if comparison["before_scan_id"] == scan_id else "after"
         other = "after" if side == "before" else "before"
@@ -1208,36 +1111,35 @@ def finding_matches(
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
-        JOIN scans ON scans.id = occurrences.scan_id
         WHERE matches.before_occurrence_id = ?
-          AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         UNION
         SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
-        JOIN scans ON scans.id = occurrences.scan_id
         WHERE matches.after_occurrence_id = ?
-          AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         ORDER BY scan_id, occurrence_id
         """,
-        (occurrence_id, scan_id, occurrence_id, scan_id),
+        (occurrence_id, occurrence_id),
     ).fetchall()
-    linked_rows = connection.execute(
-        _LINKED_FINDINGS_SQL
-        + """
-        SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
-            scans.started_at, scans.id AS scan_id
-        FROM linked
-        CROSS JOIN finding_occurrences AS occurrences ON occurrences.finding_id = linked.finding_id
-        CROSS JOIN scans ON scans.id = occurrences.scan_id
-        WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
-        """,
-        (json.dumps([occurrence_id]), scan_id),
-    ).fetchall()
+    linked_rows = list(
+        _rows_for_ids(
+            connection,
+            f"""
+            {_LINKED_FINDINGS_SQL}
+            SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
+                scans.started_at, scans.id AS scan_id
+            FROM linked
+            CROSS JOIN finding_occurrences AS occurrences
+                ON occurrences.finding_id = linked.finding_id
+            CROSS JOIN scans ON scans.id = occurrences.scan_id
+            """,
+            (occurrence_id,),
+        )
+    )
     known_scans = sorted(
         {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows},
-        key=lambda item: (timestamp_key(item[0]), item[1]),
+        key=lambda scan: (timestamp_key(scan[0]), scan[1]),
     )
     included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
     rows.extend(

@@ -19,9 +19,15 @@ from workbench_constants import (
     PHASE_PROGRESS_UNITS,
     PHASES,
     REMEDIATION_UPDATE_STATES,
-    non_negative_int,
     positive_int,
 )
+
+
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("expected a non-negative integer")
+    return parsed
 
 
 def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False) -> None:
@@ -125,17 +131,68 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     begin_deep_scan.add_argument("--deep-scan-project-json")
     begin_deep_scan.add_argument("--project-config-path")
     begin_deep_scan.add_argument("--join-only", action="store_true")
-    begin_deep_scan.add_argument("--completed-inputs-json")
-    begin_deep_scan.set_defaults(
-        mode="deep",
-        target_summary=None,
-        diff_target_kind=None,
-        diff_base_revision=None,
-        diff_head_revision=None,
-        diff_content_digest=None,
-    )
+    begin_deep_scan.add_argument("--probe-model-file-inputs", action="store_true")
+    begin_deep_scan.add_argument("--model-file-inputs-json")
+    begin_deep_scan.add_argument("--workflow-version", default="deep-security-scan/v1")
 
-    add_command("check-deep-scan-target", "--scan-id")
+    add_command("get-deep-scan", "--scan-id", "--thread-id")
+
+    add_command("acknowledge-deep-scan-result", "--scan-id")
+
+    claim_coordinator = add_command("claim-deep-scan-coordinator", "--scan-id", "--thread-id")
+    claim_coordinator.add_argument("--claim-token")
+    claim_coordinator.add_argument("--coordinator-generation", type=positive_int)
+
+    upsert_deep_worker = add_command("upsert-deep-scan-worker", "--scan-id", "--worker-id")
+    upsert_deep_worker.add_argument(
+        "--kind", choices=("setup", "discovery", "dedup"), required=True
+    )
+    upsert_deep_worker.add_argument(
+        "--status", choices=("queued", "running", "succeeded", "failed", "canceled"), required=True
+    )
+    upsert_deep_worker.add_argument("--prompt-path", required=True)
+    upsert_deep_worker.add_argument("--artifact-dir", required=True)
+    upsert_deep_worker.add_argument("--result-manifest-path")
+    upsert_deep_worker.add_argument("--attempt", type=non_negative_int)
+    upsert_deep_worker.add_argument("--sdk-thread-id")
+    upsert_deep_worker.add_argument("--error-message")
+    upsert_deep_worker.add_argument("--terminal-failure", action="store_true")
+    upsert_deep_worker.add_argument(
+        "--replaceable-failure-kind",
+        choices=("policy_refusal", "transient_error", "invalid_discovery_artifacts"),
+    )
+    upsert_deep_worker.add_argument("--coordinator-generation", type=positive_int)
+
+    iteration = add_command(
+        "record-deep-scan-iteration", "--scan-id", "--worker-id", "--result-manifest-path"
+    )
+    iteration.add_argument("--input-worker-id", action="append", required=True)
+    iteration.add_argument("--no-new-streak", type=non_negative_int, required=True)
+    iteration.add_argument("--consecutive-errors", type=non_negative_int, required=True)
+    iteration.add_argument("--coordinator-generation", type=positive_int)
+
+    finish_deep_scan = add_command("finish-deep-scan", "--scan-id")
+    finish_deep_scan.add_argument(
+        "--terminal-reason", choices=("saturated", "capped"), required=True
+    )
+    finish_deep_scan.add_argument("--manifest-path", required=True)
+    finish_deep_scan.add_argument("--staged-manifest-path")
+    finish_deep_scan.add_argument("--omitted-worker-id", action="append", default=[])
+    finish_deep_scan.add_argument("--coordinator-generation", type=positive_int)
+
+    fail_deep_scan = add_command("fail-deep-scan", "--scan-id", "--message")
+    fail_deep_scan.add_argument("--manifest-path")
+    fail_deep_scan.add_argument("--staged-manifest-path")
+    fail_deep_scan.add_argument(
+        "--deep-status", choices=("failed", "interrupted"), default="failed"
+    )
+    fail_deep_scan.add_argument("--coordinator-generation", type=positive_int)
+
+    publication_failure = add_command(
+        "record-deep-scan-publication-failure", "--scan-id", "--message"
+    )
+    publication_failure.add_argument("--coordinator-generation", type=positive_int)
+
     get_scan = add_command("get-scan", "--scan-id")
     detail = get_scan.add_mutually_exclusive_group()
     detail.add_argument("--occurrence-id")
@@ -182,19 +239,14 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     )
     register_cli_scan.add_argument("--archived-scan-dir")
 
-    set_scan_thread = subparsers.add_parser("set-scan-thread")
-    set_scan_thread.add_argument("--scan-id", required=True)
-    set_scan_thread.add_argument("--claim-token")
-    set_scan_thread.add_argument("--thread-id", required=True)
+    add_command("set-scan-thread", "--scan-id", "--thread-id")
 
     set_scan_cost_limit = add_command("set-scan-cost-limit", "--scan-id")
     set_scan_cost_limit.add_argument("--max-cost-usd", required=True, type=float)
 
     add_command("get-scan-recipe", "--scan-id")
 
-    get_cli_scan_resume = subparsers.add_parser("get-cli-scan-resume")
-    get_cli_scan_resume.add_argument("--scan-id", required=True)
-    get_cli_scan_resume.add_argument("--claim-token")
+    get_cli_scan_resume = add_command("get-cli-scan-resume", "--scan-id")
     get_cli_scan_resume.add_argument("--allow-unavailable", action="store_true")
 
     compare_scans = add_command("compare-scans", "--before-scan-id", "--after-scan-id")
@@ -242,6 +294,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
+    update_progress.add_argument("--coordinator-generation", type=positive_int)
     update_progress.add_argument("--model")
     update_progress.add_argument("--reasoning-effort")
 
@@ -261,40 +314,23 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
         "--turn-status", choices=("completed", "interrupted", "failed"), default="completed"
     )
 
-    complete_budget_exhausted_scan = subparsers.add_parser("complete-budget-exhausted-scan")
-    complete_budget_exhausted_scan.add_argument("--scan-id", required=True)
-    complete_budget_exhausted_scan.add_argument("--claim-token")
-    complete_budget_exhausted_scan.add_argument("--cost-json", required=True)
+    complete_budget_exhausted_scan = add_command(
+        "complete-budget-exhausted-scan", "--scan-id", "--cost-json"
+    )
     complete_budget_exhausted_scan.add_argument("--message")
 
-    defer_publication_help = (
-        "Record the stop without publishing; after workers stop, run "
-        "preserve-scan-results --after-stop (default: publish immediately)."
-    )
-    cancel_scan = subparsers.add_parser("cancel-scan")
-    cancel_scan.add_argument("--scan-id", required=True)
+    cancel_scan = add_command("cancel-scan", "--scan-id")
     cancel_scan.add_argument("--thread-id")
     cancel_scan.add_argument("--cost-json")
-    cancel_scan.add_argument(
-        "--defer-publication", action="store_true", help=defer_publication_help
-    )
 
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
-    fail_scan.add_argument("--defer-publication", action="store_true", help=defer_publication_help)
 
     preserve_scan = add_command("preserve-scan-results", "--scan-id")
     preserve_scan.add_argument("--thread-id")
     preserve_scan.add_argument("--claim-token")
-    preserve_scan.add_argument(
-        "--cost-json", help="Save a JSON cost or {usage, cost} receipt with the retained results."
-    )
-    preserve_scan.add_argument(
-        "--after-stop",
-        action="store_true",
-        help="After workers stop, stop remaining child records and publish the saved results.",
-    )
+    preserve_scan.add_argument("--coordinator-generation", type=positive_int)
 
     recovery_help = "Validate and republish retained checkpoints for a failed, non-canceled scan."
     recover_scan = subparsers.add_parser(
@@ -302,12 +338,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     )
     recover_scan.add_argument("--scan-id", required=True, help="ID of the stopped scan to recover.")
 
-    write_scan_draft = subparsers.add_parser("write-scan-draft")
-    write_scan_draft.add_argument("--scan-id", required=True)
-    write_scan_draft.add_argument(
-        "--draft-path",
-        help="Staged documents JSON; omit to read {documents, checkpoint} from stdin.",
-    )
+    write_scan_draft = add_command("write-scan-draft", "--scan-id", "--draft-path")
     write_scan_draft.add_argument("--checkpoint-path")
     write_scan_draft.add_argument("--expected-draft-digest")
     write_scan_draft.add_argument("--claim-token")

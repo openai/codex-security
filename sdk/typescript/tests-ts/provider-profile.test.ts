@@ -1,4 +1,3 @@
-import { nativeRequest } from "./support/native-request.js";
 import { existsSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import {
@@ -35,7 +34,6 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-provider-profile-",
 );
-
 afterEach(cleanup);
 
 const provider = {
@@ -43,7 +41,6 @@ const provider = {
   wire_api: "responses",
   http_headers: { "X-Synthetic-Key": "synthetic-provider-secret" },
 };
-
 const config = {
   model_provider: "synthetic.gateway",
   model_providers: { "synthetic.gateway": provider },
@@ -59,7 +56,6 @@ const startupProvider = {
     args: ["synthetic-command-secret"],
   },
 };
-
 const startupProviders = {
   omitted: null,
   "synthetic.gateway": startupProvider,
@@ -70,6 +66,15 @@ test("native preflight preserves consent and attribution while reading exporters
   const sharedConfig =
     '[analytics]\nenabled = false\n[otel]\nexporter = "none"\nenvironment = "synthetic-shared"\n';
   await writeFile(join(home, "config.toml"), sharedConfig);
+  const { readDeepScanRuntimeConfig } = await import(
+    pathToFileURL(
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
+    ).href
+  );
   const native = await providerPreflightCommand(resolveCodexCommand({}), {
     analytics: { enabled: false },
     otel: { exporter: "none", environment: "synthetic-root" },
@@ -81,9 +86,13 @@ test("native preflight preserves consent and attribution while reading exporters
       },
     },
   });
-  const read = async (command: typeof native) => {
-    const { config } = await nativeRequest(
-      {
+  const read = async (args: readonly string[] | undefined) =>
+    await readDeepScanRuntimeConfig({
+      codexPath: native.command,
+      commandArgs: args,
+      cwd: home,
+      configOverrides: [],
+      env: {
         PATH: process.env["PATH"] ?? "",
         ...(process.env["SystemRoot"] === undefined
           ? {}
@@ -94,15 +103,10 @@ test("native preflight preserves consent and attribution while reading exporters
         HOME: home,
         CODEX_HOME: home,
       },
-      home,
-      [...(command.args ?? [])],
-      "config/read",
-      { cwd: home, includeLayers: false },
-      command,
-    );
-    return config;
-  };
-  const effective = await read(native);
+      signal: new AbortController().signal,
+      context: "helper",
+    });
+  const effective = await read(native.args);
   expect(effective.analytics).toEqual({ enabled: false });
   expect(effective.otel).toMatchObject({
     exporter: "none",
@@ -113,7 +117,7 @@ test("native preflight preserves consent and attribution while reading exporters
   });
   expect(await readFile(join(home, "config.toml"), "utf8")).toBe(sharedConfig);
   const next = await read(
-    await providerPreflightCommand(resolveCodexCommand({}), {}),
+    (await providerPreflightCommand(resolveCodexCommand({}), {})).args,
   );
   expect(next.otel.environment).toBe("synthetic-shared");
   expect(next.responses_api_metadata ?? null).toBeNull();
@@ -267,64 +271,6 @@ test("saved provider reads preserve JSON parse and permission failures", async (
   }
 });
 
-test("saved provider profiles keep concurrent replay credentials private and separate", async () => {
-  const home = join(await temporaryDirectory(), "home");
-  await mkdir(home, { mode: 0o700 });
-  const providers = ["first", "second"].map((name) => ({
-    synthetic: {
-      name,
-      wire_api: "responses",
-      auth: {
-        command: "synthetic-auth",
-        env: { TOKEN: `synthetic-${name}-secret` },
-      },
-    },
-  }));
-  const profiles = await Promise.all(
-    providers.map((model_providers, index) =>
-      createProviderProfile(home, {
-        model_providers,
-        developer_instructions: `Synthetic replay instructions ${index}.`,
-        analytics: { enabled: index === 0 },
-        shell_environment_policy: {
-          set: { SYNTHETIC_SETTING: `synthetic-${index}-value` },
-        },
-        model_instructions_file: join(home, `instructions-${index}.md`),
-      }),
-    ),
-  );
-  expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
-  const restored = await Promise.all(
-    profiles.map((profile) =>
-      restoreProviderProfile(
-        { model_provider: "synthetic" },
-        { name: profile.name, home: "ambient" },
-        { CODEX_HOME: home },
-      ),
-    ),
-  );
-  for (const [index, profile] of profiles.entries()) {
-    expect(restored[index]!).toMatchObject({
-      model_providers: providers[index],
-      developer_instructions: `Synthetic replay instructions ${index}.`,
-      analytics: { enabled: index === 0 },
-      shell_environment_policy: {
-        set: { SYNTHETIC_SETTING: `synthetic-${index}-value` },
-      },
-      model_instructions_file: join(home, `instructions-${index}.md`),
-    });
-    if (process.platform !== "win32")
-      expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
-  }
-  await expect(
-    restoreProviderProfile(
-      {},
-      { name: "../outside", home: "ambient" },
-      { CODEX_HOME: home },
-    ),
-  ).rejects.toThrow("invalid provider profile");
-});
-
 test.each([
   [
     "explicit custom",
@@ -376,7 +322,6 @@ test.each([
       script,
       `import { readFileSync } from "node:fs";
     import { join } from "node:path";
-import { pathToFileURL } from "node:url";
     console.log(JSON.stringify({
       args: process.argv.slice(2),
       home: process.env.CODEX_HOME,
@@ -450,9 +395,22 @@ import { pathToFileURL } from "node:url";
       settings,
     );
     expect(native.args?.slice(0, prefix.length)).toEqual(prefix);
-    const read = async () => {
-      const { config } = await nativeRequest(
-        {
+    const { readDeepScanRuntimeConfig } = await import(
+      pathToFileURL(
+        join(
+          await bundledPluginRoot(),
+          "mcp",
+          "permission-profile-preflight.mjs",
+        ),
+      ).href
+    );
+    const read = () =>
+      readDeepScanRuntimeConfig({
+        codexPath: native.command,
+        commandArgs: native.args,
+        cwd: home,
+        configOverrides: [],
+        env: {
           PATH: process.env["PATH"] ?? "",
           ...(process.env["SystemRoot"] === undefined
             ? {}
@@ -463,14 +421,9 @@ import { pathToFileURL } from "node:url";
           HOME: home,
           CODEX_HOME: home,
         },
-        home,
-        [...(native.args ?? [])],
-        "config/read",
-        { cwd: home, includeLayers: false },
-        native,
-      );
-      return config;
-    };
+        signal: new AbortController().signal,
+        context: "helper",
+      });
     if (selection === "") {
       await expect(read()).rejects.toThrow("Model provider `` not found");
     } else {
@@ -893,18 +846,3 @@ test.each([
     }
   },
 );
-
-test("execution-only replay profiles preserve configured provider defaults", async () => {
-  const home = await temporaryDirectory();
-  const settings = {
-    analytics: { enabled: false },
-    shell_environment_policy: { inherit: "all" },
-  };
-  const profile = await createProviderProfile(home, settings);
-  const restored = await restoreProviderProfile(
-    config,
-    { name: profile.name, home: "ambient" },
-    { CODEX_HOME: home },
-  );
-  expect(restored).toEqual({ ...config, ...settings });
-});

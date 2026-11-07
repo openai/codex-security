@@ -338,11 +338,3 @@ export function formatUsd(value: number): string {
     maximumFractionDigits: 9,
   }).format(value);
 }
-
-export function turnPricingMetadata(context?: ScanPricingContext) {
-  if (context === undefined) return {};
-  // Preserve the region field written on Bedrock scan results.
-  return context.provider === "amazon-bedrock"
-    ? { bedrockRegion: context.region }
-    : { pricingContext: context };
-}

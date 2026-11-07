@@ -11,8 +11,10 @@ import pytest
 
 pytest.register_assert_rewrite("publication_fixtures")
 from publication_fixtures import (  # noqa: F401 -- pytest discovers these shared fixtures here.
-    historical_publication_scan,
+    deadline_scan,
+    finish_after_crashes,
     publication_scan,
+    saturated_scan,
 )
 
 

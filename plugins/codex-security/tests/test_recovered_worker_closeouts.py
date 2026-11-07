@@ -84,7 +84,7 @@ def test_worker_closeouts_keep_distinct_ids_and_do_not_duplicate_parent_copies(
     if published:
         parent_copy(tmp_path, expected)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    coverage = recover(tmp_path, workbench_api["retained_coverage"], workers)
+    coverage = recover(tmp_path, workbench_api["saved_results"], workers)
     assert sorted(coverage.get("resolvedDeferred", []), key=lambda row: row["id"]) == expected
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
@@ -107,7 +107,7 @@ def test_worker_reopening_invalidates_its_copied_parent_closeout(
     observed(checkpoint, reopened_at)
     head = select_checkpoint(output, checkpoint)
     observed(head, reopened_at)
-    coverage = recover(tmp_path, workbench_api["retained_coverage"], [worker])
+    coverage = recover(tmp_path, workbench_api["saved_results"], [worker])
     assert sorted(coverage.get("resolvedDeferred", []), key=lambda row: row["id"]) == (
         expected if reopened_at < 20 else expected[1:]
     )
@@ -125,7 +125,7 @@ def test_archived_worker_closeout_keeps_its_original_attempt(tmp_path, workbench
     result = output / "result.json"
     result.write_text(json.dumps(saved_draft(SCAN_ID, complete=True)))
     observed(result, 30)
-    coverage = recover(tmp_path, workbench_api["retained_coverage"], [worker])
+    coverage = recover(tmp_path, workbench_api["saved_results"], [worker])
     assert sorted(coverage.get("resolvedDeferred", []), key=lambda row: row["id"]) == [
         {"id": f"worker-attempt-1-resolved-{closure['id']}", "reason": closure["reason"]}
         for closure in CLOSURES

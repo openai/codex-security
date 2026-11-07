@@ -5,8 +5,6 @@ import { PassThrough, Writable } from "node:stream";
 import {
   appendFile,
   readFile,
-  readdir,
-  writeFile,
   realpath,
   stat,
   symlink,
@@ -51,8 +49,7 @@ import {
 } from "./support/temporary-directories.js";
 import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
-import { nodeCommand, writeSource } from "./support/shell.js";
-import { startMcpClient } from "../../../plugins/codex-security/mcp-app/tests/support/mcp-client.js";
+import { writeSource } from "./support/shell.js";
 
 const { severityRubric } = hostedContract.run.params;
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
@@ -724,57 +721,25 @@ test.each(["scan-manifest.json", "findings.json", "artifacts/evidence.txt"])(
 );
 
 test("hosted receipts hash MCP checkpoints as written", async () => {
+  const { saveScanDraftCheckpoint } = await import(
+    new URL(
+      "../../../plugins/codex-security/mcp-app/src/artifact-scan-draft.ts",
+      import.meta.url,
+    ).href
+  );
   const input = await fixture();
   const result = await runHostedScan(input, {
     executor: {
       async run(request) {
-        const client = await startMcpClient(
+        const reviewState = await writeDraft(request);
+        await saveScanDraftCheckpoint(
           {
-            command: nodeCommand().command,
-            args: [
-              join(request.runtime.pluginRoot, "mcp", "server.mjs"),
-              "--stdio",
-            ],
-            env: request.runtime.environment,
+            root: request.runtime.outputDirectory,
+            repoRoot: request.repository,
+            layout: "scan",
           },
-          "hosted-checkpoint-test",
+          { scanId: request.scanId, findings: [], reviewState },
         );
-        try {
-          const draft = await client.request("tools/call", {
-            name: "record_codex_security_scan_draft",
-            arguments: {
-              scanId: request.scanId,
-              findings: [],
-              reviewState: {
-                surfaces: [
-                  { label: "Synthetic scope", disposition: "no_issue_found" },
-                ],
-                explicitExclusions: [],
-                deferred: [],
-              },
-            },
-          });
-          expect(draft["isError"], JSON.stringify(draft["content"])).not.toBe(
-            true,
-          );
-        } finally {
-          await client.close();
-        }
-        // Earlier MCP writers stored indented JSON under the same semantic digest.
-        const checkpointDirectory = join(
-          request.runtime.outputDirectory,
-          "checkpoints",
-        );
-        // The writer emits multiple candidates before publication chooses the accepted one.
-        for (const name of await readdir(checkpointDirectory)) {
-          if (name.endsWith(".json")) {
-            const file = join(checkpointDirectory, name);
-            await writeFile(
-              file,
-              JSON.stringify(await readJson(file), null, 2) + "\n",
-            );
-          }
-        }
         return receipt(request);
       },
     },

@@ -150,25 +150,13 @@ def archive_scan(
     if previous_scan is None and not (args.archive_existing and has_contents):
         yield archived_scan_dir
         return
-    scans = connection.execute(
-        """
-        WITH RECURSIVE descendants AS (
-            SELECT id, scan_dir, status FROM scans WHERE id = ?
-            UNION
-            SELECT scans.id, scans.scan_dir, scans.status FROM scans
-            JOIN descendants ON scans.parent_scan_id = descendants.id
-        )
-        SELECT id, scan_dir, status FROM descendants
-        """,
-        (previous_scan["id"] if previous_scan is not None else None,),
-    ).fetchall()
-    scans = [scan for scan in scans if Path(scan["scan_dir"]).is_relative_to(scan_dir)]
-    if any(scan["status"] == "running" for scan in scans):
-        raise SystemExit("Cannot archive output while a child scan is running.")
-    has_artifacts = connection.execute(
-        "SELECT 1 FROM scan_artifacts WHERE scan_id IN (SELECT value FROM json_each(?)) LIMIT 1",
-        (json.dumps([scan["id"] for scan in scans]),),
-    ).fetchone()
+    has_artifacts = (
+        connection.execute(
+            "SELECT 1 FROM scan_artifacts WHERE scan_id = ? LIMIT 1", (previous_scan["id"],)
+        ).fetchone()
+        if previous_scan is not None
+        else None
+    )
     moved = False
     try:
         if archived_scan_dir is None:
@@ -204,11 +192,10 @@ def archive_scan(
             else:
                 scan_dir.mkdir(mode=0o700)
                 scan_dir.chmod(0o700)
-        for scan in scans:
-            relative_directory = Path(scan["scan_dir"]).relative_to(scan_dir)
+        if previous_scan is not None:
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-                (str(archived_scan_dir / relative_directory), timestamp, scan["id"]),
+                (str(archived_scan_dir), timestamp, previous_scan["id"]),
             )
             connection.execute(
                 """UPDATE finding_workflows SET scan_dir = ?,
@@ -216,11 +203,11 @@ def archive_scan(
                         THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
                     WHERE scan_id = ? AND scan_dir = ?""",
                 (
-                    str(archived_scan_dir / relative_directory),
-                    str(Path(scan["scan_dir"]) / "exports" / "results.sarif"),
-                    str(archived_scan_dir / relative_directory / "exports" / "results.sarif"),
-                    scan["id"],
-                    scan["scan_dir"],
+                    str(archived_scan_dir),
+                    str(scan_dir / "exports" / "results.sarif"),
+                    str(archived_scan_dir / "exports" / "results.sarif"),
+                    previous_scan["id"],
+                    str(scan_dir),
                 ),
             )
 
@@ -255,7 +242,7 @@ def archive_scan(
                     )
                     connection.execute(
                         f"UPDATE {table} SET {assignments} WHERE scan_id = ?",
-                        (scan["id"],),
+                        (previous_scan["id"],),
                     )
             finally:
                 connection.create_function("archive_path", 1, None)

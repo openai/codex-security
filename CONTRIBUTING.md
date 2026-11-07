@@ -22,7 +22,9 @@ crosses a process, persistence, or package boundary.
 
 The SDK routes selected stored-finding and classification commands to the Node
 helper; scan lifecycle commands still use the Python workbench. Trace the
-specific command before changing either implementation. Deep Scan scheduling and recovery live in the SDK batch runner shared with the MCP server.
+specific command before changing either implementation. Shared Deep Scan
+behavior belongs in the plugin engine, with adapter changes in the MCP server
+or SDK only when their entrypoint behavior differs.
 
 ## How this repository works
 
@@ -45,7 +47,8 @@ maintained in the SDK.
 `pnpm --dir sdk/typescript run types` checks freshness.
 
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
-source. CI runs deterministic triage checks and the SDK’s Deep Scan composition tests.
+source. CI runs deterministic triage checks and the Deep Scan iteration and
+publication tests in the MCP suite.
 
 See the [CI guide](docs/ci.md) for check selection, platform/version coverage,
 required status checks, and test-runner qualification.

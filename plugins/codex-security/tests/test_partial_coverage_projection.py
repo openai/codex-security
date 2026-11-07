@@ -6,10 +6,10 @@ import copy
 import hashlib
 import json
 import os
+import uuid
 from argparse import Namespace
 
 import pytest
-from publication_fixtures import historical_publication_scan
 from workbench_test_support import (
     read_review_state,
     select_checkpoint,
@@ -17,12 +17,10 @@ from workbench_test_support import (
     write_result_draft,
 )
 
-publication_scan = historical_publication_scan
-
 
 @pytest.fixture
 def stop_scan(workbench_api, monkeypatch):
-    saved = workbench_api["saved_results"].checkpoint_publication
+    saved = workbench_api["saved_results"]
 
     def fail_publication(*args, **kwargs):
         raise OSError("Synthetic publication interruption.")
@@ -1466,10 +1464,35 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
 
 
-def publish_review_projection(scan, coverage):
-    # Reopen a saved coordinator projection with its previously published review state.
-    (scan.scan_dir / "coverage.json").write_text(json.dumps(coverage))
-    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+def publish_review_projection(workbench_api, connection, scan, coverage):
+    # Publish through an active coordinator before exercising stopped recovery.
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'running', coordinator_generation = 2, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    documents = {
+        "deepScanPublication": {"coordinatorGeneration": 2, "resultPath": None},
+        "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
+        "findings": {"findings": []},
+        "coverage": coverage,
+    }
+    staged = scan.scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(documents))
+    saved = workbench_api["saved_results"]
+    saved.write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        connection,
+        Namespace(
+            scan_id=scan.scan_id,
+            claim_token=None,
+            draft_path=str(staged),
+            checkpoint_path=None,
+            expected_draft_digest=None,
+        ),
+    )
 
 
 def stop_and_recover_projection(workbench_api, connection, scan, stop_scan, retry):
@@ -1640,6 +1663,8 @@ def test_recovery_projects_receipts_from_their_source_directory(
     }
     if parent:
         publish_review_projection(
+            workbench_api,
+            workbench_db,
             scan,
             {
                 **scan.coverage,

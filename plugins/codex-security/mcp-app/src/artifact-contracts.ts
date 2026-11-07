@@ -82,9 +82,7 @@ const rawDiscoveryCandidate = z.strictObject({
 });
 
 const discoveryCandidate = z.looseObject({
-  candidate_id: z
-    .string()
-    .regex(new RegExp("^(?!\\.{1,2}$)(?=.*\\S)[^/\\\\]+$")),
+  candidate_id: z.string().regex(new RegExp("^(?!\\.{1,2}$)[^/\\\\]+$")),
   ...rawDiscoveryCandidate.shape,
   cwe_ids: z.array(z.string().regex(new RegExp("^CWE-[1-9][0-9]*$"))),
   locations: z.array(normalizedDiscoveryLocation).min(1),
@@ -233,7 +231,7 @@ const draft_finding = z.looseObject({
     .looseObject({
       reportPath: pattern(
         z.string(),
-        "^(?:artifacts/deep-scan/passes/[a-zA-Z0-9][a-zA-Z0-9._-]*/)?findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md$",
+        "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$",
       ),
     })
     .optional(),

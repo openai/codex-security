@@ -7,17 +7,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import * as auth from "../../sdk/typescript/dist/auth.js";
 import {
   createIsolatedHome,
   resolveCodexCommand,
 } from "../../sdk/typescript/dist/runtime.js";
 import { preflightEval } from "../secret-discovery/harness.mts";
-import {
-  createEvalHome,
-  createPermissionCheckedCodex,
-  withEvalState,
-} from "../secret-discovery/runtime.mts";
+import { withEvalState } from "../secret-discovery/runtime.mts";
 import { cases } from "./cases.mts";
 import {
   prepareRoutingEval,
@@ -75,13 +72,10 @@ console.log(`Eval artifacts: ${directory}`);
 await saveReport();
 try {
   await withEvalState(
-    () =>
-      createEvalHome(
-        createIsolatedHome,
-        (
-          auth as unknown as typeof import("../../sdk/typescript/src/auth.js")
-        ).configuredCodexHome(process.env),
-      ),
+    createIsolatedHome,
+    (
+      auth as unknown as typeof import("../../sdk/typescript/src/auth.js")
+    ).configuredCodexHome(process.env),
     async ({ root, home, signal }) => {
       try {
         const prepared = await prepareRoutingEval(root);
@@ -92,7 +86,7 @@ try {
           routingSettings(home, codexPath),
           signal,
         );
-        const codex = createPermissionCheckedCodex(settings);
+        const codex = new Codex(settings);
         for (const scenario of cases) {
           signal.throwIfAborted();
           const { events, report } = await runRoutingCase(

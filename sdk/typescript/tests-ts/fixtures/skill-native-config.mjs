@@ -32,9 +32,7 @@ await Promise.all([
       if (request.id !== undefined) methods.set(request.id, request.method);
       if (request.method === "initialize")
         preflightClient =
-          request.params.clientInfo.name === "codex_security_deep_scan" ||
-          (request.params.clientInfo.name === "codex-security" &&
-            request.params.clientInfo.title === "Codex Security");
+          request.params.clientInfo.name === "codex_security_deep_scan";
       if (
         preflightClient &&
         request.method === "config/read" &&

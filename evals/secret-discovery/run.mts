@@ -12,24 +12,17 @@ import {
   prepareEval,
   runPreparedEval,
 } from "./harness.mts";
-import {
-  createEvalHome,
-  createPermissionCheckedCodex,
-  withEvalState,
-} from "./runtime.mts";
+import { withEvalState } from "./runtime.mts";
 
 const reports = join(import.meta.dirname, "reports/");
 await mkdir(reports, { recursive: true });
 const reportDirectory = await mkdtemp(join(reports, "run-"));
 console.log(`Eval artifacts: ${reportDirectory}`);
 await withEvalState(
-  () =>
-    createEvalHome(
-      createIsolatedHome,
-      (
-        auth as unknown as typeof import("../../sdk/typescript/src/auth.js")
-      ).configuredCodexHome(process.env),
-    ),
+  createIsolatedHome,
+  (
+    auth as unknown as typeof import("../../sdk/typescript/src/auth.js")
+  ).configuredCodexHome(process.env),
   async ({ root, home, signal }) => {
     const prepared = await prepareEval(root);
     const codexPath = await realpath(resolveCodexCommand({}).command);
@@ -38,7 +31,7 @@ await withEvalState(
       codexSettings(home, codexPath),
       signal,
     );
-    const codex = createPermissionCheckedCodex(settings);
+    const codex = new Codex(settings);
     const { report, semanticResult } = await runPreparedEval(prepared, codex, {
       model: process.argv[2],
       signal,

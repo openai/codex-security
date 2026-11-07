@@ -34,7 +34,7 @@ def test_completion_lock_creates_private_directory(
         ("start-scan", "results"),
         ("start-prompt-only-scan", "scan"),
         ("start-headless-standard-scan", "scan"),
-        ("begin-deep-scan", "scan"),
+        ("begin-deep-scan", "deepScan"),
     ],
     ids=lambda entry: entry[0],
 )

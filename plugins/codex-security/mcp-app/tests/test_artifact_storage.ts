@@ -20,7 +20,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { applicationRoot, buildServer } from "./build-server.ts";
-import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const fixture = await temporaryDirectory("codex-security-storage-test-", true);
 const stateRoot = path.join(fixture, "state");
@@ -35,28 +34,10 @@ try {
   await buildServer(bundle, {
     define: {
       __dirname: JSON.stringify(applicationRoot),
-      ...mcpBundleOptions.define,
+      "import.meta.url": "__filename",
     },
   });
   client = await connect();
-  for (const path of [
-    "artifacts/deep-scan/checkpoint.json",
-    "artifacts/DEEP-SCAN/review.md",
-  ]) {
-    const content = "Standalone phase output.\n";
-    const standalone = await save({
-      targetPath: repository,
-      storage: "persistent",
-      path,
-      content,
-    });
-    assert.equal(await readFile(standalone.path, "utf8"), content);
-    assert.equal(
-      (await read({ targetPath: repository, storage: "persistent", path }))
-        .content,
-      content,
-    );
-  }
   const started = await call<{
     scanId: string;
     scanDir: string;
@@ -172,8 +153,6 @@ try {
     "threatmodel.md",
     "drafts/checkpoint.json",
     "artifacts/deep_discovery/result.json",
-    "artifacts/deep-scan/checkpoint.json",
-    "artifacts/DEEP-SCAN/review.md",
     "artifacts/02_discovery/candidate_ledger.jsonl",
     "artifacts/02_discovery/CANDIDATE_LEDGER.JSONL",
     "artifacts/02_discovery/in_scope_files.txt",

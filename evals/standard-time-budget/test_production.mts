@@ -83,7 +83,6 @@ test("state cleanup failure saves the attempt and stops before the paired arm", 
         stateRoot: join(root, "states"),
         outputRoot,
         createClient: (_config, dependencies) => {
-          assert.equal(dependencies.createCodex, undefined);
           states.push(dependencies.environment["CODEX_SECURITY_STATE_DIR"]!);
           return {
             run: async (_target, options) => {
@@ -131,12 +130,9 @@ test("the developer eval preflights API-key authentication and the production bu
       preflightStandardEval({ OPENAI_API_KEY: "synthetic-environment" }, 1e12),
     /deadline within the supported date range/,
   );
-  await withEvalState(
-    async () => ({ home: await createIsolatedHome() }),
-    async ({ home }) => {
-      assert.equal(existsSync(join(home, "auth.json")), false);
-    },
-  );
+  await withEvalState(createIsolatedHome, undefined, async ({ home }) => {
+    assert.equal(existsSync(join(home, "auth.json")), false);
+  });
 });
 
 async function writeUsageSession(
@@ -203,12 +199,6 @@ test("the paired evaluator preserves aggregate usage across production completio
             probeCodexSandbox: async () => {},
             prepareScanArtifactRestorer: async () => ({
               restore: async () => {},
-              restoreMany: async () => {},
-              prepareDirectory: async () => {},
-              remove: async () => {},
-              async projectChild() {
-                throw new Error("Unexpected child scan in Standard eval");
-              },
             }),
             prepareRuntime: async () => ({
               codexHome: home,

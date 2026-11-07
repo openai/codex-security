@@ -8,11 +8,24 @@ import { partitionTests } from "./test-shards.mts";
 // files had a median under one second; discovery also picks up new files.
 const slowFiles: Record<string, number> = {
   "test_artifact_discovery.ts": 11,
-  "test_artifact_scan_draft_recovery.mjs": 26,
+  "test_artifact_scan_draft_recovery.ts": 26,
+  "test_artifact_scan_identity.ts": 68,
+  "test_artifact_scan_publication_recovery.ts": 14,
   "test_artifact_storage.ts": 19,
   "test_artifact_storage_regressions.ts": 34,
   "test_compact_artifact_server.ts": 84,
+  "test_coverage_provenance.ts": 60,
+  "test_deep_scan_coordinator.ts": 18,
+  "test_deep_scan_executor.ts": 40,
+  "test_deep_scan_publication_integration.ts": 153,
+  "test_deep_scan_stdio_lifecycle.ts": 23,
+  "test_deep_scan_store_integration.ts": 51,
+  "test_deep_scan_terminal_race.ts": 22,
   "test_mcp_app_smoke.ts": 45,
+  "test_retry_coverage_dispositions.ts": 96,
+  "test_retry_coverage_receipts_namespaces.ts": 135,
+  "test_retry_coverage_receipts_ownership.ts": 145,
+  "test_retry_coverage_receipts_shared.ts": 150,
   "test_workbench_database.ts": 10,
 };
 
@@ -27,7 +40,7 @@ if (
 ) {
   throw new Error("Expected a shard number and count");
 }
-const files = globSync(["tests/test_*.ts", "tests/test_*.mjs"]);
+const files = globSync("tests/test_*.ts");
 const timings = Object.fromEntries(
   files.map((file) => [
     file,

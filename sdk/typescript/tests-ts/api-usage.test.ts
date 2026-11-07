@@ -32,9 +32,14 @@ import {
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-test.each([null, undefined])(
-  "preserves finalizer usage result %p",
-  async (finalizedUsage) => {
+test.each([
+  [false, null],
+  [true, null],
+  [false, undefined],
+  [true, undefined],
+] as const)(
+  "preserves finalizer results (workbenchValidated=%p, result=%p)",
+  async (workbenchValidated, finalizedUsage) => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const codexHome = await temporaryDirectory();
     await writeSession(
@@ -50,6 +55,7 @@ test.each([null, undefined])(
       model: "gpt-5.6-sol",
     });
     const result = await runEvents(scanDir, completedEvents(), {
+      workbenchValidated,
       onThreadStarted: (threadId) => tracker.start(threadId),
       onFinalize: async (usage) => {
         const snapshot = await tracker.stop(usage);
@@ -57,8 +63,10 @@ test.each([null, undefined])(
       },
     });
 
-    expect(result).toMatchObject({
-      turnResult: {
+    expect(result.toJSON()).toMatchObject({
+      cost:
+        finalizedUsage === null ? null : { inputTokens: 10, outputTokens: 3 },
+      turn: {
         usage:
           finalizedUsage === null
             ? null
@@ -205,10 +213,8 @@ test.each([false, true])(
                   {},
                   { parent: "scan-thread" },
                 );
-                if (cancel) {
+                if (cancel)
                   controller.abort(new Error("Synthetic cancellation"));
-                  controller.signal.throwIfAborted();
-                }
                 throw new Error("Synthetic execution failure");
               })(),
             }),

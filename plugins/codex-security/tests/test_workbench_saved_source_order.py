@@ -4,26 +4,59 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
 import pytest
-from test_workbench_checkpoint_heads import drafts, select
-from workbench_test_support import saved_binding, write_checkpoint
+from test_workbench_checkpoint_heads import drafts
+from test_workbench_standard_deep_results import (
+    accepted_standard_worker,
+    deep_scan_fixture,
+    standard_finding,
+)
+from workbench_test_support import (
+    cancel_scan,
+    fail_deep_scan,
+    get_scan,
+    preserve_scan_results,
+    saved_binding,
+    saved_discovery_worker,
+    saved_draft,
+    scan_command,
+    select_checkpoint,
+    write_checkpoint,
+    write_result_draft,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_db
 import workbench_saved_results as saved
+from workbench import saved_sources
+
+
+def test_latest_iteration_uses_its_number_when_completion_times_tie() -> None:
+    def iteration(label: str, worker_id: str) -> dict[str, str]:
+        return {
+            "kind": "dedup",
+            "status": "succeeded",
+            "id": worker_id,
+            "completed_at": "2026-10-27T00:00:00Z",
+            "result_manifest_path": f"/scan/dedup/{label}/output/result.json",
+        }
+
+    previous = iteration("dedup-0009", "z")
+    latest = iteration("dedup-0010", "a")
+    assert saved_sources._latest_iteration([latest, previous]) == latest
 
 
 def test_stopped_scan_prefers_latest_iteration_over_older_reducer_checkpoint(
-    historical_publication_scan,
+    tmp_path: Path,
 ) -> None:
-    scan = historical_publication_scan()
-    scan_dir, scan_id = scan.scan_dir, scan.scan_id
-    finding = scan.findings[0]
+    state, home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    finding = standard_finding(tmp_path, scan_id, target)
     # An upgraded scan can contain both a legacy reducer checkpoint and a host iteration.
-    with scan.connection as connection:
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
         for label, worker_id in (("dedup-0009", "z"), ("dedup-0010", "a")):
             output = scan_dir / "artifacts" / "deep_discovery" / "dedup" / label / "output"
             output.mkdir(parents=True)
@@ -43,7 +76,7 @@ def test_stopped_scan_prefers_latest_iteration_over_older_reducer_checkpoint(
                 ) VALUES (?, ?, 'dedup', 'succeeded', ?, ?, ?, '2026-10-27', '2026-10-27', '2026-10-27')""",
                 (worker_id, scan_id, str(result), str(output), str(result)),
             )
-    scan.fail()
+    fail_deep_scan(state, home, scan_id, message="Stopped before parent publication.")
     findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
     assert [row["summary"] for row in findings] == ["dedup-0010"]
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
@@ -59,30 +92,234 @@ def call_workbench(monkeypatch, state, codex_home, *args):
         workbench_db.main()
 
 
+def recovered_review_state(state, scan_dir, scan_id):
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        workers = connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+        ).fetchall()
+    return saved.merge_saved_results(
+        scan_dir,
+        scan_id,
+        workbench_db.workbench_completion_binding(scan, workbench_db.now()),
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=manifest["scan"]["preservedSources"],
+    )[2]
+
+
+@pytest.mark.parametrize("termination", ["canceled", "failed", "interrupted"])
 @pytest.mark.parametrize("latest_pending", [True, False])
-@pytest.mark.parametrize("rewritten", ["accepted", "pending"])
-def test_frozen_times_survive_identical_committed_and_pending_rewrites(
-    tmp_path: Path, latest_pending: bool, rewritten: str
+@pytest.mark.parametrize("failure_stage", ["publication", "source-order", "head-and-source-order"])
+def test_failed_publication_keeps_order_after_identical_result_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    latest_pending: bool,
+    failure_stage: str,
+    termination: str,
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    pending, closed = drafts(scan_id)
+    old, latest = (closed, pending) if latest_pending else (pending, closed)
+    write_result_draft(result, old, mtime_ns=100)
+    checkpoint = write_checkpoint(result.parent / "checkpoints", latest, mtime_ns=200)
+    select_checkpoint(result.parent, checkpoint, mtime_ns=200)
+
+    def fail_publication(*args, **kwargs):
+        raise OSError("injected publication failure")
+
+    write = saved_sources.write_scan_local_bytes
+
+    def fail_snapshot(root, relative, contents):
+        if relative.startswith("source-order/") or (
+            failure_stage == "head-and-source-order" and "/checkpoint-heads/" in relative
+        ):
+            raise OSError("injected snapshot failure")
+        return write(root, relative, contents)
+
+    with monkeypatch.context() as patch:
+        if failure_stage == "publication":
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        else:
+            patch.setattr(saved_sources, "write_scan_local_bytes", fail_snapshot)
+        call_workbench(
+            patch,
+            state,
+            codex_home,
+            "cancel-scan" if termination == "canceled" else "fail-deep-scan",
+            "--scan-id",
+            scan_id,
+            *(
+                ["--deep-status", termination, "--message", "Worker stopped."]
+                if termination != "canceled"
+                else []
+            ),
+        )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        frozen = json.loads(
+            connection.execute(
+                "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()[0]
+        )
+    sources = frozen.get("sources", frozen)
+    assert result.relative_to(scan_dir).as_posix() in sources
+
+    if failure_stage != "publication":
+        with monkeypatch.context() as patch:
+            patch.setattr(saved_sources, "write_scan_local_bytes", fail_snapshot)
+            with pytest.raises((saved.ContractError, OSError), match="snapshot failure"):
+                call_workbench(
+                    patch,
+                    state,
+                    codex_home,
+                    "preserve-scan-results",
+                    "--scan-id",
+                    scan_id,
+                    "--thread-id",
+                    "standard-worker-thread",
+                )
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                json.loads(
+                    connection.execute(
+                        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+                    ).fetchone()[0]
+                )
+                == frozen
+            )
+
+    result.write_bytes(result.read_bytes())
+    os.utime(result, ns=(300, 300))
+    call_workbench(
+        monkeypatch,
+        state,
+        codex_home,
+        "preserve-scan-results",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "standard-worker-thread",
+    )
+    coverage = recovered_review_state(state, scan_dir, scan_id)
+    pending_rows = [row for row in coverage["deferred"] if row.get("reason") == "Review remains."]
+    assert pending_rows == (
+        [
+            {
+                **pending["coverage"]["deferred"][0],
+                "id": f"{worker_id}-attempt-1-deferred-1",
+                "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+            }
+        ]
+        if latest_pending
+        else []
+    )
+    published_sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
+        "preservedSources"
+    ]
+    times = saved._frozen_source_times(scan_dir, scan_id, published_sources)
+    for path, digest in sources.items():
+        if Path(path).name == "checkpoint-head.json":
+            assert saved._read_saved_result(scan_dir, path, scan_id)[1] == digest
+            assert path not in published_sources
+            captured = saved._capture_saved_source(scan_dir, path, scan_id, write=False)
+            for snapshot, (expected, observed) in captured.items():
+                assert published_sources[snapshot] == expected
+                if Path(snapshot).parent.name == "checkpoint-heads":
+                    assert times[snapshot] == observed == frozen["sourceTimes"][path]
+        else:
+            assert published_sources[path] == digest
+
+
+@pytest.mark.parametrize("explicit_recovery", [False, True])
+@pytest.mark.parametrize("layout", ["parent", "worker"])
+def test_head_capture_includes_checkpoint_published_after_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_recovery: bool, layout: str
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    pending, closed = drafts(scan_id)
+    write_result_draft(result, closed, mtime_ns=100)
+    output = scan_dir if layout == "parent" else result.parent
+    original = write_checkpoint(output / "checkpoints", closed, mtime_ns=100)
+    select_checkpoint(output, original, mtime_ns=100)
+    if explicit_recovery:
+        fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
+        result.write_bytes(result.read_bytes())
+        os.utime(result, ns=(300, 300))
+    directory = (output / "checkpoints").relative_to(scan_dir).as_posix()
+    children = saved_sources._children
+    published = []
+
+    def publish_after_listing(root, relative):
+        names = children(root, relative)
+        if relative == directory and not published:
+            checkpoint = write_checkpoint(output / "checkpoints", pending, mtime_ns=200)
+            select_checkpoint(output, checkpoint, mtime_ns=200)
+            published.append(checkpoint)
+        return names
+
+    monkeypatch.setattr(saved_sources, "_children", publish_after_listing)
+    call_workbench(
+        monkeypatch,
+        state,
+        codex_home,
+        "recover-scan-results" if explicit_recovery else "cancel-scan",
+        "--scan-id",
+        scan_id,
+    )
+    assert len(published) == 1
+    coverage = recovered_review_state(state, scan_dir, scan_id)
+    expected = pending["coverage"]["deferred"][0]
+    if layout == "worker":
+        expected = {
+            **expected,
+            "id": f"{worker_id}-attempt-1-deferred-1",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+        }
+    assert [row for row in coverage["deferred"] if row.get("reason") == "Review remains."] == [
+        expected
+    ]
+    sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
+    assert published[0].relative_to(scan_dir).as_posix() in sources
+    assert any("/checkpoint-heads/" in f"/{path}" for path in sources)
+    call_workbench(
+        monkeypatch,
+        state,
+        codex_home,
+        "preserve-scan-results",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "standard-worker-thread",
+    )
+    assert recovered_review_state(state, scan_dir, scan_id) == coverage
+
+
+@pytest.mark.parametrize("rewritten", ["result", "checkpoint"])
+def test_frozen_times_cover_sources_without_checkpoint_heads(
+    tmp_path: Path, rewritten: str
 ) -> None:
     scan_id = "source-order"
     pending, closed = drafts(scan_id)
-    accepted, incoming = (closed, pending) if latest_pending else (pending, closed)
-    committed = write_checkpoint(tmp_path / "checkpoints", accepted)
-    os.utime(committed, ns=(100, 100))
-    select(tmp_path, committed, 100)
-    checkpoint = write_checkpoint(tmp_path / "checkpoints", incoming)
-    os.utime(checkpoint, ns=(200, 200))
-    marker = tmp_path / "checkpoints/pending" / checkpoint.name
-    marker.parent.mkdir()
-    marker.write_bytes(checkpoint.read_bytes())
-    os.utime(marker, ns=(200, 200))
-    binding = saved_binding(repository="synthetic")
+    output = tmp_path / "worker"
+    output.mkdir()
+    result = output / "result.json"
+    write_result_draft(result, closed, mtime_ns=100)
+    checkpoint = write_checkpoint(output / "checkpoints", pending, mtime_ns=200)
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    binding = saved_binding("deep_repository", repository="synthetic")
 
     def merge(frozen=None):
         return saved.merge_saved_results(
             tmp_path,
             scan_id,
             binding,
+            workers,
             [],
             stopped=True,
             reason="interrupted",
@@ -91,21 +328,201 @@ def test_frozen_times_survive_identical_committed_and_pending_rewrites(
 
     first = merge()
     frozen = first[0]["scan"]["preservedSources"]
-    assert any(row["id"] == "review" for row in first[2]["deferred"]) is latest_pending
-    path, observed = (committed, 300) if rewritten == "accepted" else (checkpoint, 50)
+    assert pending["coverage"]["deferred"][0] in first[2]["deferred"]
+    path, observed = (result, 300) if rewritten == "result" else (checkpoint, 50)
     path.write_bytes(path.read_bytes())
     os.utime(path, ns=(observed, observed))
     assert merge(frozen)[2] == first[2]
     record_path = next(path for path in frozen if path.startswith("source-order/"))
     record = json.loads((tmp_path / record_path).read_text())
-    record["sources"][checkpoint.relative_to(tmp_path).as_posix()]["observedAtNs"] = "400"
+    record["sources"][result.relative_to(tmp_path).as_posix()]["observedAtNs"] = "400"
     (tmp_path / record_path).write_text(json.dumps(record))
-    with pytest.raises(saved.ContractError, match="source ordering changed"):
+    with pytest.raises(
+        saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
+    ):
         merge(frozen)
 
 
 def test_order_metadata_is_not_new_evidence(tmp_path: Path) -> None:
-    orphan = tmp_path / "source-order" / ("0" * 64 + ".json")
-    orphan.parent.mkdir()
-    orphan.write_text(json.dumps({"scanId": "scan", "sources": {}}))
-    assert saved._saved_result_paths(tmp_path, "scan") == []
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
+    manifest = (scan_dir / "scan-manifest.json").read_bytes()
+    orphan = scan_dir / "source-order" / ("0" * 64 + ".json")
+    orphan.write_text(json.dumps({"scanId": scan_id, "sources": {}}))
+    assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
+    scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert (scan_dir / "scan-manifest.json").read_bytes() == manifest
+
+
+@pytest.mark.parametrize("head_time", [100, 200, 500], ids=["older", "tied", "newer"])
+def test_restored_head_uses_its_captured_observation(tmp_path: Path, head_time: int) -> None:
+    scan_id = "restored-observation"
+    finding = standard_finding(tmp_path, scan_id, tmp_path)
+    finding.setdefault("extensions", {})["candidateId"] = "candidate-a"
+    reported = saved_draft(
+        scan_id,
+        findings=[finding],
+        complete=True,
+        surfaces=[
+            {
+                "id": "candidate-a",
+                "candidateId": "candidate-a",
+                "label": "Candidate",
+                "disposition": "reported",
+                "receiptRefs": [],
+            }
+        ],
+    )
+    rejected = saved_draft(
+        scan_id,
+        surfaces=[
+            {
+                "id": "candidate-a",
+                "candidateId": "candidate-a",
+                "label": "Candidate",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ],
+        complete=True,
+    )
+    output = tmp_path / "worker"
+    output.mkdir()
+    checkpoints = [
+        write_checkpoint(output / "checkpoints", draft) for draft in (rejected, reported)
+    ]
+    for checkpoint, observed in zip(checkpoints, (300, 400)):
+        os.utime(checkpoint, ns=(50, 50))
+        select_checkpoint(output, checkpoint, mtime_ns=observed)
+        saved._capture_saved_source(tmp_path, "worker/checkpoint-head.json", scan_id)
+    result = output / "result.json"
+    write_result_draft(result, reported, mtime_ns=200)
+    select_checkpoint(output, checkpoints[0], mtime_ns=head_time)
+    original = {path: path.read_bytes() for path in (result, *checkpoints)}
+    workers = [saved_discovery_worker(output)]
+    binding = saved_binding("deep_repository", repository="synthetic")
+    binding["target"]["targetId"] = "synthetic-target"
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    for _ in range(2):
+        assert len(first[1]["findings"]) == int(head_time < 200)
+        first = saved.merge_saved_results(
+            tmp_path,
+            scan_id,
+            binding,
+            workers,
+            [],
+            stopped=True,
+            reason="interrupted",
+            frozen_source_digests=first[0]["scan"]["preservedSources"],
+            checkpoint_heads=first[0]["scan"]["preservedCheckpointHeads"],
+        )
+    assert all(path.read_bytes() == contents for path, contents in original.items())
+
+
+@pytest.mark.parametrize("termination", ["failed", "interrupted", "canceled"])
+def test_first_stop_freezes_sources_before_report_preparation(
+    tmp_path: Path, termination: str
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    finding = standard_finding(tmp_path, scan_id, target)
+    finding.setdefault("extensions", {})["candidateId"] = "candidate-a"
+    reported = saved_draft(
+        scan_id,
+        findings=[finding],
+        complete=True,
+        surfaces=[
+            {
+                "id": "candidate-a",
+                "candidateId": "candidate-a",
+                "label": "Candidate",
+                "disposition": "reported",
+                "receiptRefs": [],
+            }
+        ],
+    )
+    write_result_draft(result, reported, mtime_ns=100)
+    checkpoint = write_checkpoint(result.parent / "checkpoints", reported)
+    select_checkpoint(result.parent, checkpoint, mtime_ns=100)
+    report = scan_dir / "report.md"
+    report.mkdir()
+    environment = {"CODEX_HOME": str(codex_home)}
+    if termination == "canceled":
+        cancel_scan(state, scan_id, "standard-worker-thread", environment=environment)
+    else:
+        fail_deep_scan(state, codex_home, scan_id, deep_status=termination)
+    stopped = get_scan(state, scan_id)["scan"]
+    assert any("report.md: expected a regular file" in warning for warning in stopped["warnings"])
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        frozen = connection.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0]
+    assert frozen is not None
+    report.rmdir()
+    rejection = saved_draft(
+        scan_id,
+        surfaces=[
+            {
+                "id": "candidate-a",
+                "candidateId": "candidate-a",
+                "label": "Candidate",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ],
+        complete=True,
+    )
+    latest = write_checkpoint(result.parent / "checkpoints", rejection)
+    select_checkpoint(result.parent, latest, mtime_ns=300)
+    preserved = preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment=environment
+    )["scan"]
+    assert preserved["findingCount"] == 1
+    assert preserved["resultsRecoveryNeeded"] is (termination != "canceled")
+    published = (scan_dir / "scan-manifest.json").read_bytes()
+    preserve_scan_results(state, scan_id, "standard-worker-thread", environment=environment)
+    assert (scan_dir / "scan-manifest.json").read_bytes() == published
+    assert result.read_text() == json.dumps(reported)
+
+
+def test_invalid_explicit_recovery_does_not_replace_first_selection(tmp_path: Path) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    initial = json.loads(result.read_text())
+    os.utime(result, ns=(100, 100))
+    checkpoint = write_checkpoint(result.parent / "checkpoints", initial)
+    select_checkpoint(result.parent, checkpoint, mtime_ns=100)
+    fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
+    artifacts = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "report.md")
+    }
+    query = (
+        "SELECT seal_manifest_digest, retained_source_digests_json, retained_checkpoint_heads_json "
+        "FROM scans WHERE id = ?"
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        original = connection.execute(query, (scan_id,)).fetchone()
+    original_checkpoint = checkpoint.read_bytes()
+    checkpoint.write_text(json.dumps({**initial, "scanId": "other-scan"}))
+    valid = {**initial, "complete": True, "threatModel": {"summary": "Completed review."}}
+    later = write_checkpoint(result.parent / "checkpoints", valid)
+    select_checkpoint(result.parent, later, mtime_ns=200)
+    environment = {"CODEX_HOME": str(codex_home)}
+    failed = scan_command(
+        state, "recover-scan-results", scan_id, environment=environment, check=False
+    )
+    assert failed["returncode"] != 0
+    assert "Frozen stopped-scan checkpoint set is incomplete" in failed["stderr"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute(query, (scan_id,)).fetchone() == original
+    assert all((scan_dir / name).read_bytes() == contents for name, contents in artifacts.items())
+    checkpoint.write_bytes(original_checkpoint)
+    scan_command(state, "recover-scan-results", scan_id, environment=environment)
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["threatModel"]["summary"] == "Completed review."

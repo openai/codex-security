@@ -1,12 +1,12 @@
 import { basename, dirname, join, relative } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { sessionLines } from "./session-lines.js";
 import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
   isScanArtifactDirectory,
-  sessionEvents,
   sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
@@ -40,7 +40,7 @@ export function readSavedScanLogs(
   codexHome: string | readonly string[],
   options: { allowMissingRoot?: boolean } = {},
 ) {
-  const threadId = scan.continuationThreadId ?? scan.threadIds?.[0];
+  const threadId = scan.continuationThreadId;
   if (!threadId && !options.allowMissingRoot) {
     throw new CodexSecurityError(
       `No session is associated with scan ${scan.scanId}.`,
@@ -48,7 +48,7 @@ export function readSavedScanLogs(
   }
   return readScanLogs({
     scanId: scan.scanId,
-    threadId,
+    threadId: threadId ?? scan.threadIds?.[0],
     threadIds: scan.threadIds,
     executionThreadIds: scan.executionThreadIds ?? [],
     codexHome,
@@ -66,13 +66,7 @@ export function readSavedScanLogs(
   });
 }
 
-interface SessionLog {
-  threadId: string;
-  parentThreadId: string | null;
-  startedAt: number | null;
-  workingDirectory: string | null;
-  path: string;
-}
+type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
 async function* scanSessions(codexHome: string, directory = "sessions") {
   for await (const path of sessionFiles(join(codexHome, directory), true)) {
@@ -96,14 +90,9 @@ async function* scanSessions(codexHome: string, directory = "sessions") {
   }
 }
 
-export async function findScanSession(
-  codexHome: string,
-  threadId: string,
-): Promise<SessionLog | null> {
-  for (const directory of ["sessions", "archived_sessions"]) {
-    for await (const session of scanSessions(codexHome, directory)) {
-      if (session.threadId === threadId) return session;
-    }
+export async function findScanSession(codexHome: string, threadId: string) {
+  for await (const session of scanSessions(codexHome)) {
+    if (session.threadId === threadId) return session;
   }
   return null;
 }
@@ -277,5 +266,23 @@ async function extendsSessionLog(
     return !(await events.next()).done;
   } finally {
     await events.return(undefined);
+  }
+}
+
+async function* sessionEvents(
+  path: string,
+): AsyncGenerator<Record<string, unknown>> {
+  try {
+    for await (const line of sessionLines(path)) {
+      if (line.trim() === "") continue;
+      try {
+        const event: unknown = JSON.parse(line);
+        if (isRecord(event)) yield event;
+      } catch {
+        continue;
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }

@@ -133,7 +133,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
 
     writeup = value.get("writeup")
     if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str):
-        prepared["writeup"] = {"reportPath": writeup["reportPath"]}
+        prepared["writeup"] = {"reportPath": bounded_json_text(writeup["reportPath"], 512)[0]}
 
     evidence_key, evidence = merged_bounded_code_evidence(value)
     if evidence_key is not None:

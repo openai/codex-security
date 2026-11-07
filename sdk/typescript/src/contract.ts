@@ -8,8 +8,8 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
-import { bundledPluginRoot } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
+import { bundledPluginRoot } from "./runtime.js";
 import { safeScopePath as sharedSafeScopePath } from "./contract-values.js";
 export {
   DEFERRED_PATH_LOCATION,
@@ -118,8 +118,6 @@ export async function loadContractWithScanDirectory(
   }, options.signal);
 }
 
-/** Normalize optional legacy details on a copy, without changing saved artifacts. */
-
 export async function requireScanFile(
   scanDirectory: string,
   relativePath: string,
@@ -154,6 +152,17 @@ export async function readScanFile(
       ),
     signal,
   );
+}
+
+export function safeScopePath(value: string): string {
+  try {
+    return sharedSafeScopePath(value);
+  } catch (error) {
+    throw new ContractValidationError(
+      error instanceof Error ? error.message : String(error),
+      { cause: error },
+    );
+  }
 }
 
 function validateExpectation(
@@ -223,11 +232,7 @@ function validateExpectation(
     const actual = new Set(actualPaths);
     if (actualPaths.length === actual.size) {
       const expected = new Set(requested.paths);
-      if (
-        actual.size === expected.size &&
-        actualPaths.every((path) => expected.has(path))
-      )
-        return;
+      if (actual.size === expected.size && actual.isSubsetOf(expected)) return;
     }
     throw new ContractValidationError(
       "Manifest include paths do not match the requested path target.",
@@ -243,17 +248,6 @@ function expectedCoverageMode(
   if (target.kind === "refs") return "branch_diff";
   if (target.kind === "working_tree") return "working_tree";
   return mode === "deep" ? "deep_repository" : "repository";
-}
-
-export function safeScopePath(value: string): string {
-  try {
-    return sharedSafeScopePath(value);
-  } catch (error) {
-    throw new ContractValidationError(
-      error instanceof Error ? error.message : String(error),
-      { cause: error },
-    );
-  }
 }
 
 export async function sameCheckedFileDevice(

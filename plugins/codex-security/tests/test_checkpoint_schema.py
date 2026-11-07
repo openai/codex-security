@@ -59,7 +59,7 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
                 if legacy_checkpoint and version == 57
                 else (version, name, sql)
                 for version, name, sql in migrations
-                if version <= 60
+                if version <= 57
                 and version not in omitted_versions
                 and not (legacy_checkpoint and version in (54, 55, 56))
                 and not (legacy_checkpoint in (47, 48, 50, 52, 53) and version in (52, 53))
@@ -120,16 +120,13 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
         before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
         migrate(connection, migrations)
         after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
-        nullable_columns = {
-            "retained_checkpoint_heads_json": None,
-            "source_scopes_json": None,
-            "launch_surface": None,
-            "launch_package_version": None,
-            "launch_plugin_version": None,
-            "launch_kind": None,
-            "parent_scan_role": None,
-        }
-        assert after == [nullable_columns | row for row in before]
+        for original, updated in zip(before, after, strict=True):
+            # Existing scan values survive the upgrade. Later nullable columns
+            # have no launch or recovery metadata to backfill for these rows.
+            for column in updated.keys() - original.keys():
+                added_value = updated.pop(column)
+                assert added_value is None
+            assert updated == original
 
         connection.execute(
             "UPDATE scans SET retained_checkpoint_heads_json = ? WHERE id = 'failed'", (heads,)

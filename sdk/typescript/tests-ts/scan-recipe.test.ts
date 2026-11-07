@@ -1,5 +1,5 @@
 import { createCliTest } from "./support/cli-run.js";
-import { ScanTransportClosedError } from "../src/scan-execution.js";
+import { writeSession } from "./support/usage-rollout.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import {
@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import { scanPreflightCodexConfig } from "../src/api.js";
 import { main } from "../src/cli.js";
 import { codexSecurityCredentialHome, runWorkbench } from "../src/runtime.js";
@@ -213,6 +214,7 @@ test.each(
       { codexOverrides: overrides },
       home,
     );
+    let providerProfilePath: string | undefined;
     const client = new TestClient(
       {
         pluginPath: PLUGIN_ROOT,
@@ -230,13 +232,37 @@ test.each(
             throw new Error("Synthetic disconnected workbench");
           return command(args, input);
         },
-        createCodex: (options) => {
-          expect<unknown>(options.config?.["model_providers"]).toEqual(
-            resolveCodexProfile(initial)["model_providers"],
-          );
-          throw new ScanTransportClosedError(
-            "Synthetic stop after registration",
-          );
+        createCodex: async (options) => {
+          if (profileKind === "clear-table") {
+            expect(options.nativeProfile).toBeUndefined();
+          } else {
+            expect(typeof options.nativeProfile).toBe("string");
+            providerProfilePath = join(
+              options.env!["CODEX_HOME"]!,
+              `${options.nativeProfile}.config.toml`,
+            );
+            expect<unknown>(
+              parseToml(await readFile(providerProfilePath, "utf8")),
+            ).toEqual({
+              model_providers: resolveCodexProfile(initial)["model_providers"],
+            });
+          }
+          return {
+            startThread: () => ({
+              id: "synthetic-recipe-thread",
+              async runStreamed() {
+                return {
+                  events: (async function* () {
+                    yield {
+                      type: "thread.started" as const,
+                      thread_id: "synthetic-recipe-thread",
+                    };
+                    throw new Error("Synthetic stop after registration");
+                  })(),
+                };
+              },
+            }),
+          };
         },
       },
     );
@@ -332,6 +358,11 @@ test.each(
       );
     } finally {
       await client.close();
+      if (providerProfilePath !== undefined) {
+        await expect(readFile(providerProfilePath)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
     }
   },
 );
@@ -385,7 +416,7 @@ test.each([
     const repository = join(root, "repository");
     const codexHome = join(root, "state", "codex-home");
     await mkdir(repository);
-    await mkdir(codexHome, { recursive: true, mode: 0o700 });
+    await mkdir(codexHome, { recursive: true });
     await writeFile(join(repository, "source.py"), "# synthetic source\n");
     const promptFile = join(root, "post-scan.md");
     const postScanPrompt =
@@ -439,9 +470,7 @@ test.each([
               runWorkbench,
               createCodex: ({ config }) => {
                 expect(config).toMatchObject(selected);
-                throw new ScanTransportClosedError(
-                  "Synthetic stop after registration",
-                );
+                throw new Error("Synthetic stop after registration");
               },
             },
           ),
@@ -481,7 +510,6 @@ test.each([
         }),
         runWorkbench: command,
       }),
-      stderr.text(),
     ).toBe(0);
   },
 );
@@ -567,7 +595,7 @@ test.each(
         args,
         input,
       );
-    let launches = 0;
+    let modelTurns = 0;
     const runtimeDependencies = {
       environment,
       prepareRuntime: async () => ({
@@ -585,13 +613,36 @@ test.each(
         return command(args, input);
       },
       createCodex: ({ config }: { config?: JsonObject }) => {
-        launches++;
-        if (cleared) {
-          expect(config).not.toHaveProperty(key);
-          expect(config).not.toHaveProperty("analytics");
-          expect(config).not.toHaveProperty("agents.reviewer.config_file");
-        }
-        throw new ScanTransportClosedError("Synthetic stop after registration");
+        const thread = (id: string, cwd?: string) => ({
+          id,
+          async runStreamed() {
+            modelTurns++;
+            if (cleared) {
+              expect(config).not.toHaveProperty(key);
+              expect(config).not.toHaveProperty("analytics");
+              expect(config).not.toHaveProperty("agents.reviewer.config_file");
+            }
+            await writeSession(home, id, {}, { cwd });
+            return {
+              events: (async function* () {
+                yield {
+                  type: "thread.started" as const,
+                  thread_id: id,
+                };
+                throw new Error("Synthetic stop after registration");
+              })(),
+            };
+          },
+        });
+        return {
+          startThread: (options?: { workingDirectory?: string }) =>
+            thread(
+              `synthetic-model-file-thread-${modelTurns + 1}`,
+              options?.workingDirectory,
+            ),
+          resumeThread: (id: string, options?: { workingDirectory?: string }) =>
+            thread(id, options?.workingDirectory),
+        };
       },
     };
     const client = new TestClient(
@@ -643,7 +694,7 @@ test.each(
             agents: { reviewer: { description: "updated reviewer" } },
           });
         }
-        expect(launches).toBe(mode === "deep" ? 3 : 2);
+        expect(modelTurns).toBe(mode === "deep" ? 3 : 2);
         expect(replay).not.toHaveProperty(key);
         expect(replay).not.toHaveProperty("analytics");
         expect(replay).not.toHaveProperty("agents.reviewer.config_file");

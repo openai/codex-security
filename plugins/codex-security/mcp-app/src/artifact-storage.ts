@@ -17,11 +17,6 @@ import type { RunArtifactWorkbench } from "./artifact-context.js";
 import { handoffClaimTokenSchema } from "./server/handoff-tools.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 
-const supplementalReservations = [
-  ...reservedArtifactPaths,
-  "artifacts/deep-scan",
-];
-
 const locationShape = {
   scanId: z.string().uuid().optional(),
   targetPath: z.string().min(1).optional(),
@@ -65,7 +60,7 @@ export async function standaloneArtifactContext(
   if (storage === "temporary") {
     // Resolve existing ancestors for stable imports without creating or requiring
     // the persistent collection. storageContext prepares the temporary root.
-    return { root: await resolveStoragePath(root), repoRoot };
+    return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
   }
   for (const storagePath of [scanRoot, root]) {
     const existingRoot = await resolveStoragePath(storagePath);
@@ -84,6 +79,7 @@ export async function standaloneArtifactContext(
   return {
     root: await requireArtifactRoot(root, "Standalone artifacts"),
     repoRoot,
+    layout: "scan",
   };
 }
 
@@ -150,7 +146,6 @@ function supplementalPath(
   input: ArtifactLocation,
   context: ArtifactContext,
   write = false,
-  reservations: readonly string[] = reservedArtifactPaths,
 ): string[] {
   const parts = components(input.path!);
   if (input.storage === "temporary") return parts;
@@ -163,7 +158,7 @@ function supplementalPath(
     (!context.scanId && !write && path === "threat_model.md");
   if (
     !allowed ||
-    reservations.some(
+    reservedArtifactPaths.some(
       (reserved) => path === reserved || path.startsWith(reserved + "/"),
     )
   ) {
@@ -193,12 +188,7 @@ export async function saveCodexSecurityArtifact(
   const parts =
     input.path === undefined
       ? undefined
-      : supplementalPath(
-          input,
-          context,
-          true,
-          context.scanId ? supplementalReservations : reservedArtifactPaths,
-        );
+      : supplementalPath(input, context, true);
   const selected = await storageContext(context, input.storage, true);
   selected.root = await requireArtifactRoot(selected.root, "Artifact storage");
   if (!parts) return { storage: input.storage, directory: selected.root };

@@ -38,7 +38,7 @@ Credential values remain part of the source evidence.
 
 ## Run
 
-Build the host native binding with `node plugins/codex-security/mcp-app/scripts/build_native.mjs` for the preflight lock. [Build the evaluation tools](../README.md#build-the-evaluation-tools), then run the commands below from the repository root.
+[Build the evaluation tools](../README.md#build-the-evaluation-tools), then run the commands below from the repository root.
 
 ## Deterministic checks
 

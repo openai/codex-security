@@ -540,24 +540,6 @@ export async function normalizeTarget(
   target: ScanTarget,
   signal?: AbortSignal,
 ): Promise<NormalizedTarget> {
-  return normalizeTargetPaths(repository, target, signal, false);
-}
-
-/** Normalize a sealed read scope; the workbench still validates its saved binding. */
-export async function normalizeSealedReadTarget(
-  repository: string,
-  target: ScanTarget,
-  signal?: AbortSignal,
-): Promise<NormalizedTarget> {
-  return normalizeTargetPaths(repository, target, signal, true);
-}
-
-async function normalizeTargetPaths(
-  repository: string,
-  target: ScanTarget,
-  signal: AbortSignal | undefined,
-  allowMissingPaths: boolean,
-): Promise<NormalizedTarget> {
   const root = await normalizeRepository(repository, signal);
   throwIfAborted(signal);
   if (target === "repository") {
@@ -615,39 +597,24 @@ async function normalizeTargetPaths(
       : resolve(root, expandHome(value));
     let canonical: string;
     try {
-      for (let ancestor = candidate; ; ancestor = dirname(ancestor)) {
-        try {
-          // Some runtimes cannot resolve special files to filesystem paths.
-          if (ancestor === candidate)
-            requireScanPathType(
-              value,
-              await abortable(() => stat(candidate), signal),
-            );
-          const resolved = await abortable(
-            () => realpath(ancestor, { encoding: "buffer" }),
-            signal,
-          );
-          requireScanPathType(
-            value,
-            await abortable(() => lstat(resolved), signal),
-          );
-          requireUtf8Path("Path target", value, resolved);
-          const path = resolved.toString();
-          if (!isAbsolute(path))
-            throw new InvalidTargetError(
-              `Could not resolve path target: ${value}`,
-            );
-          canonical = resolve(path, relative(ancestor, candidate));
-          break;
-        } catch (error) {
-          if (
-            !allowMissingPaths ||
-            (error as NodeJS.ErrnoException).code !== "ENOENT" ||
-            dirname(ancestor) === ancestor
-          )
-            throw error;
-        }
+      // Some runtimes cannot canonicalize special files to filesystem paths.
+      requireScanPathType(
+        value,
+        await abortable(() => stat(candidate), signal),
+      );
+      const resolved = await abortable(
+        () => realpath(candidate, { encoding: "buffer" }),
+        signal,
+      );
+      canonical = resolved.toString();
+      if (!isAbsolute(canonical)) {
+        throw new InvalidTargetError(`Could not resolve path target: ${value}`);
       }
+      requireScanPathType(
+        value,
+        await abortable(() => lstat(resolved), signal),
+      );
+      requireUtf8Path("Path target", value, resolved);
     } catch (error) {
       throwIfAborted(signal);
       if (error instanceof InvalidTargetError) throw error;
@@ -961,13 +928,11 @@ export async function gitMarkerRoot(
 export async function gitProtectionRoots(
   repository: string,
   signal?: AbortSignal,
-  destinationFallback: string | null = null,
 ): Promise<string[]> {
-  const [destination, origin] = await Promise.all([
+  const roots = await Promise.all([
     gitMarkerRoot(repository, signal, "outermost"),
     walkGitMarkers(resolve(repository), signal, "outermost"),
   ]);
-  const roots = [destination ?? destinationFallback, origin];
   return [...new Set(roots.filter((root): root is string => root !== null))];
 }
 

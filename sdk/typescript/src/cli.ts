@@ -4,15 +4,13 @@ import { severityRubricSchema } from "./severity-rubric.js";
 import { explicitlyCanceled } from "./scan-executor.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
-import { isNonEmptyString, notify, parseJson } from "./value.js";
+import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import {
   providerPreflightCommand,
   restoreProviderProfile,
   withCodexPreflightLock,
 } from "./provider-profile.js";
-
-import { loadDeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
-import { appServerCyberAccessProgram } from "./cli-daybreak.js";
+import { isNonEmptyString, notify, parseJson } from "./value.js";
 import { compareTimestamps } from "./timestamps.js";
 
 import {
@@ -408,9 +406,12 @@ import {
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
-import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
-import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
-import { nativeScanConfiguration } from "./execution-preparation.js";
+import {
+  absoluteModelFilePaths,
+  deepScanOptions,
+  requireDeepScanExecutable,
+  resolveDeepScanConfig,
+} from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import {
   DEEP_SCAN_SETTINGS,
@@ -1134,17 +1135,15 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  requireSealedResume?: boolean;
+  executableSourcePaths?: readonly string[];
   rubricPath?: string;
   severityRubric?: ScanOptions["severityRubric"];
   rerunInputIdentity?: JsonValue;
-  publicationOnly?: boolean;
-  restoreReplayConfiguration?: () => Promise<JsonObject>;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
   resumeScanId?: string;
-  inheritedPermissions?: ScanOptions["inheritedPermissions"];
-  preserveProviderEnvironment?: boolean;
   mock?: boolean;
   workflowId?: string;
   safetyIdentifier?: string;
@@ -2047,7 +2046,11 @@ async function skillStartupConfigOverrides(
   );
   const native = await import(
     pathToFileURL(
-      join(await bundledPluginRoot(), "scripts", "codex_profile.mjs"),
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
     ).href
   );
   // A private user-file layer applies consent before native startup without
@@ -2069,14 +2072,14 @@ async function skillStartupConfigOverrides(
       CODEX_HOME: preflightHome,
     };
     response = (await withCodexPreflightLock(preflightEnvironment, signal, () =>
-      native.readCodexRuntimeConfigWithOrigins({
-        clientVersion: VERSION,
+      native.readDeepScanRuntimeConfigWithOrigins({
         codexPath: command.command,
         appServerArgs: args,
         cwd: directory,
         configOverrides: [],
         env: preflightEnvironment,
         signal,
+        context: "helper",
       }),
     )) as JsonObject;
   } finally {
@@ -2354,14 +2357,15 @@ export async function main(
     protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<JsonObject> => {
     try {
-      const result = await dependencies.runWorkbench(
-        args,
-        undefined,
-        undefined,
-        pythonPath,
-        protectedRoot,
+      return await select(
+        await dependencies.runWorkbench(
+          args,
+          undefined,
+          undefined,
+          pythonPath,
+          protectedRoot,
+        ),
       );
-      return await select(result);
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
       exitCode = 2;
@@ -2904,12 +2908,8 @@ export async function main(
             },
             dependencies.currentDirectory(),
             dependencies.environment,
-            { sealedProducerVersion: saved["sealedProducerVersion"] },
+            canReadSealedScan(saved),
           );
-          if (scanArguments.mode !== "deep")
-            throw new CodexSecurityError(
-              "Only Deep Scans can be resumed with this command.",
-            );
           scanArguments.resumeScanId = saved["scanId"];
           scanArguments.outputDir = resolveCliPath(
             dependencies.currentDirectory(),
@@ -5224,6 +5224,7 @@ export async function main(
                   ? undefined
                   : resolveCliPath(directory, options.rubric),
               codexOverrides: config.codexOverrides,
+              executableSourcePaths: config.executableSourcePaths,
               projectConfig: provenance,
               workflowId: options.workflowId,
               safetyIdentifier: options.safetyIdentifier,
@@ -6157,6 +6158,7 @@ export async function main(
             validationPromptFile: settings.validationPromptFile,
             postScanPromptFile: settings.postScanPromptFile,
             config: {
+              ...resolved.config,
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
                 await parseScanCodexOverrides(
@@ -6216,17 +6218,19 @@ export async function main(
                       );
                       return undefined;
                     }
-                    if (
-                      typeof saved["sealedProducerVersion"] !== "string" &&
-                      typeof saved["threadId"] === "string" &&
-                      (
-                        await findScanSession(
-                          codexSecurityCredentialHome(dependencies.environment),
-                          saved["threadId"],
-                        )
-                      )?.workingDirectory !==
-                        join(scanDir, "artifacts/deep-scan/merge")
-                    ) {
+                    const passive =
+                      canReadSealedScan(saved) &&
+                      !prompts.postScanPrompt?.trim();
+                    const session =
+                      !passive && typeof saved["threadId"] === "string"
+                        ? await findScanSession(
+                            codexSecurityCredentialHome(
+                              dependencies.environment,
+                            ),
+                            saved["threadId"],
+                          )
+                        : null;
+                    if (!passive && session?.workingDirectory !== scanDir) {
                       errorOutput.write(
                         `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
                       );
@@ -6243,10 +6247,7 @@ export async function main(
                       },
                       currentDirectory,
                       dependencies.environment,
-                      {
-                        sealedProducerVersion: saved["sealedProducerVersion"],
-                        postScanPrompt: prompts.postScanPrompt,
-                      },
+                      passive,
                     );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
@@ -6256,6 +6257,9 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        ...(passive
+                          ? { requireSealedResume: true, target: undefined }
+                          : {}),
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         telemetryContext: prompts.telemetryContext,
                         onTelemetry: prompts.onTelemetry,
@@ -6263,9 +6267,6 @@ export async function main(
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,
-                        inheritedPermissions: recipe.inheritedPermissions,
-                        preserveProviderEnvironment:
-                          recipe.preserveProviderEnvironment,
                         postScanPrompt:
                           recipe.postScanPrompt ?? prompts.postScanPrompt,
                         signal: controller.signal,
@@ -7944,6 +7945,19 @@ async function runScanImport(
   }
 }
 
+function canReadSealedScan(saved: JsonObject): boolean {
+  const recipe = saved["recipe"];
+  return (
+    typeof saved["sealedProducerVersion"] === "string" &&
+    isJsonObject(recipe) &&
+    recipe["ownerSuggestions"] !== true &&
+    !(
+      typeof recipe["postScanPrompt"] === "string" &&
+      recipe["postScanPrompt"].trim()
+    )
+  );
+}
+
 async function prepareScanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
   operation: "resume" | "rerun",
@@ -7957,10 +7971,7 @@ async function prepareScanArgumentsFromRecipe(
   >,
   directory: string,
   environment: CliDependencies["environment"],
-  continuation?: {
-    sealedProducerVersion?: unknown;
-    postScanPrompt?: string;
-  },
+  passive = false,
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -8028,17 +8039,6 @@ async function prepareScanArgumentsFromRecipe(
   if (config === undefined || !isJsonObject(config)) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid configuration.",
-    );
-  }
-  const inheritedPermissions = recipe["inheritedPermissions"];
-  if (
-    inheritedPermissions !== undefined &&
-    (!isJsonObject(inheritedPermissions) ||
-      !isJsonObject(inheritedPermissions["filesystem"] ?? null) ||
-      !isJsonObject(inheritedPermissions["network"] ?? null))
-  ) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains invalid native permissions.",
     );
   }
   const reference = target["baseRef"] ?? target["base"];
@@ -8153,27 +8153,16 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
-  const publicationOnly =
-    typeof continuation?.sealedProducerVersion === "string" &&
-    !(postScanPrompt ?? continuation.postScanPrompt)?.trim();
-  const restoreReplayConfiguration = () =>
-    recipe["preserveProviderEnvironment"] === true
-      ? nativeScanConfiguration(
-          environment,
-          { recipe: { config, providerProfile: recipe["providerProfile"] } },
-          deepScan.data?.subagents ?? DEFAULT_DEEP_SCAN_SETTINGS.subagents,
-        )
-      : restoreProviderProfile(config, recipe["providerProfile"], environment);
-  const replayConfig = publicationOnly
-    ? config
-    : await restoreReplayConfiguration();
+  const replayConfig = passive
+    ? {}
+    : await restoreProviderProfile(
+        config,
+        recipe["providerProfile"],
+        environment,
+      );
   return {
+    ...(passive ? { requireSealedResume: true } : {}),
     repository,
-    publicationOnly,
-    ...(publicationOnly ? { restoreReplayConfiguration } : {}),
-    inheritedPermissions:
-      inheritedPermissions as ScanOptions["inheritedPermissions"],
-    preserveProviderEnvironment: recipe["preserveProviderEnvironment"] === true,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram: cyberAccessProgram.data,
     ownerSuggestions: ownerSuggestions.data,
@@ -8191,9 +8180,9 @@ async function prepareScanArgumentsFromRecipe(
           : kind === "working_tree"
             ? DiffTarget.workingTree({ base: reference ?? "HEAD" })
             : "repository",
-    knowledgeBasePaths: knowledgeBasePaths.map((path) =>
-      resolveCliPath(directory, path),
-    ),
+    knowledgeBasePaths: passive
+      ? []
+      : knowledgeBasePaths.map((path) => resolveCliPath(directory, path)),
     ...prompts,
     safetyIdentifier,
     postScanPrompt,
@@ -10093,6 +10082,7 @@ async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
     config: JsonObject;
+    deepScan?: ScanArguments;
     command: "scan" | "policy";
     signal: AbortSignal;
   },
@@ -10116,12 +10106,30 @@ async function chooseInteractiveAuthentication(
   const prompt =
     dependencies.scanAuthenticationPrompt ?? createTerminalPrompt(errorOutput);
   const hasStoredSignIn = dependencies.hasStoredChatGPTSignIn;
-  if (
-    !prompt.isInteractive() ||
-    hasStoredSignIn === undefined ||
-    !(await abortable(() => hasStoredSignIn(signal), signal))
-  )
-    return auth;
+  if (!prompt.isInteractive() || hasStoredSignIn === undefined) return auth;
+  if (options.deepScan) {
+    const legacy = await resolveDeepScanConfig(
+      deepScanOptions(options.deepScan),
+      join(
+        scanCodexHome(dependencies.environment),
+        "codex-security",
+        "config.toml",
+      ),
+      signal,
+    );
+    const paths = [
+      ...(options.deepScan.executableSourcePaths ?? []),
+      ...(legacy.sourcePaths ?? []),
+      ...absoluteModelFilePaths(config, dependencies.environment),
+    ];
+    if (paths.length)
+      await requireDeepScanExecutable(
+        resolveCodexCommand(dependencies.environment).command,
+        paths,
+        signal,
+      );
+  }
+  if (!(await abortable(() => hasStoredSignIn(signal), signal))) return auth;
   const source = authentication.source;
   try {
     errorOutput.write(
@@ -10325,6 +10333,9 @@ async function executeScan(
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
+      ...(arguments_.executableSourcePaths
+        ? { executableSourcePaths: arguments_.executableSourcePaths }
+        : {}),
       codexOverrides: arguments_.codexOverrides,
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
@@ -10372,14 +10383,12 @@ async function executeScan(
     const otel = resolvedConfiguration["otel"];
     if (isJsonObject(otel)) patchOtel = otel;
     auth =
-      !arguments_.dryRun &&
-      !arguments_.mock &&
-      !arguments_.publicationOnly &&
-      interactive
+      !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
               config: effectiveConfiguration,
+              ...(arguments_.mode === "deep" ? { deepScan: arguments_ } : {}),
               command: "scan",
               signal: preparationAbortController.signal,
             },
@@ -10399,19 +10408,16 @@ async function executeScan(
           : providerConfiguration,
       };
     }
-    selectedAuthentication =
-      arguments_.mock || arguments_.publicationOnly
-        ? null
-        : scanAuthentication(
-            dependencies.environment,
-            auth,
-            provider,
-            hasCommandAuth(effectiveConfiguration),
-            {
-              preflight: arguments_.dryRun,
-              providerEnvKey: scanProviderEnvKey(effectiveConfiguration),
-            },
-          );
+    selectedAuthentication = arguments_.mock
+      ? null
+      : scanAuthentication(
+          dependencies.environment,
+          auth,
+          provider,
+          hasCommandAuth(effectiveConfiguration),
+          arguments_.dryRun,
+          scanProviderEnvKey(effectiveConfiguration),
+        );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
@@ -10530,8 +10536,6 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
-      inheritedPermissions: arguments_.inheritedPermissions,
-      preserveProviderEnvironment: arguments_.preserveProviderEnvironment,
       ...(arguments_.rubricPath === undefined
         ? {}
         : { rubricPath: arguments_.rubricPath }),
@@ -10539,6 +10543,9 @@ async function executeScan(
         ? {}
         : { severityRubric: arguments_.severityRubric }),
       knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
+      ...(arguments_.requireSealedResume
+        ? { requireSealedResume: true, target: undefined }
+        : {}),
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),
@@ -11367,49 +11374,6 @@ async function executeScan(
       ),
     };
     try {
-      if (
-        selected.findings.length > 0 &&
-        arguments_.restoreReplayConfiguration
-      ) {
-        const restored = resolveCodexProfile({
-          ...DEFAULT_CODEX_CONFIG,
-          ...(await arguments_.restoreReplayConfiguration()),
-        });
-        ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
-          scanModelConfiguration(restored));
-        patchServiceTier = restored["service_tier"] ?? "default";
-        const analytics = restored["analytics"];
-        patchAnalyticsOverride =
-          isJsonObject(analytics) && analytics["enabled"] !== undefined
-            ? `analytics.enabled=${JSON.stringify(analytics["enabled"])}`
-            : undefined;
-        const provider = scanModelProvider(restored);
-        if (typeof provider === "string") {
-          providerOptions = {
-            provider,
-            providerConfiguration:
-              (
-                restored["model_providers"] as
-                  Record<string, JsonObject> | undefined
-              )?.[provider] ??
-              (isExternalModelProvider(provider)
-                ? EXTERNAL_CODEX_PROVIDERS[provider]
-                : undefined),
-          };
-        }
-        if (!arguments_.dryRun && !arguments_.mock && interactive) {
-          auth = await chooseInteractiveAuthentication(
-            {
-              auth,
-              config: restored,
-              command: "scan",
-              signal: preparationAbortController.signal,
-            },
-            errorOutput,
-            dependencies,
-          );
-        }
-      }
       patches = await runFindingPatches(
         selected,
         {
@@ -11718,42 +11682,48 @@ async function readDeepScanStop(
       nextStep: "To scan further, rerun with a higher --max-cost.",
     };
   }
-  const response = await runWorkbench([
-    "get-scan",
-    "--scan-id",
-    result.manifest.scan.id,
-  ]);
-  const state = await loadDeepScanCheckpointSummary(result.scanDir);
+  const response = await runWorkbench(
+    workbenchArgs("get-deep-scan", {
+      scanId: result.manifest.scan.id,
+      threadId: result.threadId,
+    }),
+  );
+  const state = response["deepScan"] as
+    | {
+        terminalReason: string;
+        dispatchedCount: number;
+        completionSequence: number;
+        noNewStreak: number;
+        config: Required<DeepScanOptions>;
+        createdAt: string;
+        completedAt: string;
+      }
+    | undefined;
   if (state?.terminalReason === "saturated") {
     return {
       reason: `The last ${state.noNewStreak} review rounds found no new issues. More issues may remain.`,
     };
   }
   if (state?.terminalReason !== "capped") return undefined;
-  const recipe = response["recipe"] as
-    { deepScan?: Required<DeepScanOptions> } | undefined;
-  if (recipe?.deepScan === undefined) return undefined;
-  const { maxDiscoveryRuns, maxTimeHours } = recipe.deepScan;
-  const historical = state["legacy"] as { discoveryRuns?: number } | undefined;
+  const { maxDiscoveryRuns, maxTimeHours } = state.config;
+  // A capped run with no completed reviews can finish only at its discovery deadline.
   if (
-    state.passes.length + (historical?.discoveryRuns ?? 0) >=
-    maxDiscoveryRuns
+    state.completionSequence > 0 &&
+    state.dispatchedCount >= maxDiscoveryRuns
   ) {
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.mergedScanIds.length > 0 && state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
   const elapsedHours =
-    (Date.parse(result.manifest.scan.completedAt) -
-      Date.parse(state.startedAt)) /
-    3_600_000;
+    (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
   if (elapsedHours >= maxTimeHours) {
     let maxTimeMinutes = maxTimeHours * 60;
     const roundedMinutes = Number(maxTimeMinutes.toPrecision(15));
     if (roundedMinutes / 60 === maxTimeHours) maxTimeMinutes = roundedMinutes;
     return {
-      reason: `Reached the ${maxTimeMinutes}-minute time limit. More issues may remain.`,
+      reason: `Reached the ${maxTimeMinutes}-minute time limit. ${state.completionSequence === 0 ? "No source review completed." : "More issues may remain."}`,
       nextStep:
         maxTimeHours < 96
           ? `To scan further, rerun with --max-time greater than ${maxTimeMinutes}.`

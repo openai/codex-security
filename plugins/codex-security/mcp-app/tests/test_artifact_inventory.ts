@@ -615,20 +615,26 @@ test(async function testInventoryChildPreservesRawPaths(t) {
       ),
     },
   });
+  const octal = (value: Buffer) =>
+    [...value]
+      .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
+      .join("");
   const { stdout } = await execFile(
-    process.env.PYTHON ?? "python3",
+    "/bin/sh",
     [
       "-c",
-      // Raw environment bytes are valid on macOS even though APFS names are UTF-8.
-      String.raw`import os, sys
-os.environb[b"HOME"] = b"/fixture/home-\xff"
-os.environb[b"GIT_CONFIG_GLOBAL"] = bytes.fromhex(sys.argv[1])
-os.environb[b"CODEX_SECURITY_GIT"] = bytes.fromhex(sys.argv[2])
-os.execv(sys.argv[3], sys.argv[3:])`,
-      config.toString("hex"),
-      git.toString("hex"),
+      [
+        // Raw environment bytes are valid on macOS even though APFS names are UTF-8.
+        'HOME=$(printf "/fixture/home-\\377"); export HOME',
+        'GIT_CONFIG_GLOBAL=$(printf "%b" "$3"); export GIT_CONFIG_GLOBAL',
+        'CODEX_SECURITY_GIT=$(printf "%b" "$4"); export CODEX_SECURITY_GIT',
+        'exec "$1" "$2"',
+      ].join("\n"),
+      "inventory-fixture",
       process.execPath,
       driver,
+      octal(config),
+      octal(git),
     ],
     { encoding: "utf8" },
   );
@@ -666,18 +672,18 @@ test(async function testInventoryChildFailuresPreserveOutput() {
   }
 });
 
-test(async function testScansReadTheirOwnBoundInventory() {
-  const first = await createFixture("first scan inventory");
-  const second = await createFixture("second scan inventory");
-  await writeInventory(first.scanInventory, "./src/first.ts\n");
-  await writeInventory(second.scanInventory, "./src/second.ts\n");
+test(async function testWorkerReadsItsOwnBoundInventory() {
+  const fixture = await createFixture("isolated worker inventory");
+  await writeInventory(fixture.scanInventory, "./src/parent.ts\n");
+  await writeInventory(fixture.workerInventory, "./src/worker.ts\n");
 
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(first.scan), {
-    items: [{ path: "./src/first.ts" }],
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
+    items: [{ path: "./src/parent.ts" }],
   });
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(second.scan), {
-    items: [{ path: "./src/second.ts" }],
-  });
+  assert.deepEqual(
+    await inventory.listCodexSecurityReviewItems(fixture.worker),
+    { items: [{ path: "./src/worker.ts" }] },
+  );
 });
 
 test(async function testCursorDoesNotExceedInventory() {
@@ -766,14 +772,11 @@ test(async function testInventoryReadErrorsAreReported() {
   }
 });
 
-test(async function testUnboundContextCannotPrepareInventory() {
-  const fixture = await createFixture("unbound context cannot prepare");
+test(async function testWorkersCannotPrepareInventory() {
+  const fixture = await createFixture("worker cannot prepare");
 
   await assert.rejects(
-    inventory.prepareCodexSecurityReviewItems({
-      ...fixture.scan,
-      scanId: undefined,
-    }),
+    inventory.prepareCodexSecurityReviewItems(fixture.worker),
     /only a parent scan/i,
   );
 });
@@ -838,6 +841,7 @@ async function createFixture(label: string) {
   const fixtureRoot = path.join(root, label);
   const repoRoot = path.join(fixtureRoot, "repository");
   const scanRoot = path.join(fixtureRoot, "scan");
+  const workerRoot = path.join(fixtureRoot, "worker");
   const pluginRoot = path.resolve(
     import.meta.dirname,
     "../../../../sdk/typescript/_bundled_plugin",
@@ -856,13 +860,24 @@ async function createFixture(label: string) {
       "02_discovery",
       "in_scope_files.txt",
     ),
+    workerInventory: path.join(
+      workerRoot,
+      "artifacts",
+      "02_discovery",
+      "in_scope_files.txt",
+    ),
     scan: {
       root: scanRoot,
       repoRoot,
-      scanId: "f84c8312-a602-4660-8e01-518a176cd75a",
+      layout: "scan",
       scope: ".",
       pluginRoot,
       pythonCommand: path.join(root, "missing-python"),
+    },
+    worker: {
+      root: workerRoot,
+      repoRoot,
+      layout: "worker",
     },
   };
 }

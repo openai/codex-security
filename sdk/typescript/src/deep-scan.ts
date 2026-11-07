@@ -1,1300 +1,508 @@
-import { tokenUsage, type ScanTokenUsage } from "./cost-model.js";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import type { CodexOptions } from "@openai/codex-sdk";
+import { parse } from "smol-toml";
+import {
+  bundledCodexSdkEnvironment,
+  resolveBundledCodexExecutable,
+} from "./codex-sdk-environment.js";
+import { CodexSecurityError } from "./errors.js";
+import {
+  deepMerge,
+  inlineToml,
+  type JsonObject,
+  type JsonValue,
+} from "./config.js";
 import { isRecord } from "./record.js";
-import { createHash } from "node:crypto";
-import { join, relative } from "node:path";
-import type { CodexSecurity, ScanOptions } from "./api.js";
-import type { JsonObject } from "./config.js";
 import {
-  scanCostUsage,
-  type ScanCost,
-  type ScanUsageMeasurement,
-} from "./cost.js";
+  executablePathForSpawn,
+  isDisconnectedChildStdin,
+  PLUGIN_NAME,
+  runCodexCommand,
+  type CodexCommand,
+} from "./runtime.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
 import {
-  ScanCostLimitExceededError,
-  ScanInterruptedError,
-  errorMessage,
-} from "./errors.js";
-import type { DeepScanOptions } from "./scan-settings.js";
-import {
-  combineScanCoverage,
-  materializeScanAggregate,
-  serializeScanAggregate,
-  scanAggregateRevisionArtifacts,
-  createScanMerger,
-  reconcileScanMerge,
-  ScanMergeValidationError,
-  saveScanMergeSources,
-  type ScanMergeInput,
-} from "./scan-merge.js";
-import type { ScanArtifactRestorer } from "./runtime.js";
-import type { SemanticScan } from "./scan-semantics.js";
-import {
-  ScanFailedError,
-  ScanPermissionError,
-  ScanTransportClosedError,
-} from "./scan-execution.js";
-
-import {
-  DEEP_SCAN_CHECKPOINT,
-  loadDeepScanCheckpoint,
-  newDeepScanCheckpoint,
-  type DeepScanCheckpoint,
-} from "./deep-scan-checkpoint.js";
-import {
-  acceptMerge,
-  discoveryStopReason,
-  passDirectory,
-  registerPass,
-  reservePass,
-  stopDiscovery,
-} from "./deep-scan-lifecycle.js";
-import type { SavedScanRecord } from "./workbench-types.js";
-export {
-  DEEP_SCAN_CHECKPOINT,
-  type DeepScanCheckpoint,
-} from "./deep-scan-checkpoint.js";
-
-/** Required usage tracking must stop the entire composition before another pass. */
-export class ScanCostTrackingError extends ScanInterruptedError {}
-
-/** Accepted output can retry publication without rediscovering completed passes. */
-export class DeepScanPublicationError extends ScanInterruptedError {}
-
-/** Completed work remains accepted when projection or publication needs a retry. */
-export class DeepScanRecoveryError extends ScanInterruptedError {}
-
-/** A saved-input check rejected before this wrapped thread could execute. */
-export class DeepScanInputRecoveryError extends DeepScanRecoveryError {
-  constructor(
-    message: string,
-    scanDir: string,
-    readonly neverStarted: boolean,
-    options?: ErrorOptions,
-  ) {
-    super(message, scanDir, options);
-  }
-}
+  nativePermissionPreflight,
+  nativeProfileClient,
+  withCodexPreflightLock,
+} from "./provider-profile.js";
 
 export type DeepScanDiagnostic = Readonly<Record<string, string | number>>;
 
-export interface DeepScanComposition {
-  onDiagnostic?(event: DeepScanDiagnostic): void;
-  onMeasurement?(
-    key: string,
-    measurement: Readonly<ScanUsageMeasurement>,
-  ): void;
-  scanId: string;
-  scanDir: string;
-  repository: string;
+export interface DirectDeepScanOptions {
+  onDiagnostic?: (event: DeepScanDiagnostic) => void;
+  codexOptions: CodexOptions & { nativeProfile?: string };
+  preflightCommand: CodexCommand;
   pluginRoot: string;
-  startedAt: string;
-  settings: Required<DeepScanOptions>;
-  scanOptions: ScanOptions;
+  repository: string;
+  scanDir: string;
+  scanId: string;
+  prompt: string;
   signal: AbortSignal;
-  createClient(): Pick<CodexSecurity, "run" | "close">;
-  workbench(
-    args: readonly string[],
-    input?: string,
-    signal?: AbortSignal,
-  ): Promise<JsonObject>;
-  merge(
-    prompt: string,
-    signal: AbortSignal,
-    outputSchema?: unknown,
-    conversation?: object,
-  ): Promise<unknown>;
-  onCleanupError?(error: unknown): void;
-  onMergeCommitted?(event: {
-    scanId: string;
-    sourceScanIds: string[];
-    newFindings: number;
-    retainedFindings: number;
-  }): void;
-  writer: ScanArtifactRestorer & {
-    reserveDirectory?(relativePath: string): Promise<boolean>;
-  };
-  projectChild(
-    sourceScanId: string,
-    sourceDirectory: string,
-    signal: AbortSignal,
-  ): Promise<ScanMergeInput>;
-  publish(draft: SemanticScan): Promise<void>;
-  onCost(key: string, cost: Readonly<ScanCost> | null): void;
-  /** Used only when retiring a child proven never to have executed. */
-  unstartedCost?: Readonly<ScanCost> | null;
-  onUsage?(
-    key: string,
-    usage: Readonly<ScanTokenUsage>,
-    source?: "receipt",
-  ): void;
-  /** Restore parent accounting after every saved child receipt is reported. */
-  onCostsRecovered?(): Promise<void>;
-  historicalCost?(
-    threadId: string,
-    scanDirectory?: string,
-    optionalUsageOnly?: boolean,
-  ): Promise<ScanCost | null>;
-  costUnavailable?: boolean;
 }
 
-function validatePassDirectories(state: DeepScanCheckpoint): number {
-  const directories = new Set<string>();
-  let maximum = 0;
-  for (const pass of state.passes) {
-    const number = Number(pass.directory.split("pass-").at(-1));
-    if (
-      !Number.isSafeInteger(number) ||
-      number < 1 ||
-      pass.directory !== passDirectory(number - 1) ||
-      directories.has(pass.directory)
-    )
-      throw new Error("Saved scan pass escaped its parent.");
-    directories.add(pass.directory);
-    maximum = Math.max(maximum, number);
-  }
-  return maximum;
+// The stock SDK emits one flag per leaf, including literal dotted keys in order.
+function sdkConfigFlags(config: JsonObject, prefix = ""): string[] {
+  return Object.entries(config).flatMap(([key, value]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    return isRecord(value) && Object.keys(value).length
+      ? sdkConfigFlags(value, path)
+      : [`${path}=${inlineToml(value)}`];
+  });
 }
 
-function savedPassIndex(
-  input: Pick<DeepScanComposition, "scanId" | "scanDir" | "repository">,
-  state: DeepScanCheckpoint,
-  record: SavedScanRecord,
-): number {
-  const index = state.passes.findIndex(
-    (pass) =>
-      relative(join(input.scanDir, pass.directory), record.scanDir) === "",
-  );
-  if (index < 0) return index;
-  if (
-    record.parentScanId !== input.scanId ||
-    record.targetPath !== input.repository
-  )
-    throw new Error("Saved scan pass belongs to another parent or target.");
-  if (record.parentScanRole !== "deep_pass")
-    throw new Error("Saved scan is not an assigned Deep Scan pass.");
-  const pass = state.passes[index]!;
-  if (pass.scanId !== undefined && pass.scanId !== record.scanId)
-    throw new Error("Saved scan pass registration changed.");
-  return index;
-}
-
-function missingRunningSession(record: SavedScanRecord): boolean {
-  return record.progress.status === "running" && !record.continuationThreadId;
-}
-
-/** Reject stopped discovery without changing its artifacts or accounting. */
-export async function terminalDeepScanError(
-  input: Pick<DeepScanComposition, "scanDir">,
-  checkpoint?: DeepScanCheckpoint,
-): Promise<ScanInterruptedError | null> {
-  const state = checkpoint ?? (await loadDeepScanCheckpoint(input.scanDir));
-  if (
-    state?.version !== 3 ||
-    state.pendingStop !== undefined ||
-    (state.terminalReason !== "failed" && state.terminalReason !== "canceled")
-  )
-    return null;
-  return new ScanInterruptedError(
-    `The saved Deep Scan is ${state.terminalReason}; its retained results remain available.`,
-    input.scanDir,
-  );
-}
-
-/** Compose complete ordinary scans; only accepted merge state belongs to the parent. */
-export async function runDeepScans(
-  input: DeepScanComposition,
-): Promise<DeepScanCheckpoint> {
-  const { scanId, scanDir, settings, signal, workbench } = input;
-  const requireCost =
-    input.scanOptions.requireCost === true ||
-    input.scanOptions.maxCostUsd !== undefined;
-  const state =
-    (await loadDeepScanCheckpoint(scanDir)) ??
-    newDeepScanCheckpoint(input.startedAt);
-  if (input.costUnavailable) state.costUnavailable = true;
-  const terminal = await terminalDeepScanError(input, state);
-  if (terminal !== null) throw terminal;
-  let lastDirectory = validatePassDirectories(state);
-  const diagnostic = (event: DeepScanDiagnostic) => {
-    try {
-      void Promise.resolve(input.onDiagnostic?.(event)).catch(() => {});
-    } catch {
-      // An optional observer cannot interrupt retained scan work.
-    }
-  };
-  diagnostic({ event: "coordinator_started", scanId });
-
-  if (state.discoveryUserContext === undefined)
-    state.discoveryUserContext = input.scanOptions.scanPrompt ?? null;
-  const deadlineController = new AbortController();
-  const externalStop = new AbortController();
-  const executionSignal = AbortSignal.any([signal, externalStop.signal]);
-  const discoverySignal = AbortSignal.any([
-    executionSignal,
-    deadlineController.signal,
-  ]);
-  const persist = async (write: () => Promise<unknown>): Promise<void> => {
-    try {
-      await write();
-    } catch (cause) {
-      if (
-        executionSignal.aborted ||
-        cause instanceof DeepScanRecoveryError ||
-        cause instanceof ScanTransportClosedError ||
-        cause instanceof ScanCostTrackingError ||
-        cause instanceof ScanCostLimitExceededError ||
-        cause instanceof ScanPermissionError
-      )
-        throw cause;
-      throw new DeepScanRecoveryError(
-        `Could not retain Deep Scan progress; resume to retry: ${errorMessage(cause)}`,
-        scanDir,
-        { cause },
-      );
-    }
-  };
-  let saveTail = Promise.resolve();
-  let savedSnapshot: string | undefined;
-  let savedAggregate = state.aggregate;
-  let savedAggregatePath =
-    typeof state["aggregatePath"] === "string" ? state["aggregatePath"] : null;
-  const persistedRevisions = new Set(
-    Object.keys(state.aggregate?.revisions ?? {}),
-  );
-  const save = async (): Promise<void> => {
-    const { aggregate, ...metadata } = state;
-    // Pass registrations can change while an earlier write is still pending.
-    const metadataSnapshot = JSON.stringify(metadata);
-    const pending = saveTail.then(async () => {
-      const aggregateChanged = aggregate !== savedAggregate;
-      const contents =
-        aggregateChanged && aggregate !== null
-          ? JSON.stringify(serializeScanAggregate(aggregate))
-          : undefined;
-      const aggregatePath =
-        aggregate === null
-          ? null
-          : contents === undefined
-            ? savedAggregatePath
-            : `artifacts/deep-scan/aggregates/${createHash("sha256").update(contents).digest("hex")}.json`;
-      const snapshot = JSON.stringify({
-        ...JSON.parse(metadataSnapshot),
-        aggregatePath,
-      });
-      // Reuse only a successful write, after all earlier saves have settled.
-      if (snapshot === savedSnapshot) {
-        savedAggregate = aggregate;
-        return;
-      }
-      savedSnapshot = undefined;
-      const revisions =
-        aggregateChanged && aggregate !== null
-          ? scanAggregateRevisionArtifacts(aggregate, persistedRevisions)
-          : [];
-      for (const artifact of [
-        ...revisions,
-        ...(contents === undefined || aggregatePath === savedAggregatePath
-          ? []
-          : [{ path: aggregatePath!, contents: Buffer.from(contents) }]),
-        { path: DEEP_SCAN_CHECKPOINT, contents: Buffer.from(snapshot) },
-      ]) {
-        await persist(() =>
-          workbench(
-            [
-              "save-scan-artifact",
-              "--scan-id",
-              scanId,
-              "--artifact-path",
-              artifact.path,
-            ],
-            Buffer.from(artifact.contents).toString("utf8"),
-          ),
-        );
-      }
-      if (aggregateChanged)
-        for (const id of Object.keys(aggregate?.revisions ?? {}))
-          persistedRevisions.add(id);
-      savedAggregate = aggregate;
-      savedAggregatePath = aggregatePath;
-      savedSnapshot = snapshot;
-    });
-    saveTail = pending.catch(() => undefined);
-    return pending;
-  };
-  const retirementCost = (
-    pass: DeepScanCheckpoint["passes"][number],
-    record: SavedScanRecord,
-    cost?: Readonly<ScanCost> | null,
-  ): Readonly<ScanCost> | null | undefined =>
-    cost ??
-    record.cost ??
-    (pass.executionNotStarted === true && missingRunningSession(record)
-      ? input.unstartedCost
-      : undefined);
-  const retireChild = async (
-    childId: string,
-    message: string,
-    cost?: Readonly<ScanCost> | null,
-  ): Promise<void> => {
-    await workbench([
-      "fail-scan",
-      "--scan-id",
-      childId,
-      "--message",
-      message,
-      ...(cost ? ["--cost-json", JSON.stringify(cost)] : []),
-    ]);
-  };
-  const finishStop = async (): Promise<void> => {
-    if (state.pendingStop === undefined) return;
-    stopDiscovery(state, state.pendingStop.reason);
-    delete state.pendingStop;
-    try {
-      await save();
-    } catch (cause) {
-      if (cause instanceof ScanTransportClosedError) throw cause;
-      throw new DeepScanRecoveryError(
-        `Could not save interrupted child retirement; resume to retry: ${errorMessage(cause)}`,
-        scanDir,
-        { cause },
-      );
-    }
-  };
-  const retirePendingStop = async (): Promise<void> => {
-    if (state.pendingStop === undefined) return;
-    try {
-      const listed = await workbench([
-        "list-scans",
-        "--scan-root",
-        join(scanDir, "artifacts/deep-scan/passes"),
-      ]);
-      for (const record of listed["scans"] as SavedScanRecord[]) {
-        const index = savedPassIndex(input, state, record);
-        if (index < 0) continue;
-        const pass = state.passes[index]!;
-        registerPass(pass, record.scanId);
-        if (record.progress.status === "running")
-          await retireChild(
-            record.scanId,
-            state.pendingStop.message,
-            retirementCost(
-              pass,
-              record,
-              state.pendingStop.costs[pass.directory],
-            ),
-          );
-      }
-      await finishStop();
-    } catch (cause) {
-      if (
-        cause instanceof ScanTransportClosedError ||
-        cause instanceof DeepScanRecoveryError
-      )
-        throw cause;
-      throw new DeepScanRecoveryError(
-        `Could not retire the interrupted child scan; resume to retry: ${errorMessage(cause)}`,
-        scanDir,
-        { cause },
-      );
-    }
-  };
-  // Cleanup must precede accounting and projection: the saved stop may already
-  // have exhausted the budget or made required accounting unavailable.
-  if (state.pendingStop !== undefined) {
-    await retirePendingStop();
-    const terminal = await terminalDeepScanError(input, state);
-    if (terminal !== null) throw terminal;
-  }
-  await save();
-  await workbench([
-    "update-progress",
-    "--scan-id",
-    scanId,
-    "--phase",
-    "discovery",
-  ]).catch(() => undefined);
-  const mergeScans = await createScanMerger(input.pluginRoot);
-  const completed = new Map<string, ScanMergeInput>();
-  const saved = new Map<string, SavedScanRecord>();
-  const recoveredCosts = new Map<string, Readonly<ScanCost> | null>();
-  const updateAggregateCoverage = (): void => {
-    if (state.aggregate === null) return;
-    const merged = new Set(state.mergedScanIds);
-    state.aggregate = {
-      ...state.aggregate,
-      coverage: combineScanCoverage(
-        [...completed.values()]
-          .filter((pass) => merged.has(pass.scanId))
-          .map((pass) => pass.draft.coverage),
-        [
-          ...state.passes
-            .filter((pass) => !pass.scanId || !merged.has(pass.scanId))
-            .map((pass) => pass.directory),
-          ...(state.passes.length === 0 && deadlineController.signal.aborted
-            ? [
-                "The configured discovery time limit elapsed before any source review completed.",
-              ]
-            : []),
-        ],
-        state.mergedScanIds.some((id) => !completed.has(id))
-          ? state.aggregate.coverage
-          : undefined,
-      ),
-    };
-  };
-  const reportPassCost = (key: string, cost: Readonly<ScanCost> | null) => {
-    input.onCost(key, cost);
-    if (cost === null && requireCost)
-      throw new ScanCostTrackingError(
-        "The child scan cost is unavailable; its cost limit cannot be verified.",
-        scanDir,
-      );
-  };
-  const recoverCost = async <T>(
-    recover: () => Promise<T>,
-  ): Promise<T | null> => {
-    try {
-      return await recover();
-    } catch (cause) {
-      executionSignal.throwIfAborted();
-      if (cause instanceof ScanTransportClosedError) throw cause;
-      if (requireCost)
-        throw new ScanCostTrackingError(
-          `Could not recover Deep Scan cost: ${errorMessage(cause)}`,
-          scanDir,
-          { cause },
-        );
-      return null;
-    }
-  };
-  const projectChild = async (childId: string, childDir: string) => {
-    try {
-      return await input.projectChild(childId, childDir, executionSignal);
-    } catch (cause) {
-      executionSignal.throwIfAborted();
-      if (cause instanceof ScanTransportClosedError) throw cause;
-      throw new DeepScanRecoveryError(
-        `Could not project completed child results; resume to retry: ${errorMessage(cause)}`,
-        scanDir,
-        { cause },
-      );
-    }
-  };
-  const hydratePasses = async (): Promise<void> => {
-    const listed = await workbench([
-      "list-scans",
-      "--scan-root",
-      join(scanDir, "artifacts/deep-scan/passes"),
-    ]);
-    const records = listed["scans"] as unknown as SavedScanRecord[];
-    const passes = records.flatMap((record) => {
-      const index = savedPassIndex(input, state, record);
-      if (index < 0) return [];
-      const pass = state.passes[index]!;
-      registerPass(pass, record.scanId);
-      saved.set(record.scanId, record);
-      return [{ record, pass }];
-    });
-    const costs = new Map<string, Readonly<ScanCost> | null>();
-    let recoveryMetadataChanged = false;
-    for (const { record, pass } of passes) {
-      const missingSession = missingRunningSession(record);
-      const executionNotStarted =
-        pass.executionNotStarted === true && missingSession;
-      if (pass.executionNotStarted === true && !executionNotStarted) {
-        delete pass.executionNotStarted;
-        recoveryMetadataChanged = true;
-      }
-      if (missingSession && !executionNotStarted) state.costUnavailable = true;
-      if (!executionNotStarted) {
-        costs.set(
-          pass.directory,
-          missingSession ? null : (record.cost ?? null),
-        );
-        recoveredCosts.set(pass.directory, costs.get(pass.directory)!);
-      }
-      input.onCost(pass.directory, null);
-      const savedUsage = record["usage"];
-      let usage: ScanTokenUsage | null = null;
-      // A completed child's cost receipt covers all of its work. A partial
-      // usage projection cannot replace those saved counters.
-      if (
-        isRecord(savedUsage) &&
-        (record.progress.status !== "complete" ||
-          record.cost == null ||
-          savedUsage["coverage"] === "complete")
-      ) {
-        usage = tokenUsage({
-          input_tokens: savedUsage["inputTokens"],
-          cached_input_tokens: savedUsage["cachedInputTokens"],
-          cache_write_input_tokens: savedUsage["cacheWriteInputTokens"],
-          cache_write_input_tokens_reported:
-            record.cost == null
-              ? false
-              : record.cost.cacheWriteInputTokensReported,
-          output_tokens: savedUsage["outputTokens"],
-          reasoning_output_tokens: savedUsage["reasoningOutputTokens"],
-        });
-      }
-      if (usage === null && !missingSession && record.cost != null)
-        usage = tokenUsage(scanCostUsage(record.cost));
-      if (usage !== null) input.onUsage?.(pass.directory, usage);
-    }
-    // Recover every receipt before budget callbacks can abort another recovery.
-    for (const { record, pass } of passes) {
-      if (record.progress.status === "running" && record.continuationThreadId) {
-        costs.set(
-          pass.directory,
-          (await recoverCost(async () =>
-            input.historicalCost?.(
-              record.continuationThreadId!,
-              record.scanDir,
-            ),
-          )) ?? null,
-        );
-        recoveredCosts.set(pass.directory, costs.get(pass.directory)!);
-      } else if (
-        input.onUsage !== undefined &&
-        record.continuationThreadId &&
-        record.progress.status === "complete"
-      ) {
-        // Saved cost remains authoritative; optional token refresh cannot invalidate it.
-        await input
-          .historicalCost?.(record.continuationThreadId, record.scanDir, true)
-          .catch(() => undefined);
-        executionSignal.throwIfAborted();
-      }
-    }
-    if (state.costUnavailable || recoveryMetadataChanged) await save();
-    for (const [directory, cost] of costs)
-      if (cost !== null) reportPassCost(directory, cost);
-    if (state.costUnavailable) reportPassCost("previous-work", null);
-    for (const [directory, cost] of costs)
-      if (cost === null) reportPassCost(directory, cost);
-    if (input.onCostsRecovered) await recoverCost(input.onCostsRecovered);
-    if (discoveryActive) {
-      const outcomes = [
-        ...passes.flatMap(({ record }) =>
-          record.progress.status === "failed" ||
-          record.progress.status === "canceled" ||
-          record.progress.status === "complete"
-            ? [
-                {
-                  status: record.progress.status,
-                  completedAt: record.completedAt ?? "",
-                },
-              ]
-            : [],
-        ),
-        ...state.passes.flatMap((pass) =>
-          pass.failedBeforeRegistration
-            ? [{ status: "failed", completedAt: pass.failedBeforeRegistration }]
-            : [],
-        ),
-      ].sort((a, b) => {
-        const milliseconds =
-          Date.parse(a.completedAt) - Date.parse(b.completedAt);
-        if (milliseconds !== 0) return milliseconds;
-        const fractions = [a.completedAt, b.completedAt].map(
-          (value) => /\.(\d+)/u.exec(value)?.[1] ?? "",
-        );
-        const precision = Math.max(...fractions.map((value) => value.length));
-        return fractions[0]!
-          .padEnd(precision, "0")
-          .localeCompare(fractions[1]!.padEnd(precision, "0"));
-      });
-      state.consecutiveErrors = 0;
-      for (const outcome of outcomes) {
-        if (outcome.status !== "complete") state.consecutiveErrors += 1;
-        if (outcome.status === "complete") state.consecutiveErrors = 0;
-      }
-    }
-    for (const { record } of passes) {
-      if (record.progress.status === "complete") {
-        completed.set(
-          record.scanId,
-          await projectChild(record.scanId, record.scanDir),
-        );
-      }
-    }
-    await save();
-  };
-  const deadline =
-    Date.parse(state.startedAt) + settings.maxTimeHours * 3_600_000;
-  const discoveryActive =
-    state.terminalReason === undefined && Date.now() < deadline;
-  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-  const tick = (): void => {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0)
-      deadlineController.abort(
-        new Error("deep_scan_discovery_deadline_reached"),
-      );
-    else deadlineTimer = setTimeout(tick, Math.min(remaining, 2_147_483_647));
-  };
-  tick();
-  const consecutiveErrorLimit = new Error(
-    "Deep Scan reached its consecutive error limit.",
-  );
-  const stopReason = (): "failed" | "capped" | "canceled" =>
-    externalStop.signal.reason === consecutiveErrorLimit
-      ? "failed"
-      : executionSignal.reason instanceof ScanCostLimitExceededError
-        ? "capped"
-        : executionSignal.aborted &&
-            !(executionSignal.reason instanceof ScanCostTrackingError) &&
-            !(executionSignal.reason instanceof ScanPermissionError) &&
-            !(executionSignal.reason instanceof ScanFailedError) &&
-            !isCodexNonRetryableFailure(executionSignal.reason)
-          ? "canceled"
-          : "failed";
-  let polling = false;
-  let parentStopped = false;
-  const cancellationTimer = setInterval(() => {
-    if (polling) return;
-    polling = true;
-    void workbench(["get-scan", "--scan-id", scanId])
-      .then((result) => {
-        const { progress } = result["scan"] as SavedScanRecord;
-        if (
-          progress["status"] === "canceled" ||
-          progress["status"] === "failed"
-        ) {
-          parentStopped = true;
-          externalStop.abort(
-            progress["status"] === "failed"
-              ? new ScanFailedError("The saved parent scan stopped.")
-              : new Error("The saved parent scan stopped."),
-          );
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        polling = false;
-      });
-  }, 1_000);
-  cancellationTimer.unref();
-  const publish = async (): Promise<void> => {
-    executionSignal.throwIfAborted();
-    try {
-      await input.publish(
-        materializeScanAggregate(state.aggregate!) as SemanticScan,
-      );
-      executionSignal.throwIfAborted();
-    } catch (cause) {
-      executionSignal.throwIfAborted();
-      if (cause instanceof ScanTransportClosedError) throw cause;
-      throw new DeepScanPublicationError(
-        `Could not publish accepted Deep Scan results; resume to retry publication: ${errorMessage(cause)}`,
-        scanDir,
-        { cause },
-      );
-    }
-  };
-  const mergePending = async (allowEmpty = false): Promise<void> => {
-    if ((state.mergeFailures ?? 0) >= settings.stopAfterConsecutiveErrors)
-      throw new Error("Deep Scan reached its consecutive merge error limit.");
-    const pending = state.passes.flatMap((pass) => {
-      const result =
-        pass.scanId === undefined ? undefined : completed.get(pass.scanId);
-      return result && !state.mergedScanIds.includes(result.scanId)
-        ? [result]
-        : [];
-    });
-    if (!pending.length && (!allowEmpty || state.aggregate !== null)) return;
-    if (!pending.length) {
-      state.aggregate = {
-        ...reconcileScanMerge(scanId, [], [], null).aggregate,
-        coverage: combineScanCoverage([]),
-      };
-      await save();
-      return;
-    }
-    const contextPath = join(
-      scanDir,
-      await saveScanMergeSources(
-        pending,
-        {
-          ...input.writer,
-          restoreMany: (artifacts) =>
-            persist(() => input.writer.restoreMany(artifacts)),
-        },
-        state.aggregate,
-      ),
-    );
-    let merged: Awaited<ReturnType<typeof mergeScans>>;
-    let validationError: unknown;
-    let comparisonStop: unknown;
-    const retryMerge = async () => {
-      state.mergeFailures = (state.mergeFailures ?? 0) + 1;
-      await save();
-      return state.mergeFailures < settings.stopAfterConsecutiveErrors;
-    };
-    for (;;) {
-      executionSignal.throwIfAborted();
-      try {
-        merged = await mergeScans(
-          scanId,
-          pending,
-          state.aggregate,
-          executionSignal,
-          async (prompt, signal, outputSchema, conversation) => {
-            if (comparisonStop !== undefined) throw comparisonStop;
-            const previousMergeStarted = state.mergeStarted;
-            if (previousMergeStarted !== true) {
-              state.mergeStarted = true;
-              await save();
-            }
-            try {
-              return await input.merge(
-                prompt,
-                signal,
-                outputSchema,
-                conversation,
-              );
-            } catch (error) {
-              if (
-                previousMergeStarted !== true &&
-                error instanceof DeepScanInputRecoveryError &&
-                error.neverStarted
-              ) {
-                if (previousMergeStarted === undefined)
-                  delete state.mergeStarted;
-                else state.mergeStarted = previousMergeStarted;
-                try {
-                  await save();
-                } catch (cause) {
-                  throw new DeepScanRecoveryError(
-                    `Could not restore the unstarted reducer checkpoint: ${errorMessage(cause)}`,
-                    scanDir,
-                    { cause },
-                  );
-                }
-              }
-              throw error;
-            }
-          },
-          {
-            contextPath,
-            onInvalidResponse: retryMerge,
-            validationError,
-            onComparisonError(error) {
-              executionSignal.throwIfAborted();
-              if (
-                error instanceof DeepScanRecoveryError ||
-                error instanceof ScanTransportClosedError ||
-                error instanceof ScanPermissionError ||
-                error instanceof ScanCostLimitExceededError ||
-                error instanceof ScanCostTrackingError
-              )
-                throw error;
-              diagnostic({
-                event: "finding_comparison_failed",
-                reason: errorMessage(error),
-              });
-              // Keep disputed findings separate and checkpoint the completed scans.
-              if (isCodexNonRetryableFailure(error)) comparisonStop ??= error;
-            },
-          },
-        );
-        break;
-      } catch (error) {
-        if (
-          error instanceof SyntaxError ||
-          error instanceof ScanMergeValidationError
-        )
-          validationError = error;
-        if (
-          error instanceof ScanCostTrackingError ||
-          error instanceof ScanCostLimitExceededError
-        )
-          externalStop.abort(error);
-        if (
-          executionSignal.aborted ||
-          error instanceof DeepScanRecoveryError ||
-          error instanceof ScanTransportClosedError ||
-          error instanceof ScanPermissionError ||
-          (state.mergeFailures ?? 0) >= settings.stopAfterConsecutiveErrors ||
-          (error !== validationError && isCodexNonRetryableFailure(error))
-        )
-          throw error;
-        if (!(await retryMerge())) throw error;
-      }
-    }
-    executionSignal.throwIfAborted();
-    const sourceScanIds = pending.map((result) => result.scanId);
-    acceptMerge(
-      state,
-      merged,
-      sourceScanIds,
-      combineScanCoverage(
-        [...completed.values()].map((pass) => pass.draft.coverage),
-      ),
-    );
-    updateAggregateCoverage();
-    await save();
-    input.onMergeCommitted?.({
-      scanId,
-      sourceScanIds,
-      newFindings: merged.newFindingCount,
-      retainedFindings: merged.aggregate.findings.length,
-    });
-    await publish();
-    if (comparisonStop !== undefined) throw comparisonStop;
-  };
-  const runPass = async (
-    pass: DeepScanCheckpoint["passes"][number],
-  ): Promise<void> => {
-    const client = input.createClient();
-    let latestCost = recoveredCosts.get(pass.directory) ?? undefined;
-    let childCompleted = false;
-    const failPass = async (error: unknown): Promise<void> => {
-      if (pass.scanId === undefined || childCompleted) return;
-      const response = await workbench(["get-scan", "--scan-id", pass.scanId]);
-      const record = response["scan"] as unknown as SavedScanRecord;
-      if (record.progress.status === "complete") {
-        childCompleted = true;
-        state.consecutiveErrors = 0;
-        if (!executionSignal.aborted) {
-          completed.set(
-            record.scanId,
-            await projectChild(record.scanId, record.scanDir),
-          );
-          reportPassCost(pass.directory, record.cost ?? null);
-        }
-        return;
-      }
-      await retireChild(
-        pass.scanId,
-        errorMessage(error),
-        retirementCost(pass, record, latestCost),
-      );
-    };
-    try {
-      discoverySignal.throwIfAborted();
-      const resuming = pass.scanId !== undefined;
-      const executionNotStarted = pass.executionNotStarted === true;
-      if (executionNotStarted) {
-        delete pass.executionNotStarted;
-        try {
-          await save();
-        } catch (cause) {
-          throw new DeepScanRecoveryError(
-            `Could not consume the unstarted discovery checkpoint: ${errorMessage(cause)}`,
-            scanDir,
-            { cause },
-          );
-        }
-      }
-      let result;
-      try {
-        diagnostic({ event: "worker_started", directory: pass.directory });
-        result = await client.run(input.repository, {
-          ...input.scanOptions,
-          scanPrompt: state.discoveryUserContext ?? undefined,
-          mode: "standard",
-          workflowId: undefined,
-          postScanPrompt: undefined,
-          postScanPromptFile: undefined,
-          outputDir: join(scanDir, pass.directory),
-          resumeScanId: pass.scanId,
-          parentScanId: resuming ? undefined : scanId,
-          deepScanPass: true,
-          signal: discoverySignal,
-          onRegisteredScan: async (registration) => {
-            registerPass(pass, registration["scanId"] as string);
-            input.onCost(pass.directory, null);
-            if (
-              resuming &&
-              !executionNotStarted &&
-              registration["threadId"] === null
-            )
-              state.costUnavailable = true;
-            await save();
-            if (state.costUnavailable) reportPassCost("previous-work", null);
-          },
-          onMeasurement: input.onMeasurement
-            ? (value) => input.onMeasurement!(pass.directory, value)
-            : input.scanOptions.onMeasurement,
-          onUsage:
-            input.onUsage === undefined
-              ? input.scanOptions.onUsage
-              : (usage) => input.onUsage!(pass.directory, usage),
-          onCost: (cost) => {
-            latestCost = cost;
-            input.onCost(pass.directory, cost);
-          },
-        });
-      } catch (error) {
-        if (
-          error instanceof DeepScanInputRecoveryError &&
-          error.neverStarted &&
-          (!resuming || executionNotStarted) &&
-          pass.scanId !== undefined
-        ) {
-          pass.executionNotStarted = true;
-          try {
-            await save();
-          } catch (cause) {
-            throw new DeepScanRecoveryError(
-              `Could not save the unstarted discovery checkpoint: ${errorMessage(cause)}`,
-              scanDir,
-              { cause },
-            );
-          }
-        }
-        if (error instanceof DeepScanRecoveryError) throw error;
-        if (
-          error instanceof ScanCostTrackingError ||
-          error instanceof ScanCostLimitExceededError ||
-          error instanceof ScanTransportClosedError ||
-          error instanceof ScanPermissionError ||
-          isCodexNonRetryableFailure(error)
-        )
-          externalStop.abort(error);
-        if (discoverySignal.aborted) throw error;
-        await failPass(error);
-        if (childCompleted) return;
-        let receipt: Readonly<ScanCost> | null = null;
-        if (pass.scanId === undefined) {
-          // No child row exists to record this consumed reservation.
-          pass.failedBeforeRegistration = new Date().toISOString();
-        } else {
-          const response = await workbench([
-            "get-scan",
-            "--scan-id",
-            pass.scanId,
-          ]);
-          const record = response["scan"] as unknown as SavedScanRecord;
-          saved.set(pass.scanId, record);
-          receipt = record.cost ?? null;
-        }
-        state.consecutiveErrors += 1;
-        if (pass.scanId !== undefined) reportPassCost(pass.directory, receipt);
-        if (state.consecutiveErrors >= settings.stopAfterConsecutiveErrors) {
-          stopDiscovery(state, "failed");
-          externalStop.abort(consecutiveErrorLimit);
-        }
-        await save();
-        return;
-      }
-      childCompleted = true;
-      state.consecutiveErrors = 0;
-      if (input.onUsage !== undefined) {
-        const usage =
-          tokenUsage(result.turnResult.usage) ??
-          (result.cost === null
-            ? null
-            : tokenUsage(scanCostUsage(result.cost)));
-        if (usage !== null) input.onUsage(pass.directory, usage, "receipt");
-      }
-      completed.set(
-        result.manifest.scan.id,
-        await projectChild(result.manifest.scan.id, result.scanDir),
-      );
-      reportPassCost(pass.directory, result.cost);
-      executionSignal.throwIfAborted();
-      await save();
-    } catch (error) {
-      if (
-        error instanceof ScanTransportClosedError ||
-        error instanceof ScanCostTrackingError ||
-        error instanceof ScanCostLimitExceededError
-      )
-        externalStop.abort(error);
-      if (
-        !childCompleted &&
-        !parentStopped &&
-        discoverySignal.aborted &&
-        !(discoverySignal.reason instanceof ScanTransportClosedError)
-      ) {
-        try {
-          const reason =
-            executionSignal.aborted &&
-            !(executionSignal.reason instanceof ScanTransportClosedError)
-              ? stopReason()
-              : "capped";
-          state.pendingStop ??= {
-            reason,
-            message: errorMessage(discoverySignal.reason),
-            costs: {},
-          };
-          if (state.pendingStop.reason !== "failed")
-            state.pendingStop.reason = reason;
-          if (latestCost) state.pendingStop.costs[pass.directory] = latestCost;
-          await save();
-          await failPass(discoverySignal.reason);
-        } catch (cause) {
-          if (cause instanceof ScanTransportClosedError) throw cause;
-          throw new DeepScanRecoveryError(
-            `Could not retire the interrupted child scan; resume to retry: ${errorMessage(cause)}`,
-            scanDir,
-            { cause },
-          );
-        }
-      }
-      if (error instanceof ScanCostTrackingError) state.costUnavailable = true;
-      if (discoverySignal.aborted && pass.scanId !== undefined) {
-        input.onCost(pass.directory, null);
-        if (!(error instanceof ScanCostTrackingError)) {
-          let cost: Readonly<ScanCost> | null = null;
-          try {
-            const response = await workbench([
-              "get-scan",
-              "--scan-id",
-              pass.scanId,
-            ]);
-            const record = response["scan"] as unknown as SavedScanRecord;
-            cost = record.cost ?? null;
-          } finally {
-            if (executionSignal.aborted) input.onCost(pass.directory, cost);
-            else reportPassCost(pass.directory, cost);
-          }
-        }
-      }
-      if (error instanceof DeepScanRecoveryError) throw error;
-      if (deadlineController.signal.aborted && !executionSignal.aborted)
-        throw deadlineController.signal.reason;
-      throw error;
-    } finally {
-      try {
-        await client.close();
-      } catch (error) {
-        void Promise.resolve()
-          .then(() => input.onCleanupError?.(error))
-          .catch(() => {});
-      }
-    }
-  };
-  const settlePasses = async (
-    passes: DeepScanCheckpoint["passes"],
-  ): Promise<void> => {
-    const results = await Promise.allSettled(passes.map(runPass));
-    // Keep unfinished persistence resumable even when a sibling observed the abort.
-    for (const result of results) {
-      if (
-        (state.terminalReason === undefined ||
-          state.pendingStop !== undefined) &&
-        result.status === "rejected" &&
-        (result.reason instanceof DeepScanRecoveryError ||
-          result.reason instanceof ScanTransportClosedError)
-      )
-        throw result.reason;
-    }
-    for (const result of results) {
-      if (
-        !executionSignal.aborted &&
-        result.status === "rejected" &&
-        result.reason !== deadlineController.signal.reason
-      )
-        throw result.reason;
-    }
-    await finishStop();
-    executionSignal.throwIfAborted();
-  };
+// An older custom launcher must start in the caller's directory. Only use
+// supplied routing when its app-server cannot read the scan at startup.
+function suppliedParentRouting(
+  overrides: readonly string[],
+): JsonObject | undefined {
   try {
-    await hydratePasses();
-    if (state.mergedScanIds.some((id) => !completed.has(id))) {
-      throw new Error(
-        "An accepted merge input is no longer a sealed child scan.",
-      );
-    }
-    if (
-      discoveryActive &&
-      state.consecutiveErrors >= settings.stopAfterConsecutiveErrors
-    )
-      throw consecutiveErrorLimit;
-    while (state.terminalReason === undefined) {
-      executionSignal.throwIfAborted();
-      await mergePending();
-      const discoveryDeadlineReached =
-        deadlineController.signal.aborted || Date.now() >= deadline;
-      const unfinished = state.passes.filter(
-        (pass) =>
-          (pass.scanId === undefined && !pass.failedBeforeRegistration) ||
-          (pass.scanId !== undefined &&
-            !completed.has(pass.scanId) &&
-            saved.get(pass.scanId)?.progress.status === "running"),
-      );
-      const stop = discoveryStopReason(state, {
-        deadlineReached: discoveryDeadlineReached,
-        hasUnfinishedPasses: unfinished.length > 0,
-        maxDiscoveryRuns: settings.maxDiscoveryRuns,
-        stopAfterNoNew: settings.stopAfterNoNew,
-      });
-      if (stop !== undefined) {
-        if (discoveryDeadlineReached) {
-          if (!deadlineController.signal.aborted) tick();
-          await settlePasses(unfinished);
-        }
-        if (
-          stop === "capped" &&
-          !discoveryDeadlineReached &&
-          state.aggregate === null &&
-          state.consecutiveErrors > 0
-        )
-          throw new Error(
-            "Deep Scan stopped because every discovery run failed.",
-          );
-        stopDiscovery(state, stop);
-        break;
-      }
-      if (
-        state.aggregate === null &&
-        !state.mergeStarted &&
-        state.passes.every(
-          (pass) =>
-            pass.failedBeforeRegistration === undefined &&
-            (pass.scanId === undefined || pass.executionNotStarted),
-        )
-      ) {
-        try {
-          await workbench(
-            ["check-deep-scan-target", "--scan-id", scanId],
-            undefined,
-            discoverySignal,
-          );
-        } catch (error) {
-          if (!discoverySignal.aborted) throw error;
-        }
-        if (discoverySignal.aborted || Date.now() >= deadline) continue;
-      }
-      const batch = unfinished.slice(0, settings.workers);
-      while (
-        batch.length < settings.workers &&
-        state.passes.length < settings.maxDiscoveryRuns
-      ) {
-        const pass = reservePass(state);
-        pass.directory = passDirectory(lastDirectory++);
-        batch.push(pass);
-      }
-      if (input.writer.reserveDirectory) {
-        // Reserve labels in dispatch order before publishing them. Existing
-        // directories may belong to a coordinator finishing a handoff.
-        for (const pass of batch) {
-          if (pass.scanId !== undefined) continue;
-          while (!(await input.writer.reserveDirectory(pass.directory))) {
-            if (!Number.isSafeInteger(++lastDirectory))
-              throw new Error("No Deep Scan pass directory is available.");
-            pass.directory = passDirectory(lastDirectory - 1);
-          }
-          lastDirectory = Math.max(
-            lastDirectory,
-            Number(pass.directory.split("pass-").at(-1)),
-          );
-        }
-      }
-      await save();
-      await settlePasses(batch);
-    }
-    await workbench([
-      "update-progress",
-      "--scan-id",
-      scanId,
-      "--phase",
-      "reporting",
-    ]).catch(() => undefined);
-    await mergePending(true);
-    updateAggregateCoverage();
-    await save();
-    await publish();
-    return state;
-  } catch (error) {
-    // The workbench already retired the children and froze the parent's files.
-    if (parentStopped) throw externalStop.signal.reason;
-    if (
-      error instanceof DeepScanRecoveryError ||
-      error instanceof DeepScanPublicationError ||
-      error instanceof ScanTransportClosedError ||
-      executionSignal.reason instanceof ScanTransportClosedError
-    )
-      throw error;
-    if (
-      error instanceof ScanCostTrackingError ||
-      error instanceof ScanCostLimitExceededError ||
-      error instanceof ScanPermissionError ||
-      isCodexNonRetryableFailure(error)
-    )
-      externalStop.abort(error);
-    if (
-      state.terminalReason === undefined ||
-      state.terminalReason === "capped" ||
-      state.terminalReason === "saturated"
-    ) {
-      state.pendingStop ??= {
-        reason: stopReason(),
-        message: errorMessage(error),
-        costs: Object.fromEntries(
-          [...recoveredCosts].filter(
-            (entry): entry is [string, Readonly<ScanCost>] => entry[1] !== null,
-          ),
-        ),
-      };
-      if (executionSignal.aborted && state.pendingStop.reason !== "failed")
-        state.pendingStop.reason = stopReason();
-      try {
-        await save();
-        await retirePendingStop();
-      } catch (cause) {
-        if (
-          cause instanceof ScanTransportClosedError ||
-          cause instanceof DeepScanRecoveryError
-        )
-          throw cause;
-        throw new DeepScanRecoveryError(
-          `Could not retain interrupted child retirement; resume to retry: ${errorMessage(cause)}`,
-          scanDir,
-          { cause },
+    const config: JsonObject = Object.create(null);
+    for (const override of overrides) {
+      const equals = override.indexOf("=");
+      const key = override.slice(0, equals).trim();
+      if (!/^(?:features|mcp_servers)(?:\.|$)/u.test(key)) continue;
+      const path = key.split(".");
+      const leaf = path.pop()!;
+      let table = config;
+      for (const part of path) {
+        const next = Object.hasOwn(table, part) ? table[part] : undefined;
+        const child =
+          table === config["features"] && part === "code_mode"
+            ? codeModeTable(next)
+            : next;
+        table = table[part] = Object.assign(
+          Object.create(null),
+          isRecord(child) ? child : {},
         );
       }
+      const value = parse(`value=${override.slice(equals + 1)}`)[
+        "value"
+      ] as JsonValue;
+      const priorMode =
+        key === "features.code_mode" ? codeModeTable(table[leaf]) : undefined;
+      const newMode = priorMode && codeModeTable(value);
+      table[leaf] =
+        priorMode && newMode ? deepMerge({ ...priorMode }, newMode) : value;
     }
-    updateAggregateCoverage();
-    await save().catch(() => undefined);
-    throw error;
-  } finally {
-    clearInterval(cancellationTimer);
-    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    const servers = config["mcp_servers"];
+    const owner = isRecord(servers) ? servers[PLUGIN_NAME] : undefined;
+    // Even a supplied transport can inherit a machine-level direct opt-out.
+    if (isRecord(owner) && !Array.isArray(owner["omit_tools_from"])) return;
+    return config;
+  } catch {
+    // Leave malformed settings for exec's own parser.
+    return undefined;
   }
 }
 
-export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  // SDK diagnostics can include repository text; match complete runtime refusals.
-  return [
-    "cyber_policy",
-    "Request rejected: cyber_policy.",
-    "Request flagged for possible cybersecurity risk.",
-    "Request flagged for potentially high-risk cyber activity.",
-    "Request blocked by cyberPolicy.",
-    "Request blocked by a safety policy violation.",
-    "This content was flagged for possible cybersecurity risk.",
-    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
-    "This content was flagged for potentially high-risk cyber activity.",
-    "This request has been flagged for possible cybersecurity risk.",
-    "This request has been flagged for potentially high-risk cyber activity.",
-    "Request blocked by a cybersecurity_policy_violation.",
-    "Request refused under cybersecurity policy.",
-    "Cybersecurity policy has refused the request.",
-  ].includes(message);
+// Codex merges a structured Code Mode setting with its boolean shorthand.
+function codeModeTable(value: JsonValue | undefined): JsonObject | undefined {
+  if (typeof value === "boolean") return { enabled: value };
+  return isRecord(value) ? value : undefined;
 }
 
-/** Terminal native account limits cannot be fixed by retrying discovery. */
-export function isCodexNonRetryableFailure(error: unknown): boolean {
-  if (isCodexCybersecurityPolicyRefusal(error)) return true;
-  const message = (
-    error instanceof Error ? error.message : String(error)
-  ).replace(/^Error running remote compact task: /, "");
+/** Read the same native layers and CLI overrides as the parent before adding its tool. */
+export async function readDeepScanParentConfig(
+  options: Pick<
+    DirectDeepScanOptions,
+    "codexOptions" | "preflightCommand" | "scanDir" | "signal"
+  > & {
+    plugin?: { marketplacePath: string; pluginName: string };
+    pluginServers?: Record<string, unknown>;
+  },
+): Promise<JsonObject | undefined> {
+  const { codexOptions, preflightCommand: command } = options;
+  const config = codexOptions.config ?? {};
+  // The provider-profile launcher emits whole top-level tables instead.
+  const overrides =
+    codexOptions.nativeProfile === undefined
+      ? sdkConfigFlags(config)
+      : (await nativeProfileClient()).profileConfigOverrides(config);
+  const environment = bundledCodexSdkEnvironment(command.command, {
+    ...codexOptions.env,
+    ...(codexOptions.apiKey === undefined
+      ? {}
+      : { CODEX_API_KEY: codexOptions.apiKey }),
+  });
+  const configOverrides = [
+    ...overrides,
+    ...(codexOptions.configOverrides ?? []),
+  ];
+  // Subcommand help does not load a project. A global --cd is ignored by
+  // older app-servers, so require support on the subcommand itself.
+  const help = await runCodexCommand(
+    command,
+    ["app-server", "--cd", options.scanDir, "--help"],
+    environment,
+    undefined,
+    options.signal,
+  );
+  const supportsCd =
+    help.success && /^\s*(?:-C,\s*)?--cd\s+<[^>\n]+>/mu.test(help.stdout);
+  if (!supportsCd) {
+    // The bundled command is the native executable itself. A custom launcher
+    // can use its own working directory to resolve scripts and other inputs.
+    if (
+      resolve(options.scanDir) !== process.cwd() &&
+      !isBundledExecutable(command.command)
+    )
+      return options.plugin
+        ? undefined
+        : suppliedParentRouting(configOverrides);
+    if (environment["CODEX_HOME"])
+      environment["CODEX_HOME"] = resolve(environment["CODEX_HOME"]);
+  }
+
+  const native = await nativePermissionPreflight();
+  return withCodexPreflightLock(environment, options.signal, () =>
+    native.readDeepScanRuntimeConfig(
+      {
+        codexPath: command.command,
+        commandArgs: command.args,
+        cwd: supportsCd ? process.cwd() : options.scanDir,
+        ...(supportsCd && { configCwd: options.scanDir }),
+        configOverrides,
+        env: environment,
+        signal: options.signal,
+        context: "parent-config",
+        plugin: options.plugin,
+      },
+      (
+        config: JsonObject,
+        hasEmptyCatalog: (server: string) => Promise<boolean>,
+      ) => inspectFilteredPeers(config, options.pluginServers, hasEmptyCatalog),
+    ),
+  );
+}
+
+function isBundledExecutable(command: string): boolean {
+  try {
+    return (
+      realpathSync.native(command) ===
+      realpathSync.native(resolveBundledCodexExecutable())
+    );
+  } catch {
+    return false; // An installation may supply only an external launcher.
+  }
+}
+
+async function inspectFilteredPeers(
+  config: JsonObject,
+  pluginServers: Record<string, unknown> | undefined,
+  hasEmptyCatalog: (server: string) => Promise<boolean>,
+): Promise<JsonObject> {
+  const configured = isRecord(config["mcp_servers"])
+    ? config["mcp_servers"]
+    : {};
+  const owner = configured[PLUGIN_NAME];
   if (
-    message.startsWith("You’ve hit your usage limit.") ||
-    message.startsWith("You’ve hit your usage limit for ")
+    isRecord(owner) &&
+    (owner["command"] ||
+      owner["url"] ||
+      Array.isArray(owner["omit_tools_from"]))
   )
-    return true;
-  return [
-    "Quota exceeded. Check your plan and billing details.",
-    "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
-    "Your workspace is out of credits. Add credits to continue.",
-    "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
-    "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
-    "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
-  ].includes(message);
+    return config;
+  const servers = { ...pluginServers, ...configured };
+  const registration = servers[PLUGIN_NAME];
+  if (!isRecord(registration) || registration["enabled"] === false)
+    return config;
+  const routing = { ...configured };
+  for (const [name, settings] of Object.entries(servers)) {
+    if (
+      name === PLUGIN_NAME ||
+      !isRecord(settings) ||
+      settings["enabled"] === false ||
+      !["codex_security", "mcp__codex_security"].includes(
+        normalizedServerName(name),
+      )
+    )
+      continue;
+    if (
+      ![settings["enabled_tools"], settings["disabled_tools"]].some(
+        (tools) => Array.isArray(tools) && tools.length > 0,
+      )
+    )
+      continue;
+    if (await hasEmptyCatalog(name)) {
+      // This view is used only to select a namespace. Never change the peer's config.
+      routing[name] = { enabled_tools: [] };
+    }
+  }
+  return { ...config, mcp_servers: routing };
+}
+
+function normalizedServerName(server: string): string {
+  return server.replace(/[-.:@/]/gu, "_");
+}
+
+/** Keep direct dispatch scoped to the original SDK coordinator turn and MCP server. */
+export function deepScanParentToolOverrides(
+  config: JsonObject,
+  pluginServers: Record<string, unknown>,
+): string[] {
+  const features = config["features"] ?? {};
+  if (!isRecord(features)) return [];
+  const mode = features["code_mode"];
+  if (mode !== undefined && typeof mode !== "boolean" && !isRecord(mode))
+    return [];
+  const direct =
+    (isRecord(mode) ? mode["direct_only_tool_namespaces"] : undefined) ?? [];
+  if (!Array.isArray(direct)) return [];
+
+  const owner = PLUGIN_NAME;
+  const bare = "codex_security";
+  const prefixed = "mcp__codex_security";
+  let required = [prefixed, bare];
+  const overrides: string[] = [];
+  const configured = config["mcp_servers"];
+  // Native registrations take precedence over the selected plugin's entries.
+  const servers: Record<string, unknown> = {
+    ...pluginServers,
+    ...(isRecord(configured) ? configured : {}),
+  };
+  const ownerConfig = servers[owner];
+  if (!isRecord(ownerConfig) || ownerConfig["enabled"] === false) return [];
+  const omitted = ownerConfig["omit_tools_from"];
+  if (Array.isArray(omitted) && omitted.includes("direct")) return [];
+  // A raw transport or an existing omission leaf can be updated in place.
+  // Adding a new registration would shadow a plugin's transport and policy.
+  if (
+    isRecord(configured) &&
+    Object.hasOwn(configured, owner) &&
+    (Array.isArray(omitted) ||
+      typeof ownerConfig["command"] === "string" ||
+      typeof ownerConfig["url"] === "string")
+  ) {
+    if (omitted != null && !Array.isArray(omitted)) return [];
+    const surfaces = omitted ?? [];
+    if (surfaces.includes("code_mode") && surfaces.includes("deferred"))
+      return [];
+    return [
+      `mcp_servers.${owner}.omit_tools_from=${inlineToml([...new Set([...surfaces, "code_mode", "deferred"])])}`,
+    ];
+  }
+  const option = features["non_prefixed_mcp_tool_names"];
+  const enabled =
+    option === true || (isRecord(option) && option["enabled"] === true);
+  const selected = isRecord(option) ? option["server_names"] : undefined;
+  function namespace(server: string): string {
+    const name = normalizedServerName(server);
+    const omitPrefix =
+      enabled && (!Array.isArray(selected) || selected.includes(server));
+    return omitPrefix || name.startsWith("mcp__") ? name : `mcp__${name}`;
+  }
+  const occupied = new Set(
+    Object.entries(servers)
+      .filter(
+        ([server, settings]) =>
+          server !== owner &&
+          isRecord(settings) &&
+          settings["enabled"] !== false &&
+          (!Array.isArray(settings["enabled_tools"]) ||
+            settings["enabled_tools"].length > 0),
+      )
+      .map(([server]) => namespace(server)),
+  );
+  const current = namespace(owner);
+  if (occupied.has(current)) {
+    const excluded = isRecord(mode) ? mode["excluded_tool_namespaces"] : null;
+    const routed = Array.isArray(excluded) ? [...direct, ...excluded] : direct;
+    // Moving the owner also renames its peers. Keep names that the caller
+    // explicitly routed or excluded from Code Mode.
+    if (
+      current === bare ||
+      occupied.has(bare) ||
+      routed.some(
+        (name) =>
+          name === current ||
+          (typeof name === "string" &&
+            /^mcp__codex_security_[0-9a-f]{12}$/u.test(name)),
+      ) ||
+      (option != null && !enabled)
+    )
+      return [];
+    overrides.push(
+      `features.non_prefixed_mcp_tool_names=${inlineToml({
+        enabled: true,
+        server_names: [...(Array.isArray(selected) ? selected : []), owner],
+      })}`,
+    );
+    required = [bare];
+  } else if (occupied.has(prefixed) || occupied.has(bare)) {
+    required = [current];
+  }
+  if (!required.every((name) => direct.includes(name))) {
+    overrides.push(
+      `features.code_mode.direct_only_tool_namespaces=${inlineToml([...new Set([...direct, ...required])])}`,
+    );
+  }
+  return overrides;
+}
+
+// The direct coordinator records context but never calls a model itself.
+export const DIRECT_DEEP_SCAN_CONTROL_USAGE = {
+  input_tokens: 0,
+  cached_input_tokens: 0,
+  cache_write_input_tokens: 0,
+  output_tokens: 0,
+} as const;
+
+/** Run the same coordinator as the plugin, without a parent model turn. */
+export async function* runDeepScan(
+  options: DirectDeepScanOptions,
+): AsyncGenerator<{
+  type: string;
+  [key: string]: unknown;
+}> {
+  const native = await import(
+    pathToFileURL(
+      join(options.pluginRoot, "mcp", "permission-profile-preflight.mjs"),
+    ).href
+  );
+  const profile = await import(
+    pathToFileURL(join(options.pluginRoot, "scripts", "codex_profile.mjs")).href
+  );
+  const configured = options.codexOptions;
+  const command = options.preflightCommand;
+  const environment = bundledCodexSdkEnvironment(command.command, {
+    ...configured.env,
+    ...(configured.apiKey === undefined
+      ? {}
+      : { CODEX_API_KEY: configured.apiKey }),
+  });
+  const session = (await withCodexPreflightLock(
+    environment,
+    options.signal,
+    () =>
+      native.prepareCliDeepScanSession({
+        codexPath: command.command,
+        commandArgs: command.args,
+        cwd: options.scanDir,
+        env: environment,
+        configOverrides: [
+          ...profile.profileConfigOverrides(configured.config ?? {}),
+          ...(configured.configOverrides ?? []),
+          // This session only records native context; workers keep their own snapshot.
+          "features.plugins=false",
+        ],
+        signal: options.signal,
+        prompt:
+          options.prompt +
+          "\n\nThe host runs this Deep Scan coordinator directly and owns finalization. This saved request supplies context for later follow-up; do not start a replacement scan.",
+      }),
+  )) as {
+    threadId: string;
+    model: string;
+    reasoningEffort?: string;
+    permissionProfile: unknown;
+  };
+  yield { type: "thread.started", thread_id: session.threadId };
+  options.signal.throwIfAborted();
+  const node = process.versions["bun"]
+    ? await resolveTrustedExecutable("node", environment, [options.repository])
+    : undefined;
+  if (node === null)
+    throw new CodexSecurityError("Node.js is not available on PATH.");
+  const output = await runEngine(
+    node?.executable ?? process.execPath,
+    [join(options.pluginRoot, "mcp", "server.mjs"), "--deep-scan-engine"],
+    node?.environment ?? environment,
+    JSON.stringify({
+      scanId: options.scanId,
+      ...session,
+      ...(options.onDiagnostic && { diagnosticsVersion: 1 }),
+    }),
+    options.signal,
+    options.onDiagnostic,
+  );
+  const completed = JSON.parse(output);
+  if (
+    completed.scanId !== options.scanId ||
+    completed.manifestPath !== join(options.scanDir, "scan-manifest.json")
+  ) {
+    throw new CodexSecurityError(
+      "Deep Scan engine returned results for a different scan.",
+    );
+  }
+  // The control session makes no model calls. Worker usage is read by the
+  // existing scan tracker from the native sessions below this scan directory.
+  yield {
+    type: "turn.completed",
+    usage: { ...DIRECT_DEEP_SCAN_CONTROL_USAGE },
+  };
+}
+
+function runEngine(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  request: string,
+  signal: AbortSignal,
+  onDiagnostic: DirectDeepScanOptions["onDiagnostic"],
+): Promise<string> {
+  signal.throwIfAborted();
+  const child = spawn(executablePathForSpawn(command), args, {
+    env,
+    windowsHide: true,
+    serialization: "json",
+    stdio: onDiagnostic ? ["pipe", "pipe", "pipe", "ipc"] : "pipe",
+  }) as ChildProcessWithoutNullStreams;
+  if (onDiagnostic) {
+    child.on("message", (message) => {
+      if (!isRecord(message) || typeof message["event"] !== "string") return;
+      const fields: Record<string, string | number> = {};
+      for (const [name, value] of Object.entries(message)) {
+        if (
+          /^[a-zA-Z][a-zA-Z0-9]*$/u.test(name) &&
+          (typeof value === "number" || typeof value === "string")
+        )
+          fields[name] = value;
+      }
+      try {
+        void Promise.resolve(onDiagnostic(fields)).catch(() => {});
+      } catch {
+        // The optional diagnostic sink cannot stop the scan.
+      }
+    });
+  }
+  // EOF requests graceful coordinator/worker cleanup on Windows as well as Unix.
+  // Keep the control pipe open until completion or explicit cancellation.
+  const cancel = () => child.stdin.end();
+  let stdout = "";
+  let stderr = "";
+  let processError: Error | undefined;
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.once("error", (error) => {
+    processError = error;
+  });
+  child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+    if (!isDisconnectedChildStdin(error)) processError = error;
+  });
+  const result = new Promise<string>((resolve, reject) => {
+    child.once("close", (code) => {
+      signal.removeEventListener("abort", cancel);
+      if (signal.aborted) reject(signal.reason);
+      else if (processError) reject(processError);
+      else if (code !== 0)
+        reject(
+          new CodexSecurityError(
+            stderr.trim() || `Deep Scan engine exited with code ${code}.`,
+          ),
+        );
+      else resolve(stdout);
+    });
+  });
+  child.stdin.write(request + "\n");
+  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted) cancel();
+  return result;
 }

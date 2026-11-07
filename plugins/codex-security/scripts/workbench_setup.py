@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,6 @@ from workbench_target import (
     git_bytes,
     git_output,
     git_target_metadata,
-    protected_repository_root,
     require_git_worktree_head,
     worktree_content_digest,
 )
@@ -31,37 +29,7 @@ def require_target(value: str) -> Path:
     target = expanded.resolve()
     if not target.is_dir():
         raise SystemExit(f"Scan target is not a readable local directory: {target}")
-    if expanded != target:
-        require_safe_target_links(expanded, target)
     return target
-
-
-def require_safe_target_links(selected: Path, target: Path) -> None:
-    """Every checkout containing a traversed link must remain protected by the saved target."""
-    pending = [selected]
-    visited: set[Path] = set()
-    while pending:
-        path = pending.pop()
-        for entry in (path, *path.parents):
-            if entry in visited:
-                continue
-            visited.add(entry)
-            try:
-                metadata = entry.lstat()
-            except (FileNotFoundError, NotADirectoryError):
-                continue
-            if not (
-                stat.S_ISLNK(metadata.st_mode)
-                or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-            ):
-                continue
-            parent = entry.parent.resolve()
-            root = protected_repository_root(parent)
-            if os.path.lexists(root / ".git") and not target.is_relative_to(root):
-                raise SystemExit(
-                    "Scan target leaves its source checkout. Use the canonical target path."
-                )
-            pending.append(parent / entry.readlink())
 
 
 def inspect_target(target: Path) -> dict[str, Any]:
