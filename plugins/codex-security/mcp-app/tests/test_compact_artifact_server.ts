@@ -1,8 +1,9 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, snapshotScanDraft, writeJson } from "./support/json.ts";
 import { workerDraft, finding } from "./scan-draft-fixture.ts";
 import { gitText } from "../scripts/git.mjs";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
-import type { TextContent } from "@modelcontextprotocol/sdk/types.js";
+import type { TextContent, Tool } from "@modelcontextprotocol/sdk/types.js";
 type CompletedResult = {
   scanId: string;
   manifest: {
@@ -84,6 +85,8 @@ try {
       await testParentToolList(bundle);
       await testDiscoveryWorkerToolList(bundle);
     });
+    await test(`${label}: discovery workers share peer notes within their scan`, () =>
+      testDiscoveryPeerNotes(bundle));
   }
   await test("shipped: claimed parent operations", () =>
     testClaimedParentArtifactOperations(shipped, "shipped"));
@@ -523,28 +526,11 @@ async function testSemanticScanDraftCompletion(
       candidate_id: "candidate-0123456789abcdef",
       cwe_ids: ["CWE-89"],
     };
-    await assert.rejects(
-      readFile(
-        path.join(
-          scanDirectory,
-          "artifacts",
-          "02_discovery",
-          "in_scope_files.txt",
-        ),
-      ),
-      { code: "ENOENT" },
-    );
-    await assert.rejects(
-      readFile(
-        path.join(
-          scanDirectory,
-          "artifacts",
-          "02_discovery",
-          "candidate_ledger.jsonl",
-        ),
-      ),
-      { code: "ENOENT" },
-    );
+    for (const name of ["in_scope_files.txt", "candidate_ledger.jsonl"])
+      await assert.rejects(
+        readFile(path.join(scanDirectory, "artifacts", "02_discovery", name)),
+        { code: "ENOENT" },
+      );
 
     const codeEvidence = {
       id: "fixture-sql-sink",
@@ -912,82 +898,46 @@ async function testSemanticScanDraftCompletion(
     assert.ok(results.manifest.scan.sealedAt);
     assert.ok(results.manifest.scan.artifacts.length > 0);
     assert.equal(results.findings.findings.length, 1);
-    assert.equal(results.findings.findings[0].ruleId, finding.ruleId);
-    assert.deepEqual(results.findings.findings[0].taxonomy, finding.taxonomy);
-    assert.deepEqual(
-      results.findings.findings[0].provenance,
-      finding.provenance,
-    );
-    assert.equal(results.findings.findings[0].remediation, finding.remediation);
-    assert.deepEqual(
-      results.findings.findings[0].remediationTests,
-      finding.remediationTests,
-    );
-    assert.deepEqual(
-      results.findings.findings[0].preventiveControls,
-      finding.preventiveControls,
-    );
-    assert.equal(
-      results.findings.findings[0].extensions.candidateId,
-      candidate.candidate_id,
-    );
-    assert.ok(results.findings.findings[0].findingId);
-    assert.ok(results.findings.findings[0].occurrenceId);
-    assert.ok(results.findings.findings[0].fingerprints.primary);
+    const savedFinding = results.findings.findings[0];
+    assert.equal(savedFinding.ruleId, finding.ruleId);
+    assert.equal(savedFinding.remediation, finding.remediation);
+    for (const field of [
+      "taxonomy",
+      "provenance",
+      "remediationTests",
+      "preventiveControls",
+    ] as const)
+      assert.deepEqual(savedFinding[field], finding[field]);
+    assert.equal(savedFinding.extensions.candidateId, candidate.candidate_id);
+    assert.ok(savedFinding.findingId);
+    assert.ok(savedFinding.occurrenceId);
+    assert.ok(savedFinding.fingerprints.primary);
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
     assert.equal(results.manifest.scan.mode, "repository");
     assert.deepEqual(results.manifest.scan.scope.includePaths, ["."]);
     assert.deepEqual(results.manifest.scan.scope.excludePaths, []);
     assert.deepEqual(results.review, { excludedPaths: [] });
-    const head = JSON.parse(
-      await readFile(path.join(scanDirectory, "checkpoint-head.json"), "utf8"),
-    );
-    const retained = JSON.parse(
-      await readFile(
-        path.join(scanDirectory, "checkpoints", head.checkpoint),
-        "utf8",
-      ),
+    const head = await readJson(scanDirectory, "checkpoint-head.json");
+    const retained = (
+      await readJson(scanDirectory, "checkpoints", head.checkpoint)
     ).reviewState;
     assert.equal(retained.surfaces[0].disposition, "reported");
+    const withId = (row: Record<string, unknown>, id: string) => ({
+      ...row,
+      id,
+    });
     assert.deepEqual(retained.deferred, [
-      {
-        ...reviewState.deferred[0],
-        id: "candidate-deferred-query",
-      },
-      {
-        ...reviewState.deferred[1],
-        id: "candidate-reserved-query-2",
-      },
+      withId(reviewState.deferred[0], "candidate-deferred-query"),
+      withId(reviewState.deferred[1], "candidate-reserved-query-2"),
       reviewState.deferred[2],
-      {
-        ...reviewState.deferred[3],
-        id: "candidate-deferred-query-2",
-      },
-      {
-        ...reviewState.deferred[4],
-        id: "candidate-reserved-query-3",
-      },
-      {
-        ...reasonOnlyDeferred,
-        id: generatedIds[0],
-      },
-      {
-        ...reasonOnlyDeferred,
-        id: generatedIds[1],
-      },
-      {
-        ...explicitCollisionDeferred,
-        id: generatedIds[2],
-      },
-      {
-        ...candidateCollisionDeferred,
-        id: generatedIds[3],
-      },
+      withId(reviewState.deferred[3], "candidate-deferred-query-2"),
+      withId(reviewState.deferred[4], "candidate-reserved-query-3"),
+      withId(reasonOnlyDeferred, generatedIds[0]),
+      withId(reasonOnlyDeferred, generatedIds[1]),
+      withId(explicitCollisionDeferred, generatedIds[2]),
+      withId(candidateCollisionDeferred, generatedIds[3]),
       reviewState.deferred[9],
-      {
-        ...reviewState.deferred[10],
-        id: candidateCollisionDeferredId,
-      },
+      withId(reviewState.deferred[10], candidateCollisionDeferredId),
     ]);
     assert.deepEqual(retained.openQuestions, savedCoverage.openQuestions);
     assert.ok(
@@ -1248,7 +1198,7 @@ async function testClaimedParentArtifactOperations(
       assert.equal(await readFile(inventoryPath, "utf8"), originalInventory);
     }
 
-    execFileSync(process.env.PYTHON ?? "python3", [
+    execFileSync(fixturePython, [
       "-c",
       "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); " +
         "c.execute('UPDATE scans SET handoff_claim_token = ? WHERE id = ?', " +
@@ -1297,19 +1247,21 @@ function requireToolError(
   );
 }
 
+async function listSandboxAwareTools(client: Client, role: string) {
+  assert.deepEqual(
+    client.getServerCapabilities()?.experimental?.["codex/sandbox-state-meta"],
+    {},
+    `The ${role} MCP must advertise actual parent sandbox-state metadata.`,
+  );
+  return (await client.listTools()).tools;
+}
+
 async function testParentToolList(bundle: string) {
   const client = await startClient(bundle, {
     CODEX_SECURITY_STATE_DIR: path.join(temporaryRoot, randomUUID()),
   });
   try {
-    assert.deepEqual(
-      client.getServerCapabilities()?.experimental?.[
-        "codex/sandbox-state-meta"
-      ],
-      {},
-      "The parent MCP must advertise actual parent sandbox-state metadata.",
-    );
-    const tools = (await client.listTools()).tools;
+    const tools = await listSandboxAwareTools(client, "parent");
     for (const tool of tools) {
       if (
         (
@@ -1329,7 +1281,7 @@ async function testParentToolList(bundle: string) {
       false,
       "The parent MCP must not expose a bound discovery worker's threat-model tool.",
     );
-    for (const name of [
+    const scanTools = [
       "prepare_codex_security_review_items",
       "list_codex_security_review_items",
       "record_codex_security_discovery_candidates",
@@ -1338,6 +1290,9 @@ async function testParentToolList(bundle: string) {
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
       "get_codex_security_completed_scan",
+    ];
+    for (const name of [
+      ...scanTools,
       "get_codex_security_finding_issues",
       "record_codex_security_finding_issues",
       "complete_codex_security_scan",
@@ -1357,35 +1312,14 @@ async function testParentToolList(bundle: string) {
     }
 
     for (const tool of tools.filter((entry) =>
-      [
-        "prepare_codex_security_review_items",
-        "list_codex_security_review_items",
-        "record_codex_security_discovery_candidates",
-        "list_codex_security_candidates",
-        "record_codex_security_candidate_validations",
-        "record_candidate_attack_paths",
-        "record_codex_security_scan_draft",
-        "get_codex_security_completed_scan",
-      ].includes(entry.name),
+      scanTools.includes(entry.name),
     )) {
       assert.equal(
         tool.inputSchema.required?.includes("scanId"),
         true,
         `${tool.name} must require the authoritative workbench scan identity.`,
       );
-      for (const forbidden of [
-        "path",
-        "artifactPath",
-        "outputPath",
-        "root",
-        "operation",
-      ]) {
-        assert.equal(
-          Object.hasOwn(tool.inputSchema.properties ?? {}, forbidden),
-          false,
-          `${tool.name} must not accept a model-selected artifact destination.`,
-        );
-      }
+      assertNoArtifactDestination(tool);
       if (tool.name === "record_codex_security_scan_draft")
         assertSemanticInputProperties(tool.inputSchema);
     }
@@ -1444,6 +1378,90 @@ async function testParentToolList(bundle: string) {
   }
 }
 
+async function testDiscoveryPeerNotes(bundle: string) {
+  const scanId = randomUUID();
+  const root = await mkdtemp(path.join(temporaryRoot, "peer-notes-"));
+  const otherRoot = await mkdtemp(
+    path.join(temporaryRoot, "other-peer-notes-"),
+  );
+  const clients: Client[] = [];
+  const worker = async (scan: string, boardRoot: string, author: string) => {
+    const output = path.join(boardRoot, "workers", author, "output");
+    await mkdir(output, { recursive: true });
+    const client = await startClient(bundle, {
+      CODEX_SECURITY_SCAN_ID: scan,
+      CODEX_SECURITY_ARTIFACT_ROOT: output,
+      CODEX_SECURITY_REPO_ROOT: root,
+      CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
+      CODEX_SECURITY_DISCOVERY_BOARD_ROOT: boardRoot,
+      CODEX_SECURITY_DISCOVERY_WORKER: author,
+    });
+    clients.push(client);
+    return toolCaller(client, author);
+  };
+  try {
+    const first = await worker(scanId, root, "discovery-0001");
+    const second = await worker(scanId, root, "discovery-0002");
+    const other = await worker(randomUUID(), otherRoot, "discovery-0001");
+    const lead = { message: "Check the caller at api.ts:16." };
+    const post = "post_deep_scan_peer_note";
+    const read = "read_deep_scan_peer_notes";
+    assert.deepEqual(
+      requireSuccessfulTool(await first(read, {}), "no peers yet"),
+      { notes: [] },
+    );
+    const [{ threadId }, another] = await Promise.all([
+      first(post, lead),
+      second(post, { message: "Checking the decoder." }),
+    ]).then((responses) =>
+      responses.map((response) =>
+        requireSuccessfulTool<{ threadId: string }>(response, "post lead"),
+      ),
+    );
+    assert.notEqual(threadId, another.threadId);
+    assert.deepEqual(
+      requireSuccessfulTool(await first(post, lead), "retry lead"),
+      { id: threadId, threadId },
+    );
+    assert.equal(
+      requireSuccessfulTool<{ notes: unknown[] }>(
+        await second(read, {}),
+        "read leads",
+      ).notes.length,
+      2,
+    );
+    const reply = {
+      threadId,
+      message: "The caller checks the permission at api.ts:12.",
+    };
+    const { id } = requireSuccessfulTool<{ id: string }>(
+      await second(post, reply),
+      "peer reply",
+    );
+    const resumed = await worker(scanId, root, "discovery-0001");
+    assert.deepEqual(
+      requireSuccessfulTool(await resumed(read, { threadId }), "read reply"),
+      {
+        notes: [
+          { ...lead, id: threadId, threadId, author: "discovery-0001" },
+          { ...reply, id, author: "discovery-0002" },
+        ],
+      },
+    );
+    assert.equal(
+      (await second(post, { ...reply, author: "discovery-0001" })).isError,
+      true,
+    );
+    assert.deepEqual(
+      requireSuccessfulTool(await other(read, {}), "isolated scan"),
+      { notes: [] },
+    );
+    assert.equal((await other(post, reply)).isError, true);
+  } finally {
+    await Promise.all(clients.map((client) => client.close()));
+  }
+}
+
 async function testDiscoveryWorkerToolList(bundle: string) {
   const repoRoot = path.join(temporaryRoot, "discovery-repository");
   const artifactRoot = await mkdtemp(
@@ -1465,14 +1483,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
   });
   try {
-    assert.deepEqual(
-      client.getServerCapabilities()?.experimental?.[
-        "codex/sandbox-state-meta"
-      ],
-      {},
-      "The discovery worker MCP must advertise actual parent sandbox-state metadata.",
-    );
-    const tools = (await client.listTools()).tools;
+    const tools = await listSandboxAwareTools(client, "discovery worker");
     assert.deepEqual(
       tools.map((tool) => tool.name),
       ["record_codex_security_scan_draft"],
@@ -1486,19 +1497,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       "reviewState",
     ]);
     assert.equal(tool.inputSchema.additionalProperties, false);
-    for (const forbidden of [
-      "path",
-      "artifactPath",
-      "outputPath",
-      "root",
-      "operation",
-    ]) {
-      assert.equal(
-        Object.hasOwn(tool.inputSchema.properties ?? {}, forbidden),
-        false,
-        `${tool.name} must not accept a model-selected ${forbidden}.`,
-      );
-    }
+    assertNoArtifactDestination(tool);
 
     const input = {
       scanId,
@@ -1566,6 +1565,22 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     }
   } finally {
     await client.close();
+  }
+}
+
+function assertNoArtifactDestination(tool: Tool) {
+  for (const forbidden of [
+    "path",
+    "artifactPath",
+    "outputPath",
+    "root",
+    "operation",
+  ]) {
+    assert.equal(
+      Object.hasOwn(tool.inputSchema.properties ?? {}, forbidden),
+      false,
+      `${tool.name} must not accept a model-selected artifact destination (${forbidden}).`,
+    );
   }
 }
 

@@ -113,9 +113,12 @@ export function runPythonWithInput(
   args: string[],
   input: string | Buffer,
   label: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(python, ["-B", ...args], {
+      signal,
+      killSignal: "SIGKILL",
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -128,7 +131,16 @@ export function runPythonWithInput(
       .setEncoding("utf8")
       .on("data", (chunk: string) => errors.push(chunk));
     let inputError: Error | undefined;
-    child.on("error", reject);
+    child.on("error", (error) => {
+      if (signal?.aborted) {
+        // A killed helper can remain in a kernel filesystem call until its mount responds.
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+      }
+      reject(error);
+    });
     child.stdin.on("error", (error: Error) => {
       inputError = error;
     });

@@ -1,6 +1,9 @@
+"""Test scan ownership and coherent workbench responses when cancellation or replacement races a request."""
+
 from __future__ import annotations
 
 import argparse
+import json
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -148,12 +151,24 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     assert wrong_thread["returncode"] != 0
     assert "owning Codex thread" in str(wrong_thread["stderr"])
 
-    canceled = cancel_scan(state_dir, scan_id, thread_id)
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 25,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 1,
+        "estimatedUsd": 0.001,
+    }
+    canceled = scan_command(
+        state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, "--cost-json", json.dumps(cost)
+    )
+    assert canceled["results"]["cost"] == cost
     assert canceled["results"]["progress"]["status"] == "canceled"
     assert canceled["results"]["canceledAt"]
     assert canceled["results"]["handoffClaimToken"] == claim_token
 
     replayed = cancel_scan(state_dir, scan_id, thread_id)
+    assert replayed["results"]["cost"] == cost
     assert replayed["results"]["canceledAt"] == canceled["results"]["canceledAt"]
 
     for command in (

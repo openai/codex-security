@@ -13,6 +13,7 @@ import { after, test } from "node:test";
 import { nativeTarget } from "../../native/platform.mts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
+const launcherTest = process.platform === "win32" ? test.skip : test;
 const directories = createTemporaryDirectories(true);
 after(() => directories.cleanup());
 const sourcePluginRoot = path.resolve(import.meta.dirname, "../..");
@@ -22,6 +23,13 @@ const pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
 
 function shellQuote(value: string): string {
   return "'" + value.replaceAll("'", "'\\''") + "'";
+}
+
+async function readLog(path: string) {
+  return (await readFile(path, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
 }
 
 async function fixture(
@@ -174,24 +182,17 @@ process.dlopen = function(module, filename, ...args) {
         input,
       });
     },
-    async loads() {
-      return (await readFile(log, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-    },
-    async launches() {
-      return (await readFile(launchLog, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
+    loads: () => readLog(log),
+    async helperRuntimes() {
+      return (await readLog(launchLog))
+        .filter((entry) => entry.argv.includes("--helper"))
+        .map((entry) => entry.runtime);
     },
   };
 }
 
-test(
+launcherTest(
   "macOS helpers skip managed runtimes that reject the packaged addon",
-  { skip: process.platform === "win32" },
   async () => {
     for (const command of ["synthetic-native-helper", "resolve-security-md"]) {
       const setup = await fixture(
@@ -230,9 +231,8 @@ test(
   },
 );
 
-test(
+launcherTest(
   "macOS helpers try later PATH runtimes after an incompatible first runtime",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(true, true, true);
     await setup.addPathRuntime();
@@ -243,18 +243,12 @@ test(
       (await setup.loads()).slice(0, 3).map((entry) => entry.runtime),
       ["managed", "ordinary", "later"],
     );
-    assert.deepEqual(
-      (await setup.launches())
-        .filter((entry) => entry.argv.includes("--helper"))
-        .map((entry) => entry.runtime),
-      ["later"],
-    );
+    assert.deepEqual(await setup.helperRuntimes(), ["later"]);
   },
 );
 
-test(
+launcherTest(
   "compatible managed runtimes retain priority over PATH",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(false);
     const result = setup.run([
@@ -270,26 +264,21 @@ test(
   },
 );
 
-test(
-  "explicit runtime selection remains authoritative",
-  { skip: process.platform === "win32" },
-  async () => {
-    const setup = await fixture(true, false, true);
-    const result = setup.run(["synthetic-native-helper"], setup.managed);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stdout, /different Team IDs/);
-    const loads = await setup.loads();
-    assert.ok(loads.every((entry) => entry.runtime === "managed"));
-    assert.ok(
-      loads[0].argv.includes("--helper"),
-      "Explicit runtimes launch directly.",
-    );
-  },
-);
+launcherTest("explicit runtime selection remains authoritative", async () => {
+  const setup = await fixture(true, false, true);
+  const result = setup.run(["synthetic-native-helper"], setup.managed);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /different Team IDs/);
+  const loads = await setup.loads();
+  assert.ok(loads.every((entry) => entry.runtime === "managed"));
+  assert.ok(
+    loads[0].argv.includes("--helper"),
+    "Explicit runtimes launch directly.",
+  );
+});
 
-test(
+launcherTest(
   "helper failures are reported without trying another runtime",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(false);
     const result = setup.run([
@@ -306,9 +295,8 @@ test(
   },
 );
 
-test(
+launcherTest(
   "helpers without native dependencies still run when all runtimes reject the addon",
-  { skip: process.platform === "win32" },
   async () => {
     for (const command of [
       "validate-patch-risk-assessment",
@@ -329,11 +317,8 @@ test(
         (await setup.loads()).map((entry) => entry.runtime),
         ["managed", "ordinary"],
       );
-      const helpers = (await setup.launches()).filter((entry) =>
-        entry.argv.includes("--helper"),
-      );
       assert.deepEqual(
-        helpers.map((entry) => entry.runtime),
+        await setup.helperRuntimes(),
         ["managed"],
         "The original default must launch the command exactly once.",
       );
@@ -341,9 +326,8 @@ test(
   },
 );
 
-test(
+launcherTest(
   "native commands retain their error when no compatible runtime exists",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(true, true, true);
     const result = setup.run(["synthetic-native-helper"]);
@@ -356,20 +340,16 @@ test(
       (await setup.loads()).map((entry) => entry.runtime),
       ["managed", "ordinary", "managed"],
     );
-    const helpers = (await setup.launches()).filter((entry) =>
-      entry.argv.includes("--helper"),
-    );
     assert.deepEqual(
-      helpers.map((entry) => entry.runtime),
+      await setup.helperRuntimes(),
       ["managed"],
       "A failing command must not retry in another runtime.",
     );
   },
 );
 
-test(
+launcherTest(
   "database helpers retain the managed runtime when PATH Node lacks SQLite",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(true, false, false, false);
     const result = setup.run(
@@ -378,11 +358,6 @@ test(
       JSON.stringify(setup.root),
     );
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(
-      (await setup.launches())
-        .filter((entry) => entry.argv.includes("--helper"))
-        .map((entry) => entry.runtime),
-      ["managed"],
-    );
+    assert.deepEqual(await setup.helperRuntimes(), ["managed"]);
   },
 );

@@ -39,7 +39,7 @@ function relativeComponents(
   if (
     /^[\p{White_Space}\x1c-\x1f]*$/u.test(value) ||
     (!allowDot && normalized.length === 0) ||
-    /^\p{L}:/u.test(value) ||
+    /^[A-Za-z]:/u.test(value) ||
     /[\\\x00-\x1f]/u.test(value) ||
     value.startsWith("/") ||
     parts.includes("..")
@@ -62,11 +62,17 @@ export function coverageReceiptComponents(value: string): string[] {
   }
 }
 
+export function validateWorkerReport(report: JsonObject): void {
+  for (const field of ["findings", "scope", "threatModel"] as const)
+    requirePublicationJson(report[field], field);
+}
+
 export function validateRetainedCoverage(coverage: JsonObject): void {
   for (const field of [
     "surfaces",
     "explicitExclusions",
     "deferred",
+    "resolvedDeferred",
     "openQuestions",
   ] as const)
     requirePublicationJson(coverage[field], `coverage.${field}`);

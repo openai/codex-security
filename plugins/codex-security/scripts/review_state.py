@@ -8,17 +8,23 @@ from typing import Any
 
 
 def uses_legacy_review(scan: dict[str, Any]) -> bool:
+    """Return whether the manifest points to separate coverage or predates inline review metadata."""
     return "coverageRef" in scan or ("reviewState" not in scan and "review" not in scan)
 
 
 def review_summary(state: dict[str, Any]) -> dict[str, Any]:
+    """Return the excluded path patterns in the compact form stored on the scan manifest."""
     return {
         "excludedPaths": [item["pattern"] for item in state.get("explicitExclusions", [])],
     }
 
 
 def review_state(scan: dict[str, Any]) -> dict[str, Any]:
-    """Read new manifest metadata using the recovery code's existing representation."""
+    """Build the recovery coverage record from inline manifest metadata.
+
+    Copy the saved review state, deriving exclusions from the summary when needed,
+    and attach the inventory strategy and scope for this scan.
+    """
     summary = scan.get("review", {})
     state = copy.deepcopy(scan.get("reviewState", {}))
     mode = scan.get("mode", "repository")
@@ -48,7 +54,7 @@ def review_state(scan: dict[str, Any]) -> dict[str, Any]:
 
 
 def checkpoint_review_state(state: dict[str, Any]) -> dict[str, Any]:
-    """Retain unfinished work and candidate outcomes, without a coverage report."""
+    """Copy the review data needed for recovery, omitting per-surface risk areas and report metadata."""
     return {
         "surfaces": [
             {key: copy.deepcopy(value) for key, value in item.items() if key != "riskArea"}

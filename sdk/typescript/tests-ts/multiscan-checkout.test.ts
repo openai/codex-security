@@ -545,11 +545,9 @@ describe("multiscan", () => {
       })}\n`,
     );
 
-    expect(await runMultiscan(configured)).toMatchObject({
-      completed: 1,
-      failed: 0,
-      skipped: 1,
-    });
+    await expect(runMultiscan(configured)).rejects.toThrow(
+      "Expected a positive integer receipt attempt",
+    );
     expect(scans).toHaveBeenCalledTimes(1);
     expect(await readFile(preserved, "utf8")).toBe("preserved\n");
   });
@@ -1173,6 +1171,40 @@ describe("multiscan", () => {
       );
       expect(scans.mock.calls.length).toBe(0);
       expect(await readFile(preserved, "utf8")).toBe("preserved\n");
+    }
+  });
+
+  test("rejects a campaign link created concurrently with output preparation", async () => {
+    const { paths } = await repositoryFixture("concurrent-output");
+    const external = join(paths.root, "external");
+    await mkdir(external, { mode: 0o700 });
+    const originalLstat = filesystem.lstat;
+    const inspectOutput = spyOn(filesystem, "lstat").mockImplementation(
+      async (path, options) => {
+        try {
+          return (await originalLstat(path, options as never)) as never;
+        } catch (error) {
+          if (
+            path === paths.output &&
+            (error as NodeJS.ErrnoException).code === "ENOENT"
+          ) {
+            await symlink(
+              external,
+              paths.output,
+              process.platform === "win32" ? "junction" : "dir",
+            );
+          }
+          throw error;
+        }
+      },
+    );
+    try {
+      await expect(
+        runMultiscan(options(paths, client(completeRun))),
+      ).rejects.toThrow("symbolic links");
+      expect(await readdir(external)).toEqual([]);
+    } finally {
+      inspectOutput.mockRestore();
     }
   });
 

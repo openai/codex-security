@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { severityRubricSnapshotSchema } from "./classify-severity-records.js";
-import { CodexSecurityError } from "./errors.js";
+import {
+  CodexSecurityError,
+  ScanCostLimitExceededError,
+  ScanInterruptedError,
+} from "./errors.js";
 import type { ScanActivity } from "./scan-activity.js";
 import { scanPhaseSchema, type ScanProgress } from "./worker-progress.js";
 
@@ -24,6 +28,8 @@ export interface ScanExecutionRequest {
     outputDirectory: string;
     /** Runtime context only. Credentials belong to the host executor. */
     environment: Record<string, string>;
+    /** Per-attempt attribution; IDs are for correlation, not metric labels. */
+    requestMetadata?: Readonly<Record<string, string>>;
   };
 }
 
@@ -97,9 +103,13 @@ export interface ScanExecutor {
 
 /** Carries the exact execution outcome even when finalization cannot complete. */
 export class ScanExecutionError extends CodexSecurityError {
+  /** Foreign receipts remain available for reconciliation, not accounting. */
+  readonly receiptMatchesRequest: boolean;
+
   constructor(
     public readonly result: ScanExecutionResult,
     message?: string,
+    options: { receiptMatchesRequest?: boolean } = {},
   ) {
     super(
       message ??
@@ -107,5 +117,34 @@ export class ScanExecutionError extends CodexSecurityError {
         result.error?.message ??
         `Hosted execution ${result.status}.`,
     );
+    this.receiptMatchesRequest = options.receiptMatchesRequest ?? true;
   }
+}
+
+export function explicitlyCanceled(signal?: AbortSignal): boolean {
+  return (
+    signal?.aborted === true &&
+    !(signal.reason instanceof ScanCostLimitExceededError) &&
+    !(
+      signal.reason instanceof DOMException &&
+      signal.reason.name === "TimeoutError"
+    )
+  );
+}
+
+/** Classify the scan separately from the executor's retained outcome. */
+export function hostedScanFailureStatus(
+  error: unknown,
+  signal?: AbortSignal,
+  execution?: ScanExecutionResult,
+): "failed" | "canceled" | "acceptance_unknown" {
+  const status = (
+    error instanceof ScanExecutionError ? error.result : execution
+  )?.status;
+  if (status === "acceptance_unknown") return status;
+  if (signal?.aborted)
+    return explicitlyCanceled(signal) ? "canceled" : "failed";
+  return status === "canceled" || error instanceof ScanInterruptedError
+    ? "canceled"
+    : "failed";
 }

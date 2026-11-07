@@ -170,6 +170,27 @@ for (const legacy of [false, true]) {
   });
 }
 
+test("a supplied scope file must name its paths before the worker can accept drafts", async (t) => {
+  const { importSource } = await import("./import-module.ts");
+  const { createCodexSecurityArtifactWriterServer } = await importSource(
+    "../artifact-writer-main.ts",
+    { absWorkingDir: import.meta.dirname },
+  );
+  const f = await fixture(t, "worker");
+  const scopeFile = join(f.root, "../missing-paths.json");
+  await writeFile(scopeFile, JSON.stringify({ filePaths: ["api/source.py"] }));
+  await assert.rejects(
+    createCodexSecurityArtifactWriterServer({
+      CODEX_SECURITY_ARTIFACT_ROOT: f.root,
+      CODEX_SECURITY_REPO_ROOT: f.root,
+      CODEX_SECURITY_SCAN_ID: f.context.scanId,
+      CODEX_SECURITY_SCOPE: ".",
+      CODEX_SECURITY_INCLUDE_PATHS_FILE: scopeFile,
+    }),
+    /coordinator-bound include paths/,
+  );
+});
+
 test("worker scope keeps a finding with any matching location and supports exact files", async (t) => {
   const f = await fixture(t, "worker");
   Object.assign(f.context, {

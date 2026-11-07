@@ -3,7 +3,9 @@ import { afterEach, expect, jest, mock, test } from "bun:test";
 import {
   hostedScannerHttp,
   type HostedScannerHttpOptions,
+  hostedScannerToken,
 } from "../src/hosted-scanner-http.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const url = new URL(
   "https://semgrep.dev/api/v1/deployments/example/findings?page=1",
@@ -14,6 +16,27 @@ function get(options: HostedScannerHttpOptions) {
 
 const now = Date.UTC(2026, 10, 6, 8, 49, 20, 250);
 afterEach(() => jest.useRealTimers());
+
+const overlay =
+  "hosted scanners resolve caller token overrides using the host's environment casing";
+test(overlay, () => {
+  if (runTestInSubprocess(import.meta.path, overlay)) return;
+  process.env["SEMGREP_APP_TOKEN"] = "synthetic-host-token";
+  const environment = Object.create(process.env, {
+    Semgrep_App_Token: { value: "synthetic-caller-token", enumerable: true },
+  });
+  const token = hostedScannerToken(
+    environment,
+    "SEMGREP_APP_TOKEN",
+    undefined,
+    url.origin,
+  );
+  expect(token).toBe(
+    process.platform === "win32"
+      ? "synthetic-caller-token"
+      : "synthetic-host-token",
+  );
+});
 
 function limited(hint: string, cancel: () => void) {
   return new Response(new ReadableStream({ cancel }), {
@@ -132,4 +155,55 @@ test("does not retry a fetch rejection", async () => {
   });
   await expect(get({ fetch })).rejects.toBe(error);
   expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+test("bounds a streamed scanner error while retaining its status and diagnostic prefix", async () => {
+  let pulls = 0;
+  let canceled = false;
+  const chunk = new TextEncoder().encode("x".repeat(8192));
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(chunk);
+        if (++pulls === 40) controller.close();
+      },
+      cancel() {
+        canceled = true;
+      },
+    }),
+    { status: 503 },
+  );
+  const error = await get({ fetch: async () => response }).catch(
+    (reason: unknown) => reason,
+  );
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toContain(
+    `failed (HTTP 503): ${"x".repeat(64 * 1024)}\n`,
+  );
+  expect((error as Error).message).toContain("first 65536 bytes");
+  expect(canceled).toBe(true);
+  expect(pulls).toBeLessThan(40);
+});
+
+test("an interrupted error body retains the HTTP status, received text and transport cause", async () => {
+  const failure = new Error("scanner disconnected");
+  let sent = false;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) return controller.error(failure);
+        sent = true;
+        controller.enqueue(new TextEncoder().encode("upstream maintenance"));
+      },
+    }),
+    { status: 502 },
+  );
+  const error = await get({ fetch: async () => response }).catch(
+    (reason: unknown) => reason,
+  );
+  expect((error as Error).message).toContain(
+    "failed (HTTP 502): upstream maintenance",
+  );
+  expect((error as Error).message).toContain(failure.message);
+  expect((error as Error).cause).toBe(failure);
 });

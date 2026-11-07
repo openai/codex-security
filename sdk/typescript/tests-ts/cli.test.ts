@@ -12,7 +12,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join, normalize, relative, resolve } from "node:path";
+import {
+  delimiter,
+  dirname,
+  join,
+  normalize,
+  relative,
+  resolve,
+} from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -1127,6 +1134,67 @@ describe("CLI", () => {
     expect(onRun).not.toHaveBeenCalled();
   });
 
+  test("installs hooks with trusted Git in the selected checkout using the caller's configuration", async () => {
+    await using temp = await scopedTemporaryDirectory("trusted-hook-git-");
+    const root = await realpath(temp.path);
+    const caller = join(root, "caller");
+    const target = join(root, "target");
+    const component = join(target, "component");
+    const alias = join(caller, "target-link");
+    const hooks = join(root, "owned hooks");
+    const otherHooks = join(root, "other hooks");
+    const config = join(root, "gitconfig");
+    const git = Bun.which("git")!;
+    for (const args of [
+      ["init", "-q", caller],
+      ["init", "-q", target],
+      ["-C", caller, "config", "core.hooksPath", otherHooks],
+      ["config", "--file", config, "core.hooksPath", hooks],
+    ]) {
+      const result = await runCommand(git, args);
+      expect(result.status, result.stderr).toBe(0);
+    }
+    await mkdir(component);
+    await symlink(
+      target,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const directory of [caller, target]) {
+      await writeFile(
+        join(directory, process.platform === "win32" ? "git.exe" : "git"),
+        "",
+        { mode: 0o700 },
+      );
+    }
+    for (const selected of [component, join(alias, "component")]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const status = await runCli(
+        ["install-hook", selected, "--json"],
+        dependencies({
+          currentDirectory: caller,
+          environment: {
+            PATH: [caller, target, dirname(git)].join(delimiter),
+            SystemRoot: process.env["SystemRoot"],
+            GIT_CONFIG_GLOBAL: config,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_DIR: join(caller, ".git"),
+          },
+        }),
+      );
+      expect(status, stderr.text()).toBe(0);
+      expect(normalize(JSON.parse(stdout.text()).hook)).toBe(
+        join(hooks, "pre-commit"),
+      );
+    }
+    expect(await readFile(join(hooks, "pre-commit"), "utf8")).toContain(
+      "--working-tree",
+    );
+    await expect(stat(join(otherHooks, "pre-commit"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
     const root = await realpath(
       await temporaryDirectory("codex-security-cli-pre-commit-"),
@@ -1143,6 +1211,7 @@ describe("CLI", () => {
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
         currentDirectory: root,
+        environment: { ...process.env },
         onRun: () => (started = true),
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1281,12 +1350,33 @@ describe("CLI", () => {
         code: "ENOENT",
       });
       expect(trustedHook).not.toMatch(/^exec\s+npx(?:\s|$)/m);
-      expect(trustedHook).toContain(await realpath(process.execPath));
-      expect(trustedHook).toContain(
+      // Let Git invoke the declared /bin/sh, including its bundled shell on Windows.
+      const displayArgs = trustedHook.replace(/^exec /m, "printf '%s\\0' ");
+      expect(displayArgs).not.toBe(trustedHook);
+      const decoded = await runCommand(
+        "git",
+        [
+          "-C",
+          root,
+          "-c",
+          "alias.report-hook-argv=!/bin/sh -s",
+          "report-hook-argv",
+        ],
+        { input: displayArgs, windowsHide: true },
+      );
+      expect(decoded.status, decoded.stderr).toBe(0);
+      expect(decoded.stdout.split("\0")).toEqual([
+        await realpath(process.execPath),
         await realpath(
           fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
         ),
-      );
+        "scan",
+        ".",
+        "--working-tree",
+        "--fail-on-severity",
+        "medium",
+        "",
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1339,7 +1429,10 @@ describe("CLI", () => {
           expect(
             await captureCli(main, "stdout").run(
               ["install-hook", "."],
-              dependencies({ currentDirectory: repository }),
+              dependencies({
+                currentDirectory: repository,
+                environment: { PATH: dirname(Bun.which("git")!) },
+              }),
             ),
           ).toBe(0);
         } finally {
@@ -2120,7 +2213,7 @@ describe("CLI", () => {
 
     expect(
       await runCli(
-        ["info", "--json", "--filter-output", "model,reasoningEffort,nextStep"],
+        ["info", "--json", "--filter-output=model,reasoningEffort,nextStep"],
         deps,
       ),
     ).toBe(0);
@@ -3129,6 +3222,7 @@ describe("CLI", () => {
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
       ],
       [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [["--codex", 'model = "gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
       [
         ["--codex", 'model_reasoning_effort="high"'],
         { model_reasoning_effort: "high" },
@@ -3834,6 +3928,44 @@ describe("CLI", () => {
     );
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_SECRET");
   });
+
+  test.each([true, false])(
+    "routes direct Deep Scan coordinator diagnostics in verbose mode (%p)",
+    async (verbose) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies();
+      deps.createSecurity = (_config, observe) =>
+        fakeSecurity(async () => {
+          expect(typeof observe).toBe(verbose ? "function" : "undefined");
+          observe?.({
+            event: "finding_comparison_failed",
+            reason: "first\nsecond",
+          });
+          return fakeResult();
+        });
+      expect(
+        await runCli(
+          [
+            "scan",
+            ".",
+            "--mode",
+            "deep",
+            "--json",
+            ...(verbose ? ["--verbose"] : []),
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const diagnostics = stderr
+        .text()
+        .split("\n")
+        .filter((line) => line.includes("deep_scan.coordinator"));
+      expect(diagnostics).toHaveLength(verbose ? 1 : 0);
+      if (verbose)
+        expect(diagnostics[0]).toContain('event="finding_comparison_failed"');
+    },
+  );
 
   test("reports the effective default model and reasoning effort in verbose scan diagnostics", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -5051,6 +5183,7 @@ describe("CLI", () => {
       ["--token-limit", "4"],
       ["--token-offset", "1"],
       ["--token-offset", "1", "--token-limit", "4"],
+      ["--token-offset=1", "--token-limit=4"],
     ] as const) {
       const stdout = captureCli(main, "stdout");
       expect(await stdout.run(["scan", ...arguments_], dependencies())).toBe(0);
@@ -5656,6 +5789,22 @@ describe("CLI", () => {
       ...fakePreflight("repo"),
     });
     expect(stderr.text()).not.toContain("Running scan");
+  });
+
+  test("explains the resolved cost limit in a dry-run plan", async () => {
+    const { stdout, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["scan", "repo", "--max-cost", "5", "--dry-run", "--json"],
+        dependencies(),
+      ),
+    ).toBe(0);
+    const plan = JSON.parse(stdout.text());
+    expect(plan.maxCostUsd).toBe(5);
+    expect(plan.costLimitNote).toContain("short-context API prices");
+    expect(plan.costLimitNote).toContain("In-flight requests");
+    expect(plan.costLimitNote).toContain("ChatGPT allowance");
   });
 
   test("renders dry-run output with Incur structured formats", async () => {

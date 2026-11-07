@@ -1,3 +1,4 @@
+import { OperationTelemetry } from "../../src/operation-telemetry.js";
 import { mkdir } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -122,6 +123,7 @@ export function createValidationFixtures() {
     const root = fixtureRoot ?? (await temporaryDirectory());
     const repository = join(root, "repository");
     const codexHome = await temporaryDirectory();
+    let telemetryEnabled = false;
     const stateDirectory =
       environmentOverrides["CODEX_SECURITY_STATE_DIR"] ?? join(root, "state");
     await mkdir(repository, { recursive: true });
@@ -163,6 +165,8 @@ export function createValidationFixtures() {
       },
       {
         environment,
+        createOperationTelemetry: (options) =>
+          telemetryEnabled ? new OperationTelemetry(options) : null,
         prepareRuntime: runtimePreparer(codexHome, () => ({
           plugin: { ...preparedRuntime(codexHome).plugin, pluginRoot },
           environment,
@@ -200,6 +204,9 @@ export function createValidationFixtures() {
       workbench,
       root,
       codexHome,
+      enableTelemetry() {
+        telemetryEnabled = true;
+      },
     };
   }
 

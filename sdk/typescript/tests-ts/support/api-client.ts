@@ -1,9 +1,38 @@
 import { CodexSecurity } from "../../src/api.js";
-import type { JsonObject } from "../../src/config.js";
+import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
+  FIREWORKS_CODEX_PROVIDER,
+  OPENROUTER_CODEX_PROVIDER,
+  type JsonObject,
+} from "../../src/config.js";
 import { throwing } from "./errors.js";
 import { readFile } from "node:fs/promises";
 import { parse } from "smol-toml";
 import type { TurnOptions } from "@openai/codex-sdk";
+
+export const EXTERNAL_PROVIDER_CASES = [
+  [
+    "OpenRouter",
+    "openrouter",
+    "OPENROUTER_API_KEY",
+    "anthropic/claude-sonnet-4.5",
+    OPENROUTER_CODEX_PROVIDER,
+  ],
+  [
+    "Fireworks AI",
+    "fireworks",
+    "FIREWORKS_API_KEY",
+    "accounts/fireworks/models/qwen3-235b-a22b",
+    FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "Cheaper Inference",
+    "cheaperinference",
+    "CHEAPER_INFERENCE_API_KEY",
+    "gpt-5.4",
+    CHEAPERINFERENCE_CODEX_PROVIDER,
+  ],
+] as const;
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 type Dependencies = NonNullable<ClientArguments[1]>;
@@ -96,6 +125,24 @@ export function mockScanRegistration(
   };
 }
 
+export function measuredScanUsage(
+  inputTokens: number,
+  cachedInputTokens: number,
+  outputTokens: number,
+  reasoningOutputTokens = 0,
+): JsonObject {
+  return {
+    coverage: "complete",
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens: 0,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens: inputTokens + outputTokens,
+    byRole: { workers: { threadCount: 0 } },
+  };
+}
+
 export function mockWorkbench(
   args: readonly string[],
   input?: string,
@@ -103,6 +150,7 @@ export function mockWorkbench(
   if (args[0] === "register-cli-scan") {
     return mockScanRegistration(args, input);
   }
+  if (args[0] === "read-scan-usage") return measuredScanUsage(10, 2, 3, 1);
   if (args[0] === "get-scan-feedback") {
     return {
       scanId: "scan_example_001",
@@ -129,6 +177,7 @@ export class TestClient extends CodexSecurity {
       withSyntheticScanEvents({
         createCodex: throwing("Unexpected Codex invocation in test"),
         environment: {},
+        createOperationTelemetry: () => null,
         probeCodexSandbox: async () => {},
         prepareScanArtifactRestorer: async () => ({
           restore: async () => {},

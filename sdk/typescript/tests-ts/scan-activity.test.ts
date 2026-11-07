@@ -59,6 +59,126 @@ function commandActivityCase(
 }
 
 describe("scan activity", () => {
+  test.each([
+    [
+      "cat $CODEX_SECURITY_REPOSITORY/src/my\\ file.ts",
+      "/repo",
+      ["src/my file.ts"],
+    ],
+    [
+      "cat /code/project\\ files/\\ leading\\ file.ts\\ ",
+      "/code/project files",
+      [" leading file.ts "],
+    ],
+    [
+      "cat \"/repo/two words\\ with.txt\" '/repo/quoted path.ts' /repo/my\\\tfile.ts",
+      "/repo",
+      ["two words/ with.txt", "quoted path.ts", "my\tfile.ts"],
+    ],
+    ["cat /repo/my\\ file.ts\\\\sibling /repo/safe.ts", "/repo", ["safe.ts"]],
+  ] as const)(
+    "decodes unquoted blanks in recorded POSIX commands: %s",
+    (cmd, repository, paths) => {
+      for (const activity of [
+        scanActivityFromEvent(
+          {
+            type: "item.started",
+            item: {
+              id: "live",
+              type: "command_execution",
+              command: cmd,
+              shell: "/bin/bash",
+            },
+          },
+          repository,
+        ),
+        scanActivityFromEvent(
+          toolEvent("exec", { cmd, shell: "sh" }),
+          repository,
+        ),
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "function_call",
+            name: "exec_command",
+            call_id: "saved",
+            arguments: JSON.stringify({ cmd, shell: "/bin/zsh" }),
+          }),
+          repository,
+        ),
+      ])
+        expect(activity?.paths).toEqual([...paths]);
+    },
+  );
+
+  test.each([undefined, "/usr/bin/pwsh", "unknown"])(
+    "preserves ordinary token boundaries for shell %p",
+    (shell) => {
+      expect(
+        scanActivityFromEvent(
+          toolEvent("exec", {
+            cmd: "Get-ChildItem /repo/src\\ -File /repo/one.ts",
+            shell,
+          }),
+          "/repo",
+        )?.paths,
+      ).toEqual(["src", "one.ts"]);
+    },
+  );
+
+  test.each([
+    [
+      [
+        "grep",
+        "-F",
+        "foo\\",
+        "/repo/my file.ts",
+        "/repo/one\\two.ts",
+        "$CODEX_SECURITY_REPOSITORY/other.ts",
+      ],
+      "/repo",
+      ["my file.ts", "one\\two.ts"],
+    ],
+    [
+      ["sh", "-e", "-c", "/repo/inside.ts /repo/fake.ts", "/repo/direct.ts"],
+      "/repo",
+      ["direct.ts"],
+    ],
+    [
+      ["sh", "/repo/run.sh", "-c", "/repo/options.conf"],
+      "/repo",
+      ["run.sh", "options.conf"],
+    ],
+    [
+      ["pwsh", "-Command", "/repo/script.ps1", "/repo/script text"],
+      "/repo",
+      [],
+    ],
+    [
+      ["pwsh", "-File", "C:\\repo\\run.ps1", "-Command", "c:\\repo\\settings"],
+      "C:\\repo",
+      ["run.ps1", "settings"],
+    ],
+    [
+      ["cat", "//server/Share/Repo/my file.ts"],
+      "//Server/Share/Repo",
+      ["my file.ts"],
+    ],
+  ] as const)(
+    "uses the recorded argv boundaries for %p",
+    (command, repository, paths) => {
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "local_shell_call",
+            call_id: "argv",
+            action: { type: "exec", command },
+          }),
+          repository,
+        ),
+      ).toMatchObject({ description: command.join(" "), paths: [...paths] });
+    },
+  );
+
   test("reports repository files as soon as a read command starts", () => {
     expect(
       scanActivityFromEvent(

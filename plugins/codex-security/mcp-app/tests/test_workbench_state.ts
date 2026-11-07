@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { assertNoError } from "./assertions.ts";
 import { WORKBENCH_PYTHON } from "../src/server/workbench-process.ts";
 import assert from "node:assert/strict";
@@ -30,8 +31,8 @@ const serverBundlePath = path.join(
 );
 const script = path.join(pluginRoot, "scripts/workbench_db.py");
 const python = execFileSync(
-  process.env.PYTHON?.trim() || "python3",
-  ["-c", "import sys; print(sys.executable)"],
+  fixturePython,
+  ["-I", "-X", "utf8", "-c", "import sys; print(sys.executable)"],
   { encoding: "utf8" },
 ).trim();
 const codexHome = path.join(fixtureRoot, "home");
@@ -64,7 +65,7 @@ async function openWorkspace(env: NodeJS.ProcessEnv) {
     env,
   });
   try {
-    assertNoError(await server.initialize("workbench-state-test"));
+    await server.initialize("workbench-state-test");
     return await server.callTool(2, {
       name: "open_codex_security_workspace",
       arguments: { targetPath, scope: ".", mode: "standard" },

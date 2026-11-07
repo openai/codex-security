@@ -80,6 +80,57 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("invalidates complete totals when usage becomes partial or unavailable", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, { showCost: true });
+    dashboard.start();
+    const usage = {
+      input_tokens: 100,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 5,
+      reasoning_output_tokens: 0,
+      total_tokens: 105,
+    };
+    const cost = {
+      model: "gpt-5.6-sol",
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 5,
+      estimatedUsd: 0.001,
+    };
+    dashboard.setMeasurement({
+      usage,
+      cost,
+      coverage: "complete",
+      observedAt: new Date().toISOString(),
+      threadCount: 1,
+      missingThreadCount: 0,
+    });
+    expect(lastFrame(stderr)).not.toContain("(partial)");
+    dashboard.setMeasurement({
+      usage,
+      cost,
+      coverage: "partial",
+      observedAt: new Date().toISOString(),
+      threadCount: 1,
+      missingThreadCount: 1,
+    });
+    expect(lastFrame(stderr)).toContain("(partial)");
+    dashboard.setMeasurement({
+      usage: null,
+      cost: null,
+      coverage: "unavailable",
+      observedAt: new Date().toISOString(),
+      threadCount: 0,
+      missingThreadCount: 2,
+    });
+    expect(lastFrame(stderr)).toContain("usage unavailable");
+    expect(lastFrame(stderr)).not.toContain("105");
+    dashboard.stop();
+  });
+
   test("keeps activity while a terminal is backpressured and restores the screen", async () => {
     const stderr = capture(true);
     const stream = { ...stderr.stream, writableNeedDrain: true };
@@ -681,21 +732,37 @@ describe("live scan dashboard", () => {
   });
 
   test.each([
-    ["unknown-model", false],
-    ["gpt-5.6-cyber", true],
-  ] as const)("shows a cost row only when %s has pricing", (model, priced) => {
-    const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, {
-      model: { model, reasoningEffort: "xhigh" },
-      showCost: true,
-    });
-    dashboard.start();
-    const frame = lastFrame(stderr);
-    expect(/^\s*COST\b/m.test(frame)).toBe(priced);
-    if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
-    expect(frame).not.toContain("model pricing missing");
-    dashboard.stop();
-  });
+    ["unknown-model", undefined, false],
+    ["gpt-5.6-cyber", undefined, true],
+    [
+      "openai.gpt-5.6-cyber",
+      { provider: "amazon-bedrock", region: "us-gov-east-1" },
+      true,
+    ],
+    [
+      "openai.gpt-5.6-cyber",
+      { provider: "amazon-bedrock", region: "us-gov-west-1" },
+      false,
+    ],
+    ["gpt-6-astra", { provider: "gcp" }, false],
+    ["openai/gpt-oss-120b-maas", { provider: "gcp" }, true],
+  ] as const)(
+    "shows a cost row only when %s has pricing in %j",
+    (model, pricingContext, priced) => {
+      const stderr = capture(true);
+      const dashboard = createDashboard(stderr.stream, {
+        model: { model, reasoningEffort: "xhigh" },
+        pricingContext,
+        showCost: true,
+      });
+      dashboard.start();
+      const frame = lastFrame(stderr);
+      expect(/^\s*COST\b/m.test(frame)).toBe(priced);
+      if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
+      expect(frame).not.toContain("model pricing missing");
+      dashboard.stop();
+    },
+  );
 
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
@@ -2097,6 +2164,28 @@ describe("live scan dashboard", () => {
     });
     expect(visible()).toEqual(before);
     expect(lastFrame(stderr)).toContain("7 lines above live");
+
+    // A worker finishes an old action above the viewport with a longer result.
+    dashboard.record({
+      id: "action-10",
+      kind: "command",
+      status: "completed",
+      description: "finished",
+      paths: ["first.ts", "second.ts"],
+    });
+    expect(visible()).toEqual(before);
+
+    // A streaming action below the viewport grows and then shrinks.
+    for (const paths of [["third.ts", "fourth.ts"], []]) {
+      dashboard.record({
+        id: "action-2001",
+        kind: "command",
+        status: "completed",
+        description: "finished",
+        paths,
+      });
+      expect(visible()).toEqual(before);
+    }
     dashboard.stop();
   });
 

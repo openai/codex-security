@@ -1,4 +1,5 @@
 import { jsonLineInputSource } from "./support/json-line-input-source.ts";
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import type { PersistedDeepScanWorker } from "../src/deep-scan/types.js";
 import { readJson, readJsonLines } from "./support/json.ts";
 import {
@@ -10,7 +11,9 @@ import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { parse as parseToml } from "smol-toml";
-import { execFile } from "node:child_process";
+import { execFile, fork } from "node:child_process";
+import { once } from "node:events";
+import { text } from "node:stream/consumers";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
@@ -33,7 +36,9 @@ import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
 
-const pluginRoot = path.resolve(mcpAppRoot, "..");
+const pluginRoot = await realpath(
+  path.resolve(mcpAppRoot, "../../../sdk/typescript/_bundled_plugin"),
+);
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
 
@@ -49,11 +54,13 @@ async function testDeepScanStdioLifecycle() {
   const fixtureRoot = await temporaryDirectory("codex-security-deep-stdio-");
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
+  const expiredTargetPath = path.join(fixtureRoot, "expired-target");
   const stateDir = path.join(fixtureRoot, "state");
   const codexHome = path.join(fixtureRoot, "codex [home]");
   const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
   const projectConfigPath = path.join(fixtureRoot, "selected.yaml");
+  const expiredProjectConfigPath = path.join(fixtureRoot, "expired.yaml");
   const startLogPath = path.join(fixtureRoot, "fake-codex-started.jsonl");
   const exitLogPath = path.join(fixtureRoot, "fake-codex-exited.jsonl");
   const restartControlPath = path.join(
@@ -88,11 +95,14 @@ async function testDeepScanStdioLifecycle() {
 
   await mkdir(targetPath, { recursive: true });
   await mkdir(failedTargetPath, { recursive: true });
+  await mkdir(expiredTargetPath, { recursive: true });
   await mkdir(path.join(codexHome, "codex-security"), { recursive: true });
   for (const directory of [
     "scripts",
     "references",
     "schemas",
+    "shared",
+    "mcp/native",
     ".codex-plugin",
   ]) {
     await cp(
@@ -154,6 +164,10 @@ max_discovery_runs = 2
   await writeFakeCodex(fakeCodexPath);
   await writeFile(projectConfigPath, "scan: {max_time_minutes: 30}\n");
   await writeFile(
+    expiredProjectConfigPath,
+    "scan: {mode: deep, max_time_minutes: 0.000001}\n",
+  );
+  await writeFile(
     runtimeConfigPath,
     `model_reasoning_summary = "detailed"
 profile = "selected"
@@ -187,17 +201,11 @@ service_tier = "ultrafast"
     FAKE_CODEX_RESTART_CONTROL: restartControlPath,
     FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL: signalCheckpointControlPath,
     FAKE_CODEX_START_LOG: startLogPath,
-    FAKE_CODEX_DENIED_HOME: codexHome,
   };
   const server = startServer(serverBundlePath, environment);
 
   try {
-    const initialized = await server.request(1, "initialize", {
-      protocolVersion: "2025-11-25",
-      capabilities: {},
-      clientInfo: { name: "deep-scan-stdio-lifecycle", version: "0.1.0" },
-    });
-    assertNoError(initialized);
+    const initialized = await server.initialize("deep-scan-stdio-lifecycle");
     assert.deepEqual(
       initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
       {},
@@ -208,59 +216,43 @@ service_tier = "ultrafast"
     );
     assert.deepEqual(initialized.result.capabilities.logging, {});
 
-    const missingParentSandbox = await server.request(
-      2,
-      "tools/call",
-      toolCall(
-        "start_codex_security_deep_scan",
-        {
-          targetPath,
-          scope: ".",
-          userContext: "missing parent sandbox fixture",
-        },
-        threadId,
-        undefined,
-        null,
-      ),
-    );
-    assert.equal(missingParentSandbox.result?.isError, true);
-    assert.match(
-      missingParentSandbox.result.content
-        .map((item: { text: string }) => item.text)
-        .join(" "),
-      /parent.*sandbox|sandbox.*metadata|permission/i,
-    );
-
-    const unsupportedParentSandbox = await server.request(
-      3,
-      "tools/call",
-      toolCall(
-        "start_codex_security_deep_scan",
-        {
-          targetPath,
-          scope: ".",
-          userContext: "unsupported parent sandbox fixture",
-        },
-        threadId,
-        undefined,
+    for (const [id, reason, sandboxState] of [
+      [2, "missing", null],
+      [
+        3,
+        "unsupported",
         {
           permissionProfile: { type: "disabled" },
           sandboxCwd: pathToFileURL(pluginRoot).href,
         },
-      ),
-    );
-    assert.equal(unsupportedParentSandbox.result?.isError, true);
-    assert.match(
-      unsupportedParentSandbox.result.content
-        .map((item: { text: string }) => item.text)
-        .join(" "),
-      /parent.*sandbox|sandbox.*metadata|permission/i,
-    );
+      ],
+    ] as const) {
+      const response = await server.callTool(
+        id,
+        toolCall(
+          "start_codex_security_deep_scan",
+          {
+            targetPath,
+            scope: ".",
+            userContext: `${reason} parent sandbox fixture`,
+          },
+          threadId,
+          undefined,
+          sandboxState,
+        ),
+      );
+      assert.equal(response.result?.isError, true);
+      assert.match(
+        response.result.content
+          .map((item: { text: string }) => item.text)
+          .join(" "),
+        /parent.*sandbox|sandbox.*metadata|permission/i,
+      );
+    }
     assert.deepEqual(await readLogLines(startLogPath), []);
 
-    const missingConfig = await server.request(
+    const missingConfig = await server.callTool(
       4,
-      "tools/call",
       toolCall(
         "start_codex_security_deep_scan",
         {
@@ -277,31 +269,59 @@ service_tier = "ultrafast"
       [],
     );
 
-    server.sendRequest(
-      10,
+    const expired = await server.request(
+      5,
       "tools/call",
       toolCall(
         "start_codex_security_deep_scan",
         {
-          targetPath,
-          scope: ".",
-          userContext: "stdio lifecycle fixture",
-          projectConfigPath,
+          targetPath: expiredTargetPath,
+          projectConfigPath: expiredProjectConfigPath,
         },
         threadId,
-        {
-          "x-codex-turn-metadata": {
-            model: "gpt-5.5",
-            reasoning_effort: "xhigh",
-            thread_id: threadId,
-            turn_id: "active-parent-turn",
-            service_tier: "default",
-          },
-        },
       ),
     );
+    assertNoError(expired);
+    const expiredScanId = expired.result.structuredContent.scanId;
+    const expiredState = await getDeepScan({
+      environment,
+      scanId: expiredScanId,
+      threadId,
+    });
+    assert.equal(expiredState.terminalReason, "capped");
+    assert.equal(expiredState.dispatchedCount, 0);
+    assert.equal(
+      expired.result.structuredContent.completion.scan.reportAvailable,
+      true,
+    );
+    const coverage = await readFixtureCoverage(expiredState.scanDir, stateDir);
+    assert.match(coverage.deferred[0].reason, /discovery time limit elapsed/);
+    assert.deepEqual(await readLogLines(startLogPath), []);
 
-    const scanId = await waitForScanId({ server });
+    const targetRequest = {
+      targetPath,
+      scope: ".",
+      userContext: "stdio lifecycle fixture",
+      projectConfigPath,
+    };
+    server.sendRequest(
+      10,
+      "tools/call",
+      toolCall("start_codex_security_deep_scan", targetRequest, threadId, {
+        "x-codex-turn-metadata": {
+          model: "gpt-5.5",
+          reasoning_effort: "xhigh",
+          thread_id: threadId,
+          turn_id: "active-parent-turn",
+          service_tier: "default",
+        },
+      }),
+    );
+
+    const scanId = await waitForScanId({
+      server,
+      excludedScanIds: [expiredScanId],
+    });
     await waitForDeepScanWorker({ environment, scanId, threadId });
     const [startedWorker] = await waitForJsonLines(startLogPath, 1);
     assert.equal(startedWorker.hasExpectedApiKey, true);
@@ -314,6 +334,7 @@ service_tier = "ultrafast"
       (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
     )?.artifactDir;
     assert.equal(typeof startedArtifactRoot, "string");
+    // Another client can replace this shared install while the scan is active.
     await writeFile(
       path.join(installedPluginRoot, "scripts", "workbench_db.py"),
       'raise RuntimeError("Installed plugin helpers replaced during another scan")\n',
@@ -357,27 +378,26 @@ service_tier = "ultrafast"
       startedWorker.argv.includes('model_reasoning_summary="none"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
+    assertReadOnlyWorkerInvocation(
+      startedWorker.argv,
+      codexHome,
+      stateDir,
+      scanId,
+    );
     assertWorkerArtifactEnvironment(
       startedWorker.argv,
       pluginRoot,
       pythonWrapperPath,
     );
 
-    // Another client can replace this shared install while the scan is active.
-    await writeFile(
-      path.join(installedPluginRoot, "scripts", "workbench_db.py"),
-      "raise RuntimeError('synthetic replacement plugin helper')\n",
-    );
     await rm(path.join(installedPluginRoot, "references"), {
       recursive: true,
     });
     await rm(path.join(installedPluginRoot, "schemas"), { recursive: true });
 
     // Discovery progress is admitted once the first complete Standard worker is active.
-    const discoveryProgress = await server.request(
+    await server.callSuccessfulTool(
       15,
-      "tools/call",
       toolCall(
         "update_codex_security_scan_progress",
         {
@@ -389,14 +409,9 @@ service_tier = "ultrafast"
         threadId,
       ),
     );
-    assertNoError(discoveryProgress);
-    const discoveryScan = await runWorkbench(environment, [
-      "get-scan",
-      "--scan-id",
-      scanId,
-    ]);
-    assert.equal(discoveryScan.scan.progress.phase, "discovery");
-    assert.equal(discoveryScan.scan.progress.coverage.worklistRows, 6);
+    const discoveryScan = await getScan(environment, scanId);
+    assert.equal(discoveryScan.progress.phase, "discovery");
+    assert.equal(discoveryScan.progress.coverage.worklistRows, 6);
 
     // Stopping the original model response detaches only that long-poll waiter.
     server.notify("notifications/cancelled", {
@@ -408,12 +423,6 @@ service_tier = "ultrafast"
     const stillRunning = await getDeepScan({ environment, scanId, threadId });
     assert.equal(stillRunning.status, "running");
     assert.equal(stillRunning.cancelRequested, false);
-    assert.equal(
-      stillRunning.workers.some(
-        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
-      ),
-      false,
-    );
     assert.equal(stillRunning.workers.length, 1);
     assert.equal(stillRunning.workers[0].kind, "discovery");
     assert.equal(stillRunning.workers[0].status, "running");
@@ -424,16 +433,7 @@ service_tier = "ultrafast"
     server.sendRequest(
       11,
       "tools/call",
-      toolCall(
-        "start_codex_security_deep_scan",
-        {
-          targetPath,
-          scope: ".",
-          userContext: "stdio lifecycle fixture",
-          projectConfigPath,
-        },
-        threadId,
-      ),
+      toolCall("start_codex_security_deep_scan", targetRequest, threadId),
     );
     server.sendRequest(
       12,
@@ -452,9 +452,8 @@ service_tier = "ultrafast"
     );
     assert.equal((await readLogLines(startLogPath)).length, 1);
 
-    const rejectedWrongThreadCancel = await server.request(
+    const rejectedWrongThreadCancel = await server.callTool(
       1312,
-      "tools/call",
       toolCall("cancel_codex_security_scan", { scanId }, "another-thread"),
     );
     assert.equal(rejectedWrongThreadCancel.result?.isError, true);
@@ -468,9 +467,8 @@ service_tier = "ultrafast"
 
     await writeFile(signalCheckpointControlPath, "write-on-signal\n");
     await writeFile(cancelFailureControlPath, "fail\n");
-    const failedCancel = await server.request(
+    const failedCancel = await server.callTool(
       1313,
-      "tools/call",
       toolCall("cancel_codex_security_scan", { scanId }, threadId),
     );
     assert.equal(failedCancel.result?.isError, true);
@@ -494,23 +492,17 @@ service_tier = "ultrafast"
       assert.equal(failedJoin.result?.structuredContent, undefined);
       assert.match(failureText, /injected cancel-scan failure/);
     }
-    const stillDurablyRunning = await runWorkbench(environment, [
-      "get-scan",
-      "--scan-id",
-      scanId,
-    ]);
-    assert.equal(stillDurablyRunning.scan.progress.status, "running");
+    const stillDurablyRunning = await getScan(environment, scanId);
+    assert.equal(stillDurablyRunning.progress.status, "running");
     assert.equal(
       (await getDeepScan({ environment, scanId, threadId })).cancelRequested,
       false,
     );
 
-    const cancelResponse = await server.request(
+    await server.callSuccessfulTool(
       1314,
-      "tools/call",
       toolCall("cancel_codex_security_scan", { scanId }, threadId),
     );
-    assertNoError(cancelResponse);
     assert.equal(
       (await readLogLines(cancelLogPath)).length,
       2,
@@ -562,9 +554,8 @@ service_tier = "ultrafast"
       true,
     );
 
-    const lateJoin = await server.request(
+    const lateJoin = await server.callTool(
       14,
-      "tools/call",
       toolCall("start_codex_security_deep_scan", { scanId }, threadId),
     );
     assertCanceled(lateJoin, scanId, startedState.scanDir);
@@ -593,7 +584,7 @@ service_tier = "ultrafast"
     const failedScanId = await waitForScanId({
       server,
       requestId: 20,
-      excludedScanIds: [scanId],
+      excludedScanIds: [expiredScanId, scanId],
     });
     await waitForDeepScanWorker({
       environment,
@@ -636,12 +627,11 @@ service_tier = "ultrafast"
       failedWorker.argv.includes('model_reasoning_effort="high"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
-    assert.equal(
-      activeFailureState.workers.some(
-        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
-      ),
-      false,
+    assertReadOnlyWorkerInvocation(
+      failedWorker.argv,
+      codexHome,
+      stateDir,
+      failedScanId,
     );
     assert.equal(activeFailureState.workers.length, 1);
     assert.equal(activeFailureState.workers[0].kind, "discovery");
@@ -649,16 +639,14 @@ service_tier = "ultrafast"
     assertProcessAlive(failedWorker.pid);
 
     const failureMessage = "fixture unrecoverable failure\0source";
-    const failureResponse = await server.request(
+    await server.callSuccessfulTool(
       21,
-      "tools/call",
       toolCall(
         "fail_codex_security_scan",
         { scanId: failedScanId, message: failureMessage },
         failureThreadId,
       ),
     );
-    assertNoError(failureResponse);
 
     const failedWaiter = await server.waitForResponse(20);
     const failureText =
@@ -669,18 +657,16 @@ service_tier = "ultrafast"
     assert.equal(failedWaiter.result?.structuredContent, undefined);
     assert.match(failureText, /fixture unrecoverable failure/);
     assert.match(failureText, /no successful discovery manifest was returned/);
-    const failedContext = await server.request(
+    const failedContext = await server.callSuccessfulTool(
       211,
-      "tools/call",
       toolCall(
         "get_codex_security_scan_context",
         { scanId: failedScanId },
         failureThreadId,
       ),
     );
-    assertNoError(failedContext);
     assert.equal(
-      failedContext.result.structuredContent.scan.progress.status,
+      failedContext.structuredContent.scan.progress.status,
       "failed",
     );
     const exitedWorkers = await waitForJsonLines(exitLogPath, 2);
@@ -719,9 +705,8 @@ service_tier = "ultrafast"
       true,
     );
 
-    const failedLateJoin = await server.request(
+    const failedLateJoin = await server.callTool(
       22,
-      "tools/call",
       toolCall(
         "start_codex_security_deep_scan",
         { scanId: failedScanId },
@@ -752,35 +737,28 @@ service_tier = "ultrafast"
     );
 
     const resumedThreadId = "deep-scan-stdio-resumed-thread";
-    const opened = await server.request(
+    const opened = await server.callSuccessfulTool(
       24,
-      "tools/call",
       toolCall(
         "open_codex_security_workspace",
         { targetPath, scope: ".", mode: "deep" },
         resumedThreadId,
       ),
     );
-    assertNoError(opened);
-    const sessionId = opened.result.structuredContent.workspace.id;
-    assertNoError(
-      await server.request(
-        25,
-        "tools/call",
-        toolCall(
-          "submit_codex_security_setup",
-          { sessionId, targetPath, scope: ".", mode: "deep" },
-          resumedThreadId,
-        ),
+    const sessionId = opened.structuredContent.workspace.id;
+    await server.callSuccessfulTool(
+      25,
+      toolCall(
+        "submit_codex_security_setup",
+        { sessionId, targetPath, scope: ".", mode: "deep" },
+        resumedThreadId,
       ),
     );
-    const started = await server.request(
+    const started = await server.callSuccessfulTool(
       26,
-      "tools/call",
       toolCall("start_codex_security_scan", { sessionId }, resumedThreadId),
     );
-    assertNoError(started);
-    const resumedScan = started.result.structuredContent.workspace.results;
+    const resumedScan = started.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
     await chmod(resumedScan.scanDir, 0o755);
     const handoffClaimToken = randomUUID();
@@ -803,12 +781,9 @@ service_tier = "ultrafast"
         },
       ],
     ] as const) {
-      assertNoError(
-        await server.request(
-          id,
-          "tools/call",
-          toolCall(name, arguments_, resumedThreadId),
-        ),
+      await server.callSuccessfulTool(
+        id,
+        toolCall(name, arguments_, resumedThreadId),
       );
     }
 
@@ -867,27 +842,19 @@ service_tier = "ultrafast"
       () => process.kill(server.pid!, 0),
       "the original MCP server must have exited",
     );
-    const paused = await runWorkbench(environment, [
-      "get-scan",
-      "--scan-id",
-      resumedScanId,
-    ]);
+    const paused = await getScan(environment, resumedScanId);
     assert.deepEqual(
-      [paused.scan.progress.status, paused.scan.progress.phase],
+      [paused.progress.status, paused.progress.phase],
       ["running", "discovery"],
     );
-    assert.deepEqual(paused.scan.progress.independentReviews, {
+    assert.deepEqual(paused.progress.independentReviews, {
       completed: 1,
       active: 0,
       maximum: 2,
       consolidating: false,
     });
     assert.deepEqual(
-      [
-        paused.scan.reportAvailable,
-        paused.scan.findingCount,
-        paused.scan.artifacts,
-      ],
+      [paused.reportAvailable, paused.findingCount, paused.artifacts],
       [false, 0, {}],
     );
     const manifestPath = path.join(resumedScan.scanDir, "scan-manifest.json");
@@ -912,16 +879,7 @@ service_tier = "ultrafast"
     const resumedStartIndex = (await readJsonLines(startLogPath)).length;
     const restartedServer = startServer(serverBundlePath, environment);
     try {
-      assertNoError(
-        await restartedServer.request(1, "initialize", {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: {
-            name: "deep-scan-restarted-artifacts",
-            version: "0.1.0",
-          },
-        }),
-      );
+      await restartedServer.initialize("deep-scan-restarted-artifacts");
       restartedServer.sendRequest(
         2,
         "tools/call",
@@ -963,21 +921,16 @@ service_tier = "ultrafast"
         return run.status === "succeeded";
       }, "the detached coordinator to persist its successful aggregate");
       await waitFor(async () => {
-        const scan = await runWorkbench(environment, [
-          "get-scan",
-          "--scan-id",
-          resumedScanId,
-        ]);
-        return scan.scan.progress.status === "complete";
+        const scan = await getScan(environment, resumedScanId);
+        return scan.progress.status === "complete";
       }, "the detached coordinator to finalize without another tool call");
       const sealedBeforeRejoin = await readFile(manifestPath, "utf8");
       const reportBeforeRejoin = await readFile(
         path.join(resumedScan.scanDir, "report.md"),
         "utf8",
       );
-      const resumed = await restartedServer.request(
+      const resumed = await restartedServer.callSuccessfulTool(
         3,
-        "tools/call",
         toolCall(
           "start_codex_security_deep_scan",
           { scanId: resumedScanId, handoffClaimToken },
@@ -990,7 +943,6 @@ service_tier = "ultrafast"
           },
         ),
       );
-      assertNoError(resumed);
       const modelRows = await execFileAsync(
         process.env.PYTHON?.trim() || "python3",
         [
@@ -1001,28 +953,42 @@ service_tier = "ultrafast"
         ],
       );
       assert.deepEqual(JSON.parse(modelRows.stdout), ["gpt-6.1-sol", "max"]);
-      const instructions = resumed.result.structuredContent.instructions;
+      const instructions = resumed.structuredContent.instructions;
       assert.match(
         instructions,
         /Do not call complete_codex_security_scan again/,
       );
-      const completion = resumed.result.structuredContent.completion;
+      const completion = resumed.structuredContent.completion;
+      const sealed = await runWorkbench(environment, [
+        "get-scan",
+        "--scan-id",
+        resumedScanId,
+      ]);
+      const { accountRateLimits: _limits, ...usage } = sealed.scan.usage;
+      // The synthetic workers report their tokens; the parent has no usage receipt.
+      assert.equal(usage.coverage, "partial");
+      assert.ok(usage.inputTokens > 0);
+      assert.ok(usage.warnings.length);
       assert.deepEqual(completion, {
-        scan: { progress: { status: "complete" }, reportAvailable: true },
+        scan: {
+          progress: { status: "complete" },
+          reportAvailable: true,
+          usage,
+        },
       });
-      assert.deepEqual(resumed.result.structuredContent, {
+      assert.deepEqual(resumed.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
+        completedAudits: 2,
+        terminalReason: "saturated",
         manifestPath,
         reportPath: path.join(resumedScan.scanDir, "report.md"),
         instructions,
         completion,
       });
-      assert.deepEqual(resumed.result.content, [
-        { type: "text", text: instructions },
-      ]);
+      assert.deepEqual(resumed.content, [{ type: "text", text: instructions }]);
       assert.equal(
-        resumed.result.content.some((item: { text: string }) =>
+        resumed.content.some((item: { text: string }) =>
           item.text.includes(resumedScanId),
         ),
         true,
@@ -1068,7 +1034,7 @@ service_tier = "ultrafast"
         (await readJson(resumedScan.scanDir, "findings.json")).findings,
         [],
       );
-      const completedScan = resumed.result.structuredContent;
+      const completedScan = resumed.structuredContent;
       const sealedManifest = await readJson(completedScan.manifestPath);
       assert.equal(sealedManifest.scan.status, "completed");
       assert.ok(sealedManifest.scan.sealedAt);
@@ -1098,7 +1064,12 @@ service_tier = "ultrafast"
       for (const [index, execution] of executions.entries()) {
         const afterRestart = index + restartStartIndex >= resumedStartIndex;
         assertConfigOverrides(execution.argv, { service_tier: "default" });
-        assertReadOnlyWorkerInvocation(execution.argv, codexHome);
+        assertReadOnlyWorkerInvocation(
+          execution.argv,
+          codexHome,
+          stateDir,
+          resumedScanId,
+        );
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) {
@@ -1141,9 +1112,8 @@ service_tier = "ultrafast"
         "# Synthetic completion retry\n",
       );
       await writeFile(completionFailureControlPath, "fail\n");
-      const completionFailed = await restartedServer.request(
+      const completionFailed = await restartedServer.callTool(
         4,
-        "tools/call",
         toolCall(
           "start_codex_security_deep_scan",
           { targetPath: retryTarget },
@@ -1167,40 +1137,54 @@ service_tier = "ultrafast"
         threadId: resumedThreadId,
       });
       assert.equal(retryRun.status, "succeeded");
-      const pending = await runWorkbench(environment, [
-        "get-scan",
-        "--scan-id",
-        retryScanId,
-      ]);
-      assert.equal(pending.scan.progress.status, "running");
-      assert.equal(pending.scan.reportAvailable, false);
+      const pending = await getScan(environment, retryScanId);
+      assert.equal(pending.progress.status, "running");
+      assert.equal(pending.reportAvailable, false);
       const workerCountBeforeRetry = (await readLogLines(startLogPath)).length;
       await writeFile(
         path.join(retryTarget, "source.py"),
         "# Target changed after the failed completion\n",
       );
-      const retry = await restartedServer.request(
+      const retry = await restartedServer.callSuccessfulTool(
         5,
-        "tools/call",
         toolCall(
           "start_codex_security_deep_scan",
           { scanId: retryScanId },
           resumedThreadId,
         ),
       );
-      assertNoError(retry);
-      assert.equal(retry.result.structuredContent.scanId, retryScanId);
+      assert.equal(retry.structuredContent.scanId, retryScanId);
       assert.equal(
-        retry.result.structuredContent.completion.scan.progress.status,
+        retry.structuredContent.completion.scan.progress.status,
         "complete",
       );
       assert.equal(
-        retry.result.structuredContent.completion.scan.reportAvailable,
+        retry.structuredContent.completion.scan.reportAvailable,
         true,
       );
       assert.equal(
-        retry.result.structuredContent.reportPath,
-        path.join(retry.result.structuredContent.scanDir, "report.md"),
+        retry.structuredContent.reportPath,
+        path.join(retry.structuredContent.scanDir, "report.md"),
+      );
+      assert.equal(
+        (await readLogLines(startLogPath)).length,
+        workerCountBeforeRetry,
+      );
+      const deadlineConfig = path.join(fixtureRoot, "deadline.yaml");
+      await writeFile(deadlineConfig, "scan: {max_time_minutes: 0.000001}\n");
+      const expired = await restartedServer.request(
+        6,
+        "tools/call",
+        toolCall(
+          "start_codex_security_deep_scan",
+          { targetPath: retryTarget, projectConfigPath: deadlineConfig },
+          "deadline-thread",
+        ),
+      );
+      assertNoError(expired);
+      assert.match(
+        expired.result.structuredContent.instructions,
+        /deadline expired before any Standard scan completed/,
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,
@@ -1245,17 +1229,13 @@ async function testDetachedTargetReplay(
   );
   let server = startServer(serverBundlePath, environment);
   try {
-    assertNoError(await server.initialize("detached-target"));
+    await server.initialize("detached-target");
     server.sendRequest(2, "tools/call", request);
     const scanId = await waitForScanId({ server, requestId: 2 });
     server.notify("notifications/cancelled", { requestId: 2 });
     await waitFor(async () => {
-      const state = await runWorkbench(environment, [
-        "get-scan",
-        "--scan-id",
-        scanId,
-      ]);
-      return state.scan.progress.status === "complete";
+      const state = await getScan(environment, scanId);
+      return state.progress.status === "complete";
     }, "the detached target request to finalize");
     assert.equal(server.response(2)?.result?.structuredContent, undefined);
     const { scanDir } = await getDeepScan({ environment, scanId, threadId });
@@ -1264,10 +1244,9 @@ async function testDetachedTargetReplay(
     await server.stop();
 
     server = startServer(serverBundlePath, environment);
-    assertNoError(await server.initialize("detached-target-retry"));
-    const replay = await server.callTool(2, request);
-    assertNoError(replay);
-    const completed = replay.result.structuredContent;
+    await server.initialize("detached-target-retry");
+    const replay = await server.callSuccessfulTool(2, request);
+    const completed = replay.structuredContent;
     assert.equal(completed.scanId, scanId);
     assert.equal(completed.scanDir, scanDir);
     assert.equal(completed.completion.scan.reportAvailable, true);
@@ -1370,31 +1349,29 @@ async function testCliDeepScanEngine({
     ]);
     return { scanId: registration.scanId as string, scanDir };
   };
+  const request = (scanId: string) => ({
+    scanId,
+    threadId,
+    model: "gpt-6.1-sol",
+    reasoningEffort: "max",
+    permissionProfile: (parentSandboxState as { permissionProfile: unknown })
+      .permissionProfile,
+  });
+  const engineEnvironment = {
+    ...environment,
+    CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase,
+  };
   const launch = (scanId: string, overrides: NodeJS.ProcessEnv = {}) => {
     const execution = execFileAsync(
       process.execPath,
       [serverBundlePath, "--deep-scan-engine"],
       {
-        env: {
-          ...environment,
-          CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase,
-          ...overrides,
-        },
+        env: { ...engineEnvironment, ...overrides },
         encoding: "utf8",
         timeout: 30_000,
       },
     );
-    execution.child.stdin!.write(
-      JSON.stringify({
-        scanId,
-        threadId,
-        model: "gpt-6.1-sol",
-        reasoningEffort: "max",
-        permissionProfile: (
-          parentSandboxState as { permissionProfile: unknown }
-        ).permissionProfile,
-      }) + "\n",
-    );
+    execution.child.stdin!.write(JSON.stringify(request(scanId)) + "\n");
     return execution;
   };
   const completed = await register("cli-engine-completed", true);
@@ -1403,7 +1380,35 @@ async function testCliDeepScanEngine({
   const helperStartIndex = (
     await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
   ).length;
-  const result = await launch(completed.scanId);
+  const verbose = fork(serverBundlePath, ["--deep-scan-engine"], {
+    env: engineEnvironment,
+    execArgv: [],
+    timeout: 30_000,
+    silent: true,
+  });
+  const diagnosticEvents: unknown[] = [];
+  verbose.on("message", (event) => diagnosticEvents.push(event));
+  const output = Promise.all([
+    text(verbose.stdout!),
+    text(verbose.stderr!),
+    once(verbose, "close"),
+  ]);
+  verbose.stdin!.write(
+    JSON.stringify({ ...request(completed.scanId), diagnosticsVersion: 1 }) +
+      "\n",
+  );
+  const [stdout, stderr, [code]] = await output;
+  assert.equal(code, 0, stderr);
+  assert.ok(
+    diagnosticEvents.some(
+      (entry) => (entry as { event: string }).event === "discovery_accepted",
+    ),
+  );
+  assert.ok(
+    diagnosticEvents.some(
+      (entry) => (entry as { event: string }).event === "coordinator_terminal",
+    ),
+  );
   const helperLaunches = (
     await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
   ).slice(helperStartIndex);
@@ -1414,7 +1419,7 @@ async function testCliDeepScanEngine({
     assert.equal(launch.args.length, 7);
     assert.equal(launch.cwd, pluginRoot);
   }
-  assert.deepEqual(JSON.parse(result.stdout), {
+  assert.deepEqual(JSON.parse(stdout), {
     scanId: completed.scanId,
     manifestPath: path.join(completed.scanDir, "scan-manifest.json"),
   });
@@ -1426,7 +1431,12 @@ async function testCliDeepScanEngine({
     ["discovery-0001", "discovery-0002"],
   );
   for (const entry of starts) {
-    assertReadOnlyWorkerInvocation(entry.argv, codexHome);
+    assertReadOnlyWorkerInvocation(
+      entry.argv,
+      codexHome,
+      environment.CODEX_SECURITY_STATE_DIR!,
+      completed.scanId,
+    );
     assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
     assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
     assert.equal(entry.hasExpectedApiKey, true);
@@ -1453,8 +1463,8 @@ async function testCliDeepScanEngine({
   // A resumed SDK scan rejoins through the parent MCP turn after discovery.
   const parent = startServer(serverBundlePath, environment);
   try {
-    assertNoError(await parent.initialize("sdk-parent"));
-    const joined = await parent.callTool(
+    await parent.initialize("sdk-parent");
+    const joined = await parent.callSuccessfulTool(
       2,
       toolCall(
         "start_codex_security_deep_scan",
@@ -1462,11 +1472,10 @@ async function testCliDeepScanEngine({
         threadId,
       ),
     );
-    assertNoError(joined);
-    assert.equal(joined.result.structuredContent.scanId, completed.scanId);
-    assert.equal(joined.result.structuredContent.completion, undefined);
-    assert.equal(joined.result.structuredContent.reportPath, undefined);
-    assert.match(joined.result.structuredContent.instructions, /SDK/);
+    assert.equal(joined.structuredContent.scanId, completed.scanId);
+    assert.equal(joined.structuredContent.completion, undefined);
+    assert.equal(joined.structuredContent.reportPath, undefined);
+    assert.match(joined.structuredContent.instructions, /SDK/);
   } finally {
     await parent.stop();
   }
@@ -1624,7 +1633,12 @@ function assertWorkerArtifactEnvironment(
   assert.equal(env.CODEX_SECURITY_PYTHON_COMMAND, expectedPython);
 }
 
-function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
+function assertReadOnlyWorkerInvocation(
+  args: string[],
+  deniedHome: string,
+  stateDirectory: string,
+  scanId: string,
+) {
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
   assert.equal(
@@ -1652,7 +1666,7 @@ function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
     overrides.map((value) => parseToml(value)),
     [
       parseToml(
-        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"}},network={enabled=false}}`,
+        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"},${JSON.stringify(path.join(stateDirectory, "codex-home", "worker-usage", scanId))}={"."="deny"}},network={enabled=false}}`,
       ),
     ],
   );
@@ -1688,6 +1702,15 @@ async function waitForScanId({
   return scanId;
 }
 
+async function getScan(environment: NodeJS.ProcessEnv, scanId: string) {
+  const result = await runWorkbench(environment, [
+    "get-scan",
+    "--scan-id",
+    scanId,
+  ]);
+  return result.scan;
+}
+
 async function getDeepScan({
   environment,
   scanId,
@@ -1710,6 +1733,7 @@ async function getDeepScan({
 async function waitForDeepScanWorker(input: Parameters<typeof getDeepScan>[0]) {
   await waitFor(async () => {
     const deepScan = await getDeepScan(input);
+    if (deepScan.status === "failed") throw new Error(deepScan.error);
     const worker = deepScan.workers.find(
       (candidate: PersistedDeepScanWorker) =>
         candidate.kind === "discovery" && candidate.status === "running",
@@ -1751,6 +1775,8 @@ async function writeFakeCodex(executablePath: string) {
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 if (process.argv.includes('app-server')) {
+const profileOverride = process.argv.find(arg => arg.startsWith('permissions.codex_security_deep_scan_worker='));
+const workerProfile = (await import(${JSON.stringify(import.meta.resolve("smol-toml"))})).parse(profileOverride ?? '').permissions?.codex_security_deep_scan_worker;
 ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       let result;
       if (message.method === 'initialize') {
@@ -1758,7 +1784,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       } else if (message.method === 'thread/read') {
         result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: workerProfile } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
       } else if (message.method === 'account/read') {
@@ -1813,8 +1839,10 @@ import { appendFileSync, existsSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
 const input = Buffer.concat(await process.stdin.toArray());
-const workbenchArgs = JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'));
-appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
+const workbenchArgs = args.at(-1).endsWith('workbench_db.py')
+  ? JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'))
+  : [];
+if (workbenchArgs.length) appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
 if (workbenchArgs[0] === 'cancel-scan') {
   appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(workbenchArgs) + '\\n');

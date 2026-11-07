@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import {
   lstat,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -228,8 +229,7 @@ async function discover(
     } else if (entry.isFile()) {
       // Office keeps a "~$" owner file next to each open document.
       if (entry.name.startsWith("~$")) continue;
-      // macOS writes "._" metadata files when copying to other filesystems.
-      if (entry.name.startsWith("._")) continue;
+      if (entry.name.startsWith("._") && (await isAppleDouble(path))) continue;
       // LibreOffice keeps a ".~lock.<name>#" file next to each open document.
       if (/^\.~lock\..+#$/s.test(entry.name)) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
@@ -247,6 +247,21 @@ async function discover(
     }
   }
   return documents;
+}
+
+// AppleDouble sidecars and ordinary documents can share the same "._" prefix.
+async function isAppleDouble(path: string): Promise<boolean> {
+  const file = await open(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const header = Buffer.alloc(4);
+    const { bytesRead } = await file.read(header, 0, header.length, 0);
+    return bytesRead === header.length && header.readUInt32BE() === 0x00051607;
+  } finally {
+    await file.close();
+  }
 }
 
 function decodeText(path: string, bytes: Uint8Array): string {
@@ -332,6 +347,20 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     }[] = [];
     const stories: { text: string[]; fields: typeof fields }[] = [];
     const parser = new SaxesParser();
+    const positions = new Set(["align", "posOffset"]);
+    const drawingLayout = new Map([
+      [
+        "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        positions,
+      ],
+      ["http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing", positions],
+      [
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+        new Set(["pctPosHOffset", "pctPosVOffset", "pctWidth", "pctHeight"]),
+      ],
+    ]);
+    const declarations = new Map<string, (Set<string> | undefined)[]>();
+    const layout: boolean[] = [];
     let documentElement = false;
     let deletedDepth = 0;
     let instructionText = false;
@@ -351,8 +380,19 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         append((closed ? "" : field.literal.join("")) + field.result.join(""));
       }
     };
+    parser.on("attribute", ({ name, value }) => {
+      if (name !== "xmlns" && !name.startsWith("xmlns:")) return;
+      const bindings = declarations.get(name) ?? [];
+      bindings.push(drawingLayout.get(decodeXml(value)));
+      declarations.set(name, bindings);
+    });
     parser.on("opentag", ({ name, attributes }) => {
-      const localName = name.split(":").at(-1);
+      const colon = name.indexOf(":");
+      const declaration = colon < 0 ? "xmlns" : "xmlns:" + name.slice(0, colon);
+      const localName = name.split(":").at(-1)!;
+      layout.push(
+        declarations.get(declaration)?.at(-1)?.has(localName) ?? false,
+      );
       if (
         localName === "del" ||
         localName === "delText" ||
@@ -385,7 +425,14 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       else if (localName === "tab" && !tabStops) append("\t");
       else if (localName === "noBreakHyphen") append("-");
     });
-    parser.on("closetag", ({ name, isSelfClosing }) => {
+    parser.on("closetag", ({ name, attributes, isSelfClosing }) => {
+      layout.pop();
+      for (const key of Object.keys(attributes)) {
+        const bindings = declarations.get(key);
+        if (!bindings) continue;
+        bindings.pop();
+        if (!bindings.length) declarations.delete(key);
+      }
       const localName = name.split(":").at(-1);
       if (deletedDepth === 0 && localName === "txbxContent") {
         while (fields.length > 0) finishField(false);
@@ -405,8 +452,14 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         deletedDepth--;
       }
     });
-    parser.on("text", (value) => append(decodeXml(value)));
-    parser.on("cdata", (value) => append(value.replaceAll("&amp;", "&")));
+    // Word stores drawing positions and relative sizes as character data.
+    const appendCharacters = (value: string) => {
+      if (!layout.at(-1)) append(value);
+    };
+    parser.on("text", (value) => appendCharacters(decodeXml(value)));
+    parser.on("cdata", (value) =>
+      appendCharacters(value.replaceAll("&amp;", "&")),
+    );
     // Keep the existing entity decoder's handling of unusable references.
     // CDATA is literal text, so only undo this escaping in its handler.
     parser.write(xml.replaceAll("&", "&amp;")).close();

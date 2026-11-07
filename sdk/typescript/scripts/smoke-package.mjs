@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -437,6 +438,38 @@ try {
     { cwd: consumer },
   );
 
+  const { OpenAiFindingEmbedder } = await import(
+    pathToFileURL(join(installedRoot, "dist/server/api.js")).href
+  );
+  const finding = { description: "🔒 café 中文 ".repeat(1800) };
+  const chunks = [];
+  const embedder = new OpenAiFindingEmbedder(
+    "synthetic",
+    async (_url, init) => {
+      const { model, dimensions, input } = JSON.parse(init.body);
+      chunks.push(...input);
+      return Response.json({
+        model,
+        data: input.map((_, index) => ({
+          index,
+          embedding: Array(dimensions).fill(1),
+        })),
+      });
+    },
+  );
+  await embedder.embed([finding]);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.length),
+    [8192, 813],
+  );
+  // Generated with js-tiktoken 1.0.21 using cl100k_base on JSON.stringify(finding).
+  // The installed-package job runs in a clean checkout with no SDK build dependencies.
+  assert.equal(
+    createHash("sha256").update(JSON.stringify(chunks.flat())).digest("hex"),
+    "ed8b5af712556ad433415337fcc69ea7a564c89f892855eea729c6d5c49bcf04",
+    "Installed embedding token IDs differ from the upstream cl100k_base encoding.",
+  );
+
   await cp(
     join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
     join(consumer, "consumer.ts"),
@@ -800,12 +833,19 @@ try {
     /lin_api_|security@example\.test/u,
   );
 
+  let credentialLockState = join(consumer, "credential-lock-state");
+  if (process.platform === "win32" && !process.versions.bun) {
+    // Exercise a long SQLite guard while the canonical home fits the ACL tools' path limit.
+    const state = join(await realpath(consumer), "credential-lock-state");
+    const padding = Math.max(0, 240 - join(state, "codex-home").length - 1);
+    credentialLockState = join(state, "x".repeat(padding));
+  }
   run(
     process.execPath,
     [
       join(packageRoot, "scripts", "fixtures", "credential-lock.mjs"),
       pathToFileURL(join(installedRoot, "dist", "runtime.js")).href,
-      join(consumer, "credential-lock-state"),
+      credentialLockState,
     ],
     { cwd: consumer },
   );

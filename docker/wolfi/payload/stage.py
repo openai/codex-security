@@ -47,6 +47,7 @@ def read_json(path):
 
 
 def matches_target(package):
+    """Return whether the npm package permits the target OS, CPU, and libc."""
     for key, target in TARGET.items():
         values = package.get(key, [])
         allowed = [v for v in values if not v.startswith("!")]
@@ -56,6 +57,7 @@ def matches_target(package):
 
 
 def source_url(pkg):
+    """Return the canonical HTTPS GitHub repository URL, raising ValueError on unfamiliar metadata."""
     repo = pkg.get("repository")
     raw = repo.get("url") if isinstance(repo, dict) else repo
     # npm accepts both GitHub shorthand and conventional git URLs. Do not
@@ -67,6 +69,7 @@ def source_url(pkg):
 
 
 def select_scanner_payload(app):
+    """Prune voice assets and off-target MCP binaries in place, checking the remaining Codex files."""
     # Voice belongs to the interactive client, not repository scanning. The
     # MCP server uses Node's target (Linux x64 glibc), while the Codex executable
     # itself is the upstream static musl build.
@@ -86,6 +89,16 @@ def select_scanner_payload(app):
 
 
 def write_attributions(root, app, wanted):
+    """Write upstream notices and the source inventory into the staged license directory.
+
+    Args:
+        root (Path): Staged filesystem containing the license directory.
+        app (Path): Directory containing the installed npm packages.
+        wanted (dict): Target-specific lock records keyed by installed package path.
+
+    Raises:
+        ValueError: A notice, declared license, or source falls outside the reviewed set.
+    """
     license_dir = root / LICENSE_DIR
     notices = read_json(HERE / "notices/sources.json")
     for name, item in notices.items():
@@ -137,6 +150,15 @@ def write_attributions(root, app, wanted):
 
 
 def stage_root(root):
+    """Stage the locked scanner runtime and return its count of target npm packages.
+
+    Args:
+        root (Path): Scratch filesystem root with space for a new runtime tree.
+            A failed installation or verification can leave partial files here.
+
+    SCANNER_RUNTIME_LOCK selects an alternate lock, and SCANNER_TARBALL supplies
+    a local release archive in place of the registry's scanner package.
+    """
     app = root / INSTALL
     app.mkdir(parents=True)
     lock_path = Path(os.environ.get("SCANNER_RUNTIME_LOCK") or HERE / "package-lock.json")
@@ -204,6 +226,7 @@ def stage_root(root):
 
 
 def normalize(entry):
+    """Set reproducible ownership, timestamp, and mode on a tar member and return it to tarfile."""
     if not (entry.isdir() or entry.isreg() or entry.issym()):
         raise ValueError(f"Unexpected file type: {entry.name}")
     entry.uid = entry.gid = entry.mtime = 0
@@ -213,6 +236,7 @@ def normalize(entry):
 
 
 def main():
+    """Publish payload.tar.gz and print its package count and the digest of the uncompressed tar."""
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument("stage", type=Path, help="melange --source-dir (only payload.tar.gz will be written)")
     output = args.parse_args().stage.resolve()

@@ -49,6 +49,16 @@ function schema(database: DatabaseSync) {
     .all();
 }
 
+function storedValue(database: DatabaseSync, table: string, column: string) {
+  return database.prepare(`SELECT ${column} FROM ${table}`).get()?.[column];
+}
+
+function migrationHistory(database: DatabaseSync) {
+  return database
+    .prepare("SELECT * FROM schema_migrations ORDER BY version")
+    .all();
+}
+
 function assertMigrationNames(database: DatabaseSync, ...versions: number[]) {
   for (const version of versions)
     assert.equal(
@@ -83,7 +93,11 @@ test("retains SQLite open errors and recovery guidance", async () => {
     openWorkbenchDatabase(databasePath),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.equal((error as Error & { errcode: number }).errcode, 14);
+      const resultCode = (error as Error & { errcode: number }).errcode;
+      assert.equal(resultCode & 0xff, 14);
+      assert.throws(() => new DatabaseSync(databasePath).close(), {
+        errcode: resultCode,
+      });
       assert.equal(
         (error as Error & { code: string }).code,
         "ERR_SQLITE_ERROR",
@@ -154,16 +168,9 @@ test("every released schema upgrades to the same current schema and remains idem
       expected,
       `upgrade from version ${version}`,
     );
-    const history = database
-      .prepare("SELECT * FROM schema_migrations ORDER BY version")
-      .all();
+    const history = migrationHistory(database);
     applyMigrations(database);
-    assert.deepEqual(
-      database
-        .prepare("SELECT * FROM schema_migrations ORDER BY version")
-        .all(),
-      history,
-    );
+    assert.deepEqual(migrationHistory(database), history);
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   }
 });
@@ -196,7 +203,7 @@ for (const previewVersion of [58, 59]) {
 }
 
 for (const { missingVersions, legacyCheckpoint, mainReader } of [
-  { missingVersions: [57, 58, 59, 60], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [57], legacyCheckpoint: 0, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
   { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
@@ -215,28 +222,18 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
     const context = JSON.stringify("Original discovery context");
     let originalDiscoveryMigration: Record<string, unknown> | undefined;
     let originalCheckpointMigration: Record<string, unknown> | undefined;
+    // The preview with checkpoint migration 53 also lacked migration 52.
+    const firstMissing = legacyCheckpoint === 53 ? 52 : legacyCheckpoint;
     const old = new DatabaseSync(databasePath);
     try {
       applyMigrations(
         old,
         migrations
           .filter(
-            (item) =>
-              !missingVersions.includes(item.version) &&
-              !(legacyCheckpoint && [54, 55, 56].includes(item.version)) &&
-              !(
-                [47, 48, 50, 52, 53].includes(legacyCheckpoint) &&
-                [52, 53].includes(item.version)
-              ) &&
-              !(
-                [47, 48, 50].includes(legacyCheckpoint) &&
-                [50, 51].includes(item.version)
-              ) &&
-              !(
-                [47, 48].includes(legacyCheckpoint) &&
-                [48, 49].includes(item.version)
-              ) &&
-              !(legacyCheckpoint === 47 && item.version === 47),
+            ({ version }) =>
+              version <= 57 &&
+              !missingVersions.includes(version) &&
+              !(firstMissing && version >= firstMissing && version <= 56),
           )
           .map((item) =>
             legacyCheckpoint && item.version === 57
@@ -282,9 +279,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
     const upgraded = new DatabaseSync(databasePath);
     try {
       assert.equal(
-        upgraded
-          .prepare("SELECT retained_checkpoint_heads_json FROM scans")
-          .get()?.retained_checkpoint_heads_json,
+        storedValue(upgraded, "scans", "retained_checkpoint_heads_json"),
         !missingVersions.includes(57) ? heads : null,
       );
       upgraded
@@ -336,15 +331,15 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
       }
       assert.deepEqual(reopened.prepare("PRAGMA foreign_key_check").all(), []);
       assert.equal(
-        reopened
-          .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
-          .get()?.discovery_user_context_json,
+        storedValue(reopened, "deep_scan_runs", "discovery_user_context_json"),
         legacyCheckpoint !== 47 || mainReader ? context : null,
       );
       assert.equal(
-        reopened
-          .prepare("SELECT terminal_reviewed_surface_count FROM deep_scan_runs")
-          .get()?.terminal_reviewed_surface_count,
+        storedValue(
+          reopened,
+          "deep_scan_runs",
+          "terminal_reviewed_surface_count",
+        ),
         null,
       );
       assertMigrationNames(
@@ -375,8 +370,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
   });
 }
 
-test("worker thread history survives retry, replay, and worker retirement", (t) => {
-  const database = memory(t, 49);
+function insertRunningWorker(database: DatabaseSync) {
   insertScan(database);
   database.exec(`
     INSERT INTO deep_scan_runs (
@@ -389,6 +383,57 @@ test("worker thread history survives retry, replay, and worker retirement", (t) 
     ) VALUES ('worker', 'scan', 'discovery', 'running', '/synthetic/prompt.md',
       '/synthetic/output', 1, 'first-thread', 'created', 'updated');
   `);
+}
+
+function legacyRetry(t: TestContext, attempt: number, thread: string | null) {
+  const database = memory(t, 62);
+  insertRunningWorker(database);
+  database
+    .prepare(
+      "UPDATE deep_scan_workers SET attempt = ?, started_at = 'started', sdk_thread_id = ?",
+    )
+    .run(attempt, thread);
+  if (thread === null) database.exec("DELETE FROM deep_scan_worker_threads");
+  return database;
+}
+
+test("legacy retries can reuse a recorded thread and still verify usage", (t) => {
+  for (const thread of ["first-thread", "retry-thread", null]) {
+    const database = legacyRetry(t, 3, thread);
+    applyMigrations(database);
+    assert.equal(
+      storedValue(database, "deep_scan_runs", "worker_usage_gap"),
+      thread === null ? 1 : 0,
+    );
+  }
+});
+
+test("the allowance preview keeps its data and receives canonical usage accounting", (t) => {
+  const database = legacyRetry(t, 2, null);
+  database.exec(`
+    ALTER TABLE scans ADD COLUMN investigation_policy TEXT;
+    UPDATE scans SET investigation_policy = 'saved policy';
+    INSERT INTO schema_migrations (version, name, applied_at)
+      VALUES (63, 'retain native investigation time allowances', 'preview');
+  `);
+  applyMigrations(database);
+  assertMigrationNames(database, 63);
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
+  database.exec("UPDATE deep_scan_runs SET worker_usage_gap = 0");
+  database.exec("UPDATE deep_scan_workers SET attempt = 3");
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
+  const history = migrationHistory(database);
+  applyMigrations(database);
+  assert.deepEqual(migrationHistory(database), history);
+  assert.equal(
+    storedValue(database, "scans", "investigation_policy"),
+    "saved policy",
+  );
+});
+
+test("worker thread history survives retry, replay, and worker retirement", (t) => {
+  const database = memory(t, 49);
+  insertRunningWorker(database);
   applyMigrations(database);
   database.exec(`
     UPDATE deep_scan_workers SET sdk_thread_id = 'retry-thread', attempt = 2;
@@ -496,10 +541,7 @@ test(
     );
     const database = new DatabaseSync(join(alias, "workbench.sqlite3"));
     try {
-      assert.equal(
-        database.prepare("SELECT value FROM retained").get()?.value,
-        "original",
-      );
+      assert.equal(storedValue(database, "retained", "value"), "original");
       assertMigrationNames(
         database,
         ...migrations.map(({ version }) => version),
@@ -574,16 +616,9 @@ for (const previewVersion of [34, 40, 41, 42, 43, 44, 48]) {
         null,
       );
       assert.deepEqual(upgraded.prepare("PRAGMA foreign_key_check").all(), []);
-      const history = upgraded
-        .prepare("SELECT * FROM schema_migrations ORDER BY version")
-        .all();
+      const history = migrationHistory(upgraded);
       await databaseInfo(directory);
-      assert.deepEqual(
-        upgraded
-          .prepare("SELECT * FROM schema_migrations ORDER BY version")
-          .all(),
-        history,
-      );
+      assert.deepEqual(migrationHistory(upgraded), history);
     } finally {
       upgraded.close();
     }
@@ -608,15 +643,8 @@ test("database-info retains scan names from installed migration 42", async () =>
   const upgraded = new DatabaseSync(databasePath);
   try {
     assertMigrationNames(upgraded, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51);
-    assert.equal(
-      upgraded.prepare("SELECT name FROM scans").get()?.name,
-      "Original scan",
-    );
-    assert.equal(
-      upgraded.prepare("SELECT source_scopes_json FROM scans").get()
-        ?.source_scopes_json,
-      null,
-    );
+    assert.equal(storedValue(upgraded, "scans", "name"), "Original scan");
+    assert.equal(storedValue(upgraded, "scans", "source_scopes_json"), null);
     assert.equal(
       upgraded
         .prepare("SELECT applied_at FROM schema_migrations WHERE version = 42")
@@ -634,9 +662,7 @@ test("database-info repairs recorded scan-name and source-scope columns", async 
   const old = new DatabaseSync(databasePath);
   applyMigrations(old);
   insertScan(old);
-  const history = old
-    .prepare("SELECT * FROM schema_migrations ORDER BY version")
-    .all();
+  const history = migrationHistory(old);
   old.exec(
     "ALTER TABLE scans DROP COLUMN name; ALTER TABLE scans DROP COLUMN source_scopes_json",
   );
@@ -654,12 +680,7 @@ test("database-info repairs recorded scan-name and source-scope columns", async 
       },
       { name: null, source_scopes_json: null, target_revision: "revision" },
     );
-    assert.deepEqual(
-      repaired
-        .prepare("SELECT * FROM schema_migrations ORDER BY version")
-        .all(),
-      history,
-    );
+    assert.deepEqual(migrationHistory(repaired), history);
   } finally {
     repaired.close();
   }
@@ -676,9 +697,7 @@ for (const version of [43, 50]) {
         "UPDATE schema_migrations SET name = 'unknown source history' WHERE version = ?",
       )
       .run(version);
-    const history = old
-      .prepare("SELECT * FROM schema_migrations ORDER BY version")
-      .all();
+    const history = migrationHistory(old);
     const originalSchema = schema(old);
     old.close();
     await assert.rejects(
@@ -688,12 +707,7 @@ for (const version of [43, 50]) {
     const unchanged = new DatabaseSync(databasePath);
     try {
       assert.deepEqual(schema(unchanged), originalSchema);
-      assert.deepEqual(
-        unchanged
-          .prepare("SELECT * FROM schema_migrations ORDER BY version")
-          .all(),
-        history,
-      );
+      assert.deepEqual(migrationHistory(unchanged), history);
     } finally {
       unchanged.close();
     }
@@ -814,18 +828,13 @@ test("rejects unsupported history without partially changing its schema or rows"
     "UPDATE schema_migrations SET name = 'scan execution profiles' WHERE version = 11",
   );
   const before = schema(database);
-  const history = database
-    .prepare("SELECT * FROM schema_migrations ORDER BY version")
-    .all();
+  const history = migrationHistory(database);
   assert.throws(
     () => applyMigrations(database),
     /unsupported execution-profile migration history/u,
   );
   assert.deepEqual(schema(database), before);
-  assert.deepEqual(
-    database.prepare("SELECT * FROM schema_migrations ORDER BY version").all(),
-    history,
-  );
+  assert.deepEqual(migrationHistory(database), history);
 });
 
 test("repairs pre-release numbering and shadowed migrations without repeating data cleanup", (t) => {
@@ -858,11 +867,7 @@ test("repairs pre-release numbering and shadowed migrations without repeating da
     ALTER TABLE scan_progress DROP COLUMN preflight_issues_json;
     ALTER TABLE scans DROP COLUMN recipe_json;`);
   applyMigrations(database);
-  assert.equal(
-    database.prepare("SELECT handoff_claim_token FROM scans").get()
-      ?.handoff_claim_token,
-    null,
-  );
+  assert.equal(storedValue(database, "scans", "handoff_claim_token"), null);
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM setup_preferences").get()
       ?.count,
@@ -872,8 +877,7 @@ test("repairs pre-release numbering and shadowed migrations without repeating da
   database.exec("UPDATE scans SET handoff_claim_token = 'current'");
   applyMigrations(database);
   assert.equal(
-    database.prepare("SELECT handoff_claim_token FROM scans").get()
-      ?.handoff_claim_token,
+    storedValue(database, "scans", "handoff_claim_token"),
     "current",
   );
 });
@@ -893,8 +897,7 @@ test("relocates released warning and progress histories while retaining their da
     UPDATE schema_migrations SET version = 25 WHERE version = 26;`);
   applyMigrations(database);
   assert.equal(
-    database.prepare("SELECT completion_warnings_json FROM scans").get()
-      ?.completion_warnings_json,
+    storedValue(database, "scans", "completion_warnings_json"),
     '["retained warning"]',
   );
   assertMigrationNames(database, 12, 13, 20, 21, 25, 26);
@@ -919,10 +922,7 @@ test("repairs recorded Deep Scan and target migrations and backfills stable iden
     createHash("sha256")
       .update("local-workspace\0/synthetic/repository")
       .digest("hex");
-  assert.equal(
-    database.prepare("SELECT target_id FROM workspaces").get()?.target_id,
-    targetId,
-  );
+  assert.equal(storedValue(database, "workspaces", "target_id"), targetId);
   const scan = database
     .prepare("SELECT target_id, deep_scan_owner_thread_id FROM scans")
     .get()!;
@@ -933,10 +933,7 @@ test("repairs recorded Deep Scan and target migrations and backfills stable iden
     "UPDATE workspaces SET target_id = NULL; UPDATE scans SET target_id = NULL",
   );
   applyMigrations(database);
-  assert.equal(
-    database.prepare("SELECT target_id FROM scans").get()?.target_id,
-    null,
-  );
+  assert.equal(storedValue(database, "scans", "target_id"), null);
 });
 
 test("recorded additive migrations restore missing columns and configured error thresholds", (t) => {
@@ -976,47 +973,34 @@ test("recorded additive migrations restore missing columns and configured error 
     null,
   );
   assert.equal(
-    database
-      .prepare("SELECT terminal_reviewed_surface_count FROM deep_scan_runs")
-      .get()?.terminal_reviewed_surface_count,
+    storedValue(database, "deep_scan_runs", "terminal_reviewed_surface_count"),
     null,
   );
   assert.equal(
-    database.prepare("SELECT deep_scan_config_json FROM workspaces").get()
-      ?.deep_scan_config_json,
+    storedValue(database, "workspaces", "deep_scan_config_json"),
     null,
   );
   assert.equal(
-    database
-      .prepare("SELECT pending_target_project_path FROM deep_scan_runs")
-      .get()?.pending_target_project_path,
+    storedValue(database, "deep_scan_runs", "pending_target_project_path"),
     null,
   );
   assert.equal(
-    database
-      .prepare("SELECT stop_after_consecutive_errors FROM deep_scan_runs")
-      .get()?.stop_after_consecutive_errors,
+    storedValue(database, "deep_scan_runs", "stop_after_consecutive_errors"),
     7,
   );
   assert.equal(
-    database
-      .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
-      .get()?.discovery_user_context_json,
+    storedValue(database, "deep_scan_runs", "discovery_user_context_json"),
     null,
   );
   database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
     discovery_user_context_json = '"Original discovery context"'`);
   applyMigrations(database);
   assert.equal(
-    database
-      .prepare("SELECT stop_after_consecutive_errors FROM deep_scan_runs")
-      .get()?.stop_after_consecutive_errors,
+    storedValue(database, "deep_scan_runs", "stop_after_consecutive_errors"),
     2,
   );
   assert.equal(
-    database
-      .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
-      .get()?.discovery_user_context_json,
+    storedValue(database, "deep_scan_runs", "discovery_user_context_json"),
     '"Original discovery context"',
   );
 });
@@ -1068,27 +1052,28 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
       `"findings":${index},"opaqueId":9007199254740993`,
     ),
   );
+  const insertWorkflow = database.prepare(
+    "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
+  );
+  const insertReview = database.prepare(
+    "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
+  );
+  // run() returns the inserted row ID even when the fixture ignores the result.
+  insertWorkflow.setReadBigInts(true);
+  insertReview.setReadBigInts(true);
   for (const [index, id] of workflowIds.entries()) {
-    database
-      .prepare(
-        "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
-      )
-      .run(9007199254740993n + BigInt(index), id, states[index]);
+    insertWorkflow.run(9007199254740993n + BigInt(index), id, states[index]);
     for (const [keyIndex, key] of reviewKeys.entries()) {
-      database
-        .prepare(
-          "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
-        )
-        .run(
-          9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
-          id,
-          key,
-          JSON.stringify({
-            ...binding,
-            promptDigest: `prompt-${index}-${keyIndex}`,
-          }),
-          JSON.stringify({ retained: `${index}-${keyIndex}` }),
-        );
+      insertReview.run(
+        9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
+        id,
+        key,
+        JSON.stringify({
+          ...binding,
+          promptDigest: `prompt-${index}-${keyIndex}`,
+        }),
+        JSON.stringify({ retained: `${index}-${keyIndex}` }),
+      );
     }
   }
   const before = schema(database);

@@ -1,3 +1,5 @@
+"""Check handoff claims, releases, and continuation ownership across concurrent workbench requests."""
+
 from __future__ import annotations
 
 import sqlite3

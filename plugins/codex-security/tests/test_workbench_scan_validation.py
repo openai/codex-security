@@ -1,3 +1,5 @@
+"""Check saved target snapshots against current contents and earlier revision-only scan records."""
+
 from __future__ import annotations
 
 import os

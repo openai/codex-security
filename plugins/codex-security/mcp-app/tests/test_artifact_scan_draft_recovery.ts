@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -29,6 +30,17 @@ const { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } =
 const execFileAsync = promisify(execFile);
 const generic = { reason: "Review remains.", paths: ["src/example.py"] };
 const close = (id: string, reason = "Review completed.") => ({ id, reason });
+
+async function snapshotFiles(directory: string): Promise<[string, Buffer][]> {
+  const files: [string, Buffer][] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const filename = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...(await snapshotFiles(filename)));
+    else files.push([filename, await readFile(filename)]);
+  }
+  return files.sort(([left], [right]) => left.localeCompare(right));
+}
+
 type FixtureFinding = Record<string, unknown> & {
   title: string;
   severity: { level: string };
@@ -47,6 +59,36 @@ const findingFor = (candidateId: string): FixtureFinding => ({
   remediation: "Complete the review.",
   provenance: { source: "local_plugin", candidateId },
 });
+
+async function finalizeParentFindings({
+  root,
+  context,
+}: Awaited<ReturnType<typeof fixture>>) {
+  const manifestPath = path.join(root, "scan-manifest.json");
+  const manifest = await readJson(manifestPath);
+  Object.assign(manifest.scan, {
+    id: context.scanId,
+    producer: { name: "codex-security-plugin", version: "0.1.0" },
+    status: "completed",
+    startedAt: "2026-05-31T18:00:00Z",
+    completedAt: "2026-05-31T18:09:00Z",
+  });
+  await writeJson(manifestPath, manifest);
+  for (const file of ["findings.json", "coverage.json"]) {
+    const filePath = path.join(root, file);
+    const document = await readJson(filePath);
+    document.scanId = context.scanId;
+    await writeJson(filePath, document);
+  }
+  await execFileAsync(fixturePython, [
+    fileURLToPath(
+      new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
+    ),
+    "--scan-dir",
+    root,
+  ]);
+  return (await readJson(root, "findings.json")).findings;
+}
 
 // Finding reconciliation is shared by failed and canceled scans. Exercise both
 // terminal bindings without repeating every identity case for each status.
@@ -160,11 +202,9 @@ for (const [layout, status] of [
         saved.findings[1].identity.instance = "saved-distinct-location";
         await writeFile(file, JSON.stringify(saved));
       }
-      const { stdout } = await execFileAsync(
-        process.env.PYTHON?.trim() || "python3",
-        [
-          "-c",
-          `import sys,json
+      const { stdout } = await execFileAsync(fixturePython, [
+        "-c",
+        `import sys,json
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -182,12 +222,11 @@ prepared=_prepare_scan_finalization(root,completion_binding=binding,recover_unse
 warnings.extend(prepared.warnings)
 published=_write_prepared_scan_finalization(prepared)
 print(json.dumps({'count':len(published[1]['findings']),'status':published[0]['scan']['status'],'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
-          fileURLToPath(new URL("../../scripts", import.meta.url)),
-          f.root,
-          f.context.scanId!,
-          status,
-        ],
-      );
+        fileURLToPath(new URL("../../scripts", import.meta.url)),
+        f.root,
+        f.context.scanId!,
+        status,
+      ]);
       assert.deepEqual(JSON.parse(stdout), {
         count,
         status,
@@ -215,10 +254,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       await f.write(submitted);
       await f.write(submitted);
       await f.writeReviewState({}, true);
-      const saved = await readJson(
-        f.root,
-        layout === "worker" ? "result.json" : "findings.json",
-      );
+      const saved = await readJson(f.findingsPath);
       assert.equal(saved.findings.length, 1);
     });
   }
@@ -227,41 +263,14 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     for (const candidate of ["first", "second", "third"])
       await f.writeFindings([findingFor(candidate)]);
     await f.writeReviewState({}, true);
-    const saved = await readJson(
-      f.root,
-      layout === "worker" ? "result.json" : "findings.json",
-    );
+    const saved = await readJson(f.findingsPath);
     assert.equal(saved.findings.length, 3);
     if (layout !== "worker") {
       assert.equal(
         new Set(saved.findings.map(draftApi.scanFindingIdentity)).size,
         3,
       );
-      const manifestPath = path.join(f.root, "scan-manifest.json");
-      const manifest = await readJson(manifestPath);
-      Object.assign(manifest.scan, {
-        id: f.context.scanId!,
-        producer: { name: "codex-security-plugin", version: "0.1.0" },
-        status: "completed",
-        startedAt: "2026-05-31T18:00:00Z",
-        completedAt: "2026-05-31T18:09:00Z",
-      });
-      await writeFile(manifestPath, JSON.stringify(manifest));
-      for (const file of ["findings.json", "coverage.json"]) {
-        const filePath = path.join(f.root, file);
-        const document = await readJson(filePath);
-        document.scanId = f.context.scanId;
-        await writeFile(filePath, JSON.stringify(document));
-      }
-      await execFileAsync(process.env.PYTHON?.trim() || "python3", [
-        fileURLToPath(
-          new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
-        ),
-        "--scan-dir",
-        f.root,
-      ]);
-      const completed = await readJson(f.root, "findings.json");
-      assert.equal(completed.findings.length, 3);
+      assert.equal((await finalizeParentFindings(f)).length, 3);
     }
     assert.deepEqual(
       new Set(
@@ -522,8 +531,13 @@ for (const observation of ["checkpoint head", "worker result"]) {
     let replaced = false;
     const replaceOnce = async (destination: string) => {
       if (replaced) return;
-      replaced = true;
+      // Windows can move the open result aside, but cannot overwrite its name.
+      // Keep its original handle open while the pathname acquires the new mtime.
+      if (process.platform === "win32" && destination === resultPath) {
+        await rename(resultPath, path.join(f.root, "previous-result.json"));
+      }
       await rename(replacementPath, destination);
+      replaced = true;
     };
     const originalLstat = fsPromises.lstat;
     const originalReadFile = fsPromises.readFile;
@@ -619,11 +633,9 @@ for (const headTime of [1, 2, 3]) {
     ]) {
       originals.set(filename, await readFile(filename));
     }
-    const { stdout } = await execFileAsync(
-      process.env.PYTHON?.trim() || "python3",
-      [
-        "-c",
-        `import json,sys
+    const { stdout } = await execFileAsync(fixturePython, [
+      "-c",
+      `import json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -633,12 +645,11 @@ binding={"status":"interrupted","allowedTargetKinds":["git_revision"],"target":{
 first=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted")
 replay=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted",frozen_source_digests=first[0]["scan"]["preservedSources"])
 print(json.dumps([first[2],replay[2]]))`,
-        path.join(import.meta.dirname, "../../scripts"),
-        path.dirname(f.root),
-        f.root,
-        f.context.scanId!,
-      ],
-    );
+      path.join(import.meta.dirname, "../../scripts"),
+      path.dirname(f.root),
+      f.root,
+      f.context.scanId!,
+    ]);
     const [reviewState, replay] = JSON.parse(stdout);
     assert.deepEqual(replay, reviewState);
     for (const [field, rows] of Object.entries(added)) {
@@ -1035,6 +1046,16 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     assert.deepEqual(await readdir(f.root), []);
     second.id = "other-review";
     await f.writeReviewState({ deferred: [first, second] });
+    const before = await snapshotFiles(f.root);
+    const repeated = [
+      close(first.id),
+      close(first.id, "Checked both callers."),
+    ];
+    await assert.rejects(
+      f.writeReviewState({ resolvedDeferred: repeated }, true),
+      /reviewState.resolvedDeferred repeats review/,
+    );
+    assert.deepEqual(await snapshotFiles(f.root), before);
     await f.writeReviewState({ resolvedDeferred: [close(first.id)] }, true);
     assert.deepEqual((await f.read()).deferred, [second]);
   });
@@ -1060,17 +1081,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         (layout === "worker" ? saved.reviewState : saved).deferred = tasks;
         await writeJson(filename, saved);
       }
-      const snapshot = async (
-        directory = f.root,
-      ): Promise<[string, string][]> => {
-        const files: [string, string][] = [];
-        for (const entry of await readdir(directory, { withFileTypes: true })) {
-          const filename = path.join(directory, entry.name);
-          if (entry.isDirectory()) files.push(...(await snapshot(filename)));
-          else files.push([filename, await readFile(filename, "utf8")]);
-        }
-        return files.sort(([left], [right]) => left.localeCompare(right));
-      };
+      const snapshot = () => snapshotFiles(f.root);
       const original = await snapshot();
       for (let attempt = 0; attempt < 2; attempt += 1) {
         await assert.rejects(
@@ -1647,13 +1658,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       });
       const original = structuredClone(input);
       if (interrupted) {
-        await interruptDraftWrite(
-          path.join(
-            f.root,
-            layout === "worker" ? "result.json" : "findings.json",
-          ),
-          () => f.write(input),
-        );
+        await interruptDraftWrite(f.findingsPath, () => f.write(input));
       }
       const initial = await f.write(input);
       const [surface] = initial.reviewState.surfaces;
@@ -1962,14 +1967,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         await f.writeReviewState({ resolvedDeferred: [close(task.id)] }, true);
       for (const input of [f.draft({ deferred: [task] }), f.draft()]) {
         await f.write(input);
-        const published = await readJson(
-          f.root,
-          layout === "worker" ? "result.json" : "scan-manifest.json",
-        );
-        assert.equal(
-          layout === "worker" ? published.complete : published.scan.complete,
-          false,
-        );
+        assert.equal(await f.readComplete(), false);
         if (layout === "worker") {
           const head = await readJson(f.root, "checkpoint-head.json");
           const checkpoint = await readJson(
@@ -1982,14 +1980,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         }
       }
       await f.writeReviewState({ resolvedDeferred: [close(task.id)] }, true);
-      const finished = await readJson(
-        f.root,
-        layout === "worker" ? "result.json" : "scan-manifest.json",
-      );
-      assert.notEqual(
-        layout === "worker" ? finished.complete : finished.scan.complete,
-        false,
-      );
+      assert.notEqual(await f.readComplete(), false);
     });
   }
 
@@ -2086,12 +2077,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
             ),
             pendingBefore ? followUp : reviewed,
           );
-          const published = await readJson(
-            f.root,
-            layout === "worker" ? "result.json" : "scan-manifest.json",
-          );
-          const complete =
-            layout === "worker" ? published.complete : published.scan.complete;
+          const complete = await f.readComplete();
           if (pendingBefore || pendingAfter) assert.equal(complete, false);
           else assert.notEqual(complete, false);
         }
@@ -2108,14 +2094,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         const finished = await f.read();
         assert.deepEqual(finished.deferred, []);
         assert.equal(finished.surfaces[0].disposition, "no_issue_found");
-        const published = await readJson(
-          f.root,
-          layout === "worker" ? "result.json" : "scan-manifest.json",
-        );
-        assert.notEqual(
-          layout === "worker" ? published.complete : published.scan.complete,
-          false,
-        );
+        assert.notEqual(await f.readComplete(), false);
       });
     }
   }
@@ -2124,14 +2103,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     const f = await fixture(t, layout);
     await f.writeReviewState({}, true);
     await f.writeReviewState({ deferred: [{ id: "late", ...generic }] });
-    const published = await readJson(
-      f.root,
-      layout === "worker" ? "result.json" : "scan-manifest.json",
-    );
-    assert.equal(
-      layout === "worker" ? published.complete : published.scan.complete,
-      false,
-    );
+    assert.equal(await f.readComplete(), false);
     const pending = (await f.read()).deferred;
     assert.deepEqual(pending, [{ id: "late", ...generic }]);
     await f.writeReviewState({}, true);
@@ -2315,14 +2287,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
             otherPending,
           );
           assert.equal(result.reviewState.completeness, undefined);
-          const document = await readJson(
-            f.root,
-            layout === "worker" ? "result.json" : "scan-manifest.json",
-          );
-          assert.equal(
-            layout === "worker" ? document.complete : document.scan.complete,
-            false,
-          );
+          assert.equal(await f.readComplete(), false);
         }
       });
     }
@@ -2364,10 +2329,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       const input = f.findingsDraft([reported], { complete: true });
       await f.write(input);
       await f.write(input);
-      const saved = await readJson(
-        f.root,
-        layout === "worker" ? "result.json" : "findings.json",
-      );
+      const saved = await readJson(f.findingsPath);
       assert.equal(saved.findings.length, 1);
       const provenance = saved.findings[0].provenance;
       for (const field of ["sourceFindingIds", "sourceFindings"] as const) {
@@ -2387,32 +2349,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       const parent = layout === "worker" ? await fixture(t, "deep") : f;
       if (layout === "worker")
         await parent.writeFindings(saved.findings, { complete: true });
-      const manifestPath = path.join(parent.root, "scan-manifest.json");
-      const manifest = await readJson(manifestPath);
-      Object.assign(manifest.scan, {
-        id: parent.context.scanId,
-        producer: { name: "codex-security-plugin", version: "0.1.0" },
-        status: "completed",
-        startedAt: "2026-05-31T18:00:00Z",
-        completedAt: "2026-05-31T18:09:00Z",
-      });
-      await writeFile(manifestPath, JSON.stringify(manifest));
-      for (const file of ["findings.json", "coverage.json"]) {
-        const document = await readJson(parent.root, file);
-        document.scanId = parent.context.scanId;
-        await writeFile(path.join(parent.root, file), JSON.stringify(document));
-      }
-      await execFileAsync(process.env.PYTHON?.trim() || "python3", [
-        fileURLToPath(
-          new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
-        ),
-        "--scan-dir",
-        parent.root,
-      ]);
-      assert.equal(
-        (await readJson(parent.root, "findings.json")).findings.length,
-        1,
-      );
+      assert.equal((await finalizeParentFindings(parent)).length, 1);
     });
   }
 }

@@ -1,16 +1,14 @@
+"""Recover findings and checkpoint evidence when deep scans hit a stop condition."""
+
 from __future__ import annotations
 
 import copy
 import json
 import os
 import sqlite3
-from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import assert_published_aggregate
-from test_deep_scan_successful_publication import (
-    publication_scan as publication_scan,
-)
+from publication_fixtures import assert_published_aggregate
 from workbench_test_support import (
     read_review_state,
     saved_draft,
@@ -19,90 +17,8 @@ from workbench_test_support import (
 )
 
 
-@pytest.fixture
-def saturated_scan(publication_scan, workbench_db):
-    scan = publication_scan()
-    completed_result = scan.add_worker()
-    completed_result.write_text(
-        json.dumps(
-            {
-                "scanId": scan.scan_id,
-                "complete": True,
-                "findings": scan.findings,
-                "coverage": scan.coverage,
-            }
-        )
-    )
-    reducer_result = scan.add_worker()
-    reducer_result.write_bytes(completed_result.read_bytes())
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET completion_sequence = 1 WHERE id = ?",
-            (completed_result.parent.name,),
-        )
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
-            (reducer_result.parent.name,),
-        )
-        workbench_db.execute(
-            "INSERT INTO deep_scan_dedup_inputs "
-            "(scan_id, dedup_worker_id, discovery_worker_id, input_order) VALUES (?, ?, ?, 0)",
-            (scan.scan_id, reducer_result.parent.name, completed_result.parent.name),
-        )
-        workbench_db.execute(
-            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
-            "consecutive_no_new = stop_after_no_new, completion_sequence = 1, "
-            "max_discovery_runs = 3, discovery_runs_dispatched = 1, "
-            "manifest_path = NULL, terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-    scan.completed_worker_id = completed_result.parent.name
-    scan.reducer_id = reducer_result.parent.name
-    return scan
-
-
-def finish(workbench_api, connection, scan, *, terminal_reason="saturated"):
-    return workbench_api["deep_scan"].finish_deep_scan(
-        connection,
-        Namespace(
-            scan_id=scan.scan_id,
-            terminal_reason=terminal_reason,
-            manifest_path=str(scan.scan_dir / "scan-manifest.json"),
-            staged_manifest_path=None,
-            omitted_worker_id=[],
-        ),
-    )["deepScan"]
-
-
-@pytest.fixture
-def deadline_scan(saturated_scan, workbench_db):
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_runs SET created_at = '2000-01-01T00:00:00+00:00' WHERE scan_id = ?",
-            (saturated_scan.scan_id,),
-        )
-    return saturated_scan
-
-
-def canceled_discovery_output(connection, scan, *, attempt=1):
-    result = scan.add_worker(connection, status="canceled")
-    worker_id = result.parent.name
-    output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
-    output.parent.mkdir(parents=True)
-    result.parent.rename(output)
-    with connection:
-        connection.execute(
-            "UPDATE deep_scan_workers SET artifact_dir = ?, prompt_path = ?, "
-            "result_manifest_path = NULL, attempt = ? WHERE id = ?",
-            (str(output), str(output.parent / "prompt.md"), attempt, worker_id),
-        )
-    return worker_id, output
-
-
 @pytest.mark.parametrize("missing_writeup", [False, True], ids=["present", "missing"])
-def test_deadline_preserves_optional_reduced_writeup_behavior(
-    workbench_api, workbench_db, deadline_scan, missing_writeup
-):
+def test_deadline_preserves_optional_reduced_writeup_behavior(deadline_scan, missing_writeup):
     scan = deadline_scan
     report_path = "findings/reduced/reduced.md"
     scan.findings[0]["writeup"] = {"reportPath": report_path}
@@ -111,13 +27,13 @@ def test_deadline_preserves_optional_reduced_writeup_behavior(
         report = scan.scan_dir / report_path
         report.parent.mkdir(parents=True)
         report.write_text("# Reduced finding\n")
-    _, output = canceled_discovery_output(workbench_db, scan)
+    _, output = scan.canceled_discovery_output()
     write_checkpoint(
         output / "checkpoints",
         saved_draft(scan.scan_id, deferred=[{"reason": "Review the remaining upload paths."}]),
     )
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     completed = scan.complete()
 
     assert completed["progress"]["status"] == "complete"
@@ -130,10 +46,10 @@ def test_deadline_preserves_optional_reduced_writeup_behavior(
 
 
 def test_deadline_recovers_valid_findings_from_an_invalid_archived_retry(
-    workbench_api, workbench_db, deadline_scan
+    workbench_api, deadline_scan
 ):
     scan = deadline_scan
-    worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2)
+    worker_id, output = scan.canceled_discovery_output(attempt=2)
     archived = output.parent / "attempts" / "attempt-1"
     archived.mkdir(parents=True)
     valid = copy.deepcopy(scan.findings[0])
@@ -153,7 +69,7 @@ def test_deadline_recovers_valid_findings_from_an_invalid_archived_retry(
         saved_draft(scan.scan_id, deferred=[{"reason": "Retry review remains unfinished."}]),
     )
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     completed = scan.complete()
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
@@ -172,9 +88,7 @@ def test_deadline_recovers_valid_findings_from_an_invalid_archived_retry(
 
 
 @pytest.mark.parametrize("invalid", ["finding", "unsafe-writeup"])
-def test_deadline_does_not_recover_invalid_reduced_findings(
-    workbench_api, workbench_db, deadline_scan, invalid
-):
+def test_deadline_does_not_recover_invalid_reduced_findings(workbench_db, deadline_scan, invalid):
     from finalize_scan_contract import ContractError
 
     scan = deadline_scan
@@ -185,11 +99,11 @@ def test_deadline_does_not_recover_invalid_reduced_findings(
     findings_path = scan.scan_dir / "findings.json"
     findings_path.write_text(json.dumps({"findings": scan.findings}))
     original = findings_path.read_bytes()
-    _, output = canceled_discovery_output(workbench_db, scan)
+    _, output = scan.canceled_discovery_output()
     write_checkpoint(output / "checkpoints", saved_draft(scan.scan_id))
 
     with pytest.raises(ContractError, match="remediation|reportPath"):
-        finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+        scan.finish(terminal_reason="capped")
 
     assert findings_path.read_bytes() == original
     assert (
@@ -200,11 +114,9 @@ def test_deadline_does_not_recover_invalid_reduced_findings(
     )
 
 
-def test_deadline_preserves_worker_findings_with_optional_and_shared_identity(
-    workbench_api, workbench_db, deadline_scan
-):
+def test_deadline_preserves_worker_findings_with_optional_and_shared_identity(deadline_scan):
     scan = deadline_scan
-    _, output = canceled_discovery_output(workbench_db, scan)
+    _, output = scan.canceled_discovery_output()
     no_identity = copy.deepcopy(scan.findings[0])
     no_identity.pop("identity")
     no_identity["title"] = "Worker finding without authored identity"
@@ -222,7 +134,7 @@ def test_deadline_preserves_worker_findings_with_optional_and_shared_identity(
         saved_draft(scan.scan_id, findings=[no_identity, first, second, malformed]),
     )
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     completed = scan.complete()
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
@@ -233,11 +145,9 @@ def test_deadline_preserves_worker_findings_with_optional_and_shared_identity(
     assert any("remediation" in warning for warning in completed["warnings"])
 
 
-def test_deadline_resolves_worker_local_deferred_ids_before_scoping(
-    workbench_api, workbench_db, deadline_scan
-):
+def test_deadline_resolves_worker_local_deferred_ids_before_scoping(workbench_db, deadline_scan):
     scan = deadline_scan
-    _, output = canceled_discovery_output(workbench_db, scan)
+    _, output = scan.canceled_discovery_output()
     write_checkpoint(
         output / "checkpoints",
         saved_draft(scan.scan_id, deferred=[{"id": "review", "reason": "Review pending."}]),
@@ -248,7 +158,7 @@ def test_deadline_resolves_worker_local_deferred_ids_before_scoping(
     latest = write_checkpoint(output / "checkpoints", current, mtime_ns=200)
     select_checkpoint(output, latest)
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     scan.complete()
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
@@ -256,10 +166,10 @@ def test_deadline_resolves_worker_local_deferred_ids_before_scoping(
 
 
 def test_deadline_does_not_turn_invalid_worker_receipts_into_parent_artifacts(
-    workbench_api, workbench_db, deadline_scan
+    workbench_db, deadline_scan
 ):
     scan = deadline_scan
-    _, output = canceled_discovery_output(workbench_db, scan)
+    _, output = scan.canceled_discovery_output()
     (output / "notes.txt").write_text("Not a worker receipt under artifacts/.\n")
     write_checkpoint(
         output / "checkpoints",
@@ -276,7 +186,7 @@ def test_deadline_does_not_turn_invalid_worker_receipts_into_parent_artifacts(
         ),
     )
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     completed = scan.complete()
 
     surface = read_review_state(workbench_db, scan.scan_dir)["surfaces"][0]
@@ -313,9 +223,7 @@ def test_deadline_preserves_worker_receipts_and_surface_links(
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     expected = {}
     for label in ("upload", "download"):
-        worker_id, output = canceled_discovery_output(
-            workbench_db, scan, attempt=2 if archived else 1
-        )
+        worker_id, output = scan.canceled_discovery_output(attempt=2 if archived else 1)
         source = output.parent / "attempts" / "attempt-1" if archived else output
         receipt = source / "artifacts" / "review.txt"
         receipt.parent.mkdir(parents=True)
@@ -341,7 +249,7 @@ def test_deadline_preserves_worker_receipts_and_surface_links(
         )
         expected[label] = (worker_id, receipt, checkpoint, checkpoint.read_bytes())
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     scan.complete()
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
@@ -366,9 +274,7 @@ def test_deadline_preserves_worker_receipts_and_surface_links(
         assert checkpoint.read_bytes() == original
 
 
-def test_saturated_finish_cancels_unfinished_discovery_without_using_its_drafts(
-    workbench_api, workbench_db, saturated_scan
-):
+def test_saturated_finish_cancels_unfinished_discovery_without_using_its_drafts(saturated_scan):
     scan = saturated_scan
     unfinished = []
     for status in ("queued", "running"):
@@ -376,7 +282,7 @@ def test_saturated_finish_cancels_unfinished_discovery_without_using_its_drafts(
         result.write_text("{unfinished worker draft")
         unfinished.append(result)
 
-    finished = finish(workbench_api, workbench_db, scan)
+    finished = scan.finish()
 
     assert finished["status"] == "succeeded"
     assert finished["terminalReason"] == "saturated"
@@ -395,9 +301,7 @@ def test_saturated_finish_cancels_unfinished_discovery_without_using_its_drafts(
     assert_published_aggregate(scan)
 
 
-def test_saturated_finish_retains_failed_discovery_diagnostic(
-    workbench_api, workbench_db, saturated_scan
-):
+def test_saturated_finish_retains_failed_discovery_diagnostic(workbench_db, saturated_scan):
     scan = saturated_scan
     result = scan.add_worker(status="failed")
     error = "Worker stopped while persisting its result."
@@ -407,7 +311,7 @@ def test_saturated_finish_retains_failed_discovery_diagnostic(
             (error, result.parent.name),
         )
 
-    finished = finish(workbench_api, workbench_db, scan)
+    finished = scan.finish()
 
     assert finished["status"] == "succeeded"
     failed_worker = next(
@@ -420,9 +324,7 @@ def test_saturated_finish_retains_failed_discovery_diagnostic(
 
 
 @pytest.mark.parametrize("stop", ["deadline", "run-limit", "saturated"])
-def test_unfinished_checkpoints_after_a_completed_reduction(
-    workbench_api, workbench_db, saturated_scan, stop
-):
+def test_unfinished_checkpoints_after_a_completed_reduction(workbench_db, saturated_scan, stop):
     scan = saturated_scan
     result = scan.add_worker(status="canceled")
     recovered = copy.deepcopy(scan.findings[0])
@@ -493,7 +395,7 @@ def test_unfinished_checkpoints_after_a_completed_reduction(
             )
 
     reason = "saturated" if stop == "saturated" else "capped"
-    finished = finish(workbench_api, workbench_db, scan, terminal_reason=reason)
+    finished = scan.finish(terminal_reason=reason)
 
     assert finished["status"] == "succeeded"
     worker = next(item for item in finished["workers"] if item["id"] == result.parent.name)
@@ -539,14 +441,12 @@ def test_unfinished_checkpoints_after_a_completed_reduction(
     assert checkpoint.read_bytes() == source_bytes
     names = ("scan-manifest.json", "findings.json", "report.md")
     sealed = {name: (scan.scan_dir / name).read_bytes() for name in names}
-    finish(workbench_api, workbench_db, scan, terminal_reason=reason)
+    scan.finish(terminal_reason=reason)
     scan.complete()
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == sealed
 
 
-def test_deadline_after_all_reviews_complete_keeps_reduced_coverage(
-    workbench_api, workbench_db, saturated_scan
-):
+def test_deadline_after_all_reviews_complete_keeps_reduced_coverage(workbench_db, saturated_scan):
     scan = saturated_scan
     with workbench_db:
         workbench_db.execute(
@@ -554,7 +454,7 @@ def test_deadline_after_all_reviews_complete_keeps_reduced_coverage(
             (scan.scan_id,),
         )
 
-    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    scan.finish(terminal_reason="capped")
     scan.complete()
 
     assert_published_aggregate(scan)
@@ -566,7 +466,7 @@ def test_deadline_after_all_reviews_complete_keeps_reduced_coverage(
     ids=["saturated-setup", "saturated-reducer", "capped-discovery"],
 )
 def test_finish_preserves_other_worker_failure_checks(
-    workbench_api, workbench_db, saturated_scan, terminal_reason, kind
+    workbench_db, saturated_scan, terminal_reason, kind
 ):
     scan = saturated_scan
     result = scan.add_worker(status="failed")
@@ -582,7 +482,7 @@ def test_finish_preserves_other_worker_failure_checks(
             )
 
     with pytest.raises(SystemExit, match="after a worker has failed"):
-        finish(workbench_api, workbench_db, scan, terminal_reason=terminal_reason)
+        scan.finish(terminal_reason=terminal_reason)
 
     run = workbench_db.execute(
         "SELECT status, terminal_reason FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
@@ -643,7 +543,7 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
             "WHEN NEW.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'deadline commit failed'); END"
         )
     with pytest.raises(sqlite3.IntegrityError, match="deadline commit failed"):
-        finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+        scan.finish(terminal_reason="capped")
 
     assert observations() == before
     assert {
@@ -658,9 +558,7 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
     )
     with workbench_db:
         workbench_db.execute("DROP TRIGGER reject_deadline_commit")
-    assert (
-        finish(workbench_api, workbench_db, scan, terminal_reason="capped")["status"] == "succeeded"
-    )
+    assert scan.finish(terminal_reason="capped")["status"] == "succeeded"
     if existing_head:
         coverage = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"][
             "reviewState"
@@ -669,7 +567,7 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
 
 
 def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
-    workbench_api, workbench_db, publication_scan
+    workbench_db, publication_scan
 ):
     scan = publication_scan()
     workers = {}
@@ -718,7 +616,7 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
             (scan.scan_id,),
         )
 
-    finished = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    finished = scan.finish(terminal_reason="capped")
 
     assert finished["status"] == "succeeded"
     assert finished["completionSequence"] == 0

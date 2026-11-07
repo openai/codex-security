@@ -32,10 +32,9 @@ import {
 import {
   blobSamples,
   changedPaths,
-  decodeGitPath,
   directoryPaths,
   encodeGitPath,
-  git,
+  ignoredTrackedPaths,
   runRipgrep,
 } from "./inventory-git";
 import { PREVIEW_BYTES, previewForBytes, sampleFile } from "./source-preview";
@@ -296,31 +295,26 @@ export async function generateInventory(
         `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
       );
     let bytes = result.stdout;
-    if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
-      const tracked = await git(repo, [
-        "ls-files",
-        "--cached",
-        "--ignored",
-        "--exclude-standard",
-        "-z",
-        "--",
-        requested,
-      ]).catch((error: unknown) => {
-        if (error instanceof Error && "code" in error)
-          return { status: 127, stdout: Buffer.alloc(0) };
-        throw error;
-      });
-      if (tracked.status === 0) {
-        const prefix =
-          requested === "." || requested.startsWith("./") ? "./" : "";
-        const paths = decodeGitPath(tracked.stdout)
-          .split("\0")
-          .filter((path) => path && regular(append(repo, path)));
-        bytes = Buffer.concat([
-          bytes,
-          encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
-        ]);
-      }
+    const inWorktree = [...ancestors(repo)].some((path) => {
+      const marker = append(path, ".git");
+      // An empty .git directory can be a sandbox placeholder.
+      return (
+        exists(marker) &&
+        (!directory(marker) ||
+          exists(append(marker, "HEAD")) ||
+          regular(append(marker, "index")))
+      );
+    });
+    if (inWorktree) {
+      const paths = (await ignoredTrackedPaths(repo, requested)).filter(
+        (path) => regular(append(repo, path)),
+      );
+      const prefix =
+        requested === "." || requested.startsWith("./") ? "./" : "";
+      bytes = Buffer.concat([
+        bytes,
+        encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
+      ]);
     }
     for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
       if (path.split("/").some((part) => sourceMetadata.has(part))) continue;

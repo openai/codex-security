@@ -29,6 +29,12 @@ import {
   recordCodexSecurityCandidateAttackPaths,
 } from "../artifact-candidate-ledger.js";
 import {
+  postPeerNote,
+  postPeerNoteInput,
+  readPeerNotes,
+  readPeerNotesInput,
+} from "../deep-scan/peer-notes.js";
+import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
   recordCodexSecurityScanDraftViaWorkbench,
@@ -255,6 +261,27 @@ export function registerCompactWorkerArtifactTools(
   server: McpServer,
   context: ArtifactContext,
 ): void {
+  const board = context.discoveryBoard;
+  if (board) {
+    registerCompactTool(server, {
+      name: "post_deep_scan_peer_note",
+      title: "Post Deep Scan Peer Note",
+      description:
+        "Share a lead or ask another discovery worker to check specific evidence. Pass its threadId to reply with your independent check. The host identifies the author.",
+      inputSchema: postPeerNoteInput,
+      readOnly: false,
+      handler: (input) => postPeerNote(board, context.scanId, input),
+    });
+    registerCompactTool(server, {
+      name: "read_deep_scan_peer_notes",
+      title: "Read Deep Scan Peer Notes",
+      description:
+        "List this scan’s shared leads and questions, or pass a threadId to read that lead and its replies.",
+      inputSchema: readPeerNotesInput,
+      readOnly: true,
+      handler: (input) => readPeerNotes(board, input),
+    });
+  }
   registerCompactTool(server, {
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
