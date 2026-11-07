@@ -528,8 +528,14 @@ with every repository.
 
 Use `--output-dir DIR` to choose where a scan saves its results. The directory
 must be empty and outside the scanned directory and enclosing Git worktree.
-Existing directories keep their permissions; newly created directories are
-private to you by default.
+Existing directories keep their permissions. Newly created directories are
+private to you by default. On Windows, the directory and its parents must be
+owned by your account, Administrators, SYSTEM, or TrustedInstaller. Choose a
+path where another user cannot replace the output directory or one of its
+parents. A parent can allow other users to read it or create sibling directories.
+For an empty write destination, grant content-writing permissions to children
+through inheritance. Other users must not have permission to set reparse data
+on the destination directory itself.
 `--archive-existing` moves earlier output to a sibling directory with a unique
 suffix, such as `results.previous-ab12cd34` for an output directory named
 `results`. Use `--dry-run` to preview the move.

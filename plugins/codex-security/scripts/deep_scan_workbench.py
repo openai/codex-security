@@ -783,11 +783,8 @@ def begin_deep_scan_for_target(
         workflow_version = optional_text(args.workflow_version, maximum=256)
         if workflow_version is None:
             raise SystemExit("workflow-version is required.")
-        root = dependencies().resolve_scan_root(args.scan_root)
-        target_root = (root / dependencies().safe_segment(target.name)).resolve()
-        if target_root == target or target in target_root.parents:
-            raise SystemExit("The scan artifact directory must be outside the selected target.")
-        create_private_directory(target_root)
+        target_root = dependencies().scan_target_root(args.scan_root, target)
+        create_private_directory(target_root, scan_output=True)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
