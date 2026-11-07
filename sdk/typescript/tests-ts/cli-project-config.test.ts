@@ -390,11 +390,7 @@ test.each(["instructions_file", "validation_file"] as const)(
     await mkdir(external);
     await writeFile(join(external, "prompt.md"), "Synthetic external data.");
     await symlink(external, join(input.repository, "linked"), "junction");
-    const csv = join(input.root, "repositories.csv");
-    await writeFile(
-      csv,
-      `id,repository,revision\nsource,${input.repository},${"a".repeat(40)}\n`,
-    );
+    const csv = await bulkInventory(input, ["standard"]);
     const onConfig = mock(throwing("Runtime must not start"));
     const stderr = captureCli(main, "stderr");
     const exit = await stderr.run(
