@@ -16,7 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { zipSync } from "fflate";
@@ -1706,7 +1706,7 @@ describe("multiscan", () => {
     ]);
   });
 
-  test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {
+  test("resumes complete bundles, repairs missing reports, and rejects manifest drift", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "resume");
     const csv = `id,repository,revision\nresume,${source.path},${source.revision}\n`;
@@ -1731,19 +1731,33 @@ describe("multiscan", () => {
     expect(security.run.mock.calls.length).toBe(1);
 
     const [receipt] = await results(initial.resultsPath);
-    await rm(join(receipt!["outputDir"] as string, "report.md"));
-    const repaired = await runMultiscan(options(paths, security));
-    expect(repaired).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
-    expect(security.run.mock.calls.length).toBe(2);
-    expect((await results(repaired.resultsPath)).at(-1)?.["outputDir"]).toBe(
-      join(paths.output, "artifacts", "resume", "attempt-2"),
+    const outputDir = receipt!["outputDir"] as string;
+    const reportPath = join(outputDir, "report.md");
+    const report = await readFile(reportPath);
+    const canonicalPaths = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+    ].map((name) => join(outputDir, name));
+    const canonical = await Promise.all(
+      canonicalPaths.map((path) => readFile(path)),
     );
+    const ledger = await readFile(initial.resultsPath, "utf8");
+    await rm(reportPath);
+    const repaired = await runMultiscan(options(paths, security));
+    expect(repaired).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+    expect(security.run.mock.calls.length).toBe(1);
+    expect(await readFile(reportPath)).toEqual(report);
+    expect(
+      await Promise.all(canonicalPaths.map((path) => readFile(path))),
+    ).toEqual(canonical);
+    expect(await readFile(repaired.resultsPath, "utf8")).toBe(ledger);
 
     await writeFile(paths.input, csv.replace("resume,", "changed,"));
     await expect(runMultiscan(options(paths, security))).rejects.toThrow(
       "manifest does not match",
     );
-    expect(security.run.mock.calls.length).toBe(2);
+    expect(security.run.mock.calls.length).toBe(1);
   });
 
   test.each([
@@ -2213,7 +2227,7 @@ describe("multiscan", () => {
   );
 
   test.each([
-    ["recorded", false, 2],
+    ["recorded", false, 1],
     ["orphan", false, 2],
     ["orphan", true, 1],
   ] as const)(
@@ -2299,6 +2313,82 @@ describe("multiscan", () => {
       },
       { id: "complete", status: "completed", attempt: 1 },
     ]);
+  });
+
+  test("continues pending rows when reused scope checkout cleanup fails", async () => {
+    const { paths, source } = await repositoryFixture("reused-cleanup");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nsaved,${source.path},${source.revision},src\nnext,${source.path},${source.revision},src\n`,
+    );
+    const first = await runMultiscan(
+      options(
+        paths,
+        client(async (checkout, settings = {}) => {
+          if (basename(checkout) === "next") throw new Error("Interrupted");
+          return completedScan(settings.outputDir!, "complete", checkout);
+        }),
+        { maxAttempts: 1 },
+      ),
+    );
+    expect(first).toMatchObject({ completed: 1, failed: 1 });
+    const savedReceipt = (await results(first.resultsPath))[0];
+    // A legacy registration needs a temporary checkout to resolve its scope.
+    const database = new Database(
+      join(paths.root, "state", "workbench.sqlite3"),
+    );
+    try {
+      database.run(
+        "UPDATE scans SET recipe_json = json_remove(recipe_json, '$.target') WHERE scan_dir = ?",
+        [savedReceipt!["outputDir"] as string],
+      );
+    } finally {
+      database.close();
+    }
+    const checkout = join(paths.output, "checkouts", "saved");
+    const diagnostic = "EBUSY: synthetic cleanup sk-proj-SYNTHETIC_123";
+    const warning = `Multiscan checkout cleanup failed: ${diagnostic}`;
+    const originalRm = filesystem.rm;
+    const removeSpy = spyOn(filesystem, "rm").mockImplementation(
+      async (...args: Parameters<typeof originalRm>) => {
+        if (String(args[0]) === checkout) throw new Error(diagnostic);
+        return await Reflect.apply(originalRm, filesystem, args);
+      },
+    );
+    const progress: Parameters<
+      NonNullable<MultiscanOptions["onProgress"]>
+    >[0][] = [];
+    const run = mock(completeRun);
+    try {
+      const summary = await runMultiscan(
+        options(paths, client(run), {
+          onProgress: (event) => progress.push(event),
+        }),
+      );
+      expect(summary).toMatchObject({
+        completed: 2,
+        failed: 0,
+        skipped: 1,
+        warnings: [{ repository: "saved", warnings: [warning] }],
+      });
+      expect(progress).toContainEqual({
+        repository: "saved",
+        status: "completed",
+        attempt: 1,
+        warning,
+      });
+      const receipts = await results(summary.resultsPath);
+      expect(receipts[0]).toEqual(savedReceipt);
+      expect(receipts.at(-1)).toMatchObject({
+        id: "next",
+        status: "completed",
+        attempt: 2,
+      });
+      expect(run).toHaveBeenCalledTimes(1);
+      expect((await lstat(checkout)).isDirectory()).toBe(true);
+    } finally {
+      removeSpy.mockRestore();
+    }
   });
 
   test("rescans corrupt, modified, and mismatched sealed repository artifacts", async () => {
@@ -2684,6 +2774,13 @@ describe("multiscan", () => {
     });
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     await reseal(outputDir);
+    const sealedManifest = JSON.parse(
+      await readFile(manifestPath, "utf8"),
+    ) as ScanResult["manifest"];
+    expect(
+      await contract.hasSealedReport(outputDir, sealedManifest),
+    ).toBeTrue();
+
     const compatibleLegacyReference =
       corruption === "dangling root-cause evidence" ||
       corruption === "dangling validation evidence" ||
@@ -2849,4 +2946,147 @@ describe("multiscan", () => {
       ),
     ).toBe(false);
   });
+
+  test("skips sealed report recovery and preserves earned receipts on recovery failure", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "report-recovery");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nreport-recovery,${source.path},${source.revision}\n`,
+    );
+    let attempts = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      attempts += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const first = await runMultiscan(options(paths, security));
+    const ledger = await readFile(first.resultsPath, "utf8");
+    const resolvePython = spyOn(
+      runtime,
+      "resolvePluginPythonCommand",
+    ).mockRejectedValue(
+      new Error("Python unavailable: sk-proj-SYNTHETIC_REPORT_RECOVERY_123"),
+    );
+    try {
+      const reportSealed = spyOn(contract, "hasSealedReport").mockResolvedValue(
+        true,
+      );
+      try {
+        await expect(
+          runMultiscan(options(paths, security)),
+        ).resolves.toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+        expect(reportSealed).toHaveBeenCalledTimes(1);
+        expect(resolvePython).not.toHaveBeenCalled();
+        expect(attempts).toBe(1);
+        expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
+      } finally {
+        reportSealed.mockRestore();
+      }
+      await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+        "Multiscan report recovery is required: Python unavailable: sk-proj-SYNTHETIC_REPORT_RECOVERY_123",
+      );
+      expect(resolvePython).toHaveBeenCalledWith(
+        expect.objectContaining({
+          protectedRoot: join(paths.output, "checkouts", "report-recovery"),
+
+          environment: runtime.pluginHelperEnvironment(process.env),
+        }),
+      );
+      expect(attempts).toBe(1);
+      expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
+    } finally {
+      resolvePython.mockRestore();
+    }
+  });
+
+  test("preserves cancellation during report recovery", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "cancel-report-recovery");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nreport-recovery,${source.path},${source.revision}\n`,
+    );
+    let attempts = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      attempts += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const first = await runMultiscan(options(paths, security));
+    const ledger = await readFile(first.resultsPath, "utf8");
+    const controller = new AbortController();
+    const reason = new Error("Report recovery cancelled.");
+    const resolvePython = spyOn(
+      runtime,
+      "resolvePluginPythonCommand",
+    ).mockImplementation(async () => {
+      controller.abort(reason);
+      throw reason;
+    });
+    try {
+      await expect(
+        runMultiscan(options(paths, security, { signal: controller.signal })),
+      ).rejects.toBe(reason);
+      expect(attempts).toBe(1);
+      expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
+    } finally {
+      resolvePython.mockRestore();
+    }
+  });
+
+  for (const selection of ["PYTHON", "PATH"] as const) {
+    testPosix(
+      `report recovery uses campaign ${selection} and helper environment`,
+      async () => {
+        const { paths } = await repositoryFixture(
+          `report-environment-${selection}`,
+        );
+        const tools = join(paths.root, "report-tools");
+        await mkdir(tools);
+        const interpreter = join(tools, "campaign-python");
+        const marker = join(paths.root, "report-environment.json");
+        await writeFile(
+          interpreter,
+          `#!${PYTHON}\nimport json, os, sys\nif any(arg.endswith("finalize_scan_contract.py") for arg in sys.argv):\n    with open(${JSON.stringify(marker)}, "w") as output:\n        json.dump({name: os.environ.get(name) for name in ("PYTHON", "PATH", "MULTISCAN_REPORT_FIXTURE")}, output)\nos.execv(${JSON.stringify(PYTHON)}, [${JSON.stringify(PYTHON)}, *sys.argv[1:]])\n`,
+          { mode: 0o700 },
+        );
+        const environment = {
+          ...process.env,
+          PYTHON: selection === "PYTHON" ? interpreter : undefined,
+          PATH: tools + delimiter + (process.env["PATH"] ?? ""),
+          MULTISCAN_REPORT_FIXTURE: "invocation-specific",
+        };
+        const run = mock(completeRun);
+        const campaign = options(paths, client(run), {
+          environment,
+          config: selection === "PATH" ? { pythonPath: "campaign-python" } : {},
+        });
+        const initial = await runMultiscan(campaign);
+        const ledger = await readFile(initial.resultsPath);
+        const receipt = (await results(initial.resultsPath))[0]!;
+        const report = join(receipt["outputDir"] as string, "report.md");
+        await rm(report);
+        const previousPython = process.env["PYTHON"];
+        process.env["PYTHON"] = join(paths.root, "unavailable-ambient-python");
+        try {
+          expect(await runMultiscan(campaign)).toMatchObject({
+            completed: 1,
+            failed: 0,
+            skipped: 1,
+          });
+          const observed = JSON.parse(await readFile(marker, "utf8"));
+          expect(observed).toMatchObject({
+            PYTHON: environment.PYTHON ?? null,
+            MULTISCAN_REPORT_FIXTURE: "invocation-specific",
+          });
+          expect(observed.PATH.split(delimiter)[0]).toBe(tools);
+          expect((await lstat(report)).isFile()).toBe(true);
+          expect(run).toHaveBeenCalledTimes(1);
+          expect(await readFile(initial.resultsPath)).toEqual(ledger);
+        } finally {
+          if (previousPython === undefined) delete process.env["PYTHON"];
+          else process.env["PYTHON"] = previousPython;
+        }
+      },
+    );
+  }
 });

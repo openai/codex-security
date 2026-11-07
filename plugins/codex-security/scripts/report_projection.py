@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from itertools import chain
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
@@ -28,6 +30,7 @@ DISPOSITION_LABELS = {
     "not_applicable": "Not applicable",
     "needs_follow_up": "Needs follow-up",
 }
+REPORT_NAME_RE = re.compile(r"report\.md", re.IGNORECASE | re.ASCII)
 WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 INLINE_CODE_RE = r"(?<!`)`[^`\n]+`(?!`)"
 ENTITY_AMP_RE = r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)"
@@ -44,6 +47,103 @@ def markdown_threat_model_content(model: dict[str, Any]) -> str | None:
     if model.get("format") == "markdown" and isinstance(content, str) and content.strip():
         return content
     return None
+
+
+def is_sealed_report(
+    scan_dir: Path,
+    artifact_paths: set[str],
+    open_file: Callable[[Path, str, str], int],
+    check_directory: Callable[[Path], Path],
+) -> bool:
+    """Identify a sealed report without mistaking a separate hard link for its name."""
+    if "report.md" in artifact_paths:
+        return True
+    try:
+        output_metadata = (scan_dir / "report.md").stat(follow_symlinks=False)
+    except FileNotFoundError:
+        output_metadata = None
+    except OSError as exc:
+        raise ReportProjectionError("report.md: unable to inspect report output") from exc
+    same_file_artifacts: list[str] = []
+    if output_metadata is not None:
+        for artifact_path in artifact_paths:
+            descriptor = open_file(scan_dir, artifact_path, f"sealed artifact {artifact_path}")
+            try:
+                artifact_metadata = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            if os.path.samestat(output_metadata, artifact_metadata):
+                same_file_artifacts.append(artifact_path)
+    if output_metadata is not None and same_file_artifacts:
+        try:
+            entries = set(os.listdir(scan_dir))
+            report_entries = [name for name in entries if REPORT_NAME_RE.fullmatch(name)]
+            report_entry = None
+            if "report.md" in entries:
+                report_entry = "report.md"
+            elif len(report_entries) == 1:
+                report_entry = report_entries[0]
+            if report_entry is not None and report_entry != "report.md":
+                descriptor = open_file(scan_dir, report_entry, "report directory entry")
+                try:
+                    if not os.path.samestat(output_metadata, os.fstat(descriptor)):
+                        report_entry = None
+                finally:
+                    os.close(descriptor)
+            if (
+                report_entry is not None
+                and len(report_entries) == 1
+                and any(REPORT_NAME_RE.fullmatch(path) for path in same_file_artifacts)
+            ):
+                return True
+            root_metadata = scan_dir.stat(follow_symlinks=False)
+            for artifact_path in same_file_artifacts:
+                artifact = PurePosixPath(artifact_path)
+                parent = check_directory(scan_dir.joinpath(*artifact.parts[:-1]))
+                if not os.path.samestat(root_metadata, parent.stat(follow_symlinks=False)):
+                    continue
+                if (
+                    report_entry is not None
+                    and artifact.name in entries
+                    and artifact.name != report_entry
+                ):
+                    continue
+                raise ReportProjectionError(
+                    "report.md: cannot safely replace an ambiguous sealed artifact alias"
+                )
+        except OSError as exc:
+            raise ReportProjectionError(
+                "report.md: unable to inspect sealed artifact aliases"
+            ) from exc
+    return False
+
+
+def csv_cell(value: Any) -> Any:
+    if isinstance(value, str) and (
+        value.startswith(("'", "\t", "\r", "\n"))
+        or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
+    ):
+        return f"'{value}"
+    return value
+
+
+def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
+    return (
+        "occurrence_id",
+        "finding_id",
+        *(("candidate_id",) if deep_scan else ()),
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "status",
+        "close_reason",
+        "note",
+        "remediation",
+        "path",
+        "start_line",
+        "end_line",
+    )
 
 
 def _escape_markdown(value: str) -> str:

@@ -37,6 +37,7 @@ from posix_scan_local_files import (
     descriptor_relative_writes_available as _descriptor_relative_writes_available,
 )
 from posix_scan_local_files import managed_fd, stage_write
+from report_projection import csv_cell, finding_csv_columns
 from review_state import checkpoint_review_state, review_state, review_summary
 
 SCHEMA_VERSION = "1.0"
@@ -218,10 +219,7 @@ def _read_saved_threat_model(
         if validate_seal and filename == "scan-manifest.json" and manifest_is_sealed(scan):
             if "threatModel" not in scan:
                 _validate_manifest(manifest)
-                recorded_paths = {
-                    _require_portable_relative_path(artifact["path"], "sealed artifact path")
-                    for artifact in scan["artifacts"]
-                }
+                recorded_paths = _sealed_artifact_paths(scan)
                 if recorded_paths.isdisjoint(_LEGACY_THREAT_MODEL_PATHS):
                     validate_against_schema(
                         manifest,
@@ -231,10 +229,7 @@ def _read_saved_threat_model(
                     return None
             manifest, _, _, _ = _read_sealed_scan(scan_dir, schema_dir, "threat model export")
             scan = manifest["scan"]
-            sealed_artifact_paths = {
-                _require_portable_relative_path(artifact["path"], "sealed artifact path")
-                for artifact in scan["artifacts"]
-            }
+            sealed_artifact_paths = _sealed_artifact_paths(scan)
         provenance = threat_model_provenance(manifest)
         saved_provenance = provenance
         if "threatModel" in scan:
@@ -1560,7 +1555,8 @@ def _validate_derived_finding_identities(
             raise ContractError(f"{context}.findingId: does not match derived fingerprint identity")
         if finding.get("occurrenceId") != occurrence_id:
             raise ContractError(f"{context}.occurrenceId: does not match scan occurrence identity")
-        if finding.get("fingerprints") != fingerprints:
+        actual_fingerprints = _require_dict(finding, "fingerprints", context)
+        if any(actual_fingerprints.get(key) != value for key, value in fingerprints.items()):
             raise ContractError(f"{context}.fingerprints: does not match derived fingerprint")
 
 
@@ -2708,11 +2704,15 @@ def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any])
     return {ref: refs[ref] for ref in sorted(refs)}
 
 
-def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str, Any]) -> None:
-    artifact_paths = {
+def _sealed_artifact_paths(scan: dict[str, Any]) -> set[str]:
+    return {
         _require_portable_relative_path(artifact["path"], "sealed artifact path")
         for artifact in scan["artifacts"]
     }
+
+
+def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str, Any]) -> None:
+    artifact_paths = _sealed_artifact_paths(scan)
     for ref, context in _supplementary_artifact_refs(scan, coverage).items():
         if ref not in artifact_paths:
             raise ContractError(f"{context} is missing from sealed artifacts: {ref}")
@@ -2788,6 +2788,23 @@ def _read_sealed_scan(
     return manifest, findings, coverage, findings_bytes
 
 
+def write_report_projection(scan_dir: Path, schema_dir: Path | None = None) -> None:
+    """Refresh only an unsealed report, preserving authenticated historical reports."""
+    scan_dir = _require_scan_directory(scan_dir)
+    manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "report projection")
+    artifact_paths = _sealed_artifact_paths(manifest["scan"])
+    try:
+        if report_projection.is_sealed_report(
+            scan_dir, artifact_paths, open_scan_local_file_descriptor, _require_scan_directory
+        ):
+            return
+    except report_projection.ReportProjectionError as exc:
+        raise ContractError(str(exc)) from exc
+    write_scan_local_bytes(
+        scan_dir, "report.md", _generate_report_projection(manifest, findings, coverage)
+    )
+
+
 def build_sarif_projection(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> dict[str, Any]:
@@ -2828,15 +2845,6 @@ def write_sarif_projection(
     write_export_output(
         scan_dir, scan_dir / relative_path, "sarif", _contract_json_bytes(relative_path, sarif)
     )
-
-
-def csv_cell(value: Any) -> Any:
-    if isinstance(value, str) and (
-        value.startswith(("'", "\t", "\r", "\n"))
-        or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
-    ):
-        return f"'{value}"
-    return value
 
 
 def _has_identity_text(value: Any) -> bool:
@@ -2882,25 +2890,6 @@ def _csv_candidate_id(finding: dict[str, Any]) -> str | None:
                 if isinstance(value, str) and value.strip():
                     return value
     return None
-
-
-def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
-    return (
-        "occurrence_id",
-        "finding_id",
-        *(("candidate_id",) if deep_scan else ()),
-        "title",
-        "summary",
-        "severity",
-        "confidence",
-        "status",
-        "close_reason",
-        "note",
-        "remediation",
-        "path",
-        "start_line",
-        "end_line",
-    )
 
 
 def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
@@ -3382,6 +3371,7 @@ def main() -> int:
     parser.add_argument("--schema-dir", type=Path)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--sarif-only", action="store_true")
+    parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--sarif-output", type=Path)
     parser.add_argument(
         "--export-artifact", choices=("findings", "threat-model"), default="findings"
@@ -3395,6 +3385,12 @@ def main() -> int:
     args = parser.parse_args()
     try:
         args.scan_dir = args.scan_dir.resolve()
+        if args.report_only and (
+            args.sarif_only or args.export_format is not None or args.source_root is not None
+        ):
+            parser.error(
+                "--report-only cannot be combined with SARIF, export, or source-root options"
+            )
         if args.avit_template is not None:
             if args.export_format != "servicenow-avit":
                 parser.error(
@@ -3427,6 +3423,9 @@ def main() -> int:
             parser.error("--export-output requires --export-format")
         if args.sarif_output is not None and not args.sarif_only:
             parser.error("--sarif-output requires --sarif-only")
+        if args.report_only:
+            write_report_projection(args.scan_dir, args.schema_dir)
+            return 0
         if args.sarif_only:
             args.export_format, args.export_output = "sarif", args.sarif_output
         if args.export_format is not None:
