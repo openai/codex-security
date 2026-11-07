@@ -1,3 +1,5 @@
+"""Bind CLI scan counts, final artifacts, and recovered coverage to the registered target."""
+
 from __future__ import annotations
 
 import copy

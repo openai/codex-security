@@ -74,6 +74,7 @@ def index_findings(
     document: dict[str, Any],
     timestamp: str,
 ) -> None:
+    """Index findings for this scan and write occurrence and ordered location rows in the caller’s transaction."""
     findings = document.get("findings")
     if not isinstance(findings, list):
         raise SystemExit("findings.json must contain a findings array.")

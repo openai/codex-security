@@ -54,6 +54,10 @@ import {
 import type { SemanticScan } from "../src/scan-semantics.js";
 
 import { ScanTransportClosedError } from "../src/scan-execution.js";
+import {
+  OperationTelemetry,
+  readOperationTelemetry,
+} from "../src/operation-telemetry.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
 
@@ -626,6 +630,9 @@ function resumeDependencies(
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
   runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
+  createOperationTelemetry?: ConstructorParameters<
+    typeof TestClient
+  >[1]["createOperationTelemetry"],
 ) {
   return {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
@@ -656,6 +663,9 @@ function resumeDependencies(
         prepareScanArtifactRestorer,
         runWorkbench,
         createCodex,
+        ...(createOperationTelemetry === undefined
+          ? {}
+          : { createOperationTelemetry }),
       }),
   };
 }
@@ -868,6 +878,306 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
 }
 
+test("records independent comparison usage during a turn and restores it without replacing the grouping thread", async () => {
+  const evidence = {
+    id: "render",
+    label: "Unsafe output",
+    path: "src/render.js",
+    startLine: 1,
+    code: "render(request)",
+    explanation: "A request value flows directly to the renderer.",
+  };
+  const f = await interruptedScan("deep", false, {}, false, true, {
+    accepted: false,
+    findings: [
+      semanticFinding({
+        codeEvidence: [evidence],
+      }),
+      semanticFinding({
+        title: "Second unsafe output",
+        codeEvidence: [evidence],
+      }),
+    ],
+  });
+  const comparisonId = randomUUID();
+  const lostTransport = new AbortController();
+  const captured = Promise.withResolvers<void>();
+  let observedOnResume = false;
+  const restoredClient = resumeClient(f, () => ({
+    resumeThread(id) {
+      expect(id).toBe(f.threadId);
+      return {
+        id,
+        async runStreamed() {
+          return {
+            events: (async function* () {
+              for await (const event of completedEvents(id)) {
+                if (
+                  event.type === "item.completed" &&
+                  event.item.type === "agent_message"
+                ) {
+                  const ids = [f.childId + ":0", f.childId + ":1"];
+                  event.item.text = JSON.stringify({
+                    scanId: f.scanId,
+                    groups: [
+                      {
+                        sourceFindingIds: ids,
+                        canonicalSourceFindingId: ids[0],
+                      },
+                    ],
+                  });
+                }
+                yield event;
+              }
+            })(),
+          };
+        },
+      };
+    },
+    startThread(options) {
+      expect(options.workingDirectory).toBe(
+        join(f.scanDir, "artifacts/deep-scan/merge/artifacts"),
+      );
+      return {
+        id: comparisonId,
+        async runStreamed() {
+          return {
+            events: (async function* () {
+              yield {
+                type: "thread.started" as const,
+                thread_id: comparisonId,
+              };
+              const ids = JSON.parse(
+                await readFile(
+                  join(f.scanDir, "artifacts/deep-scan/execution-threads.json"),
+                  "utf8",
+                ),
+              );
+              expect(ids).toContain(comparisonId);
+              await writeFile(
+                join(f.codexHome, "sessions", "comparison.jsonl"),
+                [
+                  JSON.stringify({
+                    type: "session_meta",
+                    payload: {
+                      id: comparisonId,
+                      cwd: options.workingDirectory,
+                      timestamp: new Date().toISOString(),
+                    },
+                  }),
+                  JSON.stringify({
+                    type: "event_msg",
+                    payload: {
+                      type: "token_count",
+                      info: {
+                        total_token_usage: {
+                          input_tokens: 12000,
+                          output_tokens: 2,
+                        },
+                      },
+                    },
+                  }),
+                  "",
+                ].join("\n"),
+              );
+              await captured.promise;
+              lostTransport.abort(
+                new ScanTransportClosedError("comparison transport closed"),
+              );
+              throw lostTransport.signal.reason;
+            })(),
+          };
+        },
+      };
+    },
+  }));
+  const runOptions: ScanOptions = {
+    mode: "deep",
+    outputDir: f.scanDir,
+    resumeScanId: f.scanId,
+    ...f.recipe.deepScan,
+  };
+  const config = { codexOverrides: f.recipe.config };
+  const client = restoredClient(config);
+  try {
+    await expect(
+      client.run(f.repository, {
+        ...runOptions,
+        signal: lostTransport.signal,
+        onMeasurement(value) {
+          if ((value.usage?.input_tokens ?? 0) >= 12000) captured.resolve();
+        },
+      }),
+    ).rejects.toThrow("comparison transport closed");
+  } finally {
+    await client.close();
+  }
+  const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+    "scan"
+  ] as JsonObject;
+  expect(saved["continuationThreadId"]).toBe(f.threadId);
+  const resumed = resumeClient(f, () => ({
+    startThread: () => fail("Unexpected comparison before restored usage"),
+    resumeThread: (id) => ({
+      id,
+      async runStreamed() {
+        throw new ScanTransportClosedError("restored comparison checked");
+      },
+    }),
+  }))(config);
+  try {
+    await expect(
+      resumed.run(f.repository, {
+        ...runOptions,
+        onMeasurement(value) {
+          if ((value.usage?.input_tokens ?? 0) >= 12000)
+            observedOnResume = true;
+        },
+      }),
+    ).rejects.toThrow("restored comparison checked");
+    expect(observedOnResume).toBe(true);
+  } finally {
+    await resumed.close();
+  }
+}, 120000);
+
+test.each(["completed", "failed"] as const)(
+  "bulk recovery retains original correlation and unpriced usage after %s without a ledger",
+  async (outcome) => {
+    const f = await interruptedScan(
+      "deep",
+      true,
+      {
+        config: { model: "synthetic-unpriced-model", approval_policy: "never" },
+      },
+      false,
+      true,
+      { accepted: false, findings: [semanticFinding()] },
+    );
+    await rm(join(f.root, "results.jsonl"));
+    const original = new OperationTelemetry({
+      directory: f.environment.CODEX_SECURITY_STATE_DIR,
+      protectedRepository: f.repository,
+      protectedOutput: f.scanDir,
+      command: "scan",
+      surface: "cli",
+      mode: "deep",
+    });
+    await original.start();
+    await original.bindScan(f.scanId);
+    const { stdout, stderr, runCli } = createCliTest(main);
+    let resumed = 0;
+    const code = await runCli(
+      ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+      resumeDependencies(
+        f,
+        () => ({
+          startThread: () => fail("Unexpected new session"),
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            resumed++;
+            return {
+              id: threadId,
+              async runStreamed() {
+                await appendFile(
+                  f.sessionPath,
+                  JSON.stringify({
+                    type: "event_msg",
+                    payload: {
+                      type: "token_count",
+                      info: {
+                        total_token_usage: {
+                          input_tokens: 10000,
+                          output_tokens: 2000,
+                        },
+                      },
+                    },
+                  }) + "\n",
+                );
+                if (outcome === "failed")
+                  throw new Error("Synthetic resumed failure");
+                return { events: completedMergeEvents(f, threadId) };
+              },
+            };
+          },
+        }),
+        {},
+        (options) => new OperationTelemetry(options),
+      ),
+    );
+    expect(code, stderr.text()).toBe(outcome === "completed" ? 0 : 2);
+    expect(resumed, stderr.text()).toBe(1);
+    const result = JSON.parse(stdout.text());
+    const receipts = await readJsonLines(result.resultsPath);
+    expect(receipts).toHaveLength(1);
+    const { events } = await readOperationTelemetry(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+    );
+    const starts = events.filter((event) => event.type === "attempt_started");
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map((event) => event.attemptId)).size).toBe(2);
+    expect(
+      starts.every((event) => event.operationId === original.operationId),
+    ).toBe(true);
+    const terminal = events.find((event) => event.type === "attempt_finished");
+    expect(terminal).toMatchObject({
+      operationId: original.operationId,
+      outcome,
+      resumed: true,
+      measurement: {
+        cost: null,
+        usage: {
+          input_tokens: 10000,
+          output_tokens: 2000,
+          total_tokens: 12000,
+        },
+      },
+    });
+    expect(receipts[0]).toMatchObject({
+      attempt: 1,
+      status: outcome,
+      operationId: original.operationId,
+      measurement: terminal!.measurement,
+    });
+    expect(receipts[0]).not.toHaveProperty("cost");
+    if (outcome === "completed") {
+      const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+        "scan"
+      ] as JsonObject;
+      expect(saved["usage"]).toMatchObject({
+        coverage: "complete",
+        totalTokens: 12000,
+      });
+      expect(saved).not.toHaveProperty("cost");
+      await rm(result.resultsPath);
+      const recovered = createCliTest(main);
+      expect(
+        await recovered.runCli(
+          ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+          {
+            ...dependencies({
+              environment: f.environment,
+              currentDirectory: f.root,
+              onRun: () => fail("A sealed scan needs no Codex invocation"),
+            }),
+            runWorkbench: f.command,
+          },
+        ),
+        recovered.stderr.text(),
+      ).toBe(0);
+      const restored = await readJsonLines(result.resultsPath);
+      expect(restored).toHaveLength(1);
+      expect(restored[0]!["usage"]).toEqual(saved["usage"]);
+      for (const key of ["cost", "measurement", "operationId"])
+        expect(restored[0]).not.toHaveProperty(key);
+      expect(
+        (await readOperationTelemetry(f.environment.CODEX_SECURITY_STATE_DIR))
+          .events,
+      ).toEqual(events);
+    }
+  },
+);
+
 test.each([
   [false, false],
   [true, false],
@@ -976,6 +1286,7 @@ test.each([
         attempt: 1,
         cost: { inputTokens: 11000, outputTokens: 2100 },
       });
+      expect(reconciled[1]).not.toHaveProperty("operationId");
       // A subsequent bulk recovery must skip the reconciled completion.
       const nextOutput = capture();
       expect(

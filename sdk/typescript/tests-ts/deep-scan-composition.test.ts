@@ -10,6 +10,8 @@ import {
   readFile,
   rename,
   rm,
+  stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -34,6 +36,7 @@ import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import type { JsonObject as WorkbenchJsonObject } from "../src/config.js";
 import {
   runDeepScans,
+  bindDeepScanExecutable,
   DeepScanInputRecoveryError,
   DeepScanRecoveryError,
   ScanCostTrackingError,
@@ -343,6 +346,52 @@ async function harness(
 }
 
 describe("ordinary scan composition", () => {
+  test("checks a pinned executable after replacement at the same path", async () => {
+    const h = await harness();
+    const path = join(h.input.scanDir, "codex.exe");
+    const verify = bindDeepScanExecutable(path, h.input.scanDir);
+    await expect(verify()).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(path, "first");
+    await Promise.all([verify(), verify()]);
+    const metadata = await stat(path);
+    const replacement = path + ".new";
+    await writeFile(replacement, "other");
+    await utimes(replacement, metadata.atime, metadata.mtime);
+    await rename(replacement, path);
+    await expect(verify()).rejects.toBeInstanceOf(DeepScanRecoveryError);
+  });
+  test("rechecks a reserved, unstarted pass on resume and leaves a colliding directory untouched", async () => {
+    const h = await harness({ maxDiscoveryRuns: 1 });
+    const directory = "artifacts/deep-scan/passes/pass-1";
+    const state = newDeepScanCheckpoint(h.input.startedAt);
+    state.passes.push({ directory });
+    await h.seed(state);
+    const existing = join(h.input.scanDir, directory);
+    await mkdir(existing, { recursive: true });
+    await writeFile(join(existing, "prior"), "retained");
+    let checked = false;
+    const workbench = h.input.workbench;
+    h.input.workbench = (args, contents, signal) => {
+      if (args[0] === "check-deep-scan-target") checked = true;
+      return workbench(args, contents, signal);
+    };
+    h.input.writer.reserveDirectory = async (relative) => {
+      expect(checked).toBe(true);
+      try {
+        await mkdir(join(h.input.scanDir, relative));
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+        throw error;
+      }
+    };
+    await runDeepScans(h.input);
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]!.outputDir).toBe(
+      join(h.input.scanDir, "artifacts/deep-scan/passes/pass-2"),
+    );
+    expect(await readFile(join(existing, "prior"), "utf8")).toBe("retained");
+  });
   test("an empty fresh target records failure without reserving or starting children", async () => {
     const h = await harness();
     const workbench = h.input.workbench;
@@ -563,6 +612,24 @@ describe("ordinary scan composition", () => {
     ).toBe(true);
   });
 
+  test("recovers a context-limited initial grouping without retrying the whole report", async () => {
+    const h = await harness({ workers: 2, maxDiscoveryRuns: 2 });
+    h.setRun(async (options) =>
+      result(options.resumeScanId!, options.outputDir!, "same issue"),
+    );
+    let grouping = 0;
+    h.input.merge = async (_prompt, _signal, outputSchema) => {
+      expect(outputSchema).toBeUndefined();
+      grouping++;
+      throw Object.assign(new Error("context length exceeded"), {
+        code: "context_length_exceeded",
+      });
+    };
+    const state = await runDeepScans(h.input);
+    expect(grouping).toBe(1);
+    expect(state.mergedScanIds).toHaveLength(2);
+    expect(state.aggregate?.findings).toHaveLength(1);
+  });
   test("a terminal comparison checkpoints accepted child findings without another model call", async () => {
     const h = await harness({ workers: 2, maxDiscoveryRuns: 4 });
     const message = "Quota exceeded. Check your plan and billing details.";

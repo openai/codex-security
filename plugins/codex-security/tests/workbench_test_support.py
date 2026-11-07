@@ -1,3 +1,5 @@
+"""Build temporary workbench targets, scan artifacts, and database state for integration tests."""
+
 from __future__ import annotations
 
 import hashlib
@@ -39,6 +41,7 @@ PLUGIN_MANIFEST = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugi
 
 
 def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
+    """Load a fresh module from the plugin scripts directory, optionally overriding its import name."""
     script = SCRIPT.parent / f"{name}.py"
     spec = importlib.util.spec_from_file_location(module_name or name, script)
     if spec is None or spec.loader is None:
@@ -125,6 +128,7 @@ def source_plugin_version() -> str:
 
 
 def write_checkpoint(checkpoint_dir: Path, payload: Any, *, mtime_ns: int | None = None) -> Path:
+    """Write the serialized payload as a SHA-256-named checkpoint and optionally set its timestamp for ordering tests."""
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
@@ -138,6 +142,7 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any, *, mtime_ns: int | None
 
 
 def select_checkpoint(output: Path, checkpoint: Path, *, mtime_ns: int | None = None) -> Path:
+    """Write a head pointing to the checkpoint filename and return the head path for further fixture changes."""
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
     if mtime_ns is not None:
@@ -151,6 +156,7 @@ def write_result_draft(path: Path, draft: dict, *, mtime_ns: int) -> None:
 
 
 def sort_checkpoint_entries(monkeypatch, *, key=None, reverse=False):
+    """Control checkpoint enumeration order so a test can distinguish filesystem order from source precedence."""
     from workbench import saved_sources
 
     children = saved_sources._children
@@ -218,6 +224,7 @@ def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int
 def replay_saved_results(
     module, documents, scan_dir, scan_id, binding, workers=(), *, stopped=True
 ):
+    """Rebuild the interrupted result using the source digests frozen in the supplied manifest."""
     return module.merge_saved_results(
         scan_dir,
         scan_id,
@@ -243,6 +250,7 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
 
 
 def directory_snapshot_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -> str:
+    """Compute the expected snapshot digest from fixture paths, entry modes, link targets, and file contents."""
     excluded_relative = []
     for path in excluded:
         try:
@@ -286,6 +294,12 @@ def run_workbench(
     input_text: str | None = None,
     umask: int = -1,
 ) -> dict[str, object]:
+    """Run the workbench CLI with a fixture state directory and capture its output.
+
+    By default, decode JSON from stdout and raise CalledProcessError on failure.
+    With check=False, return the exit code and stderr for diagnostic assertions.
+    Entries in environment override the inherited environment and state setting.
+    """
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         check=check,
@@ -464,6 +478,8 @@ def write_remediation_patch(patch_path: Path, **text_options: Any) -> None:
 
 @dataclass(frozen=True)
 class RemediationRequest:
+    """Run remediation commands for one occurrence using the same request ID across retries and state changes."""
+
     state_dir: Path
     occurrence_id: str
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -1043,6 +1059,8 @@ def windows_file_backend() -> mock.Mock:
 
 
 class ScanFixtureTestCase(TestCase):
+    """Copy the example scan into a fresh temporary directory and rebuild its report for each test."""
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.scan_dir = Path(self.temp_dir.name) / "scan"
@@ -1065,6 +1083,7 @@ class ScanFixtureTestCase(TestCase):
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     def rewrite_sealed_artifact(self, relative_path: str, payload: object) -> None:
+        """Rewrite the JSON artifact and update its hash in the fixture manifest so the seal matches the new bytes."""
         self.write_json(relative_path, payload)
         manifest = self.read_json("scan-manifest.json")
         for artifact in manifest["scan"]["artifacts"]:
@@ -1077,3 +1096,20 @@ class ScanFixtureTestCase(TestCase):
 
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()
+
+
+def usage_counts(
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_write_input_tokens: int = 0,
+) -> dict[str, int]:
+    return {
+        "inputTokens": input_tokens,
+        "cachedInputTokens": cached_input_tokens,
+        "cacheWriteInputTokens": cache_write_input_tokens,
+        "outputTokens": output_tokens,
+        "reasoningOutputTokens": 0,
+        "totalTokens": input_tokens + output_tokens,
+    }

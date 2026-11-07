@@ -1,10 +1,11 @@
 import { join, relative } from "node:path";
-import { lstat } from "node:fs/promises";
+import { lstat, stat } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
 import { readScanFile } from "./contract.js";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { JsonObject } from "./config.js";
-import type { ScanCost } from "./cost.js";
+import type { ScanCost, ScanUsageMeasurement } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
 import {
   ScanCostLimitExceededError,
@@ -19,9 +20,11 @@ import {
   mergeExactScanFindings,
   validateScanMerge,
   unchangedScanGroups,
+  unconfirmedScanGroups,
   scanMergePrompt,
   type ScanMergeInput,
 } from "./scan-merge.js";
+import { exceedsComparisonContext } from "./same-fix.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import type { SemanticScan } from "./scan-semantics.js";
 import type { ScanResult } from "./result.js";
@@ -52,6 +55,47 @@ export {
   DEEP_SCAN_CHECKPOINT,
   type DeepScanCheckpoint,
 } from "./deep-scan-checkpoint.js";
+
+export type DeepScanDiagnostic = Readonly<Record<string, string | number>>;
+
+/** Every worker in one live composition uses the executable admitted for its first launch. */
+export function bindDeepScanExecutable(
+  path: string,
+  scanDir: string,
+): () => Promise<void> {
+  let binding: Promise<BigIntStats> | undefined;
+  const inspect = async () => {
+    const file = await stat(path, { bigint: true });
+    if (!file.isFile() || file.size === 0n)
+      throw new Error("Codex executable is not a non-empty file.");
+    return file;
+  };
+  return async () => {
+    if (binding === undefined) {
+      binding = inspect().catch((error) => {
+        binding = undefined;
+        throw error;
+      });
+      await binding;
+      return;
+    }
+    const original = await binding;
+    const current = await inspect().catch(() => null);
+    if (
+      !current ||
+      original.dev !== current.dev ||
+      original.ino !== current.ino ||
+      original.mtimeNs !== current.mtimeNs ||
+      original.ctimeNs !== current.ctimeNs ||
+      original.size !== current.size
+    ) {
+      throw new DeepScanRecoveryError(
+        `The Codex executable "${path}" changed after this Deep Scan started. Retry after the update finishes.`,
+        scanDir,
+      );
+    }
+  };
+}
 
 /** Required usage tracking must stop the entire composition before another pass. */
 export class ScanCostTrackingError extends ScanInterruptedError {}
@@ -94,6 +138,7 @@ export interface DeepScanComposition {
     signal: AbortSignal,
     outputSchema?: Record<string, unknown>,
   ): Promise<unknown>;
+  onDiagnostic?(event: DeepScanDiagnostic): void;
   onRetry?(message: string): void;
   onCleanupError?(error: unknown): void;
   onMergeCommitted?(event: {
@@ -104,6 +149,7 @@ export interface DeepScanComposition {
   }): void;
   writer: ScanArtifactRestorer & {
     remove(relativePath: string): Promise<void>;
+    reserveDirectory?(relativePath: string): Promise<boolean>;
   };
   projectChild(
     sourceScanId: string,
@@ -113,6 +159,10 @@ export interface DeepScanComposition {
   publish(draft: SemanticScan): Promise<void>;
   onCost(key: string, cost: Readonly<ScanCost> | null): void;
   onUsage?(key: string, usage: Readonly<ScanTokenUsage>): void;
+  onMeasurement?(
+    key: string,
+    measurement: Readonly<ScanUsageMeasurement>,
+  ): void;
   historicalCost?(
     threadId: string,
     scanDirectory?: string,
@@ -122,11 +172,22 @@ export interface DeepScanComposition {
   costUnavailable?: boolean;
 }
 
-function validatePassDirectories(state: DeepScanCheckpoint): void {
-  for (const [index, pass] of state.passes.entries()) {
-    if (pass.directory !== passDirectory(index))
+function validatePassDirectories(state: DeepScanCheckpoint): number {
+  const directories = new Set<string>();
+  let maximum = 0;
+  for (const pass of state.passes) {
+    const number = Number(pass.directory.split("pass-").at(-1));
+    if (
+      !Number.isSafeInteger(number) ||
+      number < 1 ||
+      pass.directory !== passDirectory(number - 1) ||
+      directories.has(pass.directory)
+    )
       throw new Error("Saved scan pass escaped its parent.");
+    directories.add(pass.directory);
+    maximum = Math.max(maximum, number);
   }
+  return maximum;
 }
 
 function savedPassIndex(
@@ -186,7 +247,15 @@ export async function runDeepScans(
   if (input.costUnavailable) state.costUnavailable = true;
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
-  validatePassDirectories(state);
+  let lastDirectory = validatePassDirectories(state);
+  const diagnostic = (event: DeepScanDiagnostic) => {
+    try {
+      void Promise.resolve(input.onDiagnostic?.(event)).catch(() => {});
+    } catch {
+      // An optional observer cannot interrupt retained scan work.
+    }
+  };
+  diagnostic({ event: "coordinator_started", scanId });
   if (state.discoveryUserContext === undefined)
     state.discoveryUserContext = input.scanOptions.scanPrompt ?? null;
   let saveTail = Promise.resolve();
@@ -296,6 +365,7 @@ export async function runDeepScans(
         );
       } else if (
         (input.onUsage !== undefined ||
+          input.onMeasurement !== undefined ||
           input.scanOptions.onWorkerEvent !== undefined) &&
         record.continuationThreadId &&
         record.progress.status === "complete"
@@ -477,12 +547,21 @@ export async function runDeepScans(
       try {
         const response = clean
           ? unchangedScanGroups(scanId, state.aggregate)
-          : await input.merge(
-              validationError === undefined
-                ? prompt
-                : `${prompt}\n\nYour previous merge response failed validation: ${errorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
-              executionSignal,
-            );
+          : await input
+              .merge(
+                validationError === undefined
+                  ? prompt
+                  : `${prompt}\n\nYour previous merge response failed validation: ${errorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
+                executionSignal,
+              )
+              .catch((error) => {
+                executionSignal.throwIfAborted();
+                if (!exceedsComparisonContext(error)) throw error;
+                input.onRetry?.(
+                  "Deep Scan is comparing smaller groups after the merge exceeded the model context.",
+                );
+                return unconfirmedScanGroups(scanId, pending, state.aggregate);
+              });
         try {
           merged = validateScanMerge(response, pending, state.aggregate);
         } catch (error) {
@@ -515,6 +594,10 @@ export async function runDeepScans(
               isCodexNonRetryableFailure(error)
             )
               throw error;
+            diagnostic({
+              event: "finding_comparison_failed",
+              reason: errorMessage(error),
+            });
             input.onRetry?.(
               `Deep Scan kept disputed findings separate: ${errorMessage(error)}`,
             );
@@ -595,7 +678,14 @@ export async function runDeepScans(
         discoverySignal.throwIfAborted();
         try {
           const resuming = pass.scanId !== undefined;
-          if (acceptedResult === undefined) clientInvoked = true;
+          if (acceptedResult === undefined) {
+            clientInvoked = true;
+            diagnostic({
+              event: "worker_started",
+              directory: pass.directory,
+              attempt: attempt + 1,
+            });
+          }
           acceptedResult ??= await client.run(input.repository, {
             ...input.scanOptions,
             scanPrompt: state.discoveryUserContext ?? undefined,
@@ -618,6 +708,11 @@ export async function runDeepScans(
               await save();
               if (state.costUnavailable) reportPassCost("previous-work", null);
             },
+            onMeasurement:
+              input.onMeasurement === undefined
+                ? input.scanOptions.onMeasurement
+                : (measurement) =>
+                    input.onMeasurement!(pass.directory, measurement),
             onUsage:
               input.onUsage === undefined
                 ? input.scanOptions.onUsage
@@ -757,7 +852,16 @@ export async function runDeepScans(
       }
       if (state.aggregate !== null && state.aggregate !== previousAggregate)
         await input.publish(state.aggregate);
-      if (!state.passes.length && state.aggregate === null) {
+      if (
+        state.aggregate === null &&
+        !state.mergeStarted &&
+        state.passes.every(
+          (pass) =>
+            !pass.failed &&
+            !pass.completed &&
+            (!pass.scanId || pass.executionNotStarted),
+        )
+      ) {
         try {
           await workbench(
             ["check-deep-scan-target", "--scan-id", scanId],
@@ -775,7 +879,25 @@ export async function runDeepScans(
         state.passes.length < settings.maxDiscoveryRuns &&
         state.noNewStreak < settings.stopAfterNoNew
       ) {
-        batch.push(reservePass(state));
+        const pass = reservePass(state);
+        pass.directory = passDirectory(lastDirectory++);
+        batch.push(pass);
+      }
+      if (input.writer.reserveDirectory) {
+        // Reserve labels in dispatch order before publishing them. Existing
+        // directories may belong to a coordinator finishing a handoff.
+        for (const pass of batch) {
+          if (pass.scanId !== undefined) continue;
+          while (!(await input.writer.reserveDirectory(pass.directory))) {
+            if (!Number.isSafeInteger(++lastDirectory))
+              throw new Error("No Deep Scan pass directory is available.");
+            pass.directory = passDirectory(lastDirectory - 1);
+          }
+          lastDirectory = Math.max(
+            lastDirectory,
+            Number(pass.directory.split("pass-").at(-1)),
+          );
+        }
       }
       await save();
       const results = await Promise.allSettled(batch.map(runPass));

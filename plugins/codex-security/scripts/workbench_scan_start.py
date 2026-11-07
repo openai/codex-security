@@ -19,7 +19,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
-from workbench.storage import state_dir
+from workbench.storage import create_private_temporary_directory, state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -30,6 +30,7 @@ from workbench_validation import optional_text, read_json_object
 
 
 def safe_segment(value: str) -> str:
+    """Normalize a filename segment, falling back to ``scan`` for an empty result."""
     segment = re.sub(r"[^\w.-]", "-", value)
     if segment != value:
         segment = segment.strip("-")
@@ -37,10 +38,12 @@ def safe_segment(value: str) -> str:
 
 
 def compact_timestamp() -> str:
+    """Return the current UTC time in YYYYMMDDTHHMMSSZ format."""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def loaded_plugin_version() -> str:
+    """Read the required version string from the loaded plugin's manifest."""
     manifest = read_json_object(
         Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
     )
@@ -56,6 +59,11 @@ def scan_target_identity(
     *,
     metadata: os.stat_result | None = None,
 ) -> tuple[str, str | None, int | str, int | str]:
+    """Return revision, content digest, device ID, and inode for scan registration.
+
+    An explicit diff uses its head revision and a None digest. Other targets use
+    the worktree or directory digest. Device and inode use the SQLite-safe representation.
+    """
     if metadata is None:
         metadata = target.stat()
     revision = diff_target["headRevision"] if diff_target else git_revision(target)
@@ -95,6 +103,7 @@ def require_deep_pass_target(
 def scan_diff_identity(
     diff_target: dict[str, str] | None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
+    """Return kind, base, head, and optional digest in database order, or four nulls."""
     if diff_target is None:
         return (None, None, None, None)
     return (
@@ -106,6 +115,7 @@ def scan_diff_identity(
 
 
 def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
+    """Rebuild the diff target from a scan row, or return None for a full scan."""
     if not row["diff_target_kind"]:
         return None
     target = {
@@ -128,6 +138,7 @@ def archive_scan(
     *,
     before_archive: Callable[[], None] | None = None,
 ) -> Iterator[Path | None]:
+    """Yield the archive directory while preparing the original scan path for reuse."""
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
         if args.archived_scan_dir is not None
@@ -170,11 +181,10 @@ def archive_scan(
         else []
     )
     scans = [scan for scan in scans if Path(scan["scan_dir"]).is_relative_to(scan_dir)]
-    artifacts = connection.execute(
-        "SELECT scan_id, kind, path FROM scan_artifacts "
-        "WHERE scan_id IN (SELECT value FROM json_each(?))",
+    has_artifacts = connection.execute(
+        "SELECT 1 FROM scan_artifacts WHERE scan_id IN (SELECT value FROM json_each(?)) LIMIT 1",
         (json.dumps([scan["id"] for scan in scans]),),
-    ).fetchall()
+    ).fetchone()
     moved = False
     try:
         if archived_scan_dir is None:
@@ -191,7 +201,7 @@ def archive_scan(
                 raise SystemExit(
                     "Cannot archive output containing the workbench state or active database."
                 )
-            if artifacts and not has_contents:
+            if has_artifacts and not has_contents:
                 raise SystemExit(
                     "The archived scan directory is required to preserve existing scan artifacts."
                 )
@@ -230,15 +240,42 @@ def archive_scan(
                     str(previous_directory),
                 ),
             )
-        for artifact in artifacts:
+
+            def archive_path(value: str | None) -> str | None:
+                if value is None or not Path(value).is_relative_to(scan_dir):
+                    return value
+                return str(archived_scan_dir / Path(value).relative_to(scan_dir))
+
+            connection.create_function("archive_path", 1, archive_path)
             try:
-                relative_path = Path(artifact["path"]).relative_to(scan_dir)
-            except ValueError:
-                continue
-            connection.execute(
-                "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
-                (str(archived_scan_dir / relative_path), artifact["scan_id"], artifact["kind"]),
-            )
+                for table, columns in (
+                    ("scan_artifacts", ("path",)),
+                    ("deep_scan_workers", ("prompt_path", "artifact_dir", "result_manifest_path")),
+                    (
+                        "deep_scan_runs",
+                        (
+                            "manifest_path",
+                            "canonical_inventory_path",
+                            "canonical_finding_report_path",
+                            "canonical_candidates_path",
+                            "dedupe_report_path",
+                            "seed_research_path",
+                            "work_ledger_path",
+                            "raw_candidates_path",
+                            "coverage_ledger_path",
+                            "findings_dir",
+                        ),
+                    ),
+                ):
+                    assignments = ", ".join(
+                        f"{column} = archive_path({column})" for column in columns
+                    )
+                    connection.execute(
+                        f"UPDATE {table} SET {assignments} WHERE scan_id = ?",
+                        (scan["id"],),
+                    )
+            finally:
+                connection.create_function("archive_path", 1, None)
         # The caller commits registration before leaving this context. Older SDKs
         # supplied an already-moved directory; only restore moves we own.
         yield archived_scan_dir
@@ -345,12 +382,10 @@ def insert_running_scan(
         # Missing version attribution must not prevent scan registration.
         plugin_version = None
     if scan_dir is None:
-        scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
-            )
-        ).resolve()
+        scan_dir = create_private_temporary_directory(
+            target_root,
+            prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
+        )
     connection.execute(
         """
         INSERT INTO scans (

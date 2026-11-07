@@ -1,4 +1,5 @@
 import { importSource } from "./import-module.ts";
+import { fixturePython } from "./support/python.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -16,6 +17,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
 import {
   draftApi,
@@ -104,6 +106,186 @@ test("current draft recovery rejects legacy optional details without modifying s
   assert.deepEqual(input, original);
 });
 
+async function finalizeParentFindings({
+  root,
+  context,
+}: Awaited<ReturnType<typeof fixture>>) {
+  const manifestPath = path.join(root, "scan-manifest.json");
+  const manifest = await readJson(manifestPath);
+  Object.assign(manifest.scan, {
+    id: context.scanId,
+    producer: { name: "codex-security-plugin", version: "0.1.0" },
+    status: "completed",
+    startedAt: "2026-05-31T18:00:00Z",
+    completedAt: "2026-05-31T18:09:00Z",
+  });
+  await writeJson(manifestPath, manifest);
+  for (const file of ["findings.json", "coverage.json"]) {
+    const filePath = path.join(root, file);
+    const document = await readJson(filePath);
+    document.scanId = context.scanId;
+    await writeJson(filePath, document);
+  }
+  await execFileAsync(fixturePython, [
+    fileURLToPath(
+      new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
+    ),
+    "--scan-dir",
+    root,
+  ]);
+  return (await readJson(root, "findings.json")).findings;
+}
+
+// Finding reconciliation is shared by failed and canceled scans. Exercise both
+// terminal bindings without repeating every identity case for each status.
+for (const [layout, status] of [
+  ["standard", "failed"],
+  ["diff", "canceled"],
+  ["deep", "failed"],
+] as const) {
+  for (const variant of [
+    "one",
+    "three",
+    "legacy",
+    "owner",
+    "siblings",
+    "preserved",
+    "new-sibling",
+    "new-worker-sibling",
+    "range-refinement",
+    "report-added",
+    "ledger-added",
+    "report-id",
+    "ledger-id",
+    "worker-report-id",
+    "worker-ledger-id",
+    "cross-field-id",
+    "severity-revision",
+    "title-revision",
+    "new-sibling-checkpoints",
+    "new-worker-sibling-checkpoints",
+  ]) {
+    test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
+      const f = await fixture(t, layout);
+      const count =
+        variant === "three"
+          ? 3
+          : variant.includes("sibling") || variant === "preserved"
+            ? 2
+            : variant.endsWith("-id")
+              ? 2
+              : 1;
+      const findings = Array.from({ length: count }, (_, index) => {
+        const finding = findingFor(
+          variant.includes("sibling") || variant.endsWith("-id")
+            ? "shared-review"
+            : `review-${index + 1}`,
+        );
+        if (
+          variant === "owner" ||
+          variant.startsWith("new-worker-") ||
+          variant.startsWith("worker-")
+        )
+          finding.provenance.workerId = "worker-1";
+        if (variant.includes("sibling"))
+          finding.title = `Synthetic sibling ${index + 1}`;
+        if (variant.endsWith("-id"))
+          finding.extensions = {
+            [variant.includes("report") ||
+            (variant === "cross-field-id" && index === 0)
+              ? "reportId"
+              : "ledgerRowId"]: `synthetic-report-${index + 1}`,
+          };
+        if (variant === "preserved") finding.locations[0].startLine = index + 1;
+        return finding;
+      });
+      if (variant === "legacy")
+        Object.assign(findings[0], {
+          identity: { anchor: "synthetic-review-finding" },
+        });
+      if (variant === "severity-revision") {
+        const initial = structuredClone(findings[0]);
+        initial.severity.level = "high";
+        initial.summary = "Initial assessment before reviewing the control.";
+        await f.checkpoint(f.findingsDraft([initial]));
+      }
+      await f.writeFindings(
+        variant.endsWith("-id") ? findings.slice(0, 1) : findings,
+      );
+      if (variant.endsWith("-id"))
+        await f.checkpoint(f.findingsDraft(findings.slice(1)));
+      if (variant.endsWith("-added")) {
+        findings[0].extensions = {
+          [variant === "report-added" ? "reportId" : "ledgerRowId"]:
+            "synthetic-report-1",
+        };
+        await f.writeFindings(findings);
+      }
+      if (variant === "title-revision") {
+        findings[0].title = "Revised synthetic review finding";
+        await f.writeFindings(findings);
+      }
+      if (variant === "range-refinement") {
+        findings[0].locations[0].endLine = 1;
+        await f.writeFindings(findings);
+      }
+      if (variant.startsWith("new-")) {
+        const file = path.join(f.root, "findings.json");
+        const saved = await readJson(file);
+        saved.findings = saved.findings.slice(0, 1);
+        await writeFile(file, JSON.stringify(saved));
+      }
+      if (variant.endsWith("-checkpoints")) {
+        findings[1].severity.level = "high";
+        await f.checkpoint(f.findingsDraft(findings.slice(1)));
+      }
+      if (variant === "preserved") {
+        const file = path.join(f.root, "findings.json");
+        const saved = await readJson(file);
+        saved.findings[1].provenance.preservedIdentity = structuredClone(
+          saved.findings[1].identity,
+        );
+        saved.findings[1].identity.instance = "saved-distinct-location";
+        await writeFile(file, JSON.stringify(saved));
+      }
+      const { stdout } = await execFileAsync(fixturePython, [
+        "-c",
+        `import sys,json
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from workbench_saved_results import merge_saved_results
+from finalize_scan_contract import _prepare_scan_finalization, _write_prepared_scan_finalization
+root,scan_id,status=Path(sys.argv[2]),sys.argv[3],sys.argv[4]
+manifest=json.loads((root/'scan-manifest.json').read_text())
+coverage=json.loads((root/'coverage.json').read_text())
+binding={'status':status,'allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
+binding.update(scanId=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
+warnings=[]
+documents=merge_saved_results(root,scan_id,binding,[],warnings,stopped=True,reason='Synthetic interruption')
+documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},status=status,startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
+for document in documents[1:]: document['scanId']=scan_id
+prepared=_prepare_scan_finalization(root,completion_binding=binding,recover_unsealed=True,draft_documents=documents)
+warnings.extend(prepared.warnings)
+published=_write_prepared_scan_finalization(prepared)
+print(json.dumps({'count':len(published[1]['findings']),'status':published[0]['scan']['status'],'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
+        fileURLToPath(new URL("../../scripts", import.meta.url)),
+        f.root,
+        f.context.scanId!,
+        status,
+      ]);
+      assert.deepEqual(JSON.parse(stdout), {
+        count,
+        status,
+        sealed: true,
+        warnings: [],
+        assessments: findings
+          .map((finding) => [finding.title, finding.severity.level])
+          .sort(),
+      });
+    });
+  }
+}
+
 for (const layout of ["standard", "diff", "worker"] as const) {
   test(`${layout}: duplicate task IDs cannot close independent deferred work`, async (t) => {
     const f = await fixture(t, layout);
@@ -187,6 +369,52 @@ for (const layout of ["standard", "diff"] as const) {
     assert.equal(result.warnings[1], "Workbench publication warning.");
   });
 }
+
+for (const source of ["title", "candidateId", "reportId", "ledgerRowId"]) {
+  for (const [value, expected] of [
+    ["_Unsafe archive_", "unsafe-archive_"],
+    [".hidden file", "hidden-file"],
+    ["/absolute path", "absolute-path"],
+    ["./_-", "finding-1"],
+    ["安全检查", "finding-1"],
+    ["Résumé review", "resume-review"],
+    ["9valid._/anchor", "9valid._/anchor"],
+  ]) {
+    test(`standard: generated ${source} identity survives a draft update for ${value}`, async (t) => {
+      const f = await fixture(t, "standard");
+      const finding = {
+        ...findingFor("candidate-example"),
+        ...(source === "title"
+          ? { title: value, provenance: { source: "local_plugin" } }
+          : { extensions: { [source]: value } }),
+      };
+      const draft = f.findingsDraft([finding]);
+      await f.write(draft);
+      const saved = (await readJson(f.root, "findings.json")).findings[0];
+      await f.write(draft);
+      const updated = (await readJson(f.root, "findings.json")).findings;
+      assert.equal(updated.length, 1);
+      assert.deepEqual(updated[0].identity, saved.identity);
+      assert.equal(
+        saved.identity[
+          source === "title" || source === "candidateId" ? "anchor" : "instance"
+        ],
+        expected,
+      );
+    });
+  }
+}
+
+test("parent: resume provisional deferred paths until the task is closed", async (t) => {
+  const f = await fixture(t, "standard");
+  const pending = { id: "review", ...generic, paths: ["../outside"] };
+  await f.writeReviewState({ deferred: [pending] });
+  assert.deepEqual((await f.writeReviewState()).reviewState.deferred, [
+    pending,
+  ]);
+  await f.writeReviewState({ resolvedDeferred: [close(pending.id)] }, true);
+  assert.deepEqual((await f.read()).deferred, []);
+});
 
 for (const layout of ["standard", "diff"] as const) {
   test(`${layout}: moving a saved task stops blocking its former surface`, async (t) => {

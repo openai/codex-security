@@ -113,14 +113,18 @@ def composition_execution_threads(scan: sqlite3.Row) -> tuple[str, ...]:
 
 
 def load_composition(
-    connection: sqlite3.Connection, scan: sqlite3.Row, *, checkpoint: bool = True
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    *,
+    checkpoint: bool = True,
+    execution_threads: bool = True,
 ) -> CompositionView:
     if scan["mode"] != "deep":
         return CompositionView(None, (), (), None)
     return CompositionView(
         read_composition_checkpoint(scan) if checkpoint else None,
         tuple(composition_children(connection, scan)),
-        composition_execution_threads(scan),
+        composition_execution_threads(scan) if execution_threads else (),
         connection.execute(
             "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
         ).fetchone(),

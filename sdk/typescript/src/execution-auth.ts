@@ -6,7 +6,6 @@ export { rawEnvironmentValue as environmentValue } from "./codex-home.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { configuredAuthEnvironment } from "./auth.js";
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import {
   EXTERNAL_CODEX_PROVIDERS,
   hasCommandAuth,
@@ -220,7 +219,6 @@ export function selectedScanEnvironment(
       ),
     );
   }
-  forwardExternalImportSetting(environment, selected);
   return selected;
 }
 
@@ -302,7 +300,6 @@ export function withoutProviderEnvironment(
   const child = Object.fromEntries(
     Object.entries(environment).filter(([key]) => !keys.has(key.toUpperCase())),
   );
-  forwardExternalImportSetting(environment, child);
   return child;
 }
 
@@ -324,7 +321,6 @@ export function withoutCodexHome(
       ([name]) => name.toUpperCase() !== "CODEX_HOME",
     ),
   );
-  forwardExternalImportSetting(environment, child);
   return child;
 }
 

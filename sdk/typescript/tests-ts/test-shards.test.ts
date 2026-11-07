@@ -274,6 +274,7 @@ test.each([
   [defaultTimeoutMs, ["--test-name-pattern", "--timeout=5000"]],
   ["7000", ["--timeout", "7000", "-t", "--timeout=5000"]],
   [defaultTimeoutMs, ["--coverage-dir", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--timings", "--timeout=5000"]],
   [defaultTimeoutMs, ["--title", "--timeout=5000"]],
   ["7000", ["--config", "--timeout=7000"]],
   ["7000", ["-c", "--timeout=7000"]],

@@ -1,3 +1,5 @@
+"""Recover findings and replay the frozen result when optional threat-model context is invalid."""
+
 from __future__ import annotations
 
 import copy

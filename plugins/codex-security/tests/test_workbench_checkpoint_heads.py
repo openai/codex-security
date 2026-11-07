@@ -1,3 +1,5 @@
+"""Replay frozen checkpoint selections across late changes, tied timestamps, and explicit recovery."""
+
 from __future__ import annotations
 
 import copy

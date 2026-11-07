@@ -14,6 +14,13 @@ from typing import Any
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 REPORTABLE_SEVERITIES = {"critical", "high", "medium", "low"}
+THREAT_MODEL_SECTIONS = (
+    ("Assets", "assets"),
+    ("Trust Boundaries", "trustBoundaries"),
+    ("Attacker Capabilities", "attackerCapabilities"),
+    ("Security Objectives", "securityObjectives"),
+    ("Assumptions", "assumptions"),
+)
 DISPOSITION_LABELS = {
     "reported": "Reported",
     "no_issue_found": "No issue found",
@@ -31,6 +38,14 @@ WWW_LINK_RE = r"(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
 
 class ReportProjectionError(ValueError):
     """Raised when a canonical scan cannot be projected into a valid report."""
+
+
+def markdown_threat_model_content(model: dict[str, Any]) -> str | None:
+    """Return nonblank authored content for a Markdown model, otherwise None."""
+    content = model.get("content")
+    if model.get("format") == "markdown" and isinstance(content, str) and content.strip():
+        return content
+    return None
 
 
 def _escape_markdown(value: str) -> str:
@@ -137,6 +152,7 @@ def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
 
 
 def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
+    """Select deep-report formatting for repository scans in deep mode and scoped scans with deep-child metadata."""
     if coverage.get("mode") == "deep_repository":
         return True
     if coverage.get("mode") != "scoped_path":
@@ -167,15 +183,6 @@ def _deep_title_parts(finding: dict[str, Any], report_id: str) -> tuple[str, str
     ):
         return match.group(1), annotation
     return normalized, None
-
-
-def _deep_finding_groups(
-    findings: list[dict[str, Any]], writeup_paths: list[str | None]
-) -> list[list[tuple[int, dict[str, Any], str | None]]]:
-    groups: dict[str, list[tuple[int, dict[str, Any], str | None]]] = {}
-    for number, (finding, report_path) in enumerate(zip(findings, writeup_paths, strict=True), 1):
-        groups.setdefault(_deep_candidate_id(finding), []).append((number, finding, report_path))
-    return list(groups.values())
 
 
 def _deep_group_levels(
@@ -244,6 +251,7 @@ def _bullet_section(heading: str, items: list[str]) -> list[str]:
 
 
 def code_evidence_rows(*catalogs: Any) -> Iterator[dict[str, Any]]:
+    """Yield evidence objects with nonblank code in their original order."""
     for items in catalogs:
         if isinstance(items, list):
             yield from (
@@ -256,6 +264,7 @@ def code_evidence_rows(*catalogs: Any) -> Iterator[dict[str, Any]]:
 
 
 def embedded_code_evidence(section: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Collect code evidence from both supported field spellings."""
     return code_evidence_rows(section.get("codeEvidence"), section.get("code_evidence"))
 
 
@@ -284,6 +293,7 @@ def _section_code_evidence(
 
 
 def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
+    """Return the first recorded root-cause field name and its merged detail, or (None, None) if absent."""
     keys = [key for key in ("rootCause", "root_cause") if key in value]
     if not keys:
         return None, None
@@ -749,6 +759,16 @@ def _linked_finding_section(number: int, finding: dict[str, Any], report_path: s
 def build_report_markdown(
     manifest: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any]
 ) -> str:
+    """Render findings and review coverage as a Markdown report ending in a newline.
+
+    Args:
+        manifest: Scan metadata, target, and scope.
+        findings_document: Canonical findings for the scan.
+        coverage: Review coverage for older manifests. Newer scans supply review state inline.
+
+    Raises:
+        ReportProjectionError: Reportable findings share a writeup path.
+    """
     scan = manifest["scan"]
     if "review" in scan and "coverageRef" not in scan:
         from review_state import review_state
@@ -765,19 +785,23 @@ def build_report_markdown(
         ),
         key=_finding_sort_key,
     )
-    writeup_paths = [_writeup_report_path(finding) for finding in findings]
-    duplicate_writeup_paths = sorted(
-        path
-        for path, count in Counter(path for path in writeup_paths if path is not None).items()
-        if count > 1
-    )
+    numbered_findings = [
+        (number, finding, _writeup_report_path(finding))
+        for number, finding in enumerate(findings, 1)
+    ]
+    writeup_counts = Counter(path for _, _, path in numbered_findings if path is not None)
+    duplicate_writeup_paths = sorted(path for path, count in writeup_counts.items() if count > 1)
     if duplicate_writeup_paths:
         raise ReportProjectionError(
             "reportable findings have duplicate writeup reportPath values: "
             + ", ".join(duplicate_writeup_paths)
         )
     deep_presentation = uses_deep_presentation(coverage, findings)
-    deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
+    deep_finding_groups: dict[str, list[tuple[int, dict[str, Any], str | None]]] = {}
+    if deep_presentation:
+        for entry in numbered_findings:
+            _, finding, _ = entry
+            deep_finding_groups.setdefault(_deep_candidate_id(finding), []).append(entry)
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = [
         _path_text(path) for path in coverage.get("includePaths", scope.get("includePaths", []))
@@ -846,8 +870,8 @@ def build_report_markdown(
             "",
         ]
     )
-    content = threat_model.get("content")
-    if threat_model.get("format") == "markdown" and isinstance(content, str) and content.strip():
+    content = markdown_threat_model_content(threat_model)
+    if content is not None:
         lines.append(content)
     else:
         lines.append(
@@ -856,16 +880,24 @@ def build_report_markdown(
                 "No explicit canonical threat-model summary was recorded.",
             )
         )
-        for heading, key in (
-            ("Assets", "assets"),
-            ("Trust Boundaries", "trustBoundaries"),
-            ("Attacker Capabilities", "attackerCapabilities"),
-            ("Security Objectives", "securityObjectives"),
-            ("Assumptions", "assumptions"),
-        ):
+        for heading, key in THREAT_MODEL_SECTIONS:
             values = _strings(threat_model.get(key))
             if values:
                 lines.extend(["", f"### {heading}", "", *(f"- {value}" for value in values)])
+    reviews = scan.get("reviewState", {}).get("reviews")
+    if isinstance(reviews, list) and any(
+        isinstance(review, dict) and isinstance(review.get("threatModel"), dict)
+        for review in reviews
+    ):
+        lines.extend(
+            [
+                "",
+                (
+                    "Other reviews recorded different threat models. See the `threatModel` fields "
+                    "in `scan.reviewState.reviews` in the [scan manifest](scan-manifest.json)."
+                ),
+            ]
+        )
     lines.extend(["", "## Findings", ""])
     informational_count = sum(
         finding["severity"]["level"] == "informational" for finding in findings_document["findings"]
@@ -887,7 +919,7 @@ def build_report_markdown(
                     "| --- | --- | --- | --- | --- |",
                 ]
             )
-            lines.extend(_deep_group_row(group) for group in deep_finding_groups)
+            lines.extend(_deep_group_row(group) for group in deep_finding_groups.values())
         else:
             lines.extend(
                 [
@@ -895,9 +927,7 @@ def build_report_markdown(
                     "| --- | --- | --- | --- |",
                 ]
             )
-            for number, (finding, report_path) in enumerate(
-                zip(findings, writeup_paths, strict=True), 1
-            ):
+            for number, finding, report_path in numbered_findings:
                 title = _cell(finding["title"])
                 finding_link = f"[{title}](#finding-{number})"
                 writeup_link = f"[Open report]({report_path})" if report_path else "inline below"
@@ -917,9 +947,7 @@ def build_report_markdown(
                 "| low | Evidence is incomplete and the item is retained only for explicit follow-up. |",
             ]
         )
-        for number, (finding, report_path) in enumerate(
-            zip(findings, writeup_paths, strict=True), 1
-        ):
+        for number, finding, report_path in numbered_findings:
             # Composed details can go beyond any one retained source write-up.
             if report_path is not None and not finding.get("provenance", {}).get("sourceFindings"):
                 lines.extend(["", *_linked_finding_section(number, finding, report_path)])
@@ -1025,6 +1053,7 @@ def generate_report_markdown(
     findings: dict[str, Any],
     coverage: dict[str, Any],
 ) -> bytes:
+    """Return the Markdown report for the scan as UTF-8 bytes ready to write."""
     return build_report_markdown(manifest, findings, coverage).encode("utf-8")
 
 

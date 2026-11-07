@@ -1,3 +1,5 @@
+"""Test scan ownership and coherent workbench responses when cancellation or replacement races a request."""
+
 from __future__ import annotations
 
 import argparse

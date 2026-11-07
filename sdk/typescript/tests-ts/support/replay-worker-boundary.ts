@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as childProcess from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { spyOn } from "bun:test";
+import { expect, spyOn } from "bun:test";
 import { parse } from "smol-toml";
 import { fakeCodexSource } from "../../../../plugins/codex-security/mcp-app/tests/support/fake-codex-source.ts";
 import { scanRuntimeCodexConfig } from "../../src/api.js";
@@ -118,10 +118,9 @@ export async function checkReplayWorkerSettings(
             selected = deepMerge(selected, parse(args[++index]!) as JsonObject);
         }
         assert.equal(selected["model_provider"], config["model_provider"]);
-        assert.deepEqual(
-          parse(marker.profileContents)["model_providers"],
-          config["model_providers"],
-        );
+        expect(
+          (parse(marker.profileContents) as JsonObject)["model_providers"],
+        ).toEqual(config["model_providers"]);
         assert.equal(marker.providerKey, environment.SYNTHETIC_GATEWAY_KEY);
         assert.equal(selected["model_providers"], undefined);
         const shared = parse(marker.codexConfig);
@@ -134,9 +133,8 @@ export async function checkReplayWorkerSettings(
           "skills",
           "model_catalog_json",
         ])
-          assert.deepEqual(selected[key], config[key]);
-        assert.deepEqual(
-          (selected["agents"] as JsonObject)["reviewer"],
+          expect(selected[key]).toEqual(config[key]);
+        expect((selected["agents"] as JsonObject)["reviewer"]).toEqual(
           (config["agents"] as JsonObject)["reviewer"],
         );
         for (const key of ["view_image", "shell_tool"])
@@ -145,24 +143,21 @@ export async function checkReplayWorkerSettings(
           parse(marker.profileContents) as JsonObject,
           selected,
         );
-        assert.deepEqual(
-          (effective["features"] as JsonObject)["code_mode"],
+        expect((effective["features"] as JsonObject)["code_mode"]).toEqual(
           (config["features"] as JsonObject)["code_mode"],
         );
         const servers = effective["mcp_servers"] as JsonObject;
-        assert.deepEqual(
-          servers["codex_security"],
+        expect(servers["codex_security"]).toEqual(
           (config["mcp_servers"] as JsonObject)["codex_security"],
         );
-        assert.deepEqual(servers["codex-security"], {
+        expect(servers["codex-security"]).toEqual({
           command: "node",
           enabled: false,
         });
         assert.equal(selected["approval_policy"], "never");
-        assert.deepEqual(
+        expect(
           (selected["permissions"] as JsonObject)["codex_security_scan"],
-          profile,
-        );
+        ).toEqual(profile);
         assert.equal(args.includes("resume"), resumed);
       }
     }

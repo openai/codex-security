@@ -1,6 +1,9 @@
+"""Check how structured scan records and legacy evidence become readable Markdown reports."""
+
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 from workbench_test_support import load_script
@@ -44,6 +47,17 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
         "deferred": [],
     }
     return manifest, findings, coverage
+
+
+def test_report_points_to_distinct_worker_models_in_the_manifest(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(Path(PROJECTION.__file__).parent)
+    manifest, findings, coverage = canonical_documents()
+    manifest["scan"].update(
+        review={},
+        reviewState={"reviews": [{"workerId": "worker", "threatModel": {"summary": "Job state"}}]},
+    )
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "scan.reviewState.reviews" in markdown
 
 
 def report_with_finding(**fields: object) -> str:

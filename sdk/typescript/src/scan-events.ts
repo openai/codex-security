@@ -1,3 +1,4 @@
+import { turnPricingMetadata } from "./cost-model.js";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bundledPluginRoot } from "./runtime.js";
@@ -54,9 +55,10 @@ interface ScanEventRunOptions {
   authentication?: ScanAuthentication;
   workbenchValidated?: boolean;
   model?: string;
+  pricingContext?: import("./cost-model.js").ScanPricingContext;
   expectedFilesTotal?: number;
   onFinalize?: (usage: unknown) => Promise<unknown>;
-  onTurnStatus?: (status: "completed" | "failed") => void;
+  onTurnStatus?: (status: "completed" | "failed", message?: string) => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -166,7 +168,8 @@ export async function runScanTurn(
       onEvent: async (event) => {
         if (event.type === "turn.completed")
           options.onTurnStatus?.("completed");
-        if (event.type === "turn.failed") options.onTurnStatus?.("failed");
+        if (event.type === "turn.failed")
+          options.onTurnStatus?.("failed", turnFailureMessage(event["error"]));
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&
@@ -258,6 +261,7 @@ export async function runScanTurn(
         status,
         finalResponse,
         usage,
+        ...turnPricingMetadata(options.pricingContext),
         ...(options.model === undefined ? {} : { model: options.model }),
       },
     };

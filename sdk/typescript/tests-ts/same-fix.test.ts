@@ -154,3 +154,42 @@ test("the primary evidence includes its immutable identity and excludes repeated
   );
   expect(reviewed).toBe(1);
 });
+
+test("context-limited comparisons retain independent pairs through both review stages", async () => {
+  for (const oversizedStage of ["review", "confirmation"]) {
+    const errors: unknown[] = [];
+    const matches = await checkSameFix(
+      [group("First"), group("Second"), group("Oversized")],
+      async (prompt) => {
+        const input = JSON.parse(prompt.split("\n").at(-1)!);
+        if (input.pairs) {
+          if (
+            oversizedStage === "review" &&
+            input.reports.some(
+              (report: { primary: { title: string } }) =>
+                report.primary.title === "Oversized",
+            )
+          )
+            throw Object.assign(new Error("prompt too long"), {
+              code: "context_length_exceeded",
+            });
+          return {
+            reviews: input.pairs.map(({ id }: { id: number }) => accept(id)),
+          };
+        }
+        if (
+          oversizedStage === "confirmation" &&
+          input.some(
+            ({ A, B }: { A: { title: string }; B: { title: string } }) =>
+              A.title === "Oversized" || B.title === "Oversized",
+          )
+        )
+          throw new Error("model ran out of room in the context window");
+        return { sources: input.map(({ id }: { id: number }) => confirm(id)) };
+      },
+      (error) => errors.push(error),
+    );
+    expect(matches).toEqual(new Map([[1, new Set([0])]]));
+    expect(errors).toHaveLength(2);
+  }
+});

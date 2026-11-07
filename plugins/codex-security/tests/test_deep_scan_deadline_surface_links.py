@@ -1,3 +1,7 @@
+"""Track source-to-surface links through deadline recovery, reused IDs, and repeated crashes."""
+
+from __future__ import annotations
+
 from workbench_test_support import (
     replay_saved_results,
     saved_binding,

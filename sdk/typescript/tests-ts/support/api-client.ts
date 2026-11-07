@@ -72,6 +72,24 @@ export function mockScanRegistration(
   };
 }
 
+export function measuredScanUsage(
+  inputTokens: number,
+  cachedInputTokens: number,
+  outputTokens: number,
+  reasoningOutputTokens = 0,
+): JsonObject {
+  return {
+    coverage: "complete",
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens: 0,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens: inputTokens + outputTokens,
+    byRole: { workers: { threadCount: 0 } },
+  };
+}
+
 export function mockWorkbench(
   args: readonly string[],
   input?: string,
@@ -80,6 +98,7 @@ export function mockWorkbench(
     return mockScanRegistration(args, input);
   }
   if (args[0] === "list-scans") return { scans: [] };
+  if (args[0] === "read-scan-usage") return measuredScanUsage(10, 2, 3, 1);
   if (args[0] === "get-scan-feedback") {
     return {
       scanId: "scan_example_001",
@@ -107,6 +126,7 @@ export class TestClient extends CodexSecurity {
         createCodex: throwing("Unexpected Codex invocation in test"),
         environment: {},
         acquireScanExecution: async () => () => {},
+        createOperationTelemetry: () => null,
         probeCodexSandbox: async () => {},
         prepareScanArtifactRestorer: async () => ({
           async projectChild() {

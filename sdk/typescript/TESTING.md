@@ -1,24 +1,59 @@
 # Testing the SDK and CLI
 
-Use the pnpm version in `package.json` and Bun 1.3.14, matching required CI.
-Install both the SDK and MCP app dependencies before building or testing.
-Prepare the [universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
-before running a command that builds the bundled plugin.
-Run these commands from `sdk/typescript`:
+## Install dependencies
+
+Use [the repository’s pinned pnpm version](../../package.json) and [CI’s Bun version](../../.github/workflows/node-ci.yml). From the repository root, enter the SDK directory and install both packages:
 
 ```sh
+cd sdk/typescript
 pnpm install --frozen-lockfile
 pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
-pnpm run check:plugin-source
+```
+
+The commands below run from `sdk/typescript` unless a different directory is named. For a test that builds or loads the bundled plugin, first [download the universal native payload](../../plugins/codex-security/native/README.md#package-inputs). The SDK’s `test`, `test:ci`, `test:mcp` and `prepack` scripts all build that bundle.
+
+## Run a focused test
+
+Run the file for the behavior you changed. This example exercises progress parsing:
+
+```sh
 bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
+```
+
+For an MCP change, follow the [MCP test guide](../../plugins/codex-security/mcp-app/TESTING.md). To see which suites this repository requires for a PR, see [How this repository tests pull requests](../../docs/ci.md).
+
+### Native Windows sandbox tests
+
+Two tests in `tests-ts/config.test.ts` start the real Codex sandbox to check
+workspace writes and policy-source reads. Sandbox setup can change machine-wide
+Windows state. These tests run by default on GitHub-hosted Windows Actions
+runners. To include them in a local or self-hosted PowerShell run, set
+`$env:CODEX_SECURITY_TEST_WINDOWS_SANDBOX = '1'` before running Bun. The value
+`true` also enables them. Set the variable to `0` or `false` to skip both, even
+on a hosted runner. The PowerShell machine-policy test has its own
+`CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST` setting.
+
+## Check the package
+
+Run static checks, the MCP suite and the SDK suite after installing the dependencies and native payload:
+
+```sh
+pnpm run check:plugin-source
 pnpm run types
-pnpm run test:mcp
 pnpm run format
+pnpm run test:mcp
 pnpm run test
-pnpm run test:ci
+```
+
+To collect JUnit and coverage while running the SDK suite, use `pnpm run test:ci` in place of `pnpm run test`. To test what an npm consumer receives, pack the archive and pass its exact path to the inspection command:
+
+```sh
 pnpm pack --pack-destination ../../dist
+pnpm run check:package ../../dist/openai-codex-security-X.Y.Z.tgz
 pnpm run test:package
 ```
+
+Replace `X.Y.Z` with the version in the filename printed by `pnpm pack`.
 
 The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
 the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during
@@ -29,8 +64,6 @@ not the generated `mcp/server.mjs` or compressed runtime chunks.
 `pnpm run check:plugin-source` fails if any file beneath `_bundled_plugin` is
 tracked by Git. Required CI runs the same check before installing dependencies.
 
-For CI's full archive inspection, pass the exact `.tgz` path printed by
-`pnpm pack` to `pnpm run check:package`.
 These checks include native Node contracts for SDK completion, cancellation,
 close cleanup, and CLI terminal sanitization. They use the installed package,
 controlled model output, and the real workbench without live model credentials.
@@ -62,20 +95,7 @@ before proposing a coverage floor.
 
 ## Native artifacts in fresh development environments
 
-SDK tests, including Ona's **Run tests** automation, require the eight verified
-native payloads. Installing Node and Python dependencies alone does not supply
-them. Select a successful native-artifacts or node-ci run built from this
-checkout's native sources and toolchain, then use the exact artifact name from
-that run (pull request artifacts use the tested merge commit):
-
-```sh
-gh run download <run-id> --name native-universal-<commit> --dir plugins/codex-security/native/prebuilt
-```
-
-Run this command from the repository root before starting the automation.
-Refresh the artifact after changing native source or toolchain. The standalone
-plugin supports a host-only build; that does not satisfy the SDK's universal
-packaging tests. See the [native build guide](../../plugins/codex-security/native/README.md).
+Before running the full SDK tests or Ona’s **Run tests** task in a fresh checkout, [download the verified native package inputs](../../plugins/codex-security/native/README.md#package-inputs) for that checkout. Refresh them whenever the native source or build toolchain changes.
 
 ## Python test dependencies
 
@@ -85,7 +105,7 @@ Use Python 3.10 or later. From the repository root, install the Python test and 
 python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
 ```
 
-This replaces `pip install -e 'plugins/codex-security[test]'`. Tests load the plugin scripts from source; the repository does not need an installed Python distribution.
+Tests load the plugin scripts from source; the repository does not need an installed Python distribution.
 The requirements file is the single list of pinned Python test dependencies. Ruff and pytest settings remain in `plugins/codex-security/pyproject.toml`; the Ruff dependency and its `required-version` setting must agree.
 
 ## Writing tests
@@ -187,8 +207,7 @@ become uneven. From the SDK directory, pass reports for one platform to
 (use `linux` or `darwin` for the other platforms). The updater sums testcase
 durations for executed cases per file and uses their median across reports. A
 report that skipped every case in a file leaves its timing hint unchanged. Other
-platforms retain their hints. Review and commit the generated snapshot. The initial hints use runs
-`39521539826`, `39694506447`, and `39694510011`. Keep runner versions, coverage,
+platforms retain their hints. Review and commit the generated snapshot. Keep runner versions, coverage,
 timeouts, seeds, and platform-specific checks unchanged when comparing scheduling
 changes; compare complete JUnit inventories and outcomes as well as wall time.
 
@@ -206,38 +225,9 @@ sealed artifacts. Each platform uploads its JUnit report. To replay the weekly j
 Ordinary source pull requests run focused contracts for the shard runner, timing
 metadata, report comparator, and Windows test-root helper in the required SDK suite.
 
-Manual and reusable workflow runs default to comparing the previous layout
-(three shards on Linux/macOS,
-seven on Windows) with the expanded production layout (six on Linux/macOS,
-fourteen on Windows), for 39 sharded runner jobs. Both layouts use the same serial
-Bun runner and platform timing snapshot; the comparison combines all shards for
-each OS before checking inventory and outcomes. Local full-suite runs still cover
-unsharded cross-file ordering. More jobs add setup overhead, so compare required-green
-latency and summed runner time alongside shard test timings.
+For a scheduling comparison, run [test-quality](../../.github/workflows/test-quality.yml) with `compare-layouts` enabled. It runs the same serial Bun test inventory under two shard layouts. Compare the aggregate JUnit identities, outcomes, occurrence counts, and assertion counts for each OS, then review Linux LCOV artifacts for coverage differences. The job summary includes failed shard timings. Compare both elapsed time to a green gate and total runner time.
 
-The comparison uses the same seed for property cases and test ordering in every
-layout. Manual runs use the workflow run number. Calls from pull request workflows
-use seed 1. Reports have unique OS/layout/shard
-names. The workflow requires every expected shard report
-before accepting comparisons, then compares complete shard groups by test
-identity, outcome, assertion count, and occurrence count, retaining legitimate
-repeated names from parameterized tests while detecting missing or extra instances. It records every
-shard's timing, including failed shards, in the job summary. It is not a required
-check or part of the release trigger.
-
-Required CI and shard diagnostics use Bun 1.3.14 without `--parallel` or
-`--isolate`. Runtime upgrades and worker-based execution need separate
-qualification of process-failure propagation and report/coverage finalization
-before promotion.
-
-Both layouts use the same property seed and coverage settings. Required CI uses
-the default property seed and collects Linux coverage; diagnostics use the seed
-above and the same Linux LCOV instrumentation. Artifacts include JUnit and
-coverage in separate OS/layout/shard paths. The automated comparison checks JUnit
-inventories, outcomes, and assertion counts; LCOV remains available for covered-line
-comparison during qualification. Compare inventories across required CI and
-diagnostics, but measure scheduling changes between diagnostic layouts.
-Both workflows install ripgrep on Linux so the inventory-path test executes.
+Use the same Bun version, seed, timeouts and coverage settings across layouts. Run the full local suite separately to exercise cross-file ordering. Qualify changes to Bun or its execution mode separately, including how test failures propagate and whether JUnit and coverage finish writing.
 
 Keep the machine-policy test serial. Do not replace the full required suite
 with `--changed`: Python files, schemas, fixtures, and workflows loaded at
@@ -246,7 +236,7 @@ runtime are not necessarily part of Bun's import graph.
 ## Mutation testing
 
 Mutation tests require Node 22.18+ or 24.11+ because Stryker 10 uses Babel 8.
-CI runs this tooling on Node 24.15.0. The SDK itself still supports Node 22.13+.
+Use the Node version pinned by the [mutation job](../../.github/workflows/test-quality.yml). The SDK’s supported runtimes are listed in its [package manifest](package.json).
 The commands below install Stryker from the separate, frozen `sdk/mutation`
 lockfile and run it from the SDK directory.
 
@@ -255,7 +245,7 @@ pnpm run test:mutation
 pnpm run test:mutation --mutate src/worker-progress.ts
 ```
 
-The initial Stryker trial covers progress parsing, safe error messages, and
+The Stryker configuration covers progress parsing, safe error messages, and
 pure cost arithmetic. It uses the fixed default property-test seed and writes
 HTML and JSON under `reports/mutation`. Review surviving mutants for missing
 behavior assertions or equivalent changes. There is no score gate yet; set

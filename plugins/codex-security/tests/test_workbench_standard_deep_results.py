@@ -1,3 +1,5 @@
+"""Reconcile saved parent and worker results across stops, reopened findings, and publication retries."""
+
 from __future__ import annotations
 
 import copy
@@ -284,6 +286,7 @@ def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None
 
     assert rejected["returncode"] != 0
     assert "Frozen stopped-scan checkpoint set is incomplete" in str(rejected["stderr"])
+    assert "Traceback" not in str(rejected["stderr"])
     assert (scan_dir / "scan-manifest.json").read_bytes() == original_manifest
     assert (scan_dir / "findings.json").read_bytes() == original_findings
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:

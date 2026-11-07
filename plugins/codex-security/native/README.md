@@ -2,17 +2,44 @@
 
 These internal bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows.
 
-The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git. `unixEnvironment` reads one named environment value as raw bytes, preserving the distinction between empty and unset values. This keeps configured filesystem locations such as `CODEX_HOME` intact when Node would replace undecodable bytes.
+## Package inputs
 
-Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
+For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run [native-artifacts](../../../.github/workflows/native-artifacts.yml) manually on a pushed branch. From the repository root, substitute the run ID and the full artifact name shown on that run. Pull request artifacts use the tested merge commit.
+
+```sh
+gh run download RUN_ID --name native-universal-COMMIT --dir plugins/codex-security/native/prebuilt
+```
+
+The ignored `prebuilt` directory must contain all eight platform directories and the shared notices. Refresh it after changing the native source or build toolchain. Missing payloads fail the build, including on hosts that only load one of them. Installed-package checks load the matching artifact with an empty `PATH`.
+
+The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. PR validation jobs share one artifact assembled by `node-ci`; release and standalone validation runs assemble their own. By default, the standalone MCP builder and npm package include the same complete `mcp/native` tree with the default `--native universal` option; neither compiles nor downloads code at runtime.
+
+The GNU x64 job also runs `notices.mjs` against the locked Cargo metadata. It collects crate licenses and the pinned Rust standard-library notices for both package surfaces. The NAPI crates omit license files from their registry archives, so `licenses/napi.txt` preserves their [pinned upstream license](https://github.com/napi-rs/napi-rs/blob/8bab46ee5dfd48a7b51e8bad3d09aed315ada4df/LICENSE). Review that override when upgrading those dependencies.
+
+## Build the standalone plugin for this host
+
+Install the [pinned Rust toolchain](rust-toolchain.toml), then build the plugin from the repository root:
 
 ```sh
 pnpm --dir sdk/typescript install --frozen-lockfile
-pnpm --dir sdk/typescript run build:ci
-node plugins/codex-security/native/build.mjs
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
+node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
+```
+
+`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. The MCP build bundles the shared SDK implementation. CI tests the resulting standalone package on Linux, macOS, and Windows.
+
+## Build and verify the native bindings
+
+The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git. `unixEnvironment` reads one named environment value as raw bytes, preserving the distinction between empty and unset values. This keeps configured filesystem locations such as `CODEX_HOME` intact when Node would replace undecodable bytes.
+
+With the pinned Rust toolchain installed, build and verify the Unix binding from the repository root:
+
+```sh
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/native/proof.mjs
-cargo +1.97.1 fmt --check --manifest-path plugins/codex-security/native/Cargo.toml
-cargo +1.97.1 clippy --locked --manifest-path plugins/codex-security/native/Cargo.toml -- -D warnings
+(cd plugins/codex-security/native && cargo fmt --check && cargo clippy --locked -- -D warnings)
 ```
 
 The proof runs without Python. It checks current and named account lookup, missing accounts, and embedded-NUL rejection. A shell-launched child verifies raw environment bytes, empty values and missing values. CI invokes it with an empty `PATH`.
@@ -29,13 +56,15 @@ The `native-unix` workflow builds Linux artifacts in digest-pinned manylinux 2.2
 
 The `native-musl` workflow uses native x64 and arm64 Ubuntu workers with digest-pinned Rust 1.97.1 Alpine compiler images. Musl builds disable static CRT linkage so Node can load the shared library. After the ELF and private-path checks, each unchanged artifact runs the full proof in pinned Node 20.0.0 Alpine 3.17 and Node 22.13.0 Alpine 3.21 images, with musl 1.2.3 and 1.2.5 respectively. Compilation uses the locked registry offline; runtime containers mount only the source and artifact read-only. Python is absent, and proof processes receive an empty `PATH`.
 
+## Windows bindings and launcher
+
 Windows uses `windows-binding.mts` and the same Rust crate. `WindowsHandle` owns a non-inheritable handle through Rust's `File`; explicit `close()` and garbage collection release it. Handles never cross into Node's CRT descriptor table. Paths and returned names are UTF-16LE buffers without a NUL terminator, preserving lone surrogates. Volume identities are decimal strings; file IDs retain all 128 bits in a buffer.
 
 `scan-read-binding.mts` supplies the held read operations used by sealed-scan validation. `openScanReadRoot` holds a canonical directory; `openFile` traverses relative directory components without following links and opens only regular files. Unix uses descriptor-relative opens. Windows opens each ancestor with attribute-read and traversal access and holds it without delete sharing for the lifetime of the root and each open file. Files support chunked reads so consumers can check cancellation between chunks. `verify` checks that the root path still names the held directory. Explicit `close` and garbage collection release handles. Private-directory permissions and artifact path policy remain with the caller. The native proofs exercise nested reads, link rejection, root replacement, and handle lifetime on every target.
 
 The binding exposes synchronous file and recursive directory creation, attributes and reparse tags, identity and final/opened names, read/write, and exact-handle rename and deletion. Rust's `File` supplies ordinary I/O. Calls return numeric Windows errors, including 6 for closed handles. Buffer ranges and path encoding are checked before use. Overlapped handles are unsupported because pending operations could retain native buffers beyond the call. Path authorization, ancestor traversal, and reparse-point policy remain the caller's responsibility.
 
-Four additional operations preserve Windows strings at the Node boundary. `windowsArguments` returns the complete OS argument vector, including the executable and Node options, using Rust's CRT-compatible parser. `windowsEnvironment` reads one wide environment name and distinguishes an absent value (`null`) from an empty buffer. `windowsAbsolutePath` resolves against the native current directory and drive directories without requiring the destination to exist. `windowsDirectoryEntries` uses `std::fs::read_dir` and cached `DirEntry::file_type()` values without opening each child; names remain UTF-16LE, and construction or iteration failures return their numeric Windows error and an empty array. Directory symlinks and junctions have both directory and symbolic-link flags. The typed adapter exposes this enumerator through `entriesWithTypes`, which `resolve-security-md --list` uses on Windows. Assessment validation, and deep-review worklists share the typed wide-path reader and writer.
+Four additional operations preserve Windows strings at the Node boundary. `windowsArguments` returns the complete OS argument vector, including the executable and Node options, using Rust's CRT-compatible parser. `windowsEnvironment` reads one wide environment name and distinguishes an absent value (`null`) from an empty buffer. `windowsAbsolutePath` resolves against the native current directory and drive directories without requiring the destination to exist. `windowsDirectoryEntries` uses `std::fs::read_dir` and cached `DirEntry::file_type()` values without opening each child; names remain UTF-16LE, and construction or iteration failures return their numeric Windows error and an empty array. Directory symlinks and junctions have both directory and symbolic-link flags. The typed adapter exposes this enumerator through `entriesWithTypes`, which `resolve-security-md --list` uses on Windows. Assessment validation and deep-review worklists share the typed wide-path reader and writer.
 
 `windows-files.mts` uses native absolute and final paths, preserving raw UTF-16 and the returned device prefix. Non-strict `realpath` resolves the nearest existing ancestor of a missing path; dangling links and other access errors remain errors. Callers must check containment independently. It follows native Windows path behavior rather than emulating Python's special cases for device names, whitespace, verbatim dot segments, and prefix removal. `stat(path, false)` retains exact symbolic-link and reparse-point metadata so callers can reject junction traversal independently of the enumerator's link label. The SDK's public runtime floor remains Node 22.13.0. Node 20.0.0 is an additional native-foundation compatibility proof; it does not change the SDK engine requirement.
 
@@ -62,30 +91,3 @@ The `native-windows` workflow builds x64 and arm64 with MSVC and a static CRT. I
 The build also compiles the test-only `windows-wide-launcher` Rust example. It starts a Node proof child with lone surrogates in arguments, environment values, and its working directory. That child checks complete directory iteration, distinct surrogate and replacement-character files, canonical paths, bounded reads, output truncation, and recursive long paths through the typed adapter. A Rust file guard with sharing disabled remains open while the child enumerates its name; an explicit data read fails with a sharing violation. Attribute-only access is not blocked by Windows file sharing. Adapter path and I/O tests run on the same matrix. Scope binding also reads raw requested-scope and contract paths, preserves ordered JSON and unrelated hash fields, truncates both outputs, and leaves documents unchanged when validation fails. The launcher cleans up the wide fixtures and is never included in the uploaded or bundled native payloads.
 
 Creating file and directory symbolic links requires Windows Developer Mode or the symbolic-link privilege. Without it, the proofs still run their other assertions, including directory junctions, and report the skipped symbolic-link assertions as `false` in their JSON output. CI requires real symbolic links on both architectures and also forces the restricted case to exercise both paths.
-
-## Package inputs
-
-With the pinned Rust toolchain installed, build the standalone plugin from a checkout containing both the plugin and SDK source:
-
-```sh
-pnpm --dir sdk/typescript install --frozen-lockfile
-pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
-node plugins/codex-security/mcp-app/scripts/build_native.mjs
-node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
-```
-
-`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. The MCP bundle includes the shared SDK implementation at build time; the packaged plugin does not require a separate SDK installation. CI builds and tests the host package on Linux, macOS, and Windows.
-
-For plugin and npm releases, use the default `--native universal`. It requires all eight verified binaries in `native/prebuilt`.
-
-The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. PR validation jobs share one artifact assembled by `node-ci`; release and standalone validation runs assemble their own. By default, the standalone MCP builder and npm package include the same complete `mcp/native` tree; neither compiles nor downloads code at runtime.
-
-The GNU x64 job also runs `notices.mjs` against the locked Cargo metadata. It collects crate licenses and the pinned Rust standard-library notices for both package surfaces. The NAPI crates omit license files from their registry archives, so `licenses/napi.txt` preserves their [pinned upstream license](https://github.com/napi-rs/napi-rs/blob/8bab46ee5dfd48a7b51e8bad3d09aed315ada4df/LICENSE). Review that override when upgrading those dependencies.
-
-For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run `native-artifacts` manually on a pushed branch. Use the artifact name shown by that run; pull-request artifacts use the tested merge commit. From the repository root:
-
-```sh
-gh run download <run-id> --name native-universal-<commit> --dir plugins/codex-security/native/prebuilt
-```
-
-The ignored `prebuilt` directory must contain all eight platform directories and the shared notices. Refresh it after changing the native source or build toolchain. Missing payloads fail the build, including on hosts that only load one of them. Installed-package checks load the matching artifact with an empty `PATH`.

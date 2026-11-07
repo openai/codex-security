@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { parseJson, stringifyJson } from "../helpers/json";
+import { sqliteFilename } from "../windows-path";
 import { requireSqliteText } from "./database";
 import type { Finding } from "./findings";
 import { transaction } from "./transaction";
@@ -259,7 +260,9 @@ export function readSeverityClassification(
   scanId: string,
 ): unknown {
   requireSqliteText([scanId]);
-  const database = new DatabaseSync(databasePath, { readOnly: true });
+  const database = new DatabaseSync(sqliteFilename(databasePath), {
+    readOnly: true,
+  });
   try {
     database.exec("PRAGMA busy_timeout = 5000");
     return transaction(database, "BEGIN", () => {

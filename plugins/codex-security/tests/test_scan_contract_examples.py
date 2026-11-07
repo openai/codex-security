@@ -1,3 +1,5 @@
+"""Validate the checked-in scan examples and exercise schema boundaries for evidence and coverage."""
+
 from __future__ import annotations
 
 import copy

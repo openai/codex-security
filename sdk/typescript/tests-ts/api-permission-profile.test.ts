@@ -61,6 +61,11 @@ async function fixture(
   await Promise.all([
     mkdir(repository),
     mkdir(codexHome),
+    writeFile(
+      executable,
+      '#!/usr/bin/env node\nrequire("./synthetic-codex.cjs");\n',
+      { mode: 0o700 },
+    ),
     mkdir(scanDir, { mode: 0o700 }),
   ]);
   await writeFile(join(repository, "app.py"), "print('synthetic fixture')\n");

@@ -2079,6 +2079,16 @@ describe("Deep worker terminal lifecycle", () => {
   );
 });
 
+test("preserves the reason a required scan artifact cannot be read", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const artifact = join(scanDir, "findings.json");
+  await rm(artifact);
+  await mkdir(artifact);
+  await expect(runEvents(scanDir, completedEvents())).rejects.toThrow(
+    /findings\.json:.*Expected a regular non-(?:symlink|reparse) scan file/u,
+  );
+});
+
 test.each(["scan-manifest.json", "findings.json", "report.md"])(
   "missing required artifact %s remains an incomplete scan",
   async (name) => {

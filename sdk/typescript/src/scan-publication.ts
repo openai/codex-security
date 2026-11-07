@@ -4,6 +4,7 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { bundledPluginRoot, type ScanArtifactRestorer } from "./runtime.js";
 import { pathToFileURL } from "node:url";
+import { turnPricingMetadata, type ScanPricingContext } from "./cost-model.js";
 import { ScanAccounting } from "./scan-accounting.js";
 import {
   loadContract,
@@ -123,6 +124,7 @@ export async function readSealedScanTurn(
   context: Omit<ScanPublicationContext, "pluginRoot"> & {
     codexHome: string;
     model: string;
+    pricingContext?: ScanPricingContext;
     startedAt: unknown;
     checkpoint: DeepScanCheckpointSummary | null;
     maxCostUsd?: number;
@@ -140,6 +142,7 @@ export async function readSealedScanTurn(
     const tracker = new ScanCostTracker({
       codexHome,
       model,
+      pricingContext: context.pricingContext,
       repository: expectation.repository,
       scanDirectory: directory,
     });
@@ -265,6 +268,7 @@ export async function readSealedScanTurn(
     turnResult: {
       status: "completed",
       model,
+      ...turnPricingMetadata(context.pricingContext),
       usage: cost
         ? scanCostUsage(cost)
         : mode === "deep"
@@ -278,7 +282,9 @@ export async function readSealedScanTurn(
 export async function publishScan(
   context: ScanPublicationContext,
   turn: CompletedScanTurn,
-  cost: ScanCost | null,
+  cost:
+    | ScanCost
+    | ReturnType<typeof import("./scan-measurement.js").measuredScanCost>,
   sealed: boolean,
 ): Promise<{
   result: ScanResult;

@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { expect, test } from "bun:test";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
@@ -12,7 +13,10 @@ import {
   semgrepJson,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
-import { snykJson } from "./support/snyk-import-fixtures.js";
+import { normalizeEndorSarif } from "../src/endor-findings.js";
+import { normalizeSemgrepSarif } from "../src/semgrep-findings.js";
+import { normalizeSnykSarif } from "../src/snyk-findings.js";
+import { snykSarif, snykJson } from "./support/snyk-import-fixtures.js";
 import {
   removeTemporaryDirectory,
   temporaryDirectory,
@@ -139,6 +143,36 @@ test.each(cases)(
   },
 );
 
+test.each(["github", "wiz"] as const)(
+  "%s distinguishes a missing report from an empty JSON Lines export",
+  async (provider) => {
+    const root = await temporaryDirectory("scanner-import-contract-");
+    try {
+      for (const [name, data] of [
+        ["report.json", ""],
+        ["report.csv.gz", gzipSync(" \n")],
+        ["report.jsonl.gz", ""],
+        ["report.jsonl.gz", " \n"],
+      ] as const) {
+        const path = join(root, name);
+        await writeFile(path, data);
+        await expect(
+          readExternalFindings(path, { provider }),
+        ).rejects.toThrow();
+      }
+      for (const name of ["selection", "selection.jsonl.gz"]) {
+        const path = join(root, name);
+        await writeFile(path, name.endsWith(".gz") ? gzipSync("") : "");
+        expect(
+          (await readExternalFindings(path, { provider })).findings,
+        ).toEqual({ read: 0, findings: [], excluded: [] });
+      }
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
 test("overlapping vendor IDs and advisories stay distinct on SQLite replay", async () => {
   await using fixture = await localFindingsFixture({ remote: repositoryUrl });
   const { repository, environment } = fixture;
@@ -237,3 +271,103 @@ test("overlapping vendor IDs and advisories stay distinct on SQLite replay", asy
     stored.find((record) => record.provider === "wiz"),
   );
 });
+
+const sarifCases = [
+  ["endor", endorSarif, normalizeEndorSarif],
+  [
+    "semgrep",
+    semgrepSarif,
+    (input: unknown) =>
+      normalizeSemgrepSarif(input, { sourceRepositoryUrl: repositoryUrl }),
+  ],
+  ["snyk", snykSarif, normalizeSnykSarif],
+] as const;
+const emptySelection = { read: 0, findings: [], excluded: [] };
+
+test.each(sarifCases)(
+  "%s SARIF accepts no-data exports and rejects failed or malformed reports",
+  (_provider, fixture, normalize) => {
+    const report = fixture();
+    const { results: _results, ...emptyRun } = report.runs[0]!;
+    const normalizeRun = (run: unknown) =>
+      normalize({ ...report, runs: [run] });
+    expect(normalize({ ...report, runs: [] })).toMatchObject(emptySelection);
+    for (const run of [emptyRun, { ...emptyRun, results: [] }])
+      expect(normalizeRun(run)).toMatchObject(emptySelection);
+    for (const invalid of [null, {}, "invalid"]) {
+      expect(() => normalizeRun({ ...emptyRun, results: invalid })).toThrow(
+        "must be an array",
+      );
+      expect(() => normalize({ ...report, runs: invalid })).toThrow(
+        "must be an array",
+      );
+    }
+    for (const [invocation, message] of [
+      [{ executionSuccessful: false }, "unsuccessful invocation"],
+      [
+        {
+          executionSuccessful: true,
+          toolExecutionNotifications: [
+            { level: "error", message: { text: "Synthetic scan failure" } },
+          ],
+        },
+        "Synthetic scan failure",
+      ],
+    ] as const)
+      expect(() =>
+        normalizeRun({ ...emptyRun, invocations: [invocation] }),
+      ).toThrow(message);
+    expect(() =>
+      normalizeRun({
+        ...emptyRun,
+        conversion: {
+          invocation: {
+            executionSuccessful: false,
+            processStartFailureMessage: "Synthetic converter failure",
+          },
+        },
+      }),
+    ).toThrow("Synthetic converter failure");
+  },
+);
+
+test.each(sarifCases)(
+  "%s SARIF validates provenance even in empty runs",
+  async (provider, fixture) => {
+    const root = await temporaryDirectory("scanner-import-contract-");
+    try {
+      const path = join(root, "report.sarif");
+      const report = fixture();
+      const run = report.runs[0]!;
+      const read = async (runs: unknown) => {
+        await writeFile(path, JSON.stringify({ ...report, runs }));
+        return readExternalFindings(path, readerOptions(provider), "local");
+      };
+      const repository = { repositoryUri: repositoryUrl };
+      for (const results of [run.results, []])
+        await expect(
+          read([{ ...run, results, versionControlProvenance: repository }]),
+        ).rejects.toThrow("version control provenance must be an array");
+      const foreignUrl = "https://github.com/example/other";
+      const foreignRun = {
+        ...run,
+        results: [],
+        versionControlProvenance: [{ repositoryUri: foreignUrl }],
+      };
+      for (const runs of [
+        [foreignRun],
+        [{ ...run, versionControlProvenance: [repository] }, foreignRun],
+      ]) {
+        const parsed = read(runs);
+        if (provider === "semgrep")
+          await expect(parsed).rejects.toThrow("does not match");
+        else
+          expect((await parsed).sourceRepositories).toContainEqual({
+            url: foreignUrl,
+          });
+      }
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);

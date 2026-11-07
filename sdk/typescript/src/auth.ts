@@ -3,8 +3,8 @@ import { isIP } from "node:net";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse } from "smol-toml";
+import { configuredCodexHome } from "./codex-home.js";
 import { inlineToml, type JsonObject } from "./config.js";
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import {
   CodexSecurityError,
   PluginBootstrapError,
@@ -18,8 +18,6 @@ import {
 } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
-
-import { configuredCodexHome } from "./codex-home.js";
 /** @internal */
 export { configuredCodexHome, environmentEntry } from "./codex-home.js";
 
@@ -28,9 +26,10 @@ export async function readCodexHomeConfig(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<JsonObject> {
+  const path = join(configuredCodexHome(environment), "config.toml");
   try {
     return parse(
-      await readFile(join(configuredCodexHome(environment), "config.toml"), {
+      await readFile(path, {
         encoding: "utf8",
         signal,
       }),
@@ -39,7 +38,7 @@ export async function readCodexHomeConfig(
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw new CodexSecurityError(
-      `Could not read the configured Codex provider: ${errorMessage(error)}`,
+      `Could not read the configured Codex provider from ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }
@@ -361,12 +360,12 @@ function plainTerminalText(value: string): string {
 export function configuredAuthEnvironment<Value>(
   environment: Record<string, Value>,
 ): Record<string, Value> {
-  const child = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(environment).filter(
       ([name]) =>
         !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
     ),
   );
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
+
+export { configuredAuthEnvironment as withoutOpenAiApiKeys };

@@ -16,7 +16,11 @@ import { VERSION } from "./version.js";
 /** Verify managed permissions before each fresh or resumed Deep Scan worker turn. */
 export function createPermissionCheckedCodex(
   { config, configOverrides, ...options }: CodexOptions,
-  dependencies: { codex?: Codex; preflightConfigOverrides?: string[] } = {},
+  dependencies: {
+    codex?: Codex;
+    preflightConfigOverrides?: string[];
+    verifyExecutable?: () => Promise<void>;
+  } = {},
 ) {
   // Raw tables preserve literal MCP server names and filesystem selectors.
   const overrides = [
@@ -103,6 +107,7 @@ export function createPermissionCheckedCodex(
       if (parentSignal?.aborted) abort();
       else parentSignal?.addEventListener("abort", abort, { once: true });
       try {
+        await dependencies.verifyExecutable?.();
         await verifyPermissionProfile({
           executable: options.codexPathOverride,
           cwd: threadOptions.workingDirectory ?? process.cwd(),
@@ -122,6 +127,7 @@ export function createPermissionCheckedCodex(
       return {
         events: (async function* () {
           try {
+            await dependencies.verifyExecutable?.();
             const { events } = await thread.runStreamed(input, {
               ...turnOptions,
               signal,

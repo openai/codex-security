@@ -268,7 +268,7 @@ def prepare_saved_coverage_projection(
 
 
 class SavedCoverageProjection:
-    """Keep worker source links stable while legacy and accepted rows converge."""
+    """Track which worker supplied a coverage row so reconstructed links can resolve to the retained surface."""
 
     def __init__(self, project_worker_coverage, legacy_surface_links, projection_origins):
         self.project_worker_coverage = project_worker_coverage
@@ -311,8 +311,7 @@ class SavedCoverageProjection:
         if field == "surfaces":
             # Canonical IDs can change while source content and ownership stay the same.
             item = {key: value for key, value in item.items() if key != "id"}
-        records = coverage.get(field, [])
-        for record in records if isinstance(records, list) else []:
+        for record in _coverage_rows(coverage, field):
             if not isinstance(record, dict):
                 continue
             original = dict(canonical_record(field, record))
@@ -347,12 +346,11 @@ class SavedCoverageProjection:
             or worker["merge_state"] != "merged"
         ):
             return False
-        reviews = canonical.get("reviews", [])
         return any(
             isinstance(review, dict)
             and review.get("workerId") == worker["id"]
             and review.get("attempt") == worker["attempt"]
-            for review in (reviews if isinstance(reviews, list) else [])
+            for review in _coverage_rows(canonical, "reviews")
         )
 
     def repair_reviewed_surface(self, coverage, canonical, worker, source, surface):
@@ -464,11 +462,8 @@ class SavedCoverageProjection:
         retained_legacy_surface_links: dict[
             int, tuple[dict[str, Any], dict[str, dict[str, Any]]]
         ] = {}
-        output_tasks = coverage.get("deferred", [])
-        task_candidates = [
-            (self.worker_row_owners.get(id(row)), row)
-            for row in (output_tasks if isinstance(output_tasks, list) else [])
-        ]
+        output_tasks = _coverage_rows(coverage, "deferred")
+        task_candidates = [(self.worker_row_owners.get(id(row)), row) for row in output_tasks]
         for task, published_id, surface, _ in self.task_surface_links(task_candidates):
             retained_surface = self.linked_surface(
                 surface,
@@ -499,8 +494,7 @@ class SavedCoverageProjection:
             named_surface_outputs = {
                 identity for outputs in self.worker_surface_outputs.values() for identity in outputs
             }
-            surfaces = coverage.get("surfaces", [])
-            for surface in surfaces if isinstance(surfaces, list) else []:
+            for surface in _coverage_rows(coverage, "surfaces"):
                 if not isinstance(surface, dict):
                     continue
                 owner, identity = self.worker_row_owners.get(id(surface)), surface.get("id")
@@ -514,7 +508,7 @@ class SavedCoverageProjection:
                         and id(existing) not in named_surface_outputs
                     ):
                         worker_surfaces[key] = surface
-            for task in output_tasks if isinstance(output_tasks, list) else []:
+            for task in output_tasks:
                 if (
                     not isinstance(task, dict)
                     or (owner := self.worker_row_owners.get(id(task))) is None
@@ -628,8 +622,7 @@ class SavedCoverageProjection:
                 # tasks. Preserve their original links, even when the outcome changes ID
                 # or a distinct retained surface shares the old source-local ID.
                 for relative, draft, owner in all_sources:
-                    originals = draft["reviewState"].get("surfaces", [])
-                    for original in originals if isinstance(originals, list) else []:
+                    for original in _coverage_rows(draft["reviewState"], "surfaces"):
                         if (
                             not isinstance(original, dict)
                             or id(original) in retained_surface_rows
@@ -670,8 +663,7 @@ class SavedCoverageProjection:
             prospective_surfaces = {}
             prospective_named = {}
             for relative, draft, owner in all_sources:
-                rows = draft["reviewState"].get("surfaces", [])
-                for row in rows if isinstance(rows, list) else []:
+                for row in _coverage_rows(draft["reviewState"], "surfaces"):
                     if owner is None or not isinstance(row, dict):
                         continue
                     emitted = surface_is_retained(relative, owner, row)

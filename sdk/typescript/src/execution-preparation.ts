@@ -74,6 +74,11 @@ const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 
 export type ExecutionPolicy = "ordinary" | "discovery" | "merge";
 interface ExecutionClient {
+  telemetryContext?: {
+    operationId: string;
+    attemptId: string;
+    parentAttemptId?: string;
+  };
   surface: "cli" | "sdk";
   command: string;
   mode?: import("./targets.js").ScanMode;
@@ -84,6 +89,7 @@ interface ExecutionClient {
 
 /** One per-scan snapshot; worker construction never consults a mutable parent environment. */
 export interface ExecutionSource {
+  readonly verifyExecutable?: () => Promise<void>;
   readonly command?: CodexCommand;
   readonly configuration: JsonObject;
   readonly environment: ProcessEnvironment;
@@ -206,6 +212,7 @@ export interface ExecutionInstructionContext {
 }
 
 export interface PreparedExecution {
+  pricingContext?: import("./cost-model.js").ScanPricingContext;
   readonly policy: ExecutionPolicy;
   readonly source: ExecutionSource;
   inheritedPermissions?: ScanPermissions;
@@ -328,6 +335,7 @@ export async function createExecutionCodex(
     command: client.command,
     pluginVersion: runtime.plugin.version,
     mode: client.mode,
+    ...client.telemetryContext,
   });
   const configuredCodexPath = environmentValue(
     session.source.environment,
@@ -386,6 +394,7 @@ export async function createExecutionCodex(
         ? undefined
         : await createProfileCodex(codexOptions, runtime.providerProfile.name);
     if (checkPermissions) {
+      await session.source.verifyExecutable?.();
       const preflightCommand = await providerPreflightCommand(
         { command: executionCommand(session.source).command },
         config ?? sessionConfig,
@@ -396,6 +405,7 @@ export async function createExecutionCodex(
       codex = createPermissionCheckedCodex(codexOptions, {
         codex: profileCodex,
         preflightConfigOverrides: providerOverrides,
+        verifyExecutable: session.source.verifyExecutable,
       });
     } else {
       codex = profileCodex ?? new Codex(codexOptions);
@@ -714,6 +724,48 @@ export function prepareMergeExecution(
 ): PreparedExecution {
   const config = deepWorkerConfig(resolveCodexProfile(session.sessionConfig));
   setScanSubagentBudget(config, subagents);
+  return { ...session, policy: "merge", sessionConfig: config };
+}
+
+/** Independent comparisons receive the complete reports in the prompt. */
+export function prepareReportComparisonExecution(
+  session: PreparedExecution,
+): PreparedExecution {
+  const config = deepWorkerConfig(resolveCodexProfile(session.sessionConfig));
+  config["web_search"] = "disabled";
+  config["project_doc_max_bytes"] = 0;
+  config["tools"] = {
+    ...(isRecord(config["tools"]) ? config["tools"] : {}),
+    experimental_request_user_input: { enabled: false },
+    update_plan: { enabled: false },
+  };
+  config["features"] = {
+    ...(isRecord(config["features"]) ? config["features"] : {}),
+    apps: false,
+    plugins: false,
+    shell_tool: false,
+    view_image: false,
+    image_generation: false,
+    goals: false,
+    request_permissions_tool: false,
+    computer_use: false,
+    unified_exec: false,
+    code_mode: false,
+    code_mode_only: false,
+    js_repl: false,
+    multi_agent: false,
+    multi_agent_v2: false,
+    enable_fanout: false,
+  };
+  for (const [name, server] of Object.entries(
+    config["mcp_servers"] as JsonObject,
+  )) {
+    if (isRecord(server))
+      (config["mcp_servers"] as JsonObject)[name] = {
+        ...server,
+        enabled: false,
+      };
+  }
   return { ...session, policy: "merge", sessionConfig: config };
 }
 

@@ -1,3 +1,7 @@
+import {
+  OperationTelemetry,
+  type OperationTelemetryEvent,
+} from "../src/operation-telemetry.js";
 import { readReviewState } from "./support/review-state.js";
 import { once } from "node:events";
 import { jsonLines } from "./support/json.js";
@@ -73,6 +77,7 @@ import { PLUGIN_ROOT, copyCredentialTestPlugin } from "./plugin-root.js";
 import {
   cancellationSetup,
   EXTERNAL_PROVIDER_CASES,
+  measuredScanUsage,
   mockScanRegistration,
   mockWorkbench,
   shellEnvironmentReference,
@@ -138,6 +143,19 @@ const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
+
+function localClient(
+  config: ConstructorParameters<typeof TestClient>[0] = {},
+  environment: ConstructorParameters<typeof TestClient>[1]["environment"] = {},
+) {
+  const prepareRuntime = mock(async () => {
+    throw new Error("runtime should not initialize");
+  });
+  return {
+    client: new TestClient(config, { environment, prepareRuntime }),
+    prepareRuntime,
+  };
+}
 
 async function repositoryDirectories() {
   const root = await temporaryDirectory();
@@ -1426,6 +1444,7 @@ describe("CodexSecurity orchestration", () => {
         CODEX_API_KEY: "synthetic-codex-key",
         OPENROUTER_API_KEY: "synthetic-openrouter-key",
         FIREWORKS_API_KEY: "synthetic-fireworks-key",
+        AWS_DEFAULT_REGION: "us-east-1",
         ...credentials,
       };
       const client = new TestClient(
@@ -3240,7 +3259,27 @@ if __name__ == "__main__":
       "complete-scan",
       "--scan-id",
       "scan_example_001",
+      "--cost-json",
+      expect.any(String),
     ]);
+    const completionReceipt = JSON.parse(commands[4]![4]!);
+    expect(completionReceipt).toMatchObject({
+      usage: {
+        source: "codex_runtime",
+        coverage: "complete",
+        observedAt: expect.any(String),
+        threadCount: 1,
+        missingThreadCount: 0,
+        coverageScope: ["thread:thread-1"],
+        inputTokens: 10,
+        cachedInputTokens: 2,
+        cacheWriteInputTokens: 0,
+        outputTokens: 3,
+        reasoningOutputTokens: 1,
+        totalTokens: 13,
+      },
+    });
+    expect(completionReceipt).not.toHaveProperty("cost");
     await client.close();
   });
 
@@ -14248,8 +14287,15 @@ if __name__ == "__main__":
     }
   });
   const prices = [
-    { model: "gpt-6-astra", min: 0.000232, max: 0.000389 },
-    { model: "gpt-5.6-cyber", min: 0.0003275, max: null },
+    { model: "gpt-6-astra", provider: "openai", min: 0.000232, max: 0.000429 },
+    { model: "gpt-6-cyber", provider: "openai", min: 0.000464, max: null },
+    { model: "gpt-5.6-cyber", provider: "openai", min: 0.0003275, max: null },
+    {
+      model: "openai/gpt-oss-120b-maas",
+      provider: "gcp",
+      min: 0.00000198,
+      max: 0.00000198,
+    },
   ];
   test.each(prices)("tracks live and saved $model costs", async (price) => {
     const { model, min, max } = price;
@@ -14266,6 +14312,7 @@ if __name__ == "__main__":
           profiles: {
             review: {
               model,
+              model_provider: price.provider,
               model_reasoning_effort: "high",
             },
           },
@@ -14294,15 +14341,22 @@ if __name__ == "__main__":
       estimatedUsdRange: { min, max, context: "unknown" },
       pricing: { serviceTier: "standard", context: "short" },
     });
-    expect([result.cost]).toEqual(costs);
+    expect(result.cost).toEqual(costs.at(-1)!);
 
     const completion = commands.find((args) => args[0] === "complete-scan");
     expect(completion).toBeDefined();
     const costIndex = completion?.indexOf("--cost-json") ?? -1;
     expect(costIndex).toBeGreaterThan(0);
-    expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toEqual(
-      result.cost,
-    );
+    expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toMatchObject({
+      cost: result.cost,
+      usage: {
+        coverage: "complete",
+        threadCount: 1,
+        inputTokens: 10,
+        outputTokens: 3,
+        totalTokens: 13,
+      },
+    });
 
     await client.close();
   });
@@ -14598,11 +14652,9 @@ if __name__ == "__main__":
   );
 
   test("raises a live budget twice without restarting or resetting accumulated usage", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
+    const { root, repository, codexHome } = await runtimeDirectories();
     const scanDir = join(root, "scan");
-    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    await mkdir(scanDir);
     const approvals = new Map<number, () => void>();
     const firstApproval = new Promise<void>((resolve) =>
       approvals.set(0.008, resolve),
@@ -14610,68 +14662,63 @@ if __name__ == "__main__":
     const secondApproval = new Promise<void>((resolve) =>
       approvals.set(0.016, resolve),
     );
+    let measured = 0;
     const requests: number[] = [];
     const commands: Array<readonly string[]> = [];
-    let starts = 0;
-    let budgetSignal: AbortSignal | undefined;
-    const client = new TestClient(
-      { codexOverrides: { model: "gpt-5.6-sol" } },
-      {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (_options, args, input) => {
-          commands.push(args);
-          return mockWorkbench(args, input);
-        },
-        createCodex: () => ({
-          startThread: () => {
-            starts += 1;
-            return {
-              id: null,
-              async runStreamed() {
-                async function* events(): AsyncGenerator<ThreadEvent> {
-                  yield { type: "thread.started", thread_id: "scan-thread" };
-                  const path = await writeUsageSession(
-                    codexHome,
-                    "scan-thread",
-                    { input_tokens: 800, output_tokens: 0 },
-                  );
-                  await writeUsageSession(
-                    codexHome,
-                    "worker-thread",
-                    { input_tokens: 100, output_tokens: 0 },
-                    { parent: "scan-thread" },
-                  );
-                  await firstApproval;
-                  await appendUsage(path, 1_700);
-                  await secondApproval;
-                  await copyCompletedScan(root);
-                  yield {
-                    type: "turn.completed",
-                    usage: {
-                      input_tokens: 2_500,
-                      cached_input_tokens: 0,
-                      cache_write_input_tokens: 0,
-                      output_tokens: 0,
-                      reasoning_output_tokens: 0,
-                    },
-                  };
-                }
-                return { events: events() };
+    const startThread = mock(() => {
+      return {
+        id: null,
+        async runStreamed() {
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            yield { type: "thread.started", thread_id: "scan-thread" };
+            const path = await writeUsageSession(codexHome, "scan-thread", {
+              input_tokens: 800,
+              output_tokens: 0,
+            });
+            await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              { input_tokens: 100, output_tokens: 0 },
+              { parent: "scan-thread", parentField: "parent_thread_id" },
+            );
+            measured = 900;
+            await firstApproval;
+            await appendUsage(path, 1_700);
+            measured = 1_800;
+            await secondApproval;
+            measured = 2_600;
+            await copyCompletedScan(root);
+            yield {
+              type: "turn.completed",
+              usage: {
+                input_tokens: 2_500,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 0,
+                reasoning_output_tokens: 0,
               },
             };
-          },
-        }),
-      },
-    );
-    const keepAlive = setTimeout(() => {}, 10_000);
+          }
+          return { events: events() };
+        },
+      };
+    });
+    let budgetSignal: AbortSignal | undefined;
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: recordingWorkbench(commands, () =>
+        measuredScanUsage(measured, 0, 0),
+      ),
+      createCodex: () => ({
+        startThread,
+      }),
+    });
+    const guard = new AbortController();
+    const guardTimer = setTimeout(() => guard.abort(), 15_000);
     try {
       const result = await client.run(repository, {
         maxCostUsd: 0.004,
-        signal: AbortSignal.timeout(5_000),
+        signal: guard.signal,
         onBudgetApproaching: ({ maxCostUsd, signal }) => {
           requests.push(maxCostUsd);
           budgetSignal = signal;
@@ -14685,7 +14732,7 @@ if __name__ == "__main__":
         inputTokens: 2_600,
         estimatedUsd: 0.0104,
       });
-      expect(starts).toBe(1);
+      expect(startThread).toHaveBeenCalledTimes(1);
       expect(requests).toEqual([0.004, 0.008]);
       expect(
         commands
@@ -14695,7 +14742,7 @@ if __name__ == "__main__":
       expect(commands.some(([command]) => command === "fail-scan")).toBe(false);
       expect(budgetSignal?.aborted).toBe(true);
     } finally {
-      clearTimeout(keepAlive);
+      clearTimeout(guardTimer);
       await client.close();
     }
   });
@@ -14711,94 +14758,73 @@ if __name__ == "__main__":
   ] as const)(
     "keeps the original budget enforceable when an increase is %s",
     async (scenario) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
+      const { root, repository, codexHome } = await runtimeDirectories();
       const scanDir = join(root, "scan");
-      await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
-      let requested!: () => void;
-      const requestStarted = new Promise<void>((resolve) => {
-        requested = resolve;
-      });
-      let observed!: () => void;
-      const nextCost = new Promise<void>((resolve) => {
-        observed = resolve;
-      });
-      let answer!: (limit: number) => void;
-      const lateAnswer = new Promise<number>((resolve) => {
-        answer = resolve;
-      });
+      await mkdir(scanDir);
+      const requestStarted = Promise.withResolvers<void>();
+      const nextCost = Promise.withResolvers<void>();
+      const lateAnswer = Promise.withResolvers<number>();
       const controller = new AbortController();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
+      let measured = 900;
       let requestCount = 0;
-      let reportedLimit: number | undefined;
+      const onCost = mock((cost: ScanCost, _limit: number | undefined) => {
+        if (cost.inputTokens === 950) nextCost.resolve();
+      });
       let budgetSignal: AbortSignal | undefined;
-      const client = new TestClient(
-        { codexOverrides: { model: "gpt-5.6-sol" } },
-        {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (_options, args, input) => {
-            commands.push(args);
-            if (scenario === "save-failed" && args[0] === "set-scan-cost-limit")
-              throw new Error("Synthetic save failure");
-            if (scenario === "saving" && args[0] === "set-scan-cost-limit")
-              await lateAnswer;
-            return mockWorkbench(args, input);
-          },
-          createCodex: () => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed(
-                _input: string,
-                { signal }: { signal: AbortSignal },
-              ) {
-                async function* events(): AsyncGenerator<ThreadEvent> {
-                  yield { type: "thread.started", thread_id: "scan-thread" };
-                  const path = await writeUsageSession(
-                    codexHome,
-                    "scan-thread",
-                    { input_tokens: 900, output_tokens: 0 },
-                  );
-                  await requestStarted;
-                  if (scenario === "completed") {
-                    await copyCompletedScan(root);
-                    yield {
-                      type: "turn.completed",
-                      usage: {
-                        input_tokens: 900,
-                        cached_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 0,
-                        reasoning_output_tokens: 0,
-                      },
-                    };
-                    return;
-                  }
-                  await appendUsage(path, 950);
-                  await nextCost;
-                  if (scenario === "canceled") controller.abort();
-                  else await appendUsage(path, 1_200);
-                  await new Promise<void>((resolve) => {
-                    if (signal.aborted) resolve();
-                    else
-                      signal.addEventListener("abort", () => resolve(), {
-                        once: true,
-                      });
-                  });
-                  await appendUsage(path, 2_000);
-                  throw new DOMException("aborted", "AbortError");
-                }
-                return { events: events() };
-              },
-            }),
-          }),
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (_options, args, input) => {
+          commands.push(args);
+          if (args[0] === "read-scan-usage")
+            return measuredScanUsage(measured, 0, 0);
+          if (scenario === "save-failed" && args[0] === "set-scan-cost-limit")
+            throw new Error("Synthetic save failure");
+          if (scenario === "saving" && args[0] === "set-scan-cost-limit")
+            await lateAnswer.promise;
+          return mockWorkbench(args, input);
         },
-      );
+        createCodex: codexFactory(
+          async (_input: string, { signal }: { signal: AbortSignal }) => {
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              yield { type: "thread.started", thread_id: "scan-thread" };
+              const path = await writeUsageSession(codexHome, "scan-thread", {
+                input_tokens: 900,
+                output_tokens: 0,
+              });
+              await requestStarted.promise;
+              if (scenario === "completed") {
+                await copyCompletedScan(root);
+                yield {
+                  type: "turn.completed",
+                  usage: {
+                    input_tokens: 900,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_output_tokens: 0,
+                  },
+                };
+                return;
+              }
+              await appendUsage(path, 950);
+              measured = 950;
+              await nextCost.promise;
+              if (scenario === "canceled") controller.abort();
+              else {
+                measured = 1_200;
+                await appendUsage(path, 1_200);
+              }
+              await (signal.aborted ? undefined : once(signal, "abort"));
+              measured = 2_000;
+              await appendUsage(path, 2_000);
+              throw new DOMException("aborted", "AbortError");
+            }
+            return { events: events() };
+          },
+        ),
+      });
       const keepAlive = setTimeout(() => {}, 10_000);
       try {
         const scan = client.run(repository, {
@@ -14810,21 +14836,18 @@ if __name__ == "__main__":
           onBudgetApproaching: ({ signal }) => {
             requestCount += 1;
             budgetSignal = signal;
-            requested();
+            requestStarted.resolve();
             if (scenario === "declined") return undefined;
             if (scenario === "invalid") return 0.004;
             if (scenario === "save-failed" || scenario === "saving")
               return 0.016;
-            return lateAnswer;
+            return lateAnswer.promise;
           },
-          onCost: (cost, limit) => {
-            reportedLimit = limit;
-            if (cost.inputTokens === 950) observed();
-          },
+          onCost,
           onWarning: (warning) => warnings.push(warning),
         });
         if (scenario === "completed")
-          await expect(scan).resolves.toMatchObject({
+          expect(await scan).toMatchObject({
             cost: { estimatedUsd: 0.0036 },
           });
         else if (scenario === "canceled")
@@ -14839,10 +14862,10 @@ if __name__ == "__main__":
             maxCostUsd: 0.004,
             cost: { estimatedUsd: 0.008 },
           });
-        answer(0.016);
+        lateAnswer.resolve(0.016);
         await new Promise((resolve) => setImmediate(resolve));
         expect(requestCount).toBe(1);
-        expect(reportedLimit).toBe(0.004);
+        expect(onCost.mock.lastCall?.[1]).toBe(0.004);
         expect(budgetSignal?.aborted).toBe(true);
         expect(
           commands.filter(([command]) => command === "set-scan-cost-limit"),
@@ -14900,7 +14923,12 @@ if __name__ == "__main__":
     })!;
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: recordingWorkbench(commands),
+      runWorkbench: recordingWorkbench(commands, {
+        ...measuredScanUsage(1_250, 200, 30),
+        threadCount: 2,
+        byRole: { workers: { threadCount: 1 } },
+        cacheWriteInputTokensReported: false,
+      }),
       createCodex: codexFactory(runStreamed),
     });
 
@@ -14938,103 +14966,34 @@ if __name__ == "__main__":
       "--thread-id",
       "scan-thread",
     ]);
-    expect(commands[3]).toEqual(["get-scan", "--scan-id", "scan_example_001"]);
-    expect(commands[4]).toEqual([
+    expect(commands.at(-2)).toEqual([
+      "get-scan",
+      "--scan-id",
+      "scan_example_001",
+    ]);
+    expect(commands.at(-1)).toEqual([
       "fail-scan",
       "--scan-id",
       "scan_example_001",
       `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
       "--cost-json",
-      JSON.stringify(cost),
+      expect.any(String),
     ]);
+    expect(JSON.parse(commands.at(-1)![5]!)).toMatchObject({
+      usage: {
+        source: "codex_runtime",
+        coverage: "complete",
+        threadCount: 2,
+        missingThreadCount: 0,
+        inputTokens: 1_250,
+        cachedInputTokens: 200,
+        outputTokens: 30,
+        totalTokens: 1_280,
+      },
+      cost,
+    });
     expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
     await expect(stat(scanDir)).resolves.toBeDefined();
-    await client.close();
-  });
-
-  test("saves a budgeted scan with a warning when token usage is unavailable", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const warnings: string[] = [];
-    const commands: Array<readonly string[]> = [];
-    let threads = 0;
-    const client = new TestClient(
-      {},
-      {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
-          commands.push(args);
-          if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args, input);
-          }
-          if (args[0] === "get-scan-feedback") {
-            return {
-              scanId: "scan_example_001",
-              targetId: "target_sha256_example",
-              falsePositives: [],
-            };
-          }
-          return {};
-        },
-        createCodex: (options: CodexOptions) => ({
-          startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
-            threads++;
-            const thread = new Codex({
-              ...options,
-              codexPathOverride: process.execPath,
-            }).startThread(threadOptions);
-            const executable = thread as unknown as {
-              _exec: { run(): AsyncGenerator<string> };
-            };
-            executable._exec.run = async function* () {
-              await copyCompletedScan(root);
-              yield JSON.stringify({
-                type: "thread.started",
-                thread_id: "scan-thread",
-              });
-              yield JSON.stringify({ type: "turn.completed", usage: null });
-            };
-            return thread;
-          },
-        }),
-      },
-    );
-
-    const result = await client.run(repository, {
-      maxCostUsd: 1,
-      ownerSuggestions: true,
-      onWarning: (warning) => {
-        warnings.push(warning);
-      },
-    });
-    expect(result.threadId).toBe("scan-thread");
-    expect(result.cost).toBeNull();
-    expect(threads).toBe(1);
-    expect(warnings).toContain(
-      "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
-    );
-    expect(commands.map(([command]) => command)).toEqual([
-      "register-cli-scan",
-      "get-scan-feedback",
-      "set-scan-thread",
-      "prepare-scan-completion",
-      "complete-scan",
-      "list-global-findings",
-    ]);
-    expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
     await client.close();
   });
 
@@ -18282,15 +18241,260 @@ setInterval(() => {}, 1000);
       await client.close();
     }
   }, 30_000);
+  test.each([
+    ["missing", {}],
+    [
+      "unsupported",
+      { AWS_REGION: "us-gov-west-1", AWS_DEFAULT_REGION: "us-gov-east-1" },
+    ],
+  ] as const)(
+    "rejects Bedrock budgets when the billing region is %s",
+    async (_reason, environment) => {
+      const { repository } = await repositoryDirectories();
+      const { client, prepareRuntime } = localClient(
+        {
+          codexOverrides: {
+            model: "openai.gpt-5.6-cyber",
+            model_provider: "amazon-bedrock",
+          },
+        },
+        environment,
+      );
+      await expect(
+        client.preflight(repository, { maxCostUsd: 1 }),
+      ).rejects.toThrow("cost limit is not available for the configured model");
+      await expect(client.preflight(repository)).resolves.toMatchObject({
+        model: "openai.gpt-5.6-cyber",
+      });
+      expect(prepareRuntime).not.toHaveBeenCalled();
+      await client.close();
+    },
+  );
+
+  test.each([true, false])(
+    "records a native failure only when its terminal event preceded cancellation (failure first: %p)",
+    async (failureFirst) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const controller = new AbortController();
+      const message = "Synthetic native turn failure";
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        if (!failureFirst) controller.abort();
+        try {
+          yield { type: "turn.failed", error: { message } };
+        } finally {
+          // The reader closes a failed stream after observing its terminal event.
+          if (failureFirst) controller.abort();
+        }
+      }
+      const telemetry: Readonly<OperationTelemetryEvent>[] = [];
+      let stopped: readonly string[] | undefined;
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createOperationTelemetry: (options) =>
+          new OperationTelemetry({
+            ...options,
+            directory: join(root, "journal"),
+          }),
+        createCodex: codexFactory(async () => ({ events: events() })),
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "fail-scan" || args[0] === "cancel-scan")
+            stopped = args;
+          return mockWorkbench(args, input);
+        },
+      });
+      await expect(
+        client.run(repository, {
+          signal: controller.signal,
+          onTelemetry: (event) => telemetry.push(event),
+        }),
+      ).rejects.toThrow();
+      expect(
+        telemetry.filter((event) => event.type === "attempt_finished"),
+      ).toEqual([
+        expect.objectContaining({
+          outcome: failureFirst ? "failed" : "canceled",
+          failureCategory: failureFirst ? "execution" : "canceled",
+        }),
+      ]);
+      expect(controller.signal.aborted).toBe(true);
+      expect(stopped?.[0]).toBe(failureFirst ? "fail-scan" : "cancel-scan");
+      if (failureFirst) expect(stopped).toContain(`--message=${message}`);
+    },
+  );
+
+  test.each([
+    ["without", false],
+    ["with", true],
+  ] as const)(
+    "warns about unreadable activity logs %s an explicit cost limit",
+    async (_description, enforceCostLimit) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(join(codexHome, "sessions"), "not a directory");
+      const commands: string[] = [];
+      const warnings: string[] = [];
+      const telemetry: Readonly<OperationTelemetryEvent>[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createOperationTelemetry: (options) =>
+          new OperationTelemetry({
+            ...options,
+            directory: join(root, "telemetry-state"),
+          }),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          commands.push(args[0]!);
+          return mockWorkbench(args, input);
+        },
+        createCodex: completedCodex(root),
+      });
+
+      const scan = client.run(repository, {
+        ...(enforceCostLimit ? { maxCostUsd: 1 } : {}),
+        onActivity: () => {},
+        onTelemetry: (event) => telemetry.push(event),
+        onWarning: (warning) => warnings.push(warning),
+      });
+      await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
+      expect(warnings).toContainEqual(
+        expect.stringContaining("Could not track scan activity:"),
+      );
+      expect(commands.includes("read-scan-usage")).toBe(enforceCostLimit);
+      expect(commands).toContain("complete-scan");
+      expect(commands).not.toContain("cancel-scan");
+      expect(
+        telemetry.filter((event) => event.type === "attempt_finished"),
+      ).toMatchObject([
+        { outcome: "completed", findingCount: 1, artifactComplete: true },
+      ]);
+      await client.close();
+    },
+  );
+
+  test("reports unpriced GCP usage without letting its observer stop the scan", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const usages: unknown[] = [];
+    const observerErrors: string[] = [];
+    const commands: Array<readonly string[]> = [];
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model: "gpt-6-astra",
+          model_provider: "openai",
+          profile: "review",
+          profiles: { review: { model_provider: "gcp" } },
+        },
+      },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: recordingWorkbench(commands),
+        createCodex: completedCodex(root),
+      },
+    );
+    try {
+      await expect(
+        client.preflight(repository, { maxCostUsd: 1 }),
+      ).rejects.toThrow("cost limit is not available for the configured model");
+      await expect(client.preflight(repository)).resolves.toMatchObject({
+        model: "gpt-6-astra",
+        modelProvider: "gcp",
+      });
+      const result = await client.run(repository, {
+        onUsage: async (usage) => {
+          usages.push(usage);
+          await Promise.resolve();
+          throw new Error("synthetic usage observer");
+        },
+        onObserverError: (observer) => observerErrors.push(observer),
+      });
+      expect(result.cost).toBeNull();
+      expect(usages).toEqual([
+        expect.objectContaining({ input_tokens: 10, output_tokens: 3 }),
+      ]);
+      expect(observerErrors).toEqual(["onUsage"]);
+      const completion = commands.find((args) => args[0] === "complete-scan");
+      const costIndex = completion?.indexOf("--cost-json") ?? -1;
+      expect(costIndex).toBeGreaterThan(0);
+      const receipt = JSON.parse(completion![costIndex + 1]!);
+      expect(receipt).toMatchObject({
+        usage: {
+          coverage: "complete",
+          threadCount: 1,
+          inputTokens: 10,
+          outputTokens: 3,
+          totalTokens: 13,
+        },
+      });
+      expect(receipt.cost).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails a budgeted scan before sealing when token usage is unavailable", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const commands: Array<readonly string[]> = [];
+    let threads = 0;
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: recordingWorkbench(commands, { coverage: "unavailable" }),
+      createCodex: (options: CodexOptions) => ({
+        startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
+          threads++;
+          const thread = new Codex({
+            ...options,
+            codexPathOverride: process.execPath,
+          }).startThread(threadOptions);
+          const executable = thread as unknown as {
+            _exec: { run(): AsyncGenerator<string> };
+          };
+          executable._exec.run = async function* () {
+            await copyCompletedScan(root);
+            yield JSON.stringify({
+              type: "thread.started",
+              thread_id: "scan-thread",
+            });
+            yield JSON.stringify({ type: "turn.completed", usage: null });
+          };
+          return thread;
+        },
+      }),
+    });
+
+    await expect(
+      client.run(repository, { maxCostUsd: 1, ownerSuggestions: true }),
+    ).rejects.toThrow(/could not verify.*cost limit/i);
+    expect(threads).toBe(1);
+    expect(commands.some(([name]) => name === "read-scan-usage")).toBe(true);
+    expect(
+      commands
+        .map(([name]) => name)
+        .filter((name) => name !== "read-scan-usage"),
+    ).toEqual([
+      "register-cli-scan",
+      "get-scan-feedback",
+      "set-scan-thread",
+      "get-scan",
+      "fail-scan",
+    ]);
+    await client.close();
+  });
 });
 
-function recordingWorkbench(commands: Array<readonly string[]>) {
+function recordingWorkbench(
+  commands: Array<readonly string[]>,
+  usage?: JsonObject | (() => JsonObject),
+) {
   return async (
     _options: unknown,
     args: readonly string[],
     input?: string,
   ): Promise<JsonObject> => {
     commands.push(args);
+    if (usage && args[0] === "read-scan-usage")
+      return typeof usage === "function" ? usage() : usage;
     return mockWorkbench(args, input);
   };
 }

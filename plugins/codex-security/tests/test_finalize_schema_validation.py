@@ -1,3 +1,5 @@
+"""Exercise numeric types and constraints on referenced nodes in the finalizer's schema checker."""
+
 from __future__ import annotations
 
 import pytest

@@ -1,3 +1,5 @@
+"""Match resumable deep scans to their original target and discovery context, including older records."""
+
 from __future__ import annotations
 
 import sqlite3

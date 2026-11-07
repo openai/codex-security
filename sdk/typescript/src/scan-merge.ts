@@ -341,12 +341,12 @@ export async function confirmScanMerge(
   return result;
 }
 
-/** Retain accepted sources after comparisons stop. Only exact copies are combined. */
-export function mergeExactScanFindings(
+/** Propose all sources for pairwise confirmation when a full grouping turn cannot run. */
+export function unconfirmedScanGroups(
   scanId: string,
   inputs: readonly ScanMergeInput[],
   previous: ScanAggregate | null,
-) {
+): ScanMergeGroups {
   const prior = unchangedScanGroups(scanId, previous).groups;
   const ids = [
     ...prior.flatMap((group) => group.sourceFindingIds),
@@ -361,8 +361,21 @@ export function mergeExactScanFindings(
         },
       ]
     : [];
+  return { scanId, groups };
+}
+
+/** Retain accepted sources after comparisons stop. Only exact copies are combined. */
+export function mergeExactScanFindings(
+  scanId: string,
+  inputs: readonly ScanMergeInput[],
+  previous: ScanAggregate | null,
+) {
   return confirmScanMerge(
-    validateScanMerge({ scanId, groups }, inputs, previous),
+    validateScanMerge(
+      unconfirmedScanGroups(scanId, inputs, previous),
+      inputs,
+      previous,
+    ),
     inputs,
     previous,
   );

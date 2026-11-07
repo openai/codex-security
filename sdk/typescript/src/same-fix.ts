@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { asRecord, canonicalJson } from "./record.js";
 import type { SemanticFinding } from "./scan-semantics.js";
 
 export type CompareReports = (
@@ -111,31 +112,75 @@ function hasAdditionalControl(a: Claim, b: Claim) {
   );
 }
 
+export function exceedsComparisonContext(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    asRecord(error)?.["code"] === "context_length_exceeded" ||
+    /\b(?:context_length_exceeded|context (?:length|window) exceeded|maximum context length is|exceeds? (?:the |this model's |the model's )?context (?:length|window)|(?:ran out of room in|exceeded) (?:the |this model's |the model's )?context window)\b/i.test(
+      message,
+    )
+  );
+}
+
+// Split on a native context-limit failure only. Keep each original pair intact.
+async function* gradeInContext<T>(
+  rows: T[],
+  request: (rows: T[]) => Promise<unknown>,
+  oversized: (row: T, error: unknown) => void,
+): AsyncGenerator<[T[], unknown]> {
+  let response: unknown;
+  try {
+    response = await request(rows);
+  } catch (error) {
+    if (!exceedsComparisonContext(error)) throw error;
+    if (rows.length === 1) {
+      oversized(rows[0]!, error);
+      return;
+    }
+    const mid = Math.ceil(rows.length / 2);
+    yield* gradeInContext(rows.slice(0, mid), request, oversized);
+    yield* gradeInContext(rows.slice(mid), request, oversized);
+    return;
+  }
+  yield [rows, response];
+}
+
 // Generate only the combinations still needed to establish a common repair.
 async function confirmSources(
   pairs: Pair[],
   claimsFor: (id: number) => Claim[],
   compare: CompareReports,
+  onReviewError: (error: unknown) => void,
 ) {
   const rejected = new Set<number>();
   const batch: { pair: Pair; A: Claim; B: Claim }[] = [];
   async function grade() {
-    const rows = batch.map(({ A, B }, id) => ({ id, A, B }));
-    const { sources } = confirmations.parse(
-      await compare(
-        sourceInstructions + "\n" + JSON.stringify(rows),
-        sourceSchema,
-      ),
-    );
-    const decisions = Map.groupBy(sources, (row) => row.id);
-    for (const [id, { pair }] of batch.entries()) {
-      const rows = decisions.get(id);
-      if (
-        rows?.length !== 1 ||
-        !rows[0]!.same ||
-        rows[0]!.survivingPaths.length
-      )
+    const results = gradeInContext(
+      batch,
+      (part) =>
+        compare(
+          sourceInstructions +
+            "\n" +
+            JSON.stringify(part.map(({ A, B }, id) => ({ id, A, B }))),
+          sourceSchema,
+        ),
+      ({ pair }, error) => {
         rejected.add(pair.id);
+        onReviewError(error);
+      },
+    );
+    for await (const [part, response] of results) {
+      const { sources } = confirmations.parse(response);
+      const decisions = Map.groupBy(sources, (row) => row.id);
+      for (const [id, { pair }] of part.entries()) {
+        const rows = decisions.get(id);
+        if (
+          rows?.length !== 1 ||
+          !rows[0]!.same ||
+          rows[0]!.survivingPaths.length
+        )
+          rejected.add(pair.id);
+      }
     }
     batch.length = 0;
   }
@@ -179,7 +224,7 @@ export async function checkSameFix(
           break;
         }
         const row = claim(report.data);
-        unique.set(JSON.stringify(row), row);
+        unique.set(canonicalJson(row), row);
       }
       rows = [...unique.values()];
       claims.set(id, rows);
@@ -187,14 +232,14 @@ export async function checkSameFix(
     return rows;
   }
   const matches = new Map<number, Set<number>>();
-  async function review(pairs: Pair[]) {
+  function requestReview(pairs: Pair[]) {
     const reports = [
       ...new Set(pairs.flatMap(({ left, right }) => [left, right])),
     ].map((id) => {
       const { finding } = groups[id]!;
       const first = claim(originalReport.parse(finding));
       const { codeEvidence: _codeEvidence, ...primary } = first;
-      const key = JSON.stringify(first);
+      const key = canonicalJson(first);
       return {
         id,
         primary: {
@@ -202,16 +247,17 @@ export async function checkSameFix(
           evidence: evidence[id]!.map((excerpt, id) => ({ id, ...excerpt })),
         },
         attached: claimsFor(id).filter(
-          (source) => JSON.stringify(source) !== key,
+          (source) => canonicalJson(source) !== key,
         ),
       };
     });
-    const result = reviews.parse(
-      await compare(
-        instructions + "\n" + JSON.stringify({ pairs, reports }),
-        reviewSchema,
-      ),
+    return compare(
+      instructions + "\n" + JSON.stringify({ pairs, reports }),
+      reviewSchema,
     );
+  }
+  async function acceptReviews(pairs: Pair[], response: unknown) {
+    const result = reviews.parse(response);
     const proposed: Pair[] = [];
     const decisions = Map.groupBy(result.reviews, (row) => row.pair);
     for (const pair of pairs) {
@@ -226,6 +272,7 @@ export async function checkSameFix(
       proposed,
       claimsFor,
       compare,
+      onReviewError,
     )) {
       const earlier = matches.get(right) ?? new Set<number>();
       earlier.add(left);
@@ -237,7 +284,11 @@ export async function checkSameFix(
   let id = 0;
   async function flush() {
     try {
-      await review(batch);
+      const results = gradeInContext(batch, requestReview, (_pair, error) =>
+        onReviewError(error),
+      );
+      for await (const [part, response] of results)
+        await acceptReviews(part, response);
     } catch (error) {
       onReviewError(error);
     }

@@ -80,6 +80,11 @@ def _source_digests(value: Any, error: str) -> dict[str, str]:
 
 
 def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
+    """Return the saved source digests and the optional path supplying the threat model.
+
+    Accept both a legacy path-to-digest map and an envelope containing sources.
+    Raise ContractError if the model points outside that envelope's source set.
+    """
     if isinstance(value, dict) and isinstance(value.get("sources"), dict):
         sources = _source_digests(
             value["sources"], "Saved stopped-scan source digests are malformed."
@@ -96,6 +101,11 @@ def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
 def _retained_checkpoint_state(
     scan: Any,
 ) -> tuple[dict[str, str | None] | None, dict[str, Any] | None]:
+    """Return selected checkpoint heads and any pending recovery record.
+
+    Older scans can store the head map directly. Recovery records also bind
+    the selection to a sealed manifest digest. A conflicting digest raises ContractError.
+    """
     raw = scan["retained_checkpoint_heads_json"]
     if raw is None:
         return None, None
@@ -149,6 +159,7 @@ def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
 
 
 def _checkpoint_head_directory(relative: str) -> Path | None:
+    """Return the owner directory of a current or archived checkpoint head path, or None for another file."""
     path = Path(relative)
     if path.name == "checkpoint-head.json":
         return path.parent
@@ -186,6 +197,7 @@ def _capture_saved_source(
     checkpoint_heads: dict[str, str | None] | None = None,
     expected_digest: str | None = None,
 ) -> dict[str, tuple[str, int]]:
+    """Capture digests and observation times for a saved source and its selected checkpoint or receipt inputs."""
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
         return capture_receipt_checkpoints(
@@ -433,6 +445,7 @@ def _restore_checkpoint_head(
     sources: dict[str, str],
     relative: str,
 ) -> None:
+    """Restore the prior selection for a checkpoint directory, allowing legacy evidence with no selected head."""
     path = Path(relative)
     if path.name != "checkpoint-head.json":
         return

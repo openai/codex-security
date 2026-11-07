@@ -1,4 +1,4 @@
-"""Semantic guard checks for control effects. Python 3.12+."""
+"""Test explorer validation against assessment bytes and inspect the resulting self-contained HTML."""
 
 import copy
 import hashlib
@@ -19,6 +19,7 @@ spec.loader.exec_module(builder)
 
 
 def run_builder(model_file, source, output):
+    """Run the explorer CLI on the supplied paths and return its exit status, stdout, and stderr."""
     return subprocess.run(
         [
             sys.executable,
@@ -59,6 +60,8 @@ class EmbeddedHtml(HTMLParser):
 
 
 class ControlValidation(unittest.TestCase):
+    """Vary a three-node scenario to test route, control, evidence, and rendering contracts."""
+
     def setUp(self):
         self.model = {
             "brand": "Synthetic assessment",
@@ -135,6 +138,17 @@ class ControlValidation(unittest.TestCase):
     def build_html(
         self, assessment_bytes, *, error=None, existing_html=None, model_encoding="utf-8"
     ):
+        """Run the builder with temporary inputs and check the outcome.
+
+        Args:
+            assessment_bytes (bytes): Exact assessment content used to validate the model.
+            error (str | None): Expected stderr substring for a build that exits with status 2.
+            existing_html (str | None): Prior output to seed and check after a failed build.
+            model_encoding (str): Encoding used to write the model fixture.
+
+        Returns:
+            str | None: The generated HTML on success, or None after the expected failure.
+        """
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             model_file, source, output = (
@@ -162,6 +176,7 @@ class ControlValidation(unittest.TestCase):
             return output.read_text(encoding="utf-8")
 
     def embedded_data(self, html, element_id):
+        """Decode the single application/json script with element_id from the generated HTML."""
         values = [
             code
             for tag, attrs, code in EmbeddedHtml(html).elements

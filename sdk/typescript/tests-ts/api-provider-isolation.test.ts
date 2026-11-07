@@ -18,6 +18,9 @@ import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/
 import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
+const nativeTestTimeoutMs = Number(
+  process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? 30_000,
+);
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
@@ -41,7 +44,14 @@ async function nativeRequest(
   const lines = createInterface({ input: child.stdout });
   let stderr = "";
   child.stderr.on("data", (chunk) => (stderr += chunk));
-  const timer = setTimeout(() => child.kill(), 15_000);
+  // Keep the child deadline inside the CI runner's per-test budget.
+  const probeTimeoutMs = nativeTestTimeoutMs / 2;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    // A descendant may retain stdout, so EOF cannot be the signal to stop reading.
+    lines.close();
+  }, probeTimeoutMs);
   const send = (message: unknown) =>
     child.stdin.write(JSON.stringify(message) + "\n");
   try {
@@ -62,13 +72,23 @@ async function nativeRequest(
       }
       if (response.id === 2) return response.result;
     }
-    throw new Error(`Native ${method} probe did not finish: ${stderr}`);
+    const reason = timedOut
+      ? `timed out after ${probeTimeoutMs}ms`
+      : "closed before replying";
+    throw new Error(`Native ${method} probe ${reason}: ${stderr}`);
   } finally {
     clearTimeout(timer);
     lines.close();
+    // Bun on Windows can keep these pipes open after the app-server process exits.
+    child.stdout.destroy();
+    child.stderr.destroy();
     child.kill();
     await closed;
   }
+}
+
+async function readProviderProfile(home: string, name: string) {
+  return parseToml(await readFile(join(home, `${name}.config.toml`), "utf8"));
 }
 
 async function effectiveProvider(
@@ -78,11 +98,9 @@ async function effectiveProvider(
   nativeProfile?: string,
 ) {
   if (nativeProfile !== undefined) {
-    const config = parseToml(
-      await readFile(
-        join(environment["CODEX_HOME"]!, `${nativeProfile}.config.toml`),
-        "utf8",
-      ),
+    const config = await readProviderProfile(
+      environment["CODEX_HOME"]!,
+      nativeProfile,
     );
     const result = await nativeRequest(environment, cwd, [], "thread/start", {
       cwd,
@@ -298,7 +316,7 @@ test.each(["openrouter", "fireworks"] as const)(
     );
     expect(selected).toMatchObject({ env_key: "SYNTHETIC_CUSTOM_API_KEY" });
   },
-  30_000,
+  nativeTestTimeoutMs,
 );
 
 for (const mode of ["standard", "deep"] as const) {

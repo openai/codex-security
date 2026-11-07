@@ -62,7 +62,15 @@ export function coverageReceiptComponents(value: string): string[] {
   }
 }
 
-export function validateRetainedCoverage(coverage: JsonObject): void {
+export function validateWorkerReport(report: JsonObject): void {
+  for (const field of ["findings", "scope", "threatModel"] as const)
+    requirePublicationJson(report[field], field);
+}
+
+export function validateRetainedCoverage(
+  coverage: JsonObject,
+  validateDeferredPaths = true,
+): void {
   for (const field of [
     "surfaces",
     "explicitExclusions",
@@ -71,6 +79,7 @@ export function validateRetainedCoverage(coverage: JsonObject): void {
     "openQuestions",
   ] as const)
     requirePublicationJson(coverage[field], `coverage.${field}`);
+  if (!validateDeferredPaths) return;
   for (const [index, row] of (coverage.deferred as JsonObject[]).entries()) {
     if (Array.isArray(row.paths))
       for (const value of row.paths as string[])

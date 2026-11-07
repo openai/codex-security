@@ -101,7 +101,6 @@ export async function recordCodexSecurityScanDraft(
 ): Promise<ScanDraftResult> {
   const parsed = scopedDeepDraft(context, parseScanDraft(input));
   requireFiniteNumbers(parsed);
-  validateRetainedCoverage(parsed.reviewState);
   requireBoundScan(context, parsed, true);
   if (
     context.mode === "deep" &&
@@ -125,6 +124,11 @@ export async function recordCodexSecurityScanDraft(
           }
         : await preserveScanDraft(context, parsed);
     const reconciled = preserved.input;
+    // An ordinary checkpoint can carry a provisional path until its task is closed.
+    validateRetainedCoverage(
+      reconciled.reviewState,
+      context.mode === "deep" || reconciled.complete !== false,
+    );
     const hardening = await readExistingHardeningPortfolio(context);
     const draft = prepareSemanticScanDraft(context, reconciled, hardening);
     try {
