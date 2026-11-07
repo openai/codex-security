@@ -47,6 +47,31 @@ function sessionEvent(
   return { type: "response_item", payload };
 }
 
+function expectCommandPaths(
+  cmd: string,
+  shell: string | undefined,
+  paths: readonly string[],
+  repository = "/repo",
+) {
+  const args = { cmd, shell };
+  const live = {
+    type: "item.started",
+    item: { id: "live", type: "command_execution", command: cmd, shell },
+  };
+  const saved = sessionEvent({
+    type: "function_call",
+    name: "exec_command",
+    call_id: "saved",
+    arguments: JSON.stringify(args),
+  });
+  for (const activity of [
+    scanActivityFromEvent(live, repository),
+    scanActivityFromEvent(toolEvent("exec", args), repository),
+    scanActivityFromSessionEvent(saved, repository),
+  ])
+    expect(activity?.paths).toEqual([...paths]);
+}
+
 function commandActivityCase(
   _name: string,
   command: string,
@@ -89,23 +114,7 @@ describe("scan activity", () => {
     ['cat "/repo/src/result:42:7"', "/usr/bin/pwsh", ["src/result"]],
   ] as const)(
     "attributes quoted filenames in live and saved commands: %s (%p)",
-    (cmd, shell, paths) => {
-      const args = { cmd, shell };
-      const event =
-        shell === undefined
-          ? commandEvent("item.started", cmd)
-          : toolEvent("exec", args);
-      expect(scanActivityFromEvent(event, "/repo")?.paths).toEqual([...paths]);
-      const saved = sessionEvent({
-        type: "function_call",
-        name: "exec_command",
-        call_id: "saved",
-        arguments: JSON.stringify(args),
-      });
-      expect(scanActivityFromSessionEvent(saved, "/repo")?.paths).toEqual([
-        ...paths,
-      ]);
-    },
+    (cmd, shell, paths) => expectCommandPaths(cmd, shell, paths),
   );
 
   test.each([
@@ -128,34 +137,8 @@ describe("scan activity", () => {
   ] as const)(
     "decodes unquoted blanks in recorded POSIX commands: %s",
     (cmd, repository, paths) => {
-      for (const activity of [
-        scanActivityFromEvent(
-          {
-            type: "item.started",
-            item: {
-              id: "live",
-              type: "command_execution",
-              command: cmd,
-              shell: "/bin/bash",
-            },
-          },
-          repository,
-        ),
-        scanActivityFromEvent(
-          toolEvent("exec", { cmd, shell: "sh" }),
-          repository,
-        ),
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            type: "function_call",
-            name: "exec_command",
-            call_id: "saved",
-            arguments: JSON.stringify({ cmd, shell: "/bin/zsh" }),
-          }),
-          repository,
-        ),
-      ])
-        expect(activity?.paths).toEqual([...paths]);
+      for (const shell of ["sh", "/bin/bash", "/bin/zsh"])
+        expectCommandPaths(cmd, shell, paths, repository);
     },
   );
 

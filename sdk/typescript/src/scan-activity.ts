@@ -7,8 +7,6 @@ const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
 const POSIX_TOKEN =
   /(?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^\s|;&<>'"\\])+/gu;
 const POSIX_SHELL = /(?:^|\/)(?:sh|bash|zsh)$/u;
-const POSIX_LAUNCHER =
-  /^((?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh))\s+-[a-z]*c[a-z]*\s+(.*)$/su;
 
 export type ScanActivityStatus = "running" | "completed" | "failed";
 
@@ -133,42 +131,38 @@ function commandDetails(
   repository: string,
   shell: unknown,
 ) {
-  const { text, script, recordedShell } =
-    typeof value === "string"
-      ? unwrapCommand(value)
-      : { text: value.join(" ") };
-  return {
-    description: text.replaceAll(/\s+/gu, " "),
-    paths:
-      typeof value === "string"
-        ? commandRepositoryPaths(
-            script ?? text,
-            repository,
-            shell ?? recordedShell,
-          )
-        : literalRepositoryPaths(value, repository),
-  };
+  let text: string;
+  let paths: string[];
+  if (typeof value === "string") {
+    const command = unwrapCommand(value);
+    text = command.text;
+    paths = commandRepositoryPaths(
+      command.script ?? text,
+      repository,
+      shell ?? command.recordedShell,
+    );
+  } else {
+    text = value.join(" ");
+    paths = literalRepositoryPaths(value, repository);
+  }
+  return { description: text.replaceAll(/\s+/gu, " "), paths };
 }
 
 /** Decode one literal POSIX word without expanding variables or running a shell. */
 function literalPosixWord(argument: string) {
-  const parts = argument.match(
-    /'[^']*'|"(?:\\[\s\S]|[^"\\$\x60])*"|\\[\s\S]|[^\s'"\\$\x60|;&<>()*?\[\]{}~]+/gu,
-  );
-  if (parts?.join("") !== argument) return undefined;
-  return parts
-    .map((part) => {
-      if (part.startsWith("'")) return part.slice(1, -1);
-      if (part.startsWith('"'))
-        return part
-          .slice(1, -1)
-          .replace(/\\([$\x60"\\\n])/gu, (_, value: string) =>
-            value === "\n" ? "" : value,
-          );
-      if (!part.startsWith("\\")) return part;
-      return part[1] === "\n" ? "" : part.slice(1);
-    })
-    .join("");
+  // A sticky match stops at the first unsupported fragment instead of skipping it.
+  const fragment =
+    /'([^']*)'|"((?:\\.|[^"\\$\x60])*)"|\\(.)|[^\s'"\\$\x60|;&<>()*?\[\]{}~]+/suy;
+  let word = "";
+  do {
+    const match = fragment.exec(argument);
+    if (!match) return undefined;
+    const [raw, single, double, escaped] = match;
+    if (double !== undefined)
+      word += double.replace(/\\\n|\\([$\x60"\\])/gu, "$1");
+    else if (escaped !== "\n") word += single ?? escaped ?? raw;
+  } while (fragment.lastIndex < argument.length);
+  return word;
 }
 
 function unwrapCommand(command: string) {
@@ -187,14 +181,15 @@ function unwrapCommand(command: string) {
   ) {
     return { text: powershell[4]! };
   }
-  const match = POSIX_LAUNCHER.exec(normalized);
-  if (match === null || !/^["']/u.test(match[2]!))
-    return { text: normalized, script: command };
-  const quote = match[2]![0]!;
-  const script = match[2]!.slice(1);
-  const decoded = literalPosixWord(match[2]!);
+  const match =
+    /^((?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh))\s+-[a-z]*c[a-z]*\s+(["'].*)$/su.exec(
+      normalized,
+    );
+  if (match === null) return { text: normalized, script: command };
+  const argument = match[2]!;
+  const decoded = literalPosixWord(argument);
   return {
-    text: script.endsWith(quote) ? script.slice(0, -1) : script,
+    text: argument.slice(1, argument.endsWith(argument[0]!) ? -1 : undefined),
     script: decoded,
     recordedShell: decoded === undefined ? undefined : match[1],
   };
@@ -500,9 +495,11 @@ function commandRepositoryPaths(
   for (const token of command.match(posixShell ? POSIX_TOKEN : SHELL_TOKEN) ??
     []) {
     let value = token;
-    const singleQuoted = value.startsWith("'") && value.endsWith("'");
-    const quoted =
-      (value.startsWith('"') && value.endsWith('"')) || singleQuoted;
+    const first = token[0]!;
+    const quote =
+      (first === "'" || first === '"') && token.endsWith(first)
+        ? first
+        : undefined;
     const hasQuote = /['"]/u.test(token);
     const posixLiteral = posixShell && (hasQuote || /\\[ \t]/u.test(token));
     if (posixLiteral) {
@@ -518,10 +515,10 @@ function commandRepositoryPaths(
       );
       if (literal === undefined || literal.startsWith("$")) continue;
       value = (variable ?? "") + literal;
-    } else if (quoted) value = value.slice(1, -1);
+    } else if (quote) value = value.slice(1, -1);
     const raw = posixLiteral ? value : value.replaceAll('\\"', '"');
     value = raw.replaceAll("\\", "/");
-    if (process.platform === "win32" && !singleQuoted) {
+    if (process.platform === "win32" && quote !== "'") {
       value = value.replace(
         /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
         "$CODEX_SECURITY_REPOSITORY/",
@@ -535,18 +532,12 @@ function commandRepositoryPaths(
       if (!posixLiteral) {
         // An opposite quote inside a quoted filename is literal data.
         const boundary =
-          quoted && !path.includes(token[0]!) ? /[\r\n].*$/u : /["'\r\n].*$/u;
+          quote && !path.includes(quote) ? /[\r\n].*$/u : /["'\r\n].*$/u;
         path = path.replace(boundary, "").trim();
       }
       path = path.replace(/\/+$/u, "");
       if (!posixLiteral) path = path.replace(/:\d+(?::\d+)?$/u, "");
-      if (
-        path !== "" &&
-        !path.startsWith("../") &&
-        !path.split("/").includes("..")
-      ) {
-        paths.add(path);
-      }
+      if (path !== "" && !path.split("/").includes("..")) paths.add(path);
     }
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }
