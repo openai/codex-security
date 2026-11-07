@@ -185,7 +185,53 @@ test.each([
   }
   const before = await readFile(target);
   const branch = git("branch", "--show-current");
-  const result = await runWorkflow(
+  const result = await publishSyntheticChange(directory);
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain("regular, unlinked Git reflogs");
+  expect(git("branch", "--show-current")).toBe(branch);
+  expect(repositoryGit(remote)("for-each-ref")).toBe("");
+  expect(await readFile(target)).toEqual(before);
+});
+
+test.each([
+  "hardlinked worktree COMMIT_EDITMSG",
+  ...(process.platform === "win32" ? [] : ["symlinked COMMIT_EDITMSG"]),
+])("refuses a %s during patch publication", async (mode) => {
+  const { directory, git, remote } = await publicationRepository(fixtures);
+  let checkout = directory;
+  if (mode === "hardlinked worktree COMMIT_EDITMSG") {
+    checkout = await fixtures.create("patch-linked-worktree-");
+    git("worktree", "add", "-b", "linked", checkout);
+  }
+  const checkoutGit = repositoryGit(checkout);
+  const message = join(
+    checkoutGit("rev-parse", "--absolute-git-dir"),
+    "COMMIT_EDITMSG",
+  );
+  const notes = join(
+    await fixtures.create("patch-operator-notes-"),
+    "COMMIT_EDITMSG",
+  );
+  const contents = "Synthetic operator notes\n";
+  await writeFile(notes, contents);
+  await rm(message, { force: true });
+  if (mode === "symlinked COMMIT_EDITMSG") await symlink(notes, message);
+  else await link(notes, message);
+  const branch = checkoutGit("branch", "--show-current");
+  const head = checkoutGit("rev-parse", "HEAD");
+
+  const result = await publishSyntheticChange(checkout);
+
+  expect(result.exitCode, result.stderr).toBe(2);
+  expect(result.stderr).toContain("COMMIT_EDITMSG");
+  expect(await readFile(notes, "utf8")).toBe(contents);
+  expect(checkoutGit("branch", "--show-current")).toBe(branch);
+  expect(checkoutGit("rev-parse", "HEAD")).toBe(head);
+  expect(repositoryGit(remote)("for-each-ref")).toBe("");
+});
+
+function publishSyntheticChange(directory: string) {
+  return runWorkflow(
     ["patch", "Synthetic issue", "--create-pr", "--json"],
     {
       currentDirectory: directory,
@@ -203,9 +249,4 @@ test.each([
       },
     },
   );
-  expect(result.exitCode).toBe(2);
-  expect(result.stderr).toContain("regular, unlinked Git reflogs");
-  expect(git("branch", "--show-current")).toBe(branch);
-  expect(repositoryGit(remote)("for-each-ref")).toBe("");
-  expect(await readFile(target)).toEqual(before);
-});
+}
