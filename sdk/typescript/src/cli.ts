@@ -10160,6 +10160,7 @@ async function patchCommandContext(
   callerDirectory: string;
   directory: string;
   gitDirectory: string;
+  gitControls?: PatchGitControls;
   administrationReferences: readonly PatchGitAdministrationReference[];
   environment: NodeJS.ProcessEnv;
   glabConfigurationPaths: Record<string, string>;
@@ -13539,8 +13540,11 @@ async function runSkill(
       dependencies.environment,
       "GIT_DIR",
     );
+    const savedControls = options.patchGitContext?.gitControls;
+    if (savedControls) await savedControls.validateCapturedSelection();
     const gitControls = patch
-      ? await capturePatchGitControls(
+      ? (savedControls ??
+        (await capturePatchGitControls(
           directory,
           async (root, checkout, args, commandOptions) => {
             const current =
@@ -13661,7 +13665,7 @@ async function runSkill(
             ),
           },
           options.automaticPublication,
-        )
+        )))
       : undefined;
     const patchPermissions =
       gitControls === undefined || options.externalSandbox
@@ -13818,7 +13822,12 @@ async function runSkill(
                           signal,
                           gitControls?.hostFilterSettings,
                         );
-                        if (!signal?.aborted) await gitControls?.validate();
+                        if (!signal?.aborted && gitControls) {
+                          await gitControls.validate();
+                          // Subsequent findings must keep the authority established for the first snapshot.
+                          const context = options.patchGitContext;
+                          if (context) context.gitControls ??= gitControls;
+                        }
                       },
                     }),
                 ...(options.onEvent === undefined

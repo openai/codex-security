@@ -54,6 +54,37 @@ describe("patch Git administration", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
 
+  test.each(["GIT_DIR", "GIT_COMMON_DIR"] as const)(
+    "a saved patch cannot adopt a different %s between findings",
+    async (selector) => {
+      const checkout = await fixtures.create("patch-bound-checkout-");
+      const other = await fixtures.create("patch-other-checkout-");
+      repositoryGit(checkout)("init", "--quiet");
+      repositoryGit(other)("init", "--quiet");
+      const environment = {
+        GIT_DIR: join(checkout, ".git"),
+        GIT_COMMON_DIR: join(checkout, ".git"),
+        GIT_WORK_TREE: checkout,
+      };
+      const controls = await capturePatchGitControls(
+        checkout,
+        async (_root, directory, args, options) =>
+          runGitRepositoryCommand("git", args, directory, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          }),
+        false,
+        false,
+      );
+      expect(controls).toBeDefined();
+      await controls!.validateCapturedSelection();
+      environment[selector] = join(other, ".git");
+      await expect(controls!.validateCapturedSelection()).rejects.toThrow(
+        "Selected Git administration changed during the patch",
+      );
+    },
+  );
+
   for (const link of [
     "none",
     "directory",

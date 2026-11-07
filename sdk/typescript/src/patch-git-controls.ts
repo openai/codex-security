@@ -151,6 +151,7 @@ export interface PatchGitControls {
   readonly snapshotConfigPaths: readonly string[];
   hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
+  validateCapturedSelection(): Promise<void>;
 }
 
 // Windows provisions read ACLs in the background. Ask Git to read the same
@@ -1245,15 +1246,18 @@ export async function capturePatchGitControls(
     }
     await captureHooks();
   };
+  const directoryArguments = ["--absolute-git-dir", "--git-common-dir"];
+  const readSelectedPath = async (argument: string) =>
+    (
+      await runControl(root, root, [
+        "rev-parse",
+        "--path-format=absolute",
+        argument,
+      ])
+    ).replace(/\n$/u, "");
   const selectedPaths: string[] = [];
-  for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
-    const output = await runControl(root, root, [
-      "rev-parse",
-      "--path-format=absolute",
-      argument,
-    ]);
-    selectedPaths.push(output.replace(/\n$/u, ""));
-  }
+  for (const argument of directoryArguments)
+    selectedPaths.push(await readSelectedPath(argument));
   const selectedDirectories = await Promise.all(
     selectedPaths.map(realControlPath),
   );
@@ -1990,5 +1994,17 @@ export async function capturePatchGitControls(
       ];
     },
     validate: () => discover(false),
+    async validateCapturedSelection() {
+      for (const [index, argument] of directoryArguments.entries()) {
+        if (
+          (await realControlPath(await readSelectedPath(argument))) !==
+          selectedDirectories[index]
+        )
+          throw new Error(
+            "Selected Git administration changed during the patch. Inspect the checkout before retrying.",
+          );
+      }
+      await discover(false);
+    },
   };
 }
