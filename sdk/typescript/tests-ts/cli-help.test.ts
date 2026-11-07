@@ -34,7 +34,9 @@ async function help(args: readonly string[], columns?: number) {
 
 function option(helpText: string, flag: string): string {
   const lines = helpText.split("\n");
-  const start = lines.findIndex((line) => line.startsWith(`  ${flag} `));
+  const start = lines.findIndex((line) =>
+    new RegExp(`^  (?:-\\w, )?${flag} `, "u").test(line),
+  );
   if (start === -1) return "";
   let end = start + 1;
   while (
@@ -150,6 +152,7 @@ describe("CLI help", () => {
 
   test.each([
     { command: ["scan"] },
+    { command: ["scan", "dependencies"] },
     { command: ["scan", "import"] },
     { command: ["scans", "rerun"] },
   ])("advertises supported formats for $command", async ({ command }) => {
@@ -224,6 +227,43 @@ describe("CLI help", () => {
     expect(option(text, "--format")).toContain("json");
   });
 
+  test("exposes dependency assessment help and schema without source scan options", async () => {
+    for (const args of [["--help"], ["scan", "--help"]])
+      expect(await help(args)).toContain("scan dependencies --help");
+    const text = await help(["scan", "dependencies", "--help"]);
+    expect(text).toContain(
+      "Usage: codex-security scan dependencies [repository]",
+    );
+    for (const flag of [
+      "--config",
+      "--auth",
+      "--model",
+      "--output-dir",
+      "--max-cost",
+      "--show-cost",
+    ])
+      expect(option(text, flag), flag).not.toBe("");
+    for (const flag of ["--path", "--mode", "--headless", "--fail-on-severity"])
+      expect(option(text, flag), flag).toBe("");
+    const schema = JSON.parse(
+      await help([
+        "scan",
+        "dependencies",
+        "--config",
+        "missing.yaml",
+        "--schema",
+        "--json",
+      ]),
+    );
+    expect(schema.options.properties).toMatchObject({
+      config: { type: "string" },
+      model: { type: "string" },
+      maxCost: { type: "number" },
+    });
+    for (const key of ["path", "mode", "headless", "failOnSeverity"])
+      expect(schema.options.properties).not.toHaveProperty(key);
+  });
+
   test.each([
     { args: ["-h"], usage: "codex-security <command>" },
     { args: ["--help", "scan"], usage: "codex-security scan [repository]" },
@@ -238,6 +278,14 @@ describe("CLI help", () => {
     {
       args: ["scan", "import", "--json", "--help"],
       usage: "codex-security scan import",
+    },
+    {
+      args: ["--json", "scan", "dependencies", "--help"],
+      usage: "codex-security scan dependencies [repository]",
+    },
+    {
+      args: ["scan", "--json", "dependencies", "--help"],
+      usage: "codex-security scan dependencies [repository]",
     },
     {
       args: ["--format", "json", "scan", "import", "--help"],
@@ -291,6 +339,7 @@ describe("CLI help", () => {
         ],
         [["publish", "scan"], []],
         [["scan", "import"], []],
+        [["scan", "dependencies"], []],
       ] as const) {
         const text = await help([...command, "--help"], columns);
         expect(text).not.toMatch(/\u001b\[/u);
