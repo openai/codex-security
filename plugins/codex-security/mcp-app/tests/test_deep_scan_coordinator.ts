@@ -79,14 +79,30 @@ async function testStandardWorkersReceiveExistingFalsePositiveFeedback() {
   );
   await mkdir(path.dirname(feedbackPath), { recursive: true });
   await writeJson(feedbackPath, [{ reason: "existing control still applies" }]);
-  const terminal = await runCoordinator(fixture, store, new FakeExecutor());
+  const rubric = {
+    markdown: "Fixture grading criteria",
+    sha256: "a".repeat(64),
+    revision: 1,
+  };
+  fixture.run.severityRubric = rubric;
+  const executor = new FakeExecutor({ failFirstDiscoveryAttempt: true });
+  const terminal = await runCoordinator(fixture, store, executor);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   const worker = [...store.workers.values()].find(
     (candidate) => candidate.kind === "discovery",
   );
   assert.ok(worker);
   const prompt = await readFile(worker.promptPath, "utf8");
-  assert.equal(prompt.includes(JSON.stringify(feedbackPath)), true);
+  const continuation = executor.discoveryContinuationPrompts.find(
+    (text) => text !== undefined,
+  );
+  assert.ok(continuation);
+  for (const turn of [prompt, continuation]) {
+    assert.ok(turn.includes(JSON.stringify(feedbackPath)));
+    assert.ok(turn.includes(rubric.markdown));
+    assert.ok(turn.includes("severityRubric.markdown"));
+    assert.doesNotMatch(turn, /default-severity-rubric\.md/);
+  }
   assert.equal(
     Object.hasOwn(
       await promptContext(worker.promptPath),

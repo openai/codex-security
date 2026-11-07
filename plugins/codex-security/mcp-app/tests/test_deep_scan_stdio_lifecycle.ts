@@ -205,7 +205,9 @@ service_tier = "ultrafast"
   const server = startServer(serverBundlePath, environment);
 
   try {
-    const initialized = await server.initialize("deep-scan-stdio-lifecycle");
+    const initialized = await server.initialize("deep-scan-stdio-lifecycle", {
+      elicitation: { form: {} },
+    });
     assert.deepEqual(
       initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
       {},
@@ -322,6 +324,85 @@ service_tier = "ultrafast"
       server,
       excludedScanIds: [expiredScanId],
     });
+    const competing = await server.request(
+      9,
+      "tools/call",
+      toolCall(
+        "start_codex_security_deep_scan",
+        { targetPath },
+        "competing-thread",
+      ),
+    );
+    assertNoError(competing);
+    assert.equal(competing.result.structuredContent.confirmationRequired, true);
+    assert.deepEqual(
+      competing.result.structuredContent.otherRunningDeepScans.map(
+        (scan: { scanId: string }) => scan.scanId,
+      ),
+      [scanId],
+    );
+    const competingWorkspace = randomUUID();
+    const appThread = "competing-app-thread";
+    await runWorkbench(environment, [
+      "create-workspace",
+      "--workspace-id",
+      competingWorkspace,
+      "--thread-id",
+      appThread,
+    ]);
+    await runWorkbench(environment, [
+      "save-workspace",
+      "--workspace-id",
+      competingWorkspace,
+      "--target-path",
+      targetPath,
+      "--scope",
+      ".",
+      "--mode",
+      "deep",
+    ]);
+    const formIds = new Set<string>();
+    for (const [requestId, choice] of [
+      [6, "dismissed"],
+      [7, "Cancel (Recommended)"],
+      [8, "Continue"],
+    ] as const) {
+      server.sendRequest(
+        requestId,
+        "tools/call",
+        toolCall(
+          "start_codex_security_scan",
+          { sessionId: competingWorkspace },
+          appThread,
+        ),
+      );
+      const form = await server.waitForMessage(
+        (message) =>
+          message.method === "elicitation/create" && !formIds.has(message.id),
+      );
+      formIds.add(form.id);
+      assert.ok(form.params.message.includes(targetPath));
+      server.sendResponse(
+        form.id,
+        choice === "dismissed"
+          ? { action: "cancel" }
+          : { action: "accept", content: { concurrent_deep_scan: choice } },
+      );
+      const answer = await server.waitForResponse(requestId);
+      assertNoError(answer);
+      const result = answer.result.structuredContent;
+      if (choice === "Continue") {
+        await runWorkbench(environment, [
+          "cancel-scan",
+          "--scan-id",
+          result.workspace.results.scanId,
+        ]);
+      } else if (choice === "dismissed") {
+        assert.equal(result.confirmationRequired, true);
+      } else {
+        assert.equal(result.status, "cancelled");
+      }
+    }
     await waitForDeepScanWorker({ environment, scanId, threadId });
     const [startedWorker] = await waitForJsonLines(startLogPath, 1);
     assert.equal(startedWorker.hasExpectedApiKey, true);

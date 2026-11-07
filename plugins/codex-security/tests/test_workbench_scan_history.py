@@ -515,7 +515,12 @@ def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_
         state_dir, codex_home, repository, tmp_path / "results", thread_id="desktop-owner"
     )["deepScan"]
     other = begin_target_scan(
-        state_dir, codex_home, other_repository, tmp_path / "results", thread_id="other-owner"
+        state_dir,
+        codex_home,
+        other_repository,
+        tmp_path / "results",
+        thread_id="other-owner",
+        confirmed_concurrent_scans=(scan["scanId"],),
     )["deepScan"]
     workers = [
         (scan["scanId"], "setup", "succeeded", "setup-worker"),

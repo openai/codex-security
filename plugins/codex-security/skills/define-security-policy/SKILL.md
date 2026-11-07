@@ -9,21 +9,9 @@ A useful `SECURITY.md` tells Codex Security what matters in a repository: the sy
 
 ## 1. Find the Applicable Policies
 
-Resolve the repository or component from the user's request. Ask if the target is ambiguous. Inventory policy paths, including hidden directories, before reading them:
+Resolve the repository or component from the user's request. Ask if the target is ambiguous. Use the checked policy paths and resolved guidance supplied for that target.
 
-```bash
-<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --list
-```
-
-On Windows, use `launch_codex_security_mcp.cmd` with the same arguments. The resolver reads regular UTF-8 policy files, including symbolic links whose targets remain within the repository. Report rejected policies and the resulting coverage gap rather than bypassing those protections.
-
-Read `../../references/security-guidance.md`, then resolve the policy chain for the file or directory being reviewed:
-
-```bash
-<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out -
-```
-
-`<plugin_dir>` is the Codex Security plugin root containing `.codex-plugin/plugin.json`, not the target repository or this skill directory.
+To collect guidance yourself, run the [`policy-list` command](../../references/skill-runtime.md) for the repository root to inventory policy paths, including hidden directories. Then follow [security-guidance.md](../../references/security-guidance.md) to resolve the policy chain for the target, with `--out -` to read it directly. The resolver reads regular UTF-8 policy files, including symbolic links whose targets stay within the repository. Report rejected policies and the resulting coverage gap.
 
 Root and nested policies compose from root to leaf; the policy closest to the code takes precedence when guidance conflicts. When reviewing a whole repository, inventory nested policies so component-specific boundaries are not missed. Do not treat `.github/SECURITY.md` or `docs/SECURITY.md` as repository-wide scanner guidance or overwrite them while creating a root policy.
 

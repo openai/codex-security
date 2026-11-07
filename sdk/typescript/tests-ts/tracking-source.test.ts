@@ -28,6 +28,7 @@ import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { readJson, writeJson } from "./support/json.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
@@ -113,6 +114,41 @@ function run(
 }
 
 describe("native tracking source validation", () => {
+  test.skipIf(process.platform !== "win32")(
+    "the tracking command preserves literal paths and the selected finding",
+    async () => {
+      const f = await fixture(2);
+      const scanDir = join(f.root, "scan %USERNAME% !EXPAND! 雪's");
+      await rename(f.scanDir, scanDir);
+      const launcher = windowsHelperFixture(f.root);
+      await cp(join(PLUGIN_ROOT, "schemas"), join(launcher.plugin, "schemas"), {
+        recursive: true,
+      });
+      const findings = f.findings.findings;
+      const selected = findings[1]!;
+      for (const powershell of launcher.powershells) {
+        for (const [selection, value] of [
+          ["all", ""],
+          ["finding-id", selected.findingId],
+          ["fingerprint", selected.fingerprints.primary],
+        ] as const) {
+          const result = await launcher.run(powershell, "tracking-source", {
+            "<plugin-root>": launcher.plugin,
+            "<user-supplied-scan-dir>": scanDir,
+            "<selection>": selection,
+            "<id_or_fingerprint>": value,
+          });
+          expect(result.status, result.diagnostics).toBe(0);
+          expect(result.stdout.trim().split(/\r?\n/u)).toEqual(
+            selection === "all"
+              ? findings.map((row) => row.findingId)
+              : [selected.findingId],
+          );
+        }
+      }
+    },
+  );
+
   test("escapes filesystem controls in a missing scan path", async () => {
     const f = await fixture();
     const result = run({

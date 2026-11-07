@@ -1,5 +1,6 @@
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { afterEach, expect, mock, test } from "bun:test";
 import {
   runHostedRemediation,
@@ -79,17 +80,36 @@ test.each([
           ? "$codex-security:fix-finding"
           : "$codex-security:verify-fix",
       );
-      if (operation === "verify")
+      const { pluginRoot } = request.runtime;
+      const staticMethod = await readFile(
+        join(pluginRoot, "references", "verification-static.md"),
+        "utf8",
+      );
+      const skill = operation === "patch" ? "fix-finding" : "verify-fix";
+      const references = join(pluginRoot, "skills", skill, "references");
+      const standardMethod = await readFile(
+        join(references, "verification-standard.md"),
+        "utf8",
+      );
+      expect(request.prompt).toContain(
+        staticVerification ? staticMethod : standardMethod,
+      );
+      expect(request.prompt).not.toContain(
+        staticVerification ? standardMethod : staticMethod,
+      );
+      if (operation === "verify") {
+        const contract = await readFile(
+          join(references, "json-result.md"),
+          "utf8",
+        );
+        expect(request.prompt).toContain(contract);
         expect(request.prompt).not.toContain('"checks"');
+      }
       options.onEvent?.({ type: "activity", description: "Checking guard" });
       if (!staticVerification) return receipt(request);
-      expect(request.prompt).toContain("Verification mode: static");
       expect(request.prompt).toContain("without executing requested setup");
       expect(request.prompt).not.toContain(
         "instructions for dynamic validation",
-      );
-      expect(request.prompt).not.toContain(
-        "only after the original issue no longer reproduces",
       );
       return receipt(request, {
         finalResponse: JSON.stringify(

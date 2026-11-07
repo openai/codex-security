@@ -3049,9 +3049,7 @@ if __name__ == "__main__":
     expect(prompt).toContain(
       `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_REVISION`,
     );
-    expect(prompt).toContain(
-      `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST`,
-    );
+    expect(prompt).not.toContain("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST");
     expect(prompt).toContain("codex-security-plugin");
     expect(prompt).not.toContain("CODEX_SECURITY_KNOWLEDGE_BASE");
     expect(prompt).not.toContain("false_positive_feedback.json");
@@ -3126,51 +3124,87 @@ if __name__ == "__main__":
     await client.close();
   });
 
-  test("passes the workbench snapshot contract to dirty Git scans", async () => {
-    const { repository, codexHome, scanDir } = await scanDirectories();
-    const createCodex = mock((_options: CodexOptions) => {
-      return {
-        startThread: () => ({
-          id: null,
-          runStreamed: async () => fail("target contract captured"),
-        }),
-      };
-    });
-
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
-        if (args[0] === "register-cli-scan") {
-          return {
-            ...mockScanRegistration(args, input),
-            targetRevision: "cafebabe",
-            contract: {
-              target: {
-                allowedKinds: ["git_worktree"],
-                requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
-              },
+  test.each([
+    ["git_revision", "cafebabe", undefined],
+    ["git_worktree", "cafebabe", TEST_SNAPSHOT_DIGEST],
+    ["directory_snapshot", "unversioned", TEST_SNAPSHOT_DIGEST],
+  ] as const)(
+    "binds registered target metadata for %s",
+    async (kind, revision, digest) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      let prompt = "";
+      const createCodex = mock((_options: CodexOptions) => {
+        return {
+          startThread: () => ({
+            id: null,
+            runStreamed: async (input: string) => {
+              prompt = input;
+              return fail("target contract captured");
             },
-          };
-        }
-        return mockWorkbench(args, input);
-      },
-      createCodex,
-    });
+          }),
+        };
+      });
 
-    await expect(client.run(repository)).rejects.toThrow(
-      "target contract captured",
-    );
-    expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
-      CODEX_SECURITY_TARGET_KIND: "git_worktree",
-      CODEX_SECURITY_TARGET_REVISION: "cafebabe",
-      CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: TEST_SNAPSHOT_DIGEST,
-    });
-    await client.close();
-  });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: {
+            CODEX_SECURITY_TARGET_REVISION: "stale-revision",
+            CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: "stale-digest",
+            ...(process.platform === "win32"
+              ? { Codex_Security_Target_Snapshot_Digest: "stale-digest" }
+              : {}),
+          },
+        }),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          if (args[0] === "register-cli-scan") {
+            return {
+              ...mockScanRegistration(args, input),
+              targetRevision: revision,
+              contract: {
+                target: {
+                  allowedKinds: [kind],
+                  ...(digest === undefined
+                    ? {}
+                    : { requiredSnapshotDigest: digest }),
+                },
+              },
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex,
+      });
+
+      await expect(client.run(repository)).rejects.toThrow(
+        "target contract captured",
+      );
+      const env = createCodex.mock.lastCall?.[0]?.env;
+      expect(env?.["CODEX_SECURITY_TARGET_KIND"]).toBe(kind);
+      expect(env?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+        revision === "unversioned" ? undefined : revision,
+      );
+      expect(env?.["CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"]).toBe(digest);
+      expect(env).not.toHaveProperty("Codex_Security_Target_Snapshot_Digest");
+      expect(
+        prompt.includes(
+          shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION"),
+        ),
+      ).toBe(revision !== "unversioned");
+      expect(
+        prompt.includes(
+          shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"),
+        ),
+      ).toBe(digest !== undefined);
+      expect(prompt).not.toContain(TEST_SNAPSHOT_DIGEST);
+      await client.close();
+    },
+  );
 
   test("resolves deep settings before runtime preparation and records the snapshot", async () => {
     const root = await temporaryDirectory();
@@ -16777,16 +16811,6 @@ if __name__ == "__main__":
     expect(prompt).toContain(
       `Use ${pythonCommand} as <python_command> for plugin Python helper scripts (.py files)`,
     );
-    const policyReference = await readFile(
-      join(PLUGIN_ROOT, "references", "security-guidance.md"),
-      "utf8",
-    );
-    const policyCommand = policyReference
-      .split("\n")
-      .find((line) => line.includes("--helper resolve-security-md"));
-    expect(policyCommand).toMatch(
-      /^<plugin_dir>\/scripts\/launch_codex_security_mcp --helper resolve-security-md /,
-    );
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",
       "/scripts/launch_codex_security_mcp",
@@ -17129,6 +17153,7 @@ if __name__ == "__main__":
       }),
     ).rejects.toThrow("prompt captured");
     expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toMatch(/scan\.mode[^.]*"branch_diff"/u);
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(

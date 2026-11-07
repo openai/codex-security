@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
 from workbench.storage import create_private_temporary_directory, state_dir
-from workbench_feedback import get_scan_feedback
+from workbench_feedback import FALSE_POSITIVE_FEEDBACK_PATH, get_scan_feedback
 from workbench_target import (
     directory_content_digest,
     git_revision,
@@ -361,7 +361,7 @@ def insert_running_scan(
         if false_positives:
             write_scan_local_bytes(
                 scan_dir,
-                "artifacts/01_context/false_positive_feedback.json",
+                FALSE_POSITIVE_FEEDBACK_PATH,
                 (json.dumps(false_positives, allow_nan=False) + "\n").encode(),
             )
     return scan_id

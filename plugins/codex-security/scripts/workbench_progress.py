@@ -1,8 +1,10 @@
 """Progress transition helpers for the Codex Security workbench."""
 
 import argparse
+import math
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,34 @@ def reportable_count(
     return count
 
 
+def set_investigation_allowance(
+    connection: sqlite3.Connection, scan: sqlite3.Row, minutes: float
+) -> None:
+    if scan["mode"] not in {"standard", "diff"} or scan["recipe_json"] is not None:
+        raise SystemExit("Only native Standard and diff scans accept an investigation allowance.")
+    if not math.isfinite(minutes) or minutes <= 0:
+        raise SystemExit("max-time-minutes must be a finite positive number of minutes.")
+    started = datetime.now(timezone.utc)
+    try:
+        deadline = started + timedelta(minutes=minutes)
+    except OverflowError as exc:
+        raise SystemExit(
+            "The requested investigation deadline is outside the supported date range."
+        ) from exc
+    if scan["investigation_policy"] is not None:
+        return
+    template = Path(__file__).resolve().parents[1] / "references" / "investigation-time-budget.md"
+    policy = (
+        template.read_text(encoding="utf-8")
+        .replace("{{budgetMinutes}}", str(minutes))
+        .replace("{{startedAt}}", started.isoformat().replace("+00:00", "Z"))
+        .replace("{{deadlineAt}}", deadline.isoformat().replace("+00:00", "Z"))
+    )
+    connection.execute(
+        "UPDATE scans SET investigation_policy = ? WHERE id = ?", (policy, scan["id"])
+    )
+
+
 def update_context(
     wb: Any,
     connection: sqlite3.Connection,
@@ -29,7 +59,9 @@ def update_context(
 ) -> dict[str, Any]:
     """Update user context on a running scan and return the refreshed scan context in the same workbench."""
     scan_id = require_uuid(args.scan_id, "scan-id")
-    context = user_context_argument(args)
+    minutes = args.max_time_minutes
+    if args.user_context is None and minutes is None:
+        raise SystemExit("Provide a replacement user context or max-time-minutes.")
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         scan = wb.require_scan(connection, scan_id)
@@ -51,22 +83,26 @@ def update_context(
                 args.claim_token,
                 error_message="Scan context updates are owned by another continuation.",
             )
-        timestamp = wb.now()
-        connection.execute(
-            "UPDATE scans SET user_context = ?, updated_at = ? WHERE id = ?",
-            (context, timestamp, scan["id"]),
-        )
-        if args.workspace_id is not None:
+        if minutes is not None:
+            set_investigation_allowance(connection, scan, minutes)
+        if args.user_context is not None:
+            context = user_context_argument(args)
+            timestamp = wb.now()
             connection.execute(
-                "UPDATE workspaces SET user_context = ?, updated_at = ? WHERE id = ?",
-                (context, timestamp, workspace["id"]),
+                "UPDATE scans SET user_context = ?, updated_at = ? WHERE id = ?",
+                (context, timestamp, scan["id"]),
             )
-        else:
-            connection.execute(
-                "UPDATE workspaces SET updated_at = ? WHERE id = ?",
-                (timestamp, workspace["id"]),
-            )
-    return wb.scan_context(connection, scan_id)
+            if args.workspace_id is not None:
+                connection.execute(
+                    "UPDATE workspaces SET user_context = ?, updated_at = ? WHERE id = ?",
+                    (context, timestamp, workspace["id"]),
+                )
+            else:
+                connection.execute(
+                    "UPDATE workspaces SET updated_at = ? WHERE id = ?",
+                    (timestamp, workspace["id"]),
+                )
+    return wb.scan_context(connection, scan_id, include_investigation_policy=True)
 
 
 def update_progress(

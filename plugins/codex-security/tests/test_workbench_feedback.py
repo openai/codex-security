@@ -122,6 +122,10 @@ def test_native_scan_materializes_false_positive_feedback(tmp_path: Path, mode: 
         == _feedback(state_dir, str(started["scanId"]))["falsePositives"]
     )
     assert feedback_path.stat().st_mode & 0o777 == 0o600
+    if mode == "standard":
+        assert get_scan(state_dir, str(started["scanId"]))["reviewerFeedbackPath"] == str(
+            feedback_path
+        )
 
 
 @pytest.mark.parametrize("note", (None, "  \t  "))

@@ -68,6 +68,7 @@ def begin_target_scan(
     thread_id: str = "thread-deep-scan",
     user_context: str | None = None,
     service_tier: str | None = None,
+    confirmed_concurrent_scans: tuple[str, ...] = (),
 ) -> dict[str, object]:
     return begin_deep_scan(
         state_dir,
@@ -82,6 +83,11 @@ def begin_target_scan(
         "16",
         *(("--user-context-stdin",) if user_context is not None else ()),
         *(("--service-tier", service_tier) if service_tier is not None else ()),
+        *(
+            arg
+            for scan_id in confirmed_concurrent_scans
+            for arg in ("--confirmed-concurrent-scan-id", scan_id)
+        ),
         environment=deep_environment(codex_home),
         input_text=user_context,
     )
@@ -131,6 +137,7 @@ def test_target_admission_stops_at_the_first_non_directory_entry(
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("ALTER TABLE scans DROP COLUMN investigation_policy")
         connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
         connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
@@ -1674,6 +1681,7 @@ def test_target_continuation_does_not_reuse_a_different_snapshot(
         target,
         scan_root,
         thread_id="thread-changed-snapshot",
+        confirmed_concurrent_scans=(first_scan_id,),
     )
     assert changed["startDisposition"] == "created"
     assert changed["deepScan"]["scanId"] != first_scan_id
@@ -1794,10 +1802,16 @@ def test_sealed_target_prefers_its_own_pending_scan(tmp_path: Path) -> None:
     (target / "source.py").write_text("print('source')\n")
     scan_root = tmp_path / "scans"
     owners = ("first-thread", "second-thread")
-    runs = [
-        begin_target_scan(state_dir, home, target, scan_root, thread_id=thread)["deepScan"]
-        for thread in owners
-    ]
+    first = begin_target_scan(state_dir, home, target, scan_root, thread_id=owners[0])["deepScan"]
+    second = begin_target_scan(
+        state_dir,
+        home,
+        target,
+        scan_root,
+        thread_id=owners[1],
+        confirmed_concurrent_scans=(first["scanId"],),
+    )["deepScan"]
+    runs = [first, second]
     for run in runs:
         scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
         mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
@@ -1875,6 +1889,7 @@ def test_target_continuation_does_not_reuse_another_threads_app_scan(
         target,
         scan_root,
         thread_id="headless-thread",
+        confirmed_concurrent_scans=() if sealed else (app_scan_id,),
     )
     assert headless["startDisposition"] == "created"
     assert headless["deepScan"]["scanId"] != app_scan_id
@@ -1915,6 +1930,59 @@ def test_concurrent_target_begin_creates_one_scan(tmp_path: Path) -> None:
         results[0]["deepScan"]["scanId"]
     }
     assert {result["startDisposition"] for result in results} == {"created", "joined"}
+
+
+def test_competing_native_launches_require_consent_for_the_current_scans(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    root = tmp_path / "scans"
+    targets = [tmp_path / name for name in ("first", "second", "third")]
+    for target in targets:
+        target.mkdir()
+
+    def launch(target: Path, *confirmed: str):
+        return begin_target_scan(
+            state,
+            tmp_path / "home",
+            target,
+            root,
+            thread_id=target.name,
+            confirmed_concurrent_scans=confirmed,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(launch, targets[:2]))
+    (created,) = (result for result in results if "deepScan" in result)
+    (pending,) = (result for result in results if result.get("confirmationRequired"))
+    first = created["deepScan"]["scanId"]
+    assert [scan["scanId"] for scan in pending["otherRunningDeepScans"]] == [first]
+    waiting = targets[results.index(pending)]
+    assert not (root / waiting.name).exists()
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (1,)
+
+    workspace_id = str(uuid.uuid4())
+    create_workspace(state, workspace_id, "--thread-id", "app-thread")
+    save_workspace(state, workspace_id, str(targets[2]), ".", "deep")
+
+    def launch_app(*confirmed: str):
+        return start_scan_command(
+            state,
+            workspace_id,
+            "--scan-root",
+            str(root),
+            *(arg for scan_id in confirmed for arg in ("--confirmed-concurrent-scan-id", scan_id)),
+        )
+
+    assert [scan["scanId"] for scan in launch_app()["otherRunningDeepScans"]] == [first]
+    assert not (root / targets[2].name).exists()
+    second = launch(waiting, first)["deepScan"]["scanId"]
+    assert launch(waiting)["startDisposition"] == "joined"
+    stale = launch_app(first)
+    assert stale["confirmationRequired"]
+    assert {scan["scanId"] for scan in stale["otherRunningDeepScans"]} == {first, second}
+    app_scan_id = launch_app(first, second)["results"]["scanId"]
+    assert launch_app()["results"]["scanId"] == app_scan_id
 
 
 def test_app_workspaces_cannot_start_duplicate_owned_target_scans(tmp_path: Path) -> None:

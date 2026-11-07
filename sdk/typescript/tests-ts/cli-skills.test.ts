@@ -127,6 +127,8 @@ describe("CLI skill commands", () => {
               expect(args[args.indexOf("--output-schema") + 1]).toBe(
                 schemaPath,
               );
+              expect(input).toMatch(/return only JSON/i);
+              expect(input).not.toMatch(/assessment in prose/i);
               expect(input!.split("\n")).toContain(JSON.stringify(context));
               expect(JSON.parse(input!.split("\n").at(-1)!)).toEqual([
                 "Candidate A",
@@ -227,6 +229,8 @@ describe("CLI skill commands", () => {
             onCodex: async (args, output, _environment, input) => {
               expect(args).not.toContain("--output-schema");
               expect(output?.responseSchema).toBeUndefined();
+              expect(input).toMatch(/assessment in prose/i);
+              expect(input).not.toMatch(/supplied output schema/i);
               expect(input).toContain(
                 JSON.stringify(
                   "Focus on tenant boundaries.\n\nCross-tenant access is prohibited.",

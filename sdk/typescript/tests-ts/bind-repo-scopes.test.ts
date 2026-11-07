@@ -294,7 +294,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
       for (const powershell of launcher.powershells) {
         const generated = await launcher.run(
           powershell,
-          "skills/security-scan/SKILL.md",
+          "scope-inventory",
           {
             "<plugin_dir>": argument(launcher.plugin),
             "<repo_root>": argument(repository),
@@ -302,8 +302,6 @@ for (const location of ["absolute", "relative", "unc"] as const)
           },
           undefined,
           workingDirectory,
-          undefined,
-          1,
         );
         expect(generated.status, generated.diagnostics).toBe(0);
         expect(
@@ -319,7 +317,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
         }
         const result = await launcher.run(
           powershell,
-          "skills/security-scan/SKILL.md",
+          "scope-binding",
           {
             "<plugin_dir>": argument(launcher.plugin),
             "<scan_dir>": argument(scanDir),

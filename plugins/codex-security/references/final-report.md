@@ -4,14 +4,7 @@ The canonical inputs are `scan-manifest.json` and `findings.json`. The host vali
 
 ## Ownership And Submission
 
-| Caller | Submit | Completion owner |
-| --- | --- | --- |
-| Workbench Standard or diff | `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState, complete? })` | Parent calls `complete_codex_security_scan` after an accepted final draft |
-| Bound Deep Standard worker | Its bound semantic draft tool | Deep coordinator |
-| Workbench Deep parent | Coordinator's accepted aggregate | Coordinator finalizes the scan and returns `completion` with the sealed manifest |
-| SDK-owned scan | Unsealed canonical files with the SDK-provided identity and metadata, using a bound draft tool when supplied | SDK; do not call completion or a finalizer |
-
-Other scans need authoritative managed context; do not substitute shell-authored canonical files. Checkpoint findings, pending candidates, and the threat model with `complete: false`. An accepted `complete: true` draft (or the backwards-compatible omitted flag) ends submission; a checkpoint does not claim completed review.
+Use the scan runtime's checkpoint writer and completion owner. Preserve authoritative metadata and identity throughout. Save the threat model, findings and pending candidates in early checkpoints. A checkpoint keeps the review open. Submit the final draft only when the assigned review is finished.
 
 Completion validates existing artifacts; it does not perform missing phases or create an absent draft. Do not claim completion or finish an existing scan goal until finalization succeeds and the generated report exists. No new goal is required by this reference.
 
@@ -77,11 +70,3 @@ Link the generated `report.md` as the primary readable result. Mention material 
 After completion, report the latest `usage.totalTokens`, `usage.inputTokens` (including cached input), and `usage.cachedInputTokens`. If `usage.completion.finalized` is `false`, leave the total to the host, which includes this final turn; do not quote preliminary counts as final or as a lower bound. Otherwise label partial coverage as "at least X tokens; some usage unavailable" and explain its warnings. If usage is unavailable, say so instead of reporting zero. Retain any separate cost estimate.
 
 Include `byRole` when present and use `window` and `tokensUpdatedAt` to describe the measured period. For account allowance, quote the latest `accountRateLimits` observation and its `observedAt`; identify weekly limits by window duration. These account-wide readings may include other work, saved readings are historical, and absent readings or null windows mean allowance was not observed. Do not convert between tokens, estimated API cost, and subscription allowance or modify sealed artifacts to add this metadata.
-
-For Codex app rendering, emit one `::code-comment` per surviving finding and none otherwise. Keep its title, explanation, and location consistent with the canonical finding. Map `critical`, `high`, `medium`, and `low` to priorities 0, 1, 2, and 3 respectively:
-
-```text
-::code-comment{title="[P1] Example title" body="One-paragraph explanation." file="/absolute/path/to/file" start=10 end=12 priority=1}
-```
-
-Use verified, tight 1-based lines and an absolute path. Optional `confidence` is numeric when available. Backticks can delimit identifiers inside attributes; do not put double quotes, including escaped quotes, inside quoted attribute values.

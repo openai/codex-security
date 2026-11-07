@@ -14,6 +14,7 @@ import { dirname, join, relative, sep, win32 } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { writeSource as write } from "./support/shell.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const temporaryDirectories = createTemporaryDirectoriesSync();
@@ -83,6 +84,32 @@ describe("built SECURITY.md helper", () => {
       );
     }
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "the policy commands preserve literal repository, scope and output paths",
+    async () => {
+      const { root, output } = fixture("repo %USERNAME% !EXPAND! 雪's");
+      const launcher = windowsHelperFixture(dirname(root));
+      const scope = "-component %USERNAME% !EXPAND! 雪's";
+      write(root, `${scope}/SECURITY.md`, "component policy\n");
+      const args = { "<plugin_dir>": launcher.plugin, "<repo_root>": root };
+      for (const powershell of launcher.powershells) {
+        const list = await launcher.run(powershell, "policy-list", args);
+        expect(list.status, list.diagnostics).toBe(0);
+        expect(JSON.parse(list.stdout)).toEqual([`${scope}/SECURITY.md`]);
+        const out = output + " %USERNAME% !EXPAND! 雪's";
+        const resolved = await launcher.run(powershell, "policy-resolve", {
+          ...args,
+          "<file_or_directory>": scope,
+          "<output_path_or_dash>": out,
+        });
+        expect(resolved.status, resolved.diagnostics).toBe(0);
+        expectGuidance(readFileSync(out, "utf8"), [
+          [`${scope}/SECURITY.md`, "component policy"],
+        ]);
+      }
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "preserves Windows home-variable precedence and drive-relative homes",

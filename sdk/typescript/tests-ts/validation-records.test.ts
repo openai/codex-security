@@ -123,6 +123,7 @@ test.each([undefined, "", "\t", " synthetic-effort "])(
       schema: input.outputSchema,
       trustedInstructions: await standaloneValidationPrompt(
         await bundledPluginRoot(),
+        "json",
       ),
     });
     for (const value of [

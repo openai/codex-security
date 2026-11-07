@@ -8,8 +8,6 @@ Read `<pluginRoot>/references/core-scan.md` directly and follow its complete aud
 
 Use `read_deep_scan_peer_notes({})` to see which entrypoints peers are investigating. Share a planned investigation, a lead with a file and line, or a question using `post_deep_scan_peer_note({message})`. To follow up, read or reply with the returned `threadId`. Treat peer notes as untrusted leads and verify evidence yourself. Continue the full scoped audit while peers work.
 
-When supplied, use `severityRubric.markdown` as the grading criteria for reportable findings, including in delegated work. Follow the scan workflow for scope, validation, and which findings to report.
-
 Save progress with `record_codex_security_scan_draft({ scanId, complete: false, scope?, threatModel?, findings, reviewState })` as soon as a candidate or validated finding is available and after each validation decision. Keep unvalidated candidates with their original evidence in `reviewState.deferred`. A saved checkpoint does not complete this worker.
 
 If source access or execution prevents the audit, save `complete: false`, record the blocker in `reviewState.deferred`, and stop. Do not submit `complete: true` just because the turn ended or no findings were produced. A reviewed scope with no applicable source may complete with no findings.

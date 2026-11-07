@@ -7,6 +7,15 @@ Start with the [source map](#where-to-make-a-change) for a code or documentation
 Start with the owner of the behavior, then follow its callers when the change
 crosses a process, persistence, or package boundary.
 
+Keep evidence criteria, scope, and user choices in the skill. When the executor
+or caller already knows which instructions apply, supply those instructions at
+invocation. Native skills and the SDK share the
+[runtime instruction selector](plugins/codex-security/references/skill-runtime.md).
+Add a command topic to the selector and to both [shell catalogs](plugins/codex-security/templates/skill-runtime/).
+Use a level-two heading for each topic. Text before the first heading applies
+to every topic in that catalog. Exercise the command on its supported platforms.
+For scan workflow changes, check SDK custom validation against the installed skill.
+
 | Change                                          | Source to start with                                                                                                                                                                                                                   | Relevant checks                                                                                                                                                                                                                                         |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Documentation                                   | [User guides](docs/), [SDK and CLI guides](sdk/typescript/README.md), and [examples](examples/README.md)                                                                                                                               | Run `node sdk/typescript/scripts/check-markdown.mjs` after [installing the SDK dependencies](sdk/typescript/TESTING.md#install-dependencies). Check examples from their stated working directory.                                                       |

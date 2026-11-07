@@ -108,6 +108,7 @@ EXPECTED_MIGRATIONS = [
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
     (63, "retain unverified Deep Scan worker attempts"),
+    (64, "retain native investigation time allowances"),
 ]
 
 
@@ -1303,15 +1304,26 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
 
 @pytest.mark.cross_platform
-def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
-    db, migrate = create_historical_database(63)
+@pytest.mark.parametrize("reopened_on_main", [False, True])
+def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration(
+    reopened_on_main: bool,
+) -> None:
+    db, migrate = create_historical_database(64 if reopened_on_main else 63)
     with closing(db):
         timestamp = "2026-01-01T00:00:00Z"
         db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
-        record_migration(db, 63, "retain native investigation time allowances", timestamp)
+        # A released main reader has already replaced this receipt, leaving the column intact.
+        if not reopened_on_main:
+            record_migration(db, 63, "retain native investigation time allowances", timestamp)
         insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
         insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
         migrate(db)
+        allowance = db.execute(
+            "SELECT name, applied_at FROM schema_migrations WHERE version = 64"
+        ).fetchone()
+        assert allowance["name"] == "retain native investigation time allowances"
+        if not reopened_on_main:
+            assert allowance["applied_at"] == timestamp
         query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
         receipt = db.execute(query).fetchone()
         assert receipt["name"] == "retain unverified Deep Scan worker attempts"
