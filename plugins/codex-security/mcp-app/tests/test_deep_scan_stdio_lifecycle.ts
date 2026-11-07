@@ -71,7 +71,11 @@ async function testDeepScanStdioLifecycle() {
     fixtureRoot,
     "fake-codex-signal-checkpoint-control.txt",
   );
-  const fakeCodexPath = path.join(fixtureRoot, "fake-codex.mjs");
+  // The executable must live outside the directory supplying the project configuration.
+  const executableRoot = await temporaryDirectory(
+    "codex-security-stdio-runtime-",
+  );
+  const fakeCodexPath = path.join(executableRoot, "fake-codex.mjs");
   const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper ");
   const cancelFailureControlPath = path.join(
     fixtureRoot,
@@ -1226,6 +1230,7 @@ service_tier = "ultrafast"
     await server.stop();
     await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
+    await rm(executableRoot, { recursive: true, force: true });
     parentSandboxState = readOnlyParentSandboxState(pluginRoot);
   }
 }
