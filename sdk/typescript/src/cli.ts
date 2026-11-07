@@ -10327,6 +10327,7 @@ async function publishPatchBranch(
         "git",
         [
           "push",
+          "--no-signed",
           skipSubmoduleCheck
             ? "--recurse-submodules=no"
             : "--recurse-submodules=check",
