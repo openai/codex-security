@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -39,11 +40,9 @@ for (const newerTask of [false, true]) {
       };
       const script = path.join(pluginRoot, "scripts/workbench_db.py");
       const runWorkbench = async (args: string[]) => {
-        const { stdout } = await exec(
-          process.env.PYTHON || "python3",
-          [script, ...args],
-          { env: environment },
-        );
+        const { stdout } = await exec(fixturePython, [script, ...args], {
+          env: environment,
+        });
         return JSON.parse(stdout);
       };
       const registered = await runWorkbench([
@@ -124,7 +123,7 @@ for (const newerTask of [false, true]) {
           `import sys\nsys.path.insert(0, ${JSON.stringify(path.join(pluginRoot, "scripts"))})\nimport workbench_db, workbench_saved_results\ndef fail(*args, **kwargs):\n    raise OSError("Synthetic publication interruption.")\nworkbench_saved_results._write_prepared_scan_finalization = fail\nworkbench_db.main()\n`,
         );
         const { stdout } = await exec(
-          process.env.PYTHON || "python3",
+          fixturePython,
           [
             fault,
             "fail-scan",

@@ -26,6 +26,8 @@ export function workerTelemetryFixture(
             codex_security_package_version: `0.2.${index}`,
             codex_security_plugin_version: `0.1.${index}`,
             codex_security_integration: "github_action",
+            codex_security_operation_id: `operation-${index}`,
+            codex_security_attempt_id: `parent-${index}`,
             codex_security_provider:
               index % 2 === 0 ? "openai" : "amazon-bedrock",
             custom_tag: `synthetic-scan-${index}`,
@@ -71,6 +73,8 @@ export function workerTelemetryFixture(
               codex_security_package_version: "0.2.0",
               codex_security_plugin_version: "0.1.0",
               codex_security_integration: "github_action",
+              codex_security_operation_id: "operation-0",
+              codex_security_attempt_id: "parent-0",
               codex_security_provider: "openai",
               custom_tag: "preflight-default",
               "team.tag": "literal-key-0",

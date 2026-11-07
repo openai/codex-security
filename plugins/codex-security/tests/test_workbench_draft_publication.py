@@ -1,7 +1,10 @@
+"""Exercise deep scan drafts before orchestration and after the run has reached a terminal state."""
+
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -38,6 +41,7 @@ def stage_model_draft(tmp_path, scan_dir, scan_id, target, model, *, complete=Tr
     return documents, staged
 
 
+@pytest.mark.native_windows
 @pytest.mark.parametrize("filename", ["findings.json", "coverage.json"])
 @pytest.mark.parametrize("previous", ["unfinished", "symlink"])
 def test_terminal_deep_draft_compares_previous_bytes_without_parsing_review_documents(
@@ -64,7 +68,12 @@ def test_terminal_deep_draft_compares_previous_bytes_without_parsing_review_docu
             check=False,
         )
         assert rejected["returncode"] != 0
-        assert "expected a file inside the scan directory" in str(rejected["stderr"])
+        expected = (
+            "scan-local files must not be reparse points"
+            if os.name == "nt"
+            else "expected a file inside the scan directory"
+        )
+        assert expected in str(rejected["stderr"])
         assert old_document.is_symlink()
         assert outside.read_text() == "unfinished review document"
         return

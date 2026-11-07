@@ -1,3 +1,5 @@
+"""Check the plugin manifest, skill interfaces, declared app connections, and referenced assets."""
+
 from __future__ import annotations
 
 import json

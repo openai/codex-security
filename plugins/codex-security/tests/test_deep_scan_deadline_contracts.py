@@ -1,3 +1,5 @@
+"""Require recovered deadline findings and worker closeouts to satisfy the completed scan contract."""
+
 from __future__ import annotations
 
 import copy

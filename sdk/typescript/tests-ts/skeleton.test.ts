@@ -212,8 +212,11 @@ describe("TypeScript package skeleton", () => {
     expect(testStep).not.toHaveProperty("if");
     expect(testStep).not.toHaveProperty("continue-on-error");
     expect(
-      job.steps!.find(({ name }) => name === "Install plugin dependencies")?.if,
-    ).toBe("matrix.os == 'ubuntu-latest' && matrix.python == '3.12'");
+      job.steps!.find(({ uses }) => uses === "./.github/actions/setup-tools"),
+    ).toMatchObject({
+      if: "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
+      with: { compile: true },
+    });
   });
 
   test("requires a nonempty native Python report without skips", () => {
@@ -431,7 +434,7 @@ describe("TypeScript package skeleton", () => {
         job
           .steps!.filter((step) => step.uses?.startsWith("oven-sh/setup-bun@"))
           .map((step) => step.with?.["bun-version"]),
-      ).toEqual(["1.3.14"]);
+      ).toEqual(["1.4.4"]);
       for (const step of job.steps!) {
         expect(step.run ?? "").not.toMatch(
           /--(?:parallel|isolate)(?:[=\s]|$)/u,

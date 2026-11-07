@@ -20,7 +20,7 @@ Resolve the authorized target and scope. For a scoped directory, use that direct
 
 For a new target, call `inspect_codex_security_setup({ targetPath, scope: ".", mode: "deep", projectConfigPath? })`. Show the effective settings and their sources. Pass a project file only when the user selected it.
 
-Call `start_codex_security_deep_scan` with the existing scan ID and claim token or with the new target, scope, exact user context and selected project file. The coordinator owns worker setup, progress and completion. Use the returned `completion` and link the generated `report.md` and canonical artifacts. Use `completion.scan.usage` and any separate cost estimate to report usage per `<plugin_dir>/references/final-report.md`.
+Call `start_codex_security_deep_scan({ scanId, handoffClaimToken? })` for an existing scan or `start_codex_security_deep_scan({ targetPath, scope: ".", userContext?, projectConfigPath? })` for a new target. Reuse the project file selected at setup. The coordinator owns worker setup, progress and completion. Use the returned `completion` and link the generated `report.md` and canonical artifacts. Use `completion.scan.usage` and any separate cost estimate to report usage per `<plugin_dir>/references/final-report.md`.
 
 ## checkpoints
 

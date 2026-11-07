@@ -1,3 +1,5 @@
+"""Recover selected checkpoint records when sibling captures fail or a previous recovery was interrupted."""
+
 from __future__ import annotations
 
 import copy

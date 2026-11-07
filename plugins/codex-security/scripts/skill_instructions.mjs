@@ -8,7 +8,6 @@ export const skillRuntimeTopics = [
   "copy-worklist",
   "diff-local-patch",
   "diff-revisions",
-  "external-imports",
   "patch-risk-validation",
   "policy-list",
   "policy-resolve",
@@ -38,10 +37,6 @@ export async function readSkillRuntimeInstructions(
     if (topic !== "deep-scan") sections.push("checkpoints");
     if (clientSurface === "desktop") sections.push("review-comments");
     return readSections(pluginRoot, "scans", sections);
-  }
-  if (topic === "external-imports") {
-    const enabled = process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS === "1";
-    return readSections(pluginRoot, topic, [enabled ? "enabled" : "disabled"]);
   }
   const shell = platform === "win32" ? "windows" : "posix";
   return readSections(pluginRoot, shell, [topic]);

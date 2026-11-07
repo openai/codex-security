@@ -27,6 +27,11 @@ from workbench_constants import (
 
 
 def bounded_finding_details(value: Any) -> dict[str, Any]:
+    """Build the workbench preview of a stored finding, returning an empty dict for non-object input.
+
+    Budget for writeup text, diagnostics, and guidance alongside code evidence so a
+    large snippet cannot consume the whole preview.
+    """
     if not isinstance(value, dict):
         return {}
     prepared: dict[str, Any] = {}
@@ -251,6 +256,7 @@ def bounded_finding_section(
     priority_keys: tuple[str, ...],
     reserved_fields: tuple[tuple[tuple[str, ...], int], ...],
 ) -> Any:
+    """Apply each field group’s size cap before selecting fields in priority order under the section cap."""
     if not isinstance(value, dict):
         return bounded_json_value(value, [maximum_bytes])
     ordered: dict[str, Any] = {}
@@ -270,6 +276,12 @@ def bounded_finding_section(
 
 
 def merged_bounded_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
+    """Return the preferred evidence key and the preview data to store under it.
+
+    Merge camelCase and snake_case catalogs by evidence ID, keeping the first
+    eligible snippet per ID. Return (None, None) if both keys are absent.
+    If neither value is a list, preserve the first supplied value.
+    """
     evidence_keys = [key for key in ("codeEvidence", "code_evidence") if key in value]
     if not evidence_keys:
         return None, None
@@ -315,6 +327,7 @@ def merged_bounded_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any
 
 
 def json_size(value: Any) -> int:
+    """Return the byte count of the compact, ASCII-escaped JSON representation."""
     # ASCII output gives byte length; strings can use the cached default encoder.
     return len(json.dumps(value, separators=None if isinstance(value, str) else (",", ":")))
 
@@ -326,6 +339,7 @@ def bounded_json_value(
     depth: int = 0,
     max_depth: int = 4,
 ) -> Any:
+    """Build a depth-limited preview while charging its JSON representation to the shared byte budget."""
     if budget[0] <= 0:
         return None
     if depth >= max_depth:
@@ -415,6 +429,7 @@ def bounded_json_value(
 
 
 def consume_json_budget(budget: list[int], size: int) -> bool:
+    """Deduct the requested size and return whether it fit, exhausting the budget on failure."""
     if budget[0] < size:
         budget[0] = 0
         return False
@@ -423,6 +438,11 @@ def consume_json_budget(budget: list[int], size: int) -> bool:
 
 
 def bounded_json_text(value: str, maximum_bytes: int) -> tuple[str, int]:
+    """Return a string prefix and its ASCII-escaped JSON size in bytes.
+
+    Count the surrounding quotes and escape sequences toward maximum_bytes.
+    If even the empty string exceeds the budget, return the empty string and 2.
+    """
     length = bisect_right(
         range(min(len(value), maximum_bytes) + 1), maximum_bytes, key=lambda n: json_size(value[:n])
     )

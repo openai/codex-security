@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
 import { validateDiscoveryArtifacts } from "./artifact-validation.js";
@@ -11,6 +12,10 @@ import {
   confirmedOwnershipChange,
 } from "./errors.js";
 import { renderDiscoveryPrompt, reviewInstructions } from "./templates.js";
+import {
+  writeWorkerUsageReceipt,
+  type WorkerUsageReceipt,
+} from "./usage-receipt.js";
 import type {
   CodexWorkerExecutor,
   CodexWorkerDiagnostic,
@@ -21,6 +26,7 @@ import type {
   DeepScanStore,
   DeepScanWorkerMutation,
   PersistedDeepScanWorker,
+  WorkerAttribution,
 } from "./types.js";
 
 export interface AcceptedDiscovery {
@@ -51,8 +57,14 @@ export interface DeepScanWorkerRunnerOptions {
   onNonRetryableError?: (error: Error) => void;
 }
 
+type FinalAttemptStatus = "succeeded" | "failed" | "canceled";
 type WorkerAttemptOutcome =
-  | { status: "succeeded"; attempt: number; threadId?: string }
+  | {
+      status: "validated";
+      attempt: number;
+      threadId?: string;
+      finish: (status: FinalAttemptStatus) => Promise<void>;
+    }
   | {
       status: "failed";
       error: Error;
@@ -112,7 +124,7 @@ export class DeepScanWorkerRunner {
       attempt: 1,
     });
     let discoveryResult: ScanDraftInput | undefined;
-    let outcome = await this.runWorkerWithRetries({
+    const outcome = await this.runWorkerWithRetries({
       workerId,
       workerLabel,
       promptPath,
@@ -128,54 +140,64 @@ export class DeepScanWorkerRunner {
         );
       },
     });
-    if (outcome.status === "succeeded" && this.options.signal.aborted) {
-      outcome = await this.cancelAttempt(
-        {
-          workerId,
-          promptPath,
-          artifactDir,
-        },
-        outcome.attempt,
-        outcome.threadId,
-      );
-    }
     if (!discoveryResult) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
       return { ...outcome, workerId };
     }
-    if (outcome.status === "canceled" || this.options.signal.aborted) {
+    if (outcome.status === "canceled") {
       return { status: "canceled", workerId };
     }
 
-    const acceptance = {
-      id: workerId,
-      scanId: run.scanId,
-      kind: "discovery" as const,
-      status: "succeeded" as const,
-      promptPath,
-      artifactDir,
-      attempt: outcome.attempt,
-      threadId: outcome.threadId,
-      resultManifestPath: resultPath,
-    };
+    let finalStatus: FinalAttemptStatus = "failed";
     let persisted: PersistedDeepScanWorker;
     try {
-      persisted = await this.options.store.updateWorker(acceptance);
+      if (this.options.signal.aborted) {
+        finalStatus = "canceled";
+        await this.cancelAttempt(
+          { workerId, promptPath, artifactDir },
+          outcome.attempt,
+          outcome.threadId,
+        );
+        return { status: "canceled", workerId };
+      }
+      persisted = await this.options.store.updateWorker({
+        id: workerId,
+        scanId: run.scanId,
+        kind: "discovery",
+        status: "succeeded",
+        promptPath,
+        artifactDir,
+        attempt: outcome.attempt,
+        threadId: outcome.threadId,
+        resultManifestPath: resultPath,
+      });
+      if (!persisted.completionSequence) {
+        throw new Error(
+          `Discovery worker ${workerId} did not receive a completion sequence.`,
+        );
+      }
+      finalStatus = "succeeded";
     } catch (error) {
       if (confirmedOwnershipChange(error, run.scanId)) throw error;
       if (!this.options.signal.aborted) throw error;
+      finalStatus = "canceled";
       return { status: "canceled", workerId };
-    }
-    if (!persisted.completionSequence) {
-      throw new Error(
-        `Discovery worker ${workerId} did not receive a completion sequence.`,
-      );
+    } finally {
+      await outcome.finish(finalStatus);
     }
 
-    // Once SQLite accepts the scan, leave its result available for recovery.
-    this.options.log({
+    // A validation success can still race with cancellation or a lease change.
+    // Report worker success only once SQLite accepts the result.
+    this.log({
+      event: "worker_succeeded",
+      scanId: run.scanId,
+      workerId,
+      kind: "discovery",
+      attempt: persisted.attempt,
+    });
+    this.log({
       event: "discovery_accepted",
       scanId: run.scanId,
       workerId,
@@ -225,18 +247,96 @@ export class DeepScanWorkerRunner {
         threadId: resumableThreadId,
       };
       await this.options.store.updateWorker(baseMutation);
-      this.options.log({
-        event: "worker_started",
+      const started = this.options.clock.now();
+      const attemptId = randomUUID();
+      let attribution: WorkerAttribution = { attemptId };
+      let startLogged = false;
+      let finishedAt: number | undefined;
+      let outcome: "validated" | "failed" | "canceled" = "failed";
+      const receipt: WorkerUsageReceipt = {
+        schemaVersion: 1,
+        source: "codex_sdk",
+        usageScope: "thread_cumulative",
         scanId: run.scanId,
         workerId: input.workerId,
         kind: "discovery",
+        attemptId,
         attempt,
-      });
+        resumed: resumableThreadId !== undefined,
+        ...(resumableThreadId ? { threadId: resumableThreadId } : {}),
+        startedAt: new Date(started).toISOString(),
+        observedAt: new Date(started).toISOString(),
+        outcome: "running",
+        usage: null,
+      };
+      const logStarted = () => {
+        if (startLogged) return;
+        startLogged = true;
+        this.log({
+          event: "worker_started",
+          scanId: run.scanId,
+          workerId: input.workerId,
+          kind: "discovery",
+          attempt,
+          ...attribution,
+          timestamp: receipt.startedAt,
+          retry: attempt > 1,
+          resumed: receipt.resumed,
+          ...(resumableThreadId ? { threadId: resumableThreadId } : {}),
+        });
+      };
+      const persistUsage = async () => {
+        receipt.observedAt = new Date(this.options.clock.now()).toISOString();
+        try {
+          if (!run.workerUsageDirectory) {
+            throw new Error(
+              "The host did not provide a worker usage directory.",
+            );
+          }
+          await writeWorkerUsageReceipt(run.workerUsageDirectory, receipt);
+        } catch (error) {
+          this.log({
+            event: "worker_usage_unavailable",
+            scanId: run.scanId,
+            workerId: input.workerId,
+            kind: "discovery",
+            attempt,
+            ...attribution,
+            reason: `Could not retain worker usage: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      };
+      let finishRecorded = false;
+      const finishAttempt = async (status: FinalAttemptStatus) => {
+        if (finishRecorded) return;
+        finishRecorded = true;
+        logStarted();
+        receipt.outcome = status;
+        await persistUsage();
+        const finished = finishedAt ?? this.options.clock.now();
+        this.log({
+          event: "worker_finished",
+          scanId: run.scanId,
+          workerId: input.workerId,
+          kind: "discovery",
+          attempt,
+          ...attribution,
+          ...(activeThreadId ? { threadId: activeThreadId } : {}),
+          timestamp: new Date(finished).toISOString(),
+          durationMs: finished - started,
+          outcome: status,
+          retry: attempt > 1,
+          resumed: receipt.resumed,
+        });
+      };
+      await persistUsage();
       try {
         const resumePrompt = resumableThreadId
           ? (continuationPrompt ?? transientExecutionContinuation(attempt))
           : undefined;
         const result = await this.options.executor.run({
+          attemptId,
+          workerUsageDirectory: run.workerUsageDirectory,
           kind: "discovery",
           promptPath: executionPromptPath,
           workingDirectory: input.artifactDir,
@@ -275,14 +375,26 @@ export class DeepScanWorkerRunner {
               author: input.workerLabel,
             },
           },
+          onAttribution: (value) => {
+            attribution = value;
+            logStarted();
+          },
+          onUsage: async (usage, turnId) => {
+            receipt.usage = usage;
+            receipt.turnId = turnId;
+            await persistUsage();
+          },
           onThreadStarted: async (threadId) => {
+            logStarted();
             activeThreadId = threadId;
             lastThreadId = threadId;
+            receipt.threadId = threadId;
             await this.options.store.updateWorker({
               ...baseMutation,
               threadId,
             });
-            this.options.log({
+            await persistUsage();
+            this.log({
               event: "worker_thread_started",
               scanId: run.scanId,
               workerId: input.workerId,
@@ -292,10 +404,17 @@ export class DeepScanWorkerRunner {
             });
           },
         });
+        logStarted();
+        activeThreadId = result.threadId ?? activeThreadId;
+        receipt.threadId = activeThreadId;
+        receipt.turnId = result.turnId ?? receipt.turnId;
+        if (result.usage !== undefined) receipt.usage = result.usage;
         if (terminalFailure) return terminalFailure;
         if (signal.aborted) {
+          outcome = "canceled";
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
+        await persistUsage();
         validationStarted = true;
         try {
           await input.validate();
@@ -304,24 +423,22 @@ export class DeepScanWorkerRunner {
         }
         validationCompleted = true;
         if (signal.aborted) {
+          outcome = "canceled";
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
-        this.options.log({
-          event: "worker_succeeded",
-          scanId: run.scanId,
-          workerId: input.workerId,
-          kind: "discovery",
-          attempt,
-        });
+        outcome = "validated";
         return {
-          status: "succeeded",
+          status: "validated",
+          finish: finishAttempt,
           attempt,
           threadId: result.threadId ?? activeThreadId,
         };
       } catch (error) {
+        finishedAt = this.options.clock.now();
         if (confirmedOwnershipChange(error, run.scanId)) throw error;
         if (terminalFailure) return terminalFailure;
         if (signal.aborted) {
+          outcome = "canceled";
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
         const normalized = asError(error);
@@ -386,17 +503,19 @@ export class DeepScanWorkerRunner {
             });
           }
         }
+        await finishAttempt("failed");
         const delayMs = Math.ceil(
           this.options.retryDelaysMs[attempt - 1] *
             (1 + 0.3 * this.options.random()),
         );
-        this.options.log({
+        this.log({
           event: "worker_retry_scheduled",
           scanId: run.scanId,
           workerId: input.workerId,
           kind: "discovery",
           attempt,
           count: delayMs,
+          reason: deepScanErrorMessage(normalized),
         });
         try {
           await this.options.clock.sleep(delayMs, signal);
@@ -406,7 +525,17 @@ export class DeepScanWorkerRunner {
           }
           throw sleepError;
         }
+      } finally {
+        if (outcome !== "validated") await finishAttempt(outcome);
       }
+    }
+  }
+
+  private log(event: Parameters<DeepScanLogger>[0]): void {
+    try {
+      this.options.log(event);
+    } catch {
+      // Optional progress logging must not stop worker execution.
     }
   }
 

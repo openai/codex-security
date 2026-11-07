@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMain } from "../../../sdk/typescript/scripts/is-main.mjs";
 import childProcess, { type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -165,24 +166,13 @@ async function runPromptfoo(
   }
 }
 
-function runMain(filename: string, environment: NodeJS.ProcessEnv = {}) {
+if (isMain(import.meta.url)) {
   try {
-    if (!process.argv[1] || fs.realpathSync(process.argv[1]) !== filename)
-      return;
-  } catch {
-    // A virtual entry point imports this module without invoking the runner.
-    return;
+    process.exitCode = await runPromptfoo(process.argv.slice(2));
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
   }
-  runPromptfoo(process.argv.slice(2), environment)
-    .then((code) => {
-      process.exitCode = code;
-    })
-    .catch((error) => {
-      console.error(error);
-      process.exitCode = 1;
-    });
 }
 
-runMain(import.meta.filename);
-
-export { runMain, runPromptfoo, stageSkillRuntime };
+export { runPromptfoo, stageSkillRuntime };

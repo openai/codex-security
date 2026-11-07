@@ -1,3 +1,5 @@
+"""Check how workbench commands read context from stdin and handle conflicting inputs."""
+
 from __future__ import annotations
 
 import os

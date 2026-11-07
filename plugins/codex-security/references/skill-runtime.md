@@ -4,7 +4,7 @@ Use the instructions supplied by the caller. For a topic you need to resolve, ca
 
 For scans, pass `clientSurface: "desktop"` when the host explicitly identifies itself as the Codex desktop app. The default is headless.
 
-For standalone use or a shell on another host, set the command’s working directory to the installed plugin root and run `node ./scripts/skill_runtime.mjs <topic>`. Append `desktop` for a desktop scan. Resolve `external-imports` in the import command’s environment before acquiring evidence. Only the running reader can confirm the opt-in.
+For standalone use or a shell on another host, set the command’s working directory to the installed plugin root and run `node ./scripts/skill_runtime.mjs <topic>`. Append `desktop` for a desktop scan.
 
 For file-only access, read the applicable sections under `<plugin_root>/templates/skill-runtime/`.
 

@@ -1,3 +1,5 @@
+"""Check which saved sources a stopped scan selects when timestamps tie or publication is retried."""
+
 from __future__ import annotations
 
 import json

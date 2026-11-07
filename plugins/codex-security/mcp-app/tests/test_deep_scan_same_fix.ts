@@ -17,7 +17,11 @@ const groups = [
 const review = { pair: 0, decision: "same", leftEvidence: 0, rightEvidence: 0 };
 const confirmation = { id: 0, same: true, survivingPaths: [] };
 
-for (const pass of ["pair review", "source confirmation"]) {
+for (const pass of [
+  "pair review",
+  "source confirmation",
+  "non-boolean confirmation",
+]) {
   test(`contradictory ${pass} preserves the two findings`, async () => {
     const matches = await checkSameFix(
       groups,
@@ -41,7 +45,15 @@ for (const pass of ["pair review", "source confirmation"]) {
                 sources:
                   pass === "source confirmation"
                     ? [confirmation, { ...confirmation, same: false }]
-                    : [confirmation],
+                    : [
+                        {
+                          ...confirmation,
+                          same:
+                            pass === "non-boolean confirmation"
+                              ? "false"
+                              : true,
+                        },
+                      ],
               },
         ),
       assert.fail,

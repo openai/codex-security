@@ -19,7 +19,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
-from workbench.storage import state_dir
+from workbench.storage import create_private_temporary_directory, state_dir
 from workbench_feedback import FALSE_POSITIVE_FEEDBACK_PATH, get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -30,6 +30,7 @@ from workbench_validation import optional_text, read_json_object
 
 
 def safe_segment(value: str) -> str:
+    """Normalize a filename segment, falling back to ``scan`` for an empty result."""
     segment = re.sub(r"[^\w.-]", "-", value)
     if segment != value:
         segment = segment.strip("-")
@@ -37,10 +38,12 @@ def safe_segment(value: str) -> str:
 
 
 def compact_timestamp() -> str:
+    """Return the current UTC time in YYYYMMDDTHHMMSSZ format."""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def loaded_plugin_version() -> str:
+    """Read the required version string from the loaded plugin's manifest."""
     manifest = read_json_object(
         Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
     )
@@ -56,6 +59,11 @@ def scan_target_identity(
     *,
     metadata: os.stat_result | None = None,
 ) -> tuple[str, str | None, int | str, int | str]:
+    """Return revision, content digest, device ID, and inode for scan registration.
+
+    An explicit diff uses its head revision and a None digest. Other targets use
+    the worktree or directory digest. Device and inode use the SQLite-safe representation.
+    """
     if metadata is None:
         metadata = target.stat()
     revision = diff_target["headRevision"] if diff_target else git_revision(target)
@@ -77,6 +85,7 @@ def scan_target_identity(
 def scan_diff_identity(
     diff_target: dict[str, str] | None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
+    """Return kind, base, head, and optional digest in database order, or four nulls."""
     if diff_target is None:
         return (None, None, None, None)
     return (
@@ -88,6 +97,7 @@ def scan_diff_identity(
 
 
 def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
+    """Rebuild the diff target from a scan row, or return None for a full scan."""
     if not row["diff_target_kind"]:
         return None
     target = {
@@ -110,6 +120,7 @@ def archive_scan(
     *,
     before_archive: Callable[[], None] | None = None,
 ) -> Iterator[Path | None]:
+    """Yield the archive directory while preparing the original scan path for reuse."""
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
         if args.archived_scan_dir is not None
@@ -289,12 +300,10 @@ def insert_running_scan(
         # Missing version attribution must not prevent scan registration.
         plugin_version = None
     if scan_dir is None:
-        scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
-            )
-        ).resolve()
+        scan_dir = create_private_temporary_directory(
+            target_root,
+            prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
+        )
     connection.execute(
         """
         INSERT INTO scans (

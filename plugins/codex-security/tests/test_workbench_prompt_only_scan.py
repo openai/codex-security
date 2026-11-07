@@ -1,3 +1,5 @@
+"""Check ownership, target identity, and backwards compatibility when starting scans without setup."""
+
 from __future__ import annotations
 
 import argparse

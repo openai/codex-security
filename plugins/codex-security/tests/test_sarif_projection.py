@@ -1,3 +1,5 @@
+"""Project sealed findings into SARIF while preserving alert identity, rule metadata, and run warnings."""
+
 from __future__ import annotations
 
 import copy

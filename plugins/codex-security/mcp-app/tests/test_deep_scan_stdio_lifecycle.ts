@@ -201,7 +201,6 @@ service_tier = "ultrafast"
     FAKE_CODEX_RESTART_CONTROL: restartControlPath,
     FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL: signalCheckpointControlPath,
     FAKE_CODEX_START_LOG: startLogPath,
-    FAKE_CODEX_DENIED_HOME: codexHome,
   };
   const server = startServer(serverBundlePath, environment);
 
@@ -460,7 +459,12 @@ service_tier = "ultrafast"
       startedWorker.argv.includes('model_reasoning_summary="none"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
+    assertReadOnlyWorkerInvocation(
+      startedWorker.argv,
+      codexHome,
+      stateDir,
+      scanId,
+    );
     assertWorkerArtifactEnvironment(
       startedWorker.argv,
       pluginRoot,
@@ -704,7 +708,12 @@ service_tier = "ultrafast"
       failedWorker.argv.includes('model_reasoning_effort="high"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
+    assertReadOnlyWorkerInvocation(
+      failedWorker.argv,
+      codexHome,
+      stateDir,
+      failedScanId,
+    );
     assert.equal(activeFailureState.workers.length, 1);
     assert.equal(activeFailureState.workers[0].kind, "discovery");
     assert.equal(activeFailureState.workers[0].status, "running");
@@ -1037,7 +1046,9 @@ service_tier = "ultrafast"
         resumedScanId,
       ]);
       const { accountRateLimits: _limits, ...usage } = sealed.scan.usage;
-      assert.equal(usage.coverage, "unavailable");
+      // The synthetic workers report their tokens; the parent has no usage receipt.
+      assert.equal(usage.coverage, "partial");
+      assert.ok(usage.inputTokens > 0);
       assert.ok(usage.warnings.length);
       assert.deepEqual(completion, {
         scan: {
@@ -1134,7 +1145,12 @@ service_tier = "ultrafast"
       for (const [index, execution] of executions.entries()) {
         const afterRestart = index + restartStartIndex >= resumedStartIndex;
         assertConfigOverrides(execution.argv, { service_tier: "default" });
-        assertReadOnlyWorkerInvocation(execution.argv, codexHome);
+        assertReadOnlyWorkerInvocation(
+          execution.argv,
+          codexHome,
+          stateDir,
+          resumedScanId,
+        );
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) {
@@ -1230,6 +1246,26 @@ service_tier = "ultrafast"
       assert.equal(
         retry.structuredContent.reportPath,
         path.join(retry.structuredContent.scanDir, "report.md"),
+      );
+      assert.equal(
+        (await readLogLines(startLogPath)).length,
+        workerCountBeforeRetry,
+      );
+      const deadlineConfig = path.join(fixtureRoot, "deadline.yaml");
+      await writeFile(deadlineConfig, "scan: {max_time_minutes: 0.000001}\n");
+      const expired = await restartedServer.request(
+        6,
+        "tools/call",
+        toolCall(
+          "start_codex_security_deep_scan",
+          { targetPath: retryTarget, projectConfigPath: deadlineConfig },
+          "deadline-thread",
+        ),
+      );
+      assertNoError(expired);
+      assert.match(
+        expired.result.structuredContent.instructions,
+        /deadline expired before any Standard scan completed/,
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,
@@ -1476,7 +1512,12 @@ async function testCliDeepScanEngine({
     ["discovery-0001", "discovery-0002"],
   );
   for (const entry of starts) {
-    assertReadOnlyWorkerInvocation(entry.argv, codexHome);
+    assertReadOnlyWorkerInvocation(
+      entry.argv,
+      codexHome,
+      environment.CODEX_SECURITY_STATE_DIR!,
+      completed.scanId,
+    );
     assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
     assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
     assert.equal(entry.hasExpectedApiKey, true);
@@ -1673,7 +1714,12 @@ function assertWorkerArtifactEnvironment(
   assert.equal(env.CODEX_SECURITY_PYTHON_COMMAND, expectedPython);
 }
 
-function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
+function assertReadOnlyWorkerInvocation(
+  args: string[],
+  deniedHome: string,
+  stateDirectory: string,
+  scanId: string,
+) {
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
   assert.equal(
@@ -1701,7 +1747,7 @@ function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
     overrides.map((value) => parseToml(value)),
     [
       parseToml(
-        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"}},network={enabled=false}}`,
+        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"},${JSON.stringify(path.join(stateDirectory, "codex-home", "worker-usage", scanId))}={"."="deny"}},network={enabled=false}}`,
       ),
     ],
   );
@@ -1810,6 +1856,8 @@ async function writeFakeCodex(executablePath: string) {
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 if (process.argv.includes('app-server')) {
+const profileOverride = process.argv.find(arg => arg.startsWith('permissions.codex_security_deep_scan_worker='));
+const workerProfile = (await import(${JSON.stringify(import.meta.resolve("smol-toml"))})).parse(profileOverride ?? '').permissions?.codex_security_deep_scan_worker;
 ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       let result;
       if (message.method === 'initialize') {
@@ -1817,7 +1865,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       } else if (message.method === 'thread/read') {
         result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: workerProfile } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
       } else if (message.method === 'account/read') {
