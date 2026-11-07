@@ -763,6 +763,8 @@ async function ensureOutputDirectory(
   path: string,
   retainedDirectory?: string,
 ): Promise<string> {
+  const linkedOutput =
+    "Multiscan output directories must not be symbolic links.";
   let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
@@ -770,14 +772,21 @@ async function ensureOutputDirectory(
     if (process.platform === "win32") {
       // Resolve parent aliases while leaving the leaf for lstat to verify.
       path = join(await canonicalConfigPath(dirname(path)), basename(path));
-      await createWindowsOutputDirectory(path, true);
+      try {
+        await createWindowsOutputDirectory(path, true);
+      } catch (error) {
+        if ((await lstat(path).catch(() => undefined))?.isSymbolicLink()) {
+          throw new Error(linkedOutput, { cause: error });
+        }
+        throw error;
+      }
     } else {
       await mkdir(path, { recursive: true, mode: 0o700 });
     }
     metadata = await lstat(path, { bigint: true });
   }
   if (metadata.isSymbolicLink()) {
-    throw new Error("Multiscan output directories must not be symbolic links.");
+    throw new Error(linkedOutput);
   }
   if (!metadata.isDirectory()) {
     throw new Error("Multiscan output paths must be directories.");

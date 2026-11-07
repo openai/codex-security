@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import os
 import subprocess
 import sys
@@ -65,6 +67,63 @@ def test_registration_checks_reparse_access_before_archiving(tmp_path: Path, rig
     with pytest.raises(SystemExit, match="reparse point"):
         workbench_db.require_cli_scan_directory(tmp_path / "repo", args)
     assert saved.read_text() == "synthetic result"
+
+
+@pytest.mark.skipif(
+    os.environ.get("GITHUB_ACTIONS") != "true",
+    reason="creates a disposable local account on a hosted Windows runner",
+)
+def test_native_directory_write_rights_for_setting_reparse_data(tmp_path: Path) -> None:
+    def grant(path: Path, rights: str) -> None:
+        subprocess.run(
+            ["icacls.exe", str(path), "/grant", f"*S-1-1-0:{rights}"],
+            check=True,
+            capture_output=True,
+        )
+
+    grant(tmp_path, "(OI)(CI)RX")
+    target = tmp_path / "synthetic target"
+    target.mkdir()
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(tmp_path / "source junction"), str(target)],
+        check=True,
+        capture_output=True,
+    )
+    for name, rights in {
+        "write attributes": "(WA)",
+        "write data": "(WD)",
+        "write data and attributes": "(WD,WA)",
+        "writable control": "M",
+    }.items():
+        leaf = tmp_path / name
+        leaf.mkdir()
+        grant(leaf, rights)
+
+    script = Path(__file__).with_name("windows-other-user-access.ps1")
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    result = subprocess.run(
+        [
+            str(powershell),
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            base64.b64encode(script.read_text(encoding="utf-8").encode("utf-16-le")).decode(
+                "ascii"
+            ),
+        ],
+        env={
+            **os.environ,
+            "CODEX_SECURITY_TEST_REPARSE_ONLY": "1",
+            "CODEX_SECURITY_TEST_REPARSE_PARENT": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = json.loads(result.stdout)
+    assert len(rows) == 4 and all(row["stage"] == "complete" for row in rows), json.dumps(rows)
+    for row in rows:
+        assert (tmp_path / row["name"]).resolve() == target
 
 
 def test_delete_child_and_parent_reparse_rights_require_no_create_grant(tmp_path: Path) -> None:

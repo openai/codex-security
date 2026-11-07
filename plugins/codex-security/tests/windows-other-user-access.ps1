@@ -26,24 +26,25 @@ public static class ScanOutputAccessProbe {
 
     private static SafeFileHandle OpenReparseDirectory(string path, uint access) {
         // OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
-        var handle = CreateFile(path, access, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
-        if (handle.IsInvalid) throw new System.ComponentModel.Win32Exception();
-        return handle;
+        return CreateFile(path, access, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
     }
 
-    public static void CopyJunction(SafeAccessTokenHandle token, string source,
+    public static Tuple<string, int> CopyJunction(SafeAccessTokenHandle token, string source,
         string destination, uint access) {
         byte[] data = new byte[16384]; // MAXIMUM_REPARSE_DATA_BUFFER_SIZE
         int length;
         using (var handle = OpenReparseDirectory(source, 0)) {
+            if (handle.IsInvalid) return Tuple.Create("template-open", Marshal.GetLastWin32Error());
             if (!DeviceIoControl(handle, 0x900a8, null, 0, data, data.Length, out length, IntPtr.Zero))
-                throw new System.ComponentModel.Win32Exception(); // FSCTL_GET_REPARSE_POINT
+                return Tuple.Create("get", Marshal.GetLastWin32Error()); // FSCTL_GET_REPARSE_POINT
         }
-        WindowsIdentity.RunImpersonated(token, () => {
+        return WindowsIdentity.RunImpersonated(token, () => {
             using (var handle = OpenReparseDirectory(destination, access)) {
+                if (handle.IsInvalid) return Tuple.Create("open", Marshal.GetLastWin32Error());
                 int returned;
                 if (!DeviceIoControl(handle, 0x900a4, data, length, null, 0, out returned, IntPtr.Zero))
-                    throw new System.ComponentModel.Win32Exception(); // FSCTL_SET_REPARSE_POINT
+                    return Tuple.Create("set", Marshal.GetLastWin32Error()); // FSCTL_SET_REPARSE_POINT
+                return Tuple.Create("complete", 0);
             }
         });
     }
@@ -70,16 +71,19 @@ public static class ScanOutputAccessProbe {
         });
     }
 
-    public static bool CanRename(SafeAccessTokenHandle token, string path) {
+    public static int RenameError(SafeAccessTokenHandle token, string path) {
         return WindowsIdentity.RunImpersonated(token, () => {
-            if (!MoveFile(path, path + ".moved")) {
-                int error = Marshal.GetLastWin32Error();
-                if (error == 5) return false; // ERROR_ACCESS_DENIED
-                throw new System.ComponentModel.Win32Exception(error);
-            }
+            if (!MoveFile(path, path + ".moved")) return Marshal.GetLastWin32Error();
             Directory.Move(path + ".moved", path);
-            return true;
+            return 0;
         });
+    }
+
+    public static bool CanRename(SafeAccessTokenHandle token, string path) {
+        int error = RenameError(token, path);
+        if (error == 0) return true;
+        if (error == 5) return false; // ERROR_ACCESS_DENIED
+        throw new System.ComponentModel.Win32Exception(error);
     }
 
     public static void MoveDirectory(SafeAccessTokenHandle token, string source, string destination) {
@@ -103,19 +107,30 @@ try {
     if (-not [ScanOutputAccessProbe]::LogonUser($name, '.', $password, 2, 0, [ref]$token)) {
         throw [System.ComponentModel.Win32Exception]::new([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }
-    [ScanOutputAccessProbe]::ReplaceDirectory($token, $env:CODEX_SECURITY_TEST_REPLACE_DIRECTORY)
     $reparseParent = $env:CODEX_SECURITY_TEST_REPARSE_PARENT
     $sourceJunction = Join-Path $reparseParent 'source junction'
-    foreach ($leaf in @('write attributes', 'write data')) {
-        if ([ScanOutputAccessProbe]::CanRename($token, (Join-Path $reparseParent $leaf))) {
-            throw 'The leaf-only access fixture unexpectedly permitted a rename.'
-        }
+    $rights = [ordered]@{
+        'write attributes' = 0x100; 'write data' = 0x2
+        'write data and attributes' = 0x102; 'writable control' = 0x40000000
     }
-    [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, (Join-Path $reparseParent 'write attributes'), 0x100)
-    [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, (Join-Path $reparseParent 'write data'), 0x2)
+    $reparse = @(foreach ($nameAndAccess in $rights.GetEnumerator()) {
+        $path = Join-Path $reparseParent $nameAndAccess.Key
+        $renameError = [ScanOutputAccessProbe]::RenameError($token, $path)
+        $retag = [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, $path, $nameAndAccess.Value)
+        [pscustomobject]@{
+            name = $nameAndAccess.Key; access = $nameAndAccess.Value
+            stage = $retag.Item1; win32 = $retag.Item2
+            rename = $renameError -eq 0; renameWin32 = $renameError
+        }
+    })
+    if ($env:CODEX_SECURITY_TEST_REPARSE_ONLY -eq '1') {
+        ConvertTo-Json -InputObject $reparse -Compress
+        return
+    }
+    [ScanOutputAccessProbe]::ReplaceDirectory($token, $env:CODEX_SECURITY_TEST_REPLACE_DIRECTORY)
     $intermediate = Join-Path $reparseParent 'intermediate'
     [ScanOutputAccessProbe]::MoveDirectory($token, (Join-Path $intermediate 'src'), $env:CODEX_SECURITY_TEST_RETAINED_CHILD)
-    [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, $intermediate, 0x100)
+    $intermediateResult = [ScanOutputAccessProbe]::CopyJunction($token, $sourceJunction, $intermediate, 0x100)
     $protected = $env:CODEX_SECURITY_TEST_DENIED_DIRECTORY
     $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
     & $icacls $protected /grant "*$($user.SID.Value):(DE)" | Out-Null
@@ -139,7 +154,10 @@ try {
             }
         }
     )
-    ConvertTo-Json -InputObject $results -Compress
+    ConvertTo-Json -InputObject @{
+        access = $results; reparse = $reparse
+        intermediate = @{ stage = $intermediateResult.Item1; win32 = $intermediateResult.Item2 }
+    } -Depth 4 -Compress
 } finally {
     if ($null -ne $token) { $token.Dispose() }
     if ($created) { Remove-LocalUser -Name $name }
