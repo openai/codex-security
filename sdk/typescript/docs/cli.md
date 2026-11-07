@@ -926,6 +926,8 @@ that `subagents` can be zero. Discovery time accepts positive fractional minutes
 its default and maximum are 5760 minutes (96 hours). Unlike Standard's
 advisory allowance, the Deep discovery limit is enforced. Resuming a
 Deep scan keeps its original deadline; rerunning starts a new scan.
+If the deadline expires before any source review completes, the saved report
+and scan manifest record that limitation.
 `--max-time-hours`, SDK `maxTimeHours`, project `scan.deep.max_time_hours`, and
 legacy TOML `deep_scan.max_time_hours` remain deprecated Deep-only aliases in
 hours. Explicit settings override lower-priority configuration across units.
@@ -2529,6 +2531,10 @@ The assessment does not change the patch or merge state.
 Git snapshots, including snapshots of initialized submodules, run configured Git
 filters with the workspace permissions from your Codex configuration. Configure
 additional writable roots and network access in your user configuration.
+An external Git administration directory must belong to a registered worktree or
+be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git
+directory points to a separate external common directory, select that common
+directory too unless the worktree is registered.
 For Git LFS storage outside the checkout, select the cache in your user or
 system Git configuration, pass it through Git's command environment, or grant
 the snapshot workspace write access to the cache.

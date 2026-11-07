@@ -41,6 +41,51 @@ test.each([
   async ({ hook, assess, lostResult, scope }) => {
     const { directory, git } = await publicationRepository(fixtures);
     await writeFile(join(directory, "other.ts"), "original unrelated\n");
+    // The captured tree already contains the filtered contents. A native hook's
+    // Git process must not reselect checkout-provided commands during commit.
+    git("config", "filter.snapshot.clean", "git hash-object --stdin");
+    git("config", "filter.snapshot.required", "true");
+    const global = join(
+      await fixtures.create("publication-operator-config-"),
+      "gitconfig",
+    );
+    git(
+      "config",
+      "--file",
+      global,
+      "filter.operator.clean",
+      "git hash-object --stdin",
+    );
+    const branchConfig = join(directory, ".git", "publication-branch-config");
+    git(
+      "config",
+      "--file",
+      branchConfig,
+      "filter.branchonly.clean",
+      "git hash-object --stdin",
+    );
+    git(
+      "config",
+      "--file",
+      global,
+      "includeIf.onbranch:codex-security/**.path",
+      branchConfig,
+    );
+    const inactiveConfig = join(directory, ".git", "inactive-branch-config");
+    git(
+      "config",
+      "--file",
+      inactiveConfig,
+      "filter.operator.clean",
+      "git version",
+    );
+    git(
+      "config",
+      "--file",
+      global,
+      "includeIf.onbranch:never-published.path",
+      inactiveConfig,
+    );
     git("add", "other.ts");
     git("commit", "-m", "Synthetic unrelated file");
     await writeFile(join(directory, "other.ts"), "unrelated local edit\n");
@@ -56,6 +101,12 @@ test.each([
       [
         "#!/bin/sh",
         "set -eu",
+        'test "$(git config --get filter.snapshot.clean)" = ""',
+        'test "$(git config --get filter.snapshot.required)" = false',
+        'test "$(git config --get filter.branchonly.clean)" = ""',
+        'test "$(git config --get filter.branchonly.required)" = false',
+        'test "$(git config --get filter.operator.clean)" = "git hash-object --stdin"',
+
         ...(postIndex
           ? [
               'case "${GIT_INDEX_FILE:-}" in *codex-security-patch-tree-*) ;; *) exit 0;; esac',
@@ -98,12 +149,10 @@ test.each([
         if (args[0] === "switch" && args[1] === "-c")
           indexBefore = await readFile(indexPath);
         if (args[0] === "push") pushes++;
-        const output = await runGitRepositoryCommand(
-          command,
-          args,
-          cwd,
-          options,
-        );
+        const output = await runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { GIT_CONFIG_GLOBAL: global, ...options?.environment },
+        });
         if (lostResult && args[0] === "commit")
           throw new Error("Synthetic commit result lost.");
         return output;
@@ -124,6 +173,7 @@ test.each([
       ],
       {
         currentDirectory: cwd,
+        environment: { GIT_CONFIG_GLOBAL: global },
         result,
         onWorkbench: () => savedScan(result, "scan-1", cwd),
         onRepositoryCommand,

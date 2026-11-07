@@ -77,6 +77,7 @@ import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   capturePatchGitControls,
+  type PatchGitControls,
   ensureWindowsSnapshotConfigReadable,
   withPatchGitIndex,
 } from "./patch-git-controls.js";
@@ -1280,7 +1281,10 @@ interface SkillRunOptions {
   verificationMode?: z.infer<typeof VerificationModeSchema>;
   verificationIds?: readonly string[];
   onEvent?: (event: Readonly<Record<string, unknown>>) => void;
-  onBeforeTurn?: (signal?: AbortSignal) => Promise<void>;
+  onBeforeTurn?: (
+    signal?: AbortSignal,
+    hostFilterSettings?: PatchGitControls["hostFilterSettings"],
+  ) => Promise<void>;
   provider?: string;
   providerConfiguration?: JsonObject;
   environment?: NodeJS.ProcessEnv;
@@ -7461,7 +7465,10 @@ export async function main(
             let publication: PatchPublication | undefined;
             let patchRiskState: GitPatchState | undefined;
             let patchBase: GitPatchState | Map<string, string> | undefined;
-            const preparePatch = async (signal?: AbortSignal) => {
+            const preparePatch = async (
+              signal?: AbortSignal,
+              hostFilterSettings?: PatchGitControls["hostFilterSettings"],
+            ) => {
               if (patchBase !== undefined) return;
               publication = options.createPr
                 ? await preparePatchPublication(
@@ -7469,6 +7476,7 @@ export async function main(
                     selected.scanId,
                     dependencies,
                     signal,
+                    hostFilterSettings,
                   )
                 : undefined;
               patchRiskState = options.assessPatchRisk
@@ -7638,7 +7646,10 @@ export async function main(
           let preparationCompleted = false;
           let preparationEverCompleted = false;
           const identifier = directPatchIdentifier(positionals, imports);
-          const preparePatch = async (signal?: AbortSignal) => {
+          const preparePatch = async (
+            signal?: AbortSignal,
+            hostFilterSettings?: PatchGitControls["hostFilterSettings"],
+          ) => {
             preparationCompleted = false;
             patchState =
               options.assessPatchRisk || options.createPr
@@ -7664,6 +7675,7 @@ export async function main(
                 identifier ?? directPatchDigest(positionals, imports),
                 dependencies,
                 signal,
+                hostFilterSettings,
               );
             }
             signal?.throwIfAborted();
@@ -9291,6 +9303,7 @@ function directPatchDigest(
 }
 
 interface PatchPublication {
+  hostFilterSettings?: PatchGitControls["hostFilterSettings"];
   branch: string;
   sshCommand?: string;
   // Opaque Git path keys, using Latin-1 to preserve filename bytes.
@@ -9868,6 +9881,7 @@ async function preparePatchPublication(
   patchId: string,
   dependencies: CliDependencies,
   signal?: AbortSignal,
+  hostFilterSettings?: PatchGitControls["hostFilterSettings"],
 ): Promise<PatchPublication> {
   signal?.throwIfAborted();
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
@@ -9973,6 +9987,8 @@ async function preparePatchPublication(
       "--ignored=traditional",
     ],
     dependencies,
+    // Status may invoke clean/process filters while checking a tracked file.
+    { patchSnapshot: [], environment: { GIT_OPTIONAL_LOCKS: "0" } },
   );
   // A fresh index reads worktree edits hidden by assume-unchanged flags.
   const tree = await snapshotPatchTree(repository, dependencies);
@@ -10023,6 +10039,7 @@ async function preparePatchPublication(
     dirtyFiles,
     ignoredFiles,
     ignoredDigests,
+    hostFilterSettings,
     untrackedRepositoryDigests,
     sshCommand,
     tree,
@@ -10722,10 +10739,52 @@ async function createPatchPullRequest(
     patchRisk === undefined
       ? introduction
       : `${introduction}\n\n## Patch risk assessment\n\n${patchRisk.summary}`;
-  const run = (
+  // Native commit hooks keep their normal worktree and index. Git's implicit
+  // index refresh may inspect a file again, but its filtered blob is already captured.
+  const hostFilterEnvironment = async (
+    switchingBranch: boolean,
+  ): Promise<NodeJS.ProcessEnv> => {
+    const config = new Map<string, string>();
+    for (const key of (await publication.hostFilterSettings?.(
+      switchingBranch,
+    )) ?? []) {
+      config.set(key, "");
+      config.set(key.slice(0, key.lastIndexOf(".")) + ".required", "false");
+    }
+    const environment: NodeJS.ProcessEnv = {};
+    let count = Number(
+      environmentEntry(dependencies.environment, "GIT_CONFIG_COUNT") ?? 0,
+    );
+    for (const [key, value] of config) {
+      environment[`GIT_CONFIG_KEY_${count}`] = key;
+      environment[`GIT_CONFIG_VALUE_${count}`] = value;
+      count++;
+    }
+    if (config.size) environment["GIT_CONFIG_COUNT"] = String(count);
+    return environment;
+  };
+  let branchEnvironment: NodeJS.ProcessEnv | undefined;
+  const run = async (
     args: string[],
     options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
-  ) => dependencies.runRepositoryCommand("git", args, repository, options);
+  ) => {
+    if (options?.patchSnapshot !== undefined)
+      return dependencies.runRepositoryCommand(
+        "git",
+        args,
+        repository,
+        options,
+      );
+    const switching = args[0] === "switch";
+    if (switching) branchEnvironment = undefined;
+    const filterEnvironment = switching
+      ? await hostFilterEnvironment(true)
+      : (branchEnvironment ??= await hostFilterEnvironment(false));
+    return dependencies.runRepositoryCommand("git", args, repository, {
+      ...options,
+      environment: { ...options?.environment, ...filterEnvironment },
+    });
+  };
   const isDeleted = (file: string) =>
     [...sources.deleted].some(
       (source) => relativePatchPath(source, file) === "",
@@ -10849,6 +10908,7 @@ async function createPatchPullRequest(
       "--literal-pathspecs",
       "reset",
       "-q",
+      "--no-refresh",
       "HEAD",
       "--",
       ...stageFiles,
@@ -11178,9 +11238,11 @@ async function patchGitRecords(
   repository: string,
   args: string[],
   dependencies: CliDependencies,
+  options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
 ): Promise<string[]> {
   return Buffer.from(
     await dependencies.runRepositoryCommand("git", args, repository, {
+      ...options,
       trim: false,
       encoding: "base64",
       maxBuffer: Infinity,
@@ -11938,9 +12000,9 @@ async function runFindingPatches(
         dependencies,
         {
           ...options,
-          onBeforeTurn: async (signal) => {
+          onBeforeTurn: async (signal, hostFilterSettings) => {
             preparationCompleted = false;
-            await options.onBeforeTurn?.(signal);
+            await options.onBeforeTurn?.(signal, hostFilterSettings);
             base = await snapshotPatchState(
               selected.repository,
               dependencies,
@@ -12597,7 +12659,10 @@ async function runSkill(
                   ? {}
                   : {
                       async onBeforeTurn(signal?: AbortSignal) {
-                        await options.onBeforeTurn?.(signal);
+                        await options.onBeforeTurn?.(
+                          signal,
+                          gitControls?.hostFilterSettings,
+                        );
                         if (!signal?.aborted) await gitControls?.validate();
                       },
                     }),
@@ -14553,7 +14618,7 @@ async function executeScan(
               (arguments_.createPr || patchSelection?.createPullRequest)
             );
           },
-          onBeforeTurn: async (signal) => {
+          onBeforeTurn: async (signal, hostFilterSettings) => {
             if (
               publication === undefined &&
               (arguments_.createPr || patchSelection?.createPullRequest)
@@ -14563,6 +14628,7 @@ async function executeScan(
                 selected.scanId,
                 dependencies,
                 signal,
+                hostFilterSettings,
               );
           },
         },
@@ -14874,9 +14940,13 @@ async function readDeepScanStop(
   }
   if (state?.terminalReason !== "capped") return undefined;
   const { maxDiscoveryRuns, maxTimeHours } = state.config;
-  if (state.dispatchedCount >= maxDiscoveryRuns) {
+  // A capped run with no completed reviews can finish only at its discovery deadline.
+  if (
+    state.completionSequence > 0 &&
+    state.dispatchedCount >= maxDiscoveryRuns
+  ) {
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.completionSequence > 0 && state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
@@ -14887,7 +14957,7 @@ async function readDeepScanStop(
     const roundedMinutes = Number(maxTimeMinutes.toPrecision(15));
     if (roundedMinutes / 60 === maxTimeHours) maxTimeMinutes = roundedMinutes;
     return {
-      reason: `Reached the ${maxTimeMinutes}-minute time limit. More issues may remain.`,
+      reason: `Reached the ${maxTimeMinutes}-minute time limit. ${state.completionSequence === 0 ? "No source review completed." : "More issues may remain."}`,
       nextStep:
         maxTimeHours < 96
           ? `To scan further, rerun with --max-time greater than ${maxTimeMinutes}.`

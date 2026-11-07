@@ -88,12 +88,8 @@ assert.deepEqual(
     ),
   ),
   {
-    filesystemDenies: [
-      "/repo/.env",
-      "/repo/.secrets",
-      "/repo-a/**/.env",
-      "/repo-b/**/*.pem",
-    ],
+    filesystemDenies: ["/repo-a/**/.env", "/repo-b/**/*.pem"],
+    literalFilesystemDenies: ["/repo/.env", "/repo/.secrets"],
     globScanMaxDepth: 3,
   },
 );

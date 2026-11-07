@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, readFile, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
@@ -73,6 +73,7 @@ for (const policy of ["set", "exclude", "control"] as const) {
         await writeFile(
           clean,
           `const fs=require("node:fs");const input=fs.readFileSync(0,"utf8");
+if(process.env.SNAPSHOT_STATUS_TRACE === "1") fs.writeSync(2, "status-filter:"+(process.env.SNAPSHOT_STYLE??"unset")+"\\n");
 if(input.startsWith("new")){try{fs.writeFileSync(${JSON.stringify(outsideWrite)},"unexpected");}catch(error){if(!["EACCES","EPERM","EROFS"].includes(error.code))throw error;}}
 process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.startsWith("new")?require("node:crypto").randomUUID()+"\\n":""));\n`,
         );
@@ -138,10 +139,31 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
                   : "https://github.example.test/example/repository/pull/1";
               if (args.includes("add") && !inline)
                 expect(options?.sandbox).toBeDefined();
+              const status = args[0] === "status";
+              const trace: Buffer[] = [];
+              if (status) {
+                // Force Git to recheck the same-size tracked file through its clean filter.
+                await utimes(join(directory, dataPath), 1, 1);
+                expect(options?.sandbox?.directory).toBe(directory);
+                expect(
+                  options?.sandbox?.gitEnvironment?.["GIT_OPTIONAL_LOCKS"],
+                ).toBe("0");
+              }
               const result = await runRepositoryCommand(command, args, cwd, {
                 ...options,
-                environment: { ...environment, ...options?.environment },
+                environment: {
+                  ...environment,
+                  ...options?.environment,
+                  ...(status && { SNAPSHOT_STATUS_TRACE: "1" }),
+                },
+                ...(status && {
+                  onStderr: (chunk: Buffer) => trace.push(chunk),
+                }),
               });
+              if (status)
+                expect(Buffer.concat(trace).toString()).toContain(
+                  "status-filter:" + effective,
+                );
               if (args.includes("--dry-run"))
                 await expect(readFile(outsideWrite)).rejects.toMatchObject({
                   code: "ENOENT",

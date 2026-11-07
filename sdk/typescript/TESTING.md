@@ -2,7 +2,7 @@
 
 ## Install dependencies
 
-Use [the repository’s pinned pnpm version](../../package.json) and [CI’s Bun version](../../.github/workflows/node-ci.yml). From the repository root, enter the SDK directory and install both packages:
+Use [the repository’s pinned pnpm version](../../package.json) and [CI’s Bun version](../../.bun-version). From the repository root, enter the SDK directory and install both packages:
 
 ```sh
 cd sdk/typescript
