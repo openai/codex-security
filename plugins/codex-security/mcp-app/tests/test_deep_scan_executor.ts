@@ -1531,7 +1531,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       const settings = [
         { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
-        { model: "gpt-6.1-sol", reasoningEffort: "max" },
+        { model: "gpt-6.1-sol", reasoningEffort: "high" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
         {
           model: 'fixture-"future"\\模型',

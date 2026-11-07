@@ -314,9 +314,9 @@ describe("CLI skill commands", () => {
           ? []
           : ["--ephemeral", "--color", "never", "--json"]),
         "--config",
-        'model="gpt-5.6-sol"',
+        'model="gpt-6.1-sol"',
         "--config",
-        'model_reasoning_effort="xhigh"',
+        'model_reasoning_effort="high"',
         "--config",
         'approval_policy="never"',
         "--config",
@@ -1038,11 +1038,11 @@ describe("CLI skill commands", () => {
 
   test.each(
     (["validate", "patch", "verify-fix"] as const).flatMap((command) => [
-      [command, ["--codex", 'model="synthetic-model"'], "xhigh"] as const,
+      [command, ["--codex", 'model="synthetic-model"'], "high"] as const,
       [
         command,
-        ["--model", "synthetic-model", "--effort", "high"],
-        "high",
+        ["--model", "synthetic-model", "--effort", "xhigh"],
+        "xhigh",
       ] as const,
     ]),
   )(

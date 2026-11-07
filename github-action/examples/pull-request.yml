@@ -58,7 +58,7 @@ jobs:
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: diff
-          model: gpt-5.6-sol
+          model: gpt-6.1-sol
           effort: high
           max-cost: "5"
           fail-on-severity: high

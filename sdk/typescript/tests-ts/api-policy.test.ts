@@ -35,6 +35,7 @@ import {
   readOperationTelemetry,
   type OperationTelemetryEvent,
 } from "../src/operation-telemetry.js";
+import { BUDGET_TEST_CONFIG } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { InternalSecurity } from "./support/internal-security.js";
 import type { PluginPythonOptions } from "../src/runtime.js";
@@ -530,7 +531,7 @@ describe("CodexSecurity policy API", () => {
     expect(preflight.targetPath).toBe(
       join(f.repository, "component", "SECURITY.md"),
     );
-    expect(preflight.model).toBe("gpt-5.6-sol");
+    expect(preflight.model).toBe("gpt-6.1-sol");
     expect(onPrepare).not.toHaveBeenCalled();
     expect(await readdir(f.outputDir)).toEqual([]);
     await f.security.close();
@@ -1459,7 +1460,7 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("uses the shared runtime for three fresh, scoped, structured turns", async () => {
-    const f = await setup({ surface: "cli" });
+    const f = await setup({ surface: "cli", config: BUDGET_TEST_CONFIG });
     await writeFile(
       join(f.repository, "SECURITY.md"),
       "# Existing policy\nKeep the reporting channel.\n",
@@ -1832,7 +1833,7 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("enforces one cost budget across stages and preserves completed evidence", async () => {
-    const f = await setup();
+    const f = await setup({ config: BUDGET_TEST_CONFIG });
     const observed: OperationTelemetryEvent[] = [];
     try {
       const result = f.security.generatePolicy(f.repository, {
