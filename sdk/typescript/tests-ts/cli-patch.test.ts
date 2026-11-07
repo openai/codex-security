@@ -20,7 +20,11 @@ import {
   fakeResult,
   type OnCodex,
 } from "./cli-fixtures.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { git as fixtureGit } from "./git-fixture.js";
+import {
+  scopedTemporaryDirectory,
+  temporaryDirectory,
+} from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -977,7 +981,7 @@ describe("scan and patch workflow", () => {
     const remote = join(directory, "remote.git");
     const url = "https://github.example.test/example/repository/pull/17";
     const expectedBody = [
-      "Applies a security fix generated for SEC-123.",
+      "Applies the repository changes generated for SEC-123.",
       "",
       "## Patch risk assessment",
       "",
@@ -1090,7 +1094,7 @@ describe("scan and patch workflow", () => {
         "--head",
         "codex-security/patch-SEC-123",
         "--title",
-        "fix: patch verified security findings",
+        "fix: apply security patch",
         "--body",
         expectedBody,
       ]);
@@ -1502,7 +1506,7 @@ describe("scan and patch workflow", () => {
     const result = resultWithFindings(["high", "medium"]);
     result.findings.findings[0]!.title = "Synthetic private finding";
     const expectedPullRequestBody = [
-      "Applies verified security fixes from a completed scan.",
+      "Applies verified code changes for findings from a completed scan.",
       "",
       "## Patch risk assessment",
       "",
@@ -1630,7 +1634,7 @@ describe("scan and patch workflow", () => {
         "--head",
         "codex-security/patch-scan",
         "--title",
-        "fix: patch verified security findings",
+        "fix: apply security patch",
         "--body",
         expectedPullRequestBody,
       ]);
@@ -1838,35 +1842,80 @@ describe("scan and patch workflow", () => {
     }
   });
 
+  test("keeps a saved finding's source patch while credential retirement is blocked", async () => {
+    await using temp = await scopedTemporaryDirectory("credential-patch-");
+    const repository = temp.path;
+    const path = "deploy.env";
+    const file = join(repository, path);
+    const result = resultWithFindings(["high"]);
+    const patch = {
+      occurrenceId: "occ_1",
+      status: "blocked",
+      files: [path],
+      verification: "The deployment reads the token from its environment.",
+      reason: "The owner must revoke the old registry token.",
+    };
+    fixtureGit(repository, "init", "--initial-branch=main");
+    await writeFile(file, "TOKEN=synthetic-fixture\n");
+    fixtureGit(repository, "add", path);
+    fixtureGit(repository, "commit", "--no-gpg-sign", "-m", "Fixture");
+
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: repository,
+        result,
+        onWorkbench: () => savedScan(result, "scan-1", repository),
+        onRepositoryCommand: runGitRepositoryCommand,
+        onCodex: async (_args, output) => {
+          await writeFile(file, "TOKEN=${REGISTRY_TOKEN}\n");
+          output?.stdout.write(JSON.stringify({ patches: [patch] }));
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(1);
+    expect(outcome.stderr).toContain(patch.reason);
+    const response = JSON.parse(outcome.stdout);
+    expect(response).toMatchObject({
+      applied: true,
+      files: [path],
+      patches: [patch],
+    });
+    expect(response.pullRequest).toBeUndefined();
+    expect(fixtureGit(repository, "diff", "--name-only")).toBe(path);
+    expect(fixtureGit(repository, "branch", "--show-current")).toBe("main");
+  });
+
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
-    for (const status of ["blocked", "no_change", "outside"] as const) {
+    const reason = "Revoke the exposed token with its issuer.";
+    for (const [status, files, exitCode] of [
+      ["blocked", ["src/finding-1.ts"], 1],
+      ["no_change", [], 0],
+      ["verified", ["../outside.ts"], 2],
+    ] as const) {
+      const patch = {
+        occurrenceId: "occ_1",
+        status,
+        files,
+        ...(status === "blocked"
+          ? { reason }
+          : { verification: "Focused checks pass." }),
+      };
       let commandStarted = false;
       const outcome = await runWorkflow(
         ["scan", "--patch", "--create-pr", "--json"],
         {
           result: resultWithFindings(["high"]),
           onCodex: (_args, output) => {
-            output?.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status: status === "outside" ? "verified" : status,
-                    files: status === "outside" ? ["../outside.ts"] : [],
-                    ...(status === "blocked"
-                      ? { reason: "A required service is unavailable." }
-                      : { verification: "Focused checks pass." }),
-                  },
-                ],
-              }),
-            );
+            output?.stdout.write(JSON.stringify({ patches: [patch] }));
             return 0;
           },
           onRepositoryCommand: (command, args) => {
             commandStarted ||=
               command !== "git" ||
-              ["checkout", "commit", "push"].includes(args[0]!);
-            return status === "outside" && args.includes("--name-only")
+              ["checkout", "switch", "commit", "push"].includes(args[0]!);
+            return files.length > 0 && args.includes("--name-only")
               ? "src/finding-1.ts\0"
               : "";
           },
@@ -1874,11 +1923,11 @@ describe("scan and patch workflow", () => {
       );
 
       expect(commandStarted).toBe(false);
-      expect(outcome.exitCode).toBe(
-        status === "blocked" ? 1 : status === "outside" ? 2 : 0,
-      );
-      expect(JSON.parse(outcome.stdout)).not.toHaveProperty("pullRequest");
-      if (status === "outside") {
+      expect(outcome.exitCode).toBe(exitCode);
+      const response = JSON.parse(outcome.stdout);
+      expect(response).not.toHaveProperty("pullRequest");
+      expect(response.patches).toEqual([patch]);
+      if (status === "verified") {
         expect(outcome.stderr).toContain(
           "Patch files must remain inside the scanned repository.",
         );
@@ -2378,9 +2427,9 @@ describe("scan and patch workflow", () => {
             "--source-branch",
             "codex-security/patch-scan-1",
             "--title",
-            "fix: patch verified security findings",
+            "fix: apply security patch",
             "--description",
-            ">>>\nApplies verified security fixes from a completed scan.",
+            ">>>\nApplies verified code changes for findings from a completed scan.",
             "--yes",
             "--repo",
             selector,

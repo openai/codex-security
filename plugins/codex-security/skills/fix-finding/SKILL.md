@@ -30,6 +30,12 @@ Before editing, inspect the affected implementation, its direct callers, nearby 
 
 Treat the finding as a data-flow and boundary problem, not merely the named input example. Check equivalent encodings, parser forms, aliases, callers, sinks, and every representation or copy of security-sensitive state that could bypass the proposed change. Handle unsafe state explicitly; do not silently accept, truncate, or reinterpret it into another reachable form.
 
+### Credential exposure
+
+Follow the [credential remediation guidance](../../references/finding-detail-fields.md#credential-exposure) for the code change and the owner's actions. Use synthetic credentials for local checks. Never replay an exposed credential or contact its issuer.
+
+If only a runtime leak path is established, verify its repair and recommend checking affected deployments. If a credential was committed or otherwise disclosed and retirement is unconfirmed, keep the verified source change and report `blocked`. Say what was cleaned up and what the owner still needs to identify or retire.
+
 ## Implementation Workflow
 
 1. Trace the reported path and inspect only the context needed to identify the real shared boundary. Return `no_change` when repository evidence shows that the reported path is already safe; do not make a speculative change.

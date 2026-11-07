@@ -79,7 +79,7 @@ export const outputSchema = object({
       }),
       locations: array(location),
       rootCause: summary,
-      validation: summary,
+      validation: object({ summary: text, limitations: array(text) }),
       attackPath: object({ dataflow: summary, reachability: summary }),
       codeEvidence: array(
         object({
@@ -118,29 +118,35 @@ export const outputSchema = object({
 
 export async function prepareEval(
   root: string,
-  { corePromptPath = join(pluginRoot, "references/core-scan.md") } = {},
+  {
+    corePromptPath = join(pluginRoot, "references/core-scan.md"),
+    externalTokenScanner = false,
+  } = {},
 ) {
   const repo = join(root, "repository");
   const runtime = join(root, "runtime");
-  const fixture = createFixture();
+  const fixture = createFixture(externalTokenScanner);
   await writeFixture(repo, fixture);
   await mkdir(join(runtime, "references"), { recursive: true });
   const core = await readFile(corePromptPath, "utf8");
   await writeFile(join(runtime, "references/core-scan.md"), core);
-  for (const name of ["threat-model.md", "finding-detail-fields.md"]) {
-    await cp(
-      join(pluginRoot, "references", name),
-      join(runtime, "references", name),
-    );
-  }
-  for (const name of ["schemas", "examples/completed-scan"]) {
-    await cp(join(pluginRoot, name), join(runtime, name), { recursive: true });
+  for (const path of [
+    "references/threat-model.md",
+    "references/finding-detail-fields.md",
+    "references/default-severity-rubric.md",
+    "references/final-report.md",
+    "schemas",
+    "examples/completed-scan",
+  ]) {
+    await cp(join(pluginRoot, path), join(runtime, path), { recursive: true });
   }
   const prompt = [
     "Perform a static security review of the repository below.",
     `Repository and authorized scope: ${repo}, all current files.`,
     `Plugin reference directory: ${runtime}. Bare reference filenames are relative to ${join(runtime, "references")}.`,
-    "Applicable inherited SECURITY.md guidance: none; the caller checked the authorized scope and its ancestors.",
+    externalTokenScanner
+      ? `Applicable inherited SECURITY.md guidance, resolved by the caller for all files in scope from the repository root: ${fixture.files["SECURITY.md"].trim()}`
+      : "Applicable inherited SECURITY.md guidance: none; the caller checked the authorized scope and its ancestors.",
     "User security context: none. Supplied threat model: none. Knowledge base: none.",
     "Subagent allowance: 0. Perform the core workflow sequentially, including its baseline audit and final validation.",
     "This caller has no scan tools. Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",
@@ -152,6 +158,9 @@ export async function prepareEval(
     runtime,
     fixture,
     prompt,
+    reportingPolicy: externalTokenScanner
+      ? "external-token-scanner"
+      : "default",
     promptSha256: createHash("sha256").update(core).digest("hex"),
   };
 }
@@ -334,6 +343,7 @@ export async function runPreparedEval(
   if (!completed) throw new Error("Eval stream ended before turn.completed");
   const semanticResult = JSON.parse(finalResponse);
   const report = {
+    reportingPolicy: prepared.reportingPolicy,
     requestedModel: model ?? null,
     modelSelection: model
       ? "explicit"

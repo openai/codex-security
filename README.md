@@ -62,6 +62,9 @@ another command, use `codex-security`. To skip the global install, or if npm
 reports an `EEXIST` conflict, use `npx @openai/codex-security` in place of
 `cs` for both login and scanning.
 
+If another scanner handles recognizable API keys and tokens, you can
+[delegate those alerts and keep other credential findings](sdk/typescript/docs/cli.md#checked-in-credentials).
+
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
 For a headless machine, see [device or SSH login](sdk/typescript/README.md#authentication).
 

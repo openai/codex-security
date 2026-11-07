@@ -18,6 +18,8 @@ For standalone analysis, use the supplied finding, repository, threat model or s
 3. Assess impact and likelihood from those facts. Apply [references/severity-policy.md](references/severity-policy.md) for the final decision. When the scan supplies a severity rubric, use it to grade reportable findings and retain `ignore` for candidates without security impact. Keep facts, severity calibration, and the final policy decision distinguishable in the result.
 4. Return an explicit decision for every eligible candidate, including ignored or deferred candidates. Do not replace a supported instance with a neighboring finding or lose its root-control location.
 
+For a credential embedded in source, apply the [source-disclosure guidance](../../references/core-scan.md#secrets-exposed-in-source) to assess what access a source reader could gain.
+
 Use repository evidence and explicitly supplied context. Access the network only when the user has expressly authorized it; an offline scan never accesses the network. Do not invent unsupported attack chains. Missing deployment or public-ingress evidence can limit confidence without defeating an otherwise supported finding.
 
 ## Scan integration

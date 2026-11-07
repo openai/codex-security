@@ -6903,7 +6903,7 @@ export async function main(
             if (exitCode !== 0 || files.length === 0) {
               throw new PatchCommandError(
                 exitCode === 0 ? "NO_PATCH_APPLIED" : "PATCH_FAILED",
-                `Patch did not complete successfully; ${files.length} files changed. Review the patch results before retrying.`,
+                `Review the patch results for next steps. Files changed in the working tree: ${files.length}.`,
               );
             }
             errorOutput.write(
@@ -7054,8 +7054,8 @@ export async function main(
               dependencies,
               patchRisk,
               identifier === undefined
-                ? "Applies a security fix generated from supplied issue data."
-                : `Applies a security fix generated for ${identifier}.`,
+                ? "Applies the repository changes generated from the supplied issue."
+                : `Applies the repository changes generated for ${identifier}.`,
             );
           }
           if (structuredOutput)
@@ -8559,8 +8559,9 @@ function patchExitCode(patches: readonly FindingPatch[]): number {
   return patches.some(({ status }) => status === "blocked") ? 1 : 0;
 }
 
-const PATCH_PR_TITLE = "fix: patch verified security findings";
-const PATCH_PR_BODY = "Applies verified security fixes from a completed scan.";
+const PATCH_PR_TITLE = "fix: apply security patch";
+const PATCH_PR_BODY =
+  "Applies verified code changes for findings from a completed scan.";
 const PATCH_RISK_SUMMARY_START =
   "<!-- codex-security:patch-risk-summary:start -->";
 const PATCH_RISK_SUMMARY_END = "<!-- codex-security:patch-risk-summary:end -->";
@@ -8711,7 +8712,7 @@ async function createPatchPullRequest(
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
   stderr.write(
-    "Creating a draft pull request or merge request for verified patches...\n",
+    "Creating a draft pull request or merge request for the patch...\n",
   );
   await run(["switch", "-c", branch]);
   await run(["--literal-pathspecs", "add", "--", ...files]);
