@@ -33,6 +33,7 @@ afterEach(cleanup);
 type Role =
   "discovery" | "merge" | "standard" | "custom" | "comparison" | "followup";
 type Scenario =
+  | "completed-comparison"
   | "rejected"
   | "fallback"
   | "active"
@@ -265,18 +266,24 @@ async function fixture(
             'record({ kind: "followup-write-check", exitCode: checked.status, stdout: checked.stdout, stderr: checked.stderr });',
           ]
         : []),
-      ...(scenario === "active"
-        ? []
-        : [
-            "  console.log(JSON.stringify(" +
-              (role === "standard"
-                ? JSON.stringify({
-                    type: "turn.failed",
-                    error: { message: "synthetic standard execution" },
-                  })
-                : '{ type: "error", message: "Configured value for `permission_profile` is disallowed by requirements; falling back from `" + config.default_permissions + "` to required value `:read-only`." }') +
-              "));",
-          ]),
+      ...(scenario === "completed-comparison"
+        ? [
+            '  console.log(JSON.stringify({ type: "item.completed", item: { id: "comparison", type: "agent_message", text: JSON.stringify({ matches: [], uncertain: [] }) } }));',
+            '  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));',
+            "  process.exit(0);",
+          ]
+        : scenario === "active"
+          ? []
+          : [
+              "  console.log(JSON.stringify(" +
+                (role === "standard"
+                  ? JSON.stringify({
+                      type: "turn.failed",
+                      error: { message: "synthetic standard execution" },
+                    })
+                  : '{ type: "error", message: "Configured value for `permission_profile` is disallowed by requirements; falling back from `" + config.default_permissions + "` to required value `:read-only`." }') +
+                "));",
+            ]),
       '  process.on("SIGTERM", () => process.exit(0));',
       ...(role === "standard" ? [] : ["  setInterval(() => {}, 1000);"]),
       "}",
@@ -973,13 +980,19 @@ test.each(["standard", "custom"] as const)(
 test.each(["managed", "ambient"] as const)(
   "ordinary scan comparison keeps large project settings in the %s home",
   async (home) => {
-    const h = await fixture("comparison", false, "fallback", "sdk");
+    const h = await fixture("comparison", false, "completed-comparison", "sdk");
     try {
       if (home === "ambient") await h.useAmbientHome();
       const before = await readFile(join(h.codexHome, "config.toml"));
       await h.run(undefined, { inheritedPermissions: undefined });
       const observations = await h.observations();
       expect(observations.filter(({ kind }) => kind === "mcp")).toHaveLength(1);
+      expect(
+        observations.filter(
+          ({ kind, profile }) =>
+            kind === "preflight" && profile === "codex_security_comparison",
+        ),
+      ).toHaveLength(1);
       expect(observations.filter(({ kind }) => kind === "exec")).toHaveLength(
         2,
       );
@@ -994,6 +1007,7 @@ test.each(["managed", "ambient"] as const)(
           before,
         );
       expect(h.commands).toContain("complete-scan");
+      expect(h.commands).toContain("save-scan-comparison");
     } finally {
       await h.close();
     }
