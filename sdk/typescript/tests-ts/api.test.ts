@@ -19,7 +19,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
-import { hash } from "node:crypto";
+import { createHash, hash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   basename,
@@ -84,7 +84,7 @@ import {
   runReadOnlyCodex,
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
-import { normalizeTarget } from "../src/targets.js";
+import { abortable, normalizeTarget } from "../src/targets.js";
 import {
   copyCompletedScan,
   copyCredentialTestPlugin,
@@ -134,6 +134,52 @@ async function registerEightFileScan(
   return args[0] === "register-cli-scan"
     ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
     : mockWorkbench(args, input);
+}
+
+const RESUMED_SCAN_TIME = "2026-06-01T12:00:00.000Z";
+
+function resumedRolloutRecord(event: Record<string, unknown>): string {
+  return JSON.stringify({ timestamp: RESUMED_SCAN_TIME, ...event });
+}
+
+function resumeEightFileScan(repository: string, scanDir: string) {
+  const threadId = "thread-1";
+  const recipe = {
+    repository,
+    target: { kind: "repository", paths: [] },
+    repositoryRevision: "deadbeef",
+  };
+  return async (
+    _options: unknown,
+    args: readonly string[],
+    input?: string,
+  ): Promise<JsonObject> => {
+    if (args[0] === "get-cli-scan-resume") {
+      return {
+        ...mockScanRegistration(
+          ["--registration-json-stdin", "--scan-dir", scanDir],
+          JSON.stringify({ recipe }),
+        ),
+        threadId,
+        recipe,
+        scopeFileCount: 8,
+      };
+    }
+    if (args[0] === "get-scan") {
+      return {
+        scan: {
+          executionAttribution: {
+            formatVersion: 1,
+            executionThreadIds: [threadId],
+            owner: { threadId, turnId: null, startedAt: RESUMED_SCAN_TIME },
+            startedAt: RESUMED_SCAN_TIME,
+            completedAt: null,
+          },
+        },
+      };
+    }
+    return mockWorkbench(args, input);
+  };
 }
 
 // Exact ASCII fixture for the pinned native 64 KiB persistence representation.
@@ -3545,6 +3591,7 @@ if __name__ == "__main__":
     async (consolidating) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const updates: DeepScanProgress[] = [];
+      const progressReads: Array<readonly string[]> = [];
       const observerErrors: unknown[] = [];
       const warnings: string[] = [];
       const environment = { CODEX_CLI_PATH: process.execPath };
@@ -3558,8 +3605,8 @@ if __name__ == "__main__":
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
-          if (args[0] === "get-scan") {
-            expect(args).toContain("--progress-only");
+          if (args[0] === "get-scan" && args.includes("--progress-only")) {
+            progressReads.push(args);
             return {
               scan: {
                 progress: {
@@ -3594,6 +3641,12 @@ if __name__ == "__main__":
         }),
       ).rejects.toThrow("deep progress captured");
       await Bun.sleep(0);
+      expect(progressReads).toContainEqual([
+        "get-scan",
+        "--scan-id",
+        "scan_example_001",
+        "--progress-only",
+      ]);
       if (consolidating === true) {
         expect(updates).toEqual([
           { completed: 3, active: 2, maximum: 40, consolidating: true },
@@ -8560,7 +8613,7 @@ if __name__ == "__main__":
         parent,
         [0, 4]
           .map((count) =>
-            JSON.stringify({
+            resumedRolloutRecord({
               type: "response_item",
               payload: {
                 type: "custom_tool_call_output",
@@ -8572,7 +8625,7 @@ if __name__ == "__main__":
       );
       await appendFile(
         worker,
-        JSON.stringify({
+        resumedRolloutRecord({
           type: "event_msg",
           payload: {
             type: "agent_message",
@@ -8602,29 +8655,9 @@ if __name__ == "__main__":
         }
         return entries;
       }) as typeof originalReaddir);
-      const recipe = {
-        repository,
-        target: { kind: "repository", paths: [] },
-        repositoryRevision: "deadbeef",
-      };
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "get-cli-scan-resume"
-            ? {
-                ...mockScanRegistration(
-                  ["--registration-json-stdin", "--scan-dir", scanDir],
-                  JSON.stringify({ recipe }),
-                ),
-                threadId: "thread-1",
-                recipe,
-                scopeFileCount: 8,
-              }
-            : mockWorkbench(args, input),
+        runWorkbench: resumeEightFileScan(repository, scanDir),
         createCodex: () => ({
           startThread: () => {
             throw new Error("Expected a resumed thread");
@@ -8636,7 +8669,7 @@ if __name__ == "__main__":
               async function* events(): AsyncGenerator<ThreadEvent> {
                 await appendFile(
                   parent,
-                  JSON.stringify({
+                  resumedRolloutRecord({
                     type: "response_item",
                     payload: {
                       type: "custom_tool_call_output",
@@ -13069,32 +13102,12 @@ if __name__ == "__main__":
           },
         },
       ]
-        .map((event) => JSON.stringify(event))
+        .map(resumedRolloutRecord)
         .join("\n") + "\n",
     );
-    const recipe = {
-      repository,
-      target: { kind: "repository", paths: [] },
-      repositoryRevision: "deadbeef",
-    };
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
-        args[0] === "get-cli-scan-resume"
-          ? {
-              ...mockScanRegistration(
-                ["--registration-json-stdin", "--scan-dir", scanDir],
-                JSON.stringify({ recipe }),
-              ),
-              threadId: "thread-1",
-              recipe,
-              scopeFileCount: 8,
-            }
-          : mockWorkbench(args, input),
+      runWorkbench: resumeEightFileScan(repository, scanDir),
       createCodex: () => ({
         startThread: () => {
           throw new Error("Expected a resumed thread");
@@ -13111,9 +13124,9 @@ if __name__ == "__main__":
               );
               await appendFile(
                 rollout,
-                JSON.stringify(native("current")) +
+                resumedRolloutRecord(native("current")) +
                   "\n" +
-                  JSON.stringify({
+                  resumedRolloutRecord({
                     type: "response_item",
                     payload: {
                       type: "custom_tool_call_output",
@@ -14707,21 +14720,37 @@ if __name__ == "__main__":
     const { repository, codexHome, scanDir } = await scanDirectories();
     const scanId = "scan_example_001";
     const threadId = "thread-1";
-    await writeUsageSession(
-      codexHome,
-      threadId,
-      {
-        input_tokens: 2_000,
-        output_tokens: 0,
-        total_tokens: 2_000,
-      },
-      { cwd: scanDir },
+    const sessions = join(codexHome, "sessions");
+    await mkdir(sessions, { recursive: true });
+    await writeFile(
+      join(sessions, `rollout-${threadId}.jsonl`),
+      [
+        {
+          type: "session_meta",
+          payload: { id: threadId, cwd: scanDir, timestamp: RESUMED_SCAN_TIME },
+        },
+        {
+          type: "token_usage_record",
+          payload: {
+            response_id: "resumed-response",
+            model: "gpt-5.6-sol",
+            usage: {
+              input_tokens: 2_000,
+              output_tokens: 0,
+              total_tokens: 2_000,
+            },
+          },
+        },
+      ]
+        .map(resumedRolloutRecord)
+        .join("\n") + "\n",
     );
     const readConfig = mock(rejecting("native configuration failed"));
     const runStreamed = mock(async () => ({
       events: completedEvents(threadId),
     }));
     const thread = { id: threadId, runStreamed };
+    const resume = resumeEightFileScan(repository, scanDir);
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       canRunDirectDeepScan: () => false,
@@ -14730,20 +14759,10 @@ if __name__ == "__main__":
         startThread: () => thread,
         resumeThread: () => thread,
       }),
-      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
+      runWorkbench: async (options, args, input) => {
         if (args[0] === "read-scan-usage")
           return measuredScanUsage(2_000, 0, 0);
-        if (args[0] === "get-cli-scan-resume")
-          return {
-            scanId,
-            scanDir,
-            threadId,
-            targetId: "target_sha256_example",
-            targetRevision: "deadbeef",
-            recipe: { repository, target: { kind: "repository", paths: [] } },
-            contract: { target: { allowedKinds: ["git_revision"] } },
-          };
-        return mockWorkbench(args, input);
+        return await resume(options, args, input);
       },
     });
     try {
@@ -15300,6 +15319,211 @@ if __name__ == "__main__":
     },
   );
 
+  test.each([
+    ["standard", false],
+    ["deep", false],
+    ["standard", true],
+    ["deep", true],
+  ] as const)(
+    "enforces priced usage with an unpriced remainder (%s, raised limit: %p)",
+    async (mode, raised) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+      ]);
+      const commands: Array<readonly string[]> = [];
+      const costs: number[] = [];
+      let turns = 0;
+      let releaseIncrease!: () => void;
+      const increased = new Promise<void>((resolve) => {
+        releaseIncrease = resolve;
+      });
+      const knownUsage = {
+        input_tokens: raised ? 2_500 : 1_250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      };
+      const expectedCost = estimateScanCost("gpt-5.6-sol", knownUsage)!;
+      const writePricedUsage = async (usage: Record<string, number>) => {
+        const path = await writeUsageSession(codexHome, "scan-thread", usage);
+        const lines = (await readFile(path, "utf8")).split("\n");
+        lines.splice(
+          1,
+          0,
+          JSON.stringify({
+            type: "turn_context",
+            payload: { model: "gpt-5.6-sol" },
+          }),
+        );
+        await writeFile(path, lines.join("\n"));
+      };
+      const writeUnpricedUsage = async () => {
+        const path = await writeUsageSession(
+          codexHome,
+          "unpriced-worker",
+          { input_tokens: 100, output_tokens: 10 },
+          { parent: "scan-thread" },
+        );
+        const lines = (await readFile(path, "utf8")).split("\n");
+        lines.splice(
+          1,
+          0,
+          JSON.stringify({
+            type: "turn_context",
+            payload: { model: "synthetic-unpriced-model" },
+          }),
+        );
+        await writeFile(path, lines.join("\n"));
+      };
+      // The SDK publishes indexed usage while independently checking native floors.
+      // Mirror each emitted rollout snapshot in the synthetic workbench.
+      const initialInput = 800;
+      const unpricedWorker = measuredScanUsage(100, 0, 10);
+      const mixedUsage = {
+        ...measuredScanUsage(
+          knownUsage.input_tokens + 100,
+          knownUsage.cached_input_tokens,
+          knownUsage.output_tokens + 10,
+        ),
+        threadCount: 2,
+        byRole: { workers: { threadCount: 1 } },
+        modelUsage: [
+          {
+            model: "gpt-5.6-sol",
+            ...measuredScanUsage(
+              knownUsage.input_tokens,
+              knownUsage.cached_input_tokens,
+              knownUsage.output_tokens,
+            ),
+          },
+          { model: "synthetic-unpriced-model", ...unpricedWorker },
+        ],
+      };
+      let indexedUsage = measuredScanUsage(initialInput, 0, 0);
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options, args, input) => {
+            commands.push(args);
+            if (args[0] === "read-scan-usage") return indexedUsage;
+            if (args[0] === "get-scan")
+              return { scan: { id: "scan_example_001" } };
+            if (args[0] === "complete-budget-exhausted-scan")
+              throw new Error("Synthetic canonical output is not ready");
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(
+                _input: string,
+                options: { signal: AbortSignal },
+              ) {
+                turns++;
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  if (raised) {
+                    await writePricedUsage({
+                      input_tokens: initialInput,
+                      output_tokens: 0,
+                    });
+                  } else {
+                    await writePricedUsage(knownUsage);
+                    await writeUnpricedUsage();
+                    indexedUsage = mixedUsage;
+                  }
+                  yield { type: "thread.started", thread_id: "scan-thread" };
+                  if (raised) {
+                    await abortable(() => increased, options.signal);
+                    await writeUnpricedUsage();
+                    const path = join(
+                      codexHome,
+                      "sessions",
+                      "2026",
+                      "07",
+                      "26",
+                      "rollout-scan-thread.jsonl",
+                    );
+                    await appendFile(
+                      path,
+                      JSON.stringify({
+                        type: "event_msg",
+                        payload: {
+                          type: "token_count",
+                          info: { total_token_usage: knownUsage },
+                        },
+                      }) + "\n",
+                    );
+                    indexedUsage = mixedUsage;
+                  }
+                  await new Promise<void>((resolve) => {
+                    if (options.signal.aborted) resolve();
+                    else
+                      options.signal.addEventListener(
+                        "abort",
+                        () => resolve(),
+                        { once: true },
+                      );
+                  });
+                  throw new DOMException("aborted", "AbortError");
+                }
+                return { events: events() };
+              },
+            }),
+          }),
+        },
+      );
+      const keepAlive = setTimeout(() => {}, 10_000);
+      try {
+        const failure = await client
+          .run(repository, {
+            mode,
+            maxCostUsd: 0.004,
+            signal: AbortSignal.timeout(5_000),
+            postScanPrompt: "No model work after the budget stop.",
+            ...(raised ? { onBudgetApproaching: () => 0.008 } : {}),
+            onCost: (cost, limit) => {
+              costs.push(cost.estimatedUsd);
+              if (limit === 0.008) releaseIncrease();
+            },
+          })
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(ScanCostLimitExceededError);
+        expect(failure).toMatchObject({
+          maxCostUsd: raised ? 0.008 : 0.004,
+          cost: {
+            estimatedUsd: expectedCost.estimatedUsd,
+            inputTokens: knownUsage.input_tokens,
+            coverage: "partial",
+          },
+        });
+        expect(costs.every((cost) => raised && cost === 0.0032)).toBe(true);
+        expect(turns).toBe(1);
+        expect(
+          commands.some((args) => args[0] === "complete-budget-exhausted-scan"),
+        ).toBe(mode === "deep");
+        if (raised)
+          expect(
+            commands
+              .filter((args) => args[0] === "set-scan-cost-limit")
+              .map((args) => args.at(-1)),
+          ).toEqual(["0.008"]);
+      } finally {
+        clearTimeout(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();
     const commands: Array<readonly string[]> = [];
@@ -15476,6 +15700,8 @@ if __name__ == "__main__":
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
+          if (args[0] === "get-scan")
+            return { scan: { id: "scan_example_001" } };
           if (args[0] === "register-cli-scan") {
             expect(JSON.parse(input!)).toMatchObject({
               surface: "sdk",
@@ -15867,12 +16093,14 @@ if __name__ == "__main__":
       "--scan-id",
       expect.any(String),
     ]);
-    expect(commands[2]).toMatchObject([
-      "fail-scan",
-      "--scan-id",
-      expect.stringMatching(/^[0-9a-f-]{36}$/),
-      "--message=original scan failure",
-    ]);
+    expect(commands.find(([command]) => command === "fail-scan")).toMatchObject(
+      [
+        "fail-scan",
+        "--scan-id",
+        expect.stringMatching(/^[0-9a-f-]{36}$/),
+        "--message=original scan failure",
+      ],
+    );
     const history = await runWorkbench(
       { python: python!, pluginRoot: PLUGIN_ROOT, environment },
       ["list-scans", "--repository", repository],
@@ -17982,9 +18210,13 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     expect(scanSignal?.aborted).toBe(false);
   });
 
-  test.each(["standard", "deep"] as const)(
-    "isolates concurrent managed %s sessions at the Codex child boundary",
-    async (mode) => {
+  test.each([
+    ["standard", false],
+    ["deep", false],
+    ["deep", true],
+  ] as const)(
+    "isolates concurrent managed %s sessions at the Codex child boundary (capture=%p)",
+    async (mode, captureSummary) => {
       const clients: TestClient[] = [];
       try {
         const outcomes = await Promise.allSettled(
@@ -18000,12 +18232,17 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               mkdir(codexHome),
               mkdir(scanDir, { mode: 0o700 }),
             ]);
+            const model = `fixture-${name}-model`;
+            const summary = name === "first" ? "none" : "concise";
+            const configPath = join(codexHome, "config-preflight.toml");
+            let recipeConfig: JsonObject | undefined;
             await writeFile(
               preload,
               [
                 'import { appendFileSync } from "node:fs";',
                 'let prompt = ""; for await (const chunk of process.stdin) prompt += chunk;',
-                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, cwd:process.cwd(), home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `if (process.argv.includes("models")) { console.log(JSON.stringify({models:[{slug:${JSON.stringify(model)},default_reasoning_summary:${JSON.stringify(summary)}}]})); process.exit(0); }`,
                 `console.log(JSON.stringify({type:"thread.started",thread_id:${JSON.stringify(`fixture-${name}-thread`)}}));`,
                 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"scan complete"}}));',
                 'console.log(JSON.stringify({type:"turn.completed",usage:null}));',
@@ -18013,7 +18250,6 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               ].join("\n"),
             );
             const fake = nodeCodex(preload);
-            const model = `fixture-${name}-model`;
             const provider = `fixture-${name}-provider`;
             const client = new TestClient(
               {
@@ -18021,8 +18257,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                   model,
                   model_provider: provider,
                   model_reasoning_effort: "ultra",
-                  model_reasoning_summary:
-                    name === "first" ? "none" : "concise",
+                  // JavaScript callers can omit the merged default with undefined.
+                  model_reasoning_summary: captureSummary
+                    ? (undefined as unknown as string)
+                    : summary,
+                  service_tier: name === "first" ? "flex" : "fast",
                   features: {
                     multi_agent_v2: { max_concurrent_threads_per_session: 4 },
                   },
@@ -18035,8 +18274,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                 },
                 prepareRuntime: async () => ({
                   ...preparedRuntime(codexHome),
-                  configPath: join(codexHome, "preflight.toml"),
-                  deepScanConfigPath: join(codexHome, "deep.toml"),
+                  configPath,
+                  ...(mode === "deep"
+                    ? { deepScanConfigPath: join(codexHome, "deep-scan.toml") }
+                    : {}),
                   environment: {
                     ...fake.environment,
                     FIXTURE_SCAN_VALUE: name,
@@ -18045,6 +18286,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                 resolvePluginPython: async () => "/managed/python",
                 prepareOutputDir: async () => scanDir,
                 repositoryRevision: async () => "deadbeef",
+                runWorkbench: async (_options, args, input) => {
+                  if (args[0] === "register-cli-scan")
+                    recipeConfig = JSON.parse(input!).recipe.config;
+                  return mockWorkbench(args, input);
+                },
                 createCodex: (options: CodexOptions) => {
                   const codex = new Codex(options);
                   return {
@@ -18081,7 +18327,9 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                               manifest.scan.artifacts.find(
                                 (artifact: { path: string }) =>
                                   artifact.path === "coverage.json",
-                              ).sha256 = hash("sha256", coverageBytes);
+                              ).sha256 = createHash("sha256")
+                                .update(coverageBytes)
+                                .digest("hex");
                               await writeFile(
                                 manifestPath,
                                 JSON.stringify(manifest),
@@ -18101,13 +18349,39 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             const result = await client.run(repository, {
               mode,
               postScanPrompt,
+              cyberAccessProgram:
+                name === "first" ? "daybreak_blue" : "daybreak_red",
             });
             expect(result.threadId).toBe(`fixture-${name}-thread`);
             expect(result.turnResult.usage).toBeNull();
-            const children = (await readFile(marker, "utf8"))
+            const invocations = (await readFile(marker, "utf8"))
               .trim()
               .split("\n")
               .map((line) => JSON.parse(line));
+            const lookups = invocations.filter((child) =>
+              child.args.includes("models"),
+            );
+            const children = invocations.filter(
+              (child) => !child.args.includes("models"),
+            );
+            expect(recipeConfig?.["model_reasoning_summary"]).toBe(summary);
+            expect(lookups).toHaveLength(captureSummary ? 1 : 0);
+            for (const lookup of lookups) {
+              expect(await realpath(lookup.cwd)).toBe(await realpath(scanDir));
+              expect(lookup.home).toBe(codexHome);
+              expect(lookup.key).toBe(`synthetic-${name}-key`);
+              expect(lookup.value).toBe(name);
+              expect(lookup.args).toContain(`model=${JSON.stringify(model)}`);
+            }
+            const preflight = await readFile(configPath, "utf8");
+            expect(parseToml(preflight)["model_reasoning_summary"]).toBe(
+              summary,
+            );
+            expect(parseToml(preflight)["codex_security"]).toEqual({
+              cyber_access_program:
+                name === "first" ? "daybreak_blue" : "daybreak_red",
+            });
+            expect(preflight).not.toContain(`synthetic-${name}-key`);
             expect(children).toHaveLength(2);
             expect(children[1].prompt).toBe(postScanPrompt);
             expect(children[1].args).toContain("resume");
@@ -18128,6 +18402,9 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               expect(child.args).toContain('model_reasoning_effort="ultra"');
               expect(child.args).toContain(
                 `model_reasoning_summary=${JSON.stringify(name === "first" ? "none" : "concise")}`,
+              );
+              expect(child.args).toContain(
+                `service_tier=${JSON.stringify(name === "first" ? "flex" : "fast")}`,
               );
               expect(child.args).toContain(
                 "features.multi_agent_v2.max_concurrent_threads_per_session=4",

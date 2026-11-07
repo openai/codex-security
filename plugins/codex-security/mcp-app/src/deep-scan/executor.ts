@@ -22,6 +22,7 @@ import {
 } from "node:path";
 import {
   Codex,
+  type CodexOptions,
   type CyberAccessProgram,
   type ThreadEvent,
 } from "@openai/codex-sdk";
@@ -58,8 +59,13 @@ import type {
 } from "./types.js";
 
 export interface CodexSdkWorkerModelSettings {
+  /** Resolved by the execution owner, including when reconstructing a scan. */
+  codexOptions?: CodexOptions;
   model?: string;
   reasoningEffort?: string;
+  cyberAccessProgram?: CyberAccessProgram;
+  /** Recorded selections override defaults while preserving private SDK transport. */
+  runtimeSettings?: CodexSdkWorkerRuntimeSettings;
   serviceTier?: string;
   deepScanConfig?: DeepScanConfig;
   artifactContext?: CodexSdkWorkerArtifactContext;
@@ -73,6 +79,7 @@ export interface CodexSdkWorkerArtifactContext {
   repoRoot: string;
   scanId: string;
   scope?: string;
+  scanRoot?: string;
   includePaths?: readonly string[];
   filePaths?: readonly string[];
   pythonCommand?: string;
@@ -94,6 +101,7 @@ interface CodexSdkWorkerRuntimeSettings {
 }
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
+  private runtimeModelConfig?: Promise<NonNullable<CodexOptions["config"]>>;
   private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
   // Each live coordinator keeps the executable selected for its first worker.
   private codexExecutable?: Promise<BoundCodexExecutable>;
@@ -167,15 +175,23 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             }
           : parentSandbox,
       );
+      const resolved = this.modelSettings.codexOptions;
       const originalCwd = process.cwd();
-      const childEnv = await snapshotWorkerEnvironment();
+      const childEnv = await snapshotWorkerEnvironment(resolved?.env);
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
-      const runtimeSettings = await (this.runtimeSettings ??=
+      const inheritedRuntime = await (this.runtimeSettings ??=
         workerRuntimeSettings(childEnv).catch((error: unknown) => {
           // A failed read produced no snapshot. Let the next worker retry it.
           this.runtimeSettings = undefined;
           throw error;
         }));
+      const runtimeSettings =
+        this.modelSettings.runtimeSettings === undefined
+          ? inheritedRuntime
+          : restoredWorkerRuntime(
+              inheritedRuntime,
+              this.modelSettings.runtimeSettings,
+            );
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -221,12 +237,37 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           }),
         );
       }
+      if (resolved?.apiKey !== undefined)
+        childEnv.CODEX_API_KEY = resolved.apiKey;
+      const selectedConfig = await (this.runtimeModelConfig ??= resolved?.config
+        ? Promise.resolve(resolved.config)
+        : workerModelConfig(childEnv).catch((error: unknown) => {
+            this.runtimeModelConfig = undefined;
+            throw error;
+          }));
+      const modelConfig: NonNullable<CodexOptions["config"]> = {
+        ...runtimeSettings.config,
+        ...selectedConfig,
+        features: {
+          ...(isRecord(runtimeSettings.config.features)
+            ? runtimeSettings.config.features
+            : {}),
+          ...(isRecord(selectedConfig.features) ? selectedConfig.features : {}),
+        } as NonNullable<CodexOptions["config"]>,
+        ...(this.modelSettings.model
+          ? { model: this.modelSettings.model }
+          : {}),
+        ...(this.modelSettings.serviceTier === undefined
+          ? {}
+          : { service_tier: this.modelSettings.serviceTier }),
+      };
+      // The preflight file has catalog defaults; the private profile owns routing.
+      if (runtimeSettings.nativeProfile !== undefined)
+        delete modelConfig.model_providers;
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
-      const inheritedMetadata = isRecord(
-        runtimeSettings.config.responses_api_metadata,
-      )
-        ? runtimeSettings.config.responses_api_metadata
+      const inheritedMetadata = isRecord(modelConfig.responses_api_metadata)
+        ? modelConfig.responses_api_metadata
         : {};
       const attemptId = request.attemptId ?? randomUUID();
       const operationId =
@@ -260,74 +301,70 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       } catch {
         // Optional observability cannot interrupt a worker.
       }
-      const configOverrides = profileConfigOverrides({
-        ...runtimeSettings.config,
-        responses_api_metadata: {
-          codex_security_surface: "plugin",
-          codex_security_command: "scan",
-          codex_security_scan_mode: "deep",
-          ...(pluginVersion === undefined
-            ? {}
+      const configOverrides = [
+        ...(resolved?.configOverrides ?? []),
+        ...profileConfigOverrides({
+          ...modelConfig,
+          responses_api_metadata: {
+            codex_security_surface: "plugin",
+            codex_security_command: "scan",
+            codex_security_scan_mode: "deep",
+            ...(pluginVersion === undefined
+              ? {}
+              : {
+                  codex_security_plugin_version: pluginVersion,
+                }),
+            // Keep the host's integration/provider context as this coordinator
+            // launches or resumes workers with a different role.
+            ...inheritedMetadata,
+            codex_security_worker_role: request.kind,
+            ...(operationId === undefined
+              ? {}
+              : { codex_security_operation_id: operationId }),
+            codex_security_attempt_id: attemptId,
+            ...(parentAttemptId === undefined
+              ? {}
+              : {
+                  codex_security_parent_attempt_id: parentAttemptId,
+                }),
+          },
+          ...(this.modelSettings.reasoningEffort
+            ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
+            : {}),
+          ...(discovery
+            ? workerSubagentConfig(discovery.subagents, modelConfig.features)
             : {
-                codex_security_plugin_version: pluginVersion,
+                web_search: "disabled",
+                project_doc_max_bytes: 0,
+                tools: {
+                  experimental_request_user_input: { enabled: false },
+                  update_plan: { enabled: false },
+                },
+                features: {
+                  ...(isRecord(modelConfig.features) && modelConfig.features),
+                  apps: false,
+                  plugins: false,
+                  shell_tool: false,
+                  view_image: false,
+                  image_generation: false,
+                  goals: false,
+                  request_permissions_tool: false,
+                  computer_use: false,
+                  unified_exec: false,
+                  code_mode: false,
+                  code_mode_only: false,
+                  js_repl: false,
+                  multi_agent: false,
+                  multi_agent_v2: false,
+                  enable_fanout: false,
+                },
               }),
-          // Keep the host's integration/provider context as this coordinator
-          // launches or resumes workers with a different role.
-          ...inheritedMetadata,
-          codex_security_worker_role: request.kind,
-          ...(operationId === undefined
-            ? {}
-            : { codex_security_operation_id: operationId }),
-          codex_security_attempt_id: attemptId,
-          ...(parentAttemptId === undefined
-            ? {}
-            : {
-                codex_security_parent_attempt_id: parentAttemptId,
-              }),
-        },
-        ...(this.modelSettings.reasoningEffort
-          ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
-          : {}),
-        ...(this.modelSettings.serviceTier === undefined
-          ? {}
-          : { service_tier: this.modelSettings.serviceTier }),
-        ...(discovery
-          ? workerSubagentConfig(
-              discovery.subagents,
-              runtimeSettings.config.features,
-            )
-          : {
-              web_search: "disabled",
-              project_doc_max_bytes: 0,
-              tools: {
-                experimental_request_user_input: { enabled: false },
-                update_plan: { enabled: false },
-              },
-              features: {
-                ...(isRecord(runtimeSettings.config.features) &&
-                  runtimeSettings.config.features),
-                apps: false,
-                plugins: false,
-                shell_tool: false,
-                view_image: false,
-                image_generation: false,
-                goals: false,
-                request_permissions_tool: false,
-                computer_use: false,
-                unified_exec: false,
-                code_mode: false,
-                code_mode_only: false,
-                js_repl: false,
-                multi_agent: false,
-                multi_agent_v2: false,
-                enable_fanout: false,
-              },
-            }),
-        approval_policy: "never",
-        default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-        [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
-          workerProfile,
-      });
+          approval_policy: "never",
+          default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+          [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
+            workerProfile,
+        }),
+      ];
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -339,7 +376,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         process.platform,
       )?.trim();
       const executable = await (this.codexExecutable ??= bindCodexExecutable(
-        childEnv,
+        resolved?.codexPathOverride === undefined
+          ? childEnv
+          : { ...childEnv, CODEX_CLI_PATH: resolved.codexPathOverride },
         originalCwd,
       ).catch((error) => {
         // A failed first lookup has not pinned an executable yet; allow startup retries.
@@ -347,6 +386,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         throw error;
       }));
       await verifyBoundCodexExecutable(executable);
+      if (resolved?.baseUrl)
+        configOverrides.push(
+          ...profileConfigOverrides({ openai_base_url: resolved.baseUrl }),
+        );
       const preflightOptions = {
         codexPath: executable.path,
         cwd: request.workingDirectory,
@@ -365,7 +408,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               throw error;
             }))
         : undefined;
-      const workerFeatures = runtimeSettings.config.features;
+      const workerFeatures = modelConfig.features;
       if (
         parentProgram !== undefined &&
         (!isRecord(workerFeatures) ||
@@ -405,6 +448,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? request.prompt
           : await fs.readFile(request.promptPath, "utf8");
       const codexOptions = {
+        ...resolved,
         codexPathOverride: executablePathForSpawn(executable.path),
         env: childEnv,
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
@@ -413,6 +457,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Raw overrides preserve literal filesystem and MCP keys.
         configOverrides,
       };
+      delete codexOptions.config;
       const codex =
         runtimeSettings.nativeProfile === undefined
           ? new Codex(codexOptions)
@@ -458,7 +503,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           signal: controller.signal,
           ...(request.kind === "compare" && { outputSchema: request.schema }),
           cyberAccessProgram:
-            parentProgram ?? runtimeSettings.cyberAccessProgram,
+            this.modelSettings.cyberAccessProgram ??
+            parentProgram ??
+            runtimeSettings.cyberAccessProgram,
         });
         const diagnostics: CodexWorkerDiagnostic[] = [];
         let turnId: string | undefined;
@@ -761,6 +808,83 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+type TomlValue = string | number | boolean | TomlValue[] | TomlObject;
+type TomlObject = { [key: string]: TomlValue };
+
+// These are the existing non-secret selections written by the SDK preflight
+// adapter. Reading only summary left provider selection in a shared home.
+function workerModelSelection(
+  config: NonNullable<CodexOptions["config"]>,
+): TomlObject {
+  const result: TomlObject = {};
+  for (const key of [
+    "model",
+    "model_provider",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "service_tier",
+    "model_providers",
+  ]) {
+    const value = config[key];
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
+async function workerModelConfig(
+  environment: Record<string, string>,
+): Promise<NonNullable<CodexOptions["config"]>> {
+  const configPath = environmentVariable(
+    environment,
+    "CODEX_SECURITY_CONFIG_PATH",
+    process.platform,
+  );
+  if (!configPath) return {};
+  const config = parseToml(await fs.readFile(configPath, "utf8"));
+  const profiles = config.profiles;
+  const profile =
+    typeof config.profile === "string" && isRecord(profiles)
+      ? profiles[config.profile]
+      : undefined;
+  return workerModelSelection({
+    ...config,
+    ...(isRecord(profile) ? profile : {}),
+  } as NonNullable<CodexOptions["config"]>);
+}
+
+/** Keep private SDK transport while recorded selections replace current defaults. */
+function restoredWorkerRuntime(
+  inherited: CodexSdkWorkerRuntimeSettings,
+  recorded: CodexSdkWorkerRuntimeSettings,
+): CodexSdkWorkerRuntimeSettings {
+  const config = { ...inherited.config };
+  for (const key of [
+    "model",
+    "model_provider",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "service_tier",
+  ]) {
+    delete config[key];
+  }
+  const features = isRecord(config.features) ? { ...config.features } : {};
+  delete features.api_key_cyber_access_programs;
+  delete features.api_key_model_discovery;
+  return {
+    ...inherited,
+    ...recorded,
+    cyberAccessProgram: recorded.cyberAccessProgram,
+    config: {
+      ...config,
+      ...recorded.config,
+      features: {
+        ...features,
+        ...(isRecord(recorded.config.features) ? recorded.config.features : {}),
+      },
+    },
+  };
+}
+
 async function bindCodexExecutable(
   env: NodeJS.ProcessEnv,
   originalCwd: string,
@@ -995,9 +1119,11 @@ export async function workerRuntimeSettings(
   return settings;
 }
 
-async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
+async function snapshotWorkerEnvironment(
+  source: NodeJS.ProcessEnv = process.env,
+): Promise<Record<string, string>> {
   const environment = Object.fromEntries(
-    Object.entries(process.env).filter(
+    Object.entries(source).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   ) as Record<string, string>;
@@ -1010,7 +1136,7 @@ async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
       "CODEX_MANAGED_PACKAGE_ROOT",
       "LOCALAPPDATA",
     ]) {
-      const value = process.env[name];
+      const value = environmentVariable(source, name, process.platform);
       for (const key of Object.keys(environment)) {
         if (key.toUpperCase() === name) delete environment[key];
       }

@@ -91,10 +91,16 @@ def cli_scan_resume(
     ):
         raise SystemExit("Resume requires the original owning CLI session.")
     run = connection.execute(
-        "SELECT status, cancel_requested FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+        "SELECT status, cancel_requested, finalization_input_json FROM deep_scan_runs "
+        "WHERE scan_id = ?",
+        (scan["id"],),
     ).fetchone()
     if run is not None and (
-        run["status"] not in {"running", "succeeded"} or run["cancel_requested"]
+        run["status"] not in {"running", "succeeded"}
+        or (
+            run["cancel_requested"]
+            and not (run["status"] == "succeeded" and run["finalization_input_json"] is not None)
+        )
     ):
         raise SystemExit("This Deep Scan has stopped and cannot resume.")
     try:
@@ -125,6 +131,8 @@ def cli_scan_resume(
         "threadId": thread_id,
         "userContext": scan["user_context"],
     }
+    if owner == thread_id and run is not None and run["finalization_input_json"] is not None:
+        result["finalizationSelected"] = True
     # Active coordinators may still be writing drafts. Validate sealed results
     # before attaching to a coordinator that has finished.
     if run is not None and run["status"] == "succeeded":

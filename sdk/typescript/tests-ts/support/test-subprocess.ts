@@ -1,7 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { expect } from "bun:test";
 
-export function runTestInSubprocess(file: string, name: string): boolean {
+export function runTestInSubprocess(
+  file: string,
+  name: string,
+  preload?: string,
+): boolean {
   const identity = `${file}::${name}`;
   if (process.env["CODEX_SECURITY_ISOLATED_TEST"] === identity) return false;
   const timeout = process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000";
@@ -9,7 +13,15 @@ export function runTestInSubprocess(file: string, name: string): boolean {
 
   const result = spawnSync(
     process.execPath,
-    ["test", "--timeout", timeout, "--test-name-pattern", pattern, file],
+    [
+      "test",
+      ...(preload === undefined ? [] : ["--preload", preload]),
+      "--timeout",
+      timeout,
+      "--test-name-pattern",
+      pattern,
+      file,
+    ],
     {
       cwd: new URL("../../", import.meta.url),
       encoding: "utf8",

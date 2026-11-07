@@ -88,7 +88,7 @@ test.each([undefined, "Summarize the completed scan."])(
               timestamp: "2026-07-26T12:00:00Z",
             },
           );
-          await writeSession(
+          const workerRollout = await writeSession(
             codexHome,
             "discovery-session",
             { input_tokens: 100, output_tokens: 10 },
@@ -103,6 +103,26 @@ test.each([undefined, "Summarize the completed scan."])(
               ),
               timestamp: "2026-07-26T12:00:01Z",
             },
+          );
+          // Real worker rollouts record their model before emitting usage.
+          const rollout = (await readFile(workerRollout, "utf8"))
+            .trimEnd()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          rollout.splice(1, 0, {
+            type: "turn_context",
+            payload: { model: "gpt-5.6-sol" },
+          });
+          await writeFile(
+            workerRollout,
+            rollout
+              .map((event) =>
+                JSON.stringify({
+                  timestamp: "2026-07-26T12:00:01Z",
+                  ...event,
+                }),
+              )
+              .join("\n") + "\n",
           );
           yield { type: "thread.started", thread_id: "engine-session" };
           // The host must count workers while the no-inference coordinator runs.
@@ -119,6 +139,23 @@ test.each([undefined, "Summarize the completed scan."])(
         },
         runWorkbench: async (_options, args, input) => {
           commands.push(args[0]!);
+          if (args[0] === "get-scan") {
+            return {
+              scan: {
+                executionAttribution: {
+                  formatVersion: 1,
+                  executionThreadIds: ["engine-session", "discovery-session"],
+                  owner: {
+                    threadId: "engine-session",
+                    turnId: null,
+                    startedAt: "2026-07-26T12:00:00Z",
+                  },
+                  startedAt: "2026-07-26T12:00:00Z",
+                  completedAt: null,
+                },
+              },
+            };
+          }
           if (args[0] === "prepare-scan-completion") {
             await writeFile(
               join(scanDir, "report.md"),

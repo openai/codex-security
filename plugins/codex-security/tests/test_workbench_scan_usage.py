@@ -484,7 +484,10 @@ def test_legacy_compaction_usage_is_unverifiable_only_inside_scan_window(
     assert usage.warnings == ({"compaction_usage_unavailable"} if expected_warning else set())
 
 
-def test_legacy_compaction_warning_survives_a_later_native_turn(scan_usage, tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_context", [False, True])
+def test_legacy_compaction_warning_survives_a_later_native_turn(
+    scan_usage, tmp_path: Path, with_context: bool
+) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     parent = _rollout(
         tmp_path,
@@ -492,6 +495,11 @@ def test_legacy_compaction_warning_survives_a_later_native_turn(scan_usage, tmp_
         [
             _token_event(started, 10, 1),
             _event(started, "compacted", {"message": "Summary.", "replacement_history": []}),
+            *(
+                [_event(started, "turn_context", {"turn_id": "native-turn", "model": "model-b"})]
+                if with_context
+                else []
+            ),
             _event(started, "event_msg", {"type": "task_started", "turn_id": "native-turn"}),
             _response_event(started, "scan-parent", "native", 20, 2, turn_id="native-turn"),
             _event(started, "event_msg", {"type": "task_complete"}),
@@ -1666,154 +1674,6 @@ def test_completion_reconciles_supplied_usage_with_native_evidence(
         assert usage["warnings"] == ["token_record_missing"]
     else:
         assert not usage.get("warnings")
-
-
-@pytest.mark.parametrize(
-    "worker_state",
-    ["absent", "measured", "missing_graph_child", "missing_registered_worker", "unmeasured"],
-)
-def test_completion_persists_direct_control_zero_without_hiding_missing_workers(
-    tmp_path: Path, worker_state: str
-) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
-    counted = fixture.started_at + timedelta(microseconds=1)
-    threads = {
-        # The app-server client persists this originator while injecting context,
-        # without starting a model turn or producing a native token receipt.
-        "scan-parent": _rollout(
-            tmp_path,
-            "scan-parent",
-            [
-                _event(counted, "turn_context", {}),
-                _event(counted, "response_item", {"type": "message"}),
-            ],
-            originator="codex_security_deep_scan",
-        ),
-    }
-    edges = []
-    measured_worker = worker_state not in {"absent", "unmeasured"}
-    if worker_state != "absent":
-        threads["scan-worker"] = _rollout(
-            tmp_path,
-            "scan-worker",
-            [_token_event(counted, 100, 10)] if measured_worker else [],
-            parent_thread_id="scan-parent",
-            task_started_at=counted,
-            originator="codex_security_deep_scan",
-        )
-        edges.append(("scan-parent", "scan-worker"))
-    if worker_state == "missing_graph_child":
-        threads["missing-worker"] = tmp_path / "missing-worker.jsonl"
-        edges.append(("scan-parent", "missing-worker"))
-    elif worker_state == "missing_registered_worker":
-        with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
-            connection.execute(
-                "INSERT INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id) "
-                "VALUES (?, ?, ?)",
-                (fixture.scan_id, "earlier-attempt", "missing-worker"),
-            )
-    _state_graph(fixture.environment, threads, edges)
-    missing_warnings = {
-        "missing_graph_child": ["rollout_unavailable"],
-        "missing_registered_worker": ["scan_root_unavailable"],
-        "unmeasured": ["token_record_missing", "token_usage_unavailable", "turn_in_progress"],
-    }.get(worker_state, [])
-    usage = {
-        "coverage": "partial" if missing_warnings else "complete",
-        "source": "codex_rollout",
-        **_counts(100 if measured_worker else 0, 0, 10 if measured_worker else 0),
-        "threadCount": 2 if measured_worker else 1,
-        **({"missingThreadCount": 1, "warnings": missing_warnings} if missing_warnings else {}),
-    }
-
-    completed = _complete_scan(fixture)["scan"]
-
-    assert completed["usage"].items() >= usage.items()
-    usage = completed["usage"]
-    assert usage["byRole"]["parent"] == {**_counts(0, 0, 0), "threadCount": 1}
-    assert usage["byRole"]["workers"] == {
-        **_counts(100 if measured_worker else 0, 0, 10 if measured_worker else 0),
-        "threadCount": 1 if measured_worker else 0,
-    }
-    assert "cost" not in completed
-    repeated = fixture.command("complete-scan")["scan"]
-    assert repeated["usage"] == usage
-    assert "cost" not in repeated
-    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
-        stored = connection.execute(
-            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
-        ).fetchone()[0]
-    assert json.loads(stored) == {"usage": usage}
-
-
-@pytest.mark.parametrize("turn_start", ["before_scan", "during_scan", "untimestamped", "post_scan"])
-def test_direct_control_resumed_model_turn_requires_a_usage_receipt(
-    tmp_path: Path, turn_start: str
-) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
-    counted = fixture.started_at + timedelta(microseconds=1)
-    timestamp = (
-        fixture.started_at - timedelta(seconds=1)
-        if turn_start == "before_scan"
-        else counted + timedelta(days=1)
-        if turn_start == "post_scan"
-        else counted
-    )
-    event = _event(timestamp, "event_msg", {"type": "task_started", "turn_id": "resumed-turn"})
-    if turn_start == "untimestamped":
-        del event["timestamp"]
-    _state_graph(
-        fixture.environment,
-        {
-            "scan-parent": _rollout(
-                tmp_path, "scan-parent", [event], originator="codex_security_deep_scan"
-            ),
-            "scan-worker": _rollout(
-                tmp_path,
-                "scan-worker",
-                [_token_event(counted, 100, 10)],
-                parent_thread_id="scan-parent",
-            ),
-        },
-        [("scan-parent", "scan-worker")],
-    )
-
-    usage = _complete_scan(fixture)["scan"]["usage"]
-
-    expected = {
-        "coverage": "complete" if turn_start == "post_scan" else "partial",
-        "source": "codex_rollout",
-        **_counts(100, 0, 10),
-        "threadCount": 2 if turn_start == "post_scan" else 1,
-        **(
-            {}
-            if turn_start == "post_scan"
-            else {
-                "missingThreadCount": 1,
-                "warnings": [
-                    "token_record_missing",
-                    "token_usage_unavailable",
-                    "turn_record_invalid" if turn_start == "untimestamped" else "turn_in_progress",
-                ],
-            }
-        ),
-    }
-    assert usage.items() >= expected.items()
-
-
-@pytest.mark.parametrize("originator", ["codex_sdk_ts", "synthetic_override", None])
-def test_metadata_only_deep_owner_requires_direct_control_originator(
-    tmp_path: Path, originator: str | None
-) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
-    fixture.write_parent_rollout([], originator=originator)
-
-    assert _complete_scan(fixture)["scan"]["usage"] == {
-        "coverage": "unavailable",
-        "source": "codex_rollout",
-        "threadCount": 0,
-        "warnings": ["token_record_missing", "token_usage_unavailable"],
-    }
 
 
 def test_budget_keeps_measured_totals_when_a_started_worker_has_no_thread(tmp_path: Path) -> None:

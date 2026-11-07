@@ -1,5 +1,6 @@
 import {
   CodexSdkWorkerExecutor,
+  restoredDeepScanWorkerSettings,
   fakeCodexFixture,
   workerRequest,
   assertReadOnlyWorkerPolicy,
@@ -20,6 +21,7 @@ export async function testWorkerCyberAccessSettings() {
   const cases: {
     name: string;
     configuration?: string;
+    restored?: boolean;
     workerFeatures?: Record<string, boolean>;
     daybreak?: boolean;
     workerDaybreak?: boolean;
@@ -48,6 +50,12 @@ export async function testWorkerCyberAccessSettings() {
       configuration: 'service_tier = "ultrafast"\n',
       parentServiceTier: "fast",
       serviceTier: "fast",
+    },
+    {
+      name: "recorded-omissions",
+      configuration:
+        'model_reasoning_summary = "detailed"\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+      restored: true,
     },
     {
       name: "blue",
@@ -290,6 +298,12 @@ export async function testWorkerCyberAccessSettings() {
         );
       }
       testCase.executor = new CodexSdkWorkerExecutor({
+        ...(testCase.restored
+          ? restoredDeepScanWorkerSettings(
+              { codexPath: process.execPath, codexHome: fixture.root },
+              parentSandbox,
+            )
+          : {}),
         model: testCase.name,
         parentSandbox,
         parentTurn: testCase.parentTurn,
@@ -390,6 +404,10 @@ export async function testWorkerCyberAccessSettings() {
             ({ args }) => args[args.indexOf("--model") + 1] === name,
           );
           const invocation = await readJson(launch!.markerPath);
+          if (name === "recorded-omissions")
+            assertConfigOverrides(invocation.argv, {
+              model_reasoning_summary: undefined,
+            });
           assert.deepEqual(
             invocation.argv.filter((arg: string) =>
               arg.startsWith("service_tier="),

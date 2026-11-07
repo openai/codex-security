@@ -34,6 +34,7 @@ import {
 import path from "node:path";
 import {
   testDeepScanLifecycle,
+  testStaleDiscoveryCheckpointRetriesBeforeAcceptance,
   testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
 } from "./deep_scan_lifecycle_cases.ts";
 import {
@@ -55,12 +56,10 @@ import {
   promptContext,
   standardScanDraft,
   eventually,
-  assertNoPublishedCandidates,
   immediateClock,
   createCoordinator,
   runCoordinator,
   recordingClock,
-  recordCodexSecurityWorkerScanDraft,
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
@@ -2693,7 +2692,8 @@ async function testResumeDoesNotRequireHistoricalWorkerPrompt(
         attempt: 1,
         promptPath,
         artifactDir: fixture.run.scanDir,
-      } as PersistedDeepScanWorker,
+        mergeState: "none",
+      } satisfies PersistedDeepScanWorker,
     ],
   });
   const executor = new FakeExecutor();
@@ -2900,6 +2900,7 @@ function registerCases<T extends unknown[]>(
 }
 
 after(() => temporaryDirectories.cleanup());
+test(testStaleDiscoveryCheckpointRetriesBeforeAcceptance);
 test("Deep Scan lifecycle", testDeepScanLifecycle);
 registerCases(testTerminalFailureStopsDispatchBeforeWorkerShutdown, [
   [false],

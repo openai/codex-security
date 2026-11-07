@@ -209,6 +209,8 @@ export interface WorkbenchCommandOptions {
   currentDirectory?: string;
   signal?: AbortSignal;
   failureMessage?: string;
+  /** Read committed Deep settings through the existing private workbench channel. */
+  withExecutionSettings?: boolean;
 }
 
 export interface ScanArtifactRestorer {
@@ -1848,6 +1850,11 @@ export async function runWorkbench(
       : undefined;
     // Validate one JSON document before framing its unchanged source as payload.
     if (nativeLocalDedupe && input !== undefined) JSON.parse(input);
+    const pythonProgram = archiveHandshake
+      ? ARCHIVE_REGISTRATION_PROGRAM
+      : options.withExecutionSettings
+        ? "import inspect, runpy, sys; main = runpy.run_path(sys.argv.pop(1))['main']; main(**({'with_execution_settings': True} if 'with_execution_settings' in inspect.signature(main).parameters else {}))"
+        : WORKBENCH_SCRIPT_PROGRAM;
     const result = await runCodexCommand(
       { command },
       native
@@ -1858,10 +1865,7 @@ export async function runWorkbench(
             "utf8",
             "-B",
             "-c",
-            WORKBENCH_ARGUMENTS_PROGRAM +
-              (archiveHandshake
-                ? ARCHIVE_REGISTRATION_PROGRAM
-                : WORKBENCH_SCRIPT_PROGRAM),
+            WORKBENCH_ARGUMENTS_PROGRAM + pythonProgram,
             script,
           ],
       pluginHelperEnvironment({
@@ -1890,6 +1894,7 @@ export async function runWorkbench(
             )
           : input,
       signal,
+      undefined,
       archiveHandshake,
       // Frame Python arguments on stdin to preserve NUL and long diagnostics.
       native
@@ -3434,6 +3439,7 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
+  cwd?: string,
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
@@ -3449,6 +3455,7 @@ export async function runCodexCommand(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
+      ...(cwd === undefined ? {} : { cwd }),
     },
   );
   let stdout = "";

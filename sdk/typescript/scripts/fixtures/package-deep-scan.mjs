@@ -13,9 +13,9 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { startRpc } from "./package-rpc.mjs";
@@ -78,9 +78,10 @@ try {
   const checks = await Promise.allSettled([
     runInstalledSdk(installedPlugin, executable).then(() =>
       console.log(
-        `Validated installed SDK direct Deep Scan${retryMissingResult ? " and worker retry" : ""}.`,
+        `Validated installed SDK parent-driven Deep Scan${retryMissingResult ? " and worker retry" : ""}.`,
       ),
     ),
+    runInstalledDirectSdk(installedPlugin, executable),
     runDetachedPlugin(detachedPlugin, executable).then(() =>
       console.log("Validated detached plugin restart and finalization."),
     ),
@@ -94,7 +95,7 @@ try {
     "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, worker checkpoints, finding union, restart before finalization, and sealed results.",
   );
 } catch (error) {
-  for (const name of ["installed", "detached"]) {
+  for (const name of ["installed", "detached", "installed-direct"]) {
     try {
       error.message += `\n${await readFile(join(root, name, "executions.jsonl"), "utf8")}`;
     } catch (readError) {
@@ -112,7 +113,7 @@ try {
   });
 }
 
-async function fixture(name, pluginRoot, executable) {
+async function fixture(name, pluginRoot, executable, retry = false) {
   const directory = join(root, name);
   const target = join(directory, "target with spaces %");
   const home = join(directory, "home");
@@ -159,6 +160,9 @@ async function fixture(name, pluginRoot, executable) {
       : {}),
     PACKAGE_DEEP_TRACE: join(directory, "executions.jsonl"),
   });
+  if (retry) {
+    env.PACKAGE_DEEP_EMPTY_ONCE = join(directory, "missing-result-completion");
+  }
   env.PYTHON = await resolvePluginPython({
     environment: env,
     protectedRoot: target,
@@ -365,6 +369,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
   } finally {
     await rpc.close();
   }
+  await assertSavedState(f, scanId, owner);
   await assertExecutions(f, scanId);
 }
 
@@ -382,13 +387,173 @@ async function workbench(f, args) {
 }
 
 async function runInstalledSdk(pluginRoot, executable) {
-  const f = await fixture("installed", pluginRoot, executable);
-  if (retryMissingResult) {
-    f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
-      f.directory,
-      "missing-result-completion",
+  const f = await fixture(
+    "installed",
+    pluginRoot,
+    executable,
+    retryMissingResult,
+  );
+  const sdk = await import(
+    pathToFileURL(join(installedRoot, "dist", "index.js")).href
+  );
+  const manifest = JSON.parse(
+    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
+  );
+  const owner = "package-sdk-owner";
+  const postScanPrompt = "Explain the completed synthetic scan.";
+  const prompts = [];
+  let threadCount = 0;
+  const warnings = [];
+  let manifestBeforeFollowUp;
+  let scanId;
+  const client = new sdk.CodexSecurity(
+    { pythonPath: f.env.PYTHON },
+    {
+      environment: f.env,
+      prepareRuntime: async () => ({
+        codexHome: f.home,
+        deepScanConfigPath: join(f.home, "deep-scan-config.toml"),
+        environment: f.env,
+        credentialsAvailable: true,
+        plugin: {
+          pluginRoot,
+          marketplaceRoot: pluginRoot,
+          installedRoot: pluginRoot,
+          marketplaceName: "codex-security-sdk",
+          name: manifest.name,
+          version: manifest.version,
+        },
+      }),
+      canRunDirectDeepScan: () => false,
+      // Replace only the parent model's tool choice. The installed SDK registers
+      // and finalizes the scan; the packaged MCP runs the real Deep lifecycle.
+      createCodex({ env, apiKey }) {
+        function thread({ workingDirectory }) {
+          return {
+            id: owner,
+            async runStreamed(prompt) {
+              prompts.push(prompt);
+              return {
+                events: (async function* () {
+                  yield { type: "thread.started", thread_id: owner };
+                  if (prompt === postScanPrompt) {
+                    manifestBeforeFollowUp = await readFile(
+                      join(workingDirectory, "scan-manifest.json"),
+                      "utf8",
+                    );
+                    const completed = JSON.parse(manifestBeforeFollowUp);
+                    assert.equal(completed.scan.status, "completed");
+                    assert.ok(completed.scan.sealedAt);
+                    yield {
+                      type: "turn.completed",
+                      usage: {
+                        input_tokens: 100_000,
+                        cached_input_tokens: 0,
+                        output_tokens: 100_000,
+                      },
+                    };
+                    return;
+                  }
+                  scanId = env.CODEX_SECURITY_SCAN_ID;
+                  // The pinned SDK maps its apiKey option to this child variable.
+                  const rpc = await server(f, {
+                    ...env,
+                    ...(apiKey ? { CODEX_API_KEY: apiKey } : {}),
+                  });
+                  try {
+                    const result = await rpc.call(
+                      "start_codex_security_deep_scan",
+                      { scanId },
+                      metadata(f, owner),
+                    );
+                    await assertDraft(result.manifestPath);
+                  } finally {
+                    await rpc.close();
+                  }
+                  yield {
+                    type: "turn.completed",
+                    usage: {
+                      input_tokens: 1,
+                      cached_input_tokens: 0,
+                      output_tokens: 1,
+                    },
+                  };
+                })(),
+              };
+            },
+          };
+        }
+        return {
+          startThread(options) {
+            threadCount += 1;
+            return thread(options);
+          },
+          resumeThread(threadId, options) {
+            assert.equal(threadId, owner);
+            return thread(options);
+          },
+        };
+      },
+    },
+  );
+  try {
+    const result = await client.run(f.target, {
+      mode: "deep",
+      auth: "api-key",
+      workers: 1,
+      subagents: 0,
+      maxDiscoveryRuns: 2,
+      stopAfterNoNew: 2,
+      postScanPrompt,
+      onWarning: (warning) => warnings.push(warning),
+      outputDir: join(f.directory, "output"),
+    });
+    assert.equal(threadCount, 1);
+    assert.equal(prompts.length, 2, warnings.join("\n"));
+    assert.equal(prompts[1], postScanPrompt);
+    assert.equal(result.threadId, owner);
+    assert.equal(result.manifest.scan.status, "completed");
+    assert.ok(result.manifest.scan.sealedAt);
+    assert.equal(result.manifest.scan.id, scanId);
+    assert.deepEqual(result.findings.findings, []);
+    assert.equal(
+      await readFile(result.manifestPath, "utf8"),
+      manifestBeforeFollowUp,
+      warnings.join("\n"),
     );
+    assert.ok(result.cost === null || result.cost.inputTokens < 100_000);
+    assert.equal(result.toJSON().threadId, owner);
+    assert.ok(
+      (await readFile(join(f.directory, "output", "report.md"), "utf8"))
+        .length > 0,
+    );
+  } finally {
+    await client.close();
   }
+  await assertSavedState(f, scanId, owner);
+  await assertExecutions(f, scanId, 2);
+}
+
+async function assertSavedState(f, scanId, owner) {
+  const { deepScan } = await workbench(f, [
+    "get-deep-scan",
+    "--scan-id",
+    scanId,
+    "--thread-id",
+    owner,
+  ]);
+  assert.equal(deepScan.status, "succeeded");
+  assert.equal(deepScan.workflowVersion, "deep-security-scan/v1");
+  assert.equal(deepScan.finalizationInput ?? null, null);
+}
+
+async function runInstalledDirectSdk(pluginRoot, executable) {
+  const f = await fixture(
+    "installed-direct",
+    pluginRoot,
+    executable,
+    retryMissingResult,
+  );
   const sdk = await import(
     pathToFileURL(join(installedRoot, "dist", "index.js")).href
   );
@@ -458,6 +623,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
+  await assertSavedState(f, scanId, owner);
   await assertExecutions(f, scanId);
 }
 
@@ -483,7 +649,7 @@ async function readExecutions(f) {
   }
 }
 
-async function assertExecutions(f, scanId) {
+async function assertExecutions(f, scanId, preflightsWithoutRetry = 3) {
   const executions = await readExecutions(f);
   for (const execution of executions) {
     assert.equal(
@@ -498,8 +664,10 @@ async function assertExecutions(f, scanId) {
   assert.equal(workers.filter((entry) => !entry.complete).length, incomplete);
   assert.equal(workers.filter((entry) => entry.resumed).length, incomplete);
   assert.equal(
-    executions.filter((entry) => entry.phase === "preflight").length,
-    3 + incomplete,
+    executions.filter(
+      (entry) => entry.phase === "preflight" && entry.args.includes("--stdio"),
+    ).length,
+    preflightsWithoutRetry + incomplete,
   );
   for (const execution of workers) {
     assert.equal(execution.scanId, scanId);

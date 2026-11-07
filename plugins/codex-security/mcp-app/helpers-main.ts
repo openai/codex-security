@@ -1,9 +1,5 @@
-import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-export {
-  parseCanonicalScanDraft,
-  parseCurrentFindings,
-} from "./src/artifact-scan-draft.js";
+import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 export {
   loadSealedContract,
   readSealedScanFile,
@@ -29,6 +25,13 @@ import {
   stringifyJson,
 } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
+
+export {
+  parseCanonicalScanDraft,
+  readScanAuditDraft,
+  parseCurrentFindings,
+} from "./src/artifact-scan-draft.js";
+export { resumeSelectedDeepScan } from "./src/deep-scan/finalization.js";
 
 // Importing the bundled parser does not invoke its CLI adapter.
 const entryPath = import.meta.url.startsWith("file:")
