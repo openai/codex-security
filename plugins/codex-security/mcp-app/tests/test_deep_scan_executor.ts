@@ -20,7 +20,6 @@ import {
   workerGitEnvironment,
   workerRuntimeEnvironment,
   workerScanEnvironment,
-  externalImports,
   expectedGitEnvironment,
   restoreEnv,
 } from "./support/fake-codex-source.ts";
@@ -60,18 +59,24 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { rootCertificates } from "node:tls";
-import { importModule } from "./import-module.ts";
 
 import type {
   CodexWorkerDiagnostic,
   CodexWorkerRequest,
 } from "../src/deep-scan/types.js";
+import { testExecutorExecutablePinning } from "./deep_scan_executable_cases.ts";
 import { testWorkerSelectedProfileFiles } from "./deep_scan_profile_file_cases.ts";
 import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_alias_cases.ts";
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 import { workerTelemetryFixture } from "./deep_scan_worker_telemetry_fixture.ts";
 import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
 
+const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
+const nativeLauncher = path.join(
+  path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
+  "bin",
+  "codex.js",
+);
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
@@ -119,6 +124,7 @@ try {
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
+    await check(t, testRuntimeSnapshotReadRetry);
     if (process.platform !== "win32") {
       await check(
         t,
@@ -148,6 +154,17 @@ try {
 
   await test("Deep worker executable selection", async (t) => {
     await check(t, testConfiguredExecutablePaths);
+    await check(
+      t,
+      () =>
+        testExecutorExecutablePinning({
+          CodexSdkWorkerExecutor,
+          fakeCodexFixture,
+          parentSandbox: trustedParentSandbox,
+          resolveCodexPath,
+        }),
+      "worker executable pinning",
+    );
     if (process.platform !== "win32") {
       await check(t, testWorkerLaunchesWithoutGlobalCodex);
       await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
@@ -1002,6 +1019,29 @@ async function testSdkInvocationAndThreadCapture() {
   }, deniedWorkerPermissionProfile);
 }
 
+async function testRuntimeSnapshotReadRetry() {
+  await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+    const configPath = path.join(fixture.root, "runtime.toml");
+    const savedPath = process.env.CODEX_SECURITY_CONFIG_PATH;
+    process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+    try {
+      const executor = new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+      });
+      const request = workerRequest(promptPath, workingDirectory);
+      await writeFile(promptPath, "fixture worker");
+      await assert.rejects(executor.run(request), { code: "ENOENT" });
+      await writeFile(configPath, 'model_reasoning_effort = "low"');
+      await executor.run(request);
+      assertConfigOverrides((await readJson(fixture.markerPath)).argv, {
+        model_reasoning_effort: "low",
+      });
+    } finally {
+      restoreEnv("CODEX_SECURITY_CONFIG_PATH", savedPath);
+    }
+  });
+}
+
 async function testReportOnlyComparison() {
   return withWorkerFixture(async (fixture, _promptPath, workingDirectory) => {
     const executor = new CodexSdkWorkerExecutor({
@@ -1015,12 +1055,20 @@ async function testReportOnlyComparison() {
       },
     });
     const input = "Compare the two supplied reports.";
+    const onThreadStarted = mock.fn();
+    const onUsage = mock.fn();
     const response = await executor.compareFindings(
       input,
       workingDirectory,
       new AbortController().signal,
       { type: "object", properties: { reviews: { type: "array" } } },
+      { attemptId: "fixture-comparison", onThreadStarted, onUsage },
     );
+    assert.equal(
+      onThreadStarted.mock.calls[0]?.arguments[0],
+      "fixture-thread-id",
+    );
+    assert.equal(onUsage.mock.calls[0]?.arguments[0]?.total_tokens, 2);
     assert.deepEqual(JSON.parse(response), { reviews: [] });
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.stdin, input);
@@ -1029,6 +1077,7 @@ async function testReportOnlyComparison() {
     assertConfigOverrides(invocation.argv, {
       model_reasoning_effort: "high",
       "responses_api_metadata.codex_security_worker_role": "compare",
+      "responses_api_metadata.codex_security_attempt_id": "fixture-comparison",
       "mcp_servers.cs_artifacts": undefined,
       "features.shell_tool": false,
       "features.image_generation": false,
@@ -1041,13 +1090,41 @@ async function testReportOnlyComparison() {
     assertConfigOverrides(preflight.argv, {
       "mcp_servers.codex-security.command": undefined,
     });
-    const servers = nativeConfigOverrides(invocation.argv)
+    const overrides = nativeConfigOverrides(invocation.argv);
+    const servers = overrides
       .map((arg) => parseToml(arg).mcp_servers)
       .findLast(Boolean);
     assert.deepEqual(JSON.parse(JSON.stringify(servers)), {
       "fixture.catalog": { enabled: false },
       "codex-security": { enabled: false },
     });
+    // Check the actual CLI parser. A TOML parser alone accepts quoted dotted
+    // override paths that the pinned native executable splits literally.
+    await writeFile(
+      path.join(fixture.root, "config.toml"),
+      '[mcp_servers."fixture.catalog"]\ncommand = "fixture-command"\n' +
+        '[mcp_servers.codex-security]\nurl = "https://example.invalid/mcp"\n',
+    );
+    const effective = spawnSync(
+      process.execPath,
+      [
+        nativeLauncher,
+        "mcp",
+        "get",
+        "fixture.catalog",
+        "--json",
+        ...overrides.flatMap((override) => ["--config", override]),
+      ],
+      {
+        encoding: "utf8",
+        cwd: fixture.root,
+        env: { ...process.env, CODEX_HOME: fixture.root },
+      },
+    );
+    assert.equal(effective.status, 0, effective.stderr);
+    const server = JSON.parse(effective.stdout);
+    assert.equal(server.enabled, false);
+    assert.equal(server.transport.command, "fixture-command");
   });
 }
 
@@ -1072,12 +1149,6 @@ async function testOpenAiCredentialsReachWorker() {
     );
     assert.equal(created.status, 0, created.stderr);
   }
-  const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
-  const nativeLauncher = path.join(
-    path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
-    "bin",
-    "codex.js",
-  );
   const cases: {
     openai?: string;
     codex?: string;
@@ -1397,7 +1468,6 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
@@ -1573,6 +1643,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
           const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
+          const workerUsageDirectory = path.join(
+            fixture.root,
+            `state-${index}`,
+            "codex-home",
+            "worker-usage",
+            `scan-${index}`,
+          );
           const parentSandbox = {
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
@@ -1636,12 +1713,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             nativeProfile,
             profilePath,
             parentSandbox,
+            workerUsageDirectory,
             permissionProfile: {
               ...deniedWorkerPermissionProfile,
               filesystem: {
                 ...deniedWorkerPermissionProfile.filesystem,
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
+                [workerUsageDirectory]: { ".": "deny" },
                 [literalDeniedPath]: { ".": "deny" },
               },
             },
@@ -1945,6 +2024,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         path.join(fixture.root, `selected node ${index}`, "node"),
       );
 
+      await Promise.all(
+        settings.map(async (_, index) => {
+          const directory = path.join(
+            fixture.root,
+            `plugin-${index}`,
+            ".codex-plugin",
+          );
+          await mkdir(directory, { recursive: true });
+          await writeJson(path.join(directory, "plugin.json"), {
+            version: `9.9.${index}`,
+          });
+        }),
+      );
       const executors = settings.map(
         (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
@@ -1986,10 +2078,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         await Promise.all(
           executors.map((executor, index) => {
             // Snapshot each scan environment independently.
-            restoreEnv(
-              "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
-              externalImports[index].inherited,
-            );
             process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
             Object.assign(process.env, temporaryEnvironments[index]);
             process.env.CODEX_SECURITY_STATE_DIR = path.join(
@@ -2017,6 +2105,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             return executor.run(
               workerRequest(promptPath, workerDirectories[index], {
+                attemptId: `worker-${index}-discovery-${resumeThreadId ?? "new"}`,
+                workerUsageDirectory:
+                  workerConfigurations[index].workerUsageDirectory,
                 subagents,
                 resumeThreadId,
                 ...(resumeThreadId
@@ -2100,17 +2191,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
             workerConfigurations[index].knowledgePath,
           );
+          assert.equal(
+            selectedProvider.parentSandbox.literalFilesystemDenies.includes(
+              selectedProvider.workerUsageDirectory,
+            ),
+            false,
+          );
           const invocation = await readJson(workerLaunch.markerPath);
           assertFlagPair(invocation.argv, "--cd", workerDirectories[index]);
-          assert.equal(
-            invocation.runtimeEnvironment
-              .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
-            externalImports[index].override ?? externalImports[index].inherited,
-          );
-          assert.equal(
-            process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
-            externalImports.at(-1)!.inherited,
-          );
           if (
             process.platform === "win32" &&
             configuration === "" &&
@@ -2263,7 +2351,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 codex_security_surface: "plugin",
                 codex_security_command: "scan",
                 codex_security_scan_mode: "deep",
+                codex_security_plugin_version: `9.9.${index}`,
                 ...workerConfigurations[index].telemetry.responses_api_metadata,
+                codex_security_operation_id:
+                  selectedProvider.telemetry.responses_api_metadata
+                    ?.codex_security_operation_id ??
+                  `fixture-scan-${model ?? "inherited"}`,
+                codex_security_attempt_id: `worker-${index}-discovery-${resumeThreadId ?? "new"}`,
+                ...(selectedProvider.telemetry.responses_api_metadata
+                  ?.codex_security_attempt_id
+                  ? { codex_security_parent_attempt_id: `parent-${index}` }
+                  : {}),
                 codex_security_worker_role: "discovery",
               },
             },
@@ -3330,6 +3428,7 @@ async function testAbortPropagation() {
 
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
   await completedWorkerSettlesWithoutWaitingForProcessExit();
+  await completedWorkerSettlesWithoutWaitingForProcessExit(false, true);
   for (const resumed of [false, true]) {
     await completedWorkerSettlesWithoutWaitingForProcessExit(true, resumed);
   }
@@ -3417,6 +3516,10 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
       result.threadId,
       resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
     );
+    assert.equal(result.usage?.cache_write_input_tokens, 0);
+    assert.equal(result.usage?.cache_write_input_tokens_reported, false);
+    assert.equal(result.usage?.input_tokens, resumed ? 2 : 1);
+    assert.equal(result.usage?.total_tokens, resumed ? 4 : 2);
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--profile"), withProfile);
     assert.equal(invocation.argv.includes("resume"), resumed);

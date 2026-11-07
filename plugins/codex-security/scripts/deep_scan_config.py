@@ -34,12 +34,14 @@ CONFIG_KEYS = set(CONFIG_FIELDS.values())
 
 
 def codex_home() -> Path:
+    """Expand CODEX_HOME, falling back to ~/.codex when the setting is empty or whitespace."""
     return Path(
         os.environ["CODEX_HOME"] if os.environ.get("CODEX_HOME", "").strip() else "~/.codex"
     ).expanduser()
 
 
 def config_path() -> Path:
+    """Return the configured TOML path or the per-user config.toml under the Codex home."""
     configured = os.environ.get("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", "").strip()
     if configured:
         return Path(configured).expanduser()
@@ -47,12 +49,28 @@ def config_path() -> Path:
 
 
 def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | float]:
+    """Return the numeric deep scan settings for a launch with no project overrides."""
     return resolve_deep_scan_setup(available_parallelism)["settings"]
 
 
 def resolve_deep_scan_setup(
     available_parallelism: int, project_json: str | None = None
 ) -> dict[str, Any]:
+    """Resolve project overrides, per-user TOML settings, and bundled defaults in that order.
+
+    Args:
+        available_parallelism (int): Positive parallelism reported by the caller.
+            The configured worker count is independent of this value.
+        project_json (str | None): Serialized project configuration with path and settings keys.
+
+    Returns:
+        dict: Numeric settings and a source label for each, plus the paths of the
+            supplied project configuration and any existing per-user configuration.
+
+    Raises:
+        SystemExit: A selected setting is invalid or a required TOML file cannot be read.
+        json.JSONDecodeError: The supplied project JSON cannot be parsed.
+    """
     project = json.loads(project_json) if project_json is not None else None
     overrides = project["settings"] if project is not None else {}
     unknown = sorted(set(overrides) - set(CONFIG_FIELDS))
@@ -106,6 +124,7 @@ def resolve_deep_scan_setup(
 
 
 def require_integer(value: object, label: str, *, minimum: int) -> int:
+    """Return an integer at least minimum, accepting integral floats and raising SystemExit for invalid counts."""
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -121,6 +140,7 @@ def require_integer(value: object, label: str, *, minimum: int) -> int:
 
 
 def require_positive_number(value: object, label: str) -> int | float:
+    """Return a duration in hours, raising SystemExit unless it falls in (0, 96]."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SystemExit(f"{label} must be a positive finite number no greater than 96.")
     if not 0 < value <= MAX_TIME_HOURS:

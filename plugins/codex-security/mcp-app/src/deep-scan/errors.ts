@@ -1,3 +1,4 @@
+import { asRecord } from "../record.js";
 import type { DeepScanRunState } from "./types.js";
 
 const STALE_COORDINATOR_GENERATION_MESSAGE =
@@ -102,6 +103,15 @@ export function abortError(reason?: unknown): Error {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function exceedsContext(error: unknown) {
+  return (
+    asRecord(error)?.code === "context_length_exceeded" ||
+    /\b(?:context_length_exceeded|context (?:length|window) exceeded|maximum context length is|exceeds? (?:the |this model's |the model's )?context (?:length|window)|(?:ran out of room in|exceeded) (?:the |this model's |the model's )?context window)\b/i.test(
+      errorMessage(error),
+    )
+  );
 }
 
 export function errorNameWithCode(error: Error): string {

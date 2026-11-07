@@ -55,7 +55,12 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
-from workbench.storage import create_private_directory, resolve_scan_root, state_dir
+from workbench.storage import (
+    create_private_directory,
+    resolve_scan_root,
+    saved_deep_workers,
+    state_dir,
+)
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -69,7 +74,6 @@ from workbench_constants import (
     FINDING_REMEDIATION_BYTES,
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
-    FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
@@ -170,6 +174,7 @@ def database_path() -> Path:
 
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Any:
+    """Hold the cross-process lock for a scan ID until the context exits."""
     lock_dir = state_dir() / "completion-locks"
     create_private_directory(lock_dir)
     lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
@@ -233,6 +238,20 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 
 def connect(*, deferred: bool = False) -> sqlite3.Connection:
+    """Open the workbench SQLite database and bring its schema up to date.
+
+    Args:
+        deferred (bool): Let the first migration attempt defer its write lock.
+            Retries after lock contention use an immediate transaction.
+
+    Returns:
+        sqlite3.Connection: A caller-owned connection with named rows, foreign
+            keys enabled, and write-ahead logging.
+
+    Raises:
+        sqlite3.OperationalError: Opening or configuring the database fails, or
+            lock contention persists after retries.
+    """
     path = database_path()
     guidance = (
         f"Workbench database: {path}. Ensure the state directory and SQLite journal files "
@@ -284,11 +303,13 @@ def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
 
 
 def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
+    """Return requested paths paired with whether the stored recipe identified each one as a file."""
     files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
     return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
 
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
+    """Return the target identity, scope requirements, and diff target recorded for this scan."""
     target = Path(scan["target_path"])
     target_contract = {
         "allowedKinds": expected_target_kinds(scan),
@@ -321,6 +342,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
 
 
 def expected_coverage_mode(scan: sqlite3.Row) -> str:
+    """Return the coverage mode implied by the recorded scope, scan mode, and diff target kind."""
     if scan["mode"] == "diff":
         mode = {
             "commit": "commit",
@@ -342,6 +364,7 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
 def workbench_completion_binding(
     scan: sqlite3.Row, completed_at: str, manifest: dict[str, Any] | None = None
 ) -> dict[str, Any]:
+    """Build the scan ID, timestamps, producer, target, and scope used to bind output artifacts at completion."""
     contract = scan_contract(scan)
     target_contract = contract["target"]
     plugin_version = loaded_plugin_version()
@@ -379,6 +402,7 @@ def workbench_completion_binding(
 
 
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
+    """Raise SystemExit if the supplied manifest does not match the registered scan, target, or scope."""
     manifest_scan = manifest.get("scan")
     if not isinstance(manifest_scan, dict):
         raise SystemExit("scan-manifest.json scan must be an object.")
@@ -466,6 +490,10 @@ def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
 
 
 def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
+    """Return a canonical UUID or resolve a unique scan ID prefix of at least eight characters.
+
+    Raise SystemExit for a prefix that is too short, ambiguous, or absent from the database.
+    """
     try:
         return str(uuid.UUID(scan_id))
     except ValueError:
@@ -937,6 +965,7 @@ def _start_prompt_driven_scan(
 
 
 def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
+    """Return the SHA-256 of the scan-local file contents, prefixed with sha256:."""
     digest = hashlib.sha256()
     with open_scan_local_file(scan_dir, relative_path) as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -945,6 +974,7 @@ def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
 
 
 def published_manifest_digest(scan_dir: Path, manifest: dict[str, Any]) -> str:
+    """Return the canonical manifest digest or raise SystemExit if the published bytes differ."""
     canonical = (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n").encode()
     expected = f"sha256:{hashlib.sha256(canonical).hexdigest()}"
     actual = scan_local_file_digest(scan_dir, ARTIFACTS["manifest"])
@@ -954,6 +984,7 @@ def published_manifest_digest(scan_dir: Path, manifest: dict[str, Any]) -> str:
 
 
 def require_recorded_manifest_digest(scan: sqlite3.Row, scan_dir: Path) -> None:
+    """Raise SystemExit if the saved manifest differs from the digest recorded when the scan was sealed."""
     expected = scan["seal_manifest_digest"]
     if expected is None:
         return
@@ -964,6 +995,7 @@ def require_recorded_manifest_digest(scan: sqlite3.Row, scan_dir: Path) -> None:
 def pin_legacy_manifest_digest(
     connection: sqlite3.Connection, scan_id: str, manifest_digest: str
 ) -> None:
+    """Record a previously missing digest in a write transaction, rejecting a conflict with an existing digest."""
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         scan = require_scan(connection, scan_id)
@@ -997,6 +1029,20 @@ def complete_scan(
         )
 
 
+def read_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    # Validation can finish after the scan's recorded completion timestamp.
+    usage = scan_usage.collect_scan_usage(
+        connection,
+        require_scan(connection, args.scan_id),
+        thread_id=args.thread_id,
+        validation_thread_id=args.validation_thread_id,
+        completed_at=now(),
+    )
+    if "cacheWriteInputTokens" in usage:
+        usage.setdefault("cacheWriteInputTokensReported", True)
+    return usage
+
+
 def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     with scan_completion_lock(scan_id):
@@ -1009,7 +1055,7 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
         if completion["threadId"] != args.thread_id or completion["turnId"] != args.turn_id:
             raise SystemExit("The scan usage belongs to a different completion turn.")
         if not completion["finalized"]:
-            usage = scan_usage.collect_scan_usage(
+            usage = scan_usage.collect_scan_usage_safely(
                 connection,
                 scan,
                 thread_id=args.thread_id,
@@ -1028,7 +1074,9 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
                         f"scan_turn_{args.turn_status}",
                     ]
                 usage["completion"] = {**completion, "finalized": True}
-            cost_json = parse_scan_cost(json.dumps({**stored, "usage": usage}))
+            fields = scan_usage.merge_scan_usage_fields(stored, {"usage": usage})
+            fields["usage"]["completion"] = usage["completion"]
+            cost_json = parse_scan_cost(json.dumps(fields))
             with connection:
                 connection.execute(
                     "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
@@ -1039,6 +1087,7 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
 def complete_budget_exhausted_scan(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
+    """Complete a running CLI Deep Scan using the measured cost and saved results after its budget is exhausted."""
     scan_id = require_uuid(args.scan_id, "scan-id")
     cost_json = parse_scan_cost(args.cost_json)
     if cost_json is None:
@@ -1253,10 +1302,7 @@ def complete_scan_locked(
                     scan_dir,
                     scan["id"],
                     completion_binding,
-                    connection.execute(
-                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                        (scan["id"],),
-                    ).fetchall(),
+                    saved_deep_workers(connection, scan),
                     warnings,
                     stopped=False,
                     scan_mode=scan["mode"],
@@ -1340,26 +1386,27 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
-    cost_fields = scan_usage.stored_scan_cost_fields(cost_json)
-    if "usage" not in cost_fields:
-        cost_fields["usage"] = scan_usage.collect_scan_usage(
-            connection,
-            scan,
-            thread_id=thread_id,
-            completed_at=completion_timestamp,
+    measured_usage = scan_usage.collect_scan_usage_safely(
+        connection,
+        scan,
+        thread_id=thread_id,
+        completed_at=completion_timestamp,
+    )
+    cost_fields = scan_usage.merge_scan_usage_fields(
+        scan_usage.stored_scan_cost_fields(cost_json), {"usage": measured_usage}
+    )
+    measured_usage = cost_fields["usage"]
+    if thread_id is not None and turn_id is not None:
+        measured_usage["completion"] = {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "finalized": False,
+        }
+        if measured_usage["coverage"] == "complete":
+            measured_usage["coverage"] = "partial"
+        measured_usage["warnings"] = sorted(
+            {*measured_usage.get("warnings", []), "turn_in_progress"}
         )
-        measured_usage = cost_fields["usage"]
-        if thread_id is not None and turn_id is not None:
-            measured_usage["completion"] = {
-                "threadId": thread_id,
-                "turnId": turn_id,
-                "finalized": False,
-            }
-            if measured_usage["coverage"] == "complete":
-                measured_usage["coverage"] = "partial"
-            measured_usage["warnings"] = sorted(
-                {*measured_usage.get("warnings", []), "turn_in_progress"}
-            )
     cost_json = parse_scan_cost(json.dumps(cost_fields))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
@@ -1438,6 +1485,12 @@ def register_cli_scan(
     *,
     before_archive: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
+    """Register a CLI scan and its selected target before execution begins.
+
+    Record the launch recipe and target identity with the new scan. When reusing
+    an output directory, coordinate archiving with registration so previous results
+    can still be located. Return the scan ID, contract, and target metadata.
+    """
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = None
@@ -2472,6 +2525,20 @@ def scan_context(
 
 
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "progress_only", False):
+        scan = connection.execute(
+            """
+            SELECT scans.id, scans.mode, scans.phase, scans.status, scans.canceled_at,
+                   progress.*, progress.updated_at AS progress_updated_at
+            FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
+            WHERE scans.id = ?
+            """,
+            (resolve_scan_id(connection, args.scan_id),),
+        ).fetchone()
+        if scan is None:
+            raise SystemExit("Codex Security scan not found.")
+        progress, _ = scan_progress_result(connection, scan)
+        return {"scan": {"progress": progress}}
     result = scan_context(connection, args.scan_id, args.occurrence_id)
     if result["scan"]["progress"]["status"] != "running":
         scan = require_scan(connection, args.scan_id)
@@ -2485,7 +2552,7 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
-    limit = min(args.limit, FINDINGS_PAGE_MAX)
+    limit = args.limit
     rows = scan_history.finding_occurrence_rows(
         connection,
         scan["id"],
@@ -2524,57 +2591,9 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
     }
 
 
-def scan_result(
-    connection: sqlite3.Connection,
-    scan: sqlite3.Row,
-    *,
-    occurrence_id: str | None = None,
-) -> dict[str, Any]:
-    backfill_legacy_finding_details(connection, scan)
-    scan = scan_history.scan_with_progress(connection, scan["id"])
-    artifact_rows = connection.execute(
-        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (scan["id"],)
-    )
-    artifacts = {}
-    for row in artifact_rows:
-        if row["kind"] not in ARTIFACTS:
-            continue
-        path = available_artifact_path(Path(scan["scan_dir"]), Path(row["path"]))
-        if path is not None:
-            artifacts[row["kind"]] = str(path)
-    sarif_path = available_artifact_path(
-        Path(scan["scan_dir"]), Path(scan["scan_dir"]) / "exports" / "results.sarif"
-    )
-    if sarif_path is not None:
-        artifacts["sarifReport"] = str(sarif_path)
-    model_fields = saved_results.threat_model_fields(_WORKBENCH_DB_CONTEXT, scan)
-    if path := model_fields.get("threatModelPath"):
-        artifacts["threatModel"] = path
-    occurrence_rows = scan_history.finding_occurrence_rows(
-        connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
-    )
-    if occurrence_id is not None:
-        occurrence = require_occurrence(connection, occurrence_id)
-        if occurrence["scan_id"] != scan["id"]:
-            raise SystemExit("This finding does not belong to the selected scan.")
-        if all(row["id"] != occurrence["id"] for row in occurrence_rows):
-            occurrence_rows.append(occurrence)
-    finding_count = connection.execute(
-        "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()[0]
-    severity_counts = {
-        row["severity"]: row["count"]
-        for row in connection.execute(
-            """
-            SELECT severity, COUNT(*) AS count
-            FROM finding_occurrences
-            WHERE scan_id = ?
-            GROUP BY severity
-            """,
-            (scan["id"],),
-        )
-    }
-    remediation_available, remediation_unavailable_reason = remediation_availability(scan)
+def scan_progress_result(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> tuple[dict[str, Any], str]:
     independent_reviews = (
         deep_scan.independent_review_progress(connection, scan["id"])
         if scan["mode"] == "deep"
@@ -2606,6 +2625,64 @@ def scan_result(
     if independent_reviews is not None:
         review_updated_at = str(independent_reviews.pop("updatedAt"))
         progress_result["independentReviews"] = independent_reviews
+    return progress_result, review_updated_at
+
+
+def scan_result(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    *,
+    occurrence_id: str | None = None,
+) -> dict[str, Any]:
+    """Assemble the workbench view of a saved scan, backfilling older finding details as needed.
+
+    An occurrence ID selects one finding from that scan. An occurrence belonging
+    to a different scan raises SystemExit.
+    """
+    backfill_legacy_finding_details(connection, scan)
+    scan = scan_history.scan_with_progress(connection, scan["id"])
+    artifact_rows = connection.execute(
+        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (scan["id"],)
+    )
+    artifacts = {}
+    for row in artifact_rows:
+        if row["kind"] not in ARTIFACTS:
+            continue
+        path = available_artifact_path(Path(scan["scan_dir"]), Path(row["path"]))
+        if path is not None:
+            artifacts[row["kind"]] = str(path)
+    sarif_path = available_artifact_path(
+        Path(scan["scan_dir"]), Path(scan["scan_dir"]) / "exports" / "results.sarif"
+    )
+    if sarif_path is not None:
+        artifacts["sarifReport"] = str(sarif_path)
+    model_fields = saved_results.threat_model_fields(_WORKBENCH_DB_CONTEXT, scan)
+    if path := model_fields.get("threatModelPath"):
+        artifacts["threatModel"] = path
+    occurrence_rows = scan_history.finding_occurrence_rows(
+        connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
+    )
+    if occurrence_id is not None:
+        occurrence = require_occurrence(connection, occurrence_id)
+        if occurrence["scan_id"] != scan["id"]:
+            raise SystemExit("This finding does not belong to the selected scan.")
+        if all(row["id"] != occurrence["id"] for row in occurrence_rows):
+            occurrence_rows.append(occurrence)
+    severity_counts = {
+        row["severity"]: row["count"]
+        for row in connection.execute(
+            """
+            SELECT severity, COUNT(*) AS count
+            FROM finding_occurrences
+            WHERE scan_id = ?
+            GROUP BY severity
+            """,
+            (scan["id"],),
+        )
+    }
+    finding_count = sum(severity_counts.values())
+    remediation_available, remediation_unavailable_reason = remediation_availability(scan)
+    progress_result, review_updated_at = scan_progress_result(connection, scan)
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )
@@ -3145,11 +3222,21 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
     if args.command == "finding-issues":
-        result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
+        try:
+            result = publication.finding_issues(
+                _WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin)
+            )
+        except sqlite3.OperationalError as exc:
+            if not getattr(exc, "_codex_security_state_unavailable", False):
+                raise
+            print(f"sqlite3.OperationalError: {exc}", file=sys.stderr)
+            raise SystemExit(73) from None
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
-        connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
+        connect(
+            deferred=args.command in {"get-scan", "read-scan-usage", "list-scans", "database-info"}
+        )
     ) as connection:
         remediation_state.require_available(connection, args, require_scan)
         handlers = {
@@ -3169,6 +3256,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "register-cli-scan": partial(register_cli_scan, before_archive=before_archive),
             "set-scan-thread": set_scan_thread,
             "set-scan-cost-limit": set_scan_cost_limit,
+            "read-scan-usage": read_scan_usage,
             "finalize-scan-usage": finalize_scan_usage,
             "list-global-findings": native_indexes.list_global_findings,
             "list-repositories": native_indexes.list_repositories,
@@ -3282,4 +3370,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from None

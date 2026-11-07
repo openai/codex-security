@@ -1,3 +1,5 @@
+"""Require evidence for rejection and closure decisions before recovered scans can be sealed."""
+
 from __future__ import annotations
 
 import copy

@@ -1,3 +1,5 @@
+"""Check bundled tokenizer component identities and the legacy npm dependency fallback."""
+
 import json
 import runpy
 import unittest

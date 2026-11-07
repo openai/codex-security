@@ -1,7 +1,10 @@
 import { runNodePython } from "./support/python-probe.js";
 import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
-import { createApiTestFixtures } from "./support/temporary-directories.js";
+import {
+  createApiTestFixtures,
+  removeTemporaryDirectory,
+} from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
@@ -78,6 +81,8 @@ import {
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
+  isLocalWindowsCredentialVolume,
+  parseWindowsTokenGroupSids,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
@@ -139,6 +144,34 @@ function credentialAncestors(home: string, directory: string): string[] {
   return ancestors;
 }
 
+const credentialAclFunction = "function Write-CredentialAcl($path) {";
+
+function instrumentCredentialAcl(
+  home: string,
+  transform: (script: string) => string,
+) {
+  const originalSpawn = childProcess.spawn;
+  mock.module("node:child_process", () => ({
+    ...childProcess,
+    spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+      const [command, args, options] = spawnArgs;
+      if (
+        options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+        !Array.isArray(args)
+      )
+        return originalSpawn(...spawnArgs);
+      const index = args.indexOf("-Command") + 1;
+      const script = args[index];
+      if (typeof script !== "string" || !script.includes(credentialAclFunction))
+        return originalSpawn(...spawnArgs);
+      const instrumented = [...args];
+      instrumented[index] = transform(script);
+      return originalSpawn(command, instrumented, options);
+    },
+  }));
+  return () => restoreSpawn(originalSpawn);
+}
+
 function windowsTestCommand(
   tool: string,
   args: readonly string[],
@@ -166,6 +199,30 @@ function windowsUserSid() {
   const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
   expect(sid).toBeDefined();
   return sid;
+}
+
+function setWindowsTestDacl(
+  python: Parameters<typeof runNodePython>[0],
+  path: string,
+  descriptor: string,
+) {
+  const setup = runNodePython(python, [
+    "-c",
+    [
+      "import ctypes, sys",
+      "from ctypes import wintypes",
+      "adv = ctypes.WinDLL('advapi32', use_last_error=True)",
+      "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+      "sd = wintypes.LPVOID()",
+      "if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sys.argv[2], 1, ctypes.byref(sd), None): raise ctypes.WinError(ctypes.get_last_error())",
+      "try:",
+      "    if not adv.SetFileSecurityW(sys.argv[1], wintypes.DWORD(0x80000004), sd): raise ctypes.WinError(ctypes.get_last_error())",
+      "finally: kernel.LocalFree(sd)",
+    ].join("\n"),
+    win32.toNamespacedPath(path),
+    descriptor,
+  ]);
+  expect(setup.status).toBe(0);
 }
 
 function inspectWindowsTestAcl(
@@ -1848,6 +1905,107 @@ for await (const line of createInterface({ input: process.stdin })) {
     },
   );
 
+  test.skipIf(process.platform !== "win32")(
+    "explains access denied when the SDK cannot reopen its Windows plugin installation receipt",
+    async () => {
+      const user = windowsUserSid()!;
+      if (user === "S-1-5-18") return; // SYSTEM is the independent file trustee.
+      const python = await resolvePluginPython();
+      const root = await temporaryDirectory();
+      // This fixture needs a local volume with FILE_PERSISTENT_ACLS.
+      const volume = runNodePython(python, [
+        "-c",
+        [
+          "import ctypes, sys",
+          "from ctypes import wintypes",
+          "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+          "volume = ctypes.create_unicode_buffer(32768)",
+          "if not kernel.GetVolumePathNameW(sys.argv[1], volume, len(volume)): raise ctypes.WinError(ctypes.get_last_error())",
+          "kind = kernel.GetDriveTypeW(volume.value)",
+          "if kind in (0, 1): raise RuntimeError('Could not determine the test volume type')",
+          "flags = wintypes.DWORD()",
+          "if kind in (2, 3, 6):",
+          "    if not kernel.GetVolumeInformationW(volume.value, None, 0, None, None, ctypes.byref(flags), None, 0): raise ctypes.WinError(ctypes.get_last_error())",
+          "print('supported' if flags.value & 0x8 else 'unsupported')",
+        ].join("\n"),
+        win32.toNamespacedPath(root),
+      ]);
+      expect(volume.status, volume.stderr).toBe(0);
+      const support = volume.stdout.trim();
+      expect(["supported", "unsupported"]).toContain(support);
+      if (support === "unsupported") return;
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = await createMarketplace(home, selected);
+      const installed = join(root, "installed");
+      await cp(selected, installed, { recursive: true });
+      await writeFile(
+        join(home, "config.toml"),
+        '[marketplaces.codex-security-sdk]\nsource_type="local"\nsource=' +
+          JSON.stringify(marketplace) +
+          '\n[plugins."codex-security@codex-security-sdk"]\nenabled=true\n',
+      );
+      const deny = "(D;OICI;FR;;;S-1-5-21-0-0-0-424242)";
+      const system = "(A;OICI;FA;;;SY)";
+      const full = "D:P" + deny + "(A;OICI;FA;;;" + user + ")" + system;
+      const receipt = join(marketplace, "installed-plugin.json");
+      let installs = 0;
+      const options = {
+        codexCommand: { command: "unused" },
+        environment: {},
+        runCodex: async (_command: unknown, args: readonly string[]) => {
+          expect(args.slice(0, 2)).toEqual(["plugin", "add"]);
+          installs++;
+          return JSON.stringify({ installedPath: installed, version: "1.2.3" });
+        },
+      };
+      setWindowsTestDacl(
+        python,
+        marketplace,
+        "D:P" + deny + "(A;;FA;;;" + user + ")" + system,
+      );
+      try {
+        expect(
+          (await bootstrapPlugin(home, selected, options)).installedRoot,
+        ).toBe(installed);
+        const original = await readFile(receipt, "utf8").then(
+          () => undefined,
+          (error: NodeJS.ErrnoException) => error,
+        );
+        expect(["EPERM", "EACCES"]).toContain(original?.code ?? "");
+        const failure = await bootstrapPlugin(home, selected, options).then(
+          () => {
+            throw new Error("Expected Windows to reject reopening the receipt");
+          },
+          (error: NodeJS.ErrnoException) => error,
+        );
+        expect(failure.code).toBe(original!.code);
+        expect(failure.path).toBe(receipt);
+        expect(failure.syscall).toBe(original!.syscall);
+        expect(failure.message).toContain(original!.message);
+        expect(failure.message).toContain("permissions new files inherit");
+        expect(installs).toBe(1);
+      } finally {
+        // Correct this fixture's grant on the directory and its existing receipt.
+        setWindowsTestDacl(python, marketplace, full);
+        if (existsSync(receipt))
+          setWindowsTestDacl(
+            python,
+            receipt,
+            "D:P" + deny + "(A;;FA;;;" + user + ")" + system,
+          );
+      }
+      // A receipt newly created under the corrected parent also reopens normally.
+      await rm(receipt);
+      await bootstrapPlugin(home, selected, options);
+      expect(
+        (await bootstrapPlugin(home, selected, options)).installedRoot,
+      ).toBe(installed);
+      expect(installs).toBe(2);
+    },
+    60_000,
+  );
+
   test("uses the installed plugin path returned by Codex", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
@@ -2853,6 +3011,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           stderr: "",
         });
       }
+      await removeTemporaryDirectory(root);
     },
   );
 
@@ -2889,7 +3048,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     };
     const parentEnvironment = pluginExecutionEnvironment(process.execPath, {
       PATH: "",
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
       ...(process.env["SystemRoot"] === undefined
         ? {}
         : { SystemRoot: process.env["SystemRoot"] }),
@@ -2908,9 +3066,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
       resolveCodexCommand().command,
     );
-    expect(workerEnvironment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"]).toBe(
-      "1",
-    );
     expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
     expect(workerEnvironment["CODEX_SECURITY_PYTHON_COMMAND"]).toBe(
       process.execPath,
@@ -2928,25 +3083,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     expect(nestedCodex.status).toBe(0);
     expect(nestedCodex.stdout).toMatch(/^codex-cli\s+\d/u);
-  });
-
-  test("forwards the external import setting to the plugin helper", () => {
-    const flag = "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS";
-    const node = Bun.which("node")!;
-    const environment: NodeJS.ProcessEnv = Object.assign(
-      Object.create({ [flag]: "1" }),
-      { CODEX_CLI_PATH: node, SystemRoot: process.env["SystemRoot"] },
-    );
-    const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
-    const run = () =>
-      spawnSync(node, [helper, "list-external-findings", "--help"], {
-        env: pluginExecutionEnvironment(node, environment),
-      }).status;
-
-    expect(run()).toBe(0);
-    environment[flag] = undefined;
-    environment["Codex_Security_Enable_External_Imports"] = "1";
-    expect(run()).toBe(2);
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
@@ -3667,6 +3803,7 @@ describe("runtime directories and plugin Python boundary", () => {
       "transient missing descendant",
       "persistent missing descendant",
       "access denied",
+      "batch access denied",
       "unexpected error",
       "missing home",
       "transient path-not-found descendant",
@@ -3685,66 +3822,41 @@ describe("runtime directories and plugin Python boundary", () => {
     await requireSecureCredentialHome(home);
     const descendant = join(home, ".auth-replay.tmp");
     await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
+    const batchOnly = kind === "batch access denied";
+    if (batchOnly) await writeFile(join(home, "sibling.tmp"), "fixture\n");
+    const accessDenied = kind.endsWith("access denied");
     const pathNotFound = kind.includes("path-not-found");
     const missing = pathNotFound || kind.includes("missing");
     const transient = kind.startsWith("transient ");
     const persistent = kind.startsWith("persistent ");
-    const exception = pathNotFound
-      ? "System.Management.Automation.ItemNotFoundException"
+    const [exception, category] = pathNotFound
+      ? ["System.Management.Automation.ItemNotFoundException", "ObjectNotFound"]
       : missing
-        ? "System.IO.FileNotFoundException"
-        : kind === "access denied"
-          ? "System.UnauthorizedAccessException"
-          : "System.InvalidOperationException";
-    const errorId = pathNotFound
-      ? "GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand"
-      : missing
-        ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
-        : kind === "access denied"
-          ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
-          : "SyntheticCredentialAclFailure";
-    const category =
-      kind === "access denied"
-        ? "PermissionDenied"
-        : missing && !pathNotFound
-          ? "NotSpecified"
-          : "ObjectNotFound";
+        ? ["System.IO.FileNotFoundException", "NotSpecified"]
+        : accessDenied
+          ? ["System.UnauthorizedAccessException", "PermissionDenied"]
+          : ["System.InvalidOperationException", "ObjectNotFound"];
+    const errorName = pathNotFound
+      ? "GetAcl_PathNotFound_Exception"
+      : exception;
+    const errorId =
+      missing || accessDenied
+        ? `${errorName},Microsoft.PowerShell.Commands.GetAclCommand`
+        : "SyntheticCredentialAclFailure";
     const failurePath = kind.endsWith("home")
       ? home
       : win32.toNamespacedPath(descendant);
     // Replay the native error without relying on racing a filesystem deletion.
-    const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
-    const marker = "function Write-CredentialAcl($path) {";
-    const originalSpawn = childProcess.spawn;
+    const injection = `if (@($path) -contains '${failurePath.replaceAll("'", "''")}'${batchOnly ? " -and @($path).Count -gt 1" : ""}) { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
     let attempts = 0;
-    mock.module("node:child_process", () => ({
-      ...childProcess,
-      spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
-        const [command, args, options] = spawnArgs;
-        if (
-          options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
-          !Array.isArray(args)
-        ) {
-          return originalSpawn(...spawnArgs);
-        }
-        const scriptIndex = args.indexOf("-Command") + 1;
-        const script = args[scriptIndex];
-        if (typeof script !== "string" || !script.includes(marker)) {
-          return originalSpawn(...spawnArgs);
-        }
-        attempts += 1;
-        if (transient && attempts > 1) {
-          return originalSpawn(...spawnArgs);
-        }
-        expect(script.split(marker)).toHaveLength(2);
-        const replayArgs = [...args];
-        replayArgs[scriptIndex] = script.replace(
-          marker,
-          `${marker} ${injection}`,
-        );
-        return originalSpawn(command, replayArgs, options);
-      },
-    }));
+    const restore = instrumentCredentialAcl(home, (script) => {
+      attempts += 1;
+      if (transient && attempts > 1) return script;
+      return script.replace(
+        credentialAclFunction,
+        `${credentialAclFunction} ${injection}`,
+      );
+    });
     try {
       if (transient) {
         await requireSecureCredentialHome(home);
@@ -3758,9 +3870,49 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(attempts).toBe(persistent ? 3 : 1);
       }
     } finally {
-      restoreSpawn(originalSpawn);
+      restore();
     }
   });
+
+  for (const language of ["FullLanguage", "ConstrainedLanguage"] as const) {
+    const name = `batches Windows credential ACL queries without dropping files in ${language}`;
+    test.skipIf(process.platform !== "win32")(name, async () => {
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const { root, home } = await credentialHome(false);
+      await requireSecureCredentialHome(home);
+      const cache = join(home, "cache");
+      await mkdir(cache);
+      for (let index = 0; index < 8; index++)
+        await writeFile(join(cache, `entry-${index}.txt`), "fixture\n");
+      const trace = join(root, "acl-queries.txt");
+      const append = `Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${trace.replaceAll("'", "''")}' -Value`;
+      const restore = instrumentCredentialAcl(home, (script) =>
+        [
+          language === "ConstrainedLanguage"
+            ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'"
+            : "",
+          script.replace(
+            credentialAclFunction,
+            `${credentialAclFunction} ${append} (@($path).Count);`,
+          ),
+          `${append} ('complete:' + $script:descriptorCount)`,
+        ].join("\n"),
+      );
+      try {
+        await requireSecureCredentialHome(home);
+        const rows = (await readFile(trace, "utf8")).trim().split(/\r?\n/u);
+        const expected = credentialAncestors(home, "").length + 10;
+        expect(rows.pop()).toBe(`complete:${expected}`);
+        const queries = rows.map(Number);
+        expect(queries).toContain(8);
+        expect(queries.reduce((total, count) => total + count, 0)).toBe(
+          expected,
+        );
+      } finally {
+        restore();
+      }
+    });
+  }
 
   test("retries interrupted Windows credential ACL enumeration", async () => {
     const root = await temporaryDirectory();
@@ -4432,6 +4584,69 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("allows OWNER RIGHTS on a Windows ancestor only after verifying its owner", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const stranger = "S-1-5-21-111-222-333-1002";
+    for (const trustee of ["OW", "S-1-3-4"]) {
+      for (const owner of [user, "SY", "BA"]) {
+        const descriptor = `O:${owner}G:SYD:P(A;OICI;FA;;;${trustee})(A;;FA;;;${stranger})`;
+        expect(
+          inspectWindowsCredentialAcl(descriptor, user, { scope: "ancestor" })
+            .untrustedPrincipals,
+        ).toEqual([stranger]);
+      }
+      for (const owner of [stranger, "OW"]) {
+        expect(() =>
+          inspectWindowsCredentialAcl(
+            `O:${owner}G:SYD:P(A;;FA;;;${trustee})`,
+            user,
+            { scope: "ancestor" },
+          ),
+        ).toThrow(/owner/u);
+      }
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "prepares a Windows credential home beneath a protected OWNER RIGHTS ancestor",
+    async () => {
+      const parent = join(await temporaryDirectory(), "private-parent");
+      await mkdir(parent);
+      const environment = { ...process.env, QA_OWNER_RIGHTS_PARENT: parent };
+      const grant = windowsTestCommand("icacls.exe", [
+        parent,
+        "/inheritance:r",
+        "/grant:r",
+        `*${windowsUserSid()}:(OI)(CI)F`,
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+        "*S-1-3-4:(OI)(CI)F",
+      ]);
+      expect(grant.status, grant.stderr).toBe(0);
+      const readParent = () =>
+        inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:QA_OWNER_RIGHTS_PARENT).Sddl",
+          ],
+          environment,
+        );
+      const before = readParent();
+      expect(before.status, before.stderr).toBe(0);
+      expect(before.stdout).toMatch(/;;;(?:OW|S-1-3-4)\)/u);
+      const state = join(parent, "state");
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }),
+      ).toBe(join(state, "codex-home"));
+      const after = readParent();
+      expect(after.status, after.stderr).toBe(0);
+      expect(after.stdout).toBe(before.stdout);
+    },
+  );
+
   test("identifies broad, foreign, and inherited Windows ACL grants", () => {
     const user = "S-1-5-21-111-222-333-1001";
     const stranger = "S-1-5-21-111-222-333-1002";
@@ -4474,6 +4689,61 @@ describe("runtime directories and plugin Python boundary", () => {
       untrustedPrincipals: [],
       deniedPrincipals: ["S-1-1-0"],
     });
+  });
+
+  test("uses local group membership only on local Windows volumes", async () => {
+    const readType = mock(async () => "4");
+    for (const path of [
+      String.raw`\\server\share\home`,
+      String.raw`\\?\UNC\server\share\home`,
+    ]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+    }
+    expect(readType).not.toHaveBeenCalled();
+    for (const path of [String.raw`X:\home`, String.raw`\\?\X:\home`]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+      expect(readType).toHaveBeenLastCalledWith("X:");
+      expect(
+        await isLocalWindowsCredentialVolume(path, async () => "3\r\n"),
+      ).toBe(true);
+      expect(await isLocalWindowsCredentialVolume(path, async () => "")).toBe(
+        false,
+      );
+    }
+  });
+
+  test("preserves account denies only after excluding current token membership", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const group = "S-1-5-21-111-222-333-512";
+    const other = "S-1-5-21-0-0-0-424242";
+    const currentGroupSids = parseWindowsTokenGroupSids(
+      `"Domain, Group","Group","${group}","Group used for deny only"\r\n`,
+    );
+    const descriptor = `O:${user}D:P(D;OICI;FR;;;${other})(A;OICI;FA;;;${user})`;
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user).grantsCurrentUserAccess,
+    ).toBe(false);
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user, { currentGroupSids }),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      deniedPrincipals: [],
+    });
+    for (const principal of [user, "DA", "WD", "OW"]) {
+      expect(
+        inspectWindowsCredentialAcl(
+          descriptor.replace(other, principal),
+          user,
+          {
+            currentGroupSids,
+            resolvedAliases: { DA: group },
+          },
+        ).grantsCurrentUserAccess,
+      ).toBe(false);
+    }
+    for (const invalid of ["", `"a","b","${group}","c"\r\ninvalid`]) {
+      expect(() => parseWindowsTokenGroupSids(invalid)).toThrow();
+    }
   });
 
   test("requires effective, inheritable Windows credential access", () => {
@@ -5069,6 +5339,105 @@ describe("runtime directories and plugin Python boundary", () => {
       expect([sid!, "S-1-5-18", "S-1-5-32-544"]).toContain(access.owner);
       expect(new Set(access.principals)).toEqual(
         new Set([sid!, "S-1-5-18", "S-1-5-32-544"]),
+      );
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "preserves an unmapped Windows deny SID on a private credential home and its children",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      const home = join(state, "codex-home");
+      await mkdir(home, { recursive: true });
+      const child = join(home, "sessions");
+      const file = join(child, "fixture.txt");
+      const unmappedSid = "S-1-5-21-0-0-0-424242";
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_TEST_ACL_PATH: win32.toNamespacedPath(home),
+        CODEX_SECURITY_TEST_CHILD: win32.toNamespacedPath(child),
+        CODEX_SECURITY_TEST_FILE: win32.toNamespacedPath(file),
+      };
+      const identity = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
+      expect(identity.status).toBe(0);
+      const userSid = identity.stdout.match(/"(S-1-[0-9-]+)"\s*$/iu)?.[1];
+      if (!userSid)
+        throw new Error("Could not identify the Windows fixture user SID");
+      const sddl = `D:P(D;OICI;FR;;;${unmappedSid})(A;OICI;FA;;;${userSid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`;
+      // Set the raw DACL without resolving the synthetic trustee or invoking PowerShell methods.
+      const python = await resolvePluginPython();
+
+      setWindowsTestDacl(python, home, sddl);
+      await mkdir(child);
+      await writeFile(file, "synthetic credential fixture\n");
+      // A subtree reset would replace this distinct protected file ACL with the home ACL.
+      setWindowsTestDacl(
+        python,
+        file,
+        `D:P(D;;FR;;;${unmappedSid})(A;;FA;;;${userSid})`,
+      );
+
+      const readDescriptors = () => {
+        const result = inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH).Sddl",
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_CHILD).Sddl",
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_FILE).Sddl",
+          ],
+          environment,
+        );
+        if (result.status !== 0)
+          throw new Error(
+            "Fixture ACL read failed: " +
+              (result.stderr.match(
+                /FullyQualifiedErrorId\s*:\s*([\w.,-]+)/u,
+              )?.[1] ?? "unknown"),
+          );
+        return result.stdout.trim().split(/\r?\n/u);
+      };
+      const before = readDescriptors();
+      expect(before.length).toBe(3);
+      expect(before[0]!.includes("D:P") && before[2]!.includes("D:P")).toBe(
+        true,
+      );
+      expect(before[2] !== before[1]).toBe(true);
+      expect(
+        before.every((descriptor) => descriptor.includes(`;;;${unmappedSid})`)),
+      ).toBe(true);
+      const expectedHome = await realpath(home);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const prepared = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }).catch((error: unknown) => {
+          const cause = error instanceof Error ? error.cause : undefined;
+          if (
+            cause instanceof Error &&
+            "cmd" in cause &&
+            typeof cause.cmd === "string" &&
+            /\bicacls\.exe\b/iu.test(cause.cmd) &&
+            cause.cmd.includes(" /remove:d ") &&
+            cause.cmd.includes(`*${unmappedSid}`)
+          ) {
+            throw new Error("icacls attempted to remove the synthetic DENY");
+          }
+          throw error;
+        });
+        expect(prepared === expectedHome).toBe(true);
+        const after = readDescriptors();
+        expect(
+          after.map((descriptor, index) => descriptor === before[index]),
+        ).toEqual([true, true, true]);
+      }
+      expect(await readFile(file, "utf8")).toBe(
+        "synthetic credential fixture\n",
       );
     },
   );
@@ -5764,93 +6133,6 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await readlink(join(scanDir, "scan-manifest.json"))).toBe(
       join(root, "missing-manifest.json"),
     );
-  });
-
-  test("preserves recorded artifact paths when archiving a completed scan", async () => {
-    const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
-    const archivedScanDir = `${scanDir}.previous-20260729T000000Z`;
-    await mkdir(scanDir, { mode: 0o700 });
-    await mkdir(archivedScanDir, { mode: 0o700 });
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const result = runNodePython(python!, [
-      "-c",
-      [
-        "import argparse, json, sqlite3, sys",
-        "from pathlib import Path",
-        "sys.path.insert(0, sys.argv[1])",
-        "from workbench_scan_start import archive_scan",
-        "scan_dir = Path(sys.argv[2])",
-        "archived_scan_dir = Path(sys.argv[3])",
-        "connection = sqlite3.connect(':memory:')",
-        "connection.row_factory = sqlite3.Row",
-        "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
-        "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-        "connection.execute('CREATE TABLE finding_workflows (scan_id TEXT, scan_dir TEXT NOT NULL, results_json TEXT NOT NULL)')",
-        "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
-        "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
-        "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
-        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
-        "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
-        "    pass",
-        "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
-        "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
-        "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
-      ].join("\n"),
-      join(PLUGIN_ROOT, "scripts"),
-      scanDir,
-      archivedScanDir,
-    ]);
-
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toEqual({
-      scanDir: archivedScanDir,
-      artifacts: [
-        { kind: "coverage", path: join(archivedScanDir, "coverage.json") },
-        { kind: "findings", path: join(archivedScanDir, "findings.json") },
-        { kind: "manifest", path: join(archivedScanDir, "scan-manifest.json") },
-        { kind: "markdownReport", path: join(archivedScanDir, "report.md") },
-      ],
-    });
-  });
-
-  test("does not strand completed scan artifacts without an archive path", async () => {
-    const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
-    await mkdir(scanDir, { mode: 0o700 });
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const result = runNodePython(python!, [
-      "-c",
-      [
-        "import argparse, sqlite3, sys",
-        "from pathlib import Path",
-        "sys.path.insert(0, sys.argv[1])",
-        "from workbench_scan_start import archive_scan",
-        "scan_dir = Path(sys.argv[2])",
-        "connection = sqlite3.connect(':memory:')",
-        "connection.row_factory = sqlite3.Row",
-        "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
-        "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-        "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
-        "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
-        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
-        "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
-        "    pass",
-      ].join("\n"),
-      join(PLUGIN_ROOT, "scripts"),
-      scanDir,
-    ]);
-
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      "The archived scan directory is required to preserve existing scan artifacts.",
-    );
-    expect(await readdir(root)).toEqual(["scan"]);
   });
 
   for (const readonly of [false, true]) {

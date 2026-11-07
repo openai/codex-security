@@ -5,7 +5,7 @@
       {
         "mediaType": "application/json",
         "path": "findings.json",
-        "sha256": "fea40b4d1f0b92090f1c0a06f43fa03da5bdf4e7f8bdf8e8a7953ae626600d5b"
+        "sha256": "3c63586ea38b07b1d5ad9004ba2afc27f67e79ed164da508c7beae72648eb3b7"
       }
     ],
     "completedAt": "2026-05-31T18:09:00Z",
@@ -20,10 +20,12 @@
       "excludedPaths": []
     },
     "scope": {
+      "context": "Illustrative scan of a synthetic archive importer.",
       "excludePaths": [],
       "includePaths": [
         "."
-      ]
+      ],
+      "validationMode": "Static source review"
     },
     "sealedAt": "2026-05-31T18:09:00Z",
     "startedAt": "2026-05-31T18:00:00Z",
