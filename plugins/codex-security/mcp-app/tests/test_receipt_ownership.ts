@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -131,7 +132,7 @@ function recoverCoverage(
 ) {
   return JSON.parse(
     execFileSync(
-      process.env.PYTHON || "python3",
+      fixturePython,
       [
         "-B",
         "-c",
