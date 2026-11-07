@@ -10,6 +10,8 @@ from typing import Any
 
 from finalize_scan_contract import (
     ContractError,
+    MissingScanLocalFileError,
+    NonRegularScanLocalFileError,
     _require_portable_relative_path,
     _require_str,
     _validate_schema_node,
@@ -393,38 +395,51 @@ def _generic_surface_updates(
                             repaired = False
                             break
                         replacement_paths[key] = normalized
+                historical = []
                 for saved_relative, row in receipt_matches:
                     previous_refs = surface_receipts(saved_relative, row)
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
-                            failure = receipt_error(ref) if repaired else None
-                            replaceable = failure is not None
-                            if repaired and isinstance(ref, str):
-                                try:
-                                    normalized = _require_portable_relative_path(
-                                        ref, "Saved coverage receipt"
-                                    )
-                                except ContractError as error:
-                                    failure = error
-                                    replaceable = True
-                                else:
-                                    key = normalized.lower()
-                                    previous = replacement_paths.get(key)
-                                    if previous is not None and previous != normalized:
-                                        failure = ContractError(
-                                            f"Saved coverage receipt: duplicate artifact path: {previous} and {normalized}"
-                                        )
-                                        replaceable = True
-                                    elif not replaceable:
-                                        replacement_paths[key] = normalized
-                            if replaceable:
-                                replaced_receipt = True
-                                if receipt_warnings is not None:
-                                    receipt_warnings.append(
-                                        f"Replaced invalid saved coverage receipt {ref}: {failure}"
-                                    )
-                                continue
-                            refs.append(ref)
+                            historical.append((ref, receipt_error(ref) if repaired else None))
+                # Bind verified spellings first so an invalid older alias cannot hide evidence.
+                historical.sort(key=lambda entry: entry[1] is not None)
+                for ref, failure in historical:
+                    if ref in refs:
+                        continue
+                    replaceable = isinstance(failure, MissingScanLocalFileError)
+                    if repaired and isinstance(ref, str):
+                        try:
+                            normalized = _require_portable_relative_path(
+                                ref, "Saved coverage receipt"
+                            )
+                        except ContractError as error:
+                            failure = error
+                            replaceable = True
+                        else:
+                            key = normalized.lower()
+                            previous = replacement_paths.get(key)
+                            if (
+                                previous is not None
+                                and previous != normalized
+                                and (
+                                    failure is None
+                                    or isinstance(failure, NonRegularScanLocalFileError)
+                                )
+                            ):
+                                failure = ContractError(
+                                    f"Saved coverage receipt: duplicate artifact path: {previous} and {normalized}"
+                                )
+                                replaceable = True
+                            elif failure is None:
+                                replacement_paths[key] = normalized
+                    if replaceable:
+                        replaced_receipt = True
+                        if receipt_warnings is not None:
+                            receipt_warnings.append(
+                                f"Replaced invalid saved coverage receipt {ref}: {failure}"
+                            )
+                        continue
+                    refs.append(ref)
             if repair_only and not replaced_receipt:
                 continue
             try:

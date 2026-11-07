@@ -117,6 +117,10 @@ class MissingScanLocalFileError(ContractError):
     """Raised when a scan-local file or its containing directory is absent."""
 
 
+class NonRegularScanLocalFileError(ContractError):
+    """Raised when a scan-local leaf exists but is not a regular, non-symlink file."""
+
+
 class RecoverableContractError(ContractError):
     """Raised when scan completion can safely be retried before publication."""
 
@@ -620,15 +624,21 @@ def _open_scan_local_file_with_path(
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
+        from windows_scan_local_files import WindowsScanLocalNonRegularFileError
+
         try:
             backend = _windows_scan_local_files()
             if resolve_spelling:
                 return backend.open_read_fd_with_path(scan_dir, relative_path, context)
             return backend.open_read_fd(scan_dir, relative_path, context), relative_path
+        except WindowsScanLocalNonRegularFileError as exc:
+            raise NonRegularScanLocalFileError(str(exc)) from exc
         except OSError as exc:
             # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
             if exc.errno in {2, 3}:
-                raise MissingScanLocalFileError(str(exc)) from exc
+                raise MissingScanLocalFileError(
+                    f"{context}: expected a file inside the scan directory"
+                ) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -655,14 +665,16 @@ def _open_scan_local_file_with_path(
                         link_target = scan_dir.joinpath(*parts[:-1], link_target)
                     link_target.resolve(strict=False).relative_to(scan_dir)
                 except (OSError, RuntimeError, ValueError):
-                    raise ContractError(
+                    raise NonRegularScanLocalFileError(
                         f"{context}: expected a file inside the scan directory"
                     ) from exc
-                raise ContractError(f"{context}: expected a regular non-symlink file") from exc
+                raise NonRegularScanLocalFileError(
+                    f"{context}: expected a regular non-symlink file"
+                ) from exc
             raise ContractError(f"{context}: expected a file inside the scan directory") from exc
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
-            raise ContractError(f"{context}: expected a regular non-symlink file")
+            raise NonRegularScanLocalFileError(f"{context}: expected a regular non-symlink file")
         if resolve_spelling:
             names = os.listdir(parent_fd)
             if parts[-1] not in names:

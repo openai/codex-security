@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import { finding } from "./scan-draft-fixture.ts";
@@ -454,7 +455,7 @@ async function testJoiningCallerAdmission(
       registry,
       runWorkbench,
       pluginRoot,
-      pythonCommand: process.env.PYTHON?.trim() || "python3",
+      pythonCommand: fixturePython,
       parentSandbox: { filesystemDenies: [] },
       threadId,
     });
@@ -491,7 +492,7 @@ async function testJoiningCallerAdmission(
 }
 
 async function expireLease(environment: NodeJS.ProcessEnv, scanId: string) {
-  await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+  await execFileAsync(fixturePython, [
     "-c",
     `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
@@ -666,13 +667,16 @@ async function createWorkbenchFixture(prefix: string) {
 }
 
 function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
-  const python = process.env.PYTHON?.trim() || "python3";
   return async (args: string[]) => {
-    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
-      cwd: pluginRoot,
-      env: environment,
-      ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
-    });
+    const { stdout } = await execFileAsync(
+      fixturePython,
+      [workbenchPath, ...args],
+      {
+        cwd: pluginRoot,
+        env: environment,
+        ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
+      },
+    );
     return JSON.parse(stdout);
   };
 }
@@ -1167,7 +1171,6 @@ async function testReducerCommitAndFinishAgainstRealWorkbench() {
   const scanRoot = path.join(fixtureRoot, "scans");
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-integration-thread";
-  const python = process.env.PYTHON?.trim() || "python3";
   const runWorkbench = mock.fn(createWorkbenchRunner(environment));
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
@@ -1217,7 +1220,7 @@ max_time_hours = 2.5
       observer.fail(run.scanId, "observer cannot fail its owner"),
       /current coordinator lease/,
     );
-    const writer = spawn(python, [
+    const writer = spawn(fixturePython, [
       "-c",
       `import sqlite3, sys
 connection = sqlite3.connect(sys.argv[1])
@@ -1795,7 +1798,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     );
     const runSql = async (sql: string) =>
       execFileAsync(
-        process.env.PYTHON?.trim() || "python3",
+        fixturePython,
         [
           "-c",
           "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); connection.executescript(sys.argv[2]); connection.close()",

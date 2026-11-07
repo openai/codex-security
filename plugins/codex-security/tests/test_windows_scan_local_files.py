@@ -51,6 +51,18 @@ def test_accepts_normal_scan_local_path() -> None:
     )
 
 
+@pytest.mark.parametrize("relative_path", ["missing.bin", "missing/artifact.bin"])
+def test_missing_scan_local_file_reports_a_portable_error(
+    tmp_path: Path, relative_path: str
+) -> None:
+    finalizer = load_script("finalize_scan_contract")
+
+    with pytest.raises(finalizer.MissingScanLocalFileError) as error:
+        finalizer.open_scan_local_file_descriptor(tmp_path, relative_path, "Saved artifact")
+
+    assert str(error.value) == "Saved artifact: expected a file inside the scan directory"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 security APIs")
 def test_directory_acl_copy_does_not_create_from_a_missing_source(tmp_path: Path) -> None:
     destination = tmp_path / "replacement"
