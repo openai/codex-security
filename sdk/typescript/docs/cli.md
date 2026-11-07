@@ -1305,10 +1305,12 @@ selection. It lists repositories pushed in the last 90 days, excluding forks
 and archives, asks for output, and saves the selection as `repositories.csv`.
 Private checkouts use your GitHub CLI login.
 
-A local `.git` marker can identify either bare storage or a working tree.
-When that distinction is ambiguous, bulk scans treat the marker's parent as a
-possible worktree. To select a shared prompt or knowledge-base document outside
-that directory, pass its canonical path directly.
+A usable local Git source selected by its directory protects document links
+inside it. For a standard SHA-1 repository created with `git init --bare` or
+`git clone --bare`, a `.git` marker can identify the storage alone. If other
+Git settings leave ownership ambiguous, bulk scans also protect the marker's
+parent. Pass the canonical path to select a shared external prompt or
+knowledge-base document in that case.
 
 For CI, provide CSV with `id`, `repository`, and a full commit `revision`.
 Optional `scope`, `mode`, and `prompt` customize each row:

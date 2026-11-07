@@ -47,10 +47,13 @@ async function bareMetadataRoots(
 async function readMetadataText(
   path: string,
   signal?: AbortSignal,
-  format?: "gitfile" | "HEAD",
+  format?: "gitfile" | "HEAD" | "generated config",
 ): Promise<string | undefined> {
   const selected = await abortable(
-    () => stat(path).catch(nullIfMissingPath),
+    () =>
+      (format === "generated config" ? lstat : stat)(path).catch(
+        nullIfMissingPath,
+      ),
     signal,
   );
   if (!selected?.isFile()) return undefined;
@@ -58,20 +61,36 @@ async function readMetadataText(
     path,
     constants.O_RDONLY |
       (constants.O_NONBLOCK ?? 0) |
-      (format === "HEAD" ? (constants.O_NOFOLLOW ?? 0) : 0),
+      (format === "HEAD" || format === "generated config"
+        ? (constants.O_NOFOLLOW ?? 0)
+        : 0),
   );
   try {
     const metadata = await abortable(() => file.stat(), signal);
     if (!metadata.isFile()) return undefined;
     if (format === undefined)
       return await file.readFile({ encoding: "utf8", signal });
-    // Match Git's 1 MiB gitfile limit and its 255-byte HEAD prefix.
-    if (format === "gitfile" && metadata.size > 1024 * 1024) return undefined;
-    const length = format === "HEAD" ? 255 : metadata.size;
-    if (!length) return "";
-    const bytes = await buffer(
-      file.createReadStream({ end: length - 1, signal }),
-    );
+    // Git reads a 255-byte HEAD prefix. Use its 1 MiB gitfile limit for optional config recognition too.
+    if (format !== "HEAD" && metadata.size > 1024 * 1024) return undefined;
+    if (
+      format === "generated config" &&
+      (metadata.dev !== selected.dev || metadata.ino !== selected.ino)
+    )
+      return undefined;
+    const end = format === "HEAD" ? 254 : metadata.size;
+    const bytes = await buffer(file.createReadStream({ end, signal }));
+    if (format !== "HEAD" && bytes.length !== metadata.size) return undefined;
+    if (format === "generated config") {
+      const current = await lstat(path).catch(nullIfMissingPath);
+      if (
+        !current?.isFile() ||
+        current.dev !== metadata.dev ||
+        current.ino !== metadata.ino ||
+        current.size !== metadata.size ||
+        current.ctimeMs !== metadata.ctimeMs
+      )
+        return undefined;
+    }
     return bytes.toString("utf8");
   } finally {
     await file.close();
@@ -195,14 +214,54 @@ async function gitSourceStorage(
   return associatedMetadataRoots(target, context, signal, context.directory);
 }
 
+async function isGeneratedBareStorage(directory: string, signal?: AbortSignal) {
+  const count = environmentEntry(process.env, "GIT_CONFIG_COUNT");
+  if (
+    (count !== undefined && count !== "0") ||
+    [
+      "GIT_DIR",
+      "GIT_WORK_TREE",
+      "GIT_COMMON_DIR",
+      "GIT_CONFIG_PARAMETERS",
+    ].some((key) => environmentEntry(process.env, key) !== undefined)
+  )
+    return false;
+  if (await lstat(join(directory, "config.worktree")).catch(nullIfMissingPath))
+    return false;
+  const config = await readMetadataText(
+    join(directory, "config"),
+    signal,
+    "generated config",
+  );
+  if (config === undefined) return false;
+  const text = config.replaceAll("\r\n", "\n");
+  // Only Git's generated core header, platform flags and optional bare-clone remote describe bare storage here.
+  const header =
+    /^\[core\]\n\trepositoryformatversion = 0\n\tfilemode = (?:true|false)\n\tbare = true\n/u.exec(
+      text,
+    );
+  if (header === null) return false;
+  const tail = text
+    .slice(header[0].length)
+    .replace(
+      /^(?:\t(?:ignorecase|precomposeunicode|symlinks) = (?:true|false)\n)*/u,
+      "",
+    );
+  return (
+    tail === "" ||
+    /^\[remote "[A-Za-z0-9_.-]+"\]\n\turl = [^\0\r\n]+\n$/u.test(tail)
+  );
+}
+
 /** Match the local upload-pack source and its document boundaries before workers fetch it. */
 export async function localGitSourceRoots(
   repository: string,
   signal?: AbortSignal,
 ): Promise<string[]> {
   const suffixed = repository + ".git";
+  const worktreeMarker = join(repository, ".git");
   for (const entry of [
-    join(repository, ".git"),
+    worktreeMarker,
     repository,
     join(suffixed, ".git"),
     suffixed,
@@ -216,8 +275,17 @@ export async function localGitSourceRoots(
       signal,
     ).catch(nullIfUnavailableInputRoot);
     const target = storage?.[0];
-    if (storage && target)
-      return worktreeDocumentRoots(entry, target, storage, signal);
+    if (storage && target) {
+      const selectedDirectory =
+        entry === worktreeMarker ? await realpath(repository) : undefined;
+      return worktreeDocumentRoots(
+        entry,
+        target,
+        storage,
+        selectedDirectory,
+        signal,
+      );
+    }
     // A regular file (including a bundle) ends Git's search and owns no directories.
     if (metadata.isFile()) return [];
   }
@@ -228,6 +296,7 @@ async function worktreeDocumentRoots(
   entry: string,
   target: string,
   storage: readonly string[],
+  selectedDirectory: string | undefined,
   signal?: AbortSignal,
 ) {
   const common = storage[1];
@@ -283,11 +352,20 @@ async function worktreeDocumentRoots(
     )
       owners.push(candidate);
   }
-  const roots = [...new Set([...owners, ...storage])];
+  const worktrees =
+    common === undefined &&
+    owners.some((owner) => owner !== selectedDirectory) &&
+    (await isGeneratedBareStorage(target, signal).catch(() => {
+      signal?.throwIfAborted();
+      return false;
+    }))
+      ? owners.filter((owner) => owner === selectedDirectory)
+      : owners;
+  const roots = [...new Set([...worktrees, ...storage])];
   // A worktree retains its own link boundary even when it lives inside Git storage.
   return roots.filter(
     (root) =>
-      owners.includes(root) ||
+      worktrees.includes(root) ||
       !roots.some((other) => other !== root && isWithin(other, root)),
   );
 }

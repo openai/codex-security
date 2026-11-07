@@ -1046,6 +1046,75 @@ describe("multiscan", () => {
     },
   );
 
+  test.each([
+    "init",
+    "clone",
+    "explicit directory",
+    "nonbare",
+    "duplicate",
+    "worktree config",
+    "linked",
+    "commondir",
+    "include",
+  ])("bulk document ownership with %s metadata", async (kind) => {
+    const paths = await fixture();
+    const primary = await repository(paths.root, "source");
+    const storage = join(paths.root, "storage");
+    if (kind === "init") {
+      git(paths.root, "init", "--bare", "--quiet", storage);
+      git(primary.path, "push", "--quiet", storage, "HEAD:refs/heads/example");
+    } else {
+      git(paths.root, "clone", "--bare", "--quiet", primary.path, storage);
+    }
+    if (kind === "nonbare") git(storage, "config", "core.bare", "false");
+    if (kind === "duplicate")
+      git(storage, "config", "--add", "core.bare", "false");
+    if (kind === "worktree config") {
+      git(storage, "config", "extensions.worktreeConfig", "true");
+      await writeFile(
+        join(storage, "config.worktree"),
+        "[core]\n\tbare = false\n",
+      );
+    }
+    if (kind === "include") {
+      const included = join(paths.root, "included.cfg");
+      await writeFile(included, "[core]\n\tbare = false\n");
+      git(storage, "config", "include.path", included);
+    }
+    if (kind === "commondir")
+      await writeFile(join(storage, "commondir"), ".\n");
+    const operator = join(paths.root, "operator");
+    const marker = join(operator, ".git");
+    if (kind === "linked") {
+      git(storage, "worktree", "add", "--detach", operator, primary.revision);
+    } else {
+      await mkdir(operator);
+      if (kind === "init")
+        await filesystem.symlink(storage, marker, "junction");
+      else await writeFile(marker, `gitdir: ${storage}\n`);
+    }
+    await writeFile(
+      join(paths.root, "guide.md"),
+      "Synthetic shared instructions.",
+    );
+    await filesystem.symlink(paths.root, join(operator, "docs"), "junction");
+    const selection = kind === "explicit directory" ? operator : marker;
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrow,${selection},${primary.revision}\n`,
+    );
+    const summary = await runMultiscan(
+      options(paths, client(completeRun), {
+        maxAttempts: 1,
+        knowledgeBasePaths: [join(operator, "docs", "guide.md")],
+      }),
+    );
+    const [row] = await results(summary.resultsPath);
+    if (kind === "init" || kind === "clone")
+      expect(row?.["status"]).toBe("completed");
+    else expect(row?.["error"]).toContain("repository symbolic link");
+  });
+
   test("shared knowledge failures affect all modes before mode-specific inputs", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "shared-knowledge");
