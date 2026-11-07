@@ -569,6 +569,17 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
       mkdirSync(interpreters);
       symlinkSync(join(f.repo, "sh"), join(interpreters, "sh"));
       symlinkSync(join(f.repo, "sh"), join(interpreters, "final-sh"));
+      const checkoutRuntime = join(f.repo, "runtime");
+      copyFileSync(process.execPath, checkoutRuntime);
+      const loader = join(interpreters, "loader");
+      symlinkSync(checkoutRuntime, loader);
+      const scripts = join(f.root, "scripts");
+      mkdirSync(scripts);
+      writeFileSync(
+        join(scripts, "sh"),
+        `#!${loader}\nawait Bun.write("shim-ran", "used"); process.exit(73);\n`,
+        { mode: 0o700 },
+      );
       const missing = join(f.root, "incomplete");
       mkdirSync(missing);
       writeFileSync(join(missing, "sh"), "#!/missing-interpreter\n", {
@@ -606,6 +617,7 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
           "",
           ".",
           missing,
+          scripts,
           interpreters,
           shell,
           alias,
@@ -640,6 +652,58 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
       expect(result.status).not.toBe(0);
     },
   );
+  for (const nested of [false, true]) {
+    // Linux can execute a script as another script's shebang interpreter.
+    test.skipIf(
+      process.platform === "win32" || (nested && process.platform !== "linux"),
+    )(
+      `${command} checks ${nested ? "nested " : ""}absolute ripgrep interpreters before launch`,
+      () => {
+        const f = fixture();
+        f.write("scope/visible.py");
+        const checkoutRuntime = join(f.repo, "runtime");
+        copyFileSync(process.execPath, checkoutRuntime);
+        const directories = ["first", "fallback"].map((name) => {
+          const directory = join(f.root, name);
+          mkdirSync(directory);
+          const shell = join(directory, "sh");
+          symlinkSync(name === "first" ? checkoutRuntime : "/bin/sh", shell);
+          const recordUnsafeLaunch =
+            'await Bun.write("first-ran", "used"); process.exit(73);';
+          const interpreter = nested ? join(directory, "interpreter") : shell;
+          if (nested) {
+            const dispatch =
+              name === "first" ? recordUnsafeLaunch : 'exec /bin/sh "$@"';
+            writeFileSync(interpreter, `#!${shell}\n${dispatch}\n`, {
+              mode: 0o700,
+            });
+          }
+          const script =
+            name === "first"
+              ? recordUnsafeLaunch
+              : 'printf used > fallback-ran\nexec "$INVENTORY_SEARCH" "$@"';
+          writeFileSync(
+            join(directory, "rg"),
+            `#!${interpreter}\n${script}\n`,
+            { mode: 0o700 },
+          );
+          return directory;
+        });
+        const result = runPathInventory(f, command, {
+          ...f.toolEnvironment,
+          PATH: directories.join(delimiter),
+          INVENTORY_SEARCH: Bun.which("rg", {
+            PATH: f.toolEnvironment["PATH"],
+          })!,
+          CODEX_SECURITY_GIT: "",
+        });
+        expect(readdirSync(f.repo)).not.toContain("first-ran");
+        expect(readdirSync(f.repo)).toContain("fallback-ran");
+        expect(result.status, result.stderr).toBe(0);
+        expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
+      },
+    );
+  }
   test.skipIf(process.platform === "win32")(
     `${command} continues PATH lookup after a missing ripgrep interpreter`,
     () => {

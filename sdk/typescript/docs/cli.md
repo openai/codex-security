@@ -1322,10 +1322,13 @@ source and campaign checkout. Inventory uses an external ripgrep executable or
 the copy shipped with the selected Codex installation.
 
 On POSIX, campaign processes and script-based inventory tools search readable
-tool directories. When a directory contains a link into a selected source, its
-other tools remain available through temporary links. Keep helpers that locate
-their installation relative to their invoked path, such as virtual environments,
-in directories without such links. On Windows, the campaign omits a tool directory
+tool directories. Launchers must be readable so their shebang interpreters can
+be checked. Use an absolute interpreter path for campaign scripts, including
+`#!/usr/bin/env sh`, because workers run in different directories. When a directory contains an
+ineligible launcher or a link into a selected source, its other tools remain
+available through temporary links. Keep tools that locate resources relative to
+their invoked path, such as virtual environments, in directories where every
+entry can be used. On Windows, the campaign omits a tool directory
 from the child PATH if its Git or ripgrep link passes through a selected source.
 
 CSV scopes are literal paths relative to each checkout, including names such

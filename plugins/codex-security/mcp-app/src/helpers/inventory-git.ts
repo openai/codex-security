@@ -10,6 +10,7 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   lstatSync,
   mkdirSync,
@@ -29,7 +30,7 @@ import {
   sep,
 } from "node:path";
 import { createRequire } from "node:module";
-import { constants, tmpdir } from "node:os";
+import { constants, release, tmpdir } from "node:os";
 import { spawnWindowsProcess } from "../../../native/windows-process.mjs";
 import { nativeTarget } from "../../../native/platform.mjs";
 import {
@@ -136,15 +137,79 @@ const nativeImageMagic = new Set(
     : [0x7f454c46],
 ); // ELF
 
-function scriptExecutable(command: string): boolean {
-  if (!executable(command)) return false;
+// Linux reads BINPRM_BUF_SIZE bytes for exec. XNU uses IMG_SHSIZE and also
+// treats "#" as a shebang terminator. Arguments are left entirely to the OS.
+const macShebang = process.platform === "darwin";
+const legacyLinuxShebang =
+  process.platform === "linux" &&
+  /^(?:[0-4]\.|5\.0(?:\.|-|$))/u.test(release());
+const headerSize = macShebang ? 512 : 256;
+function toolHeader(path: string): "native" | "text" | string[] | undefined {
   try {
-    for (const chunk of readChunks(command))
-      return chunk.length < 4 || !nativeImageMagic.has(chunk.readUInt32BE());
-    return false;
+    for (const chunk of readChunks(path, undefined, headerSize)) {
+      if (chunk.length >= 4 && nativeImageMagic.has(chunk.readUInt32BE()))
+        return "native";
+      if (chunk[0] !== 35 || chunk[1] !== 33) return "text";
+      const line = chunk.subarray(2).toString("latin1");
+      if (macShebang && !/[#\n]/u.test(line)) return "text";
+      const pattern = macShebang
+        ? /^[ \t]*([^ \t#\n\0]+)/u
+        : /^[ \t]*([^ \t\n\0]+)/u;
+      const token = pattern.exec(line);
+      const names: string[] = [];
+      if (
+        token &&
+        (macShebang ||
+          chunk.length < headerSize ||
+          token[0].length < line.length)
+      )
+        names.push(token[1]!);
+      // Older Linux kernels could execute a name truncated at header byte 127.
+      // Check both spellings on those releases, including vendor backports.
+      if (legacyLinuxShebang && token && token[0].length > 125) {
+        const truncated = pattern.exec(line.slice(0, 125))?.[1];
+        if (truncated) names.push(truncated);
+      }
+      return names.length
+        ? names.map((name) => decodePosixBytes(Buffer.from(name, "latin1")))
+        : "text";
+    }
+    return "text";
   } catch {
-    return true;
+    return undefined;
   }
+}
+
+function interpreterCheck(
+  cwd: string,
+  allowsPath: (path: string) => boolean,
+  shared: boolean,
+) {
+  const checked = new Map<string, boolean>();
+  function allows(path: string, loader = false): boolean {
+    const prior = checked.get(path);
+    if (prior !== undefined) return prior;
+    if (!executable(path)) return true; // Leave missing loaders and EACCES to exec.
+    const header = toolHeader(path);
+    if (!header) return false;
+    if (typeof header === "string") {
+      if (loader) checked.set(path, true);
+      return true;
+    }
+    checked.set(path, true); // A cycle without a protected path is an OS launch error.
+    const safe = header.every((interpreter) => {
+      // A campaign's PATH is reused by children in different working directories.
+      if (shared && !isAbsolute(interpreter)) return false;
+      const file = isAbsolute(interpreter)
+        ? interpreter
+        : append(cwd, interpreter);
+      // XNU redirects once; Linux can chain interpreter scripts.
+      return allowsPath(file) && (macShebang || allows(file, true));
+    });
+    checked.set(path, safe);
+    return safe;
+  }
+  return allows;
 }
 
 // libuv can return Win32 link targets using the extended drive or UNC spelling.
@@ -236,7 +301,7 @@ function scriptPathDirectory(
   directory: string,
   isProtected: (path: string) => boolean,
   temporary: string[],
-  campaignAllows?: (path: string) => boolean,
+  allows: (path: string, link: boolean) => boolean,
 ): string {
   const entries = readdirSync(fsPath(directory), {
     withFileTypes: true,
@@ -247,11 +312,9 @@ function scriptPathDirectory(
     decodePosixBytes(Buffer.isBuffer(entry) ? entry : entry.name);
   const allowed = entries.filter((entry) => {
     const path = append(directory, nameOf(entry));
-    if (!(Buffer.isBuffer(entry) ? lstat(path) : entry).isSymbolicLink())
-      return true;
-    return campaignAllows
-      ? campaignAllows(path)
-      : !executable(path) || !isProtected(canonical(path));
+    const kind = Buffer.isBuffer(entry) ? lstat(path) : entry;
+    const link = kind.isSymbolicLink();
+    return (!link && !kind.isFile()) || allows(path, link);
   });
   if (allowed.length === entries.length) return directory;
   // Keep safe neighbors in their original PATH position. env and the kernel
@@ -298,14 +361,20 @@ export function inventoryToolPath(
       if (boundaries.has(key(parent))) return true;
     return false;
   };
-  const allows =
-    mode === "campaign" ? campaignPathCheck(isProtected, cwd) : undefined;
+  const pathAllowed = campaignPathCheck(isProtected, cwd);
   // Windows removes unsafe search entries in the SDK, before CreateProcess.
-  if (windows) return { path, allows, cleanup() {} };
+  if (windows) return { path, allows: pathAllowed, cleanup() {} };
+  const interpreterAllowed = interpreterCheck(
+    cwd,
+    pathAllowed,
+    mode === "campaign",
+  );
+  const allows = (file: string) =>
+    pathAllowed(file) && interpreterAllowed(file);
   const directories = path.split(delimiter).flatMap((entry) => {
     try {
       const lookup = isAbsolute(entry) ? entry : append(cwd, entry);
-      if (allows && !allows(lookup)) return [];
+      if (mode === "campaign" && !pathAllowed(lookup)) return [];
       let directory = canonical(lookup);
       if (isProtected(directory)) return [];
       if (mode !== "native")
@@ -313,11 +382,13 @@ export function inventoryToolPath(
           directory,
           isProtected,
           temporary,
-          allows,
+          (file, link) => (link ? allows(file) : interpreterAllowed(file)),
         );
       // A directory containing ":" can be on PATH through an external alias.
       if (directory.includes(delimiter))
-        return lookup.includes(delimiter) || isProtected(resolve(lookup))
+        return lookup.includes(delimiter) ||
+          isProtected(resolve(lookup)) ||
+          !pathAllowed(lookup)
           ? []
           : [lookup];
       return [directory];
@@ -383,6 +454,13 @@ function* trustedTools(
             : [name];
           return names.map((name) => append(directory, name));
         });
+  const cwd = name === "git" ? process.cwd() : target;
+  const pathAllowed = campaignPathCheck(
+    (path) => isRepositoryPath(protectedRoot, path),
+    cwd,
+  );
+  const interpreterAllowed =
+    !windows && interpreterCheck(cwd, pathAllowed, false);
   let lookupDenied = false;
   for (const selected of candidates) {
     const candidate =
@@ -414,12 +492,15 @@ function* trustedTools(
         (!/\.(exe|com)$/iu.test(candidate) || /\.(bat|cmd)$/iu.test(resolved)))
     )
       continue;
-    const inRepository = [resolve(candidate), invocation, resolved].some(
-      (path) => isRepositoryPath(protectedRoot, path),
-    );
+    const inRepository =
+      [resolve(candidate), invocation, resolved].some((path) =>
+        isRepositoryPath(protectedRoot, path),
+      ) ||
+      (!windows && !pathAllowed(candidate));
     if (
-      inRepository &&
-      !(name === "rg" && selectedBundledRipgrep(resolved, protectedRoot))
+      (inRepository &&
+        !(name === "rg" && selectedBundledRipgrep(resolved, protectedRoot))) ||
+      (interpreterAllowed && !interpreterAllowed(resolved))
     ) {
       if (configured !== undefined)
         throw new Error(
@@ -456,6 +537,21 @@ type ToolOptions = SpawnOptions & {
   stdio: ["ignore" | "pipe", "pipe", "pipe"];
 };
 
+const inventoryViews = new AsyncLocalStorage<
+  Map<string, ReturnType<typeof inventoryToolPath>>
+>();
+
+export async function withInventoryToolPaths<T>(
+  run: () => Promise<T>,
+): Promise<T> {
+  const views = new Map<string, ReturnType<typeof inventoryToolPath>>();
+  try {
+    return await inventoryViews.run(views, run);
+  } finally {
+    for (const view of views.values()) view.cleanup();
+  }
+}
+
 function spawnInventoryTool(
   command: string,
   args: string[],
@@ -465,12 +561,18 @@ function spawnInventoryTool(
 ) {
   if (windows || inherited.PATH === undefined)
     return spawnTool(command, args, options, inherited);
-  const view = inventoryToolPath(
-    inherited.PATH,
-    options.cwd ?? process.cwd(),
-    [root],
-    scriptExecutable(command) ? "script" : "native",
-  );
+  const cwd = options.cwd ?? process.cwd();
+  const mode =
+    executable(command) && toolHeader(command) !== "native"
+      ? "script"
+      : "native";
+  const views = inventoryViews.getStore();
+  const key = JSON.stringify([root, cwd, inherited.PATH, mode]);
+  let view = views?.get(key);
+  if (!view) {
+    view = inventoryToolPath(inherited.PATH, cwd, [root], mode);
+    views?.set(key, view);
+  }
   const PATH = view.path;
   try {
     const result = spawnTool(
@@ -479,10 +581,10 @@ function spawnInventoryTool(
       { ...options, env: { ...(options.env ?? process.env), PATH } },
       { ...inherited, PATH },
     );
-    result.child.once("close", view.cleanup);
+    if (!views) result.child.once("close", view.cleanup);
     return result;
   } catch (error) {
-    view.cleanup();
+    if (!views) view.cleanup();
     throw error;
   }
 }
