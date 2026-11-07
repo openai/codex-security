@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 
 
 def descriptor_relative_writes_available() -> bool:
+    """Return whether the platform supports the descriptor-relative operations used for writes."""
     # os.replace accepts src_dir_fd/dst_dir_fd wherever descriptor-relative
     # os.rename is supported, but Python lists only os.rename in supports_dir_fd.
     required_operations = (os.mkdir, os.open, os.rename, os.stat, os.unlink)
@@ -24,6 +25,7 @@ def descriptor_relative_writes_available() -> bool:
 
 @contextmanager
 def managed_fd(descriptor: int) -> Iterator[int]:
+    """Yield the descriptor and close it when the context exits, including on error."""
     try:
         yield descriptor
     finally:
@@ -34,6 +36,7 @@ def managed_fd(descriptor: int) -> Iterator[int]:
 def stage_file(
     parent_fd: int, filename: str, payload: bytes, owner_read_write: bool
 ) -> Iterator[int]:
+    """Yield a synced file descriptor for a new staging entry, removing the entry on exit if it still matches."""
     descriptor = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
     try:
         with os.fdopen(descriptor, "wb", closefd=False) as handle:
@@ -56,6 +59,7 @@ def stage_file(
 
 
 def _rename_exclusive(parent_fd: int, source: str, destination: str) -> None:
+    """Rename a directory entry atomically while requiring the destination to be absent."""
     import ctypes
 
     libc = ctypes.CDLL(None, use_errno=True)
@@ -87,6 +91,7 @@ def _rename_exclusive(parent_fd: int, source: str, destination: str) -> None:
 
 
 def publish_new_file(parent_fd: int, source: str, destination: str) -> None:
+    """Publish the staged name without overwriting the destination, using an exclusive rename if linking is unavailable."""
     try:
         os.link(
             source, destination, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False
@@ -118,6 +123,12 @@ def stage_write(
     check_parent: Callable[[Path], None],
     contract_error: type[ValueError],
 ) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
+    """Stage payload under the open parent directory and yield a callable that publishes it.
+
+    Call the publisher inside the context. It returns file metadata and the
+    change time in nanoseconds. With compare_existing, matching bytes can
+    reuse an existing file when replacements are allowed.
+    """
     name = PurePosixPath(relative_path).name
     # Stage through the held parent so a replacement path cannot redirect the write.
     try:

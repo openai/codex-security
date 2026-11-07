@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 
 def main() -> None:
+    """Back up the read-only source database into a separate destination using SQLite’s backup API."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)

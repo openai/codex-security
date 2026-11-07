@@ -1,21 +1,23 @@
+import { asRecord } from "../record.js";
 import type { DeepScanRunState } from "./types.js";
 
 const STALE_COORDINATOR_GENERATION_MESSAGE =
   "Deep Scan coordinator lease belongs to a newer generation.";
 
 // The SDK currently exposes only the message for turn errors. Match known
-// refusal messages exactly so repository output embedded in another error
-// cannot be mistaken for a refusal.
+// terminal messages exactly so repository output embedded in another error
+// cannot be mistaken for a permanent failure.
 const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
   "Request blocked by cyberPolicy.",
   "Request blocked by a safety policy violation.",
   "This content was flagged for possible cybersecurity risk.",
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
   "This content was flagged for potentially high-risk cyber activity.",
   "This request has been flagged for possible cybersecurity risk.",
   "This request has been flagged for potentially high-risk cyber activity.",
 ]);
 
-/** Explicitly opt a confirmed scan-wide prerequisite failure out of retries. */
+/** A confirmed terminal worker failure that stops the scan without retries. */
 export class DeepScanNonRetryableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -32,10 +34,11 @@ const USAGE_LIMIT_MESSAGES = new Set([
   "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
 ]);
 
-// Codex exec exposes only text for failed turns. Match its native quota messages here.
+// Classify only terminal turn failures; diagnostics can contain arbitrary output.
 export function codexWorkerTurnError(message: string): Error {
   const reason = message.replace(/^Error running remote compact task: /, "");
   if (
+    CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message) ||
     USAGE_LIMIT_MESSAGES.has(reason) ||
     reason.startsWith("You’ve hit your usage limit.") ||
     reason.startsWith("You’ve hit your usage limit for ")
@@ -85,16 +88,10 @@ export function isStaleCoordinatorGenerationError(error: unknown): boolean {
   return false;
 }
 
-/** A safety refusal retires the refused thread; it is not a broken scan. */
-export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
-  return CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(errorMessage(error));
-}
-
 export function classifyCodexWorkerError(error: unknown): Error {
   // OS error codes alone do not establish a permanent failure, and SDK errors
   // can contain arbitrary command output. Leave both on the normal retry path
-  // unless a producer explicitly identifies the failure as nonretryable. The
-  // worker runner handles exact policy refusals without failing the scan.
+  // unless a producer explicitly identifies the failure as nonretryable.
   return error instanceof Error ? error : new Error(String(error));
 }
 
@@ -106,6 +103,15 @@ export function abortError(reason?: unknown): Error {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function exceedsContext(error: unknown) {
+  return (
+    asRecord(error)?.code === "context_length_exceeded" ||
+    /\b(?:context_length_exceeded|context (?:length|window) exceeded|maximum context length is|exceeds? (?:the |this model's |the model's )?context (?:length|window)|(?:ran out of room in|exceeded) (?:the |this model's |the model's )?context window)\b/i.test(
+      errorMessage(error),
+    )
+  );
 }
 
 export function errorNameWithCode(error: Error): string {

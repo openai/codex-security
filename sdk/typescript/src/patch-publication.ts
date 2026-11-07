@@ -138,7 +138,7 @@ export function createGitLabPatchPublisher({
   };
 }
 
-function gitlabPatchDescription(body: string): string {
+export function gitlabPatchDescription(body: string): string {
   // GitLab ignores quick actions inside its native fenced blockquotes. Choose
   // a fence the report cannot close after quick-action CR removal; preserve its
   // original bytes and end the outer quote at EOF.

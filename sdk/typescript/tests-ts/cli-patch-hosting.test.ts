@@ -1,8 +1,8 @@
 import { gitText } from "./support/shell.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, realpath, rmdir, writeFile } from "node:fs/promises";
+import { delimiter, dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -121,11 +121,14 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each(["preflight", "push"] as const)(
+  test.each(["preflight", "push", "push from removed component"] as const)(
     "HTTP %s uses the operator credential helper without executing checkout helpers",
     async (stage) => {
       const { directory, git } = await publicationRepository();
       const external = await fixtures.create("patch-credentials-");
+      const component = join(directory, "component");
+      const removesComponent = stage === "push from removed component";
+      if (removesComponent) await mkdir(component);
       let challenged = false;
       const server = Bun.serve({
         hostname: "127.0.0.1",
@@ -176,7 +179,7 @@ describe("patch change tracking", () => {
           "config",
           "--file",
           global,
-          stage === "push"
+          stage !== "preflight"
             ? "includeIf.onbranch:codex-security/**.path"
             : "include.path",
           checkout,
@@ -192,20 +195,25 @@ describe("patch change tracking", () => {
           NO_PROXY: "127.0.0.1",
         };
         const outcome = await runWorkflow(
-          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          removesComponent
+            ? ["patch", "Synthetic issue", "--create-pr", "--json"]
+            : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
           {
-            currentDirectory: directory,
+            currentDirectory: removesComponent ? component : directory,
             environment,
             onWorkbench: () =>
               savedScan(resultWithFindings(["high"]), "scan-1", directory),
             onCodex: async (args, output) => {
+              if (removesComponent) await rmdir(component);
               await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-              completePatches(args, output);
+              if (removesComponent) output?.stdout.write("Patch complete.\n");
+              else completePatches(args, output);
               return 0;
             },
             onRepositoryCommand: (tool, args, cwd, options) => {
               if (tool !== "git") return "";
-              if (stage === "push" && args.includes("ls-remote")) return "";
+              if (stage !== "preflight" && args.includes("ls-remote"))
+                return "";
               return runRepositoryCommand(tool, args, cwd, {
                 ...options,
                 environment: { ...environment, ...options?.environment },
@@ -223,7 +231,7 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each(["local", "include"] as const)(
+  test.each(["local", "include", "separate caller include"] as const)(
     "publication preflight refuses a checkout-selected SSH command from %s",
     async (source) => {
       const { directory, git } = await publicationRepository();
@@ -236,8 +244,12 @@ describe("patch change tracking", () => {
       );
       const commandPath = (value: string) => `"${value.replaceAll("\\", "/")}"`;
       const config = join(directory, "transport.gitconfig");
+      const separate = source === "separate caller include";
+      const tree = separate
+        ? await fixtures.create("patch-ssh-worktree-")
+        : directory;
       const environment: NodeJS.ProcessEnv = {};
-      if (source === "include") {
+      if (source !== "local") {
         environment["GIT_CONFIG_GLOBAL"] = join(external, "user.gitconfig");
         git(
           "config",
@@ -249,13 +261,18 @@ describe("patch change tracking", () => {
       }
       git(
         "config",
-        ...(source === "include" ? ["--file", config] : []),
+        ...(source !== "local" ? ["--file", config] : []),
         "core.sshCommand",
         [process.execPath, script, marker].map(commandPath).join(" "),
       );
-      if (source === "include") {
+      if (source !== "local") {
         git("add", "transport.gitconfig");
         git("commit", "-m", "Synthetic checkout configuration");
+      }
+      if (separate) {
+        git("--work-tree=" + tree, "checkout-index", "--all");
+        environment["GIT_WORK_TREE"] = tree;
+        environment["GIT_DIR"] = join(directory, ".git");
       }
       git(
         "remote",
@@ -265,12 +282,14 @@ describe("patch change tracking", () => {
       );
       const model = mock(async () => 0);
       const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        separate
+          ? ["patch", "Synthetic issue", "--create-pr", "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
           environment,
           onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+            savedScan(resultWithFindings(["high"]), "scan-1", tree),
           onCodex: model,
           onRepositoryCommand: (command, args, cwd, options) =>
             command === "git"
@@ -288,6 +307,146 @@ describe("patch change tracking", () => {
       expect(model).not.toHaveBeenCalled();
     },
   );
+
+  test.each([
+    ["core.gitProxy", "git://gitlab.com/test/project.git", "core.gitProxy"],
+    [
+      "http.proxy",
+      "https://gitlab.com/test/project.git",
+      "checkout-selected HTTP",
+    ],
+    [
+      "remote.origin.proxy",
+      "https://gitlab.com/test/project.git",
+      "remote.origin.proxy",
+    ],
+    [
+      "credential.helper",
+      "https://gitlab.com/test/project.git",
+      "fixture credentials checked",
+    ],
+  ] as const)(
+    "excludes caller-owned %s for a separate worktree",
+    async (setting, remote, error) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-separate-config-");
+      const tree = join(external, "tree");
+      await mkdir(tree);
+      git("--work-tree=" + tree, "checkout-index", "--all");
+      const included = join(directory, "transport.gitconfig");
+      const global = join(external, "global.gitconfig");
+      git("config", "--file", global, "include.path", included);
+      git("config", "--file", included, setting, "fixture-caller-value");
+      git("remote", "set-url", "origin", remote);
+      const environment = {
+        GIT_DIR: join(directory, ".git"),
+        GIT_WORK_TREE: tree,
+        GIT_CONFIG_GLOBAL: global,
+      };
+      const model = mock(() => 0);
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment,
+          onCodex: model,
+          onRepositoryCommand: (tool, args, cwd, options) => {
+            if (tool !== "git") return "";
+            if (args.includes("ls-remote")) {
+              expect(setting).toBe("credential.helper");
+              expect(Object.values(options?.environment ?? {})).not.toContain(
+                "fixture-caller-value",
+              );
+              throw new Error("fixture credentials checked");
+            }
+            return runGitRepositoryCommand(tool, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            });
+          },
+        },
+        { localHosting: false },
+      );
+      expect(outcome.stderr).toContain(error);
+      expect(model).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    "relative external command",
+    "relative external executable",
+    "relative external core command",
+    "checkout program",
+    "shell expansion",
+    "checkout SSH configuration",
+    "ambiguous known-hosts list",
+  ])("binds the %s before running a patch", async (kind) => {
+    const { directory, git } = await publicationRepository();
+    const external = await realpath(
+      await fixtures.create("patch-ssh-external-"),
+    );
+    const component = join(directory, "component");
+    await mkdir(component);
+    const safe = kind.startsWith("relative external");
+    const helper = join(safe ? external : directory, "operator's ssh");
+    await writeFile(helper, "", { mode: 0o700 });
+    const relativeHelper = relative(directory, helper).replaceAll("\\", "/");
+    const configured =
+      '"' + (safe ? relativeHelper : "./" + relativeHelper) + '"';
+    const environment: NodeJS.ProcessEnv = {};
+    if (kind.endsWith("core command")) {
+      const config = join(external, "gitconfig");
+      git("config", "--file", config, "core.sshCommand", configured);
+      environment["GIT_CONFIG_GLOBAL"] = config;
+    } else if (kind.endsWith("executable")) {
+      environment["GIT_SSH"] = relativeHelper;
+    } else if (kind === "ambiguous known-hosts list") {
+      const hosts = join(external, "known hosts");
+      await writeFile(hosts, "");
+      environment["GIT_SSH_COMMAND"] = `ssh -o "UserKnownHostsFile=${hosts}"`;
+    } else {
+      environment["GIT_SSH_COMMAND"] =
+        kind === "shell expansion"
+          ? 'ssh "$DYNAMIC_OPTION"'
+          : kind === "checkout SSH configuration"
+            ? "ssh -F relative/config"
+            : configured;
+    }
+    git("remote", "set-url", "origin", "git@gitlab.com:example/repository.git");
+    let probed = false;
+    const model = mock(() => 0);
+    const result = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: component,
+        onCodex: model,
+        environment,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onRepositoryCommand: (tool, args, cwd, options) => {
+          if (tool === "glab") return "";
+          if (args.includes("ls-remote")) {
+            probed = true;
+            expect(options?.environment?.["GIT_SSH_COMMAND"]).toBe(
+              "'" + helper.replaceAll("'", "'\\''") + "'",
+            );
+            // End this preflight after observing the bound command.
+            throw new Error("fixture transport inspected");
+          }
+          return runGitRepositoryCommand(tool, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          });
+        },
+      },
+      { localHosting: false },
+    );
+    expect(probed).toBe(safe);
+    expect(result.stderr).toContain(
+      safe ? "fixture transport inspected" : "Cannot bind the SSH transport",
+    );
+    expect(model).not.toHaveBeenCalled();
+  });
 
   test("push uses the SSH command approved before branch-conditional configuration activates", async () => {
     const { directory, git } = await publicationRepository();
@@ -338,8 +497,8 @@ describe("patch change tracking", () => {
         onRepositoryCommand: (tool, args, cwd, options) => {
           if (tool === "glab") return "";
           if (args.includes("ls-remote")) {
-            expect(options?.environment?.["GIT_SSH_COMMAND"]).toBe(
-              command("approved"),
+            expect(options?.environment?.["GIT_SSH_COMMAND"]).toContain(
+              "'approved'",
             );
             return "";
           }
@@ -1099,7 +1258,16 @@ process.exit(result.status ?? 1);
         "# Synthetic included Git configuration.\n",
       );
       git("config", "include.path", "hosting-config");
-      const configuredCommand = 'ssh -F "synthetic config"';
+      const tools = await realpath(
+        await fixtures.create("patch-ssh-fixtures-"),
+      );
+      const ssh = join(tools, process.platform === "win32" ? "ssh.exe" : "ssh");
+      await writeFile(ssh, "", { mode: 0o700 });
+      // Use native separators, including the literal backslashes in a
+      // double-quoted Windows path passed through Git for Windows.
+      const config = join(tools, "synthetic config");
+      await writeFile(config, "");
+      const configuredCommand = `ssh -F "${config}"`;
       const coreCommand = transport.includes("core")
         ? configuredCommand
         : transport.endsWith("command")
@@ -1108,14 +1276,15 @@ process.exit(result.status ?? 1);
       const environment: NodeJS.ProcessEnv = transport.endsWith("command")
         ? { GIT_SSH_COMMAND: configuredCommand, GIT_SSH: "ignored-ssh" }
         : transport.endsWith("executable")
-          ? { GIT_SSH: "synthetic path/ssh" }
+          ? { GIT_SSH: relative(directory, ssh) }
           : {};
       if (transport === "local-fetch-ghrepo" || transport.endsWith("push-only"))
         environment["GH_REPO"] = "upstream-owner/repository";
+      environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
       const effectiveCommand =
-        environment["GIT_SSH_COMMAND"] ??
-        coreCommand ??
-        (environment["GIT_SSH"] === undefined ? "ssh" : '"$GIT_SSH"');
+        environment["GIT_SSH_COMMAND"] || coreCommand
+          ? `'${ssh}' '-F' '${config}'`
+          : `'${ssh}'`;
       const alias =
         transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"
           ? transport.includes("scoped")

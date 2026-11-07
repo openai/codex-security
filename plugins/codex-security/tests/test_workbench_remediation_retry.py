@@ -1,3 +1,5 @@
+"""Exercise patch verification and retries after failed remediation steps, including offline Git reads."""
+
 from __future__ import annotations
 
 import argparse

@@ -7,6 +7,7 @@ import {
   extname,
   isAbsolute,
   join,
+  parse,
   relative,
   resolve,
   sep,
@@ -41,6 +42,7 @@ export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
+  options?: { gitTransportDirectory: string },
 ): Promise<InspectedExecutable> {
   const roots = await Promise.all(
     (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
@@ -49,6 +51,13 @@ export async function inspectTrustedExecutable(
   );
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
+  const fromLauncherDirectory = (value: string) => {
+    if (!options || isAbsolute(value)) return value;
+    // Keep parent traversal through symlinks until realpath inspects it.
+    return parse(value).root
+      ? resolve(options.gitTransportDirectory, value)
+      : `${options.gitTransportDirectory}${sep}${value}`;
+  };
   const path =
     environment["PATH"] ??
     Object.entries(environment).find(
@@ -64,29 +73,41 @@ export async function inspectTrustedExecutable(
       entry = entry.slice(1, -1);
     }
     if (entry.length === 0) continue;
-    const canonical = await realpath(entry).catch(() => null);
+    const canonical = await realpath(fromLauncherDirectory(entry)).catch(
+      () => null,
+    );
     if (canonical === null || isProtected(canonical)) continue;
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
-  const pathLike = candidate.includes("/") || candidate.includes("\\");
+  const pathLike =
+    candidate.includes("/") ||
+    candidate.includes("\\") ||
+    Boolean(options && parse(candidate).root);
+  if (pathLike) candidate = fromLauncherDirectory(candidate);
   // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
   // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
   // will actually run instead of rejecting an otherwise valid Windows configuration.
+  // Git for Windows can launch a trusted transport or askpass script via its interpreter.
+  // Direct Node subprocesses still require a native executable.
+  const allowScript = options !== undefined;
   const extensions =
     process.platform === "win32"
       ? /\.(?:exe|com)$/iu.test(candidate)
         ? [{ suffix: "", runnable: true }]
         : pathLike
           ? extname(candidate) === ""
-            ? [{ suffix: ".exe", runnable: true }]
-            : [{ suffix: "", runnable: false }]
+            ? [
+                { suffix: ".exe", runnable: true },
+                { suffix: "", runnable: allowScript },
+              ]
+            : [{ suffix: "", runnable: allowScript }]
           : [
               { suffix: ".exe", runnable: true },
               { suffix: ".com", runnable: true },
               { suffix: ".bat", runnable: false },
               { suffix: ".cmd", runnable: false },
-              { suffix: "", runnable: false },
+              { suffix: "", runnable: allowScript },
             ]
       : [{ suffix: "", runnable: true }];
   const candidates = pathLike
@@ -114,7 +135,11 @@ export async function inspectTrustedExecutable(
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
-    if (process.platform === "win32" && /\.(?:bat|cmd)$/iu.test(canonical)) {
+    if (
+      !allowScript &&
+      process.platform === "win32" &&
+      /\.(?:bat|cmd)$/iu.test(canonical)
+    ) {
       continue;
     }
     if (!current.runnable) continue;
@@ -124,6 +149,11 @@ export async function inspectTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
+      if (options) {
+        // Authentication can happen after a patch replaces an intermediate link.
+        executable ??= canonical;
+        continue;
+      }
       // Keep explicit virtualenv launchers, but resolve repository-local aliases
       // to the trusted target instead of invoking them from the repository.
       const invocationPath = pathLike

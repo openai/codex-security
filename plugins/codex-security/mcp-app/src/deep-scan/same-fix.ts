@@ -1,3 +1,5 @@
+import { canonicalJson } from "../record.js";
+import { exceedsContext } from "./errors.js";
 import type { ComparisonReport, CompareReports } from "./iteration.js";
 
 const schema = {
@@ -63,6 +65,10 @@ Apply each fix alone. If a claimed defect in the other report survives, quote th
 const PAIRS_PER_REVIEW = 16;
 type Pair = { id: number; left: number; right: number };
 function claim({
+  ruleId,
+  identity,
+  validation,
+  attackPath,
   title,
   summary,
   rootCause,
@@ -70,7 +76,18 @@ function claim({
   locations,
   codeEvidence,
 }: Record<string, unknown>) {
-  return { title, summary, rootCause, remediation, locations, codeEvidence };
+  return {
+    ruleId,
+    identity,
+    validation,
+    attackPath,
+    title,
+    summary,
+    rootCause,
+    remediation,
+    locations,
+    codeEvidence,
+  };
 }
 
 // Structured output constrains each row, but can still return the same ID twice.
@@ -80,32 +97,67 @@ function unambiguous<T>(rows: T[], id: (row: T) => number): T[] {
   );
 }
 
+// Keep the normal streaming batch size. A smaller retry still carries every
+// field for each pair and source, even when one pair cannot be graded.
+async function* gradeInContext<T>(
+  rows: T[],
+  request: (part: T[]) => Promise<string>,
+  oversized: (row: T, error: unknown) => void,
+): AsyncGenerator<[T[], string]> {
+  let response: string;
+  try {
+    response = await request(rows);
+  } catch (error) {
+    if (!exceedsContext(error)) throw error;
+    if (rows.length === 1) {
+      oversized(rows[0]!, error);
+      return;
+    }
+    const mid = Math.ceil(rows.length / 2);
+    yield* gradeInContext(rows.slice(0, mid), request, oversized);
+    yield* gradeInContext(rows.slice(mid), request, oversized);
+    return;
+  }
+  yield [rows, response];
+}
+
 async function confirmSources(
   pairs: Pair[],
   claimsFor: (id: number) => ReturnType<typeof claim>[],
   compare: CompareReports,
+  onReviewError: (error: unknown) => void,
 ) {
   const rejected = new Set<number>();
   type Claim = ReturnType<typeof claim>;
   const batch: { pair: Pair; A: Claim; B: Claim }[] = [];
   async function gradeBatch() {
-    const rows = batch.map(({ A, B }, id) => ({ id, A, B }));
-    const { sources } = JSON.parse(
-      await compare(
-        sourceInstructions + "\n" + JSON.stringify(rows),
-        sourceSchema,
-      ),
+    const results = gradeInContext(
+      batch,
+      (part) =>
+        compare(
+          sourceInstructions +
+            "\n" +
+            JSON.stringify(part.map(({ A, B }, id) => ({ id, A, B }))),
+          sourceSchema,
+        ),
+      ({ pair }, error) => {
+        rejected.add(pair.id);
+        onReviewError(error);
+      },
     );
-    const same = new Set(
-      unambiguous(
-        sources as { id: number; same: boolean; survivingPaths: string[] }[],
-        (s) => s.id,
-      )
-        .filter((s) => s.same && !s.survivingPaths.length)
-        .map((s) => s.id),
-    );
-    for (const [id, { pair }] of batch.entries())
-      if (!same.has(id)) rejected.add(pair.id);
+    for await (const [part, response] of results) {
+      const { sources } = JSON.parse(response);
+      const same = new Set(
+        unambiguous(
+          sources as { id: number; same: boolean; survivingPaths: string[] }[],
+          (s) => s.id,
+        )
+          .filter((s) => s.same === true && !s.survivingPaths.length)
+          .map((s) => s.id),
+      );
+      for (const [id, { pair }] of part.entries())
+        if (!same.has(id)) rejected.add(pair.id);
+    }
     batch.length = 0;
   }
   // A single surviving path rejects the pair. Generate only the cases we still need.
@@ -125,7 +177,7 @@ async function confirmSources(
   return pairs.filter(({ id }) => !rejected.has(id));
 }
 
-function sharesSource(a: ComparisonReport, b: ComparisonReport) {
+export function sharesSource(a: ComparisonReport, b: ComparisonReport) {
   return (
     a.locations.some(([path, start, end]) =>
       b.locations.some(
@@ -151,6 +203,7 @@ export async function checkSameFix(
   originals: Map<number, Record<string, unknown>[]>,
   compare: CompareReports,
   onReviewError: (error: unknown) => void,
+  fallbackOverlap?: (left: number, right: number) => boolean,
 ) {
   const evidence = records.map((record) =>
     record.evidence.flatMap(([path, code]) => (path ? [{ path, code }] : [])),
@@ -170,9 +223,12 @@ export async function checkSameFix(
         if (prior !== undefined && priorTargets[left] !== prior) continue;
         if (
           prior === undefined &&
-          !(a && b
-            ? a.some((key) => b.includes(key))
-            : sharesSource(records[left]!, records[right]!))
+          !(
+            fallbackOverlap?.(left, right) ??
+            (a && b
+              ? a.some((key) => b.includes(key))
+              : sharesSource(records[left]!, records[right]!))
+          )
         )
           continue;
         if (
@@ -193,7 +249,7 @@ export async function checkSameFix(
       const distinct = new Map<string, ReturnType<typeof claim>>();
       for (const source of originals.get(id)!) {
         const row = claim(source);
-        distinct.set(JSON.stringify(row), row);
+        distinct.set(canonicalJson(row), row);
       }
       rows = [...distinct.values()];
       claims.set(id, rows);
@@ -201,31 +257,29 @@ export async function checkSameFix(
     return rows;
   }
   const matches = new Map<number, Set<number>>();
-  async function reviewPairs(pairs: Pair[]) {
+  function requestReview(pairs: Pair[]) {
     const reports = [
       ...new Set(pairs.flatMap(({ left, right }) => [left, right])),
     ].map((id) => {
       const [first, ...rest] = claimsFor(id);
-      const { title, summary, rootCause, remediation } = first!;
+      const { codeEvidence: _codeEvidence, ...primary } = first!;
       return {
         id,
         primary: {
-          title,
-          summary,
-          rootCause,
-          remediation,
+          ...primary,
           locations: records[id]!.locations,
           evidence: evidence[id]!.map((excerpt, id) => ({ id, ...excerpt })),
         },
         attached: rest,
       };
     });
-    const { reviews } = JSON.parse(
-      await compare(
-        instructions + "\n" + JSON.stringify({ pairs, reports }),
-        schema,
-      ),
+    return compare(
+      instructions + "\n" + JSON.stringify({ pairs, reports }),
+      schema,
     );
+  }
+  async function acceptReviews(pairs: Pair[], response: string) {
+    const { reviews } = JSON.parse(response);
     const proposed: Pair[] = [];
     const decisions = unambiguous(
       reviews as {
@@ -248,6 +302,7 @@ export async function checkSameFix(
       proposed,
       claimsFor,
       compare,
+      onReviewError,
     )) {
       const earlier = matches.get(right) ?? new Set<number>();
       earlier.add(left);
@@ -256,7 +311,11 @@ export async function checkSameFix(
   }
   async function reviewBatch(pairs: Pair[]) {
     try {
-      await reviewPairs(pairs);
+      const results = gradeInContext(pairs, requestReview, (_pair, error) =>
+        onReviewError(error),
+      );
+      for await (const [part, response] of results)
+        await acceptReviews(part, response);
     } catch (error) {
       onReviewError(error);
     }

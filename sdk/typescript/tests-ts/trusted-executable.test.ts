@@ -57,6 +57,53 @@ async function resolveWindowsExecutable(
 }
 
 describe("trusted executable resolution", () => {
+  test("pins named askpass scripts on the transport PATH outside the worktree", async () => {
+    const root = await temporaryDirectory("askpass-");
+    const repository = join(root, "repo");
+    const trusted = join(root, "helpers");
+    await Promise.all([mkdir(repository), mkdir(trusted)]);
+    for (const directory of [repository, trusted]) {
+      await writeFile(join(directory, "askpass.sh"), "#!/bin/sh\nexit 1\n", {
+        mode: 0o700,
+      });
+    }
+    const resolved = await inspectTrustedExecutable(
+      "askpass.sh",
+      { PATH: [".", relative(repository, trusted)].join(delimiter) },
+      repository,
+      { gitTransportDirectory: repository },
+    );
+    expect(resolved.executable).toBe(
+      await realpath(join(trusted, "askpass.sh")),
+    );
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "pins askpass aliases that traverse a worktree link",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repo");
+      await mkdir(repository);
+      const helper = join(root, "trusted.sh");
+      const alias = join(root, "askpass");
+      const link = join(repository, "selected-helper");
+      await writeFile(helper, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+      await symlink(helper, link);
+      await symlink(link, alias);
+      for (const name of ["askpass", alias]) {
+        const resolved = await inspectTrustedExecutable(
+          name,
+          { PATH: root },
+          repository,
+          {
+            gitTransportDirectory: repository,
+          },
+        );
+        expect(resolved.executable).toBe(await realpath(helper));
+      }
+    },
+  );
+
   test("accepts safe relative PATH entries without trusting repository links", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

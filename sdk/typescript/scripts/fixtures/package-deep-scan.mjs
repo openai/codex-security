@@ -436,15 +436,15 @@ async function runInstalledSdk(pluginRoot, executable) {
   try {
     const result = await client.run(f.target, {
       mode: "deep",
+      onScanRegistered: (scan) => {
+        scanId = scan.scanId;
+      },
       auth: "api-key",
       workers: 1,
       subagents: 0,
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 2,
       outputDir: join(f.directory, "output"),
-      onScanRegistered(scan) {
-        scanId = scan.scanId;
-      },
     });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");

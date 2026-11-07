@@ -2,6 +2,7 @@ import type { JsonObject } from "./types.js";
 import {
   coverageReceiptComponents,
   validateRetainedCoverage,
+  validateWorkerReport,
 } from "./coverage-publication.js";
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -545,13 +546,17 @@ export async function retainRecordedReceiptOwnership(
   context: ArtifactContext,
   input: JsonObject,
 ): Promise<void> {
-  if (await hasScanDraftCheckpoint(context, input)) return;
   const coverage = input.reviewState ?? input.coverage;
   if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return;
-  for (const surface of coverage.surfaces) {
-    if (isObject(surface) && isObject(surface.provenance))
-      delete surface.provenance.scanReceiptRefs;
-  }
+  const owners = coverage.surfaces.flatMap((surface) =>
+    isObject(surface) &&
+    isObject(surface.provenance) &&
+    "scanReceiptRefs" in surface.provenance
+      ? [surface.provenance]
+      : [],
+  );
+  if (!owners.length || (await hasScanDraftCheckpoint(context, input))) return;
+  for (const owner of owners) delete owner.scanReceiptRefs;
 }
 
 export function workerCoverageReceiptLocation(
@@ -562,13 +567,14 @@ export function workerCoverageReceiptLocation(
   const components = coverageReceiptComponents(ref);
   if (context.layout !== "worker") return { context, components };
   const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+  const normalized = components.join("/");
   const shared =
     isObject(surface.provenance) &&
     (surface.provenance.scanReceiptRefs as string[] | undefined)?.includes(ref);
   if (
     shared ||
-    ref.startsWith(`${workerPrefix}output/`) ||
-    ref.startsWith(`${workerPrefix}attempts/`)
+    normalized.startsWith(`${workerPrefix}output/`) ||
+    normalized.startsWith(`${workerPrefix}attempts/`)
   ) {
     return {
       context: {
@@ -691,6 +697,7 @@ async function preserveScanDraft(
   warnings?: string[];
 }> {
   requireFiniteNumbers(input);
+  if (context.layout === "worker") validateWorkerReport(input);
   const warnings: string[] = [];
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation =

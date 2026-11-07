@@ -244,7 +244,7 @@
     "darwin": 9.2,
     "win32": 15.6
   },
-  "cli-external-imports-feature.test.ts": {
+  "cli-external-imports.test.ts": {
     "linux": 3,
     "win32": 4.9,
     "darwin": 3.1
@@ -274,6 +274,12 @@
     "darwin": 1.3,
     "win32": 3.9
   },
+  "cli-patch-hosting.test.ts": {
+    "linux": 220
+  },
+  "cli-patch-nested.test.ts": {
+    "linux": 291
+  },
   "cli-patch-results.test.ts": {
     "linux": 3.5,
     "darwin": 8,
@@ -285,7 +291,7 @@
     "win32": 5.8
   },
   "cli-patch.test.ts": {
-    "linux": 3.5,
+    "linux": 585.2,
     "darwin": 6.9,
     "win32": 23.8
   },
@@ -588,11 +594,6 @@
     "linux": 11.4,
     "darwin": 9.2,
     "win32": 21.9
-  },
-  "external-imports-feature.test.ts": {
-    "linux": 0.1,
-    "win32": 0.3,
-    "darwin": 0.1
   },
   "feedback.test.ts": {
     "linux": 0.6,

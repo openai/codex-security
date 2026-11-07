@@ -187,6 +187,7 @@ test("info resolves a config and its sources without a target, prompt reads, or 
   expect(stdout.text()).not.toContain("synthetic-private-value");
   expect(JSON.parse(stdout.text())).toMatchObject({
     model: "gpt-5.6-terra",
+    nextStep: expect.stringContaining("scan . -c FILE --dry-run"),
     configuration: {
       path: input.config,
       settings: {
@@ -1380,7 +1381,7 @@ test.each([
         ["scans", "rerun", "saved", "--json", "--full-output"],
         dependencies({
           currentDirectory: input.repository,
-          onWorkbench: async () => ({ recipe }),
+          onWorkbench: async () => ({ recipe, scanId: "saved" }),
           onRun,
         }),
       ),
