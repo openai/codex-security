@@ -66,7 +66,7 @@ async function readBody(request) {
   }
   let value;
   try {
-    value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    value = JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
   } catch {
     throw new HttpError(400, "Invalid JSON document.");
   }
