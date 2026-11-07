@@ -94,13 +94,13 @@ async function fixture(scanId?: string, savedRoot?: string) {
   };
 }
 
-async function savedFixture() {
+async function savedFixture(repositoryPath = "repository") {
   const root = await temporaryDirectory();
-  const repository = join(root, "repository");
+  const repository = join(root, repositoryPath);
   const caller = join(root, "caller");
   const scanDirectory = join(root, "scan");
   for (const directory of [repository, caller, scanDirectory])
-    await mkdir(directory, { mode: 0o700 });
+    await mkdir(directory, { recursive: true, mode: 0o700 });
   const environment = {
     PATH: process.env["PATH"],
     SystemRoot: process.env["SystemRoot"],
@@ -288,8 +288,10 @@ process.exitCode = await main(["classify-severity", "--scan", ${JSON.stringify(f
 }
 
 test("saved classification checks document links against the selected repository", async () => {
-  const f = await savedFixture();
-  for (const owner of [f.repository, f.caller, f.scanDirectory]) {
+  const f = await savedFixture(join("checkout", "source"));
+  const checkout = dirname(f.repository);
+  await mkdir(join(checkout, ".git"));
+  for (const owner of [checkout, f.repository, f.caller, f.scanDirectory]) {
     await symlink(f.root, join(owner, "docs"), "junction");
   }
   const options = {
@@ -314,6 +316,12 @@ test("saved classification checks document links against the selected repository
     }),
   ).rejects.toThrow("repository symbolic link");
   expect((await classify(f.caller)).assessments).toEqual([]);
+
+  const replacement = await temporaryDirectory();
+  await mkdir(join(replacement, ".git"));
+  await rm(f.repository, { recursive: true });
+  await symlink(replacement, f.repository, "junction");
+  await expect(classify(checkout)).rejects.toThrow("repository symbolic link");
 });
 
 test.each(["id", "prefix", "latest", "missing target"])(

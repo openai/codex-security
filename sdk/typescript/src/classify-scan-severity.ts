@@ -9,6 +9,7 @@ import {
 } from "./classify-severity.js";
 import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
+import { documentSourceRoots } from "./knowledge-base.js";
 import type { Finding } from "./models.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
@@ -74,7 +75,10 @@ export async function classifyScanSeverityInternal(
     { ...options, expectedScanId: scan.scanId },
     surface,
     bootstrap?.protectedRoots,
-    typeof scan["targetPath"] === "string" ? scan["targetPath"] : undefined,
+    typeof scan["targetPath"] === "string" &&
+      (options.rubricPath !== undefined || options.knowledgeBasePaths?.length)
+      ? await documentSourceRoots(scan["targetPath"], options.signal, true)
+      : [],
   );
 }
 
@@ -92,7 +96,7 @@ export async function classifyScanDirectorySeverityInternal(
   options: ClassifyScanSeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   protectedRoots: readonly string[] = [],
-  repository?: string,
+  documentRoots: readonly string[] = [],
 ): Promise<ScanSeverityClassification> {
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     requestedDirectory,
@@ -122,7 +126,7 @@ export async function classifyScanDirectorySeverityInternal(
         findings.map(({ findingId }) => findingId),
         options.reprocess ?? false,
       ),
-      repository === undefined ? [scanDirectory] : [scanDirectory, repository],
+      [scanDirectory, ...documentRoots],
     )),
     scanId: contract.manifest.scan.id,
   };

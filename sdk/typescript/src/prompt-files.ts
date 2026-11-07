@@ -1,14 +1,6 @@
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, readlink, realpath } from "node:fs/promises";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  parse,
-  resolve,
-  sep,
-} from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { CodexSecurityError } from "./errors.js";
 import { expandHome } from "./runtime.js";
 import { isWithin } from "./trusted-executable.js";
@@ -66,48 +58,48 @@ export async function resolveScanPrompts(
   };
 }
 
-/** Walk the directories actually traversed, including the paths stored in operator aliases. */
-async function* inputDirectoryLinks(directory: string, signal?: AbortSignal) {
+/** An unavailable source row must not prevent other rows from loading shared inputs. */
+export function nullIfUnavailableInputRoot(error: NodeJS.ErrnoException): null {
+  if (
+    ["ENOENT", "ENOTDIR", "ENAMETOOLONG", "ELOOP", "EACCES", "EPERM"].includes(
+      error.code ?? "",
+    )
+  )
+    return null;
+  throw error;
+}
+
+/** Walk the selected path and the raw targets of any directory links it traverses. */
+export async function escapingInputDirectoryLink(
+  selected: string,
+  destination: string,
+  roots: readonly string[],
+  signal?: AbortSignal,
+): Promise<string | null> {
+  if (selected === destination) return null;
+  const outside = roots.filter((root) => !isWithin(root, destination));
+  if (outside.length === 0) return null;
+
+  const directory = dirname(selected);
   const pending = [
     isAbsolute(directory) ? directory : `${process.cwd()}${sep}${directory}`,
   ];
   const inspected = new Set<string>();
   while (pending.length) {
-    const input = pending.pop()!;
-    let path = parse(input).root;
-    const components = input
-      .slice(path.length)
-      .split(process.platform === "win32" ? /[\\/]+/u : /\/+/u);
-    for (const component of components) {
-      if (!component || component === ".") continue;
-      // Keep ".." so a link before it is inspected using filesystem semantics.
-      path += (path.endsWith(sep) ? "" : sep) + component;
-      if (inspected.has(path)) continue;
+    for (let path = pending.pop()!; ; path = dirname(path)) {
+      const parent = dirname(path);
+      if (parent === path) break;
+      // Drop trailing separators without normalizing a link target's ".." components.
+      const entry = parent + (parent.endsWith(sep) ? "" : sep) + basename(path);
+      if (inspected.has(entry)) break;
       signal?.throwIfAborted();
-      inspected.add(path);
-      if (!(await lstat(path)).isSymbolicLink()) continue;
-      const owner = await realpath(dirname(path));
-      yield { path, owner };
-      const target = await readlink(path);
+      inspected.add(entry);
+      if (!(await lstat(entry)).isSymbolicLink()) continue;
+      const owner = await realpath(parent);
+      if (outside.some((root) => isWithin(root, owner))) return entry;
+      const target = await readlink(entry);
       pending.push(isAbsolute(target) ? target : `${owner}${sep}${target}`);
     }
-  }
-}
-
-/** Report the first link that redirects a selected input out of its repository. */
-export async function escapingInputDirectoryLink(
-  directory: string,
-  destination: string,
-  canonicalRoots: readonly string[],
-  signal?: AbortSignal,
-): Promise<string | null> {
-  if (directory === destination) return null;
-  const outsideRoots = canonicalRoots.filter(
-    (root) => !isWithin(root, destination),
-  );
-  if (outsideRoots.length === 0) return null;
-  for await (const { path, owner } of inputDirectoryLinks(directory, signal)) {
-    if (outsideRoots.some((root) => isWithin(root, owner))) return path;
   }
   return null;
 }
@@ -125,13 +117,14 @@ export async function readRegularInputFile(
   const repositories =
     typeof repository === "string" ? [repository] : repository;
   const roots = await Promise.all(repositories.map((root) => realpath(root)));
-  if (await escapingInputDirectoryLink(dirname(path), canonicalParent, roots)) {
+  const canonical = join(canonicalParent, basename(path));
+  if (await escapingInputDirectoryLink(path, canonical, roots)) {
     throw new CodexSecurityError(
       "Input files must not follow repository directory links outside the selected repository.",
     );
   }
   const file = await open(
-    join(canonicalParent, basename(path)),
+    canonical,
     constants.O_RDONLY |
       (constants.O_NOFOLLOW ?? 0) |
       (constants.O_NONBLOCK ?? 0),

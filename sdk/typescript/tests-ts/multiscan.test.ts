@@ -45,9 +45,31 @@ describe("multiscan", () => {
     const source = await repository(paths.root, "prompt-source");
     const prompt = join(paths.root, "shared-prompt.md");
     await writeFile(prompt, "Review synthetic boundaries.");
+    const operator = join(paths.root, "operator");
+    await mkdir(join(operator, ".git"), { recursive: true });
+    await filesystem.symlink(paths.root, join(operator, "current"), "junction");
+    const selected = join(operator, "current", "shared-prompt.md");
+    const localFile = join(operator, "not-a-repository.csv");
+    await writeFile(localFile, "synthetic row");
+    const localDirectory = join(operator, "docs");
+    await mkdir(localDirectory);
+    const rows = [
+      ["missing", join(operator, "absent"), "failed"],
+      ["invalid", join(prompt, "child"), "failed"],
+      ["long", join(paths.root, "x".repeat(300)), "failed"],
+      ["file", localFile, "failed"],
+      ["directory", localDirectory, "failed"],
+      ["first", source.path, "completed"],
+      ["second", join(source.path, ".git"), "completed"],
+    ];
     await writeFile(
       paths.input,
-      `id,repository,revision\nmissing,${join(paths.root, "absent")},${source.revision}\ninvalid,${join(prompt, "child")},${source.revision}\nfirst,${source.path},${source.revision}\nsecond,${source.path},${source.revision}\n`,
+      [
+        "id,repository,revision",
+        ...rows.map(
+          ([id, repository]) => `${id},${repository},${source.revision}`,
+        ),
+      ].join("\n"),
     );
     let scans = 0;
     const summary = await runMultiscan(
@@ -64,19 +86,16 @@ describe("multiscan", () => {
         }),
         {
           maxAttempts: 1,
-          scanPromptFile: prompt,
-          knowledgeBasePaths: [prompt],
+          scanPromptFile: selected,
+          knowledgeBasePaths: [selected],
         },
       ),
     );
     expect(scans).toBe(2);
-    expect(summary).toMatchObject({ total: 4, completed: 2, failed: 2 });
-    expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "missing", status: "failed" },
-      { id: "invalid", status: "failed" },
-      { id: "first", status: "completed" },
-      { id: "second", status: "completed" },
-    ]);
+    expect(summary).toMatchObject({ total: 7, completed: 2, failed: 5 });
+    expect(await results(summary.resultsPath)).toMatchObject(
+      rows.map(([id, , status]) => ({ id, status })),
+    );
   });
 
   test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(

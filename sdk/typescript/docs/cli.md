@@ -1800,7 +1800,8 @@ If the request fails, times out, or returns an invalid rubric, the built-in
 rubric is used. An explicit `--rubric` (SDK `rubricPath`) skips the lookup and
 uses your policy for every review. Rubrics and repeatable `--knowledge-base`
 context accept text, PDF, DOCX, and directories. Select external documents directly
-when a repository directory link points outside the selected source.
+when a repository directory link points outside the selected source. Saved scans
+retain their original checkout boundary if the target subdirectory moves.
 
 Each finding is classified three times by default. `--runs N` accepts
 an integer from 1 through 10; SDK options use `classificationRuns` with the same

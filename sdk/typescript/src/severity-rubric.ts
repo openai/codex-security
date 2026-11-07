@@ -46,10 +46,10 @@ function rubricSnapshot({
 
 export async function readSeverityRubricFile(
   path: string,
-  repositories: readonly string[],
+  repository: string | readonly string[],
 ): Promise<SeverityRubricSnapshot> {
   const markdown = rubricFields.shape.markdown.parse(
-    await readRegularInputFile(path, repositories),
+    await readRegularInputFile(path, repository),
   );
   return rubricSnapshot({ markdown, revision: 1 });
 }

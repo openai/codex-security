@@ -990,6 +990,8 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const context = join(root, "context");
+    const read = (...paths: string[]) =>
+      readKnowledgeBaseSnapshot(paths, undefined, repository);
     await mkdir(join(repository, ".git"), { recursive: true });
     await mkdir(join(context, "nested"), { recursive: true });
     await writeFile(join(context, "nested", "guide.md"), "Operator context.");
@@ -1009,13 +1011,9 @@ describe("scan knowledge bases", () => {
           "dir",
         );
         const file = suffix.endsWith("nested") ? "guide.md" : "nested/guide.md";
-        await expect(
-          readKnowledgeBaseSnapshot(
-            [join(redirected, file)],
-            undefined,
-            repository,
-          ),
-        ).rejects.toThrow("symbolic link");
+        await expect(read(join(redirected, file))).rejects.toThrow(
+          "symbolic link",
+        );
       }
     }
     await writeFile(join(repository, "guide.md"), "Checkout context.");
@@ -1031,30 +1029,18 @@ describe("scan knowledge bases", () => {
     );
     for (const name of ["nested", join("nested", "guide.md")]) {
       for (const directory of [join(alias, "documents"), nestedAlias]) {
-        await expect(
-          readKnowledgeBaseSnapshot(
-            [join(directory, name)],
-            undefined,
-            repository,
-          ),
-        ).rejects.toThrow("symbolic link");
+        await expect(read(join(directory, name))).rejects.toThrow(
+          "symbolic link",
+        );
       }
     }
     await symlink(root, join(repository, "up"), linkType);
-    const selectedRoot = await readKnowledgeBaseSnapshot(
-      [join(repository, "up", "repository")],
-      undefined,
-      repository,
-    );
+    const selectedRoot = await read(join(repository, "up", "repository"));
     expect(selectedRoot.sources).toEqual([repository]);
-    const snapshot = await readKnowledgeBaseSnapshot(
-      [
-        join(alias, "guide.md"),
-        join(context, "nested", "guide.md"),
-        join(alias, "stable", "guide.md"),
-      ],
-      undefined,
-      repository,
+    const snapshot = await read(
+      join(alias, "guide.md"),
+      join(context, "nested", "guide.md"),
+      join(alias, "stable", "guide.md"),
     );
     expect(Object.values(snapshot.documents)).toEqual([
       "Checkout context.",
@@ -1068,6 +1054,12 @@ describe("scan knowledge bases", () => {
     const project = join(outer, "project");
     const source = join(project, "src");
     const policy = join(outer, "policy");
+    const read = (owner: string, link: string) =>
+      readKnowledgeBaseSnapshot(
+        [join(owner, link, "guide.md")],
+        undefined,
+        source,
+      );
     await mkdir(join(outer, ".git"));
     await mkdir(join(project, ".git"), { recursive: true });
     await mkdir(source);
@@ -1076,26 +1068,14 @@ describe("scan knowledge bases", () => {
     const linkType = process.platform === "win32" ? "junction" : "dir";
     await symlink(policy, join(project, "docs"), linkType);
     await symlink(policy, join(outer, "current"), linkType);
-    await expect(
-      readKnowledgeBaseSnapshot(
-        [join(project, "docs", "guide.md")],
-        undefined,
-        source,
-      ),
-    ).rejects.toThrow("repository symbolic link");
-    await filesystem.rmdir(source);
-    await expect(
-      readKnowledgeBaseSnapshot(
-        [join(project, "docs", "guide.md")],
-        undefined,
-        source,
-      ),
-    ).rejects.toThrow("repository symbolic link");
-    const snapshot = await readKnowledgeBaseSnapshot(
-      [join(outer, "current", "guide.md")],
-      undefined,
-      source,
+    await expect(read(project, "docs")).rejects.toThrow(
+      "repository symbolic link",
     );
+    await filesystem.rmdir(source);
+    await expect(read(project, "docs")).rejects.toThrow(
+      "repository symbolic link",
+    );
+    const snapshot = await read(outer, "current");
     expect(Object.values(snapshot.documents)).toEqual(["External guide."]);
   });
 

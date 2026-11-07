@@ -11,12 +11,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
 import { expandHome } from "./runtime.js";
-import { escapingInputDirectoryLink } from "./prompt-files.js";
+import {
+  escapingInputDirectoryLink,
+  nullIfUnavailableInputRoot,
+} from "./prompt-files.js";
 import {
   gitMarkerRoot,
   isGitMetadataDirectory,
@@ -58,42 +61,46 @@ export async function knowledgeBaseProtectedRoots(
     : [...snapshot.protectedRoots];
 }
 
+/** A saved target's canonical spelling still identifies its original checkout if a directory was replaced. */
+export async function documentSourceRoots(
+  root: string,
+  signal?: AbortSignal,
+  savedTarget = false,
+): Promise<string[]> {
+  const selected = resolve(expandHome(root));
+  const roots: string[] = [];
+  for (let ancestor = selected; ; ancestor = dirname(ancestor)) {
+    signal?.throwIfAborted();
+    try {
+      const canonical = await realpath(ancestor);
+      if (ancestor === selected) roots.push(canonical);
+      if (!savedTarget || relative(ancestor, canonical) === "") {
+        const checkout = await gitMarkerRoot(canonical, signal, "nearest");
+        if (checkout !== null && !roots.includes(checkout))
+          roots.push(checkout);
+        return roots;
+      }
+    } catch (error) {
+      nullIfUnavailableInputRoot(error as NodeJS.ErrnoException);
+    }
+    if (ancestor === dirname(ancestor)) return roots;
+  }
+}
+
 /** @internal Extract once so campaign identity and workers use identical inputs. */
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
-  repository: string | readonly string[] = [],
+  selection?: string | { directories: readonly string[] },
 ): Promise<KnowledgeBaseSnapshot> {
   try {
     const sources = new Set<string>();
     const documents = new Set<string>();
 
-    const roots = typeof repository === "string" ? [repository] : repository;
-    const canonicalRoots = new Set<string>();
-    for (const root of roots) {
-      const selected = resolve(expandHome(root));
-      // Saved targets may have moved, and a bulk source can fail independently.
-      // Its nearest accessible checkout still owns its directory links.
-      for (let ancestor = selected; ; ancestor = dirname(ancestor)) {
-        signal?.throwIfAborted();
-        try {
-          const canonical = await realpath(ancestor);
-          if (ancestor === selected) canonicalRoots.add(canonical);
-          const checkout = await gitMarkerRoot(canonical, signal, "nearest");
-          if (checkout !== null) canonicalRoots.add(checkout);
-          break;
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code;
-          if (
-            !["ENOENT", "ENOTDIR", "ELOOP", "EACCES", "EPERM"].includes(
-              code ?? "",
-            )
-          )
-            throw error;
-          if (ancestor === dirname(ancestor)) break;
-        }
-      }
-    }
+    const roots =
+      typeof selection === "string"
+        ? await documentSourceRoots(selection, signal)
+        : (selection?.directories ?? []);
     for (const requested of paths) {
       signal?.throwIfAborted();
       if (!requested.trim())
@@ -113,9 +120,9 @@ export async function readKnowledgeBaseSnapshot(
 
       const source = await realpath(path);
       const escaped = await escapingInputDirectoryLink(
-        dirname(path),
+        path,
         source,
-        [...canonicalRoots],
+        roots,
         signal,
       );
       if (escaped !== null) {
@@ -219,22 +226,6 @@ export async function prepareKnowledgeBase(
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
     throw new ConfigurationError(errorMessage(error), { cause: error });
   }
-}
-
-/** @internal Read the same extracted document text used by scans. */
-export async function readKnowledgeBaseDocuments(
-  paths: readonly string[],
-  signal?: AbortSignal,
-  repository?: string | readonly string[],
-): Promise<string[]> {
-  const { documents } = await readKnowledgeBaseSnapshot(
-    paths,
-    signal,
-    repository,
-  );
-  return Object.keys(documents)
-    .sort()
-    .map((name) => documents[name]!);
 }
 
 async function discover(

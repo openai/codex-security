@@ -44,7 +44,10 @@ import {
   readKnowledgeBaseSnapshot,
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
-import { resolveScanPrompts } from "./prompt-files.js";
+import {
+  nullIfUnavailableInputRoot,
+  resolveScanPrompts,
+} from "./prompt-files.js";
 import {
   canonicalConfigPath,
   createWindowsOutputDirectory,
@@ -198,11 +201,9 @@ export async function runMultiscan(
     for (const repository of new Set(tasks.map((task) => task.repository))) {
       if (!isAbsolute(repository)) continue;
       try {
-        repositories.push(await realpath(repository));
+        repositories.push(await localSourceRoot(repository));
       } catch (error) {
-        // Missing sources retain the campaign's per-repository failure behavior.
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+        nullIfUnavailableInputRoot(error as NodeJS.ErrnoException);
       }
     }
   }
@@ -272,6 +273,24 @@ export async function runMultiscan(
   }
 }
 
+async function localSourceRoot(repository: string): Promise<string> {
+  const path = await realpath(repository);
+  return basename(path) === ".git" ? dirname(path) : path;
+}
+
+/** An unavailable CSV source fails its own checkout without claiming shared document paths. */
+async function availableLocalSources(tasks: readonly MultiscanTask[]) {
+  const sources = new Set<string>();
+  for (const repository of new Set(tasks.map((task) => task.repository))) {
+    if (!isAbsolute(repository)) continue;
+    const root = await localSourceRoot(repository).catch(
+      nullIfUnavailableInputRoot,
+    );
+    if (root !== null) sources.add(root);
+  }
+  return [...sources];
+}
+
 async function runCampaign(
   options: MultiscanOptions,
   tasks: MultiscanTask[],
@@ -282,23 +301,21 @@ async function runCampaign(
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   const knowledgeByMode: MultiscanKnowledge = {};
-  const documentRoots = [
-    ...new Set(tasks.map((task) => task.repository).filter(isAbsolute)),
-  ];
+  let sources: Promise<string[]> | undefined;
+  const readDocuments = async (paths: readonly string[]) => {
+    sources ??= availableLocalSources(tasks);
+    return readKnowledgeBaseSnapshot(paths, options.signal, {
+      directories: await sources,
+    });
+  };
   const sharedKnowledge = options.knowledgeBasePaths?.length
-    ? readKnowledgeBaseSnapshot(
-        options.knowledgeBasePaths,
-        options.signal,
-        documentRoots,
-      )
+    ? readDocuments(options.knowledgeBasePaths)
     : undefined;
   for (const mode of new Set(tasks.map((task) => task.mode))) {
     try {
       const paths = options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
       const snapshot = await (sharedKnowledge ??
-        (paths?.length
-          ? readKnowledgeBaseSnapshot(paths, options.signal, documentRoots)
-          : undefined));
+        (paths?.length ? readDocuments(paths) : undefined));
       if (snapshot !== undefined) knowledgeByMode[mode] = { snapshot };
     } catch (error) {
       options.signal?.throwIfAborted();
