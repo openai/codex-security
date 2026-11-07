@@ -352,15 +352,16 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
       output.write(value);
     },
     async confirm(message, defaultValue = false, signal) {
-      const { confirm } = await import("@inquirer/prompts");
+      const { default: confirm } = await import("@inquirer/confirm");
       return confirm({ message, default: defaultValue }, context(signal));
     },
     async input(message, defaultValue, signal) {
-      const { input } = await import("@inquirer/prompts");
+      const { default: input } = await import("@inquirer/input");
       return input({ message, default: defaultValue }, context(signal));
     },
     async checkbox(message, options, presentation, signal) {
-      const { checkbox, Separator } = await import("@inquirer/prompts");
+      const { default: checkbox, Separator } =
+        await import("@inquirer/checkbox");
       return checkbox(
         {
           message,
@@ -380,7 +381,7 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
       );
     },
     async select(message, options, presentation, signal) {
-      const { search } = await import("@inquirer/prompts");
+      const { default: search } = await import("@inquirer/search");
       return search(
         {
           message,
