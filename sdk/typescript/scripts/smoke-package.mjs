@@ -902,6 +902,20 @@ try {
   );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    run(
+      process.execPath,
+      [
+        join(packageRoot, "scripts", "fixtures", "package-review-items.mjs"),
+        installedRoot,
+      ],
+      {
+        cwd: consumer,
+        env: { ...process.env, CODEX_MCP_NODE_PATH: process.execPath },
+      },
+    );
+  }
+
   run(
     process.execPath,
     [
