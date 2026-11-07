@@ -1305,6 +1305,11 @@ selection. It lists repositories pushed in the last 90 days, excluding forks
 and archives, asks for output, and saves the selection as `repositories.csv`.
 Private checkouts use your GitHub CLI login.
 
+A local `.git` marker can identify either bare storage or a working tree.
+When that distinction is ambiguous, bulk scans treat the marker's parent as a
+possible worktree. To select a shared prompt or knowledge-base document outside
+that directory, pass its canonical path directly.
+
 For CI, provide CSV with `id`, `repository`, and a full commit `revision`.
 Optional `scope`, `mode`, and `prompt` customize each row:
 

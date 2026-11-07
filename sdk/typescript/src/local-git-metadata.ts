@@ -271,7 +271,7 @@ async function worktreeDocumentRoots(
         candidates.add(parent);
     }
   }
-  const owners = [];
+  const owners: string[] = [];
   for (const candidate of candidates) {
     const marker = join(candidate, ".git");
     const metadata = await stat(marker).catch(nullIfUnavailableInputRoot);
@@ -284,8 +284,11 @@ async function worktreeDocumentRoots(
       owners.push(candidate);
   }
   const roots = [...new Set([...owners, ...storage])];
+  // A worktree retains its own link boundary even when it lives inside Git storage.
   return roots.filter(
-    (root) => !roots.some((other) => other !== root && isWithin(other, root)),
+    (root) =>
+      owners.includes(root) ||
+      !roots.some((other) => other !== root && isWithin(other, root)),
   );
 }
 
