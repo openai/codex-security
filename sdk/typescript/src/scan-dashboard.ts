@@ -1756,5 +1756,8 @@ function budgetBar(cost: number, limit: number): string {
 }
 
 function terminalText(value: string): string {
-  return stripAnsi(value).replaceAll(/[\u0000-\u001F\u007F]/gu, " ");
+  return stripAnsi(value).replaceAll(
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
+    " ",
+  );
 }
