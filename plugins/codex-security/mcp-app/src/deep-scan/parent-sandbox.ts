@@ -7,12 +7,12 @@ export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 
 export type DeepWorkerParentSandbox = {
   /**
-   * Validated path and glob keys copied into the worker's stricter root-read
+   * Validated glob keys copied into the worker's stricter root-read
    * profile. Grants are intentionally not transported because Deep Scan
    * workers never inherit parent write access.
    */
   readonly filesystemDenies: readonly string[];
-  /** Literal paths with glob characters retain native point-deny semantics. */
+  /** Preserve literal paths separately from glob patterns. */
   readonly literalFilesystemDenies?: readonly string[];
   readonly globScanMaxDepth?: number;
 };
@@ -97,10 +97,7 @@ export function resolveDeepWorkerParentSandbox(
             "a parent filesystem denial path cannot be preserved",
           );
         }
-        (hasGlobMetacharacters(path.path)
-          ? literalFilesystemDenies
-          : filesystemDenies
-        ).push(path.path);
+        literalFilesystemDenies.push(path.path);
       }
     } else if (path.type === "glob_pattern") {
       if (!isNonEmptyString(path.pattern)) {
@@ -243,10 +240,6 @@ function isValidSpecialPath(value: Record<string, unknown>): boolean {
     return value.subpath === undefined || value.subpath === null;
   }
   return false;
-}
-
-function hasGlobMetacharacters(value: string): boolean {
-  return value.includes("*") || value.includes("?") || value.includes("[");
 }
 
 function unsupportedParentSandbox(reason: string): DeepScanNonRetryableError {

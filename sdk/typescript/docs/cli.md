@@ -926,6 +926,8 @@ that `subagents` can be zero. Discovery time accepts positive fractional minutes
 its default and maximum are 5760 minutes (96 hours). Unlike Standard's
 advisory allowance, the Deep discovery limit is enforced. Resuming a
 Deep scan keeps its original deadline; rerunning starts a new scan.
+If the deadline expires before any source review completes, the saved report
+and scan manifest record that limitation.
 `--max-time-hours`, SDK `maxTimeHours`, project `scan.deep.max_time_hours`, and
 legacy TOML `deep_scan.max_time_hours` remain deprecated Deep-only aliases in
 hours. Explicit settings override lower-priority configuration across units.
