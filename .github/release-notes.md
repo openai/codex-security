@@ -147,6 +147,11 @@
 - bump taiki-e/install-action from 2.88.0 to 2.88.1 in /.github/actions/audit-pnpm-lockfiles ([#2397](https://github.com/openai/codex-security/pull/2397))
 - reduce the dependency tree for evals, SDK and tooling ([#2409](https://github.com/openai/codex-security/pull/2409))
 - update the Bun toolchain to 1.4.4 ([#2417](https://github.com/openai/codex-security/pull/2417))
+- preserve quoted POSIX filenames ([#2418](https://github.com/openai/codex-security/pull/2418))
+- share the pinned Bun version ([#2422](https://github.com/openai/codex-security/pull/2422))
+- clear Deep Scan consolidation progress when a scan stops ([#2433](https://github.com/openai/codex-security/pull/2433))
+- report when Deep Scan times out before completing a review ([#2434](https://github.com/openai/codex-security/pull/2434))
+- avoid overlapping Deep Scan worker sandbox denies ([#2416](https://github.com/openai/codex-security/pull/2416))
 
 </details>
 
