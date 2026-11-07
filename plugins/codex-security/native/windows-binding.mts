@@ -44,7 +44,11 @@ export interface WindowsBinding {
   ): { error: number; handle?: WindowsHandle | null };
   createWindowsDirectories(path: Buffer): number;
   createPrivateWindowsDirectory(path: Buffer, checkOutput?: boolean): number;
-  validateWindowsOutputPath(path: Buffer): number;
+  validateWindowsOutputPath(
+    path: Buffer,
+    writableLeaf?: boolean,
+    retainedDirectory?: string,
+  ): number;
 }
 
 export { windowsFlags } from "./windows-flags.mjs";

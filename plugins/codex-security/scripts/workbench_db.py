@@ -1469,7 +1469,11 @@ def complete_scan_locked(
 
 
 def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Path:
-    scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
+    # Registration uses an empty output, including the replacement created with
+    # the original DACL after archival. Check that ACL before moving any results.
+    scan_dir = require_canonical_scan_directory(
+        Path(args.scan_dir).expanduser(), writable_output=True
+    )
     if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
         raise SystemExit(
             "The scan artifact directory must be outside and not contain the selected target."
@@ -3161,7 +3165,7 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
     return resolved
 
 
-def require_canonical_scan_directory(scan_dir: Path) -> Path:
+def require_canonical_scan_directory(scan_dir: Path, *, writable_output: bool = False) -> Path:
     scan_dir = scan_dir.absolute()
     try:
         metadata = scan_dir.lstat()
@@ -3179,7 +3183,7 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         from windows_scan_local_files import require_windows_output_path
 
         try:
-            require_windows_output_path(scan_dir)
+            require_windows_output_path(scan_dir, writable_output=writable_output)
         except OSError as exc:
             raise SystemExit(str(exc)) from exc
     else:

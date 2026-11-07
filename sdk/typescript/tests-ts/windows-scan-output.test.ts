@@ -12,6 +12,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "bun:test";
+import { runComponentScans } from "../src/component-scan.js";
 import { loadContract } from "../src/contract.js";
 import { runMultiscan } from "../src/multiscan.js";
 import * as runtime from "../src/runtime.js";
@@ -348,7 +349,12 @@ windowsTest("existing Windows scan ACLs are preserved", async () => {
   const output = join(root, "scan");
   await mkdir(output);
   // Built-in Users exists on every Windows host; only this fixture gets the grant.
-  await icacls(output, "/grant", "*S-1-5-32-545:(OI)(CI)M");
+  await icacls(
+    output,
+    "/grant",
+    "*S-1-5-32-545:(AD)",
+    "*S-1-5-32-545:(OI)(CI)(IO)M",
+  );
   const before = await descriptor(output);
   const permissions = await accessRules(output);
   expect(before).toContain(";;;BU)");
@@ -388,12 +394,66 @@ windowsTest(
     const root = await temporaryDirectory();
     const output = join(root, "campaign");
     await mkdir(output);
-    await icacls(output, "/grant", "*S-1-5-32-545:(OI)(CI)M");
+    await icacls(
+      output,
+      "/grant",
+      "*S-1-5-32-545:(AD)",
+      "*S-1-5-32-545:(OI)(CI)(IO)M",
+    );
     const permissions = await accessRules(output);
     await createMultiscanCampaign(output);
     expect(await accessRules(output)).toBe(permissions);
   },
 );
+
+windowsTest(
+  "writable admission preserves the ACL on a rejected empty directory",
+  async () => {
+    const root = await temporaryDirectory();
+    for (const rights of ["WA", "WD"]) {
+      const output = join(root, rights);
+      await mkdir(output);
+      await icacls(output, "/grant", `*S-1-1-0:(${rights})`);
+      const before = await descriptor(output);
+      await expect(
+        runtime.prepareOutputDir(output, "fixture"),
+      ).rejects.toThrow();
+      expect(await descriptor(output)).toBe(before);
+      await cp(example, output, { recursive: true });
+      await loadContract(output, { pluginRoot: PLUGIN_ROOT });
+    }
+  },
+);
+
+windowsTest(
+  "resumes a campaign whose retained artifacts keep it nonempty",
+  async () => {
+    const { paths } = await repositoryFixture("retained-campaign-source");
+    const configured = options(paths, client(completeRun), { maxAttempts: 1 });
+    await expect(runMultiscan(configured)).resolves.toMatchObject({
+      completed: 1,
+    });
+    await icacls(paths.output, "/grant", "*S-1-1-0:(WA)");
+    const before = await descriptor(paths.output);
+    await expect(runMultiscan(configured)).resolves.toMatchObject({
+      skipped: 1,
+      failed: 0,
+    });
+    expect(await descriptor(paths.output)).toBe(before);
+    await icacls(join(paths.output, "artifacts"), "/grant", "*S-1-1-0:(DE)");
+    await expect(runMultiscan(configured)).rejects.toThrow();
+  },
+);
+
+windowsTest("rejects a parent that can be emptied and retagged", async () => {
+  const root = await temporaryDirectory();
+  const parent = join(root, "directory");
+  const output = join(parent, "scan");
+  await mkdir(parent);
+  await runtime.prepareOutputDir(output, "fixture");
+  await icacls(parent, "/grant", "*S-1-1-0:(DC,WA)");
+  await expect(runtime.prepareOutputDir(output, "fixture")).rejects.toThrow();
+});
 
 windowsTest(
   "output admission distinguishes effective parent delete-child grants",
@@ -546,7 +606,50 @@ test.skipIf(
     );
     const denied = join(writableParent, "named-user grant");
     await mkdir(denied);
+    const reparseParent = join(root, "output leaves");
+    await mkdir(reparseParent);
+    const repository = await temporaryDirectory();
+    await writeFile(join(repository, "source.txt"), "Synthetic component");
+    await mkdir(join(repository, "src"));
+    await symlink(
+      repository,
+      join(reparseParent, "source junction"),
+      "junction",
+    );
+    const reparseLeaves = [
+      ["write attributes", "WA"],
+      ["write data", "WD"],
+    ] as const;
+    for (const [name, right] of reparseLeaves) {
+      const outputDir = await runtime.prepareOutputDir(
+        join(reparseParent, name),
+        "fixture",
+      );
+      await icacls(outputDir, "/grant", `*S-1-1-0:(${right})`);
+      await expect(
+        runComponentScans({
+          repository,
+          outputDir,
+          components: [{ name: "Source", paths: ["source.txt"] }],
+          planOnly: true,
+        }),
+      ).rejects.toThrow(/could not be trusted/);
+      await expect(
+        lstat(join(outputDir, "components.json")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    const intermediate = join(reparseParent, "intermediate");
+    await mkdir(intermediate);
+    const child = await runtime.prepareOutputDir(
+      join(intermediate, "src"),
+      "fixture",
+    );
+    const retainedChild = join(writableParent, "retained private child");
+    await icacls(intermediate, "/grant", "*S-1-1-0:(DC,WA)");
+    await expect(runtime.prepareOutputDir(child, "fixture")).rejects.toThrow();
     const result = await runPowerShell(script, {
+      CODEX_SECURITY_TEST_RETAINED_CHILD: retainedChild,
+      CODEX_SECURITY_TEST_REPARSE_PARENT: reparseParent,
       CODEX_SECURITY_TEST_BUN: process.execPath,
       CODEX_SECURITY_TEST_RUNTIME: new URL("../src/runtime.ts", import.meta.url)
         .href,
@@ -561,6 +664,13 @@ test.skipIf(
       { read: true, write: true },
       ...privateProbes.map(() => ({ read: false, write: false })),
     ]);
+    for (const [name] of reparseLeaves) {
+      expect(await realpath(join(reparseParent, name))).toBe(
+        await realpath(repository),
+      );
+    }
+    expect((await lstat(retainedChild)).isDirectory()).toBe(true);
+    expect(await realpath(child)).toBe(await realpath(join(repository, "src")));
     expect(await readFile(join(selected, "marker.txt"), "utf8")).toBe(
       "replacement",
     );

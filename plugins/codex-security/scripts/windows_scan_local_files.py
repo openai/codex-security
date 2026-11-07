@@ -52,7 +52,10 @@ _DELETE = 0x00010000
 _FILE_ADD_SUBDIRECTORY = 0x00000004
 _FILE_DELETE_CHILD = 0x00000040
 _CHANGE_ACL = 0x000C0000  # WRITE_DAC | WRITE_OWNER
-_OUTPUT_RIGHTS = _DELETE | _FILE_ADD_SUBDIRECTORY | _FILE_DELETE_CHILD | _CHANGE_ACL
+_SET_REPARSE_POINT = 0x00000102  # FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA
+_OUTPUT_RIGHTS = (
+    _DELETE | _FILE_ADD_SUBDIRECTORY | _FILE_DELETE_CHILD | _CHANGE_ACL | _SET_REPARSE_POINT
+)
 _FILE_TRAVERSE = 0x00000020
 _FILE_READ_ATTRIBUTES = 0x00000080
 _READ_CONTROL = 0x00020000
@@ -610,7 +613,7 @@ def _output_dacl_grants(acl: wintypes.LPVOID, trusted: set[str], path: Path) -> 
         if mask & 0x10000000:  # GENERIC_ALL
             mask |= _OUTPUT_RIGHTS
         if mask & _GENERIC_WRITE:
-            mask |= _FILE_ADD_SUBDIRECTORY
+            mask |= _FILE_ADD_SUBDIRECTORY | _SET_REPARSE_POINT
         mask &= _OUTPUT_RIGHTS
         if not mask:
             continue
@@ -668,7 +671,7 @@ def _checked_output_directory(path: Path) -> Iterator[tuple[int, int]]:
             assert handle.value is not None
             _verify_directory(handle.value, directory)
             grants = _output_directory_grants(handle.value, directory)
-            if parent_grants & _FILE_ADD_SUBDIRECTORY and (
+            if parent_grants & (_FILE_ADD_SUBDIRECTORY | _SET_REPARSE_POINT) and (
                 parent_grants & _FILE_DELETE_CHILD or grants & _DELETE
             ):
                 raise _invalid_path(
@@ -678,9 +681,12 @@ def _checked_output_directory(path: Path) -> Iterator[tuple[int, int]]:
         yield parent, parent_grants
 
 
-def require_windows_output_path(path: Path) -> None:
-    with _checked_output_directory(path):
-        pass
+def require_windows_output_path(path: Path, *, writable_output: bool = False) -> None:
+    with _checked_output_directory(path) as (_, grants):
+        if writable_output and grants & _SET_REPARSE_POINT:
+            raise _invalid_path(
+                path, "Another user can turn the output directory into a reparse point when empty."
+            )
 
 
 class _UnicodeString(ctypes.Structure):
@@ -739,7 +745,7 @@ def _relative_output_directory(
 
 def create_windows_output_directory(path: Path, descriptor: wintypes.LPVOID) -> int:
     with _checked_output_directory(path.parent) as (parent, grants):
-        if grants & _FILE_ADD_SUBDIRECTORY and grants & _FILE_DELETE_CHILD:
+        if grants & (_FILE_ADD_SUBDIRECTORY | _SET_REPARSE_POINT) and grants & _FILE_DELETE_CHILD:
             raise _invalid_path(path, "Scan output directory can be replaced by another user.")
         error, handle = _relative_output_directory(parent, path.name, descriptor)
         if not error:

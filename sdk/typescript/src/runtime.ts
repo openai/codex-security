@@ -1977,8 +1977,10 @@ export async function validateOutputDir(
         throw new OutputDirectoryNotEmptyError(path);
       }
       requireOutputDirectoryOwnership(metadata, path);
-      const canonical = await realpath(path);
-      await requireSecureOutputAncestry(canonical);
+      const writableLeaf =
+        !archiveExisting ||
+        (process.platform === "win32" && (await readdir(path)).length === 0);
+      const canonical = await checkedOutputPath(path, writableLeaf);
       requireModelSafeOutputDir(canonical);
       return canonical;
     }
@@ -2297,16 +2299,24 @@ async function windowsOutputBinding() {
     ),
   ) as {
     createPrivateWindowsDirectory(path: Buffer, checkOutput: boolean): number;
-    validateWindowsOutputPath(path: Buffer): number;
+    validateWindowsOutputPath(
+      path: Buffer,
+      writableLeaf?: boolean,
+      retainedDirectory?: string,
+    ): number;
   };
 }
 
 function validateWindowsOutputPath(
   native: Awaited<ReturnType<typeof windowsOutputBinding>>,
   path: string,
+  writableLeaf: boolean,
+  retainedDirectory?: string,
 ): void {
   const error = native.validateWindowsOutputPath(
     Buffer.from(win32.toNamespacedPath(path), "utf16le"),
+    writableLeaf,
+    retainedDirectory,
   );
   if (error !== 0)
     throw new OutputDirectoryError(
@@ -2337,7 +2347,7 @@ export async function createWindowsOutputDirectory(
     }
     if (error === 0) return firstCreated ?? target;
     if (recursive && error === 183 && (await stat(target)).isDirectory()) {
-      validateWindowsOutputPath(native, target);
+      validateWindowsOutputPath(native, target, target === path);
       return firstCreated;
     }
     throw new OutputDirectoryError(
@@ -2356,7 +2366,10 @@ export async function validatePreparedOutputDir(
   if (!metadata.isDirectory()) {
     throw new OutputDirectoryError(`Scan output is not a directory: ${path}`);
   }
-  const canonical = await realpath(path);
+  const writableLeaf =
+    !allowNonempty ||
+    (process.platform === "win32" && (await readdir(path)).length === 0);
+  const canonical = await checkedOutputPath(path, writableLeaf);
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
   if (!allowNonempty && (await readdir(canonical)).length !== 0) {
@@ -2365,6 +2378,25 @@ export async function validatePreparedOutputDir(
     );
   }
   requireOutputDirectoryOwnership(metadata, path);
+  return canonical;
+}
+
+async function checkedOutputPath(
+  path: string,
+  writableLeaf: boolean,
+): Promise<string> {
+  if (process.platform === "win32") {
+    // Keep the selected leaf for the no-follow check, including across an
+    // in-place directory change between lstat and canonicalization.
+    const selected = join(await realpath(dirname(path)), basename(path));
+    validateWindowsOutputPath(
+      await windowsOutputBinding(),
+      selected,
+      writableLeaf,
+    );
+    return realpath(selected);
+  }
+  const canonical = await realpath(path);
   await requireSecureOutputAncestry(canonical);
   return canonical;
 }
@@ -2402,7 +2434,7 @@ export async function requireSecureOutputAncestry(
   effectiveUid = process.geteuid?.(),
 ): Promise<void> {
   if (process.platform === "win32")
-    return validateWindowsOutputPath(await windowsOutputBinding(), path);
+    return validateWindowsOutputPath(await windowsOutputBinding(), path, false);
   let current = dirname(resolve(path));
   while (true) {
     try {
@@ -2445,6 +2477,18 @@ export async function requireSecureOutputAncestry(
     if (parent === current) return;
     current = parent;
   }
+}
+
+export async function requireWritableWindowsOutput(
+  path: string,
+  retainedDirectory?: string,
+): Promise<void> {
+  validateWindowsOutputPath(
+    await windowsOutputBinding(),
+    path,
+    true,
+    retainedDirectory,
+  );
 }
 
 export function requireTrustedOutputAncestor(

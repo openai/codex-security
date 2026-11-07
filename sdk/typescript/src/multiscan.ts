@@ -49,6 +49,7 @@ import {
   canonicalConfigPath,
   createWindowsOutputDirectory,
   requireSecureOutputAncestry,
+  requireWritableWindowsOutput,
   resolvePluginPath,
   validateOutputDir,
 } from "./runtime.js";
@@ -236,7 +237,7 @@ export async function runMultiscan(
     if (!manifest?.isFile())
       throw new Error("Bulk recovery requires an existing campaign manifest.");
   }
-  const output = await ensureOutputDirectory(requestedOutput);
+  const output = await ensureOutputDirectory(requestedOutput, "artifacts");
   if (process.platform !== "win32") await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   let pluginWorkspace: string | undefined;
@@ -758,7 +759,10 @@ async function removeCheckout(path: string): Promise<string | undefined> {
   );
 }
 
-async function ensureOutputDirectory(path: string): Promise<string> {
+async function ensureOutputDirectory(
+  path: string,
+  retainedDirectory?: string,
+): Promise<string> {
   let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
@@ -784,7 +788,7 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     throw new Error("Multiscan output directories changed during preparation.");
   }
   if (process.platform === "win32") {
-    await requireSecureOutputAncestry(canonical);
+    await requireWritableWindowsOutput(canonical, retainedDirectory);
     return canonical;
   }
   if ((directory.mode & 0o022n) !== 0n) {

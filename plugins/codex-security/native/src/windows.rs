@@ -737,6 +737,8 @@ pub fn create_private_windows_directory(
             std::path::Path::new(&target),
             &sid,
             Some(attributes.lpSecurityDescriptor),
+            false,
+            None,
         )
         .map_or_else(|error| error, |()| 0)
     } else {

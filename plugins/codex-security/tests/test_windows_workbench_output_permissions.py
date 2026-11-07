@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -42,6 +43,41 @@ def test_scan_directory_checks_parent_replacement_rights(tmp_path: Path) -> None
         storage.create_private_temporary_directory(selected, prefix="next_")
     with pytest.raises(SystemExit, match="can be replaced"):
         workbench_db.require_canonical_scan_directory(scan)
+
+
+@pytest.mark.parametrize("right", ["WA", "WD"])
+def test_registration_checks_reparse_access_before_archiving(tmp_path: Path, right: str) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    subprocess.run(
+        ["icacls.exe", str(output), "/grant", f"*S-1-1-0:({right})"],
+        check=True,
+        capture_output=True,
+    )
+    args = argparse.Namespace(scan_dir=output, archive_existing=False, archived_scan_dir=None)
+    with pytest.raises(SystemExit, match="reparse point"):
+        workbench_db.require_cli_scan_directory(tmp_path / "repo", args)
+
+    saved = output / "result"
+    saved.write_text("synthetic result")
+    assert workbench_db.require_canonical_scan_directory(output) == output
+    args.archive_existing = True
+    with pytest.raises(SystemExit, match="reparse point"):
+        workbench_db.require_cli_scan_directory(tmp_path / "repo", args)
+    assert saved.read_text() == "synthetic result"
+
+
+def test_delete_child_and_parent_reparse_rights_require_no_create_grant(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    output = parent / "output"
+    output.mkdir(parents=True)
+    subprocess.run(
+        ["icacls.exe", str(parent), "/grant", "*S-1-1-0:(DC,WA)"],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(SystemExit, match="can be replaced"):
+        workbench_db.require_canonical_scan_directory(output)
 
 
 @pytest.mark.parametrize("existing", [True, False], ids=["initial-selection", "concurrent-create"])

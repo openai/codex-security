@@ -36,14 +36,17 @@ use windows_sys::Win32::{
         DELETE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_TRAVERSE, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+        FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, READ_CONTROL, WRITE_DAC,
+        WRITE_OWNER,
     },
 };
 
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const CHANGE_ACL: u32 = WRITE_DAC | WRITE_OWNER;
-const OUTPUT_RIGHTS: u32 = FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | DELETE | CHANGE_ACL;
+const SET_REPARSE_POINT: u32 = FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA;
+const OUTPUT_RIGHTS: u32 =
+    FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | DELETE | CHANGE_ACL | SET_REPARSE_POINT;
 const EVERYONE: &str = "S-1-1-0";
 const AUTHENTICATED_USERS: &str = "S-1-5-11";
 
@@ -118,7 +121,7 @@ fn inspect_dacl(acl: *const ACL, user: &str) -> Result<u32, u32> {
             mask |= OUTPUT_RIGHTS;
         }
         if mask & GENERIC_WRITE != 0 {
-            mask |= FILE_ADD_SUBDIRECTORY;
+            mask |= FILE_ADD_SUBDIRECTORY | SET_REPARSE_POINT;
         }
         mask &= OUTPUT_RIGHTS;
         if mask == 0 {
@@ -253,6 +256,8 @@ pub(crate) fn inspect_output_path(
     path: &Path,
     user: &str,
     create: Option<PSECURITY_DESCRIPTOR>,
+    writable_leaf: bool,
+    retained_directory: Option<&OsStr>,
 ) -> Result<(), u32> {
     let mut ancestors: Vec<File> = Vec::new();
     let mut parent = 0;
@@ -302,6 +307,26 @@ pub(crate) fn inspect_output_path(
         if replaceable(parent, rights) {
             return Err(ERROR_ACCESS_DENIED);
         }
+        if entry == path && writable_leaf && rights & SET_REPARSE_POINT != 0 {
+            // Windows can retag only an empty directory. A known child that
+            // another user cannot remove keeps a resumed output nonempty.
+            let name = retained_directory
+                .filter(|name| Path::new(name).file_name() == Some(*name))
+                .ok_or(ERROR_ACCESS_DENIED)?;
+            if rights & FILE_DELETE_CHILD != 0 {
+                return Err(ERROR_ACCESS_DENIED);
+            }
+            let child = relative_directory(&file, name, None)?;
+            let attributes = child
+                .metadata()
+                .map_err(|e| e.raw_os_error().unwrap_or(5) as u32)?
+                .file_attributes();
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || output_rights(&child, user)? & DELETE != 0
+            {
+                return Err(ERROR_ACCESS_DENIED);
+            }
+        }
         ancestors.push(file);
         parent = rights;
     }
@@ -313,13 +338,26 @@ pub(crate) fn inspect_output_path(
 }
 
 fn replaceable(parent: u32, child: u32) -> bool {
-    parent & FILE_ADD_SUBDIRECTORY != 0 && (parent & FILE_DELETE_CHILD != 0 || child & DELETE != 0)
+    parent & (FILE_ADD_SUBDIRECTORY | SET_REPARSE_POINT) != 0
+        && (parent & FILE_DELETE_CHILD != 0 || child & DELETE != 0)
 }
 
 #[napi]
-pub fn validate_windows_output_path(path: Buffer) -> napi::Result<u32> {
+pub fn validate_windows_output_path(
+    path: Buffer,
+    writable_leaf: Option<bool>,
+    retained_directory: Option<String>,
+) -> napi::Result<u32> {
     let path = os_string(path)?;
     Ok(current_user_sid()
-        .and_then(|user| inspect_output_path(Path::new(&path), &user, None))
+        .and_then(|user| {
+            inspect_output_path(
+                Path::new(&path),
+                &user,
+                None,
+                writable_leaf == Some(true),
+                retained_directory.as_deref().map(OsStr::new),
+            )
+        })
         .map_or_else(|e| e, |_| 0))
 }
