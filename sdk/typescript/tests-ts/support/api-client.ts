@@ -177,6 +177,7 @@ export class TestClient extends CodexSecurity {
       withSyntheticScanEvents({
         createCodex: throwing("Unexpected Codex invocation in test"),
         environment: {},
+        createOperationTelemetry: () => null,
         probeCodexSandbox: async () => {},
         prepareScanArtifactRestorer: async () => ({
           restore: async () => {},

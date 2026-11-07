@@ -11,27 +11,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import {
-  dependencies as cliDependencies,
-  FakeSignals,
-} from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { opengrepJson } from "./support/opengrep-import-fixtures.js";
 import {
   inspectorReport,
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
-
-const dependencies: typeof cliDependencies = (options = {}) => {
-  const result = cliDependencies(options);
-  return {
-    ...result,
-    environment: {
-      ...result.environment,
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-    },
-  };
-};
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -187,7 +173,7 @@ test("local preview and declined confirmation do not create database state or us
       externalPublicationPrompt: {
         isInteractive: () => true,
         confirm: async (question, defaultValue) => {
-          expect(question).toContain("Store these 1 findings locally");
+          expect(question).toBe("Store this finding locally?");
           expect(defaultValue).toBe(false);
           expect(declined.stderr.text()).toContain(f.repository);
           expect(declined.stderr.text()).toContain(f.record.id);
@@ -415,7 +401,9 @@ test("local import confirms exclusions and returns partial status after storing 
       externalPublicationPrompt: {
         isInteractive: () => true,
         confirm: async (question) => {
-          expect(question).toContain("skip 1 excluded records");
+          expect(question).toBe(
+            "Store this finding locally and skip 1 excluded record?",
+          );
           expect(cli.stderr.text()).toContain("Excluded: 1");
           return true;
         },

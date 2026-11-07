@@ -1,5 +1,11 @@
+import { vertexModelPricing } from "./vertex-pricing.js";
+import { bedrockModelPricing } from "./bedrock-pricing.js";
 import { isRecord } from "./record.js";
 import { isSafeNonNegativeInteger } from "./value.js";
+
+export type ScanPricingContext =
+  | { provider: "amazon-bedrock"; region: string | null }
+  | { provider: "gcp"; managedEndpoint?: boolean };
 
 export interface ScanCost {
   model: string;
@@ -47,38 +53,6 @@ export interface ScanTokenUsage {
   total_tokens: number;
 }
 
-const BEDROCK_MODEL_PRICING: Readonly<
-  Record<
-    string,
-    {
-      short: ModelPricing;
-      long?: ModelPricing;
-      unitsPerUsd: number;
-      source: string;
-      asOf: string;
-    }
-  >
-> = {
-  // AWS commercial in-region Standard prices already include the 10% fee.
-  "openai.gpt-daybreak-blue-5.6-sol": {
-    short: [4_400, 440, 5_500, 22_000],
-    long: [8_800, 880, 11_000, 33_000],
-    unitsPerUsd: 1_000_000_000,
-    source:
-      "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
-    asOf: "2026-10-01",
-  },
-  "openai.gpt-5.6-cyber": {
-    // Half-nanodollar units preserve the $17.1875/M cache-write rate exactly,
-    // including an odd number of cache-write tokens.
-    short: [27_500, 2_750, 34_375, 165_000],
-    unitsPerUsd: 2_000_000_000,
-    source:
-      "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html",
-    asOf: "2026-10-01",
-  },
-};
-
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   // GPT-5.5 has no additional cache-write charge.
   "gpt-5.5": [5_000, 500, 5_000, 30_000],
@@ -93,14 +67,15 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-luna": [200, 20, 250, 1_200],
   // https://developers.openai.com/api/docs/pricing#cyber-models
   "gpt-5.6-cyber": [12_500, 1_250, 15_625, 75_000],
+  "gpt-6-cyber": [20_000, 2_000, 25_000, 100_000],
 };
 
 // Verified Standard rates: https://developers.openai.com/api/docs/pricing
 // GPT-5.5: https://developers.openai.com/api/docs/models/gpt-5.5
 // GPT-6 Sol: https://developers.openai.com/api/docs/models/gpt-6-sol
 // Do not infer tiers from aggregate scan tokens: the runtime does not report
-// which usage received long-context pricing. GPT-5.6-Cyber has no verified
-// long-context rate in the pricing table, so its upper estimate stays unavailable.
+// which usage received long-context pricing. GPT-5.6-Cyber and GPT-6-Cyber have no
+// verified long-context rates, so their upper estimates stay unavailable.
 const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
   {
     "gpt-5.5": [10_000, 1_000, 10_000, 45_000],
@@ -168,22 +143,39 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   };
 }
 
+function providerModelPricing(
+  model: string,
+  context?: ScanPricingContext | string | null,
+) {
+  if (context == null || typeof context === "string") {
+    return bedrockModelPricing(model, context);
+  }
+  if (context.provider === "amazon-bedrock") {
+    return bedrockModelPricing(model, context.region);
+  }
+  if (context.provider === "gcp" && context.managedEndpoint !== false) {
+    return vertexModelPricing(model);
+  }
+  return undefined;
+}
+
+/**
+ * Estimates Standard token costs using the selected provider's published rates.
+ * A string (or null for an unknown region) selects Bedrock for compatibility.
+ * Model-only Bedrock frontier estimates use the commercial in-region price.
+ */
 export function estimateScanCost(
   model: string | undefined,
   usage: unknown,
+  context?: ScanPricingContext | string | null,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const bedrockPricing = Object.hasOwn(BEDROCK_MODEL_PRICING, model)
-    ? BEDROCK_MODEL_PRICING[model]
-    : undefined;
-  const unitsPerUsd = bedrockPricing?.unitsPerUsd ?? 1_000_000_000;
-  const pricingModel = model.startsWith("openai.")
-    ? model.slice("openai.".length)
-    : model;
+  const providerPricing = providerModelPricing(model, context);
+  const unitsPerUsd = providerPricing?.unitsPerUsd ?? 1_000_000_000;
   const pricing =
-    bedrockPricing?.short ??
-    (Object.hasOwn(MODEL_PRICING_NANODOLLARS, pricingModel)
-      ? MODEL_PRICING_NANODOLLARS[pricingModel]
+    providerPricing?.short ??
+    (context === undefined && Object.hasOwn(MODEL_PRICING_NANODOLLARS, model)
+      ? MODEL_PRICING_NANODOLLARS[model]
       : undefined);
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
@@ -202,9 +194,9 @@ export function estimateScanCost(
     outputTokens * outputRate;
   if (!Number.isSafeInteger(costUnits)) return null;
 
-  const longPricing = bedrockPricing
-    ? bedrockPricing.long
-    : LONG_CONTEXT_PRICING_NANODOLLARS[pricingModel];
+  const longPricing = providerPricing
+    ? providerPricing.long
+    : LONG_CONTEXT_PRICING_NANODOLLARS[model];
   let maximumUnits: number | null = null;
   if (longPricing !== undefined) {
     const [longInput, longRead, longWrite, longOutput] = longPricing;
@@ -238,22 +230,24 @@ export function estimateScanCost(
       context: "unknown",
     },
     pricing: {
-      source: bedrockPricing
-        ? bedrockPricing.source
-        : pricingModel.startsWith("gpt-5.5")
+      source: providerPricing
+        ? providerPricing.source
+        : model.startsWith("gpt-5.5")
           ? "https://developers.openai.com/api/docs/models/gpt-5.5"
-          : pricingModel === "gpt-6-sol"
+          : model === "gpt-6-sol"
             ? "https://developers.openai.com/api/docs/models/gpt-6-sol"
             : "https://developers.openai.com/api/docs/pricing",
-      asOf: bedrockPricing
-        ? bedrockPricing.asOf
-        : pricingModel === "gpt-6-sol"
+      asOf: providerPricing
+        ? providerPricing.asOf
+        : model === "gpt-6-sol"
           ? "2026-10-10"
-          : pricingModel === "gpt-5.6-cyber"
+          : model === "gpt-5.6-cyber"
             ? "2026-10-06"
-            : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
-              ? "2026-09-30"
-              : "2026-09-14",
+            : model === "gpt-6-cyber"
+              ? "2026-11-05"
+              : model === "gpt-6.1-sol" || model === "gpt-6-luna"
+                ? "2026-09-30"
+                : "2026-09-14",
       serviceTier: "standard",
       context: "short",
       usdPerMillionTokens: usdPerMillionTokens(pricing, unitsPerUsd),

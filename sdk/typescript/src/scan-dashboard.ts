@@ -17,6 +17,7 @@ import {
   formatUsd,
   type ScanCost,
   type ScanSessionEvent,
+  type ScanUsageMeasurement,
   type ScanUsageObservation,
 } from "./cost.js";
 import {
@@ -25,6 +26,7 @@ import {
   formatScanCosts,
   formatScanCostTokens,
   formatTokenUsage,
+  type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
 import { formatDeepScanReviews } from "./scan-progress.js";
@@ -91,6 +93,7 @@ interface ScanDashboardOptions {
   componentName?: string;
   mode?: ScanMode;
   model?: ScanModelConfiguration;
+  pricingContext?: ScanPricingContext;
   maxCostUsd?: number;
   showCost?: boolean;
   clock: DashboardClock;
@@ -173,6 +176,7 @@ export class ScanDashboard {
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
   #tokens: string | null = null;
+  #usageCoverage: ScanUsageMeasurement["coverage"] | null = null;
   #usageFreshness: string | null = null;
   #accountLimits: string | null = null;
   #chatGptAuth = false;
@@ -511,7 +515,9 @@ export class ScanDashboard {
         );
       }
     }
-    if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
+    if (receipt.measurement !== undefined)
+      dashboard.setMeasurement(receipt.measurement);
+    else if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
     component.receipt = { ...receipt };
     this.#refresh();
   }
@@ -552,6 +558,9 @@ export class ScanDashboard {
         break;
       case "usage":
         dashboard.setUsage(event.value);
+        break;
+      case "measurement":
+        dashboard.setMeasurement(event.value);
         break;
       case "usage-observation":
         dashboard.setUsageObservation(event.value);
@@ -594,13 +603,23 @@ export class ScanDashboard {
     cost: Readonly<ScanCost>,
     maxCostUsd = this.#options.maxCostUsd,
   ): void {
+    this.#usageCoverage = "complete";
     this.#cost = cost;
     this.#tokens = formatScanCostTokens(cost);
     this.#options.maxCostUsd = maxCostUsd;
     this.#refresh();
   }
 
+  public setMeasurement(measurement: Readonly<ScanUsageMeasurement>): void {
+    this.#usageCoverage = measurement.coverage;
+    this.#cost = measurement.cost;
+    this.#tokens =
+      measurement.usage === null ? null : formatTokenUsage(measurement.usage);
+    this.#refresh();
+  }
+
   public setUsage(usage: Readonly<ScanTokenUsage>): void {
+    this.#usageCoverage = "complete";
     this.#tokens = formatTokenUsage(usage);
     this.#refresh();
   }
@@ -983,8 +1002,8 @@ export class ScanDashboard {
     );
     const costWidth = Math.max(
       8,
-      ...this.#components.map(({ dashboard }) =>
-        dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
+      ...this.#components.map(
+        ({ dashboard }) => dashboard.#componentCostLabel().length,
       ),
     );
     const nameAndStatusWidth =
@@ -1018,7 +1037,7 @@ export class ScanDashboard {
           receipt.findingCount === undefined
             ? "—"
             : formatCount(receipt.findingCount),
-          dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost),
+          dashboard.#componentCostLabel(),
         ),
     );
     if (table.length === 0) table.push(`  ${this.#stage}…`);
@@ -1058,6 +1077,12 @@ export class ScanDashboard {
     );
   }
 
+  #componentCostLabel(): string {
+    return this.#cost === null
+      ? "—"
+      : `${formatScanCost(this.#cost)}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
+  }
+
   #componentCostLines(): string[] {
     if (!this.#showCost) return [];
     const costs = this.#components.flatMap(({ dashboard }) =>
@@ -1065,7 +1090,7 @@ export class ScanDashboard {
     );
     return wrapActivity(
       "  COST     ",
-      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)} · component scans only`,
+      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)}${this.#components.some(({ dashboard }) => dashboard.#usageCoverage !== "complete") ? " (partial)" : ""} · component scans only`,
       this.#width(),
     );
   }
@@ -1100,15 +1125,15 @@ export class ScanDashboard {
       return { footer: [], details: [] };
     }
     const width = this.#width();
+    const tokens =
+      this.#usageCoverage === "unavailable"
+        ? "usage unavailable"
+        : `${this.#tokens ?? "waiting for usage"}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
     const limits =
       this.#accountLimits ??
       (this.#chatGptAuth ? ACCOUNT_LIMITS_UNAVAILABLE : null);
     const lines = [
-      ...wrapActivity(
-        "  TOKENS   ",
-        this.#tokens ?? "waiting for usage",
-        width,
-      ),
+      ...wrapActivity("  TOKENS   ", tokens, width),
       ...this.#costLines(),
       ...(this.#tokens === null
         ? []
@@ -1142,10 +1167,11 @@ export class ScanDashboard {
     if (
       this.#cost === null &&
       this.#options.maxCostUsd === undefined &&
-      estimateScanCost(this.#options.model?.model, {
-        input_tokens: 0,
-        output_tokens: 0,
-      }) === null
+      estimateScanCost(
+        this.#options.model?.model,
+        { input_tokens: 0, output_tokens: 0 },
+        this.#options.pricingContext,
+      ) === null
     ) {
       return [];
     }
@@ -1155,7 +1181,11 @@ export class ScanDashboard {
           ? "waiting for usage"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
-    return wrapActivity("  COST     ", cost, this.#width());
+    return wrapActivity(
+      "  COST     ",
+      `${cost}${this.#usageCoverage === "partial" ? " (partial)" : this.#usageCoverage === "unavailable" ? " (usage unavailable)" : ""}`,
+      this.#width(),
+    );
   }
 
   #activityLines(width: number): DashboardActivityLine[] {
