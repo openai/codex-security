@@ -8,7 +8,10 @@ import shutil
 import sqlite3
 import uuid
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
+from unittest.mock import Mock
+from urllib.parse import quote, unquote
 
 import pytest
 from workbench_test_support import load_script, run_workbench, write_completed_contract
@@ -23,6 +26,162 @@ RECEIPT_MIGRATION = next(
 )
 LINEAR = {"type": "linear", "teamId": "team-example"}
 JIRA = {"type": "jira", "cloudId": "site-example", "projectId": "10001"}
+
+
+@pytest.fixture
+def inspection(tmp_path: Path):
+    publication = load_script("workbench_publication")
+    scan_dir, validated = source(tmp_path)
+    payload = {"action": "inspect", "scanDirectory": str(scan_dir), "destination": LINEAR}
+    return publication, payload, validated
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("root", ["C:\\", "\\\\server\\share\\"])
+@pytest.mark.parametrize("extended", [False, True])
+def test_inspection_windows_filename_spelling(inspection, monkeypatch, root, extended) -> None:
+    publication, payload, validated = inspection
+    ordinary = PureWindowsPath(root) / "state %23 # équipe" / "workbench.sqlite3"
+    expected = (
+        ("\\\\?\\UNC\\" + str(ordinary)[2:])
+        if root.startswith("\\\\")
+        else "\\\\?\\" + str(ordinary)
+    )
+    stat = Mock()
+
+    class Filename(PureWindowsPath):
+        def stat(self):
+            return stat(str(self))
+
+    path = Filename(expected if extended else ordinary)
+    connect = Mock(return_value=sqlite3.connect(":memory:"))
+    monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(publication, "validate_contract", lambda _: validated)
+    monkeypatch.setattr(publication, "Path", Filename)
+    monkeypatch.setattr(publication.sqlite3, "connect", connect)
+
+    result = publication.finding_issues(SimpleNamespace(database_path=lambda: path), payload)
+
+    assert result["storeExists"] is True
+    assert {"stat": stat.call_args.args[0], "uri": connect.call_args.args[0]} == {
+        "stat": expected,
+        "uri": f"file:{quote(expected, safe='')}?mode=ro",
+    }
+    assert connect.call_args.kwargs == {"uri": True, "timeout": 5}
+    assert unquote(connect.call_args.args[0][5:].split("?")[0]) == expected
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("require_history", [False, True])
+def test_inspection_legacy_windows_filename_boundary(
+    inspection, monkeypatch, require_history
+) -> None:
+    publication, payload, validated = inspection
+
+    class Filename(PureWindowsPath):
+        def stat(self):
+            if not str(self).startswith("\\\\?\\") and len(str(self)) >= 260:
+                raise FileNotFoundError("synthetic legacy MAX_PATH failure")
+
+    directory = Filename("C:/") / ("s" * 246)
+    path = directory / "workbench.sqlite3"
+    assert len(str(directory)) < 260 <= len(str(path))
+
+    monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(publication, "validate_contract", lambda _: validated)
+    monkeypatch.setattr(publication, "Path", Filename)
+    monkeypatch.setattr(
+        publication.sqlite3, "connect", Mock(return_value=sqlite3.connect(":memory:"))
+    )
+    monkeypatch.setattr(publication, "verify_publication_history", Mock())
+    payload["requireHistory"] = require_history
+
+    try:
+        result = publication.finding_issues(SimpleNamespace(database_path=lambda: path), payload)
+    except SystemExit as exc:
+        pytest.fail(f"Existing database was treated as missing: {exc}")
+    assert result["storeExists"] is True
+
+
+@pytest.mark.parametrize(
+    "state_name",
+    [
+        pytest.param("state %23 # équipe", marks=pytest.mark.cross_platform),
+        pytest.param(
+            "state ?mode=rw",
+            marks=[
+                pytest.mark.native_macos,
+                pytest.mark.skipif(os.name == "nt", reason="? is not a Windows filename character"),
+            ],
+        ),
+    ],
+)
+def test_inspection_uri_reads_literal_filename_readonly(
+    tmp_path: Path, inspection, monkeypatch, state_name: str
+) -> None:
+    publication, payload, validated = inspection
+    path = tmp_path / state_name / "workbench.sqlite3"
+    legacy_database(path, validated, LINEAR)
+    original = path.read_bytes()
+    real_inspect = publication.inspect_issue_receipts
+
+    def inspect_readonly(connection, *args):
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("CREATE TABLE inspection_must_not_write (value TEXT)")
+        return real_inspect(connection, *args)
+
+    monkeypatch.setattr(publication, "inspect_issue_receipts", inspect_readonly)
+    result = publication.finding_issues(SimpleNamespace(database_path=lambda: path), payload)
+    assert result["receipts"][0]["issueIdentifier"] == "SEC-101"
+    assert path.read_bytes() == original
+    assert list(path.parent.iterdir()) == [path]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    "message,tagged", [("unable to open database file", True), ("database is locked", False)]
+)
+def test_inspection_access_failure_preserves_fallback_tag(
+    inspection, monkeypatch, message, tagged
+) -> None:
+    publication, payload, validated = inspection
+    path = Mock()
+    path.stat.side_effect = PermissionError("synthetic access failure")
+    error = sqlite3.OperationalError(message)
+    monkeypatch.setattr(publication, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(publication.sqlite3, "connect", Mock(side_effect=error))
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        publication.finding_issues(SimpleNamespace(database_path=lambda: path), payload)
+    assert raised.value is error
+    assert getattr(error, "_codex_security_state_unavailable", False) is tagged
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows extended-length paths")
+@pytest.mark.parametrize("extended", [False, True])
+def test_inspection_native_windows_filename_boundary(tmp_path: Path, inspection, extended) -> None:
+    publication, payload, validated = inspection
+    windows_files = load_script("windows_scan_local_files")
+    directory = tmp_path
+    while len(str(directory)) < 200:
+        directory /= "segment" * 5
+    directory /= "s" * (250 - len(str(directory)) - 1)
+    path = directory / "workbench.sqlite3"
+    assert len(str(directory)) < 260 <= len(str(path))
+    native_path = Path(windows_files._extended_path(path))
+    native_path.parent.parent.mkdir(parents=True, exist_ok=True)
+    legacy_database(native_path, validated, LINEAR)
+    original = native_path.read_bytes()
+
+    selected_path = native_path if extended else path
+    result = publication.finding_issues(
+        SimpleNamespace(database_path=lambda: selected_path), payload
+    )
+
+    assert result["storeExists"] is True
+    assert result["receipts"][0]["issueIdentifier"] == "SEC-101"
+    assert native_path.read_bytes() == original
+    assert list(native_path.parent.iterdir()) == [native_path]
 
 
 def source(tmp_path: Path) -> tuple[Path, dict]:
@@ -86,14 +245,22 @@ def legacy_database(path: Path, validated: dict, destination: dict) -> None:
         connection.commit()
 
 
-def test_inspection_of_portable_source_does_not_create_state(tmp_path: Path) -> None:
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("existing_directory", [False, True])
+def test_inspection_of_portable_source_does_not_create_state(
+    tmp_path: Path, existing_directory: bool
+) -> None:
     scan_dir, validated = source(tmp_path)
     state = tmp_path / "state"
+    if existing_directory:
+        state.mkdir()
     result = issues(state, scan_dir, "inspect")
     assert result["scanId"] == validated["manifest"]["scan"]["id"]
     assert result["receipts"] == []
     assert result["storeExists"] is False
-    assert not state.exists()
+    assert state.exists() is existing_directory
+    if existing_directory:
+        assert list(state.iterdir()) == []
 
 
 @pytest.mark.skipif(

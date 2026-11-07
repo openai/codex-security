@@ -28,6 +28,7 @@ from finalize_scan_contract import (
     write_sarif_projection,
 )
 from validate_scan_contract import validate_contract
+from windows_scan_local_files import _extended_path
 
 
 def destination_key(destination: Any) -> str:
@@ -211,6 +212,8 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         "receipts": [],
     }
     path = db.database_path()
+    if os.name == "nt":
+        path = Path(_extended_path(path))
     if payload["action"] == "inspect" or require_history:
         try:
             path.stat()
