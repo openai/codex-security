@@ -13,6 +13,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { bundledPluginRoot } from "./bundled-plugin.js";
 
 export interface TrustedExecutable {
   executable: string;
@@ -46,7 +47,6 @@ function canonicalRoot(root: string): Promise<string> {
 }
 
 async function campaignPathHelper() {
-  const { bundledPluginRoot } = await import("./runtime.js");
   const path = join(await bundledPluginRoot(), "mcp/helpers.mjs");
   const project = (await import(pathToFileURL(path).href)).default
     .inventoryToolPath;
