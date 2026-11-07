@@ -2008,21 +2008,23 @@ attach only their owner's session. Unrecorded earlier retry sessions may be abse
 ## Scan history and reruns
 
 Commands default to the current repository. IDs accept unique prefixes of at
-least eight characters.
+least eight characters. Repository findings track an issue across scans; a scan
+view shows the occurrences reported by that particular run.
 
-| Command                                               | Purpose                                                    |
-| ----------------------------------------------------- | ---------------------------------------------------------- |
-| `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.      |
-| `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                 |
-| `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active. |
-| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                         |
-| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                            |
-| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                    |
-| `scans match --all`                                   | Match completed scans across worktrees/clones.             |
-| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
-| `findings list [REPOSITORY]`                          | List open findings.                                        |
-| `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.         |
-| `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
+| Command                                               | Purpose                                                              |
+| ----------------------------------------------------- | -------------------------------------------------------------------- |
+| `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.                |
+| `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                           |
+| `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active.           |
+| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                                   |
+| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                                      |
+| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                              |
+| `scans match --all`                                   | Match completed scans across worktrees/clones.                       |
+| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.                     |
+| `findings list [REPOSITORY]`                          | List open findings.                                                  |
+| `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.                   |
+| `findings show OCCURRENCE_ID`                         | Show full details, remediation advice, and saved occurrence history. |
+| `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                          |
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
 selects the latest scan of any status. After a successful scan followed by a
@@ -2083,6 +2085,36 @@ Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
 work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder
 reads concatenated frames and reports truncated streams as collection errors.
+
+Use `findings list --scan SCAN_ID` for one saved scan, or `--all-repositories`
+for every repository. These options cannot be combined with a repository
+argument. Filter with `--query TEXT`, `--severity LEVEL`, or `--status open|closed`.
+Repository and all-repository lists default to open findings; scan-specific
+lists include both statuses unless filtered. `--status closed` also includes
+closed findings that no longer appear in the latest completed scan. A finding
+missing from a later scan remains open unless explicitly closed; comparisons
+report it as `not_observed` until remediation is verified.
+
+An unfiltered repository list in an interactive terminal shows all open findings.
+Filtered, scan-specific, all-repository, and machine-readable lists return one
+page. Pages default to 20 findings; use `--limit N` to choose the page size.
+Start at offset 0 and follow `nextOffset` with `--offset N` until it is null,
+keeping the same scope and filters on each request. For example:
+
+```bash
+codex-security findings list --severity high --limit 50 --json
+codex-security findings list --status closed
+```
+
+Finding lists include the occurrence IDs used by `findings show` and
+`findings false-positive`. Closed finding details distinguish fixed, false
+positive, and ignored findings. An explicit triage action applies to the matched
+finding history; a later scan that reports a fixed or false-positive finding
+again reopens it.
+
+Listing and showing saved findings or scans reads local data without calling a
+model. Matching and comparisons use Codex when saved matches are unavailable,
+and save the resulting links. Rerunning a scan starts a new scan.
 
 ### Resuming an interrupted Deep Scan
 

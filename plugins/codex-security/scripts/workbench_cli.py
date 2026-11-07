@@ -9,12 +9,12 @@ from pathlib import Path
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_constants import (
+    DEFAULT_PAGE_SIZE,
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
     FINDING_CLOSE_REASONS,
     FINDING_SEVERITIES,
     FINDING_STATUSES,
-    FINDINGS_PAGE_MAX,
     MODES,
     PHASE_PROGRESS_UNITS,
     PHASES,
@@ -197,7 +197,11 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     detail.add_argument("--progress-only", action="store_true")
     get_scan.add_argument("--check-target", action="store_true")
 
-    add_command("rename-scan", "--scan-id", "--name")
+    get_finding = subparsers.add_parser("get-finding")
+    get_finding.add_argument("--occurrence-id", required=True)
+    rename_scan = subparsers.add_parser("rename-scan")
+    rename_scan.add_argument("--scan-id", required=True)
+    rename_scan.add_argument("--name", required=True)
 
     read_scan_usage = add_command("read-scan-usage", "--scan-id", "--thread-id")
     read_scan_usage.add_argument("--validation-thread-id")
@@ -265,9 +269,12 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     list_global_findings.add_argument("--query")
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
-    list_global_findings.add_argument("--target-id")
+    list_global_findings.add_argument("--repository")
+    list_global_findings.add_argument("--target-id", action="append")
+    list_global_findings.add_argument("--target-path", action="append")
+    list_global_findings.add_argument("--include-resolved", action="store_true")
     list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
-    list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
+    list_global_findings.add_argument("--limit", type=positive_int, default=DEFAULT_PAGE_SIZE)
     list_repositories = subparsers.add_parser("list-repositories")
     list_repositories.add_argument("--query")
     list_repositories.add_argument("--target-id")
@@ -280,7 +287,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     list_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_findings.add_argument("--status", choices=FINDING_STATUSES)
     list_findings.add_argument("--offset", type=non_negative_int, default=0)
-    list_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
+    list_findings.add_argument("--limit", type=positive_int, default=DEFAULT_PAGE_SIZE)
 
     update_progress = add_command("update-progress", "--scan-id")
     update_progress.add_argument("--phase", choices=PHASES)

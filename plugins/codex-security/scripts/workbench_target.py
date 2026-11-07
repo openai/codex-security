@@ -1380,9 +1380,9 @@ def require_remediation_target(value: str) -> Path:
     return stored
 
 
-def require_scan_target_identity(scan: sqlite3.Row) -> Path:
+def require_scan_target_identity(scan: sqlite3.Row, *, target_path: str | None = None) -> Path:
     """Return the recorded checkout path or raise SystemExit if it no longer identifies the original directory."""
-    target = require_remediation_target(scan["target_path"])
+    target = require_remediation_target(scan["target_path"] if target_path is None else target_path)
     expected_inode = scan["target_inode"]
     if expected_inode is None:
         raise SystemExit(
@@ -1395,7 +1395,10 @@ def require_scan_target_identity(scan: sqlite3.Row) -> Path:
         raise SystemExit(
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc
-    if not stored_filesystem_identity_matches(expected_inode, metadata.st_ino):
+    if not stored_filesystem_identity_matches(expected_inode, metadata.st_ino) or (
+        target_path is not None
+        and not stored_filesystem_identity_matches(scan["target_device"], metadata.st_dev)
+    ):
         raise SystemExit(
             "Remediation is unavailable because the selected checkout path was replaced. "
             "Start a new scan."

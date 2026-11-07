@@ -5632,6 +5632,7 @@ export async function listRepositoryFindings(
   do {
     const page = await workbench([
       "list-global-findings",
+      ...(status === "all" ? ["--include-resolved"] : []),
       "--target-id",
       targetId,
       ...(status === "open" ? ["--status", "open"] : []),
