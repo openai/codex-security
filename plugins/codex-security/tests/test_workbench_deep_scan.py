@@ -1314,11 +1314,28 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
     )
     assert "orchestration must finish and persist its manifest" in str(premature["stderr"])
 
+    def model_begin(thread: str) -> dict[str, object]:
+        return begin_deep_scan(
+            state_dir,
+            thread,
+            "--scan-id",
+            scan_id,
+            "--model-thread-id",
+            thread,
+            environment=deep_environment(codex_home),
+            check=False,
+        )
+
+    assert "awaiting its owning Codex thread" in str(model_begin("other-thread")["stderr"])
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "sdk-thread")
+    assert "owning Codex thread" in str(model_begin("other-thread")["stderr"])
     begun = begin_deep_scan(
         state_dir,
         "sdk-thread",
         "--scan-id",
         scan_id,
+        "--model-thread-id",
+        "sdk-thread",
         "--service-tier",
         "priority",
         environment=deep_environment(codex_home),
