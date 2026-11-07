@@ -2,8 +2,8 @@ import { hash } from "node:crypto";
 import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { workflowDigest } from "../src/finding-workflow.js";
 import { modelResponseText } from "./support/model-response-text.js";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
@@ -271,6 +271,32 @@ test("represents policy exclusions independently from Low", async () => {
     level: null,
   });
   expect(validateSeverityClassification(result, [finding])).toEqual(result);
+});
+
+test("record classification reads selected external documents directly", async () => {
+  const caller = await temporaryDirectory();
+  const policy = await temporaryDirectory();
+  const guide = await document("External context.");
+  const alias = join(caller, "docs");
+  const externalAlias = join(policy, "current");
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  await mkdir(join(policy, ".git"));
+  await symlink(dirname(guide), alias, linkType);
+  await symlink(dirname(guide), externalAlias, linkType);
+  const { codex, calls } = fakeCodex(assessed);
+  const options = { workingDirectory: caller, codex, classificationRuns: 1 };
+  await expect(
+    classifySeverity([finding], {
+      ...options,
+      rubricPath: join(alias, "policy.md"),
+    }),
+  ).rejects.toThrow("repository symbolic link");
+  expect(calls).toHaveLength(0);
+  await classifySeverity([finding], {
+    ...options,
+    rubricPath: join(externalAlias, "policy.md"),
+  });
+  expect(calls[0]!.prompt).toContain("External context.");
 });
 
 test("rubric directories retain the ordered document digest without a revision", async () => {

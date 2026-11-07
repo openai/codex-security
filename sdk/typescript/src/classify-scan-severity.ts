@@ -9,6 +9,9 @@ import {
 } from "./classify-severity.js";
 import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
+import { documentSourceRoots } from "./knowledge-base.js";
+import type { DocumentSourceSelection } from "./prompt-files.js";
+import { isRecord } from "./record.js";
 import type { Finding } from "./models.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
@@ -17,6 +20,7 @@ import {
   type SavedScanDependencies,
 } from "./saved-scan.js";
 import { SeverityStore } from "./severity-store.js";
+import { workbenchArgs } from "./workbench-arguments.js";
 
 const CLASSIFICATION_FILE = "severity-classification.json";
 export interface ScanSeverityClassification extends SeverityClassification {
@@ -29,6 +33,12 @@ export interface ClassifyScanSeverityOptions extends ClassifySeverityOptions {
   /** Reclassify selected findings even when their saved assessment matches the inputs. */
   reprocess?: boolean;
   expectedScanId?: string;
+}
+
+function isRootList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((root) => typeof root === "string")
+  );
 }
 
 /** Resolve a saved scan ID, unique prefix, or latest and save its classification. */
@@ -58,10 +68,11 @@ export async function classifyScanSeverityInternal(
         currentDirectory,
         signal: options.signal,
       });
+  const runWorkbench = (args: readonly string[], input?: string) =>
+    (dependencies.runWorkbench ?? bootstrap!)(args, input, options.signal);
   const scan = await resolveCompletedScan(scanId, {
     currentDirectory: () => currentDirectory,
-    runWorkbench: (args, input) =>
-      (dependencies.runWorkbench ?? bootstrap!)(args, input, options.signal),
+    runWorkbench,
   });
   if (
     options.expectedScanId !== undefined &&
@@ -69,11 +80,42 @@ export async function classifyScanSeverityInternal(
   ) {
     throw new CodexSecurityError("Saved scan does not match expectedScanId.");
   }
+  const lookupSavedRoots = async (owners: readonly string[]) => {
+    const target = scan["targetPath"];
+    if (typeof target !== "string") return [];
+    const result = await runWorkbench(
+      workbenchArgs("get-scan", {
+        scanId: scan.scanId,
+        documentLinkOwnersStdin: true,
+      }),
+      JSON.stringify(owners),
+    );
+    const state = result["scan"];
+    const saved = isRecord(state) ? state : {};
+    const recorded = saved["documentSourceRoots"];
+    const matched = saved["matchedDocumentSourceRoots"];
+    if (
+      saved["scanId"] !== scan.scanId ||
+      !isRootList(matched) ||
+      (recorded !== null && !isRootList(recorded))
+    ) {
+      throw new CodexSecurityError(
+        "Could not identify the saved checkout for the selected document.",
+      );
+    }
+    // Only ambiguous legacy records need a boundary inferred from the surviving checkout.
+    return [
+      ...(recorded ??
+        (await documentSourceRoots(target, options.signal, true))),
+      ...matched,
+    ];
+  };
   return classifyScanDirectorySeverityInternal(
     scan.scanDir,
     { ...options, expectedScanId: scan.scanId },
     surface,
     bootstrap?.protectedRoots,
+    lookupSavedRoots,
   );
 }
 
@@ -91,6 +133,7 @@ export async function classifyScanDirectorySeverityInternal(
   options: ClassifyScanSeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   protectedRoots: readonly string[] = [],
+  lookupSavedRoots?: DocumentSourceSelection["lookupSavedRoots"],
 ): Promise<ScanSeverityClassification> {
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     requestedDirectory,
@@ -120,6 +163,10 @@ export async function classifyScanDirectorySeverityInternal(
         findings.map(({ findingId }) => findingId),
         options.reprocess ?? false,
       ),
+      {
+        directories: [scanDirectory],
+        ...(lookupSavedRoots ? { lookupSavedRoots } : {}),
+      },
     )),
     scanId: contract.manifest.scan.id,
   };

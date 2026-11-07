@@ -202,7 +202,8 @@ def _stream_is_binary(output: BinaryIO, size: int, *, drain: bool = False) -> bo
     return binary
 
 
-def _protected_repository_root(target: Path) -> Path:
+def repository_marker_root(target: Path, *, outermost: bool) -> Path:
+    """Return the selected directory or its nearest or outermost enclosing checkout."""
     root = target.resolve()
     if root.is_file():
         root = root.parent
@@ -213,6 +214,8 @@ def _protected_repository_root(target: Path) -> Path:
         except FileNotFoundError:
             continue
         protected = ancestor
+        if not outermost:
+            break
     return protected
 
 
@@ -236,7 +239,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         candidates = iter((candidate,))
 
     try:
-        repository = _protected_repository_root(protected_root)
+        repository = repository_marker_root(protected_root, outermost=True)
     except (OSError, RuntimeError):
         return None
 

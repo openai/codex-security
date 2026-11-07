@@ -523,8 +523,10 @@ Use the separate `suggest-owners` command for explicit owner-only jobs.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
-explicit unsupported binary files are rejected. Bulk scans share this context
-with every repository.
+explicit unsupported binary files are rejected. Select external documents
+directly. A directory link inside the scan target or its enclosing checkout must
+keep the selected document inside that source.
+Bulk scans share this context with every repository.
 
 Use `--output-dir DIR` to choose where a scan saves its results. The directory
 must be empty and outside the scanned directory and enclosing Git worktree.
@@ -1303,6 +1305,13 @@ selection. It lists repositories pushed in the last 90 days, excluding forks
 and archives, asks for output, and saves the selection as `repositories.csv`.
 Private checkouts use your GitHub CLI login.
 
+A usable local Git source selected by its directory protects document links
+inside it. For a standard SHA-1 repository created with `git init --bare` or
+`git clone --bare`, a `.git` marker can identify the storage alone. With a
+custom repository configuration or inherited command-scope Git settings, bulk
+scans may also protect the marker's parent. Pass the canonical path to select
+a shared external prompt or knowledge-base document in that case.
+
 For CI, provide CSV with `id`, `repository`, and a full commit `revision`.
 Optional `scope`, `mode`, and `prompt` customize each row:
 
@@ -1799,7 +1808,16 @@ request. It sends the config name without findings or account identifiers.
 If the request fails, times out, or returns an invalid rubric, the built-in
 rubric is used. An explicit `--rubric` (SDK `rubricPath`) skips the lookup and
 uses your policy for every review. Rubrics and repeatable `--knowledge-base`
-context accept text, PDF, DOCX, and directories.
+context accept text, PDF, DOCX, and directories. Select external documents directly
+when a repository directory link points outside the selected source. Saved scans
+use filesystem identity to recognize the selected directory and its enclosing
+checkout after either is moved. Older scans use the current checkout when the target
+still matches. If a legacy target was replaced and its original checkout is
+ambiguous, select external documents directly instead of through the remaining
+checkout’s links. With either a saved scan ID or a scan directory, an artifact-owned
+link must also stay inside the artifact directory, where the model can write
+files. An operator-owned alias outside the source and artifacts can select an
+external document.
 
 Each finding is classified three times by default. `--runs N` accepts
 an integer from 1 through 10; SDK options use `classificationRuns` with the same
@@ -1909,8 +1927,10 @@ await publishScan(scanDirectory, {
 ```
 
 `classifySeverity()` accepts `findingId`, `title`, `summary`, and available
-evidence/metadata. Imported reports may lack severity or occurrence IDs; omitting
-`rubricPath` uses the selected default policy even when a scanner severity is present.
+evidence/metadata. For in-memory findings, `workingDirectory` (the current directory
+by default) and its enclosing checkout define the boundary for directory links.
+Imported reports may lack severity or occurrence IDs; omitting `rubricPath` uses
+the selected default policy even when a scanner severity is present.
 Scan wrappers persist checkpoints (including for
 external directories), accept `reprocess: true`, and treat `findingIds: []` as an
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and

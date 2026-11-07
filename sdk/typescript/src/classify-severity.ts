@@ -7,7 +7,8 @@ import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
-import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
+import { readKnowledgeBaseSnapshot } from "./knowledge-base.js";
+import type { DocumentSourceSelection } from "./prompt-files.js";
 import type { Finding } from "./models.js";
 import {
   runReadOnlyCodex,
@@ -122,6 +123,7 @@ export async function classifySeverityInternal(
   options: ClassifySeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   checkpoint?: SeverityClassificationCheckpoint,
+  documentSelection?: DocumentSourceSelection,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
   const classificationRuns = classificationRunsSchema
@@ -136,16 +138,31 @@ export async function classifySeverityInternal(
     }
     ids.add(finding.findingId);
   }
+  const readDocuments = async (paths: readonly string[]): Promise<string[]> => {
+    const { documents } = await readKnowledgeBaseSnapshot(
+      paths,
+      options.signal,
+      documentSelection ?? options.workingDirectory ?? process.cwd(),
+    );
+    const contents = Object.keys(documents)
+      .sort()
+      .map((name) => documents[name]!);
+    if (contents.every((text) => !text.trim()))
+      throw new CodexSecurityError(
+        "Classification documents must not be empty.",
+      );
+    return contents;
+  };
   let rubric: string[];
   let defaultRubric: SeverityRubricSnapshot | undefined;
   if (options.rubricPath === undefined) {
     defaultRubric = await getDefaultSeverityRubric(options);
     rubric = [defaultRubric.markdown];
   } else {
-    rubric = await readDocuments([options.rubricPath], options.signal);
+    rubric = await readDocuments([options.rubricPath]);
   }
   const knowledge = options.knowledgeBasePaths?.length
-    ? await readDocuments(options.knowledgeBasePaths, options.signal)
+    ? await readDocuments(options.knowledgeBasePaths)
     : null;
   const rubricCheckpointSha256 = workflowDigest(rubric);
   const metadata = {
@@ -217,17 +234,6 @@ export async function classifySeverityInternal(
   }
   options.signal?.throwIfAborted();
   return result;
-}
-
-async function readDocuments(
-  paths: readonly string[],
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const contents = await readKnowledgeBaseDocuments(paths, signal);
-  if (contents.every((text) => !text.trim())) {
-    throw new CodexSecurityError("Classification documents must not be empty.");
-  }
-  return contents;
 }
 
 /** @internal Check parsed assessments against the actual finding evidence. */

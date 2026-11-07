@@ -821,6 +821,16 @@ describe("CodexSecurity orchestration", () => {
         "Knowledge base directory contains no supported documents",
       ],
     ];
+    const redirected = join(repository, "documents");
+    await symlink(
+      root,
+      redirected,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    invalidDocuments.push([
+      join(redirected, "context.json"),
+      "repository symbolic link",
+    ]);
     if (process.platform !== "win32") {
       const linkedDocument = join(root, "linked.md");
       await symlink(knowledgeBase, linkedDocument);

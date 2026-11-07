@@ -1010,7 +1010,11 @@ export class CodexSecurity {
       const finding = standaloneFindingForPrompt(options.finding);
       const snapshot = options.knowledgeBasePaths?.length
         ? (options.knowledgeBaseSnapshot ??
-          (await readKnowledgeBaseSnapshot(options.knowledgeBasePaths, signal)))
+          (await readKnowledgeBaseSnapshot(
+            options.knowledgeBasePaths,
+            signal,
+            options.repositoryPath,
+          )))
         : undefined;
       let protectedRoots: string[] | undefined;
       if (snapshot !== undefined) {
@@ -1714,6 +1718,8 @@ export class CodexSecurity {
       const knowledgeBase = await prepareKnowledgeBase(
         options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
         options.signal,
+        undefined,
+        inputs.repository,
       );
       await knowledgeBase.cleanup();
     }
@@ -1919,6 +1925,7 @@ export class CodexSecurity {
           options.knowledgeBasePaths,
           signal,
           outputDir,
+          inputs.repository,
         );
       }
       notifyObserver(options, "onOutputDirReady")(outputDir);
@@ -2321,6 +2328,7 @@ export class CodexSecurity {
             (await readKnowledgeBaseSnapshot(
               options.knowledgeBasePaths,
               signal,
+              repo,
             )),
         };
         knowledgeBase = await prepareKnowledgeBase(
@@ -2724,7 +2732,7 @@ export class CodexSecurity {
         else if (options.rubricPath !== undefined)
           severityRubric = await readSeverityRubricFile(
             resolve(expandHome(options.rubricPath)),
-            protectedRoot,
+            [repo, protectedRoot],
           );
         else
           severityRubric = await getDefaultSeverityRubric({
@@ -5176,6 +5184,8 @@ export class CodexSecurity {
         const knowledgeBase = await prepareKnowledgeBase(
           options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
           signal,
+          undefined,
+          local.repository,
         );
         await knowledgeBase.cleanup();
       }

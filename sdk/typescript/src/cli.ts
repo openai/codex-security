@@ -6487,6 +6487,9 @@ export async function main(
               options.knowledgeBase.map((path) =>
                 resolveCliPath(dependencies.currentDirectory(), path),
               ),
+              undefined,
+              undefined,
+              dependencies.currentDirectory(),
             );
           }
           exitCode = await runSkill(
@@ -10868,6 +10871,7 @@ async function executeScan(
       options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
         options.knowledgeBasePaths,
         preparationAbortController.signal,
+        resolve(directory, expandHome(repository)),
       );
     }
     if (arguments_.rerunInputIdentity !== undefined) {

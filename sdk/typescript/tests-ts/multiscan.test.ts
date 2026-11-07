@@ -26,6 +26,7 @@ import {
   type SecurityClient,
   type MultiscanOptions,
   createMultiscanFixtures,
+  git,
   repository,
   completedScan,
   customPlugin,
@@ -40,14 +41,61 @@ const { fixture, repositoryFixture, cleanup } = createMultiscanFixtures();
 afterEach(cleanup);
 
 describe("multiscan", () => {
-  test("prepares shared prompt files once while missing sources remain row failures", async () => {
+  test("prepares shared document inputs once while invalid sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");
+    const linked = join(paths.root, "linked");
+    git(source.path, "worktree", "add", "--detach", linked, source.revision);
+    const admin = git(linked, "rev-parse", "--absolute-git-dir");
+    const common = join(source.path, ".git");
+    await writeFile(join(common, "internal.md"), "Shared storage input.");
+    await filesystem.symlink(common, join(admin, "storage"), "junction");
+    const internal = join(admin, "storage", "internal.md");
     const prompt = join(paths.root, "shared-prompt.md");
     await writeFile(prompt, "Review synthetic boundaries.");
+    const config = join(paths.root, "operator");
+    const staleMarker = join(config, ".git");
+    await mkdir(staleMarker, { recursive: true });
+    const operator = join(config, "policy");
+    await mkdir(operator);
+    const marker = join(operator, ".git");
+    await writeFile(marker, "gitdir: docs\n");
+    const bundle = join(operator, "source.bundle");
+    git(source.path, "bundle", "create", bundle, "--all");
+    const aliases = join(operator, "aliases");
+    await mkdir(aliases);
+    const pointer = join(aliases, "source.ref");
+    await writeFile(pointer, `gitdir: ${join(source.path, ".git")}\n`);
+    await filesystem.symlink(paths.root, join(aliases, "current"), "junction");
+    const selected = join(aliases, "current", "shared-prompt.md");
+    const localFile = join(operator, "not-a-repository.csv");
+    await writeFile(localFile, "synthetic row");
+    const localDirectory = join(operator, "docs");
+    await mkdir(join(localDirectory, "refs"), { recursive: true });
+    await mkdir(join(localDirectory, "objects"));
+    await writeFile(join(localDirectory, "HEAD"), "ordinary text");
+    const rows = [
+      ["missing", join(operator, "absent"), "failed"],
+      ["invalid", join(prompt, "child"), "failed"],
+      ["long", join(paths.root, "x".repeat(300)), "failed"],
+      ["file", localFile, "failed"],
+      ["marker", marker, "failed"],
+      ["stale-marker", staleMarker, "failed"],
+      ["directory", localDirectory, "failed"],
+      ["plain-directory", aliases, "failed"],
+      ["first", join(linked, ".git"), "completed"],
+      ["second", join(source.path, ".git"), "completed"],
+      ["bundle", bundle, "completed"],
+      ["pointer", pointer, "completed"],
+    ];
     await writeFile(
       paths.input,
-      `id,repository,revision\nmissing,${join(paths.root, "absent")},${source.revision}\nfirst,${source.path},${source.revision}\nsecond,${source.path},${source.revision}\n`,
+      [
+        "id,repository,revision",
+        ...rows.map(
+          ([id, repository]) => `${id},${repository},${source.revision}`,
+        ),
+      ].join("\n"),
     );
     let scans = 0;
     const summary = await runMultiscan(
@@ -56,19 +104,24 @@ describe("multiscan", () => {
         client(async (_checkout, scanOptions = {}) => {
           expect(scanOptions.scanPrompt).toBe("Review synthetic boundaries.");
           expect(scanOptions.scanPromptFile).toBeUndefined();
+          expect(
+            Object.values(scanOptions.knowledgeBaseSnapshot!.documents).sort(),
+          ).toEqual(["Review synthetic boundaries.", "Shared storage input."]);
           if (scans++ === 0) await rm(prompt);
           return await completedScan(scanOptions.outputDir!);
         }),
-        { maxAttempts: 1, scanPromptFile: prompt },
+        {
+          maxAttempts: 1,
+          scanPromptFile: selected,
+          knowledgeBasePaths: [selected, internal],
+        },
       ),
     );
-    expect(scans).toBe(2);
-    expect(summary).toMatchObject({ total: 3, completed: 2, failed: 1 });
-    expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "missing", status: "failed" },
-      { id: "first", status: "completed" },
-      { id: "second", status: "completed" },
-    ]);
+    expect(scans).toBe(4);
+    expect(summary).toMatchObject({ total: 12, completed: 4, failed: 8 });
+    expect(await results(summary.resultsPath)).toMatchObject(
+      rows.map(([id, , status]) => ({ id, status })),
+    );
   });
 
   test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(
@@ -902,6 +955,179 @@ describe("multiscan", () => {
     expect(runs).toBe(2);
     expect(await readFile(join(standard, "checkpoint"), "utf8")).toBe("keep");
     expect(await readFile(join(deep, "checkpoint"), "utf8")).toBe("keep");
+  });
+
+  test.each([
+    "worktree",
+    "metadata",
+    "gitfile",
+    "bare",
+    "implicit bare",
+    "pointer",
+    "linked pointer",
+    "linked common",
+    "bare alias",
+  ])(
+    "rejects knowledge reached through a local source directory link for %s",
+    async (kind) => {
+      const paths = await fixture();
+      const primary = await repository(paths.root, "source");
+      let source = primary.path;
+      let selection = kind === "metadata" ? join(source, ".git") : source;
+      if (kind === "pointer") {
+        selection = join(source, "target.ref");
+        await writeFile(selection, "gitdir: .git\n");
+      } else if (
+        kind === "gitfile" ||
+        kind === "linked pointer" ||
+        kind === "linked common"
+      ) {
+        source = join(paths.root, "linked");
+        git(
+          primary.path,
+          "worktree",
+          "add",
+          "--detach",
+          source,
+          primary.revision,
+        );
+        selection = join(source, ".git");
+        if (kind === "linked pointer" || kind === "linked common") {
+          const target = await readFile(selection, "utf8");
+          selection = join(paths.root, "linked.ref");
+          await writeFile(selection, target);
+          if (kind === "linked common") source = join(primary.path, ".git");
+        } else if (process.platform !== "win32") {
+          const pointer = join(paths.root, "worktree-pointer");
+          await rename(selection, pointer);
+          await filesystem.symlink(pointer, selection);
+        }
+      } else if (
+        kind === "bare" ||
+        kind === "implicit bare" ||
+        kind === "bare alias"
+      ) {
+        selection = join(paths.root, "archive");
+        source = kind === "implicit bare" ? selection + ".git" : selection;
+        git(primary.path, "clone", "--quiet", "--bare", primary.path, source);
+        await mkdir(join(source, ".git"));
+        if (kind === "bare alias") {
+          const parent = join(paths.root, "checkout");
+          await mkdir(parent);
+          selection = join(parent, ".git");
+          await filesystem.symlink(source, selection, "junction");
+        } else if (kind === "implicit bare" && process.platform !== "win32") {
+          const marker = join(selection, ".git");
+          await mkdir(marker, { recursive: true });
+          await writeFile(join(marker, "HEAD"), "unavailable", { mode: 0 });
+        }
+      }
+      await writeFile(join(paths.root, "context.md"), "External context.");
+      await filesystem.symlink(paths.root, join(source, "docs"), "junction");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrow,${selection},${primary.revision}\n`,
+      );
+      const knowledgeBasePaths = [join(source, "docs", "context.md")];
+      const summary = await runMultiscan(
+        options(paths, client(completeRun), {
+          maxAttempts: 1,
+          ...(kind !== "gitfile"
+            ? { knowledgeBasePaths }
+            : { scanOptionsByMode: { standard: { knowledgeBasePaths } } }),
+        }),
+      );
+      expect(await results(summary.resultsPath)).toMatchObject([
+        {
+          id: "row",
+          error: expect.stringContaining("repository symbolic link"),
+        },
+      ]);
+    },
+  );
+
+  test.each([
+    "init",
+    "clone",
+    "caller Git locations",
+    "explicit directory",
+    "nonbare",
+    "duplicate",
+    "worktree config",
+    "linked",
+    "commondir",
+    "include",
+  ])("bulk document ownership with %s metadata", async (kind) => {
+    const callerLocations = kind === "caller Git locations";
+    if (
+      callerLocations &&
+      runTestInSubprocess(
+        import.meta.path,
+        `bulk document ownership with ${kind} metadata`,
+      )
+    )
+      return;
+    const paths = await fixture();
+    const primary = await repository(paths.root, "source");
+    const storage = join(paths.root, "storage");
+    if (kind === "init") {
+      git(paths.root, "init", "--bare", "--quiet", storage);
+      git(primary.path, "push", "--quiet", storage, "HEAD:refs/heads/example");
+    } else {
+      git(paths.root, "clone", "--bare", "--quiet", primary.path, storage);
+    }
+    if (kind === "nonbare") git(storage, "config", "core.bare", "false");
+    if (kind === "duplicate")
+      git(storage, "config", "--add", "core.bare", "false");
+    if (kind === "worktree config") {
+      git(storage, "config", "extensions.worktreeConfig", "true");
+      await writeFile(
+        join(storage, "config.worktree"),
+        "[core]\n\tbare = false\n",
+      );
+    }
+    if (kind === "include") {
+      const included = join(paths.root, "included.cfg");
+      await writeFile(included, "[core]\n\tbare = false\n");
+      git(storage, "config", "include.path", included);
+    }
+    if (kind === "commondir")
+      await writeFile(join(storage, "commondir"), ".\n");
+    const operator = join(paths.root, "operator");
+    const marker = join(operator, ".git");
+    if (kind === "linked") {
+      git(storage, "worktree", "add", "--detach", operator, primary.revision);
+    } else {
+      await mkdir(operator);
+      if (kind === "init")
+        await filesystem.symlink(storage, marker, "junction");
+      else await writeFile(marker, `gitdir: ${storage}\n`);
+    }
+    await writeFile(
+      join(paths.root, "guide.md"),
+      "Synthetic shared instructions.",
+    );
+    await filesystem.symlink(paths.root, join(operator, "docs"), "junction");
+    const selection = kind === "explicit directory" ? operator : marker;
+    if (callerLocations) {
+      process.env["GIT_DIR"] = join(primary.path, ".git");
+      process.env["GIT_COMMON_DIR"] = join(primary.path, ".git");
+      process.env["GIT_WORK_TREE"] = primary.path;
+    }
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrow,${selection},${primary.revision}\n`,
+    );
+    const summary = await runMultiscan(
+      options(paths, client(completeRun), {
+        maxAttempts: 1,
+        knowledgeBasePaths: [join(operator, "docs", "guide.md")],
+      }),
+    );
+    const [row] = await results(summary.resultsPath);
+    if (kind === "init" || kind === "clone" || callerLocations)
+      expect(row?.["status"]).toBe("completed");
+    else expect(row?.["error"]).toContain("repository symbolic link");
   });
 
   test("shared knowledge failures affect all modes before mode-specific inputs", async () => {

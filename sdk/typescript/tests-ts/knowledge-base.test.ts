@@ -986,6 +986,99 @@ describe("scan knowledge bases", () => {
     );
   });
 
+  test("rejects files and directories reached through a checkout-owned directory link", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const context = join(root, "context");
+    const read = (...paths: string[]) =>
+      readKnowledgeBaseSnapshot(paths, undefined, repository);
+    await mkdir(join(repository, ".git"), { recursive: true });
+    await mkdir(join(context, "nested"), { recursive: true });
+    await writeFile(join(context, "nested", "guide.md"), "Operator context.");
+
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    const alias = join(root, "checkout-alias");
+    await symlink(repository, alias, linkType);
+    await symlink(context, join(repository, "documents"), linkType);
+    const nestedAlias = join(root, "docs-alias");
+    await symlink(join(repository, "documents"), nestedAlias, linkType);
+    if (process.platform !== "win32") {
+      for (const [index, suffix] of ["/", "/.", "//nested"].entries()) {
+        const redirected = join(root, `redirect-${index}`);
+        await symlink(
+          join(repository, "documents") + suffix,
+          redirected,
+          "dir",
+        );
+        const file = suffix.endsWith("nested") ? "guide.md" : "nested/guide.md";
+        await expect(read(join(redirected, file))).rejects.toThrow(
+          "symbolic link",
+        );
+      }
+    }
+    await writeFile(join(repository, "guide.md"), "Checkout context.");
+    await mkdir(join(repository, "versions"));
+    await writeFile(
+      join(repository, "versions", "guide.md"),
+      "Versioned policy.",
+    );
+    await symlink(
+      join(repository, "versions"),
+      join(repository, "stable"),
+      linkType,
+    );
+    for (const name of ["nested", join("nested", "guide.md")]) {
+      for (const directory of [join(alias, "documents"), nestedAlias]) {
+        await expect(read(join(directory, name))).rejects.toThrow(
+          "symbolic link",
+        );
+      }
+    }
+    await symlink(root, join(repository, "up"), linkType);
+    const selectedRoot = await read(join(repository, "up", "repository"));
+    expect(selectedRoot.sources).toEqual([repository]);
+    const snapshot = await read(
+      join(alias, "guide.md"),
+      join(context, "nested", "guide.md"),
+      join(alias, "stable", "guide.md"),
+    );
+    expect(Object.values(snapshot.documents)).toEqual([
+      "Checkout context.",
+      "Operator context.",
+      "Versioned policy.",
+    ]);
+  });
+
+  test("a source inside a nested checkout uses that checkout's document boundary", async () => {
+    const outer = await temporaryDirectory();
+    const project = join(outer, "project");
+    const source = join(project, "src");
+    const policy = join(outer, "policy");
+    const read = (owner: string, link: string) =>
+      readKnowledgeBaseSnapshot(
+        [join(owner, link, "guide.md")],
+        undefined,
+        source,
+      );
+    await mkdir(join(outer, ".git"));
+    await mkdir(join(project, ".git"), { recursive: true });
+    await mkdir(source);
+    await mkdir(policy);
+    await writeFile(join(policy, "guide.md"), "External guide.");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    await symlink(policy, join(project, "docs"), linkType);
+    await symlink(policy, join(outer, "current"), linkType);
+    await expect(read(project, "docs")).rejects.toThrow(
+      "repository symbolic link",
+    );
+    await filesystem.rmdir(source);
+    await expect(read(project, "docs")).rejects.toThrow(
+      "repository symbolic link",
+    );
+    const snapshot = await read(outer, "current");
+    expect(Object.values(snapshot.documents)).toEqual(["External guide."]);
+  });
+
   testPosix("rejects unreadable source documents", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "scope.md");
