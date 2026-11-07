@@ -23,24 +23,20 @@ test("streams captured blob bytes through the selected Git context", async () =>
   const object = git("hash-object", "-w", file);
   const other = await fixtures.create("patch-blob-caller-");
   const digest = createHash("sha256");
-  let chunks = 0;
   const output = await runRepositoryCommand(
     "git",
     ["cat-file", "blob", object],
     other,
     {
+      maxBuffer: 1024,
       environment: {
         GIT_DIR: join(directory, ".git"),
         GIT_WORK_TREE: directory,
       },
-      onStdout: (chunk) => {
-        chunks++;
-        digest.update(chunk);
-      },
+      onStdout: (chunk) => digest.update(chunk),
     },
   );
   expect(output.length).toBe(0);
-  expect(chunks).toBeGreaterThan(1);
   expect(digest.digest("hex")).toBe(
     createHash("sha256").update(payload).digest("hex"),
   );
