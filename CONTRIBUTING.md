@@ -53,6 +53,8 @@ publication tests in the MCP suite.
 See the [CI guide](docs/ci.md) for check selection, platform/version coverage,
 required status checks, and test-runner qualification.
 
+For a live check of a scanner Cloud writer, use the [staging import smoke check](docs/scanner-imports/staging-qa.md) with a synthetic finding and a designated QA repository.
+
 ## Support for open-source projects
 
 If you maintain an open-source project,
