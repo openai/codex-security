@@ -47,10 +47,44 @@ export class PublicationTelemetryRecorder {
   };
   outcome: PublicationTelemetry["outcome"] = "failed";
 
-  constructor(
+  private constructor(
     private readonly destination: PublicationTelemetry["destination"],
     private readonly observer?: PublicationTelemetryObserver,
   ) {}
+
+  static async observe<T extends { telemetry?: PublicationTelemetry }>(
+    destination: PublicationTelemetry["destination"],
+    options: {
+      onTelemetry?: PublicationTelemetryObserver;
+      signal?: AbortSignal;
+      dryRun?: boolean;
+    },
+    publish: (telemetry: PublicationTelemetryRecorder) => Promise<T>,
+  ): Promise<T> {
+    const recorder = new PublicationTelemetryRecorder(
+      destination,
+      options.onTelemetry,
+    );
+    try {
+      const result = await publish(recorder);
+      result.telemetry ??= recorder.snapshot(
+        options.dryRun ? "preview" : "completed",
+      );
+      recorder.notify(result.telemetry);
+      return result;
+    } catch (error) {
+      recorder.notify(
+        recorder.snapshot(
+          recorder.outcome === "indeterminate"
+            ? "indeterminate"
+            : options.signal?.aborted
+              ? "canceled"
+              : "failed",
+        ),
+      );
+      throw error;
+    }
+  }
 
   snapshot(outcome = this.outcome): PublicationTelemetry {
     return Object.freeze({
@@ -66,7 +100,7 @@ export class PublicationTelemetryRecorder {
     });
   }
 
-  notify(telemetry: PublicationTelemetry): void {
+  private notify(telemetry: PublicationTelemetry): void {
     void Promise.resolve()
       .then(() => this.observer?.(telemetry))
       .catch(() => {});

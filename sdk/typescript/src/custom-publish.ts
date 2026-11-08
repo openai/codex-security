@@ -57,31 +57,9 @@ export async function publishScanToCustomInternal(
   options: PublishScanToCustomOptions,
   dependencies: CustomPublicationDependencies = {},
 ): Promise<CustomPublicationResult> {
-  const telemetry = new PublicationTelemetryRecorder(
-    "custom",
-    options.onTelemetry,
+  return PublicationTelemetryRecorder.observe("custom", options, (telemetry) =>
+    publishScanToCustomAttempt(scanDirectory, options, dependencies, telemetry),
   );
-  try {
-    const result = await publishScanToCustomAttempt(
-      scanDirectory,
-      options,
-      dependencies,
-      telemetry,
-    );
-    telemetry.notify(result.telemetry!);
-    return result;
-  } catch (error) {
-    telemetry.notify(
-      telemetry.snapshot(
-        telemetry.outcome === "indeterminate"
-          ? "indeterminate"
-          : options.signal?.aborted
-            ? "canceled"
-            : "failed",
-      ),
-    );
-    throw error;
-  }
 }
 
 async function publishScanToCustomAttempt(

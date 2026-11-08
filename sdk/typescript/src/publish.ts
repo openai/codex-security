@@ -248,34 +248,9 @@ export async function publishScanInternal(
   options: PublishScanOptions,
   dependencies: PublishScanDependencies = {},
 ): Promise<PublishScanResult> {
-  const telemetry = new PublicationTelemetryRecorder(
-    "linear",
-    options.onTelemetry,
+  return PublicationTelemetryRecorder.observe("linear", options, (telemetry) =>
+    publishScanAttempt(scanDirectory, options, dependencies, telemetry),
   );
-  try {
-    const result = await publishScanAttempt(
-      scanDirectory,
-      options,
-      dependencies,
-      telemetry,
-    );
-    result.telemetry ??= telemetry.snapshot(
-      options.dryRun ? "preview" : "completed",
-    );
-    telemetry.notify(result.telemetry);
-    return result;
-  } catch (error) {
-    telemetry.notify(
-      telemetry.snapshot(
-        telemetry.outcome === "indeterminate"
-          ? "indeterminate"
-          : options.signal?.aborted
-            ? "canceled"
-            : "failed",
-      ),
-    );
-    throw error;
-  }
 }
 
 async function publishScanAttempt(
