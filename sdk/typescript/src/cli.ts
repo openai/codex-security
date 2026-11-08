@@ -64,6 +64,7 @@ import {
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, Formatter, z } from "incur";
+import type { ZodType } from "zod";
 import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
@@ -8089,36 +8090,29 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe has an invalid Git head.",
     );
   }
-  const threshold = ScanSettingsSchema.shape.failureSeverity.safeParse(
-    recipe["failOnSeverity"],
+  const fields = ScanSettingsSchema.shape;
+  const readSetting = <T>(key: string, schema: ZodType<T>, label: string) => {
+    const result = schema.safeParse(recipe[key]);
+    if (!result.success)
+      throw new CodexSecurityError(
+        `The saved scan recipe contains an invalid ${label}.`,
+      );
+    return result.data;
+  };
+  const failureSeverity = readSetting(
+    "failOnSeverity",
+    fields.failureSeverity,
+    "severity policy",
   );
-  if (!threshold.success) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid severity policy.",
-    );
-  }
-  const maxCostUsd = recipe["maxCostUsd"];
-  if (
-    maxCostUsd !== undefined &&
-    (typeof maxCostUsd !== "number" ||
-      !Number.isFinite(maxCostUsd) ||
-      maxCostUsd <= 0)
-  ) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid cost limit.",
-    );
-  }
+  const maxCostUsd = readSetting("maxCostUsd", fields.maxCostUsd, "cost limit");
+  const maxTimeMinutes = readSetting(
+    "maxTimeMinutes",
+    fields.maxTimeMinutes,
+    "investigation time limit",
+  );
   const deepScan = DeepScanSettingsSchema.optional().safeParse(
     recipe["deepScan"],
   );
-  const maxTimeMinutes = ScanSettingsSchema.shape.maxTimeMinutes.safeParse(
-    recipe["maxTimeMinutes"],
-  );
-  if (!maxTimeMinutes.success) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid investigation time limit.",
-    );
-  }
   if (!deepScan.success) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid deep scan settings.",
@@ -8132,27 +8126,17 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe is missing resolved deep scan settings.",
     );
   }
-  const ownerSuggestions = ScanSettingsSchema.shape.ownerSuggestions.safeParse(
-    recipe["ownerSuggestions"],
+  const ownerSuggestions = readSetting(
+    "ownerSuggestions",
+    fields.ownerSuggestions,
+    "owner suggestions setting",
   );
-  if (!ownerSuggestions.success)
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid owner suggestions setting.",
-    );
-  const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
-  const cyberAccessProgram =
-    ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
-      recipe["cyberAccessProgram"],
-    );
-  if (!cyberAccessProgram.success) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid Cyber access program.",
-    );
-  }
-  if (!auth.success)
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid authentication choice.",
-    );
+  const cyberAccessProgram = readSetting(
+    "cyberAccessProgram",
+    fields.cyberAccessProgram,
+    "Cyber access program",
+  );
+  const auth = readSetting("auth", fields.auth, "authentication choice");
   if (
     mode !== "deep" &&
     deepScan.data !== undefined &&
@@ -8193,9 +8177,9 @@ async function prepareScanArgumentsFromRecipe(
   );
   return {
     repository,
-    auth: auth.data ?? DEFAULT_SCAN_AUTH,
-    cyberAccessProgram: cyberAccessProgram.data,
-    ownerSuggestions: ownerSuggestions.data,
+    auth: auth ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram,
+    ownerSuggestions,
     ...(severityRubric === undefined ? {} : { severityRubric }),
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:
@@ -8222,9 +8206,9 @@ async function prepareScanArgumentsFromRecipe(
     codexOverrides: Object.hasOwn(replayConfig, "approval_policy")
       ? replayConfig
       : { ...replayConfig, approval_policy: "never" },
-    failureSeverity: threshold.data,
+    failureSeverity,
     maxCostUsd,
-    maxTimeMinutes: maxTimeMinutes.data,
+    maxTimeMinutes,
     dryRun: false,
     ...(recipe["mock"] === true ? { mock: true } : {}),
     expectedPluginVersion:
