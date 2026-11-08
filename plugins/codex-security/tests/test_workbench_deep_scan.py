@@ -78,8 +78,6 @@ def begin_target_scan(
         ".",
         "--scan-root",
         str(scan_root),
-        "--available-parallelism",
-        "16",
         *(("--user-context-stdin",) if user_context is not None else ()),
         *(("--service-tier", service_tier) if service_tier is not None else ()),
         environment=deep_environment(codex_home),
@@ -1185,8 +1183,6 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
         ".",
         "--scan-root",
         str(tmp_path / "scans"),
-        "--available-parallelism",
-        "16",
         environment={
             **deep_environment(codex_home),
             "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH": str(isolated_config_path),
@@ -1567,8 +1563,6 @@ def assert_rejected_config(tmp_path: Path, setting: str, value: str, requirement
         "thread-deep-scan",
         "--target-path",
         str(target),
-        "--available-parallelism",
-        "8",
         environment=deep_environment(codex_home),
         check=False,
     )
@@ -2025,8 +2019,6 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         scan_id,
         "--claim-token",
         claim_token,
-        "--available-parallelism",
-        "8",
         environment=deep_environment(codex_home),
     )
     assert begun["startDisposition"] == "created"
