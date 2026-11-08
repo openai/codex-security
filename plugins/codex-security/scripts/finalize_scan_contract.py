@@ -2747,9 +2747,9 @@ def _validate_existing_seal(
             raise ContractError(f"{context}: sealed artifact changed or is missing")
 
 
-def _read_sealed_artifacts(
+def _read_scan_artifacts(
     scan_dir: Path, scan: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     findings, findings_bytes = _read_scan_local_json_bytes(
         scan_dir, scan["findingsRef"], scan["findingsRef"]
     )
@@ -2761,8 +2761,15 @@ def _read_sealed_artifacts(
         contents[scan["coverageRef"]] = coverage_bytes
     else:
         coverage = review_state(scan)
+    return findings, coverage, contents
+
+
+def _read_sealed_artifacts(
+    scan_dir: Path, scan: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+    findings, coverage, contents = _read_scan_artifacts(scan_dir, scan)
     _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
-    return findings, coverage, findings_bytes
+    return findings, coverage, contents[scan["findingsRef"]]
 
 
 def _read_sealed_scan(
@@ -3130,19 +3137,14 @@ def _prepare_scan_finalization(
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
     if draft_documents is None:
-        findings, findings_input_bytes = _read_scan_local_json_bytes(
-            scan_dir, scan["findingsRef"], scan["findingsRef"]
-        )
-        if "coverageRef" in scan:
-            coverage, coverage_input_bytes = _read_scan_local_json_bytes(
-                scan_dir, scan["coverageRef"], scan["coverageRef"]
-            )
-        else:
-            coverage = review_state(scan)
-            coverage_input_bytes = _json_bytes(coverage)
+        findings, coverage, contents = _read_scan_artifacts(scan_dir, scan)
     else:
         findings, coverage = copy.deepcopy(draft_documents[1:])
-        findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
+        contents = {scan["findingsRef"]: _json_bytes(findings)}
+        if "coverageRef" in scan:
+            contents[scan["coverageRef"]] = _json_bytes(coverage)
+    if "coverageRef" not in scan:
+        _json_bytes(coverage)
     if not was_sealed:
         # Preserve legacy sealed bundles, but do not publish a completeness claim.
         coverage.pop("completeness", None)
@@ -3166,14 +3168,7 @@ def _prepare_scan_finalization(
         raise ContractError(
             f"coverage.mode: must match selected scan mode {expected_coverage_mode}"
         )
-    _validate_existing_seal(
-        scan_dir,
-        scan,
-        artifact_contents={
-            scan["findingsRef"]: findings_input_bytes,
-            **({scan["coverageRef"]: coverage_input_bytes} if "coverageRef" in scan else {}),
-        },
-    )
+    _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
     _validate_target(_require_dict(scan, "target", "manifest.scan"))
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
