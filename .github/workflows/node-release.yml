@@ -112,11 +112,8 @@ jobs:
           if ! published_versions="$(
             sfw npm view @openai/codex-security versions --json
           )"; then
-            published_versions="$(
-              printf '%s\n' "$published_versions" |
-                node sdk/typescript/scripts/release-automation.mjs \
-                  initial-published-versions "$version"
-            )"
+            published_versions="$(node sdk/typescript/scripts/release-automation.mjs \
+              initial-published-versions "$version" <<< "$published_versions")"
           fi
           mode="$(
             printf '%s\n' "$published_versions" |

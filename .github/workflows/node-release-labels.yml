@@ -31,50 +31,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_note_label() {
-            local type="$1" breaking_marker="$2" scope="$3"
-            if [[ "$breaking_marker" == "!" ]]; then
-              printf '%s\n' breaking-change
-              return 0
-            fi
-
-            case "$type" in
-              feat)
-                printf '%s\n' enhancement
-                ;;
-              fix)
-                printf '%s\n' bug
-                ;;
-              docs)
-                printf '%s\n' documentation
-                ;;
-              release | test)
-                printf '%s\n' skip-release-notes
-                ;;
-              chore)
-                if [[ "$scope" == "(release)" ]]; then
-                  printf '%s\n' skip-release-notes
-                fi
-                ;;
-              *)
-                return 0
-                ;;
-            esac
-          }
-
-          title_sentinel="__CODEX_SECURITY_TITLE_END__"
-          current_title="$(
-            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER" \
-              --jq '.title | @base64' |
-              node --input-type=module --eval '
-                import { readFileSync } from "node:fs";
-                process.stdout.write(
-                  Buffer.from(readFileSync(0, "utf8"), "base64"),
-                );
-              ' &&
-              printf '%s' "$title_sentinel"
-          )"
-          current_title="${current_title%"$title_sentinel"}"
+          # The suffix preserves trailing newlines through shell command substitution.
+          current_title="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER" --jq '.title + "."')"
+          current_title="${current_title%.}"
           conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
           if [[ "$current_title" == *$'\n'* ||
                 "$current_title" == *$'\r'* ||
@@ -82,10 +41,22 @@ jobs:
             echo "Pull request title must follow <type>[optional scope][!]: <description>." >&2
             exit 1
           fi
-          type="${BASH_REMATCH[1]}"
-          scope="${BASH_REMATCH[2]:-}"
-          breaking_marker="${BASH_REMATCH[3]:-}"
-          label="$(release_note_label "$type" "$breaking_marker" "$scope")"
+          label=""
+          if [[ "${BASH_REMATCH[3]}" == "!" ]]; then
+            label=breaking-change
+          else
+            case "${BASH_REMATCH[1]}" in
+              feat) label=enhancement ;;
+              fix) label=bug ;;
+              docs) label=documentation ;;
+              release | test) label=skip-release-notes ;;
+              chore)
+                if [[ "${BASH_REMATCH[2]}" == "(release)" ]]; then
+                  label=skip-release-notes
+                fi
+                ;;
+            esac
+          fi
           current_labels="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
               --jq '.[].name'
@@ -103,7 +74,7 @@ jobs:
 
           label_already_present=false
           manual_category_present=false
-          bot_labels=""
+          bot_labels=()
           while IFS= read -r current_label; do
             case "$current_label" in
               breaking-change | enhancement | bug | documentation | skip-release-notes)
@@ -122,16 +93,13 @@ jobs:
                     manual_category_present=true
                   fi
                 else
-                  bot_labels+="$current_label"$'\n'
+                  bot_labels+=("$current_label")
                 fi
                 ;;
             esac
           done <<< "$current_labels"
 
-          while IFS= read -r current_label; do
-            if [[ -z "$current_label" ]]; then
-              continue
-            fi
+          for current_label in "${bot_labels[@]}"; do
             if [[ "$manual_category_present" == true || "$current_label" != "$label" ]]; then
               gh api --method DELETE \
                 "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$current_label" \
@@ -139,7 +107,7 @@ jobs:
             else
               label_already_present=true
             fi
-          done <<< "$bot_labels"
+          done
 
           if [[ -z "$label" ]]; then
             echo "No automatic release-note category applies."
