@@ -2582,7 +2582,6 @@ export async function main(
   }).command("false-positive", {
     description: "Mark a finding as a false positive for future scans.",
     destructive: true,
-    mcp: false,
     args: z.object({
       occurrenceId: z
         .string()
@@ -2615,7 +2614,6 @@ export async function main(
   });
   findingFeedback.command("list", {
     description: "List open findings for a repository across its scans.",
-    mcp: false,
     args: z.object({
       repository: z
         .string()
@@ -2682,7 +2680,6 @@ export async function main(
   });
   findingFeedback.command("imported", {
     description: "List imported vendor evidence for a local repository.",
-    mcp: false,
     args: z.object({
       repository: z
         .string()
@@ -2741,7 +2738,6 @@ export async function main(
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
-      mcp: false,
       args: z.object({
         repository: z
           .string()
@@ -2788,7 +2784,6 @@ export async function main(
     .command("show", {
       description: "Show the results and saved configuration for a scan.",
       hint: "Without an ID, show selects the latest completed scan; logs selects the latest scan of any status. Pass the same ID to inspect one run.",
-      mcp: false,
       args: z.object({
         scanId: z
           .string()
@@ -2851,7 +2846,6 @@ export async function main(
     .command("logs", {
       description: "Show saved activity for a scan and its workers.",
       hint: "Without an ID, logs selects the latest scan, including failed and active runs; show selects the latest completed scan. Pass the same ID to inspect one run.",
-      mcp: false,
       args: z.object({
         scanId: z
           .string()
@@ -2921,7 +2915,6 @@ export async function main(
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
-      mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
       }),
@@ -3007,7 +3000,6 @@ export async function main(
         "Start a new scan using saved settings and current checkout/context files.",
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
-      mcp: false,
       args: z.object({
         scanId: z
           .string()
@@ -3159,7 +3151,6 @@ export async function main(
     .command("match", {
       description: "Match findings by root cause across saved scans.",
       destructive: true,
-      mcp: false,
       args: z.object({
         beforeId: z
           .string()
@@ -3206,7 +3197,6 @@ export async function main(
     .command("compare", {
       description: "Match and compare findings between scans.",
       destructive: true,
-      mcp: false,
       args: z.object({
         beforeId: z
           .string()
@@ -3265,7 +3255,6 @@ export async function main(
       "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
       "  codex-security publish scan --to custom --scan latest --findings-url http://localhost:3000",
     destructive: true,
-    mcp: false,
     args: z.object({
       scanDir: z
         .string()
@@ -3890,7 +3879,6 @@ export async function main(
         "Preview and import a saved scanner report locally or to Cloud.",
       hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
-      mcp: false,
       args: z.object({
         file: z
           .string()
@@ -4243,7 +4231,6 @@ export async function main(
     .command("check", {
       description:
         "Check saved scan history and Linear access without creating issues.",
-      mcp: false,
       args: z.object({
         scanDir: z.string().describe("Completed scan directory."),
       }),
@@ -4278,7 +4265,6 @@ export async function main(
     description: "Read GitHub code scanning alerts without changing GitHub.",
     hint: "Save complete --format json output for publish findings --provider github. This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
-    mcp: false,
     args: z.object({
       repository: z
         .string()
@@ -4405,7 +4391,6 @@ export async function main(
       description: "Read GitHub security advisories without changing GitHub.",
       hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
       destructive: false,
-      mcp: false,
       args: z.object({
         repository: z
           .string()
@@ -4474,7 +4459,6 @@ export async function main(
         "Read Snyk Open Source or Code issues for one monitored project.",
       hint: "Requires SNYK_TOKEN. Save the complete --format json output. Use publish findings --provider snyk with --to local or --to cloud.",
       destructive: false,
-      mcp: false,
       args: z.object({
         project: z.string().min(1).describe("Snyk project ID."),
       }),
@@ -4535,7 +4519,6 @@ export async function main(
         "Read a full Semgrep Platform project and ref through the Web API.",
       hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output with publish findings --provider semgrep and --to local or --to cloud. Selected Guardian MCP captures also support both destinations.",
       destructive: false,
-      mcp: false,
       args: z.object({
         project: z
           .string()
@@ -4601,7 +4584,6 @@ export async function main(
         "Collect Sonar security findings or replay a saved capture into the local workbench.",
       hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a live capture for review without importing findings.",
       destructive: true,
-      mcp: false,
       args: z.object({
         capture: z
           .string()
@@ -4854,7 +4836,7 @@ export async function main(
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
-      tools: { discovery: "direct" },
+      tools: { discovery: "direct", include: ["info"] },
       instructions:
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
@@ -4863,7 +4845,6 @@ export async function main(
     .command("policy", {
       description: "Draft SECURITY.md for review.",
       destructive: true,
-      mcp: false,
       args: z.object({
         repository: z
           .string()
@@ -5049,7 +5030,6 @@ export async function main(
         "Use ./import to scan a repository named import.\n" +
         "Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
-      mcp: false,
       alias: { config: "c" },
       args: z.object({
         repository: z
@@ -5318,7 +5298,6 @@ export async function main(
         "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
       hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
-      mcp: false,
       args: z.object({
         repository: z
           .string()
@@ -5409,7 +5388,6 @@ export async function main(
     .command("suggest-owners", {
       description: "Suggest finding owners from CODEOWNERS and Git history.",
       destructive: false,
-      mcp: false,
       args: z.object({
         findings: z
           .string()
@@ -5477,7 +5455,6 @@ export async function main(
       description: "Assess severity for saved findings or canonical records.",
       hint: "For saved findings, use --rubric for your own policy or set CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1 for the Statsig default. For host-provided reviews, use --records.",
       destructive: true,
-      mcp: false,
       options: z.object({
         runs: classificationRunsSchema
           .default(3)
@@ -5602,7 +5579,6 @@ export async function main(
       description: "Identify duplicate findings in a saved scan.",
       hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       destructive: true,
-      mcp: false,
       options: z.object({
         concurrency: positiveInteger
           .default(DEFAULT_DEDUPE_CONCURRENCY)
@@ -5783,7 +5759,6 @@ export async function main(
     .command("scan-components", {
       description: "Scan project components and combine results.",
       destructive: true,
-      mcp: false,
       alias: { config: "c" },
       args: z.object({
         repository: z
@@ -6043,7 +6018,6 @@ export async function main(
     .command("bulk-scan", {
       description: "Discover and scan multiple repositories.",
       destructive: true,
-      mcp: false,
       alias: { config: "c" },
       args: z.object({
         input: z
@@ -6361,7 +6335,6 @@ export async function main(
         "Use --export-format for artifact format. The global --format option controls\n" +
         "framework output such as --schema; it does not change exported files.",
       destructive: true,
-      mcp: false,
       args: z.object({
         scanDir: z
           .string()
@@ -6507,7 +6480,6 @@ export async function main(
       description:
         "Assess candidate security findings using source evidence only.",
       destructive: false,
-      mcp: false,
       args: z.object({
         "findings...": z
           .string()
@@ -6582,7 +6554,6 @@ export async function main(
       description:
         "Verify existing security fixes without changing the repository.",
       destructive: false,
-      mcp: false,
       args: z.object({
         "findings...": z
           .string()
@@ -6814,7 +6785,6 @@ export async function main(
     .command("patch", {
       description: "Patch one or more security issues.",
       destructive: true,
-      mcp: false,
       args: z.object({
         "issues...": z
           .string()
@@ -7164,7 +7134,6 @@ export async function main(
         "  Keep SSH connected until login finishes.\n" +
         "Docs: https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
       destructive: true,
-      mcp: false,
       args: z.object({
         action: z
           .enum(["status"])
@@ -7265,7 +7234,6 @@ export async function main(
     .command("logout", {
       description: "Remove the stored sign-in.",
       destructive: true,
-      mcp: false,
       async run() {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           dependencies.environment,
@@ -7288,7 +7256,6 @@ export async function main(
       description: "Create a starter project configuration.",
       hint: "Existing files are never overwritten.",
       destructive: true,
-      mcp: false,
       args: z.object({
         file: z
           .string()
@@ -7319,7 +7286,6 @@ export async function main(
     .command("feedback", {
       description: "Send feedback to OpenAI and return a feedback ID.",
       destructive: true,
-      mcp: false,
       args: z.object({
         scanId: z
           .string()
@@ -7723,7 +7689,6 @@ export async function main(
         description:
           "Save CSV or JSON findings as a completed scan without security analysis.",
         destructive: true,
-        mcp: false,
         options: z
           .object({
             csv: optionValue("--csv")
