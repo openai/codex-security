@@ -1047,15 +1047,26 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     throw new Error("Unable to identify the current Windows user SID");
   }
 
-  // Signed built-in cmdlets remain available under ConstrainedLanguage;
-  // arbitrary .NET constructors, static methods, and SID translation do not.
+  // Direct .NET filesystem reads avoid per-entry provider overhead. Signed
+  // built-in cmdlets retain support for ConstrainedLanguage sessions.
   // Enumerate and count ACLs in the same process: parallel startup can create
   // or remove private cache and lock files while this traversal is running.
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "$script:descriptorCount = 0",
     "function Write-CredentialAcl($path) {",
-    "  $descriptors = @(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl)",
+    "  $descriptors = @(if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {",
+    "    foreach ($literalPath in @($path)) {",
+    "      try {",
+    "        $attributes = [System.IO.File]::GetAttributes($literalPath)",
+    "        $acl = if ($attributes -band 16) { [System.IO.Directory]::GetAccessControl($literalPath) } else { [System.IO.File]::GetAccessControl($literalPath) }",
+    "        $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)",
+    "      } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {",
+    // Preserve Get-Acl's disappearing-path errors for the existing batch recovery.
+    "        Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $literalPath | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+    "      }",
+    "    }",
+    "  } else { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl })",
     "  if ($descriptors.Count -ne @($path).Count) { throw 'Windows credential ACL could not be verified' }",
     "  foreach ($descriptor in $descriptors) { if (-not $descriptor) { throw 'Windows credential ACL could not be verified' }; $script:descriptorCount += 1; $descriptor }",
     "}",
@@ -1069,7 +1080,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "  }",
     "  $children = @(foreach ($entry in $entries) {",
     "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
-    "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
+    "    if ($entry -isnot [System.IO.DirectoryInfo] -and $entry -isnot [System.IO.FileInfo]) { throw 'Windows credential home contains an unsafe entry' }",
     // Keep the extended-length path when Windows PowerShell returns child names.
     '    "$path\\$($entry.Name)"',
     "  })",
@@ -1085,7 +1096,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "    }",
     "  }",
     "  for ($i = 0; $i -lt $children.Count; $i++) {",
-    "    if ($children[$i] -and $entries[$i].PSIsContainer) { Read-CredentialDescendants $children[$i] }",
+    "    if ($children[$i] -and $entries[$i] -is [System.IO.DirectoryInfo]) { Read-CredentialDescendants $children[$i] }",
     "  }",
     "}",
     ancestorAclScript,
