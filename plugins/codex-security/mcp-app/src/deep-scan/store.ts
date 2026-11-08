@@ -187,6 +187,16 @@ export class WorkbenchDeepScanStore {
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
     }
+    if (result.coordinatorDisposition === "claimed") {
+      this.coordinatorLeases.set(run.scanId, {
+        input: {
+          scanId: run.scanId,
+          threadId: input.threadId,
+          handoffClaimToken: input.handoffClaimToken,
+        },
+        run,
+      });
+    }
     return run;
   }
 

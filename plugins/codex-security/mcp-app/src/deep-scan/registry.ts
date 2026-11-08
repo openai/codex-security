@@ -24,7 +24,12 @@ export class DeepScanCoordinatorRegistry {
 
   start(options: CoordinatorOptions): DeepScanCoordinator {
     const existing = this.coordinators.get(options.run.scanId);
-    if (existing) return existing;
+    if (
+      existing &&
+      existing.snapshot().coordinatorGeneration ===
+        options.run.coordinatorGeneration
+    )
+      return existing;
     if (this.closed) throw new Error("Deep Scan coordinator host has closed.");
     let coordinator!: DeepScanCoordinator;
     coordinator = new DeepScanCoordinator({
@@ -201,7 +206,12 @@ export async function startOrJoinDeepScanCoordinator(
   joined: boolean;
 }> {
   const existing = input.registry.get(input.run.scanId);
-  if (existing) return { coordinator: existing, joined: true };
+  if (
+    existing &&
+    existing.snapshot().coordinatorGeneration ===
+      input.run.coordinatorGeneration
+  )
+    return { coordinator: existing, joined: true };
   const threadId = input.options.threadId;
   if (!threadId) {
     throw new Error(

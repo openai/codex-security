@@ -13,6 +13,7 @@ const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
 );
 
 await testBeginProtocolAndParsing();
+await testResumeClaimsItsNewGeneration();
 await testScopeResponseParsing();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
@@ -113,6 +114,25 @@ async function testBeginProtocolAndParsing() {
   );
   assert.deepEqual(scoped.includePaths, ["api", "README.md"]);
   assert.deepEqual(scoped.filePaths, ["README.md"]);
+}
+
+async function testResumeClaimsItsNewGeneration() {
+  const scanId = randomUUID();
+  const calls: string[][] = [];
+  const store = new WorkbenchDeepScanStore(async (args: string[]) => {
+    calls.push(args);
+    return stateResult(scanId, {
+      startDisposition: "joined",
+      coordinatorDisposition:
+        args[0] === "begin-deep-scan" ? "claimed" : "adopted",
+      deepScan: { coordinatorGeneration: 3 },
+    });
+  });
+  await store.begin({ scanId, threadId: "owner", scanRoot: "/fixture/scans" });
+  const claim = await store.claimCoordinator({ scanId, threadId: "owner" });
+  assert.equal(flagValue(calls[1], "--coordinator-generation"), "3");
+  assert.equal(claim.acquired, true);
+  assert.equal(claim.run.coordinatorGeneration, 3);
 }
 
 async function testScopeResponseParsing() {
@@ -1050,12 +1070,14 @@ function stateResult(
   scanId: string,
   overrides: {
     startDisposition?: string;
+    coordinatorDisposition?: string;
     deepScan?: Record<string, unknown> & { config?: Record<string, unknown> };
   } = {},
 ) {
   const deepScanOverride = overrides.deepScan ?? {};
   return {
     startDisposition: overrides.startDisposition,
+    coordinatorDisposition: overrides.coordinatorDisposition,
     deepScan: {
       scanId,
       status: "running",

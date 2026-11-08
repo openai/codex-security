@@ -1216,12 +1216,17 @@ report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report returns `0` by default, or `1` if findings
 meet a configured failure threshold.
 
-When a worker turn fails with a known cybersecurity policy refusal or an
-exhausted usage limit, Deep Scan stops retries and replacements, cancels active
-siblings, and retains completed worker artifacts. A capability check can succeed
-before a later request is refused. Use `scans show SCAN_ID` to inspect the failed
-scan and its retained results. To run it again from a saved recipe, use
-`scans rerun SCAN_ID`, which starts fresh discovery.
+When a worker turn fails with an exhausted usage limit, Deep Scan stops retries
+and replacements, cancels active siblings, and preserves accepted reviews and
+checkpoints. The coordinator reports `interrupted` with `resumeAvailable: true`;
+the saved scan remains `running` and no final report is sealed. After the usage
+allowance becomes available, use `scans resume SCAN_ID` to continue the same scan.
+Completed reviews are reused, and the original scan and time limits still apply.
+
+A known cybersecurity policy refusal remains a terminal failure. A capability
+check can succeed before a later request is refused. Use `scans show SCAN_ID` to
+inspect the failed scan and retained results, or `scans rerun SCAN_ID` to start
+fresh discovery from its saved recipe.
 
 At 80% of a single interactive scan's limit, the dashboard offers a higher total
 budget. Enter a larger total, or leave it blank/press Escape to keep the limit.
@@ -2096,6 +2101,10 @@ codex-security scans resume SCAN_ID
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
+This includes usage-limit pauses whose Deep Scan coordinator is `interrupted`
+with `resumeAvailable: true`. Wait for the allowance to reset before resuming.
+Plugin callers resume by calling `start_codex_security_deep_scan` with the same
+`scanId` and, when supplied, its original `handoffClaimToken`.
 
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
 settings/instructions. Knowledge-bearing scans save their extracted documents in

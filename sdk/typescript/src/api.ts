@@ -121,6 +121,7 @@ import {
   deepScanParentToolOverrides,
   readDeepScanParentConfig,
   runDeepScan,
+  DeepScanInterruptedError,
   type DeepScanDiagnostic,
 } from "./deep-scan.js";
 import {
@@ -4068,6 +4069,34 @@ export class CodexSecurity {
                 completedScan,
                 terminalTurnStatus,
               );
+          } else if (
+            isRecord(completedScan) &&
+            completedScan["mode"] === "deep" &&
+            typeof completedScan["continuationThreadId"] === "string" &&
+            !signal.aborted &&
+            !(failure instanceof ScanCostLimitExceededError)
+          ) {
+            const savedDeepScan = await workbench(
+              cleanupOptions,
+              workbenchArgs("get-deep-scan", {
+                scanId: activeScan.id,
+                threadId: completedScan["continuationThreadId"],
+              }),
+            );
+            const deepScan = savedDeepScan["deepScan"];
+            if (
+              isRecord(deepScan) &&
+              deepScan["status"] === "interrupted" &&
+              deepScan["resumeAvailable"] === true
+            ) {
+              failure = new DeepScanInterruptedError(
+                typeof deepScan["error"] === "string"
+                  ? deepScan["error"]
+                  : errorMessage(failure),
+                activeScan.id,
+                scanDir,
+              );
+            }
           }
         } catch (cleanupError) {
           notifyObserver(
@@ -4080,7 +4109,11 @@ export class CodexSecurity {
       }
       // A failed attachment must not turn a resumable coordinator into a terminal failure.
       // Deep Scan orchestration persists its own terminal failures and cancellations.
-      if (activeScan !== null && options.resumeScanId === undefined) {
+      if (
+        activeScan !== null &&
+        options.resumeScanId === undefined &&
+        !(failure instanceof DeepScanInterruptedError)
+      ) {
         if (
           options.validationPrompt !== undefined &&
           customValidation.status !== "complete"
@@ -4113,7 +4146,11 @@ export class CodexSecurity {
           activeScan = null;
         } catch {}
       }
-      if (runPostScan !== null && !signal.aborted) {
+      if (
+        runPostScan !== null &&
+        !signal.aborted &&
+        !(failure instanceof DeepScanInterruptedError)
+      ) {
         scanProgressTracker?.stop();
         try {
           for await (const event of (await runPostScan()).events) {

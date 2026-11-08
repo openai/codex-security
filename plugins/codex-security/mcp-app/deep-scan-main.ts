@@ -83,6 +83,16 @@ export async function runCliDeepScan(): Promise<void> {
       if (controller.signal.aborted) stop();
       terminal = await started.coordinator.wait(controller.signal);
     }
+    if (terminal.status === "interrupted" && terminal.resumeAvailable) {
+      process.stdout.write(
+        JSON.stringify({
+          scanId: terminal.scanId,
+          status: "interrupted",
+          error: terminal.error,
+        }) + "\n",
+      );
+      return;
+    }
     if (terminal.status !== "succeeded") {
       throw new Error(terminal.error ?? `Deep Scan ${terminal.status}.`);
     }

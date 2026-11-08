@@ -9,6 +9,7 @@ import {
   deepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
+  DeepScanUsageLimitError,
   confirmedOwnershipChange,
 } from "./errors.js";
 import { renderDiscoveryPrompt } from "./templates.js";
@@ -562,9 +563,13 @@ export class DeepScanWorkerRunner {
       artifactDir: input.artifactDir,
       attempt,
       threadId,
-      ...(coordinatorShutdown
-        ? { error: "coordinator_shutdown: mcp_transport_closed" }
-        : {}),
+      ...(this.options.signal.reason instanceof DeepScanUsageLimitError
+        ? {
+            error: `coordinator_shutdown: ${this.options.signal.reason.message}`,
+          }
+        : coordinatorShutdown
+          ? { error: "coordinator_shutdown: mcp_transport_closed" }
+          : {}),
     });
     return { status: "canceled" };
   }

@@ -23,6 +23,7 @@ from workbench.storage import (
     worker_usage_directory,
 )
 from workbench_constants import PHASES
+from workbench_scan_history import require_resume_target
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
@@ -356,6 +357,13 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "workflowVersion": run["workflow_version"],
         "coordinatorGeneration": run["coordinator_generation"],
         "status": run["status"],
+        **(
+            {"resumeAvailable": True}
+            if run["status"] == "interrupted"
+            and scan["status"] == "running"
+            and scan["seal_manifest_digest"] is None
+            else {}
+        ),
         "phase": run["phase"],
         # Older coordinators could persist discovery on the parent before dispatching.
         "discoveryStarted": (
@@ -400,7 +408,7 @@ def independent_review_progress(
     """Return completed and allowed review counts and the consolidation state, or None for a missing run."""
     run = connection.execute(
         """
-        SELECT completion_sequence, phase, updated_at, max_discovery_runs
+        SELECT completion_sequence, phase, updated_at, max_discovery_runs, status
         FROM deep_scan_runs
         WHERE scan_id = ?
         """,
@@ -419,10 +427,12 @@ def independent_review_progress(
     ).fetchone()
     consolidating = run["phase"] in {"reducing", "terminal"} or (active == 0 and buffered > 0)
     return {
-        "active": int(active),
+        "active": int(active) if run["status"] == "running" else 0,
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": parent_running and consolidating,
+        "consolidating": parent_running
+        and run["status"] in {"running", "succeeded"}
+        and consolidating,
         "updatedAt": str(run["updated_at"]),
     }
 
@@ -666,7 +676,37 @@ def begin_deep_scan_for_scan(
         )
         connection.commit()
     if existing is not None:
-        return deep_scan_result(connection, scan_id, start_disposition="joined")
+        resumed = False
+        connection.execute("BEGIN IMMEDIATE")
+        with connection:
+            scan, _ = require_owned_scan(connection, scan_id, thread_id)
+            require_current_continuation(
+                scan,
+                args.claim_token,
+                error_message="Deep Scan orchestration is owned by another continuation.",
+            )
+            run = require_deep_scan_run(connection, scan_id)
+            if (
+                run["status"] == "interrupted"
+                and scan["status"] == "running"
+                and scan["seal_manifest_digest"] is None
+            ):
+                # Explicit same-ID continuation fences the stopped coordinator.
+                # Recover unfinished attempts before granting the new lease.
+                require_resume_target(scan)
+                recover_expired_coordinator(connection, run, dependencies().now())
+                connection.execute(
+                    "UPDATE deep_scan_runs SET status = 'running', cancel_requested = 0, "
+                    "error_message = NULL, completed_at = NULL, "
+                    "coordinator_generation = coordinator_generation + 1, updated_at = ? "
+                    "WHERE scan_id = ?",
+                    (dependencies().now(), scan_id),
+                )
+                resumed = True
+        return {
+            **deep_scan_result(connection, scan_id, start_disposition="joined"),
+            **({"coordinatorDisposition": "claimed"} if resumed else {}),
+        }
     workspace = dependencies().require_workspace(connection, scan["workspace_id"])
     configuration = effective_deep_scan_config(args, workspace)
     config = configuration["settings"]
@@ -1633,6 +1673,39 @@ def fail_deep_scan_locked(
         require_current_coordinator(run, args)
         scan = dependencies().require_scan(connection, scan_id)
         recorded_manifest = archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
+        if (
+            args.deep_status == "interrupted"
+            and not args.manifest_path
+            and not args.staged_manifest_path
+            and recorded_manifest is None
+            and scan["status"] == "running"
+            and scan["seal_manifest_digest"] is None
+            and run["status"] in {"running", "interrupted"}
+        ):
+            if run["status"] == "interrupted":
+                if run["error_message"] != message:
+                    raise SystemExit("Deep Scan interruption reason is immutable until resumed.")
+                connection.commit()
+                return deep_scan_result(connection, scan_id)
+            message = run["error_message"] or message
+            timestamp = dependencies().now()
+            connection.execute(
+                "UPDATE deep_scan_workers SET status = 'canceled', "
+                "error_message = 'coordinator_shutdown: ' || COALESCE(error_message, ?), "
+                "completed_at = ?, updated_at = ? WHERE scan_id = ? "
+                "AND (status IN ('queued', 'running') "
+                "OR (status = 'failed' AND error_message = ?))",
+                (message, timestamp, timestamp, scan_id, message),
+            )
+            connection.execute(
+                "UPDATE deep_scan_runs SET status = 'interrupted', cancel_requested = 1, "
+                "error_message = ?, updated_at = ? WHERE scan_id = ?",
+                (message, timestamp, scan_id),
+            )
+            connection.execute("UPDATE scans SET updated_at = ? WHERE id = ?", (timestamp, scan_id))
+            connection.commit()
+            # Retain checkpoint/worker artifacts without sealing an unfinished scan.
+            return deep_scan_result(connection, scan_id)
         manifest_path = None
         if args.manifest_path:
             manifest_path = (
@@ -1795,7 +1868,7 @@ def cancel_from_parent_scan(connection: sqlite3.Connection, scan_id: str, timest
         UPDATE deep_scan_runs
         SET status = 'canceled', phase = 'terminal', cancel_requested = 1, error_message = NULL,
             terminal_reviewed_surface_count = NULL, completed_at = ?, updated_at = ?
-        WHERE scan_id = ? AND status IN ('running', 'succeeded')
+        WHERE scan_id = ? AND status IN ('running', 'succeeded', 'interrupted')
         """,
         (timestamp, timestamp, scan_id),
     )

@@ -298,6 +298,15 @@ export class FakeStore {
     this.run.status = status;
     this.run.error = message;
     this.run.manifestPath = manifestPath;
+    if (status === "interrupted" && !manifestPath) {
+      this.run.resumeAvailable = true;
+      for (const worker of this.workers.values()) {
+        if (worker.status === "failed" && worker.error === message) {
+          worker.status = "canceled";
+          worker.error = `coordinator_shutdown: ${message}`;
+        }
+      }
+    }
     return structuredClone(this.run);
   }
 

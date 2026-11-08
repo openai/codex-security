@@ -1781,7 +1781,10 @@ async function testStoreConfirmationSurvivesReplayAndThreadMetadata() {
 
 async function testJoinAndOrphanRules() {
   const fixture = await fixtureRun(twoRunConfig({ workers: 2, subagents: 1 }));
-  const existingCoordinator = { marker: "existing" };
+  const existingCoordinator = {
+    marker: "existing",
+    snapshot: () => fixture.run,
+  };
   const defaults = {
     executor: {},
     pluginRoot: fixture.pluginRoot,
@@ -1904,13 +1907,14 @@ async function testJoinAndOrphanRules() {
 
   const lock = new AsyncLock();
   const firstGate = Promise.withResolvers<void>();
-  let liveCoordinator: { marker: string } | undefined;
+  let liveCoordinator:
+    { marker: string; snapshot: () => DeepScanRunState } | undefined;
   starts.mock.resetCalls();
   const registry = {
     get: () => liveCoordinator,
     start: () => {
       starts();
-      liveCoordinator = { marker: "concurrent" };
+      liveCoordinator = { marker: "concurrent", snapshot: () => fixture.run };
       return liveCoordinator;
     },
   };
@@ -2460,12 +2464,37 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
   assert.equal(store.iterations[0].workerIds.length, 2);
   assert.equal(
     terminal?.status,
-    mode === "quota" ? "failed" : "succeeded",
+    mode === "quota" ? "interrupted" : "succeeded",
     terminal?.error,
   );
   const checkpoint = await readJson(store.iterations[0].resultPath);
   assert.equal(checkpoint.findings.length, mode === "quota" ? 2 : 1);
-  if (mode === "quota") assert.match(terminal.error ?? "", /Quota exceeded/);
+  if (mode === "quota") {
+    assert.match(terminal.error ?? "", /Quota exceeded/);
+    assert.equal(store.finishCalls.length, 0);
+    await assertNoPublishedCandidates(fixture.run.scanDir);
+    const saved = await readFile(store.iterations[0].resultPath, "utf8");
+    // The workbench reactivates the same run and fences the old coordinator.
+    Object.assign(store.run, {
+      status: "running",
+      error: null,
+      cancelRequested: false,
+      coordinatorGeneration: 3,
+      resumeAvailable: undefined,
+    });
+    const replacement = new FakeExecutor();
+    const continued = await runCoordinator(fixture, store, replacement, {
+      run: await store.get(),
+    });
+    assert.equal(continued?.status, "succeeded", continued?.error);
+    assert.equal(continued.scanId, terminal.scanId);
+    assert.ok(replacement.discoveryCalls > 0);
+    assert.equal(replacement.discoveryAttempts.has("discovery-0001"), false);
+    assert.equal(replacement.discoveryAttempts.has("discovery-0002"), false);
+    assert.equal(await readFile(store.iterations[0].resultPath, "utf8"), saved);
+    const manifest = await readJson(continued.manifestPath);
+    assert.equal(manifest.findings.length, 2);
+  }
 }
 
 async function testDiscoveryDeadlineReducesSingleBufferedFinding(
@@ -2869,10 +2898,13 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
     }
     shutdown.resolve();
     const result = await terminal;
-    assert.equal(result?.status, "failed");
+    assert.equal(result?.status, resumed ? "failed" : "interrupted");
     assert.equal(result?.error, message);
     assert.equal(signals.length, callsAtFailure);
-    assert.equal(store.workers.get(source.id)?.status, "failed");
+    assert.equal(
+      store.workers.get(source.id)?.status,
+      resumed ? "failed" : "canceled",
+    );
     assert.deepEqual(
       store.workerUpdates.filter((update) => update.terminalFailure),
       [source],

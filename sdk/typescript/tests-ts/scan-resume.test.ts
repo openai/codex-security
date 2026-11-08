@@ -320,6 +320,41 @@ test("resume resolves an interrupted scan without changing its ID, recipe, or co
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
 
+test("usage-limit pauses retain the original CLI resume context", async () => {
+  const f = await interruptedScan("deep");
+  await f.command([
+    "fail-deep-scan",
+    "--scan-id",
+    f.scanId,
+    "--deep-status",
+    "interrupted",
+    "--message",
+    "Quota exceeded. Check your plan and billing details.",
+  ]);
+  const paused = await f.command([
+    "get-deep-scan",
+    "--scan-id",
+    f.scanId,
+    "--thread-id",
+    f.threadId,
+  ]);
+  expect(paused["deepScan"]).toMatchObject({
+    status: "interrupted",
+    resumeAvailable: true,
+  });
+  const resumed = await f.command([
+    "get-cli-scan-resume",
+    "--scan-id",
+    f.scanId,
+  ]);
+  expect(resumed).toMatchObject({
+    ...f.registration,
+    recipe: f.recipe,
+    threadId: f.threadId,
+  });
+  expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
+});
+
 test.each([
   "failed",
   "canceled",
