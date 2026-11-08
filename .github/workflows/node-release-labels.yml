@@ -99,15 +99,18 @@ jobs:
             esac
           done <<< "$current_labels"
 
-          for current_label in "${bot_labels[@]}"; do
-            if [[ "$manual_category_present" == true || "$current_label" != "$label" ]]; then
-              gh api --method DELETE \
-                "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$current_label" \
-                --silent
-            else
-              label_already_present=true
-            fi
-          done
+          # Bash 3.2 treats an empty array as unset under nounset.
+          if (( ${#bot_labels[@]} )); then
+            for current_label in "${bot_labels[@]}"; do
+              if [[ "$manual_category_present" == true || "$current_label" != "$label" ]]; then
+                gh api --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$current_label" \
+                  --silent
+              else
+                label_already_present=true
+              fi
+            done
+          fi
 
           if [[ -z "$label" ]]; then
             echo "No automatic release-note category applies."
