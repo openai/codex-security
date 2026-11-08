@@ -3759,16 +3759,23 @@ async function testWorkerTerminalEvents() {
           onNonRetryableError,
         });
         if (event?.type === "turn.failed") {
-          const permanent = terminalMessages.includes(event.error.message);
+          const usageLimited =
+            event.error.message === quotaMessage ||
+            event.error.message === wrappedQuota;
+          const nonRetryable = terminalMessages.includes(event.error.message);
           await assert.rejects(execution, {
-            name: permanent ? "DeepScanNonRetryableError" : "Error",
+            name: usageLimited
+              ? "DeepScanUsageLimitError"
+              : nonRetryable
+                ? "DeepScanNonRetryableError"
+                : "Error",
             message: event.error.message,
           });
           assert.deepEqual(
             onNonRetryableError.mock.calls.map(
               ({ arguments: [error] }) => error.message,
             ),
-            permanent ? [event.error.message] : [],
+            nonRetryable ? [event.error.message] : [],
           );
           continue;
         }

@@ -50,9 +50,16 @@ export async function testExecutorExecutablePinning({
     ) => {
       const script = nativeScripts.get(command);
       if (script) nativeLaunches.push(command);
+      // Node's JS entry resolver rejects the extended drive form. Keep the
+      // native executable spelling intact for the pinning assertions.
+      const entry =
+        script ??
+        (command.startsWith("\\\\?\\") && command[5] === ":"
+          ? command.slice(4)
+          : command);
       return originalSpawn(
         script ? command : process.execPath,
-        [script ?? command, ...args],
+        [entry, ...args],
         options,
       );
     }) as typeof childProcess.spawn;
