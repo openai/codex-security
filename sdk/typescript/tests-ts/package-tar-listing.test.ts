@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { brotliCompressSync, brotliDecompressSync, gzipSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
+import packageJson from "../package.json" with { type: "json" };
 import {
   archive,
   cleanCompressedPayload,
@@ -78,14 +79,9 @@ function packageTar({
   const paths = [
     "package/package.json",
     "package/README.md",
-    "package/docs/cli.md",
-    "package/docs/findings-service.md",
-    "package/docs/dedupe-records.md",
-    "package/docs/classify-severity-records.md",
-    "package/docs/hosted-scans.md",
-    "package/docs/validate-records.md",
-    "package/docs/hosted-remediation.md",
-    "package/docs/telemetry.md",
+    ...packageJson.files
+      .filter((path) => path.startsWith("docs/"))
+      .map((path) => `package/${path}`),
     "package/schemas/hosted-scan-v2.fixture.json",
     "package/schemas/project-config.schema.json",
     "package/schemas/external-findings.schema.json",
