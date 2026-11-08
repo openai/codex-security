@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { classificationRunsSchema } from "./severity-review.js";
+import { DEFAULT_REVIEW_RUNS, reviewRunsOption } from "./severity-review.js";
 import { severityRubricSchema } from "./severity-rubric.js";
 import { explicitlyCanceled } from "./scan-executor.js";
 import { workbenchArgs } from "./workbench-arguments.js";
@@ -2274,12 +2274,11 @@ export async function main(
             runs: { type: "string" },
           },
         });
-        classificationRuns = classificationRunsSchema.parse(
-          values.runs === undefined ? 3 : Number(values.runs),
-        );
+        if (values.runs !== undefined)
+          classificationRuns = reviewRunsOption.parse(Number(values.runs));
       } catch {
         errorOutput.write(
-          "codex-security: Use --records with only --runs (an integer from 1 to 10; default: 3).\n",
+          `codex-security: Use --records with only --runs (an integer from 1 to 10; default: ${DEFAULT_REVIEW_RUNS}).\n`,
         );
         return 2;
       }
@@ -5479,11 +5478,9 @@ export async function main(
       destructive: true,
       mcp: false,
       options: z.object({
-        runs: classificationRunsSchema
-          .default(3)
-          .describe(
-            "Number of independent classification runs (1–10; default: 3).",
-          ),
+        runs: reviewRunsOption.describe(
+          `Number of independent classification runs (1–10; default: ${DEFAULT_REVIEW_RUNS}).`,
+        ),
         records: z
           .boolean()
           .default(false)
