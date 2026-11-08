@@ -2850,38 +2850,30 @@ def _has_identity_text(value: Any) -> bool:
     )
 
 
+def _candidate_id_values(finding: dict[str, Any]) -> Iterator[Any]:
+    if isinstance(provenance := finding.get("provenance"), dict):
+        yield provenance.get("candidateId")
+    if isinstance(extensions := finding.get("extensions"), dict):
+        for key in ("candidateId", "reportId", "ledgerRowId"):
+            yield extensions.get(key)
+
+
 def finding_candidate_id(finding: dict[str, Any]) -> str | None:
-    provenance = finding.get("provenance")
-    if isinstance(provenance, dict) and _has_identity_text(value := provenance.get("candidateId")):
-        return value
-    extensions = finding.get("extensions")
-    if not isinstance(extensions, dict):
-        return None
     return next(
-        (
-            value
-            for field in ("candidateId", "reportId", "ledgerRowId")
-            if _has_identity_text(value := extensions.get(field))
-        ),
-        None,
+        (value for value in _candidate_id_values(finding) if _has_identity_text(value)), None
     )
 
 
 def _csv_candidate_id(finding: dict[str, Any]) -> str | None:
-    candidate_id = finding_candidate_id(finding)
-    if candidate_id is not None:
-        return candidate_id
     # Preserve literal CSV metadata, such as FEFF, that is not a canonical identity.
-    for metadata, fields in (
-        (finding.get("provenance"), ("candidateId",)),
-        (finding.get("extensions"), ("candidateId", "reportId", "ledgerRowId")),
-    ):
-        if isinstance(metadata, dict):
-            for field in fields:
-                value = metadata.get(field)
-                if isinstance(value, str) and value.strip():
-                    return value
-    return None
+    return finding_candidate_id(finding) or next(
+        (
+            value
+            for value in _candidate_id_values(finding)
+            if isinstance(value, str) and value.strip()
+        ),
+        None,
+    )
 
 
 def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
