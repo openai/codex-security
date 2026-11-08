@@ -1221,6 +1221,8 @@ for await (const line of createInterface({ input: process.stdin })) {
         );
       }
     },
+    // Four real clients each allow 20s startup plus shutdown and registration.
+    120_000,
   );
 
   test("copies configured plugins with more than 4,096 entries", async () => {
