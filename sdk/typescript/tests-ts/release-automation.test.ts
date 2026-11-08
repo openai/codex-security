@@ -123,15 +123,45 @@ function runPublisher({
         RELEASE_VERSION: "0.1.2",
         RELEASE_SHA: releaseCommit,
         RELEASE_ARCHIVE: archivePath,
-        PREVIOUS_TAG: "npm-v0.1.1",
-        MAKE_LATEST: String(makeLatest),
       },
       workspace,
       (program: string, args: string[]) => {
         calls.push([program, ...args]);
+        if (program === "npm") {
+          expect(args).toEqual([
+            "view",
+            "@openai/codex-security",
+            "versions",
+            "--json",
+            "--registry=https://registry.npmjs.org/",
+          ]);
+          return {
+            status: 0,
+            stdout: JSON.stringify(makeLatest ? ["0.1.2"] : ["0.1.2", "0.1.3"]),
+          };
+        }
+        if (program === "git" && args[0] === "rev-parse")
+          return { status: 0, stdout: "" };
+        if (program === "git" && args[0] === "tag") {
+          expect(args).toEqual([
+            "tag",
+            "--merged",
+            `${releaseCommit}^`,
+            "--list",
+            "npm-v*",
+            "--sort=-version:refname",
+          ]);
+          return { status: 0, stdout: "npm-v0.1.1\nnpm-v0.1.0\n" };
+        }
         const endpoint = args.find((argument) => argument.startsWith("repos/"));
         if (program === "gh" && args[0] === "api") {
           switch (endpoint) {
+            case "repos/test/codex-security/releases?per_page=100":
+              expect(args).toContain("--paginate");
+              expect(args).toContain(
+                ".[] | select(.draft == false and .prerelease == false) | .tag_name",
+              );
+              return { status: 0, stdout: "npm-v0.1.1\n" };
             case "repos/test/codex-security/releases/tags/npm-v0.1.2":
               return existingLookup !== "existing"
                 ? lookup(existingLookup)
@@ -3160,8 +3190,10 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       import { syncBuiltinESMExports } from "node:module";
       import { readFileSync, writeFileSync } from "node:fs";
       childProcess.spawnSync = (program, args, options) => {
+        if (program === "npm") return { status: 0, stdout: '["0.1.2","0.1.3"]' };
         if (program === "git") return { status: 1, stdout: "" };
         if (program !== "gh") throw new Error("Unexpected command: " + program);
+        if (args.includes("repos/test/codex-security/releases?per_page=100")) return { status: 0, stdout: "" };
         if (args.includes("repos/test/codex-security/releases/tags/npm-v0.1.2")) {
           return { status: 1, stdout: 'HTTP/2.0 404 Not Found\\n\\n{"message":"Not Found"}' };
         }
@@ -3197,8 +3229,6 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
             RELEASE_VERSION: "0.1.2",
             RELEASE_SHA: releaseCommit,
             RELEASE_ARCHIVE: join(workspace, "verified archive.tgz"),
-            PREVIOUS_TAG: "",
-            MAKE_LATEST: "false",
           },
           { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
         );
@@ -3216,7 +3246,6 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     const result = runPublisher({ existingLookup: "missing" });
     expect(result.status).toBe(0);
     expect(result.calls.at(-1)).toContain("--latest=false");
-    expect(githubReleaseWorkflow).toContain("release-history");
   });
 
   test.each(["", "not-json"])(
@@ -3239,12 +3268,6 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
   );
 
   test("generates notes only from a previously published release", () => {
-    expect(githubReleaseWorkflow).toContain(
-      "npm view @openai/codex-security versions",
-    );
-    expect(githubReleaseWorkflow).toContain(
-      "steps.history.outputs.previous-tag",
-    );
     const result = runPublisher({ existingLookup: "missing" });
     expect(
       result.calls.find((call) =>
@@ -3270,6 +3293,10 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
     expect(result.calls.map((call) => call.slice(0, 3))).toEqual([
+      ["npm", "view", "@openai/codex-security"],
+      ["gh", "api", "--paginate"],
+      ["git", "rev-parse", `${releaseCommit}^`],
+      ["git", "tag", "--merged"],
       ["gh", "api", "--include"],
       ["gh", "release", "download"],
     ]);
