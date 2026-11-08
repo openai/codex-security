@@ -185,7 +185,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     // Do not merge older review work into them.
     const preserved = finalDeepDraft
       ? await preserveDeepThreatModel(context, parsed)
-      : await preserveScanDraft(context, parsed, false);
+      : await preserveScanDraft(context, parsed);
     const reconciled = preserved.input;
     const contract = requireObject(
       context.targetContract,
@@ -457,25 +457,7 @@ export async function saveScanDraftCheckpoint(
   input: Omit<ScanDraftInput, "reviewState">,
   updateHead = true,
 ): Promise<void> {
-  const { handoffClaimToken: _claim, ...raw } = input;
-  const head =
-    context.layout === "scan" &&
-    context.mode === "deep" &&
-    input.complete !== false
-      ? await readCheckpointHead(context, "current")
-      : undefined;
-  const snapshot =
-    context.layout === "scan" &&
-    context.mode === "deep" &&
-    input.complete !== false
-      ? {
-          ...raw,
-          publication: {
-            previousCheckpoint: head?.checkpoint ?? null,
-            previousInputCheckpoint: head?.inputCheckpoint ?? null,
-          },
-        }
-      : raw;
+  const { handoffClaimToken: _claim, ...snapshot } = input;
   const contents = JSON.stringify(snapshot, null, 2) + "\n";
   const name = scanDraftCheckpointName(snapshot);
   const destination = await artifactDestination(
@@ -690,7 +672,6 @@ async function qualifyWorkerReceipts(
 async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
-  saveCheckpoint = true,
 ): Promise<{
   input: ScanDraftInput;
   previousDigest: string;
@@ -702,9 +683,8 @@ async function preserveScanDraft(
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation =
     resolvedDeferred(input.reviewState).length > 0;
+  const saveCheckpoint = context.layout === "worker";
   const saveObservation = saveCheckpoint && !requiresClosureValidation;
-  if (saveObservation && context.layout !== "worker")
-    await saveScanDraftCheckpoint(context, input, false);
   let result = structuredClone(input);
   let previousState: Awaited<ReturnType<typeof readPreviousScanDraft>>;
   let current: SavedScanDraft[];
@@ -726,7 +706,7 @@ async function preserveScanDraft(
         : [];
   } catch (error) {
     // Failed source reads must still preserve valid submitted progress.
-    if (saveObservation && context.layout === "worker") {
+    if (saveObservation) {
       await qualifyWorkerReceipts(context, input);
       await saveScanDraftCheckpoint(context, input, false);
     }
@@ -1944,10 +1924,7 @@ function reconcileDeferredSurfaces(
 async function readCheckpointHead(
   context: ArtifactContext,
   kind: "current" | "archived",
-): Promise<
-  | { checkpoint: string; inputCheckpoint?: string; modifiedMs: number }
-  | undefined
-> {
+): Promise<{ checkpoint: string; modifiedMs: number } | undefined> {
   const metadata = await lstatIfExists(
     join(context.root, "checkpoint-head.json"),
   );
@@ -1971,9 +1948,6 @@ async function readCheckpointHead(
   // Reselecting an immutable checkpoint updates only the head file.
   return {
     checkpoint: head.checkpoint,
-    ...(typeof head.inputCheckpoint === "string"
-      ? { inputCheckpoint: head.inputCheckpoint }
-      : {}),
     modifiedMs: saved.modifiedMs,
   };
 }
