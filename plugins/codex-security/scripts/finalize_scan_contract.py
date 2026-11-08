@@ -2262,26 +2262,6 @@ def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> No
         _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
-def _validate_canonical_schemas_before_projection(
-    manifest: dict[str, Any],
-    findings: dict[str, Any],
-    coverage: dict[str, Any],
-    schema_dir: Path,
-) -> None:
-    provisional_manifest = copy.deepcopy(manifest)
-    provisional_scan = _require_dict(provisional_manifest, "scan", "manifest")
-    provisional_scan["artifacts"] = [
-        {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
-        {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
-    ]
-    if "coverageRef" not in provisional_scan:
-        provisional_scan["mode"] = coverage["mode"]
-        provisional_scan["review"] = review_summary(coverage)
-    validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings, schema_dir / "findings.schema.json")
-    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
-
-
 def _validate_contract_refs(scan: dict[str, Any]) -> None:
     for field, expected in (
         ("coverageRef", "coverage.json"),
@@ -3205,9 +3185,19 @@ def _prepare_scan_finalization(
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
-    _validate_canonical_schemas_before_projection(
-        manifest, findings_for_validation, coverage, schema_dir
-    )
+    provisional_manifest = copy.deepcopy(manifest)
+    provisional_manifest["scan"]["artifacts"] = [
+        {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
+        {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
+    ]
+    inline_review = {}
+    if "coverageRef" not in scan:
+        inline_review = {"mode": coverage["mode"], "review": review_summary(coverage)}
+        provisional_manifest["scan"].update(inline_review)
+    validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
+    del provisional_manifest
+    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
+    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent
@@ -3253,9 +3243,8 @@ def _prepare_scan_finalization(
     else:
         findings_bytes = _contract_json_bytes("findings.json", findings)
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
-        if "coverageRef" not in scan:
-            scan["mode"] = coverage["mode"]
-            scan["review"] = review_summary(coverage)
+        if inline_review:
+            scan.update(inline_review)
             scan.pop("reviewState", None)
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
