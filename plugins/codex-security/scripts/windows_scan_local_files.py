@@ -706,13 +706,13 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
                 )
             except WindowsScanLocalFileError as exc:
                 if exc.errno == _ERROR_ACCESS_DENIED:
-                    # Opening a directory as a file reports ACCESS_DENIED. Probe
-                    # its type using only attributes, never backup access to content.
+                    # Probe attributes because opening a directory also reports ACCESS_DENIED.
                     try:
                         _validate_existing_output(path)
                     except WindowsScanLocalNonRegularFileError:
                         raise
                     except OSError:
+                        # Preserve the original access error if the probe is inconclusive.
                         pass
                 raise
             assert handle is not None and handle.value is not None

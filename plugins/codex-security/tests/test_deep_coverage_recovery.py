@@ -1307,7 +1307,7 @@ def test_windows_receipt_access_denied_requires_proof_of_a_nonregular_file(
     monkeypatch.setattr(backend, "_create_file", deny_read)
     monkeypatch.setattr(backend, "_validate_existing_output", inspect_leaf)
     with pytest.raises(finalizer.ContractError) as failure:
-        finalizer.open_scan_local_file_descriptor(tmp_path, "receipt", "Saved coverage receipt")
+        finalizer._require_scan_local_file(tmp_path, "receipt", "Saved coverage receipt")
     assert not isinstance(failure.value, finalizer.MissingScanLocalFileError)
     assert isinstance(failure.value, finalizer.NonRegularScanLocalFileError) == (
         probe == "directory"
