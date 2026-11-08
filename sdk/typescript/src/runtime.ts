@@ -1,3 +1,4 @@
+import { sqliteDatabaseOpener } from "./sqlite.js";
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
@@ -82,7 +83,6 @@ import {
 } from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
-  sqliteFilename,
   windowsUnsafePathComponent,
 } from "./windows-path.js";
 
@@ -1318,21 +1318,11 @@ export async function acquireCodexSecurityCredentialHomeLock(
   if (existingDatabaseMetadata !== null) {
     requireCredentialLockDatabaseFile(existingDatabaseMetadata, databasePath);
   }
-  const require = createRequire(import.meta.url);
-  // Both supported runtimes bundle SQLite. Keep the transaction in the process
-  // doing the protected work, so pausing it cannot expire its lock.
-  const Database = process.versions["bun"]
-    ? (require("bun:sqlite") as { Database: CredentialLockDatabaseConstructor })
-        .Database
-    : (
-        require("node:sqlite") as {
-          DatabaseSync: CredentialLockDatabaseConstructor;
-        }
-      ).DatabaseSync;
+  const openDatabase = sqliteDatabaseOpener();
   // Let SQLite create a missing guard so no separate descriptor can close after
   // another connection acquires its process-owned POSIX lock. Keep the guard
   // across releases so every contender locks the same inode.
-  const database = new Database(sqliteFilename(databasePath));
+  const database = openDatabase(databasePath);
   let databaseLocked = false;
 
   try {
@@ -1466,13 +1456,6 @@ function requireCredentialLockDatabaseFile(
       `Codex Security credential-home lock must be a regular file, not a symlink or hard link: ${path}`,
     );
   }
-}
-
-interface CredentialLockDatabaseConstructor {
-  new (path: string): {
-    exec(sql: string): unknown;
-    close(): void;
-  };
 }
 
 async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
