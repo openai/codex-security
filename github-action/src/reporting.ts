@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
-import type { Inputs } from './inputs.js';
-import type { Target } from './targets.js';
-import type { ScanResults } from './results.js';
+import type { Inputs } from './inputs.ts';
+import type { Target } from './targets.ts';
+import type { ScanResults } from './results.ts';
 
 export function plain(value: string, limit?: number): string {
   const text = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '');
