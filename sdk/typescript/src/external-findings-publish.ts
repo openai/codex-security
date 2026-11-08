@@ -10,7 +10,6 @@ import {
   rm,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { sqliteDatabaseOpener, type RuntimeDatabase } from "./sqlite.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   isBoxedPrimitive,
@@ -48,6 +47,8 @@ import {
   codexSecurityStateDirectory,
   createWindowsOutputDirectory,
   validatePreparedOutputDir,
+  sqliteDatabaseOpener,
+  type RuntimeDatabase,
 } from "./runtime.js";
 import {
   EXTERNAL_FINDINGS_PROVIDERS,

@@ -4,7 +4,6 @@ import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
-import { sqliteDatabaseOpener, type RuntimeDatabase } from "./sqlite.js";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -18,6 +17,8 @@ import {
   runWorkbench,
   workbenchEnvironment,
   type ProcessEnvironment,
+  sqliteDatabaseOpener,
+  type RuntimeDatabase,
 } from "./runtime.js";
 
 interface ScanTarget {
