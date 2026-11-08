@@ -154,6 +154,7 @@
 - avoid overlapping Deep Scan worker sandbox denies ([#2416](https://github.com/openai/codex-security/pull/2416))
 - bump napi from 3.16.0 to 3.16.1 in /plugins/codex-security/native ([#2440](https://github.com/openai/codex-security/pull/2440))
 - bound Invoice Desk JSON request bodies ([#2423](https://github.com/openai/codex-security/pull/2423))
+- publish Guardian findings and clarify scanner evidence ([#2377](https://github.com/openai/codex-security/pull/2377))
 
 </details>
 
