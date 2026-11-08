@@ -1070,6 +1070,41 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
     )
     assert "newer generation" in stale["stderr"]
 
+    # Another quota cycle refunds only its unfinished attempt, not earlier ones.
+    generation = recovered["coordinatorGeneration"]
+    again, prompt, artifacts, _ = deep.dispatch_discovery_worker(
+        name="quota-again", succeed=False, coordinator_generation=generation
+    )
+    deep.upsert_worker(
+        worker_id=again,
+        prompt_path=prompt,
+        artifact_dir=artifacts,
+        status="failed",
+        error=message,
+        terminal_failure=True,
+        coordinator_generation=generation,
+    )
+    deep.command(
+        "fail-deep-scan",
+        "--deep-status",
+        "interrupted",
+        "--message",
+        message,
+        "--coordinator-generation",
+        str(generation),
+    )
+    continued = resume_deep_scan(
+        deep.state_dir,
+        deep.id,
+        "thread-deep-scan",
+        environment=deep_environment(deep.codex_home),
+    )["deepScan"]
+    assert continued["dispatchedCount"] == 1
+    assert continued["completionSequence"] == 1
+    assert continued["createdAt"] == paused["createdAt"]
+    assert continued["config"] == paused["config"]
+    assert result.read_bytes() == saved
+
 
 @pytest.mark.cross_platform
 def test_usage_limit_pause_rejects_changed_target_on_resume(tmp_path: Path) -> None:

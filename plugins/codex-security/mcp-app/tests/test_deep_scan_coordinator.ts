@@ -2840,6 +2840,7 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
     ? "Request blocked by cyberPolicy."
     : "Quota exceeded. Check your plan and billing details.";
   const attempts: (string | undefined)[] = [];
+  let lateQuotaReported = false;
   const terminal = runCoordinator(
     fixture,
     store,
@@ -2858,7 +2859,20 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
           await shutdown.promise;
           throw new Error("later cleanup failure");
         }
-        return normal.run(request);
+        try {
+          return await normal.run(request);
+        } catch (error) {
+          if (!resumed && request.signal.aborted) {
+            // A late sibling quota signal must not replace the first cause.
+            lateQuotaReported = true;
+            request.onNonRetryableError?.(
+              codexWorkerTurnError(
+                "You’ve hit your usage limit. Try again later.",
+              ),
+            );
+          }
+          throw error;
+        }
       },
     },
     { clock: recordingClock(sleeps), retryDelaysMs: [1], random: () => 0 },
@@ -2917,10 +2931,31 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
     assert.equal(store.finishCalls.length, 0);
     assert.equal(await readFile(checkpoint, "utf8"), committed);
     assert.deepEqual(sleeps, resumed ? [1] : []);
+    assert.equal(lateQuotaReported, !resumed);
   } finally {
     shutdown.resolve();
     await terminal;
   }
+}
+
+async function testPersistedQuotaInterruptsBeforeDispatch() {
+  const { fixture, store } = await coordinatorFixture(twoRunConfig());
+  const message = "You’ve hit your usage limit. Try again later.";
+  store.run.error = message;
+  const executor = new FakeExecutor();
+  let publications = 0;
+  const terminal = await runCoordinator(fixture, store, executor, {
+    run: await store.get(),
+    onStopped: async () => {
+      publications++;
+    },
+  });
+  assert.equal(terminal?.status, "interrupted");
+  assert.equal(terminal.error, message);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(publications, 0);
+  assert.equal(store.finishCalls.length, 0);
+  await assertNoPublishedCandidates(fixture.run.scanDir);
 }
 
 function registerCases<T extends unknown[]>(
@@ -2933,6 +2968,7 @@ function registerCases<T extends unknown[]>(
 
 after(() => temporaryDirectories.cleanup());
 test("Deep Scan lifecycle", testDeepScanLifecycle);
+test(testPersistedQuotaInterruptsBeforeDispatch);
 registerCases(testTerminalFailureStopsDispatchBeforeWorkerShutdown, [
   [false],
   [true],
