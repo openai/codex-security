@@ -628,38 +628,24 @@ export function createCodexSecurityServer(): McpServer {
         threadId,
         codexModelSettingsFromExtra(extra),
       );
-      const scan = isJsonObject(started.scan) ? started.scan : undefined;
+      const scan = startedScanSchema.safeParse(started).data?.scan;
       const progress = isJsonObject(scan?.progress) ? scan.progress : undefined;
-      const workspace = isJsonObject(started.workspace)
-        ? started.workspace
-        : undefined;
-      const workspaceResults = isJsonObject(workspace?.results)
-        ? workspace.results
-        : undefined;
-      const scanId = scan?.scanId;
-      const scanDir = scan?.scanDir;
       const handoffClaimToken = scan?.handoffClaimToken;
       if (
-        (started.startDisposition !== "created" &&
-          started.startDisposition !== "joined") ||
-        typeof scanId !== "string" ||
-        !z.string().uuid().safeParse(scanId).success ||
+        !scan ||
         typeof handoffClaimToken !== "string" ||
-        !z.string().uuid().safeParse(handoffClaimToken).success ||
-        typeof scanDir !== "string" ||
-        !scanDir.trim() ||
-        scan?.mode !== "standard" ||
-        scan.handoffStatus !== "delivered" ||
+        !scanSchema.scanId.safeParse(handoffClaimToken).success ||
+        scan.mode !== "standard" ||
         scan.continuationThreadId !== threadId ||
         progress?.status !== "running" ||
         (started.startDisposition === "created" &&
-          progress.phase !== "preflight") ||
-        workspaceResults?.scanId !== scanId
+          progress.phase !== "preflight")
       ) {
         return toolErrorResult(
           "Codex Security returned malformed Standard scan ownership; no headless scan can continue.",
         );
       }
+      const { scanId, scanDir } = scan;
       authenticatedArtifactClaims.set(scanId, {
         claimToken: handoffClaimToken,
         threadId,
@@ -2076,29 +2062,29 @@ function workspaceResult(workspace: WorkspaceState, scanId?: unknown) {
   );
 }
 
+const startedScanSchema = z
+  .object({
+    startDisposition: z.enum(["created", "joined"]),
+    scan: z.looseObject({
+      scanId: scanSchema.scanId,
+      scanDir: z.string().refine((value) => value.trim().length > 0),
+      handoffStatus: z.literal("delivered"),
+    }),
+    workspace: z.object({ results: z.object({ scanId: z.string() }) }),
+  })
+  .refine(({ scan, workspace }) => scan.scanId === workspace.results.scanId);
+
 function promptOnlyScanResult(promptOnly: JsonObject) {
-  const startDisposition = promptOnly.startDisposition;
-  const scan = isJsonObject(promptOnly.scan) ? promptOnly.scan : undefined;
-  const workspace = isJsonObject(promptOnly.workspace)
-    ? promptOnly.workspace
-    : undefined;
-  const workspaceResults = isJsonObject(workspace?.results)
-    ? workspace.results
-    : undefined;
-  const scanId = scan?.scanId;
-  const scanDir = scan?.scanDir;
-  if (
-    (startDisposition !== "created" && startDisposition !== "joined") ||
-    !z.string().uuid().safeParse(scanId).success ||
-    typeof scanDir !== "string" ||
-    !scanDir.trim() ||
-    scan?.handoffStatus !== "delivered" ||
-    workspaceResults?.scanId !== scanId
-  ) {
+  const start = startedScanSchema.safeParse(promptOnly).data;
+  if (!start) {
     return toolErrorResult(
       "Codex Security prompt-only scan returned malformed context; no prompt-driven scan was started.",
     );
   }
+  const {
+    startDisposition,
+    scan: { scanId, scanDir },
+  } = start;
   return scanActionResult(
     promptOnly,
     `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
