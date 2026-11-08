@@ -99,6 +99,22 @@ def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> Non
     assert f"Text: {instruction}" in markdown
 
 
+@pytest.mark.parametrize("marker", ["#", "-", "+", "1.", "1)", "---", "--"])
+def test_projection_prefixes_bare_block_markers(marker: str) -> None:
+    markdown = report_with_finding(remediation=marker)
+
+    assert f"Text: {marker}" in markdown
+    assert f"\n{marker}\n" not in markdown
+
+
+@pytest.mark.parametrize("value", ["#foo", "-x", "-1 is invalid", "1.5 seconds", "--flag"])
+def test_projection_keeps_ordinary_text_that_starts_with_marker_characters(value: str) -> None:
+    markdown = report_with_finding(remediation=value)
+
+    assert f"\n{value}\n" in markdown
+    assert f"Text: {value}" not in markdown
+
+
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
 def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
     manifest, findings, coverage = canonical_documents()
