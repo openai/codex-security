@@ -127,7 +127,10 @@ import {
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
-import { listLocalExternalFindings } from "./external-findings-local.js";
+import {
+  listLocalExternalFindings,
+  type StoredExternalFinding,
+} from "./external-findings-local.js";
 import type { collectSonarIssues } from "./sonar-collector.js";
 import { prepareSonarImport } from "./sonar-import.js";
 import {
@@ -711,6 +714,62 @@ function publicationIssueUrl(value: string | undefined): string | undefined {
   }
 
   return value;
+}
+
+function renderImportedFindings(
+  repository: string,
+  findings: readonly StoredExternalFinding[],
+  width: number,
+): string {
+  const lines = [
+    `${formatItemCount(findings.length, "imported finding")} in ${diagnosticValue(repository)}`,
+  ];
+  for (const { provider, sourceKey, sourceFindingId, evidence } of findings) {
+    lines.push("", `[${evidence.severity}] ${diagnosticValue(evidence.title)}`);
+    if (evidence.title === evidence.details?.rule?.id) {
+      const message = evidence.description?.trim().split(/[\r\n]/u, 1)[0];
+      if (message && message !== evidence.title)
+        lines.push(
+          fitProgressLine(`  Message: ${diagnosticValue(message)}`, width),
+        );
+    }
+    const scanner = evidence.details?.scanner_origin?.trim();
+    if (scanner && scanner.toLowerCase() !== provider.toLowerCase())
+      lines.push(`  Scanner: ${diagnosticValue(scanner)}`);
+    lines.push(
+      `  Source: ${diagnosticValue(provider)} (${diagnosticValue(sourceKey)})  Finding ID: ${diagnosticValue(sourceFindingId)}`,
+    );
+
+    const pkg = evidence.packages?.[0];
+    if (pkg) {
+      const parts = [`  Package: ${diagnosticValue(pkg.name)}`];
+      if (pkg.installed_version)
+        parts.push(`Installed: ${diagnosticValue(pkg.installed_version)}`);
+      if (pkg.vulnerable_version_range)
+        parts.push(
+          `Affected: ${diagnosticValue(pkg.vulnerable_version_range)}`,
+        );
+      if (pkg.fixed_versions?.length)
+        parts.push(`Fixed: ${diagnosticValue(pkg.fixed_versions.join(", "))}`);
+      lines.push(parts.join("  "));
+    }
+    const location = evidence.locations?.[0];
+    if (location)
+      lines.push(
+        `  Location: ${diagnosticValue(location.path)}${location.line == null ? "" : `:${location.line}`}`,
+      );
+    if (evidence.url)
+      lines.push(`  Reference: ${diagnosticValue(evidence.url)}`);
+    const fileUrl = evidence.details?.file_url;
+    if (fileUrl && fileUrl !== evidence.url)
+      lines.push(`  File: ${diagnosticValue(fileUrl)}`);
+  }
+  if (findings.length)
+    lines.push(
+      "",
+      "Scanner evidence is unassessed. Use --format json for all fields and saved scanner data.",
+    );
+  return `${lines.join("\n")}\n`;
 }
 
 function renderExternalPublicationSummary(
@@ -2471,6 +2530,10 @@ export async function main(
         options.signal,
       );
     }, selection);
+  const useInteractiveHistory = (format: string) =>
+    format === "toon" &&
+    output.isTTY === true &&
+    !argv.some((argument) => OUTPUT_OPTION.test(argument));
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -2481,12 +2544,7 @@ export async function main(
       showLinkedFindings?: boolean;
     } = {},
   ): JsonObject | undefined => {
-    if (
-      result === undefined ||
-      format !== "toon" ||
-      output.isTTY !== true ||
-      argv.some((argument) => OUTPUT_OPTION.test(argument))
-    ) {
+    if (result === undefined || !useInteractiveHistory(format)) {
       return result;
     }
     renderedOutput = renderScanHistory(result, command, {
@@ -2649,6 +2707,12 @@ export async function main(
             signal: controller.signal,
           },
         );
+        if (useInteractiveHistory(format))
+          renderedOutput = renderImportedFindings(
+            repository,
+            findings,
+            output.columns || 96,
+          );
         return { repository, findings };
       } catch (error) {
         if (controller.signal.aborted) {
@@ -4469,7 +4533,7 @@ export async function main(
     .command("semgrep", {
       description:
         "Read a full Semgrep Platform project and ref through the Web API.",
-      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output with publish findings --provider semgrep and --to local or --to cloud. Use --to local for a selected Guardian MCP capture.",
+      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output with publish findings --provider semgrep and --to local or --to cloud. Selected Guardian MCP captures also support both destinations.",
       destructive: false,
       mcp: false,
       args: z.object({

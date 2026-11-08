@@ -32,9 +32,11 @@ import {
 } from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
 import type { LocalExternalImportOptions } from "./external-findings-import.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { tenableReportFormat } from "./tenable-findings.js";
 import {
   guardianFindingId,
+  guardianFindingRepository,
   guardianSelectionFormat,
 } from "./semgrep-guardian-findings.js";
 import {
@@ -159,6 +161,7 @@ import type {
   FindingImportRequest,
   FindingImportReceipt,
   ImportRepository,
+  Provider,
   SourceReportSummary,
 } from "./external-import-models.js";
 
@@ -693,13 +696,16 @@ function storedFindingId(finding: ExternalFinding): string {
   return "";
 }
 
-function rejectLocalOnlyFindings(input: ExternalFindings): void {
+function checkFindingProvider(
+  input: ExternalFindings,
+  provider: Provider,
+): void {
   function checkFormat(format: unknown) {
     if (format === tenableReportFormat)
       requireCloudReader({ provider: "tenable" });
-    if (format === guardianSelectionFormat)
+    if (format === guardianSelectionFormat && provider !== "semgrep")
       throw new CodexSecurityError(
-        "Semgrep Guardian findings require a local import.",
+        "Use the semgrep provider for Guardian findings.",
       );
   }
   checkFormat(ownData(ownData(input, "report"), "format"));
@@ -752,7 +758,8 @@ export async function prepareExternalPublication(
     const hosted =
       isRecord(report) &&
       (semgrep
-        ? isSemgrepPlatformFormat(report["format"])
+        ? isSemgrepPlatformFormat(report["format"]) ||
+          report["format"] === guardianSelectionFormat
         : isSnykRestFormat(report["format"]));
     if (!semgrep && !hosted)
       fileRepositories = () => snykFileRepositories(report);
@@ -793,7 +800,7 @@ export async function prepareExternalPublication(
       : await normalize();
   } else {
     const parsed = await readExternalFindings(path, settings);
-    rejectLocalOnlyFindings(parsed.findings);
+    checkFindingProvider(parsed.findings, provider);
     input =
       parsed.publication ??
       normalizedPublicationInput(parsed.findings, provider);
@@ -898,11 +905,20 @@ function hostedRepositoryMatcher(
       isSemgrepPlatformEvidence(finding, provider),
     );
   const claims = new Set<string>();
-  let original: string | undefined;
+  let original =
+    input.report?.["format"] === guardianSelectionFormat
+      ? declaredScannerRepositoryUrl(input.report["repositoryUrl"], "Guardian")
+      : undefined;
   const nativeRows = [];
   for (const finding of input.findings) {
     const typed = finding.evidence.details?.repository?.url;
     if (typed) claims.add(typed);
+    const guardian = guardianFindingRepository(finding, "cloud");
+    if (guardian) {
+      original ??= guardian;
+      claims.add(guardian);
+      continue;
+    }
     const data = finding.evidence.source_data;
     const sarif = semgrepSarifRepositories(finding, hasNativeSource);
     for (const { url } of sarif)
@@ -1327,7 +1343,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
-  if (original) rejectLocalOnlyFindings(original.parsed);
+  if (original) checkFindingProvider(original.parsed, provider);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -1340,7 +1356,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
-  rejectLocalOnlyFindings(current);
+  checkFindingProvider(current, provider);
   const identity = publicationIdentity(current, provider);
   return {
     current,
@@ -2230,7 +2246,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
-    rejectLocalOnlyFindings({ ...parsed, findings: saved });
+    checkFindingProvider({ ...parsed, findings: saved }, options.provider);
     const approvedScope = content.inputProjection?.semgrepPartialScopeDigest;
     if (
       approvedScope !== undefined &&
@@ -2274,7 +2290,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
-    rejectLocalOnlyFindings({ ...parsed, findings: saved });
+    checkFindingProvider({ ...parsed, findings: saved }, options.provider);
     content.legacyApproval = true;
     content.inputProjection = {
       ...content.inputProjection,
@@ -3126,6 +3142,11 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
+    if (report?.["format"] === guardianSelectionFormat)
+      requireDestination(
+        "Guardian source",
+        declaredScannerRepositoryUrl(report["repositoryUrl"], "Guardian"),
+      );
     // An immutable retry may refer to an earlier repository name. Additional
     // file declarations outside its saved findings authorize no new writes.
     if (!historical)
@@ -3190,6 +3211,11 @@ async function preparePublicationInput(
     );
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
+      const guardian = guardianFindingRepository(finding, "cloud");
+      if (guardian) {
+        requireDestination(id, guardian);
+        requireDestination(id, evidence.details?.repository?.url);
+      }
       checkRetainedTrivyProvider(provider, finding);
       if (trivyReportUrls) {
         const remote = trivyRepositoryUrl(
