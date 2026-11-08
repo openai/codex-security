@@ -200,19 +200,6 @@ export function requireReleaseIncrease(version, previousVersion) {
 
 /**
  * @param {string} version
- * @param {unknown} registryError
- * @returns {string[]}
- */
-export function initialPublishedVersions(version, registryError) {
-  releaseVersion({ name: packageName, version });
-  if (version !== "0.1.0" || registryError?.error?.code !== "E404") {
-    throw new Error("Unable to verify published npm release history.");
-  }
-  return [];
-}
-
-/**
- * @param {string} version
  * @param {unknown} publishedVersions
  * @returns {"publish" | "recover"}
  */
@@ -887,14 +874,6 @@ function main() {
     return;
   }
 
-  if (command === "initial-published-versions" && process.argv.length === 4) {
-    const registryError = JSON.parse(readFileSync(0, "utf8"));
-    console.log(
-      JSON.stringify(initialPublishedVersions(process.argv[3], registryError)),
-    );
-    return;
-  }
-
   if (command === "require-published-increase" && process.argv.length === 4) {
     const publishedVersions = JSON.parse(readFileSync(0, "utf8"));
     console.log(
@@ -978,8 +957,6 @@ function main() {
     "Usage: release-automation.mjs version <package.json>, " +
       "release-tag <ref-type> <ref> <ref-name> <package.json>, " +
       "require-increase <version> <previous-version>, " +
-      "initial-published-versions <version> " +
-      "(npm registry error JSON from stdin), " +
       "require-published-increase <version> " +
       "(published npm versions JSON from stdin), " +
       "release-mode <version> (published npm versions JSON from stdin), " +
