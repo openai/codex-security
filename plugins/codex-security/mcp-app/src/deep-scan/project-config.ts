@@ -3,21 +3,13 @@ import { homedir } from "node:os";
 import { extname, isAbsolute, resolve } from "node:path";
 import Ajv, { type ValidateFunction } from "ajv";
 import { parseDocument } from "yaml";
+import { DEEP_SCAN_FIELDS } from "../deep-scan-fields.js";
 import schema from "./project-config.schema.json";
 
 let validate: ValidateFunction | undefined;
-const fields = {
-  workers: "workers",
-  subagents_per_worker: "subagents",
-  stop_after_no_new: "stopAfterNoNew",
-  stop_after_consecutive_errors: "stopAfterConsecutiveErrors",
-  max_discovery_runs: "maxDiscoveryRuns",
-  max_time_hours: "maxTimeHours",
-} as const;
-
 export interface DeepScanProjectConfig {
   path: string;
-  settings: Partial<Record<(typeof fields)[keyof typeof fields], number>>;
+  settings: Partial<Record<(typeof DEEP_SCAN_FIELDS)[number][0], number>>;
 }
 
 /** Read only an explicitly selected file; repository configuration is never discovered. */
@@ -64,7 +56,7 @@ export async function readDeepScanProjectConfig(
     scan?: {
       mode?: string;
       max_time_minutes?: number;
-      deep?: Record<keyof typeof fields, number>;
+      deep?: Record<string, number>;
     };
     [key: string]: unknown;
   };
@@ -85,8 +77,8 @@ export async function readDeepScanProjectConfig(
     );
   }
   const settings: DeepScanProjectConfig["settings"] = {};
-  for (const [field, name] of Object.entries(fields)) {
-    const value = input.scan?.deep?.[field as keyof typeof fields];
+  for (const [name, tomlKey, , projectKey = tomlKey] of DEEP_SCAN_FIELDS) {
+    const value = input.scan?.deep?.[projectKey];
     if (value !== undefined) settings[name] = value;
   }
   const minutes = input.scan?.max_time_minutes;

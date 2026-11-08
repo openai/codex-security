@@ -1,0 +1,8 @@
+[
+  ["workers", "workers", "--workers"],
+  ["subagents", "subagents", "--subagents", "subagents_per_worker"],
+  ["stopAfterNoNew", "stop_after_no_new", "--stop-after-no-new"],
+  ["stopAfterConsecutiveErrors", "stop_after_consecutive_errors", null],
+  ["maxDiscoveryRuns", "max_discovery_runs", "--max-discovery-runs"],
+  ["maxTimeHours", "max_time_hours", "--max-time-hours"]
+]

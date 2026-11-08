@@ -5,13 +5,23 @@ const plugin = new URL("../../../plugins/codex-security/", import.meta.url);
 const deepDefaults = JSON.parse(
   await readFile(new URL("scripts/deep_scan_defaults.json", plugin), "utf8"),
 );
+const fields = JSON.parse(
+  await readFile(new URL("scripts/deep_scan_fields.json", plugin), "utf8"),
+);
+const settings = fields.map(([name, toml, flag, project = toml]) => [
+  name,
+  toml,
+  project,
+  flag,
+]);
+const fieldSource = `// Generated from the plugin deep_scan_fields.json. Run pnpm build.\nexport const DEEP_SCAN_SETTINGS = ${JSON.stringify(settings)} as const;\n`;
 const rubricPath = "references/default-severity-rubric.md";
 const rubric = await readFile(new URL(rubricPath, plugin), "utf8");
 
 for (const [filename, source] of [
   [
     "deep-scan-defaults.ts",
-    `// Generated from the plugin deep_scan_defaults.json. Run pnpm build.\nexport const DEFAULT_DEEP_SCAN_SETTINGS = ${JSON.stringify(deepDefaults)} as const;\n`,
+    `// Generated from the plugin deep_scan_defaults.json. Run pnpm build.\nexport const DEFAULT_DEEP_SCAN_SETTINGS = ${JSON.stringify(deepDefaults)} as const;\n${fieldSource}`,
   ],
   [
     "default-severity-rubric.ts",

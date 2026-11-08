@@ -27,6 +27,7 @@ import {
 } from "@openai/codex-sdk";
 import { readCodexSessionTurn } from "../../../scripts/codex_session.mjs";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { DEEP_SCAN_FIELDS } from "../deep-scan-fields.js";
 import {
   createCodexProfileClient,
   preflightProviderDefinitions,
@@ -186,16 +187,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await writePrivateFile(
           deepConfigFile,
           stringifyToml({
-            deep_scan: {
-              workers: config.workers,
-              subagents: config.subagents,
-              stop_after_no_new: config.stopAfterNoNew,
-              stop_after_consecutive_errors: config.stopAfterConsecutiveErrors,
-              max_discovery_runs: config.maxDiscoveryRuns,
-              ...(config.maxTimeHours === undefined
-                ? {}
-                : { max_time_hours: config.maxTimeHours }),
-            },
+            deep_scan: Object.fromEntries(
+              DEEP_SCAN_FIELDS.filter(
+                ([name]) => config[name] !== undefined,
+              ).map(([name, tomlKey]) => [tomlKey, config[name]]),
+            ),
           }),
         );
         for (const name of Object.keys(childEnv)) {

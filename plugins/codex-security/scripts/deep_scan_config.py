@@ -22,13 +22,12 @@ DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = DEFAULTS["stopAfterConsecutiveErrors"]
 DEFAULT_MAX_DISCOVERY_RUNS = DEFAULTS["maxDiscoveryRuns"]
 DEFAULT_MAX_TIME_HOURS = DEFAULTS["maxTimeHours"]
 MAX_TIME_HOURS = 96
+# Each field has an SDK name, TOML key, optional CLI flag, and optional project key.
 CONFIG_FIELDS = {
-    "workers": "workers",
-    "subagents": "subagents",
-    "stopAfterNoNew": "stop_after_no_new",
-    "stopAfterConsecutiveErrors": "stop_after_consecutive_errors",
-    "maxDiscoveryRuns": "max_discovery_runs",
-    "maxTimeHours": "max_time_hours",
+    name: toml_key
+    for name, toml_key, *_ in json.loads(
+        Path(__file__).with_name("deep_scan_fields.json").read_text(encoding="utf-8")
+    )
 }
 CONFIG_KEYS = set(CONFIG_FIELDS.values())
 

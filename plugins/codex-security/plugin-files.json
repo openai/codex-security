@@ -68,6 +68,7 @@
     "scripts/codex_session.mjs",
     "scripts/deep_scan_config.py",
     "scripts/deep_scan_defaults.json",
+    "scripts/deep_scan_fields.json",
     "scripts/deep_scan_workbench.py",
     "scripts/filesystem_identity.py",
     "scripts/finalize_scan_contract.py",
