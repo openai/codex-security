@@ -34,7 +34,8 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      targets: ${{ steps.target.outputs.targets }}
+      sha: ${{ steps.target.outputs.sha }}
+      pr: ${{ steps.target.outputs.pr }}
       cache-hit: ${{ steps.cache.outputs.cache-hit }}
     steps:
       - name: Check out trusted workflow helpers
@@ -56,14 +57,14 @@ jobs:
 
       # Populate only public package downloads, before any PR source or inference.
       - name: Restore CLI package download cache
-        if: steps.target.outputs.targets != '[]'
+        if: steps.target.outputs.sha != ''
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/invoice-desk-npm-cache/_cacache
           key: invoice-desk-npm-v1-${{ runner.os }}-${{ runner.arch }}-node24-cli${{ env.CODEX_SECURITY_VERSION }}
       - name: Populate CLI package download cache
-        if: steps.target.outputs.targets != '[]' && steps.cache.outputs.cache-hit != 'true'
+        if: steps.target.outputs.sha != '' && steps.cache.outputs.cache-hit != 'true'
         working-directory: ${{ runner.temp }}
         run: |
           npm install --prefix "$RUNNER_TEMP/codex-security-cli" \
@@ -72,24 +73,20 @@ jobs:
             --registry=https://registry.npmjs.org/ \
             "@openai/codex-security@$CODEX_SECURITY_VERSION"
       - name: Save CLI package download cache
-        if: steps.target.outputs.targets != '[]' && steps.cache.outputs.cache-hit != 'true'
+        if: steps.target.outputs.sha != '' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/invoice-desk-npm-cache/_cacache
           key: invoice-desk-npm-v1-${{ runner.os }}-${{ runner.arch }}-node24-cli${{ env.CODEX_SECURITY_VERSION }}
 
   scan:
-    name: "OpenAI source scan (${{ matrix.target.pr && format('PR #{0}', matrix.target.pr) || 'main' }})"
+    name: "OpenAI source scan (${{ needs.target.outputs.pr && format('PR #{0}', needs.target.outputs.pr) || 'main' }})"
     needs: target
-    if: needs.target.outputs.targets != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJSON(needs.target.outputs.targets) }}
+    if: needs.target.outputs.sha != ''
     # Rejected requests must not cancel an eligible scan or its approval request.
     # A delayed target job must not cancel a scan of a different revision.
     concurrency:
-      group: invoice-desk-scan-${{ matrix.target.pr && format('pr-{0}', matrix.target.pr) || 'main' }}-${{ matrix.target.sha }}
+      group: invoice-desk-scan-${{ needs.target.outputs.pr && format('pr-{0}', needs.target.outputs.pr) || 'main' }}-${{ needs.target.outputs.sha }}
       cancel-in-progress: true
     environment: codex-security-smoke-test
     runs-on: ubuntu-24.04
@@ -99,8 +96,8 @@ jobs:
       contents: read
       pull-requests: read
     env:
-      SOURCE_SHA: ${{ matrix.target.sha }}
-      PR_NUMBER: ${{ matrix.target.pr }}
+      SOURCE_SHA: ${{ needs.target.outputs.sha }}
+      PR_NUMBER: ${{ needs.target.outputs.pr || '0' }}
 
     steps:
       - name: Check out trusted workflow helpers
@@ -132,7 +129,7 @@ jobs:
       - name: Check out the exact source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ matrix.target.sha }}
+          ref: ${{ needs.target.outputs.sha }}
           path: source
           persist-credentials: false
       - name: Extract committed application files without running PR code
@@ -151,7 +148,7 @@ jobs:
           rm -rf -- "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/trusted-workflow"
       - name: Scan with OpenAI inference
         id: scan
-        if: steps.recheck.outputs.targets != '[]'
+        if: steps.recheck.outputs.sha != ''
         working-directory: ${{ runner.temp }}/invoice-desk
         shell: bash
         env:
@@ -267,7 +264,7 @@ jobs:
         if: ${{ !cancelled() && steps.scan.outputs.exit-code != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: invoice-desk-scan-${{ matrix.target.pr || 'main' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: invoice-desk-scan-${{ needs.target.outputs.pr || 'main' }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: warn
           path: |
