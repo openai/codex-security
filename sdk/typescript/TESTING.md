@@ -58,8 +58,9 @@ Replace `X.Y.Z` with the version in the filename printed by `pnpm pack`.
 The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
 the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during
 `prepack`, including the MCP runtime built from `mcp-app`; do not edit generated
-files there. Run `pnpm run build:plugin` when you need to inspect the staged
-payload locally. `plugins/codex-security` contains authored source and assets,
+files there. Run `pnpm run build:plugin` to inspect the staged payload locally.
+`pnpm pack` runs the SDK build first to refresh the defaults and project schemas
+that MCP uses. `plugins/codex-security` contains authored source and assets,
 not the generated `mcp/server.mjs` or compressed runtime chunks.
 `pnpm run check:plugin-source` fails if any file beneath `_bundled_plugin` is
 tracked by Git. Required CI runs the same check before installing dependencies.
