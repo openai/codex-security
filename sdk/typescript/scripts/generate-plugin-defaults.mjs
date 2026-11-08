@@ -5,13 +5,17 @@ const plugin = new URL("../../../plugins/codex-security/", import.meta.url);
 const deepDefaults = JSON.parse(
   await readFile(new URL("scripts/deep_scan_defaults.json", plugin), "utf8"),
 );
+const deepSettings = await readFile(
+  new URL("mcp-app/src/deep-scan-settings.ts", plugin),
+  "utf8",
+);
 const rubricPath = "references/default-severity-rubric.md";
 const rubric = await readFile(new URL(rubricPath, plugin), "utf8");
 
 for (const [filename, source] of [
   [
     "deep-scan-defaults.ts",
-    `// Generated from the plugin deep_scan_defaults.json. Run pnpm build.\nexport const DEFAULT_DEEP_SCAN_SETTINGS = ${JSON.stringify(deepDefaults)} as const;\n`,
+    `// Generated from the plugin Deep Scan defaults and settings. Run pnpm build.\nexport const DEFAULT_DEEP_SCAN_SETTINGS = ${JSON.stringify(deepDefaults)} as const;\n\n${deepSettings}`,
   ],
   [
     "default-severity-rubric.ts",

@@ -423,6 +423,7 @@ import {
   meetsSeverity,
   type FailureSeverity,
   type ResolvedScanSettings,
+  type ScanPromptSettings,
 } from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
@@ -2968,14 +2969,8 @@ export async function main(
             );
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
-            saved["recipe"],
+            saved,
             "resume",
-            {
-              scanPrompt:
-                typeof saved["userContext"] === "string"
-                  ? saved["userContext"]
-                  : undefined,
-            },
             dependencies.currentDirectory(),
             dependencies.environment,
           );
@@ -2991,8 +2986,6 @@ export async function main(
               (saved["recipe"] as JsonObject)["scanInputs"],
             );
           }
-          // Resume uses the installed engine with the saved recipe and checkpoints.
-          scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
         } catch (error) {
@@ -3070,11 +3063,11 @@ export async function main(
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
-          const { recipe, scanId: resolvedScanId } =
-            await dependencies.runWorkbench(
-              workbenchArgs("get-scan-recipe", { scanId }),
-            );
-          const parentScanId = resolvedScanId as string;
+          const saved = await dependencies.runWorkbench(
+            workbenchArgs("get-scan-recipe", { scanId }),
+          );
+          const recipe = saved["recipe"];
+          const parentScanId = saved["scanId"] as string;
           if (
             isJsonObject(recipe) &&
             recipe["import"] !== undefined &&
@@ -3116,33 +3109,15 @@ export async function main(
             );
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
-            recipe,
+            saved,
             "rerun",
-            {
-              scanPromptFile:
-                options.scanPromptFile === undefined
-                  ? undefined
-                  : resolveCliPath(
-                      dependencies.currentDirectory(),
-                      options.scanPromptFile,
-                    ),
-              validationPromptFile:
-                options.validationPromptFile === undefined
-                  ? undefined
-                  : resolveCliPath(
-                      dependencies.currentDirectory(),
-                      options.validationPromptFile,
-                    ),
-            },
             dependencies.currentDirectory(),
             dependencies.environment,
+            options,
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
           scanArguments.parentScanId = parentScanId;
-          scanArguments.rerunInputIdentity = isJsonObject(recipe)
-            ? (recipe["scanInputs"] ?? null)
-            : null;
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
@@ -6261,14 +6236,8 @@ export async function main(
                       return undefined;
                     }
                     const recipe = await prepareScanArgumentsFromRecipe(
-                      saved["recipe"],
+                      saved,
                       "resume",
-                      {
-                        scanPrompt:
-                          typeof saved["userContext"] === "string"
-                            ? saved["userContext"]
-                            : undefined,
-                      },
                       currentDirectory,
                       dependencies.environment,
                     );
@@ -7937,18 +7906,14 @@ async function runScanImport(
 }
 
 async function prepareScanArgumentsFromRecipe(
-  recipe: JsonValue | undefined,
+  { recipe, userContext }: JsonObject,
   operation: "resume" | "rerun",
-  {
-    scanPrompt,
-    scanPromptFile,
-    validationPromptFile,
-  }: Pick<
-    ScanArguments,
-    "scanPrompt" | "scanPromptFile" | "validationPromptFile"
-  >,
   directory: string,
   environment: CliDependencies["environment"],
+  {
+    scanPromptFile,
+    validationPromptFile,
+  }: Pick<ScanPromptSettings, "scanPromptFile" | "validationPromptFile"> = {},
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -8120,6 +8085,10 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe contains invalid launch settings.",
     );
   }
+  const scanPrompt =
+    operation === "resume" && typeof userContext === "string"
+      ? userContext
+      : undefined;
   const prompts = await resolveScanPrompts(
     { scanPrompt, scanPromptFile, validationPromptFile },
     repository,
@@ -8171,8 +8140,12 @@ async function prepareScanArgumentsFromRecipe(
     maxTimeMinutes: maxTimeMinutes.data,
     dryRun: false,
     ...(recipe["mock"] === true ? { mock: true } : {}),
+    ...(operation === "rerun"
+      ? { rerunInputIdentity: recipe["scanInputs"] ?? null }
+      : {}),
+    // Resumes use the installed engine with the saved checkpoints.
     expectedPluginVersion:
-      typeof recipe["pluginVersion"] === "string"
+      operation === "rerun" && typeof recipe["pluginVersion"] === "string"
         ? recipe["pluginVersion"]
         : undefined,
   };
