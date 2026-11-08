@@ -123,6 +123,8 @@ describe("bundled plugin build", () => {
       });
     }
     for (const file of [
+      "deep_scan_defaults.json",
+      "deep_scan_fields.json",
       "reserved_artifact_paths.json",
       "codex_profile.mjs",
       "codex_profile.d.mts",
