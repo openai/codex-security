@@ -223,7 +223,7 @@ function releaseLabelGhMock(handlers: readonly string[], shiftEndpoint = true) {
     '  case "$method $endpoint" in',
     ...handlers,
     '    "GET repos/test/codex-security/issues/17")',
-    "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+    "      printf '%s.' \"$MOCK_PR_TITLE\"",
     "      ;;",
     '    "POST repos/test/codex-security/issues/17/labels")',
     "      printf '%s\\n' \"$@\"",
@@ -4071,7 +4071,8 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
   ])("rejects nonconventional pull request title %s", async (title) => {
     const result = await runReleaseLabels(title, [
       '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+      `      [[ "$1" == --jq && "$2" == '.title + "."' ]] || return 65`,
+      "      printf '%s.' \"$MOCK_PR_TITLE\"",
       "      ;;",
       "    *)",
       "      printf '%s\\n' 'unexpected label mutation'",
@@ -4100,32 +4101,21 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
   ])(
     "preserves a manually excluded release and reconciles its category after retitling to $title",
     async ({ title, expectedLabel }) => {
-      const result = await runReleaseLabels(
-        title,
-        [
-          '    "GET repos/test/codex-security/issues/17/labels")',
-          "      printf '%s\\n' enhancement skip-release-notes",
-          "      ;;",
-          '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-          "      printf '%b\\n' 'enhancement\\tgithub-actions[bot]' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\ttrusted-reviewer'",
-          "      ;;",
-          '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
-          "      printf '%s\\n' 'removed a stale managed category'",
-          "      ;;",
-          '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
-          "      printf '%s\\n' 'removed a manually excluded release label'",
-          "      return 70",
-          "      ;;",
-        ],
-        [
-          "base64() {",
-          '  if [[ "${1:-}" == "--decode" ]]; then',
-          "    return 64",
-          "  fi",
-          '  command base64 "$@"',
-          "}",
-        ],
-      );
+      const result = await runReleaseLabels(title, [
+        '    "GET repos/test/codex-security/issues/17/labels")',
+        "      printf '%s\\n' enhancement skip-release-notes",
+        "      ;;",
+        '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
+        "      printf '%b\\n' 'enhancement\\tgithub-actions[bot]' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\ttrusted-reviewer'",
+        "      ;;",
+        '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
+        "      printf '%s\\n' 'removed a stale managed category'",
+        "      ;;",
+        '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
+        "      printf '%s\\n' 'removed a manually excluded release label'",
+        "      return 70",
+        "      ;;",
+      ]);
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(
@@ -4151,7 +4141,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
   test("preserves the latest unattributed skip label after earlier automation", async () => {
     const result = await runReleaseLabels("feat: customer-visible change", [
       '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' 'feat: customer-visible change' | base64",
+      "      printf '%s.' 'feat: customer-visible change'",
       "      ;;",
       '    "GET repos/test/codex-security/issues/17/labels")',
       "      printf '%s\\n' skip-release-notes",
@@ -4257,7 +4247,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
         title,
         [
           '    "GET repos/test/codex-security/issues/17")',
-          "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+          "      printf '%s.' \"$MOCK_PR_TITLE\"",
           "      ;;",
           '    "GET repos/test/codex-security/issues/17/labels")',
           "      return 0",
@@ -4315,7 +4305,7 @@ test.skipIf(process.platform === "win32").each([
     );
     const fixture = `gh() {
     case "$*" in
-      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' "$MOCK_PR_TITLE" | base64 ;;
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s.' "$MOCK_PR_TITLE" ;;
       "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;
       "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;
       "api --method DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL --silent") echo removed-stale-label ;;
