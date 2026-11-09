@@ -18,7 +18,11 @@ export async function readDeepScanProjectConfig(
   canonicalTarget: string,
 ): Promise<DeepScanProjectConfig | undefined> {
   if (file === undefined) return undefined;
-  const selected = file.replace(/^~(?=$|[/\\])/, () => homedir());
+  const spelling =
+    process.platform !== "win32" && file.startsWith("~\\")
+      ? file.replaceAll("\\", "/")
+      : file;
+  const selected = spelling.replace(/^~(?=$|[/\\])/, () => homedir());
   const extension = extname(selected).toLowerCase();
   if (![".json", ".yaml", ".yml"].includes(extension)) {
     throw new Error(
