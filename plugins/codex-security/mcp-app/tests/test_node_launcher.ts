@@ -247,6 +247,42 @@ launcherTest(
   },
 );
 
+test(
+  "Linux database helpers skip an automatic Node runtime without SQLite",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const root = await directories.create("codex-security-linux-launcher-");
+    const withoutSqlite = path.join(root, "node-without-sqlite");
+    await writeFile(
+      withoutSqlite,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} --no-experimental-sqlite "$@"\n`,
+      { mode: 0o755 },
+    );
+    const launcher = path.join(
+      pluginRoot,
+      "scripts",
+      "launch_codex_security_mcp",
+    );
+    const result = spawnSync(
+      "/bin/sh",
+      [launcher, "--helper", "database-info"],
+      {
+        encoding: "utf8",
+        input: JSON.stringify(root),
+        env: {
+          HOME: root,
+          PATH: path.dirname(process.execPath),
+          CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      databasePath: path.join(root, "workbench.sqlite3"),
+    });
+  },
+);
+
 launcherTest(
   "compatible managed runtimes retain priority over PATH",
   async () => {

@@ -57,12 +57,12 @@ can_load_native() {
   if [ -z "$first_node" ]; then
     first_node=$1
   fi
-  # Some managed macOS runtimes enforce library validation and cannot load the
-  # plugin's addon. Check before starting a server or helper with side effects.
+  # Database helpers need SQLite. On macOS, library validation can also
+  # prevent a managed runtime from loading the plugin's addon.
   # Capture output without opening a writable file for read-only callers.
   _native_probe_output=$("$1" -e '
+    require("node:sqlite");
     if (process.platform === "darwin") {
-      require("node:sqlite");
       require(require("node:path").join(process.argv[1], "native",
         `${process.platform}-${process.arch}`, "unix.node"));
     }
