@@ -191,9 +191,6 @@ export async function runMultiscan(
       "Bulk scans do not support diff or working-tree scopes because their checkouts are clean, shallow snapshots. Use repository or path scopes instead.",
     );
   }
-  const localSources = [
-    ...new Set(tasks.map((task) => task.repository).filter(isAbsolute)),
-  ];
   const repositories: string[] = [];
   if (
     [
@@ -202,7 +199,8 @@ export async function runMultiscan(
       [options.postScanPrompt, options.postScanPromptFile],
     ].some(([inline, file]) => inline === undefined && file !== undefined)
   ) {
-    for (const repository of localSources) {
+    for (const repository of new Set(tasks.map((task) => task.repository))) {
+      if (!isAbsolute(repository)) continue;
       try {
         repositories.push(await realpath(repository));
       } catch (error) {
@@ -259,6 +257,9 @@ export async function runMultiscan(
       );
     })());
   try {
+    const localSources = [
+      ...new Set(tasks.map((task) => task.repository).filter(isAbsolute)),
+    ];
     const worktrees = await Promise.all(
       localSources.map((source) => gitProtectionRoots(source, options.signal)),
     );
