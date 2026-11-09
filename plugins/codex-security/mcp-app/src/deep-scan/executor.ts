@@ -32,6 +32,7 @@ import {
   preflightProviderDefinitions,
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
+import { DEEP_SCAN_SETTINGS } from "../deep-scan-settings.js";
 import { executablePathForSpawn } from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
 import { workerTokenUsage } from "./usage-receipt.js";
@@ -157,15 +158,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         );
       }
       const workerProfile = workerPermissionProfile(
-        request.workerUsageDirectory
-          ? {
-              ...parentSandbox,
-              literalFilesystemDenies: [
-                ...(parentSandbox.literalFilesystemDenies ?? []),
-                request.workerUsageDirectory,
-              ],
-            }
-          : parentSandbox,
+        parentSandbox,
+        request.workerUsageDirectory,
       );
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
@@ -193,16 +187,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await writePrivateFile(
           deepConfigFile,
           stringifyToml({
-            deep_scan: {
-              workers: config.workers,
-              subagents: config.subagents,
-              stop_after_no_new: config.stopAfterNoNew,
-              stop_after_consecutive_errors: config.stopAfterConsecutiveErrors,
-              max_discovery_runs: config.maxDiscoveryRuns,
-              ...(config.maxTimeHours === undefined
-                ? {}
-                : { max_time_hours: config.maxTimeHours }),
-            },
+            deep_scan: Object.fromEntries(
+              DEEP_SCAN_SETTINGS.filter(
+                ([name]) => config[name] !== undefined,
+              ).map(([name, key]) => [key, config[name]]),
+            ),
           }),
         );
         for (const name of Object.keys(childEnv)) {
@@ -609,12 +598,33 @@ function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
   };
 }
 
-function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+function workerPermissionProfile(
+  sandbox: DeepWorkerParentSandbox,
+  workerUsageDirectory?: string,
+) {
+  const literalDenies = sandbox.literalFilesystemDenies ?? [];
   const filesystem = new Map<string, string | Record<string, string>>([
     [":root", "read"],
-    ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
+    ...[...sandbox.filesystemDenies, ...literalDenies].map(
+      (key): [string, string] => [key, "deny"],
+    ),
   ]);
-  for (const literal of sandbox.literalFilesystemDenies ?? []) {
+  const pointDenies = literalDenies.filter((path) => /[*?[\]]/u.test(path));
+  // Bubblewrap cannot mount a second mask inside a directory it already hid.
+  if (
+    workerUsageDirectory &&
+    (process.platform !== "linux" ||
+      !literalDenies.some(
+        (path) =>
+          workerUsageDirectory === path ||
+          workerUsageDirectory.startsWith(
+            path.endsWith(sep) ? path : `${path}${sep}`,
+          ),
+      ))
+  ) {
+    pointDenies.push(workerUsageDirectory);
+  }
+  for (const literal of pointDenies) {
     if (sandbox.filesystemDenies.includes(literal)) {
       const root = parse(literal).root;
       const scope = filesystem.get(root);
