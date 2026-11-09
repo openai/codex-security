@@ -3024,7 +3024,7 @@ export function resolveCodexCommand(
   const expanded =
     configured === undefined
       ? undefined
-      : expandExecutableHome(configured, environment);
+      : expandHomeForLookup(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
@@ -3836,7 +3836,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandExecutableHome(candidate, environment)
+      ? expandHomeForLookup(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3884,9 +3884,9 @@ export function sameFile(left: string, right: string): Promise<boolean> {
   );
 }
 
-function expandExecutableHome(
+export function expandHomeForLookup(
   value: string,
-  environment: ProcessEnvironment,
+  environment: ProcessEnvironment = process.env,
 ): string {
   const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
   // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
