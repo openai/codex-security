@@ -12,31 +12,12 @@ import {
   rm,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { retryWindowsRename } from "../src/retry-windows-rename.js";
 import { isMain } from "./is-main.mjs";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const packageRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(packageRoot, "../..");
-
-async function retryWindowsRename(operation, rollback) {
-  // Windows can temporarily deny a directory rename while a file inside is open.
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      await rollback?.();
-      if (
-        process.platform !== "win32" ||
-        !["EPERM", "EACCES", "EBUSY"].includes(error.code) ||
-        attempt === 5
-      ) {
-        throw error;
-      }
-      await delay(100 * (attempt + 1));
-    }
-  }
-}
 
 function validatePath(path) {
   const parts = path.split("/");
