@@ -3118,13 +3118,18 @@ export async function bootstrapPlugin(
           () => null,
         );
   const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
-  const matchesSelected = (destination: string, allowExtraFiles = false) =>
+  const matchesSelected = (
+    destination: string,
+    allowExtraFiles = false,
+    generatedDirectory?: string,
+  ) =>
     pluginContentsMatch(
       root,
       destination,
       options.signal,
       allowExtraFiles,
       projection,
+      generatedDirectory,
     );
   const stagedMatches =
     staged?.version === version && (await matchesSelected(stagedRoot));
@@ -3279,10 +3284,22 @@ export async function bootstrapPlugin(
     );
   }
 
-  if (retried && !(await matchesSelected(installed["installedPath"], true))) {
-    throw new PluginBootstrapError(
-      "The retried Codex plugin install did not install the selected plugin contents.",
+  if (retried) {
+    const installedRoot = installed["installedPath"];
+    // The pinned local installer converts plugin commands into skills here.
+    const migratedCommands = join(
+      installedRoot,
+      ".codex-plugin",
+      "migrated-command-skills",
     );
+    if (
+      !(await matchesSelected(stagedRoot)) ||
+      !(await matchesSelected(installedRoot, false, migratedCommands))
+    ) {
+      throw new PluginBootstrapError(
+        "The retried Codex plugin install did not install the selected plugin contents.",
+      );
+    }
   }
 
   await writeFile(
@@ -3310,6 +3327,7 @@ async function pluginContentsMatch(
   signal?: AbortSignal,
   allowExtraFiles = false,
   projection?: PluginRuntimeProjection,
+  generatedDirectory?: string,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 
@@ -3358,11 +3376,20 @@ async function pluginContentsMatch(
     ([path]) =>
       dirname(path) === projectedDirectory && !entries.includes(basename(path)),
   );
-  if (
-    !allowExtraFiles &&
-    entries.length + generated.length !== (await readdir(destination)).length
-  ) {
-    return false;
+  if (!allowExtraFiles) {
+    const installedEntries = await readdir(destination);
+    let expectedCount = entries.length + generated.length;
+    if (generatedDirectory && dirname(generatedDirectory) === destination) {
+      const name = basename(generatedDirectory);
+      if (
+        !entries.includes(name) &&
+        installedEntries.includes(name) &&
+        (await lstat(generatedDirectory)).isDirectory()
+      ) {
+        expectedCount++;
+      }
+    }
+    if (expectedCount !== installedEntries.length) return false;
   }
   for (const [path, file] of generated) {
     const generatedPath = join(destination, basename(path));
@@ -3378,13 +3405,15 @@ async function pluginContentsMatch(
   }
 
   for (const entry of entries) {
+    const destinationEntry = join(destination, entry);
     if (
       !(await pluginContentsMatch(
         join(source, entry),
-        join(destination, entry),
+        destinationEntry,
         signal,
-        allowExtraFiles,
+        allowExtraFiles || destinationEntry === generatedDirectory,
         projection,
+        generatedDirectory,
       ))
     ) {
       return false;

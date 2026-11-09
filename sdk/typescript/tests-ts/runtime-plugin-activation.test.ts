@@ -24,6 +24,8 @@ type Step = {
   exit?: number;
   stale?: boolean;
   replaceMarketplace?: boolean;
+  extraSkill?: "marketplace" | "installed";
+  invalidMigrationFile?: boolean;
 };
 
 // Exercise the real subprocess/error boundary. A successful native install can
@@ -40,6 +42,13 @@ const fakeCli = `
   const step = steps.shift();
   if (!step) throw new Error("Unexpected extra install");
   fs.writeFileSync(plan, JSON.stringify(steps));
+  const staged = join(home, "sdk-marketplace", "plugins", "codex-security");
+  const addSkill = (root, name) => {
+    const path = join(root, name);
+    fs.mkdirSync(path, { recursive: true });
+    fs.writeFileSync(join(path, "SKILL.md"), "synthetic skill");
+  };
+  if (step.extraSkill === "marketplace") addSkill(staged, "skills/unselected");
   if (step.replaceMarketplace)
     fs.writeFileSync(join(home, "sdk-marketplace", "plugins", "codex-security", "marker.txt"), "different selection");
   if (step.exit) {
@@ -48,9 +57,12 @@ const fakeCli = `
     process.exit(step.exit);
   }
   const installedPath = join(home, "installed");
-  fs.cpSync(join(home, "sdk-marketplace", "plugins", "codex-security"), installedPath, { recursive: true });
+  fs.cpSync(staged, installedPath, { recursive: true });
   if (step.stale) fs.writeFileSync(join(installedPath, "marker.txt"), "previous");
-  fs.writeFileSync(join(installedPath, "native-metadata"), "migration");
+  if (step.extraSkill === "installed") addSkill(installedPath, "skills/unselected");
+  const migrated = join(installedPath, ".codex-plugin", "migrated-command-skills");
+  if (step.invalidMigrationFile) fs.writeFileSync(migrated, "unexpected file");
+  else addSkill(migrated, "source-command-sample");
   process.stdout.write(JSON.stringify({ installedPath, version: "1.2.3" }));
 `;
 
@@ -64,6 +76,11 @@ async function fixture(steps: Step[]) {
     JSON.stringify({ name: "codex-security", version: "1.2.3" }),
   );
   await writeFile(join(selected, "marker.txt"), "selected");
+  await mkdir(join(selected, "commands"));
+  await writeFile(
+    join(selected, "commands", "sample.md"),
+    "---\ndescription: local test\n---\nSample.",
+  );
   const marketplace = await createMarketplace(home, selected);
   await writeFile(
     join(home, "config.toml"),
@@ -115,6 +132,18 @@ test("only Windows retries a rolled-back bundled plugin activation and records t
   expect(
     await readFile(join(installed.installedRoot, "marker.txt"), "utf8"),
   ).toBe("selected");
+  expect(
+    await readFile(
+      join(
+        installed.installedRoot,
+        ".codex-plugin",
+        "migrated-command-skills",
+        "source-command-sample",
+        "SKILL.md",
+      ),
+      "utf8",
+    ),
+  ).toBe("synthetic skill");
   expect(JSON.parse(await readFile(f.record, "utf8"))).toEqual({
     installedPath: installed.installedRoot,
     version: "1.2.3",
@@ -161,6 +190,24 @@ test.skipIf(process.platform !== "win32").each([
   [
     "marketplace replaced during retry",
     [{ exit: 1, stderr: denied }, { replaceMarketplace: true }],
+    "selected plugin contents",
+    0,
+  ],
+  [
+    "additional marketplace skill during retry",
+    [{ exit: 1, stderr: denied }, { extraSkill: "marketplace" }],
+    "selected plugin contents",
+    0,
+  ],
+  [
+    "additional installed skill after the original marketplace is restored",
+    [{ exit: 1, stderr: denied }, { extraSkill: "installed" }],
+    "selected plugin contents",
+    0,
+  ],
+  [
+    "regular file at the native migration directory",
+    [{ exit: 1, stderr: denied }, { invalidMigrationFile: true }],
     "selected plugin contents",
     0,
   ],
