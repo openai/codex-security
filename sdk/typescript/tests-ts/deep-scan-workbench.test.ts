@@ -193,8 +193,6 @@ test.each([
       "synthetic-thread",
       "--scan-root",
       join(root, "scans"),
-      "--available-parallelism",
-      "4",
       "--workflow-version",
       "deep-scan-mcp/v1",
     ]);
@@ -274,8 +272,6 @@ describe("deep scan workbench ownership", () => {
         "--user-context-stdin",
         "--scan-root",
         join(root, "scans"),
-        "--available-parallelism",
-        "4",
       ],
       {
         env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir },
@@ -452,8 +448,6 @@ describe("deep scan workbench ownership", () => {
         "budget-recovery-thread",
         "--scan-root",
         join(root, "scans"),
-        "--available-parallelism",
-        "4",
         "--workflow-version",
         "deep-scan-mcp/v1",
       ]);
@@ -786,8 +780,6 @@ describe("deep scan workbench ownership", () => {
         "empty-deadline-thread",
         "--scan-root",
         join(root, "scans"),
-        "--available-parallelism",
-        "4",
         "--workflow-version",
         "deep-scan-mcp/v1",
       ])

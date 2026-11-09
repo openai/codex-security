@@ -8,6 +8,8 @@ import {
 } from "./semgrep-platform-findings.js";
 import {
   gitPathToHttpPath,
+  gitServiceHostname,
+  isPublicGitHost,
   gitTransportBytes,
   hostedRepositoryMatches,
 } from "./hosted-git-repository.js";
@@ -193,17 +195,9 @@ interface RemoteRepositoryIdentity {
   homeRelative?: boolean;
 }
 
-function sonarHostedGit(hostname: string) {
-  return (
-    isGitHubCloudHost(hostname) ||
-    hostname === "gitlab.com" ||
-    hostname === "bitbucket.org"
-  );
-}
-
 function sonarHostedHostname(hostname: string) {
-  const name = hostname.toLowerCase().replace(/\.$/u, "");
-  return sonarHostedGit(name) ||
+  const name = gitServiceHostname(hostname.toLowerCase());
+  return isPublicGitHost(name) ||
     ["ssh.github.com", "ssh.dev.azure.com", "dev.azure.com"].includes(name)
     ? name
     : undefined;
@@ -389,7 +383,7 @@ export function sonarRepositoryForRemote(origin: string): string | undefined {
       isGitSsh(url.protocol) &&
       url.username === "git" &&
       (!url.port || url.port === "22") &&
-      sonarHostedGit(hostname)
+      isPublicGitHost(hostname)
     ) {
       candidate = `https://${hostname}/${path}`;
     } else {

@@ -8,7 +8,6 @@ import { build } from "esbuild";
 import { buildNativeWrappers } from "./build_native_wrappers.mjs";
 
 const root = resolve(import.meta.dirname, "..");
-const maxChunkBytes = 140_000;
 
 export async function buildMcpApp({ output, native = "universal" }) {
   if (native !== "universal" && native !== "host") {
@@ -124,18 +123,9 @@ export async function buildMcpApp({ output, native = "universal" }) {
     const runtime = brotliCompressSync(result.outputFiles[0].contents, {
       params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
     });
-    const chunkPrefix = name + ".mjs.br.part-";
-    await writeFile(join(mcpDir, name + ".mjs"), loader(chunkPrefix), "utf8");
-    for (
-      let offset = 0, index = 0;
-      offset < runtime.length;
-      offset += maxChunkBytes, index += 1
-    ) {
-      await writeFile(
-        join(mcpDir, chunkPrefix + String(index).padStart(3, "0")),
-        runtime.subarray(offset, offset + maxChunkBytes),
-      );
-    }
+    const payload = name + ".mjs.br";
+    await writeFile(join(mcpDir, payload), runtime);
+    await writeFile(join(mcpDir, name + ".mjs"), loader(payload), "utf8");
   }
 }
 
@@ -177,23 +167,14 @@ if (isMain()) {
   }
 }
 
-function loader(chunkPrefix) {
-  return `import { Buffer } from "node:buffer";
-import { readFile, readdir } from "node:fs/promises";
+function loader(payload) {
+  return `import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 
-const runtimeChunkNames = (await readdir(new URL("./", import.meta.url)))
-  .filter((name) => name.startsWith("${chunkPrefix}"))
-  .sort();
-if (!runtimeChunkNames.length) {
-  throw new Error("Missing compressed Codex Security MCP server runtime chunks.");
-}
-const compressedRuntime = Buffer.concat(
-  await Promise.all(runtimeChunkNames.map((name) => readFile(new URL(\`./\${name}\`, import.meta.url))))
-);
+const compressedRuntime = await readFile(new URL("./${payload}", import.meta.url));
 const runtimeSource = brotliDecompressSync(compressedRuntime).toString("utf8");
 const require = createRequire(import.meta.url);
 const Module = require("node:module");

@@ -9,9 +9,7 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { join } from "node:path";
-import { sqliteFilename } from "./windows-path.js";
 import { nullIfMissingFile } from "./targets.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
@@ -50,6 +48,8 @@ import {
   codexSecurityStateDirectory,
   createWindowsOutputDirectory,
   validatePreparedOutputDir,
+  sqliteDatabaseOpener,
+  type RuntimeDatabase,
 } from "./runtime.js";
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
@@ -594,13 +594,8 @@ async function withImportLocks<T>(
     await createWindowsOutputDirectory(state, true);
   else await mkdir(state, { recursive: true, mode: 0o700 });
   await validatePreparedOutputDir(state, undefined, true);
-  const require = createRequire(import.meta.url);
-  const Database = (
-    process.versions["bun"]
-      ? require("bun:sqlite").Database
-      : require("node:sqlite").DatabaseSync
-  ) as new (path: string) => { exec(sql: string): void; close(): void };
-  const guards: InstanceType<typeof Database>[] = [];
+  const openDatabase = sqliteDatabaseOpener();
+  const guards: RuntimeDatabase[] = [];
   try {
     for (const key of [...new Set(keys)].sort()) {
       const path = join(state, `${key}.lock.sqlite`);
@@ -609,7 +604,7 @@ async function withImportLocks<T>(
         throw new CodexSecurityError(
           "The publication lock is not a regular file.",
         );
-      const guard = new Database(sqliteFilename(path));
+      const guard = openDatabase(path);
       guards.push(guard);
       if (process.platform !== "win32") chmodSync(path, 0o600);
       guard.exec("PRAGMA busy_timeout = 0");

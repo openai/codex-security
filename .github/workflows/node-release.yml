@@ -112,8 +112,8 @@ jobs:
           if ! published_versions="$(
             sfw npm view @openai/codex-security versions --json
           )"; then
-            published_versions="$(node sdk/typescript/scripts/release-automation.mjs \
-              initial-published-versions "$version" <<< "$published_versions")"
+            echo "Unable to verify published npm release history." >&2
+            exit 1
           fi
           mode="$(
             printf '%s\n' "$published_versions" |
@@ -320,27 +320,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24.15.0"
-          registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
-
-      - name: Install provenance-capable npm
-        shell: bash
-        run: |
-          set -euo pipefail
-          source .github/scripts/release-npm.sh
-          install_release_npm
-          printf '%s\n' "$release_npm_bin" >> "$GITHUB_PATH"
-
-      - name: Verify npm on PATH
-        shell: bash
-        run: |
-          set -euo pipefail
-          source .github/scripts/release-npm.sh
-          verify_release_npm "$(command -v npm)"
+      - name: Set up release npm
+        uses: ./.github/actions/setup-release-npm
 
       - name: Download verified package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -453,21 +434,8 @@ jobs:
           fi
           echo "Protected npm release tag matches the verified commit."
 
-      - name: Publish initial npm release
-        if: needs.verify.outputs.mode == 'publish' && github.ref_name == 'npm-v0.1.0'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
-            echo "Security Products must configure NPM_FIRST_PUBLISH_TOKEN in the protected npm environment before the initial release." >&2
-            exit 1
-          fi
-          npm publish ./dist/*.tgz --provenance --access public --tag latest
-
       - name: Publish to npm using trusted publishing
-        if: needs.verify.outputs.mode == 'publish' && github.ref_name != 'npm-v0.1.0'
+        if: needs.verify.outputs.mode == 'publish'
         run: npm publish ./dist/*.tgz --provenance --access public --tag latest
 
   dispatch-github-release:

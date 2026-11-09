@@ -200,19 +200,6 @@ export function requireReleaseIncrease(version, previousVersion) {
 
 /**
  * @param {string} version
- * @param {unknown} registryError
- * @returns {string[]}
- */
-export function initialPublishedVersions(version, registryError) {
-  releaseVersion({ name: packageName, version });
-  if (version !== "0.1.0" || registryError?.error?.code !== "E404") {
-    throw new Error("Unable to verify published npm release history.");
-  }
-  return [];
-}
-
-/**
- * @param {string} version
  * @param {unknown} publishedVersions
  * @returns {"publish" | "recover"}
  */
@@ -856,46 +843,19 @@ function main() {
   }
 
   const historyCommands = {
-    "initial-published-versions": initialPublishedVersions,
     "require-published-increase": requirePublishedReleaseIncrease,
     "release-mode": publishedReleaseMode,
   };
   if (process.argv.length === 4 && Object.hasOwn(historyCommands, command)) {
     const input = JSON.parse(readFileSync(0, "utf8"));
     const result = historyCommands[command](process.argv[3], input);
-    console.log(Array.isArray(result) ? JSON.stringify(result) : result);
+    console.log(result);
     return;
   }
 
   if (command === "validate-release-notes" && process.argv.length === 5) {
     const notes = readFileSync(process.argv[4], "utf8");
     process.stdout.write(parseReviewedReleaseNotes(process.argv[3], notes));
-    return;
-  }
-
-  if (command === "release-history" && process.argv.length === 4) {
-    const registryVersions = JSON.parse(
-      process.env.CODEX_SECURITY_PUBLISHED_NPM_VERSIONS ?? "[]",
-    );
-    const githubReleaseTags = (
-      process.env.CODEX_SECURITY_PUBLISHED_GITHUB_TAGS ?? ""
-    )
-      .split("\n")
-      .filter(Boolean);
-    const reachableTags = (
-      process.env.CODEX_SECURITY_REACHABLE_RELEASE_TAGS ?? ""
-    )
-      .split("\n")
-      .filter(Boolean);
-    console.log(
-      JSON.stringify(
-        releaseHistory(process.argv[3], {
-          registryVersions,
-          githubReleaseTags,
-          reachableTags,
-        }),
-      ),
-    );
     return;
   }
 
@@ -936,13 +896,10 @@ function main() {
     "Usage: release-automation.mjs version <package.json>, " +
       "release-tag <ref-type> <ref> <ref-name> <package.json>, " +
       "require-increase <version> <previous-version>, " +
-      "initial-published-versions <version> " +
-      "(npm registry error JSON from stdin), " +
       "require-published-increase <version> " +
       "(published npm versions JSON from stdin), " +
       "release-mode <version> (published npm versions JSON from stdin), " +
       "validate-release-notes <version> <release-notes-file>, " +
-      "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +
       "verify-github-publication <archive> <version> <git-head> " +

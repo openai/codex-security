@@ -45,6 +45,10 @@ pnpm run test:mcp
 pnpm run test
 ```
 
+The release checker rejects tar archives with sparse entries. If you created a
+candidate archive with a sparse-aware tar tool, regenerate it from the source
+checkout with `pnpm pack` before signing or publishing it.
+
 To collect JUnit and coverage while running the SDK suite, use `pnpm run test:ci` in place of `pnpm run test`. To test what an npm consumer receives, pack the archive and pass its exact path to the inspection command:
 
 ```sh
@@ -54,13 +58,15 @@ pnpm run test:package
 ```
 
 Replace `X.Y.Z` with the version in the filename printed by `pnpm pack`.
+Packing regenerates SDK defaults and project schemas before building the MCP runtime.
 
 The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
 the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during
 `prepack`, including the MCP runtime built from `mcp-app`; do not edit generated
 files there. Run `pnpm run build:plugin` when you need to inspect the staged
-payload locally. `plugins/codex-security` contains authored source and assets,
-not the generated `mcp/server.mjs` or compressed runtime chunks.
+payload locally. Rebuilding replaces the entire generated directory, including
+any numbered Brotli parts from earlier builds. Each MCP entrypoint now loads
+its matching `.mjs.br` file.
 `pnpm run check:plugin-source` fails if any file beneath `_bundled_plugin` is
 tracked by Git. Required CI runs the same check before installing dependencies.
 

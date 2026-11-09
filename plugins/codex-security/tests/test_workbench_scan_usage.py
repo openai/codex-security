@@ -133,8 +133,6 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
             "scan-parent",
             "--scan-id",
             str(started["scanId"]),
-            "--available-parallelism",
-            "4",
             environment=environment,
         )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
