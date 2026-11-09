@@ -1608,7 +1608,7 @@ describe("live scan dashboard", () => {
       { length: 20 },
       (_, index) => ({
         id: `c${index}`,
-        name: `Component ${index}`,
+        name: `Component\u0085${index}`,
         paths: [`src/${index}`],
         status: "pending",
         outputDir: `/synthetic/${index}`,
@@ -1634,6 +1634,7 @@ describe("live scan dashboard", () => {
         .every((line) => line.length <= 80),
     ).toBe(true);
     input.emit("data", "\r");
+    expect(frame()).toContain("project  ·  Component 19");
     expect(frame()).not.toContain("COST");
     input.emit("data", "\u0003");
     expect(onInterrupt).toHaveBeenCalled();

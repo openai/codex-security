@@ -184,6 +184,12 @@
 - share public Git host classification with Sonar ([#2474](https://github.com/openai/codex-security/pull/2474))
 - validate Tenable repository URLs and CSV line numbers at capture ([#2454](https://github.com/openai/codex-security/pull/2454))
 - fetch calibration revisions as source refs ([#2425](https://github.com/openai/codex-security/pull/2425))
+- update pdfjs-dist to 6.5.438 in the TypeScript SDK ([#2484](https://github.com/openai/codex-security/pull/2484))
+- show scan scope limitations in the job summary ([#2435](https://github.com/openai/codex-security/pull/2435))
+- show deferred validation in cost-limited Deep Scan reports ([#2436](https://github.com/openai/codex-security/pull/2436))
+- pin directories during scan artifact operations ([#2427](https://github.com/openai/codex-security/pull/2427))
+- publish verified saved-finding changes ([#2429](https://github.com/openai/codex-security/pull/2429))
+- escape component names in terminal output ([#2424](https://github.com/openai/codex-security/pull/2424))
 
 </details>
 

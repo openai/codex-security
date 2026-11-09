@@ -63,3 +63,21 @@ def test_private_temporary_directory_rejects_post_creation_substitution(
             path.rmdir()
 
     assert list(external.iterdir()) == []
+
+
+def test_parent_remains_in_place_while_verifying_new_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "parent"
+    moved = tmp_path / "moved"
+    parent.mkdir()
+
+    def rename_parent(_path: Path, _information: int) -> None:
+        parent.rename(moved)
+        pytest.fail("Renamed the parent during verification")
+
+    monkeypatch.setattr(windows_scan_local_files, "_directory_security_descriptor", rename_parent)
+    with pytest.raises(PermissionError) as error:
+        storage.create_private_temporary_directory(parent, prefix="scan_")
+    assert error.value.winerror == 32  # ERROR_SHARING_VIOLATION
+    parent.rename(moved)
