@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -328,7 +329,7 @@ try {
   });
   assert.equal(projectedModel.content.slice(0, content.length), content);
   execFileSync(
-    process.env.PYTHON || "python3",
+    fixturePython,
     [
       path.resolve(applicationRoot, "../scripts/workbench_db.py"),
       "prepare-scan-completion",
