@@ -544,7 +544,10 @@ async function resumeWithPlugin(source: string) {
             if (process.platform === "win32") {
               const currentPlugin = options.env!["CODEX_SECURITY_PLUGIN_ROOT"]!;
               if (selected) {
-                expect(dirname(dirname(currentPlugin))).toBe(f.root);
+                // The fixture root and its process temp parent can both host the ZIP.
+                expect([f.root, dirname(f.root)]).toContain(
+                  dirname(dirname(currentPlugin)),
+                );
                 expect(currentPlugin).not.toBe(selected.root);
               } else expect(dirname(currentPlugin)).toBe(bootstrapWorkspace);
               expect(filesystem[currentPlugin]).toEqual({ ".": "read" });
