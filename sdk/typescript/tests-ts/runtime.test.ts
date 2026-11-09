@@ -6859,6 +6859,39 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
+  test.skipIf(process.platform !== "linux")(
+    "discovers system Python when the account has no home for the managed cache",
+    async () => {
+      const options = {
+        environment: {
+          PATH: process.env["PATH"],
+          LD_LIBRARY_PATH: process.env["LD_LIBRARY_PATH"],
+        },
+        protectedRoot: await temporaryDirectory(),
+      };
+      const systemPython = await resolvePluginPython({
+        ...options,
+        managedRuntimeRoots: [],
+      });
+      const homeError = new Error("home lookup failed");
+      using home = spyOn(await import("node:os"), "homedir").mockImplementation(
+        () => {
+          throw Object.assign(new Error("no home for this UID"), {
+            info: { code: "ENOENT", syscall: "uv_os_homedir" },
+          });
+        },
+      );
+      expect(await resolvePluginPython(options)).toBe(systemPython);
+      await expect(
+        resolvePluginPython({ ...options, environment: { PATH: "" } }),
+      ).rejects.toBeInstanceOf(PluginPythonUnavailableError);
+      home.mockImplementation(() => {
+        throw homeError;
+      });
+      await expect(resolvePluginPython(options)).rejects.toBe(homeError);
+    },
+  );
+
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
     using _home = spyOn(await import("node:os"), "homedir").mockImplementation(
