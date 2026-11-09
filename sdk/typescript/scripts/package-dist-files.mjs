@@ -120,6 +120,7 @@ const distModules = [
   "owner-evidence",
   "patch-publication",
   "patch-tui",
+  "plugin-python-probe",
   "publication",
   "publication-events",
   "publication-store",
