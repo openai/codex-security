@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as timers from "node:timers/promises";
 import * as executable from "../src/codex-sdk-environment.js";
@@ -61,12 +61,16 @@ const fakeCli = `
   if (step.stale) fs.writeFileSync(join(installedPath, "marker.txt"), "previous");
   if (step.extraSkill === "installed") addSkill(installedPath, "skills/unselected");
   const migrated = join(installedPath, ".codex-plugin", "migrated-command-skills");
+  fs.rmSync(migrated, { recursive: true, force: true });
   if (step.invalidMigrationFile) fs.writeFileSync(migrated, "unexpected file");
-  else addSkill(migrated, "source-command-sample");
+  else if (fs.existsSync(join(staged, "commands", "sample.md"))) addSkill(migrated, "source-command-sample");
   process.stdout.write(JSON.stringify({ installedPath, version: "1.2.3" }));
 `;
 
-async function fixture(steps: Step[]) {
+async function fixture(
+  steps: Step[],
+  staleMigration?: "regenerated" | "removed" | "case-preserved",
+) {
   const root = await temporaryDirectory();
   const selected = join(root, "selected");
   const home = join(root, "home");
@@ -76,11 +80,25 @@ async function fixture(steps: Step[]) {
     JSON.stringify({ name: "codex-security", version: "1.2.3" }),
   );
   await writeFile(join(selected, "marker.txt"), "selected");
-  await mkdir(join(selected, "commands"));
-  await writeFile(
-    join(selected, "commands", "sample.md"),
-    "---\ndescription: local test\n---\nSample.",
-  );
+  if (staleMigration !== "removed") {
+    await mkdir(join(selected, "commands"));
+    await writeFile(
+      join(selected, "commands", "sample.md"),
+      "---\ndescription: local test\n---\nSample.",
+    );
+  }
+  if (staleMigration) {
+    const retired = join(
+      selected,
+      ".codex-plugin",
+      staleMigration === "case-preserved"
+        ? "MIGRATED-COMMAND-SKILLS"
+        : "migrated-command-skills",
+      "source-command-retired",
+    );
+    await mkdir(retired, { recursive: true });
+    await writeFile(join(retired, "SKILL.md"), "retired");
+  }
   const marketplace = await createMarketplace(home, selected);
   await writeFile(
     join(home, "config.toml"),
@@ -150,6 +168,45 @@ test("only Windows retries a rolled-back bundled plugin activation and records t
   });
   expect((await f.install()).installedRoot).toBe(installed.installedRoot);
 });
+
+test
+  .skipIf(process.platform !== "win32")
+  .each(["regenerated", "removed", "case-preserved"] as const)(
+  "accepts stale native command output that is %s during recovery",
+  async (mode) => {
+    const f = await fixture([{ exit: 1, stderr: denied }, {}], mode);
+    using resolver = spyOn(
+      executable,
+      "resolveBundledCodexExecutable",
+    ).mockReturnValue(f.command);
+    const result = await f.install();
+    const migration = join(".codex-plugin", "migrated-command-skills");
+    expect(
+      await readFile(
+        join(
+          result.pluginRoot,
+          mode === "case-preserved"
+            ? join(".codex-plugin", "MIGRATED-COMMAND-SKILLS")
+            : migration,
+          "source-command-retired",
+          "SKILL.md",
+        ),
+        "utf8",
+      ),
+    ).toBe("retired");
+    const installedEntries = await readdir(
+      join(result.installedRoot, migration),
+    ).catch((error: NodeJS.ErrnoException) => error.code);
+    expect(installedEntries).toEqual(
+      mode === "removed" ? "ENOENT" : ["source-command-sample"],
+    );
+    expect(JSON.parse(await readFile(f.record, "utf8")).installedPath).toBe(
+      result.installedRoot,
+    );
+    expect(await f.remaining()).toHaveLength(0);
+    expect(resolver).toHaveBeenCalled();
+  },
+);
 
 test.skipIf(process.platform !== "win32").each([
   [

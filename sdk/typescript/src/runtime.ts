@@ -3367,7 +3367,33 @@ async function pluginContentsMatch(
     return false;
   }
 
-  const entries = await readdir(source);
+  let entries = await readdir(source);
+  let nativeOutputs = 0;
+  if (generatedDirectory) {
+    const parent = dirname(generatedDirectory);
+    if (
+      parent === destination ||
+      (relative(parent, destination) === "" &&
+        (await sameFile(parent, destination)))
+    ) {
+      // The installer removes old command output before regenerating it. Resolve
+      // its source spelling on volumes that preserve case but ignore it on lookup.
+      const path = join(source, basename(generatedDirectory));
+      const original = await lstat(path).catch(nullIfMissingFileError);
+      if (original?.isSymbolicLink()) return false;
+      if (original) {
+        const name = basename(await realpath(path));
+        entries = entries.filter((entry) => entry !== name);
+      }
+      const installed = await lstat(generatedDirectory).catch(
+        nullIfMissingFileError,
+      );
+      if (installed) {
+        if (!installed.isDirectory()) return false;
+        nativeOutputs = 1;
+      }
+    }
+  }
   const projectedDirectory =
     projection === undefined
       ? undefined
@@ -3376,21 +3402,12 @@ async function pluginContentsMatch(
     ([path]) =>
       dirname(path) === projectedDirectory && !entries.includes(basename(path)),
   );
-  if (!allowExtraFiles) {
-    const installedEntries = await readdir(destination);
-    let expectedCount = entries.length + generated.length;
-    if (generatedDirectory && dirname(generatedDirectory) === destination) {
-      const name = basename(generatedDirectory);
-      if (
-        !entries.includes(name) &&
-        installedEntries.includes(name) &&
-        (await lstat(generatedDirectory)).isDirectory()
-      ) {
-        expectedCount++;
-      }
-    }
-    if (expectedCount !== installedEntries.length) return false;
-  }
+  if (
+    !allowExtraFiles &&
+    entries.length + generated.length + nativeOutputs !==
+      (await readdir(destination)).length
+  )
+    return false;
   for (const [path, file] of generated) {
     const generatedPath = join(destination, basename(path));
     const metadata = await lstat(generatedPath).catch(nullIfMissingFileError);
@@ -3405,13 +3422,12 @@ async function pluginContentsMatch(
   }
 
   for (const entry of entries) {
-    const destinationEntry = join(destination, entry);
     if (
       !(await pluginContentsMatch(
         join(source, entry),
-        destinationEntry,
+        join(destination, entry),
         signal,
-        allowExtraFiles || destinationEntry === generatedDirectory,
+        allowExtraFiles,
         projection,
         generatedDirectory,
       ))
