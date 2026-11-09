@@ -33,7 +33,10 @@ import {
 import { readCloudCredentials } from "./cloud-publish.js";
 import type { LocalExternalImportOptions } from "./external-findings-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
-import { tenableReportFormat } from "./tenable-findings.js";
+import {
+  tenableReportFormat,
+  tenableSourceRepository,
+} from "./tenable-findings.js";
 import {
   guardianFindingId,
   guardianFindingRepository,
@@ -53,7 +56,6 @@ import {
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
-  requireCloudReader,
   semgrepSarifRepositories,
   snykFileRepositories,
   type CloudFindingsReader,
@@ -172,6 +174,8 @@ export interface NormalizedExternalPublicationOptions {
   repository: string;
   provider: FindingImportRequest["source"]["provider"];
   sourceKey: string;
+  /** For Tenable, verify this declaration against the retained repository evidence. */
+  sourceRepositoryUrl?: string;
   /** Full Inspector project ARNs mapped to independently verified repository URLs. */
   inspectorProjectMap?: ReadonlyMap<string, string>;
 }
@@ -697,12 +701,14 @@ function storedFindingId(finding: ExternalFinding): string {
 }
 
 function checkFindingProvider(
-  input: ExternalFindings,
+  input: Pick<ExternalFindings, "findings" | "report">,
   provider: Provider,
 ): void {
   function checkFormat(format: unknown) {
-    if (format === tenableReportFormat)
-      requireCloudReader({ provider: "tenable" });
+    if (format === tenableReportFormat && provider !== "tenable")
+      throw new CodexSecurityError(
+        "Retained Tenable evidence requires the tenable provider.",
+      );
     if (format === guardianSelectionFormat && provider !== "semgrep")
       throw new CodexSecurityError(
         "Use the semgrep provider for Guardian findings.",
@@ -724,7 +730,6 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
-  requireCloudReader(settings);
   const readerSources = snapshotSourceRepositories(
     dependencies.sourceRepositories,
   );
@@ -830,12 +835,12 @@ export async function prepareNormalizedExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
-  requireCloudReader(settings);
   return preparePublicationInput(
     normalizedPublicationInput(input, settings.provider),
     settings,
     dependencies,
     snapshotSourceRepositories(dependencies.sourceRepositories),
+    settings.provider === "tenable" ? settings.sourceRepositoryUrl : undefined,
   );
 }
 
@@ -1171,11 +1176,12 @@ function publicationIdentity(
   parsed: ExternalFindings,
   provider?: NormalizedExternalPublicationOptions["provider"],
 ) {
-  // For Trivy, the independently checked header binds the repository. Files
+  // For Trivy and Tenable, the checked header binds the repository. Files
   // and normalized rows use the same checkpoint when their findings agree.
   if (
     parsed.report === undefined ||
-    (provider === "trivy" && isTrivyReportHeader(parsed.report))
+    (provider === "trivy" && isTrivyReportHeader(parsed.report)) ||
+    (provider === "tenable" && parsed.report["format"] === tenableReportFormat)
   )
     return parsed.findings;
   return { findings: parsed.findings, report: reportForJson(parsed.report) };
@@ -1601,6 +1607,9 @@ async function preparePublicationInput(
   }
   async function checkSelection(input: PublicationSelection) {
     const parsed = input.current;
+    checkFindingProvider(parsed, options.provider);
+    if (options.provider === "tenable" && parsed.findings.length)
+      tenableSourceRepository(parsed, declaredUrl, readerSources, "cloud");
     checkTrivyReportProvider(options.provider, parsed.report);
     for (const finding of parsed.findings)
       checkRetainedTrivyProvider(options.provider, finding);
@@ -3109,6 +3118,19 @@ async function preparePublicationInput(
     historical = Boolean(saved),
   ) {
     const { provider } = options;
+    checkFindingProvider({ findings, report }, provider);
+    if (provider === "tenable") {
+      const source = tenableSourceRepository(
+        { findings, report },
+        declaredUrl,
+        readerSources,
+        "cloud",
+      );
+      if (catalogKey(source.url) !== catalogKey(approvedUrl))
+        throw new CodexSecurityError(
+          "Tenable's source repository does not match the selected Cloud repository.",
+        );
+    }
     checkTrivyReportProvider(provider, report);
     // A catalog casing or spelling change keeps the original source comparison target.
     const approved = hosted ? saved?.approvedRepositoryUrl : undefined;
@@ -3629,7 +3651,7 @@ async function preparePublicationInput(
     },
   };
   if (
-    hosted &&
+    (hosted || options.provider === "tenable") &&
     (!saved || saved.approvedRepositoryUrl || matchesHostedRepository)
   )
     submission.approvedRepositoryUrl =

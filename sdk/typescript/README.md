@@ -705,6 +705,12 @@ Omit `issueKeys` to collect the project's open security issues. An empty list is
 If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
 to check the Sonar binding before fetching issues.
 
+For a Tenable One Code Repository export, pass the verified repository URL in
+`options.sourceRepositoryUrl` when preparing a file import. Normalized Cloud
+imports check that URL, when supplied, against the native evidence. Use the
+same source key and native finding IDs when retrying. See the
+[Tenable guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md).
+
 For AWS Continuum code findings, use `readContinuumFindings(path, sourceRepositoryUrl)`
 with a saved list or detail response, or `normalizeContinuumFindings(input, sourceRepositoryUrl)`
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.

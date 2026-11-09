@@ -15,7 +15,7 @@ Use the same acquisition format for repeated imports. Check the provider's ident
 
 ## Import locally
 
-Use the checkout path with `--repository`. A saved report can be imported locally offline. Use this destination for Tenable One Code Repository captures. [Supported inputs by provider](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#choose-your-scanner)
+Use the checkout path with `--repository`. A saved report can be imported locally offline. [Supported inputs by provider](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#choose-your-scanner)
 
 ```sh
 codex-security publish findings /path/to/selected-wiz-findings.json \
@@ -28,6 +28,10 @@ Show the repository, source namespace, normalized evidence, and exclusions. For 
 Read the stored evidence with `codex-security findings imported /path/to/project --format json`; the repository defaults to the current directory. Report created, updated, unchanged, and excluded counts, including exclusion reasons when the command exits 1.
 
 Local records remain unassessed source evidence, separate from `findings list` and completed scans. Repeated imports use the same repository/provider/source-key/source-ID identity; omitted records remain stored. When a source repository URL and local Git remotes are available, the URL must match a remote. Local import does not publish to Cloud or automatically investigate or patch findings.
+
+## Tenable One Code Repository findings
+
+Use a [Tenable selection file](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md) for one Code Repository asset with `--provider tenable`, the verified `--source-repository-url` and a stable tenant/asset source key. Preview the matching checkout or connected Cloud repository. For Cloud, check the account and whether the preview selects a private inbox or repository publisher before confirming.
 
 ## Trivy dependency vulnerabilities
 

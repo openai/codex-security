@@ -86,6 +86,12 @@ import {
   privateReport,
   selectPrivateReport,
 } from "../src/private-finding-import.js";
+import {
+  EXTERNAL_FINDINGS_READERS,
+  type ExternalFindingsReader,
+} from "../src/external-findings-read.js";
+import { readTenableFindings } from "../src/tenable-findings.js";
+import { tenableReport } from "./support/tenable-import-fixtures.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import { normalizeOpenGrepFindings } from "../src/opengrep-findings.js";
 import {
@@ -1264,7 +1270,7 @@ test("a projected Snyk issue resumes its approved private repository after a ren
 
 async function privateUploadFixture(
   raw: unknown,
-  provider: "endor" | "semgrep" | "snyk" | "wiz",
+  provider: FindingImportRequest["source"]["provider"],
   repositoryUrl?: string,
 ) {
   const f = await fixture(raw, repositoryUrl);
@@ -1274,6 +1280,7 @@ async function privateUploadFixture(
     version: "original-inbox",
     formats: ["security.findings.v1"],
     recoverUpload: false,
+    interruptUpload: true,
   };
   const uploads: { id: string; bytes: string }[] = [];
   const jobs: unknown[] = [];
@@ -1302,11 +1309,11 @@ async function privateUploadFixture(
       }
       if (pathname.endsWith("/finding-imports/files")) {
         const form = init.body as FormData;
-        uploads.push({
-          id: String(form.get("request_id")),
-          bytes: await (form.get("file") as Blob).text(),
-        });
-        throw new Error("Interrupted private upload");
+        const bytes = await (form.get("file") as Blob).text();
+        uploads.push({ id: String(form.get("request_id")), bytes });
+        if (inbox.interruptUpload)
+          throw new Error("Interrupted private upload");
+        return Response.json(privateFileMetadata(fileId, bytes));
       }
       return f.deps.fetch(url, init);
     },
@@ -1314,6 +1321,188 @@ async function privateUploadFixture(
   const prepareFile = () => prepareExternalPublication(f.file, settings, deps);
   return { f, settings, deps, inbox, uploads, jobs, fileId, prepareFile };
 }
+
+const tenableOptions = {
+  ...options,
+  provider: "tenable" as const,
+  sourceRepositoryUrl: tenableReport.repository_url,
+};
+
+test("Tenable SDK retry publishes the approved file selection with the native occurrence ID and state", async () => {
+  const capture = {
+    ...tenableReport,
+    findings: [{ ...tenableReport.findings[0]!, state: "FIXED" }],
+  };
+  const f = await fixture(capture, capture.repository_url);
+  const first = await prepareExternalPublication(
+    f.file,
+    tenableOptions,
+    f.deps,
+  );
+  expect(f.posts).toHaveLength(0);
+  await f.loseResponse(first);
+  f.state.repositoryUrl = "https://github.com/example/renamed";
+  // SDK callers can retain the original row without carrying a file-level header.
+  const { findings, read, excluded } = await readTenableFindings(
+    f.file,
+    capture.repository_url,
+    "cloud",
+  );
+  const retry = await prepareNormalizedExternalPublication(
+    { findings, read, excluded },
+    tenableOptions,
+    f.deps,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toHaveLength(2);
+  expect(f.posts[1]).toBe(f.posts[0]);
+  expect(f.reports.get("00017")).toMatchObject({
+    source: { provider: "tenable", source_key: tenableOptions.sourceKey },
+    source_finding_id: "00017",
+    assessment: { state: "not_assessed" },
+    evidence: {
+      locations: [{ path: "src/app.ts", line: 7 }],
+      source_data: { asset: capture.asset, finding: capture.findings[0] },
+    },
+  });
+});
+
+test("Tenable verifies the catalog repository and retained SDK identity before uploading", async () => {
+  const url = tenableReport.repository_url;
+  const otherUrl = "https://github.com/example/another";
+  const f = await fixture(tenableReport, otherUrl);
+  await expect(
+    prepareExternalPublication(f.file, tenableOptions, f.deps),
+  ).rejects.toThrow(/repository/i);
+  f.state.repositoryUrl = url;
+  const parsed = await readTenableFindings(f.file, url, "cloud");
+  const rejected = (input: ExternalFindings, reason: RegExp) =>
+    expect(
+      prepareNormalizedExternalPublication(input, tenableOptions, f.deps),
+    ).rejects.toThrow(reason);
+  const otherId = structuredClone(parsed);
+  otherId.findings[0]!.source_finding_id = "17";
+  await rejected(otherId, /finding ID|identity/i);
+  const wrongReport = structuredClone(parsed);
+  wrongReport.report!["repositoryUrl"] = otherUrl;
+  await rejected(wrongReport, /repository/i);
+  const otherAsset = structuredClone(parsed);
+  const sourceData = otherAsset.findings[0]!.evidence.source_data!;
+  const asset_id = "20000000-0000-4000-8000-000000000002";
+  sourceData["asset"] = { ...tenableReport.asset, asset_id };
+  sourceData["finding"] = { ...tenableReport.findings[0], asset_id };
+  await rejected(otherAsset, /asset/i);
+  const typed = structuredClone(parsed);
+  typed.findings[0]!.evidence.details = {
+    kind: "sast",
+    repository: { url: otherUrl },
+  };
+  await rejected(typed, /repository/i);
+  // Removing only the header must not turn native Tenable evidence into a Wiz row.
+  for (const input of [parsed, { ...parsed, report: undefined }])
+    await expect(
+      prepareNormalizedExternalPublication(input, options, f.deps),
+    ).rejects.toThrow(/tenable/i);
+  expect(f.posts).toHaveLength(0);
+});
+
+test("Tenable rejects conflicting custom-host casing before authentication", async () => {
+  const url = "https://git.example.test/Team/Repo";
+  const otherCase = "https://git.example.test/Team/repo";
+  const f = await fixture({ ...tenableReport, repository_url: url }, url);
+  const parsed = await readTenableFindings(f.file, url, "cloud");
+  const credentials = mock(async () => {
+    throw new Error("Unexpected credential read");
+  });
+  const deps = { ...f.deps, credentials };
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      { ...tenableOptions, sourceRepositoryUrl: otherCase },
+      deps,
+    ),
+  ).rejects.toThrow(/repository/i);
+  parsed.report!["repositoryUrl"] = otherCase;
+  await expect(
+    prepareNormalizedExternalPublication(
+      parsed,
+      { ...tenableOptions, sourceRepositoryUrl: url },
+      deps,
+    ),
+  ).rejects.toThrow(/repository/i);
+  expect(credentials).not.toHaveBeenCalled();
+  expect(f.posts).toHaveLength(0);
+});
+
+test("normalized Tenable callers cannot replace the retained repository declaration", async () => {
+  const f = await fixture(tenableReport, tenableReport.repository_url);
+  const parsed = await readTenableFindings(
+    f.file,
+    tenableReport.repository_url,
+    "cloud",
+  );
+  const credentials = mock(async () => {
+    throw new Error("Unexpected credential read");
+  });
+  await expect(
+    prepareNormalizedExternalPublication(
+      parsed,
+      {
+        ...tenableOptions,
+        sourceRepositoryUrl: "https://github.com/example/another",
+      },
+      { ...f.deps, credentials },
+    ),
+  ).rejects.toThrow(/repository/i);
+  expect(credentials).not.toHaveBeenCalled();
+  expect(f.posts).toHaveLength(0);
+});
+
+test("Tenable private imports require structured support and upload only the approved findings", async () => {
+  const { f, deps, inbox, uploads, jobs, fileId } = await privateUploadFixture(
+    tenableReport,
+    "tenable",
+    tenableReport.repository_url,
+  );
+  const prepare = () =>
+    prepareExternalPublication(f.file, tenableOptions, deps);
+  inbox.formats = ["wiz.vulnerability_json.v1"];
+  await expect(prepare()).rejects.toThrow(/format|security\.findings\.v1/i);
+  inbox.formats.push("security.findings.v1");
+  const first = await prepare();
+  expect(first.preview.privateImport?.format).toBe("security.findings.v1");
+  expect(uploads).toHaveLength(0);
+  expect(jobs).toHaveLength(0);
+  await expect(first.publish()).rejects.toThrow("Interrupted private upload");
+  expect(uploads).toHaveLength(1);
+  expect(JSON.parse(uploads[0]!.bytes)).toMatchObject({
+    format: "security.findings.v1",
+    findings: [
+      {
+        source_finding_id: "00017",
+        evidence: {
+          source_data: {
+            repository_url: tenableReport.repository_url,
+            asset: tenableReport.asset,
+            finding: tenableReport.findings[0],
+          },
+          locations: [{ path: "src/app.ts", start_line: 7 }],
+        },
+      },
+    ],
+  });
+  inbox.recoverUpload = true;
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).status).toBe("complete");
+  expect(uploads).toHaveLength(1);
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]).toMatchObject(
+    privateJobFields("tenable", fileId, "security.findings.v1"),
+  );
+  expect(f.posts).toHaveLength(0);
+});
 
 test("a Snyk private upload resumes after a rename and still checks supplemental SDK repository claims", async () => {
   const { url, capture, report } = privateSnykProject();
@@ -11964,13 +12153,186 @@ test("an interrupted native Endor checkpoint retains its original bytes and IDs 
   });
 });
 
-const versionThreeReports = [
-  ["blackduck", blackDuckBomReport(), { row: blackDuckBomRow() }],
-  [
-    "checkmarx",
+// Pair a native report with the private job route it requires; omitted versions
+// use the unversioned jobs endpoint even when the catalog acknowledges v2.
+const readerReports = {
+  blackduck: [blackDuckBomReport(), 3],
+  checkmarx: [
     { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
-    { row: checkmarxSastRow() },
+    3,
   ],
+  continuum: [continuumDetail(), 2],
+  endor: [[endorSource]],
+  github: [[importedAlert()]],
+  inspector: [inspectorReport(), 2],
+  opengrep: [opengrepJson()],
+  semgrep: [nativeSemgrep],
+  snyk: [snykJson()],
+  sonar: [sonarReport, 3],
+  tenable: [tenableReport, 3],
+  trivy: [trivy, 3],
+  veracode: [veracodePolicyPage(), 3],
+  wiz: [
+    [
+      {
+        id: "occurrence-1",
+        name: "CVE-2099-0001",
+        detailedName: "example-package",
+        vendorSeverity: "HIGH",
+        vulnerableAsset: { id: "asset-1" },
+      },
+    ],
+  ],
+} satisfies Record<ExternalFindingsReader, [unknown, (2 | 3)?]>;
+
+// Private structured evidence uses nullable severity and start/end lines.
+// Pin those wire fields to the native fixtures, including the second Continuum
+// location and Endor package paths with no reported line.
+const privateReaderFields = {
+  blackduck: { severity: "high", locations: [] },
+  checkmarx: { severity: "medium", locations: [] },
+  continuum: {
+    severity: "critical",
+    locations: [
+      { path: "src/example.ts", start_line: 3, end_line: 5 },
+      { path: "src/other.ts", start_line: 12 },
+    ],
+  },
+  endor: {
+    severity: "critical",
+    locations: [
+      { path: "package.json", start_line: null },
+      { path: "package-lock.json", start_line: null },
+    ],
+  },
+  github: {
+    severity: "high",
+    locations: [{ path: "src/query.ts", start_line: 12, end_line: 14 }],
+  },
+  inspector: {
+    severity: "high",
+    locations: [{ path: "apps/web/package.json", start_line: null }],
+  },
+  opengrep: {
+    severity: null,
+    locations: [{ path: "src/example.ts", start_line: 3, end_line: 3 }],
+  },
+  semgrep: {
+    severity: "critical",
+    locations: [{ path: "src/example.ts", start_line: 3, end_line: 3 }],
+  },
+  snyk: { severity: "high", locations: [] },
+  sonar: {
+    severity: "high",
+    locations: [{ path: "src/example.ts", start_line: null }],
+  },
+  tenable: {
+    severity: "high",
+    locations: [{ path: "src/app.ts", start_line: 7 }],
+  },
+  trivy: {
+    severity: "high",
+    locations: [{ path: "package-lock.json", start_line: 12 }],
+  },
+  veracode: { severity: "high", locations: [] },
+  wiz: { severity: "high", locations: [] },
+} satisfies Record<
+  ExternalFindingsReader,
+  {
+    severity: string | null;
+    locations: { path: string; start_line: number | null; end_line?: number }[];
+  }
+>;
+
+test.each(EXTERNAL_FINDINGS_READERS)(
+  "the SDK sends the reviewed %s source identity and evidence to either Cloud destination",
+  async (reader) => {
+    const [report, jobVersion] = readerReports[reader];
+    const provider = reader === "opengrep" ? "semgrep" : reader;
+    const url =
+      reader === "tenable" ? tenableReport.repository_url : exampleRepository;
+    const { f, deps, inbox, uploads, jobs, fileId } =
+      await privateUploadFixture(report, provider, url);
+    const versionHeader = "Codex-Security-Private-Import-Job-Version";
+    const prepare = () =>
+      prepareExternalPublication(
+        f.file,
+        {
+          ...options,
+          provider: reader,
+          ...(reader === "trivy"
+            ? { trivyScanRoot: "." }
+            : { sourceRepositoryUrl: url }),
+        },
+        {
+          ...deps,
+          fetch(url, init) {
+            const path = new URL(url).pathname;
+            if (path.endsWith("/external/repositories"))
+              expect(new Headers(init.headers).get(versionHeader)).toBe(
+                String(jobVersion ?? 2),
+              );
+            if (path.endsWith("/finding-imports/jobs"))
+              expect(path).toBe(
+                `/backend-api/aardvark${jobVersion ? `/v${jobVersion}` : ""}/finding-imports/jobs`,
+              );
+            return deps.fetch(url, init);
+          },
+        },
+      );
+    const capability = "Codex-Security-Private-Import-Providers";
+    delete f.state.catalogHeaders[capability];
+    const repository = await prepare();
+    expect(repository.preview.findings).toHaveLength(1);
+    // Reader-specific tests cover native ID generation. Here the reviewed ID
+    // and original source evidence must survive either transport.
+    const { source_finding_id, evidence } = structuredClone(
+      repository.preview.findings[0]!,
+    );
+    const source = { provider, source_key: options.sourceKey };
+    expect(f.posts).toHaveLength(0);
+    expect((await repository.publish()).verified).toBe(1);
+    const stored = f.reports.get(source_finding_id);
+    expect(stored).toMatchObject({ source, source_finding_id });
+    expect(stored?.evidence).toEqual(evidence);
+
+    // An unsupported inbox format must not silently switch back to the still
+    // connected repository publisher.
+    f.state.catalogHeaders[capability] = provider;
+    f.state.catalogHeaders[versionHeader] = String(jobVersion ?? 2);
+    inbox.formats = [];
+    await expect(prepare()).rejects.toThrow(/format|security\.findings\.v1/i);
+    expect(f.posts).toHaveLength(1);
+    expect(uploads).toHaveLength(0);
+    expect(jobs).toHaveLength(0);
+
+    inbox.formats = ["security.findings.v1"];
+    inbox.interruptUpload = false;
+    const prepared = await prepare();
+    expect(prepared.preview.privateImport?.format).toBe("security.findings.v1");
+    expect(uploads).toHaveLength(0);
+    expect((await prepared.publish()).privateJob?.status).toBe("completed");
+    expect(uploads).toHaveLength(1);
+    const uploaded = JSON.parse(uploads[0]!.bytes).findings;
+    expect(uploaded).toEqual([
+      {
+        source_finding_id,
+        evidence: {
+          ...evidence,
+          ...privateReaderFields[reader],
+        },
+      },
+    ]);
+    expect(jobs).toMatchObject([
+      privateJobFields(provider, fileId, "security.findings.v1"),
+    ]);
+    expect(f.posts).toHaveLength(1);
+  },
+);
+
+const versionThreeReports = [
+  ["blackduck", readerReports.blackduck[0], { row: blackDuckBomRow() }],
+  ["checkmarx", readerReports.checkmarx[0], { row: checkmarxSastRow() }],
   ["sonar", sonarReport, { issue: sonarReport.pages[0]!.issues[0]! }],
   ["trivy", trivy, { vulnerability: trivy.Results[0]!.Vulnerabilities[0]! }],
   ["veracode", veracodePolicyPage(), { row: veracodePolicyRow() }],
@@ -12029,15 +12391,7 @@ test.each([
   {
     provider: "wiz",
     format: "wiz.vulnerability_json.v1",
-    raw: [
-      {
-        id: "occurrence-1",
-        name: "CVE-2099-0001",
-        detailedName: "example-package",
-        vendorSeverity: "HIGH",
-        vulnerableAsset: { id: "asset-1" },
-      },
-    ],
+    raw: readerReports.wiz[0],
   },
 ] as const)(
   "a signed-in $provider private import resumes lost upload and job responses",
@@ -12716,4 +13070,48 @@ test("filtered, unsupported and changed files never upload an unreviewed native 
     JSON.stringify({ ...raw, meta: { ...raw.meta, name: "unreviewed" } }),
   );
   expect((await select()).bytes).not.toContain("unreviewed");
+});
+
+test("the CLI publishes a native Tenable report only after approval", async () => {
+  const url = tenableReport.repository_url;
+  const f = await fixture(tenableReport, url);
+  const args = [
+    "publish",
+    "findings",
+    f.file,
+    "--to=cloud",
+    "--provider=tenable",
+    `--repository=${f.destination().id}`,
+    `--source-repository-url=${url}`,
+    "--source-key=tenant/code-repository",
+    "--format=json",
+  ];
+  const declined = createCliTest(main);
+  const confirm = mock(async () => false);
+  const code = await declined.runCli(args, {
+    ...f.cliDeps,
+    externalPublicationPrompt: { isInteractive: () => true, confirm },
+  });
+  expect(code, declined.stderr.text()).toBe(0);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  const { published, preview } = JSON.parse(declined.stdout.text());
+  expect(published).toBe(false);
+  expect(preview.destination.url).toBe(url);
+  expect(preview.findings[0].source_finding_id).toBe("00017");
+  expect(f.posts).toHaveLength(0);
+
+  const approved = createCliTest(main);
+  expect(
+    await approved.runCli([...args, "--yes"], f.cliDeps),
+    approved.stderr.text(),
+  ).toBe(0);
+  expect(JSON.parse(approved.stdout.text())).toMatchObject({
+    status: "complete",
+    counts: { created: 1 },
+  });
+  expect(f.posts).toHaveLength(1);
+  expect(f.reports.get("00017")).toMatchObject({
+    source: { provider: "tenable", source_key: "tenant/code-repository" },
+    evidence: preview.findings[0].evidence,
+  });
 });
