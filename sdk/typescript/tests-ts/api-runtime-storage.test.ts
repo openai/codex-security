@@ -30,6 +30,7 @@ test.skipIf(process.platform !== "win32").each(["changed", "canceled"])(
   "retains a %s ZIP error when Windows holds the scan input open",
   async (result) => {
     const root = await temporaryDirectory();
+    using temporary = spyOn(os, "tmpdir").mockReturnValue(root);
     const bootstrap = join(root, "bootstrap");
     const output = join(root, "scan");
     const archive = join(root, "selected.zip");
@@ -115,12 +116,16 @@ test.skipIf(process.platform !== "win32")(
     const bootstrap = join(root, "bootstrap");
     const ordinaryTemp = join(root, "scan-temporary");
     const explicit = join(root, "explicit", "scan");
+    const deepOutput = join(root, "nested-output-".repeat(8), "scan");
+    const equalLengthTemp = join(root, "parallel");
     const configuredDefault = join(root, "state", "scans", "fixture", "scan");
     const privateDefault = join(ambient, "state", "scans", "fixture", "scan");
     for (const path of [
       bootstrap,
       ordinaryTemp,
       explicit,
+      deepOutput,
+      equalLengthTemp,
       configuredDefault,
       privateDefault,
     ])
@@ -151,11 +156,15 @@ test.skipIf(process.platform !== "win32")(
         [ambient, bootstrap],
         () => {},
       );
-    for (const [output, expectedParent] of [
-      [explicit, dirname(explicit)],
-      [configuredDefault, dirname(configuredDefault)],
-      [privateDefault, ordinaryTemp],
+    for (const [output, temp, expectedParent] of [
+      [explicit, ordinaryTemp, dirname(explicit)],
+      [explicit, equalLengthTemp, dirname(explicit)],
+      [deepOutput, ordinaryTemp, ordinaryTemp],
+      [configuredDefault, ordinaryTemp, ordinaryTemp],
+      [deepOutput, ambient, dirname(deepOutput)],
+      [privateDefault, ordinaryTemp, ordinaryTemp],
     ] as const) {
+      temporary.mockReturnValue(temp);
       const staged = await prepare(output);
       expect(staged).toBeDefined();
       try {

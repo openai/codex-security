@@ -2918,9 +2918,20 @@ export async function prepareWindowsScanPluginZip(
   if (protectedPath(canonicalSource))
     throw new LocalPluginBootstrapError(changed);
   let workspace: string | undefined;
-  for (const parent of new Set([dirname(scanDirectory), tmpdir()])) {
+  const parents = [...new Set([dirname(scanDirectory), tmpdir()])].filter(
+    (parent) => !protectedPath(parent) && !isWithin(scanDirectory, parent),
+  );
+  // PowerShell may fail to launch the selected plugin's .cmd at a long path.
+  // Prefer the shorter canonical parent, retaining the output parent on ties.
+  const candidates = await Promise.allSettled(
+    parents.map((path) => realpath(path)),
+  );
+  const length = (candidate: PromiseSettledResult<string>) =>
+    candidate.status === "fulfilled" ? candidate.value.length : Infinity;
+  for (const candidate of candidates.sort((a, b) => length(a) - length(b))) {
     try {
-      const canonical = await realpath(parent);
+      if (candidate.status === "rejected") throw candidate.reason;
+      const canonical = candidate.value;
       if (protectedPath(canonical) || isWithin(scanDirectory, canonical))
         continue;
       // Host-side plugin helpers may execute from this copy. A sibling keeps it
