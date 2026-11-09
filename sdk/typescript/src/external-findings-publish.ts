@@ -9,9 +9,8 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { join } from "node:path";
-import { sqliteFilename } from "./windows-path.js";
+import { nullIfMissingFile } from "./targets.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   isBoxedPrimitive,
@@ -52,6 +51,8 @@ import {
   codexSecurityStateDirectory,
   createWindowsOutputDirectory,
   validatePreparedOutputDir,
+  sqliteDatabaseOpener,
+  type RuntimeDatabase,
 } from "./runtime.js";
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
@@ -494,10 +495,7 @@ function sameFindingSelection(
 }
 
 async function readOptionalFile(path: string): Promise<string | undefined> {
-  return readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  });
+  return (await readFile(path, "utf8").catch(nullIfMissingFile)) ?? undefined;
 }
 
 export function externalPublicationStateDirectory(
@@ -546,16 +544,14 @@ function validatePublicationReceipt(
   batch: FindingImportRequest,
 ): FindingImportReceipt {
   const receipt = validateImportReceipt(value);
-  const batchItems = new Map(batch.items.map((item) => [item.client_id, item]));
+  const remaining = new Set(batch.items.map((item) => item.client_id));
   if (
     receipt.id !== batch.request_id ||
     wireJson(receipt.repository) !== wireJson(batch.repository) ||
     wireJson(receipt.source) !== wireJson(batch.source) ||
     receipt.item_count !== batch.items.length ||
     receipt.results.length !== batch.items.length ||
-    new Set(receipt.results.map((item) => item.client_id)).size !==
-      batch.items.length ||
-    receipt.results.some((item) => !batchItems.has(item.client_id))
+    receipt.results.some((item) => !remaining.delete(item.client_id))
   )
     throw new CodexSecurityError(
       "Cloud returned a receipt for a different publication.",
@@ -602,27 +598,17 @@ async function withImportLocks<T>(
     await createWindowsOutputDirectory(state, true);
   else await mkdir(state, { recursive: true, mode: 0o700 });
   await validatePreparedOutputDir(state, undefined, true);
-  const require = createRequire(import.meta.url);
-  const Database = (
-    process.versions["bun"]
-      ? require("bun:sqlite").Database
-      : require("node:sqlite").DatabaseSync
-  ) as new (path: string) => { exec(sql: string): void; close(): void };
-  const guards: InstanceType<typeof Database>[] = [];
+  const openDatabase = sqliteDatabaseOpener();
+  const guards: RuntimeDatabase[] = [];
   try {
     for (const key of [...new Set(keys)].sort()) {
       const path = join(state, `${key}.lock.sqlite`);
-      const metadata = await lstat(path).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return undefined;
-          throw error;
-        },
-      );
+      const metadata = await lstat(path).catch(nullIfMissingFile);
       if (metadata && !metadata.isFile())
         throw new CodexSecurityError(
           "The publication lock is not a regular file.",
         );
-      const guard = new Database(sqliteFilename(path));
+      const guard = openDatabase(path);
       guards.push(guard);
       if (process.platform !== "win32") chmodSync(path, 0o600);
       guard.exec("PRAGMA busy_timeout = 0");
@@ -1580,6 +1566,9 @@ async function preparePublicationInput(
     ? (url: string) => cloudSourceKey(url, "github")
     : cloudRepositoryUrlKey;
   const state = externalPublicationStateDirectory(environment);
+  function pendingFile(key: string) {
+    return join(state, `${key}.pending.json`);
+  }
   let previousFindings: ExternalFindings | undefined;
   async function previousFindingsIfSaved(
     input: PublicationSelection,
@@ -1589,12 +1578,7 @@ async function preparePublicationInput(
       return previousFindings;
     // An empty state directory (or just this current receipt) needs only the
     // current reader for its preview.
-    const entries = await readdir(state).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return [];
-        throw error;
-      },
-    );
+    const entries = (await readdir(state).catch(nullIfMissingFile)) ?? [];
     if (
       entries.some(
         (name) =>
@@ -1787,9 +1771,7 @@ async function preparePublicationInput(
       if (projectionKeys.has(candidateKey)) continue;
       // New imports use the first reconstructed projection; an exact pending key
       // takes precedence, including an earlier SDK's unmodified original input.
-      capturedPending = await readOptionalFile(
-        join(state, candidateKey + ".pending.json"),
-      );
+      capturedPending = await readOptionalFile(pendingFile(candidateKey));
       if (projection === resolved || capturedPending !== undefined)
         projection = candidate;
       projectionKeys.add(candidateKey);
@@ -1823,7 +1805,7 @@ async function preparePublicationInput(
     key: string,
     context: () => Promise<PrivateImportContext>,
   ): Promise<{ pending: string | undefined } | undefined> {
-    const pending = await readOptionalFile(join(state, key + ".pending.json"));
+    const pending = await readOptionalFile(pendingFile(key));
     if (pending !== undefined) return { pending };
     const saved = await readOptionalFile(
       join(state, key + ".private-import.json"),
@@ -1908,9 +1890,7 @@ async function preparePublicationInput(
       originalWireKey,
       localeKey(original.parsed.findings),
     ])) {
-      const bytes = await readOptionalFile(
-        join(state, `${pathKey}.pending.json`),
-      );
+      const bytes = await readOptionalFile(pendingFile(pathKey));
       if (bytes === undefined) continue;
       const record = JSON.parse(bytes) as SavedSubmission | null;
       if (
@@ -2172,11 +2152,7 @@ async function preparePublicationInput(
     content: SavedSubmission,
     retire: () => Promise<void>,
   ) {
-    if (
-      content.requests.some(
-        (batch) => batch.repository.reset_marker !== destination.reset_marker,
-      )
-    ) {
+    if (wasReset(content)) {
       if (hosted) await confirmReset();
       await retire();
       throw new CloudImportError(
@@ -2184,6 +2160,20 @@ async function preparePublicationInput(
         "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
       );
     }
+  }
+  function retirePendingIfReset(
+    content: SavedSubmission,
+    keys: string[],
+    path: string,
+    remove = () => rm(path),
+  ) {
+    return retireIfReset(content, () =>
+      underLocks(keys, async () => {
+        const bytes = await readOptionalFile(path);
+        if (bytes !== undefined && sameSubmission(JSON.parse(bytes), content))
+          await remove();
+      }),
+    );
   }
   function readSaved(
     content: SavedSubmission | null | undefined,
@@ -2316,7 +2306,7 @@ async function preparePublicationInput(
   }
   const key = scopeKey(currentIdentity);
   const stagingKey = originalKey ?? key;
-  const canonicalPath = join(state, `${key}.pending.json`);
+  const canonicalPath = pendingFile(key);
   const lookupPath = join(state, `${key}.lookup.json`);
   // A lookup only suggests a regular file to validate. A missing or stale hint
   // leaves the same on-disk discovery available as before.
@@ -2341,7 +2331,7 @@ async function preparePublicationInput(
   let recovered: SavedSubmission | undefined;
   for (const legacyKey of legacyKeys) {
     if (legacyKey === key || legacyKey === originalKey) continue;
-    const legacyPath = join(state, `${legacyKey}.pending.json`);
+    const legacyPath = pendingFile(legacyKey);
     const captured = await readOptionalFile(legacyPath);
     if (captured !== undefined) {
       // Preserve requests staged by the earlier locale-based filename format.
@@ -2639,10 +2629,7 @@ async function preparePublicationInput(
       state,
       undefined,
       true,
-    ).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined;
-      throw error;
-    });
+    ).catch(nullIfMissingFile);
     if (!directory) return undefined;
     const known = new Set(
       [key, originalKey, knownFileKey].filter((value) => value !== undefined),
@@ -2656,7 +2643,7 @@ async function preparePublicationInput(
       selected?: Checkpoint,
       contents?: string,
     ): Promise<Checkpoint | undefined> {
-      const path = join(state, `${fileKey}.pending.json`);
+      const path = pendingFile(fileKey);
       const serialized =
         contents ??
         (selected?.fileKey === key && !known.has(fileKey)
@@ -2698,16 +2685,7 @@ async function preparePublicationInput(
                 throw new CodexSecurityError(
                   "The pending request and this preview have different repository reset markers. Review the destination again.",
                 );
-              await retireIfReset(record, () =>
-                underLocks([fileKey], async () => {
-                  const bytes = await readOptionalFile(path);
-                  if (
-                    bytes !== undefined &&
-                    sameSubmission(JSON.parse(bytes), record)
-                  )
-                    await rm(path);
-                }),
-              );
+              await retirePendingIfReset(record, [fileKey], path);
             }
             throw new CodexSecurityError(originalHostedRetry);
           }
@@ -2774,9 +2752,7 @@ async function preparePublicationInput(
     if (!selected && knownFileKey !== undefined && !hosted) return undefined;
     const hint = await lookupFileKey();
     if (hint && !known.has(hint)) {
-      const contents = await readOptionalRegularFile(
-        join(state, `${hint}.pending.json`),
-      );
+      const contents = await readOptionalRegularFile(pendingFile(hint));
       if (contents !== undefined) {
         selected = await readCandidate(hint, selected, contents);
         known.add(hint);
@@ -2793,12 +2769,10 @@ async function preparePublicationInput(
         selected.content.inputProjection?.identityFormat === 2)
     )
       return selected;
-    const entries = await readdir(state, { withFileTypes: true }).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return [];
-        throw error;
-      },
-    );
+    const entries =
+      (await readdir(state, { withFileTypes: true }).catch(
+        nullIfMissingFile,
+      )) ?? [];
     for (const entry of entries) {
       if (!entry.isFile() || !/^[a-f0-9]{64}\.pending\.json$/u.test(entry.name))
         continue;
@@ -2864,7 +2838,7 @@ async function preparePublicationInput(
   }
   let selected = await selectedCheckpoint(recovered ? key : undefined, true);
   const fileKey = selected?.fileKey ?? (recovered ? key : stagingKey);
-  const pendingPath = join(state, `${fileKey}.pending.json`);
+  const pendingPath = pendingFile(fileKey);
   async function rememberFile() {
     if (fileKey !== key && (await lookupFileKey()) !== fileKey)
       await writeAtomicJson(lookupPath, fileKey).catch(() => undefined);
@@ -2908,18 +2882,8 @@ async function preparePublicationInput(
   const saved = selected?.content ?? recovered;
   if (historicalOnly && !saved) throw unmatchedPreviousNumbers();
   if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
-  if (saved) {
-    await retireIfReset(saved, () =>
-      underLocks(lockKeys, async () => {
-        const current = await readOptionalFile(pendingPath);
-        if (
-          current !== undefined &&
-          sameSubmission(JSON.parse(current) as SavedSubmission, saved)
-        )
-          await removePending();
-      }),
-    );
-  }
+  if (saved)
+    await retirePendingIfReset(saved, lockKeys, pendingPath, removePending);
   if (saved?.inspectorProjectMapRequired && !inspectorProjectMap)
     throw new CodexSecurityError(
       "Supply the verified Inspector project binding again to resume.",
@@ -3756,7 +3720,7 @@ async function preparePublicationInput(
           if (!submission.receipts?.length) throw error;
           throw interruptedPreview(errorMessage(error), error);
         });
-        const pending = selected?.content;
+        let pending = selected?.content;
         const current = pending ?? submission;
         const adoptProjectMap =
           submission.inspectorProjectMapRequired &&
@@ -3796,14 +3760,13 @@ async function preparePublicationInput(
           submission.approvedRepositoryPlatform === "other" &&
           !current.approvedRepositoryPlatform;
         if (adoptStrictRepository) current.approvedRepositoryPlatform = "other";
-        const receipts = (current.receipts ?? []).map(validateImportReceipt);
-        if (receipts.length > requests.length)
+        const cached = (current.receipts ?? []).map(validateImportReceipt);
+        if (cached.length > requests.length)
           throw new CodexSecurityError(
             "Saved publication has more receipts than requests.",
           );
         const acknowledged: FindingImportReceipt[] = [];
         let verified = 0;
-        let persisted = pending !== undefined;
         try {
           if (selected?.checkedCanonical) current.canonicalChecked = true;
           if (pending === undefined) {
@@ -3816,9 +3779,8 @@ async function preparePublicationInput(
                   if (
                     otherKey !== key &&
                     otherKey !== fileKey &&
-                    (await readOptionalFile(
-                      join(state, otherKey + ".pending.json"),
-                    )) !== undefined
+                    (await readOptionalFile(pendingFile(otherKey))) !==
+                      undefined
                   )
                     throw new CodexSecurityError(
                       "Another publication prepared this input. Run the command again to review and resume that saved request.",
@@ -3831,10 +3793,9 @@ async function preparePublicationInput(
               }
               await writeAtomicJson(pendingPath, current);
             });
-            persisted = true;
+            pending = current;
           } else if (adoptProjectMap || adoptStrictRepository) {
             await writeAtomicJson(pendingPath, current);
-            persisted = true;
           } else if (selected?.checkedCanonical) {
             // The existing approval and receipts are usable if caching the scan fails.
             await writeAtomicJson(pendingPath, current).catch(() => undefined);
@@ -3848,7 +3809,7 @@ async function preparePublicationInput(
           let acknowledgedCount = 0;
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validatePublicationReceipt(
-              receipts[batchIndex] ??
+              cached[batchIndex] ??
                 (await request(`${importPrefix}/finding_imports`, batch)),
               batch,
             );
@@ -3859,20 +3820,19 @@ async function preparePublicationInput(
               completed: acknowledgedCount,
               total: direct.findings.length,
             });
-            if (batchIndex === receipts.length) {
-              receipts.push(receipt);
+            if (batchIndex >= cached.length) {
               // Acknowledged batches must not consume another POST quota on retry.
               // Readback can still resume after this checkpoint without replaying writes.
               await writeAtomicJson(pendingPath, {
                 ...submission,
                 canonicalChecked: current.canonicalChecked,
-                receipts,
+                receipts: acknowledged,
               });
             }
           }
           // Verify readable source records without mistaking a newer concurrent
           // observation for failure of the original, immutable import receipt.
-          const readbacks = receipts.flatMap((receipt, batchIndex) => {
+          const readbacks = acknowledged.flatMap((receipt, batchIndex) => {
             const batch = requests[batchIndex]!;
             const batchItems = new Map(
               batch.items.map((item) => [item.client_id, item]),
@@ -3931,16 +3891,16 @@ async function preparePublicationInput(
         } catch (error) {
           if (error instanceof CloudImportError && error.status === 409) {
             await removePending();
-            persisted = false;
+            pending = undefined;
           }
-          const message = `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : persisted ? `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}` : "No resumable request was saved. Correct the error and review the input before retrying."}`;
+          const message = `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : pending ? `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}` : "No resumable request was saved. Correct the error and review the input before retrying."}`;
           throw new ExternalPublicationError(
             message,
             {
               ...result(acknowledged, verified),
               status: "interrupted",
               error: message,
-              ...(persisted ? { savedSubmission: pendingPath } : {}),
+              ...(pending ? { savedSubmission: pendingPath } : {}),
             },
             error,
           );

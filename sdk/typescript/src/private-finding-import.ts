@@ -296,7 +296,7 @@ const checkpointSchema = z.object({
   accountId: z.string(),
   contextVersion: z.string(),
   sha256: z.string(),
-  source: z.object({ provider: z.string(), source_key: z.string() }),
+  source: jobSchema.shape.source,
   repository: z.object({ id: z.string(), repo_connector_id: z.string() }),
   uploadRequestId: z.uuid(),
   jobRequestId: z.uuid(),
@@ -311,6 +311,24 @@ const checkpointSchema = z.object({
     .optional(),
   previousReceipt: jobSchema.refine(unsuccessfulJob).optional(),
 });
+
+function matchesJobScope(
+  job: PrivateImportJob,
+  scope: Pick<
+    z.infer<typeof checkpointSchema>,
+    "format" | "source" | "repository"
+  >,
+) {
+  const [target] = job.default_targets;
+  return (
+    job.input.format === scope.format &&
+    job.source.provider === scope.source.provider &&
+    job.source.source_key === scope.source.source_key &&
+    job.default_targets.length === 1 &&
+    target?.repo_id === scope.repository.id &&
+    target.repo_connector_id === scope.repository.repo_connector_id
+  );
+}
 
 export function unsuccessfulJob(job: PrivateImportJob | undefined) {
   return job?.status === "failed" || job?.status === "cancelled";
@@ -334,47 +352,24 @@ export function readPrivateCheckpoint(
 ) {
   if (serialized === undefined) return;
   const checkpoint = parsePrivateCheckpoint(serialized);
-  const {
-    uploadRequestId,
-    jobRequestId,
-    jobApiVersion,
-    approvedRepositoryUrl,
-    approvedRepositoryPlatform,
-    fileId,
-    jobId,
-    receipt,
-    previousReceipt,
-    contextVersion,
-    format,
-    sha256,
-    ...scope
-  } = checkpoint;
-  const {
-    contextVersion: currentContext,
-    format: selectedFormat,
-    sha256: selectedDigest,
-    ...selectedScope
-  } = expected;
-  const sameContext = contextVersion === currentContext;
+  const { fileId, jobId, receipt, previousReceipt } = checkpoint;
+  const { apiBaseUrl, accountId, source, repository } = checkpoint;
+  const { contextVersion, format, sha256, ...scope } = expected;
+  const sameContext = checkpoint.contextVersion === contextVersion;
   if (
-    canonicalJson(scope) !== canonicalJson(selectedScope) ||
-    (sameContext && (format !== selectedFormat || sha256 !== selectedDigest)) ||
+    canonicalJson({ apiBaseUrl, accountId, source, repository }) !==
+      canonicalJson(scope) ||
+    (sameContext &&
+      (checkpoint.format !== format || checkpoint.sha256 !== sha256)) ||
     (jobId && !fileId) ||
     [receipt, previousReceipt].some(
-      (job) =>
-        job &&
-        (job.input.format !== format ||
-          canonicalJson(job.source) !== canonicalJson(scope.source) ||
-          job.default_targets.length !== 1 ||
-          job.default_targets[0]?.repo_id !== scope.repository.id ||
-          job.default_targets[0]?.repo_connector_id !==
-            scope.repository.repo_connector_id),
+      (job) => job && !matchesJobScope(job, checkpoint),
     ) ||
     (receipt &&
       (receipt.id !== jobId ||
-        receipt.request_id !== jobRequestId ||
+        receipt.request_id !== checkpoint.jobRequestId ||
         receipt.input.file_id !== fileId)) ||
-    uploadRequestId === jobRequestId
+    checkpoint.uploadRequestId === checkpoint.jobRequestId
   )
     throw new CodexSecurityError(
       "Saved private import does not match this account, repository or report.",
@@ -524,23 +519,12 @@ export function privateImportClient(
           (id !== undefined && job.id !== id) ||
           job.request_id !== input.requestId ||
           job.input.file_id !== input.fileId ||
-          job.input.format !== input.format ||
-          job.source.provider !== input.source.provider ||
-          job.source.source_key !== input.source.source_key ||
-          job.default_targets.length !== 1 ||
-          job.default_targets[0]?.repo_id !== input.repository.id ||
-          job.default_targets[0]?.repo_connector_id !==
-            input.repository.repo_connector_id
+          !matchesJobScope(job, input)
         )
           throw new CodexSecurityError(
             "Cloud returned a job for a different private import.",
           );
-        if (
-          job.status === "completed" ||
-          job.status === "failed" ||
-          job.status === "cancelled"
-        )
-          return job;
+        if (job.status === "completed" || unsuccessfulJob(job)) return job;
         if (!id) {
           id = job.id;
           await accepted(id);

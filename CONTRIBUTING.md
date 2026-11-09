@@ -46,6 +46,11 @@ plugin helper, then regenerate its SDK copy. Historical finding normalization is
 maintained in the SDK.
 `pnpm --dir sdk/typescript run types` checks freshness.
 
+The SDK build reads Deep Scan setting names from
+`plugins/codex-security/mcp-app/src/deep-scan-settings.ts`. If you build the
+SDK from a sparse checkout, include this file alongside the plugin defaults
+and severity rubric.
+
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
 source. CI runs deterministic triage checks and the Deep Scan iteration and
 publication tests in the MCP suite.
