@@ -32,6 +32,7 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     load_script,
+    mark_deep_coordinator_succeeded,
     run_workbench,
     save_workspace,
     scan_command,
@@ -2086,6 +2087,24 @@ def test_legacy_delivered_scan_waits_for_its_thread(
     assert get_scan(state_dir, scan_id, *read_context)["scan"]["scanId"] == scan_id
     previous = get_scan(state_dir, previous_id, *read_context, check=False)
     assert "awaiting its owning Codex thread" in previous["stderr"]
+
+    mark_deep_coordinator_succeeded(state_dir, scan_id, Path(begun["deepScan"]["scanDir"]))
+    replacement = run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--target-path",
+        str(target),
+        "--thread-id",
+        "other",
+        "--model-thread-id",
+        "other",
+        "--user-context",
+        begun["deepScan"]["userContext"],
+        "--workflow-version",
+        "fixture",
+    )
+    assert replacement["startDisposition"] == "created"
+    assert replacement["deepScan"]["scanId"] != scan_id
 
 
 @pytest.mark.parametrize(

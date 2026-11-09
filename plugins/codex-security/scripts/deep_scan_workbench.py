@@ -576,6 +576,7 @@ def terminal_deep_scan_for_target_snapshot(
             AND scans.target_inode = ?
             AND scans.handoff_status = 'delivered'
             AND scans.handoff_claim_token IS NULL
+            AND scans.continuation_thread_id IS NULL
             AND workspaces.active_scan_id = scans.id
             AND deep_scan_runs.status = 'succeeded'
             AND deep_scan_runs.phase = 'terminal'
@@ -741,7 +742,8 @@ def begin_deep_scan_for_target(
                 AND (deep_scan_runs.pending_target_project_path IS NULL
                     OR deep_scan_runs.pending_target_project_path = ?)
                 AND scans.recipe_json IS NULL
-                AND scans.handoff_claim_token IS NULL AND deep_scan_runs.status = 'succeeded'
+                AND scans.handoff_claim_token IS NULL AND scans.continuation_thread_id IS NULL
+                AND deep_scan_runs.status = 'succeeded'
                 AND deep_scan_runs.discovery_user_context_json = ?
             LIMIT 1
             """,
