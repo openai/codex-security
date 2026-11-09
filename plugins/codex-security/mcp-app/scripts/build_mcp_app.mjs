@@ -12,17 +12,18 @@ const root = resolve(import.meta.dirname, "..");
 async function runAppBuild() {
   const options = { cwd: root, stdio: "inherit" };
   const binDirectory = join("node_modules", ".bin");
-  // Node's Windows task runner can skip a long package.json or .bin directory
-  // and select an ancestor's script or compiler.
-  if (
-    process.platform !== "win32" ||
-    process.versions.bun ||
-    join(root, binDirectory).length < 260
-  ) {
+  if (process.platform !== "win32" || join(root, binDirectory).length < 260) {
     execFileSync(process.execPath, ["--run", "build"], options);
     return;
   }
+  if (process.versions.bun) {
+    // Bun reserves `build` for its bundler unless `run` is explicit.
+    execFileSync(process.execPath, ["run", "build"], options);
+    return;
+  }
 
+  // Node's Windows task runner can skip a long package.json or .bin directory
+  // and select an ancestor's script or compiler.
   const manifest = join(root, "package.json");
   const { scripts } = JSON.parse(await readFile(manifest, "utf8"));
   const bins = [];

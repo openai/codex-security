@@ -209,20 +209,17 @@ describe("bundled plugin build", () => {
 
     const destination = join(root, "mcp");
     await writeFixture(destination, "helpers.mjs.br.part-000", "stale");
-    await execFileAsync(
-      "node",
-      [
-        join(source, "mcp-app", "scripts", "build_mcp_app.mjs"),
-        "--output",
-        destination,
-      ],
-      {
-        env: {
-          ...process.env,
-          PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
-        },
+    const buildArgs = [
+      join(source, "mcp-app", "scripts", "build_mcp_app.mjs"),
+      "--output",
+      destination,
+    ];
+    await execFileAsync("node", buildArgs, {
+      env: {
+        ...process.env,
+        PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
       },
-    );
+    });
 
     if (process.platform === "win32") {
       const [script, manifest] = JSON.parse(
@@ -232,6 +229,15 @@ describe("bundled plugin build", () => {
       expect(await realpath(manifest)).toBe(
         await realpath(join(source, "mcp-app", "package.json")),
       );
+      const pkg = JSON.parse(await readFile(manifest, "utf8"));
+      pkg.scripts.build = `node -e "require('node:fs').writeFileSync('bun-build-receipt', process.env.npm_lifecycle_event); process.exit(72)"`;
+      await writeFile(manifest, JSON.stringify(pkg));
+      await expect(
+        execFileAsync(process.execPath, buildArgs),
+      ).rejects.toThrow();
+      expect(
+        await readFile(join(source, "mcp-app", "bun-build-receipt"), "utf8"),
+      ).toBe("build");
     }
     const contract = JSON.parse(
       await readFile(
