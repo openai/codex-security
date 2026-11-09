@@ -1016,7 +1016,9 @@ function expandHome(value: string): string {
     return homedir();
   }
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
+    const separators =
+      sep === "/" && value.startsWith("~/") ? /^\/+/ : /^[/\\]+/;
+    return resolve(homedir(), value.slice(2).replace(separators, ""));
   }
   return value;
 }
