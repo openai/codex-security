@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import os
 import shutil
@@ -349,7 +350,12 @@ def test_completion_captures_target_warnings_before_first_seal(
 @pytest.mark.parametrize("mode", ["standard", "deep"])
 def test_completion_preserves_non_utf8_filename_warning(publication_scan, tmp_path, mode):
     scan = publication_scan(mode=mode)
-    os.mkfifo(os.fsencode(tmp_path / "target") + b"/new-pipe-\xff")
+    try:
+        os.mkfifo(os.fsencode(tmp_path / "target") + b"/new-pipe-\xff")
+    except OSError as exc:
+        if exc.errno == errno.EILSEQ:
+            pytest.skip("Filesystem rejects non-UTF-8 filenames")
+        raise
 
     completed = scan.complete()
 

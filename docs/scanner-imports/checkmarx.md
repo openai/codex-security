@@ -20,9 +20,10 @@ codex-security publish findings "$report" --to local --repository . \
 ```
 
 For CxSAST, use the XML path and a key such as `cxsast/example-instance/example-project/main/sast`.
-Check `report.scanId`, the SAST findings and any exclusions. A confirmed local import
-with exclusions saves the accepted findings and exits with status 1. Use the same
-file for confirmation and retries. [Save or publish and verify](README.md#save-or-publish-and-verify).
+Check `report.scanId`, the SAST findings and any exclusions. If the preview
+contains both findings and exclusions, a confirmed local import saves the
+accepted findings and exits with status 1. Use the same file for confirmation
+and retries. [Save or publish and verify](README.md#save-or-publish-and-verify).
 
 ## Collect an existing scan with Codex
 
@@ -70,6 +71,11 @@ CxSAST uses the project, query, path similarity ID and ordered path nodes,
 or the reported result location for a path without nodes. Moving a node can
 create a new occurrence. [Checkmarx similarity IDs](https://docs.checkmarx.com/en/34965-205026-similarity-id.html)
 
-Findings start as `not_assessed` and retain the native severity, triage state,
-paths and snippets in `evidence.source_data`. A scan may cover a directory or
-archive. Verify how its paths map to the checkout before investigating a finding.
+The finding title is the Checkmarx query name. The scan ID, severity, rule,
+CWE (when supplied) and Checkmarx triage state appear in the imported evidence.
+To trace a Checkmarx One result, read `evidence.source_data.row.data.nodes`.
+For CxSAST, read `evidence.source_data.nodes` in order. If you use the
+original `DeepLink` under `evidence.source_data.result`, check its server
+against the CxSAST instance where you exported the scan.
+The scan may cover a directory or archive. Its paths stay in the scanner
+evidence until you establish how they map to the checkout.

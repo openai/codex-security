@@ -93,7 +93,11 @@ test("retains SQLite open errors and recovery guidance", async () => {
     openWorkbenchDatabase(databasePath),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.equal((error as Error & { errcode: number }).errcode, 14);
+      const resultCode = (error as Error & { errcode: number }).errcode;
+      assert.equal(resultCode & 0xff, 14);
+      assert.throws(() => new DatabaseSync(databasePath).close(), {
+        errcode: resultCode,
+      });
       assert.equal(
         (error as Error & { code: string }).code,
         "ERR_SQLITE_ERROR",
@@ -1089,27 +1093,28 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
       `"findings":${index},"opaqueId":9007199254740993`,
     ),
   );
+  const insertWorkflow = database.prepare(
+    "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
+  );
+  const insertReview = database.prepare(
+    "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
+  );
+  // run() returns the inserted row ID even when the fixture ignores the result.
+  insertWorkflow.setReadBigInts(true);
+  insertReview.setReadBigInts(true);
   for (const [index, id] of workflowIds.entries()) {
-    database
-      .prepare(
-        "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
-      )
-      .run(9007199254740993n + BigInt(index), id, states[index]);
+    insertWorkflow.run(9007199254740993n + BigInt(index), id, states[index]);
     for (const [keyIndex, key] of reviewKeys.entries()) {
-      database
-        .prepare(
-          "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
-        )
-        .run(
-          9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
-          id,
-          key,
-          JSON.stringify({
-            ...binding,
-            promptDigest: `prompt-${index}-${keyIndex}`,
-          }),
-          JSON.stringify({ retained: `${index}-${keyIndex}` }),
-        );
+      insertReview.run(
+        9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
+        id,
+        key,
+        JSON.stringify({
+          ...binding,
+          promptDigest: `prompt-${index}-${keyIndex}`,
+        }),
+        JSON.stringify({ retained: `${index}-${keyIndex}` }),
+      );
     }
   }
   const before = schema(database);
