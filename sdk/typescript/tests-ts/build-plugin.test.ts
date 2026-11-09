@@ -487,7 +487,11 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
   );
 
   test("builds from a source snapshot without Git metadata", async () => {
-    const root = await temporaryDirectory();
+    const temporary = await temporaryDirectory();
+    const root =
+      process.platform === "win32"
+        ? join(temporary, "p".repeat(Math.max(1, 260 - temporary.length)))
+        : temporary;
     const packageRoot = join(root, "sdk", "typescript");
     const source = join(root, "plugins", "codex-security");
 
@@ -532,6 +536,11 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
         "utf8",
       ),
     ).toBe("#!/bin/sh\nexit 0\n");
+    expect(
+      (await readdir(packageRoot)).filter((name) =>
+        name.startsWith(".plugin-build-"),
+      ),
+    ).toEqual([]);
   });
 
   test("stages only declared runtime files from the canonical plugin source", async () => {
