@@ -45,6 +45,10 @@ pnpm run test:mcp
 pnpm run test
 ```
 
+The release checker rejects tar archives with sparse entries. If you created a
+candidate archive with a sparse-aware tar tool, regenerate it from the source
+checkout with `pnpm pack` before signing or publishing it.
+
 To collect JUnit and coverage while running the SDK suite, use `pnpm run test:ci` in place of `pnpm run test`. To test what an npm consumer receives, pack the archive and pass its exact path to the inspection command:
 
 ```sh
