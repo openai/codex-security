@@ -1818,9 +1818,8 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("pins both supported-minimum verification and protected signing runtimes", () => {
+  test("pins the supported-minimum release verification runtime", () => {
     expect(protectedReleaseWorkflow).toContain('node-version: "22.13.0"');
-    expect(protectedReleaseWorkflow).toContain('node-version: "24.15.0"');
   });
 
   test("restricts release cuts to main and increasing stable versions", () => {
@@ -3841,18 +3840,31 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
   });
 
   test("cryptographically verifies the exact npm provenance bundle", () => {
-    expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
     expect(githubReleaseWorkflow).toContain("npm audit signatures");
     expect(githubReleaseWorkflow).toContain("--include-attestations");
     expect(githubReleaseWorkflow).toContain("verify-recovered-provenance");
   });
 
   test("both release jobs require the npm installed through the Socket Firewall", async () => {
-    const both = (name: string) => {
-      const script = workflowStepShell(protectedReleaseWorkflow, name);
-      expect(workflowStepShell(githubReleaseWorkflow, name)).toBe(script);
-      return script;
+    const action = "./.github/actions/setup-release-npm";
+    for (const [workflow, job] of [
+      [protectedReleaseWorkflow, "publish"],
+      [githubReleaseWorkflow, "release"],
+    ] as const) {
+      const { jobs } = Bun.YAML.parse(workflow) as WorkflowContract;
+      expect(jobs[job]?.steps?.map((step) => step.uses)).toContain(action);
+    }
+    const manifest = new URL(`../../../${action}/action.yml`, import.meta.url);
+    const { runs } = Bun.YAML.parse(readFileSync(manifest, "utf8")) as {
+      runs: { steps: NonNullable<WorkflowContract["jobs"][string]["steps"]> };
     };
+    const [node, install, verifyPath] = runs.steps;
+    expect(node?.uses).toMatch(/^actions\/setup-node@[a-f0-9]{40}$/);
+    expect(node?.with).toEqual({
+      "node-version": "24.15.0",
+      "registry-url": "https://registry.npmjs.org",
+      "package-manager-cache": false,
+    });
     const result = await runShell(
       `RUNNER_TEMP="$(cd "$RUNNER_TEMP" && pwd)"
 GITHUB_PATH="$RUNNER_TEMP/path"
@@ -3862,10 +3874,10 @@ npm() {
   printf '#!/bin/sh\\necho "\${TEST_NPM_VERSION:-11.12.1}"\\n' > "$3/node_modules/.bin/npm"
   chmod +x "$3/node_modules/.bin/npm"
 }
-${both("Install provenance-capable npm")}
+${install!.run}
 export PATH="$(cat "$GITHUB_PATH"):$PATH"
 verify() { "$BASH" <<'VERIFY'
-${both("Verify npm on PATH")}
+${verifyPath!.run}
 VERIFY
 }
 verify && echo selected
