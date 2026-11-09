@@ -15,6 +15,7 @@ import {
   readScannerJson,
   repositoryFilePath,
   scannerSeverity,
+  trackReaderSelection,
 } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
@@ -153,7 +154,14 @@ export async function readTenableFindings(
   } = selection.parse(await readScannerJson(path));
   const repository = assertRepository(repository_url, declared, target);
   const ids = new Set<string>();
-  const findings = rows.map((finding) => {
+  const result: ExternalFindings = {
+    read: rows.length,
+    report: { format: tenableReportFormat, repositoryUrl: repository, asset },
+    findings: [],
+    excluded: [],
+  };
+  const review = trackReaderSelection(result);
+  for (const [index, finding] of rows.entries()) {
     if (finding.asset_id !== asset.asset_id)
       throw new Error(
         "Every Tenable finding must belong to the selected Code Repository asset.",
@@ -162,19 +170,19 @@ export async function readTenableFindings(
       throw new Error(`Duplicate Tenable finding ID: ${finding.finding_id}`);
     ids.add(finding.finding_id);
     const severity = finding.severity.trim().toLowerCase();
-    return {
-      source_finding_id: finding.finding_id,
-      evidence: validateExternalEvidence(
+    const locations = findingLocations(
+      finding.code_file_path,
+      finding.code_line_number,
+    );
+    const evidence = () =>
+      validateExternalEvidence(
         {
           title: finding.finding_name,
           severity: scannerSeverity(
             severity === "info" ? "informational" : severity,
           ),
           description: finding.description,
-          locations: findingLocations(
-            finding.code_file_path,
-            finding.code_line_number,
-          ),
+          locations,
           source_data: {
             format: tenableReportFormat,
             repository_url,
@@ -183,13 +191,14 @@ export async function readTenableFindings(
           },
         },
         target,
-      ),
-    };
-  });
-  return {
-    read: rows.length,
-    report: { format: tenableReportFormat, repositoryUrl: repository, asset },
-    findings,
-    excluded: [],
-  };
+      );
+    if (target === "cloud")
+      review.append(index + 1, finding.finding_id, evidence);
+    else
+      result.findings.push({
+        source_finding_id: finding.finding_id,
+        evidence: evidence(),
+      });
+  }
+  return review.finish();
 }

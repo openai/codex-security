@@ -63,6 +63,29 @@ test("the reader preserves vendor state and optional severity and locations", as
   });
 });
 
+test("Cloud excludes an oversized Tenable row and retains the other findings", async () => {
+  await using fixture = await checkout();
+  await fixture.writeJson({
+    ...report,
+    findings: [
+      { ...row, description: "x".repeat(65_537) },
+      { ...row, finding_id: "00018" },
+    ],
+  });
+  const result = await readTenableFindings(
+    fixture.file,
+    repositoryUrl,
+    "cloud",
+  );
+  expect(result.read).toBe(2);
+  expect(result.findings.map((item) => item.source_finding_id)).toEqual([
+    "00018",
+  ]);
+  expect(result.excluded).toMatchObject([
+    { position: 1, source_finding_id: row.finding_id },
+  ]);
+});
+
 test("the reader rejects ambiguous assets, findings and locations", async () => {
   await using fixture = await checkout();
   for (const override of [
