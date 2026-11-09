@@ -226,7 +226,6 @@ const retriedFailures = new Set([
   "text-only",
   "failed-turn",
   "rate-limit-turn",
-  "flex-unavailable-turn",
   "restricted-capacity-turn",
   "server-error",
   "connection-error",
@@ -238,7 +237,6 @@ const retriedFailures = new Set([
 const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
   "recover-rate-limit-code": "rate-limit-turn",
-  "recover-flex-unavailable": "flex-unavailable-turn",
   "recover-restricted-capacity": "restricted-capacity-turn",
   "recover-server-error": "server-error",
   "recover-connection-error": "connection-error",
