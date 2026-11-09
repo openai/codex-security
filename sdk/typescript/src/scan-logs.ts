@@ -1,6 +1,7 @@
 import { basename, dirname, join, relative } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { sessionLines } from "./session-lines.js";
+import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
+import { parseJson } from "./value.js";
 import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
@@ -70,23 +71,20 @@ type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
 async function* scanSessions(codexHome: string, directory = "sessions") {
   for await (const path of sessionFiles(join(codexHome, directory), true)) {
-    for await (const first of sessionEvents(path)) {
-      if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
-        break;
-      }
-      const metadata = first["payload"];
-      const threadId = metadata["id"];
-      if (typeof threadId !== "string") break;
-      yield {
-        threadId,
-        parentThreadId: sessionParentThreadId(metadata),
-        startedAt: sessionStartedAt(metadata["timestamp"]),
-        workingDirectory:
-          typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
-        path,
-      };
-      break;
-    }
+    const first = await firstSessionEvent(path);
+    if (first?.["type"] !== "session_meta" || !isRecord(first["payload"]))
+      continue;
+    const metadata = first["payload"];
+    const threadId = metadata["id"];
+    if (typeof threadId !== "string") continue;
+    yield {
+      threadId,
+      parentThreadId: sessionParentThreadId(metadata),
+      startedAt: sessionStartedAt(metadata["timestamp"]),
+      workingDirectory:
+        typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
+      path,
+    };
   }
 }
 
@@ -267,6 +265,16 @@ async function extendsSessionLog(
   } finally {
     await events.return(undefined);
   }
+}
+
+async function firstSessionEvent(path: string) {
+  const line = await firstNativeSessionLine(path);
+  if (line !== undefined) {
+    const event = parseJson(() => line);
+    if (isRecord(event)) return event;
+  }
+  // Also handles metadata split across frames and malformed prefix lines.
+  for await (const event of sessionEvents(path)) return event;
 }
 
 async function* sessionEvents(
