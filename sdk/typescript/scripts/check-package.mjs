@@ -15,14 +15,12 @@ import { gunzipSync } from "node:zlib";
 import { packageDistFiles } from "./package-dist-files.mjs";
 import {
   assertPublicPackageContents,
+  assertPublicText,
   MAX_EXPANDED_ASSET_BYTES,
 } from "./package-public-content.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
-import {
-  assertStoredSparseContents,
-  readTarArchive,
-} from "./package-tar-entries.mjs";
+import { readTarArchive } from "./package-tar-entries.mjs";
 import {
   assertTarListingSizes,
   regularTarListingLines,
@@ -57,7 +55,7 @@ const rawEntries = storedArchive.entries;
 validatePackagePaths(rawEntries.map(({ path }) => path));
 assertPublicPackageContents(
   storedArchive.files,
-  Buffer.concat(storedArchive.metadata.filter(Buffer.isBuffer)),
+  Buffer.concat(storedArchive.metadata),
 );
 const processEnvironment = { ...process.env };
 delete processEnvironment.TAR_OPTIONS;
@@ -194,6 +192,8 @@ const listingSizes = assertTarListingSizes(
   listingLines,
   MAX_EXPANDED_ASSET_BYTES,
 );
+if (rawEntries.some(({ size }, index) => size !== listingSizes[index]))
+  invalidTarEntry();
 for (const [path, name] of [
   ["package/bin/codex-security.mjs", "CLI"],
   ["package/_bundled_plugin/scripts/launch_codex_security_mcp", "MCP"],
@@ -215,20 +215,18 @@ function privateExtractionDirectories(directory) {
 }
 
 function extractedArchiveFiles() {
-  const logicalSizes = new Map();
   const expectedPaths = new Map();
-  for (const [index, { path }] of rawEntries.entries()) {
+  for (const { path } of rawEntries) {
     const directory = path.endsWith("/");
     const extractedPath = directory ? path.slice(0, -1) : path;
     const type = directory ? "directory" : "file";
     const previousType = expectedPaths.get(extractedPath);
     if (previousType !== undefined && previousType !== type) invalidTarEntry();
-    if (!directory) logicalSizes.set(path, listingSizes[index]);
     expectedPaths.set(extractedPath, type);
     const parts = extractedPath.split("/");
     for (let index = 1; index < parts.length; index++) {
       const directory = parts.slice(0, index).join("/");
-      if (logicalSizes.has(directory)) invalidTarEntry();
+      if (storedArchive.files.has(directory)) invalidTarEntry();
       expectedPaths.set(directory, "directory");
     }
   }
@@ -239,7 +237,7 @@ function extractedArchiveFiles() {
   try {
     chmodSync(extractionRoot, 0o700);
     const fileList = join(extractionRoot, "members.list");
-    writeFileSync(fileList, [...logicalSizes.keys(), ""].join("\0"));
+    writeFileSync(fileList, [...storedArchive.files.keys(), ""].join("\0"));
     try {
       tar([
         "-m",
@@ -278,10 +276,11 @@ function extractedArchiveFiles() {
           continue;
         }
 
+        const stored = storedArchive.files.get(path);
         if (
           !stats.isFile() ||
           stats.nlink !== 1 ||
-          stats.size !== logicalSizes.get(path) ||
+          stats.size !== stored?.length ||
           stats.size > MAX_EXPANDED_ASSET_BYTES ||
           expandedBytes > MAX_EXPANDED_ASSET_BYTES - stats.size
         ) {
@@ -289,12 +288,17 @@ function extractedArchiveFiles() {
         }
         expandedBytes += stats.size;
         chmodSync(extractedPath, 0o600);
-        archiveFiles.set(path, readFileSync(extractedPath));
+        const contents = readFileSync(extractedPath);
+        if (!contents.equals(stored)) invalidTarEntry();
+        archiveFiles.set(path, contents);
       }
     }
     visit(extractionRoot);
 
-    if (expectedPaths.size !== 0 || archiveFiles.size !== logicalSizes.size) {
+    if (
+      expectedPaths.size !== 0 ||
+      archiveFiles.size !== storedArchive.files.size
+    ) {
       invalidTarEntry();
     }
     return archiveFiles;
@@ -319,7 +323,10 @@ assertExpectedGitHead(
 );
 
 assertPublicPackageContents(archiveFiles);
-assertStoredSparseContents(storedArchive, archiveFiles);
+// Keep the separate UTF-8 decoding of headers and padding alongside the raw metadata scan.
+assertPublicText(
+  storedArchive.metadata.map((part) => part.toString("utf8")).join(""),
+);
 for (const path of archiveFiles.keys()) {
   if (
     /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path) &&

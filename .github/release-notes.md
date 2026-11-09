@@ -156,6 +156,33 @@
 - bound Invoice Desk JSON request bodies ([#2423](https://github.com/openai/codex-security/pull/2423))
 - publish Guardian findings and clarify scanner evidence ([#2377](https://github.com/openai/codex-security/pull/2377))
 - update taiki-e/install-action to v2.89.0 ([#2451](https://github.com/openai/codex-security/pull/2451))
+- share candidate metadata precedence ([#2458](https://github.com/openai/codex-security/pull/2458))
+- derive historical union types from their members ([#2459](https://github.com/openai/codex-security/pull/2459))
+- select required jobs in one pass ([#2460](https://github.com/openai/codex-security/pull/2460))
+- register only info as an MCP tool ([#2461](https://github.com/openai/codex-security/pull/2461))
+- share the implicit TOON output check ([#2462](https://github.com/openai/codex-security/pull/2462))
+- group scan comparison findings once for display ([#2463](https://github.com/openai/codex-security/pull/2463))
+- reuse accepted worker coverage sources ([#2464](https://github.com/openai/codex-security/pull/2464))
+- validate delivered scan identity in one place ([#2465](https://github.com/openai/codex-security/pull/2465))
+- derive inline review fields once before sealing ([#2466](https://github.com/openai/codex-security/pull/2466))
+- pass the selected Invoice Desk target directly to the scan ([#2467](https://github.com/openai/codex-security/pull/2467))
+- reuse canonical decimals for legacy scanner records ([#2468](https://github.com/openai/codex-security/pull/2468))
+- store each MCP runtime in one Brotli file ([#2469](https://github.com/openai/codex-security/pull/2469))
+- consolidate direct model pricing ([#2470](https://github.com/openai/codex-security/pull/2470))
+- share validation across root and profile overrides ([#2471](https://github.com/openai/codex-security/pull/2471))
+- retire first-publish npm bootstrap ([#2472](https://github.com/openai/codex-security/pull/2472))
+- generate project schemas before bundling MCP ([#2473](https://github.com/openai/codex-security/pull/2473))
+- resolve history in the GitHub publisher ([#2475](https://github.com/openai/codex-security/pull/2475))
+- share npm setup and verification ([#2476](https://github.com/openai/codex-security/pull/2476))
+- share saved scan recipe settings across registration and replay ([#2477](https://github.com/openai/codex-security/pull/2477))
+- share relative path validation for draft and sealed scans ([#2478](https://github.com/openai/codex-security/pull/2478))
+- match equivalent Python package names in Dependabot alerts ([#2453](https://github.com/openai/codex-security/pull/2453))
+- share the severity review count default ([#2479](https://github.com/openai/codex-security/pull/2479))
+- share the SQLite opener across history and locking ([#2480](https://github.com/openai/codex-security/pull/2480))
+- share terminal error listener cleanup ([#2481](https://github.com/openai/codex-security/pull/2481))
+- stop passing host CPU counts to worker setup ([#2482](https://github.com/openai/codex-security/pull/2482))
+- share public Git host classification with Sonar ([#2474](https://github.com/openai/codex-security/pull/2474))
+- validate Tenable repository URLs and CSV line numbers at capture ([#2454](https://github.com/openai/codex-security/pull/2454))
 
 </details>
 
@@ -169,5 +196,6 @@
 
 - deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
 - restrict sockets and process tracing in Compose ([#160](https://github.com/openai/codex-security/pull/160))
+- reject sparse entries in release tarballs ([#2456](https://github.com/openai/codex-security/pull/2456))
 
 <!-- release-section: upgrades:end -->

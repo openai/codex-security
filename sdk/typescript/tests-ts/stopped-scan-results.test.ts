@@ -27,7 +27,7 @@ const stoppedScanProbe = [
   "def run(*arguments):",
   "    completed = subprocess.run([sys.executable, '-I', '-B', str(script), *arguments], check=True, capture_output=True, text=True, env=environment)",
   "    return json.loads(completed.stdout)",
-  "started = run('begin-deep-scan', '--thread-id', 'stopped-result-owner', '--target-path', str(target), '--scope', '.', '--scan-root', str(root / 'scans'), '--available-parallelism', '4')['deepScan']",
+  "started = run('begin-deep-scan', '--thread-id', 'stopped-result-owner', '--target-path', str(target), '--scope', '.', '--scan-root', str(root / 'scans'))['deepScan']",
   "scan_id = started['scanId']",
   "scan_dir = pathlib.Path(started['scanDir'])",
   "worker_id = str(uuid.uuid4())",
