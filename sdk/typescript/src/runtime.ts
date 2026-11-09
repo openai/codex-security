@@ -3118,15 +3118,16 @@ export async function bootstrapPlugin(
           () => null,
         );
   const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
-  const stagedMatches =
-    staged?.version === version &&
-    (await pluginContentsMatch(
+  const matchesSelected = (destination: string, allowExtraFiles = false) =>
+    pluginContentsMatch(
       root,
-      stagedRoot,
+      destination,
       options.signal,
-      false,
+      allowExtraFiles,
       projection,
-    ));
+    );
+  const stagedMatches =
+    staged?.version === version && (await matchesSelected(stagedRoot));
 
   if (!stagedMatches) {
     if (existing !== null) {
@@ -3205,13 +3206,7 @@ export async function bootstrapPlugin(
     isRecord(previous) &&
     typeof previous["installedPath"] === "string" &&
     previous["version"] === version &&
-    (await pluginContentsMatch(
-      root,
-      previous["installedPath"],
-      options.signal,
-      true,
-      projection,
-    ))
+    (await matchesSelected(previous["installedPath"], true))
   ) {
     return {
       pluginRoot: root,
@@ -3223,12 +3218,46 @@ export async function bootstrapPlugin(
     };
   }
 
-  const output = await run(
-    command,
-    ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
-    environment,
-    options.signal,
-  );
+  const addPlugin = () =>
+    run(
+      command,
+      ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
+      environment,
+      options.signal,
+    );
+  let output: string;
+  let retried = false;
+  try {
+    output = await addPlugin();
+  } catch (first) {
+    if (!isRolledBackPluginActivation(first)) throw first;
+    throwIfSignalAborted(options.signal);
+    let bundled: string;
+    try {
+      bundled = resolveBundledCodexExecutable();
+    } catch {
+      throw first;
+    }
+    if (!(await sameFile(command.command, bundled))) throw first;
+    // The bundled CLI restored the old cache. A short-lived Windows reader
+    // of the new tree can release it before a fresh installation attempt.
+    try {
+      await delay(100, undefined, { signal: options.signal });
+      throwIfSignalAborted(options.signal);
+      if (!(await matchesSelected(stagedRoot))) {
+        throw new LocalPluginBootstrapError(
+          "The selected plugin or its marketplace changed before the native installation could be retried.",
+          { cause: first },
+        );
+      }
+      throwIfSignalAborted(options.signal);
+      output = await addPlugin();
+      retried = true;
+    } catch (second) {
+      throwIfSignalAborted(options.signal);
+      throw isRolledBackPluginActivation(second) ? first : second;
+    }
+  }
 
   let installed: unknown;
   try {
@@ -3247,6 +3276,12 @@ export async function bootstrapPlugin(
   ) {
     throw new PluginBootstrapError(
       "Codex plugin install did not return the selected plugin path and version.",
+    );
+  }
+
+  if (retried && !(await matchesSelected(installed["installedPath"], true))) {
+    throw new PluginBootstrapError(
+      "The retried Codex plugin install did not install the selected plugin contents.",
     );
   }
 
@@ -3681,6 +3716,15 @@ export async function probeCodexSandbox(
   );
 }
 
+class RolledBackPluginActivationError extends Error {}
+
+function isRolledBackPluginActivation(error: unknown): boolean {
+  return (
+    error instanceof PluginBootstrapError &&
+    error.cause instanceof RolledBackPluginActivationError
+  );
+}
+
 async function runPluginCommand(
   command: CodexCommand,
   args: readonly string[],
@@ -3696,11 +3740,24 @@ async function runPluginCommand(
       signal,
     );
     if (!success) {
-      throw new Error(
+      const detail =
         stderr.trim() ||
-          stdout.trim() ||
-          `Codex exited with status ${exitCode}.`,
-      );
+        stdout.trim() ||
+        `Codex exited with status ${exitCode}.`;
+      // This native headline is emitted only after the previous entry was
+      // restored. The Windows message itself may be localized.
+      if (
+        process.platform === "win32" &&
+        args[0] === "plugin" &&
+        args[1] === "add" &&
+        exitCode === 1 &&
+        /^Error: failed to activate updated plugin cache entry: [^\r\n]+ \(os error 5\)(?:\r?\n|$)/u.test(
+          stderr,
+        ) &&
+        !stderr.includes("failed to restore previous cache entry")
+      )
+        throw new RolledBackPluginActivationError(detail);
+      throw new Error(detail);
     }
     return stdout;
   } catch (error) {
