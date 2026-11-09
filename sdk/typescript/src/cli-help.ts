@@ -71,6 +71,7 @@ const PUBLISH_GROUPS: readonly Group[] = [
 const VALUE_LABELS: Record<string, string> = {
   context: "text",
   "context-file": "file",
+  "vuln-description": "text",
   "output-schema": "file",
   config: "file",
   path: "path",

@@ -29,7 +29,7 @@ codex-security info --json
 - [Inspect saved scans and rerun them](#scan-history-and-reruns),
   [classify severity](#classify-finding-severity), or
   [suggest owners](#suggest-finding-owners).
-- [Check a dependency CVE](#check-a-dependency-cve),
+- [Check a dependency for vulnerabilities](#check-a-dependency-for-vulnerabilities),
   [validate and patch findings](#validate-and-patch-findings), or
   [verify an existing fix](#verify-fixes).
 - [Publish to Cloud](#publish-findings-to-cloud) or
@@ -2315,23 +2315,35 @@ reinstall with the same threshold. Restore the backup if installation fails.
 The installer uses host Git for the selected repository and respects
 `core.hooksPath`.
 
-## Check a dependency CVE
+## Check a dependency for vulnerabilities
 
-The only required argument is a public CVE ID. Install OpenGrep on `PATH`
-outside the scanned checkout. Run the check from anywhere in the Git checkout.
-Outside Git it uses the current directory.
+<a id="check-a-dependency-cve"></a>
+
+Use `cs exploitability check <subject>` with a CVE ID or a package in
+`ecosystem:name` form. Install OpenGrep on `PATH` outside the scanned checkout.
+Run the check from anywhere in the Git checkout. Outside Git it uses the
+current directory.
 
 ```bash
 codex-security exploitability --help
 codex-security exploitability check CVE-2023-4863
 codex-security exploitability check CVE-2023-4863 --json
+codex-security exploitability check npm:example-package
+codex-security exploitability check npm:example-package \
+  --vuln-description "Version 2.3.1 may skip signature verification when reading a manifest"
 ```
 
-The command looks up the advisory in the Open Source Vulnerabilities (OSV)
-database and runs the bundled `dependency-exploitability` skill. The skill
-checks the resolved dependency, applicable patches and the prerequisites for
-each use. It can request a local dependency trace with a time budget and hop
-limit. The tracer uses ripgrep to find files and reads package and build
+For a CVE, the command looks up its advisory in the Open Source Vulnerabilities
+(OSV) database. For a package alone, it queries OSV by ecosystem and package
+name and assesses each published vulnerability separately. To check a newly
+reported issue, pass the package and describe the suspected behavior with
+`--vuln-description`. This form skips OSV and passes the description to the
+investigator and reviewer.
+
+The bundled `dependency-exploitability` skill checks the resolved dependency,
+applicable patches and the prerequisites for each use. It can request a local
+dependency trace with a time budget and hop limit. The tracer uses ripgrep
+to find files and reads package and build
 manifests for dependency declarations. The built-in parser recognizes npm
 dependency maps and literal system package installs in standard Dockerfiles
 and Containerfiles. Matches in other recognized dependency manifests are
@@ -2433,9 +2445,18 @@ The setting is optional. The local provider reads Backstage component catalogs
 beside dependency matches as source evidence.
 See [inventory lookup configuration](https://github.com/openai/codex-security/blob/main/docs/project-configuration.md#inventory-lookups-for-dependency-checks).
 
-The assessment consumes model usage. Use `--model` and
-`--effort` to select model settings. A completed report exits with status
-zero for any verdict. Use `--json` and inspect its `status` field in automation.
+The assessment consumes model usage. Use `--model` and `--effort` to select
+model settings. For sign-in errors, run `cs login status` with the same
+environment as the check. See [authentication](#authentication).
+
+A completed report exits with status zero for any verdict. Use `--json` in
+automation. A CVE report has a top-level `status`. A package report identifies
+the package and returns a `checks` array with a verdict, evidence and usage for
+each vulnerability. Each published vulnerability has an `advisoryId` and its
+OSV URLs in `advisories`. An empty `checks` array means OSV returned no active
+advisories for this package and no assessment ran. A check with
+`--vuln-description` has a single entry with `advisoryId: null` and records
+the supplied text in the report's top-level `vulnDescription`.
 
 ## Validate and patch findings
 

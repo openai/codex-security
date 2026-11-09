@@ -1,5 +1,9 @@
 import { expect, mock, test } from "bun:test";
-import { lookupDependencyAdvisory } from "../src/dependency-advisory.js";
+import {
+  lookupDependencyAdvisory,
+  lookupPackageAdvisories,
+  parseDependencyPackage,
+} from "../src/dependency-advisory.js";
 
 const cve = "CVE-2000-1234";
 const alias = "GHSA-2345-6789-cfgh";
@@ -246,4 +250,137 @@ test("reports missing records, upstream errors, and failed requests", async () =
       throw new TypeError("Connection failed");
     }),
   ).rejects.toThrow(/connection failed/i);
+});
+
+test("parses ecosystem-qualified public package names without changing OSV casing", () => {
+  for (const [subject, ecosystem, name] of [
+    ["npm:@scope/example", "npm", "@scope/example"],
+    ["Maven:org.example:sample", "Maven", "org.example:sample"],
+    ["Echo:Maven:org.example:sample", "Echo:Maven", "org.example:sample"],
+    ["Go:example.invalid/module", "Go", "example.invalid/module"],
+    ["PyPI:Sample_Package", "PyPI", "Sample_Package"],
+    ["GitHub Actions:example/action", "GitHub Actions", "example/action"],
+    ["Debian:12:sample", "Debian:12", "sample"],
+    ["openSUSE:Leap 15.6:sample", "openSUSE:Leap 15.6", "sample"],
+    ["Alpine:v3.20:sample", "Alpine:v3.20", "sample"],
+    [
+      "SwiftURL:https://example.invalid/Module",
+      "SwiftURL",
+      "https://example.invalid/Module",
+    ],
+  ] as const)
+    expect(parseDependencyPackage(subject)).toEqual({ ecosystem, name });
+  for (const invalid of [
+    "unqualified",
+    ":sample",
+    "npm:",
+    "npm:bad name",
+    "Maven:missing-artifact",
+    "Debian::sample",
+    "npm:@scope",
+    "npm:sample@1.0",
+    "https://example.invalid/repo",
+    "https://example.invalid:8443/repo",
+  ])
+    expect(() => parseDependencyPackage(invalid)).toThrow(/package/iu);
+});
+
+test("queries all OSV pages for the named package and groups only active aliases", async () => {
+  const pkg = parseDependencyPackage("npm:@sample/example");
+  const signal = new AbortController().signal;
+  const data = { package: pkg };
+  const queries: unknown[] = [];
+  const pages = [
+    { next_page_token: "first" },
+    {
+      vulns: [
+        {
+          id: alias,
+          aliases: [cve],
+          details: "Affected under the documented conditions.",
+          affected,
+        },
+        { id: "MAL-2000-2", related: [cve] },
+        {
+          id: "WITHDRAWN-1",
+          aliases: [cve, "MAL-2000-2"],
+          withdrawn: "2000-01-01T00:00:00Z",
+        },
+        { id: "SECONDARY-2", aliases: ["OTHER-2"] },
+      ],
+      next_page_token: "second",
+    },
+    {
+      vulns: [
+        {
+          id: alias,
+          aliases: [cve],
+          details: "Affected under the documented conditions.",
+          affected,
+        },
+        { id: "BRIDGE-3", aliases: [alias, "OTHER-2"] },
+      ],
+    },
+  ];
+  const actual = await lookupPackageAdvisories(
+    pkg,
+    signal,
+    async (url, options) => {
+      expect(url).toBe("https://api.osv.dev/v1/query");
+      expect(options.method).toBe("POST");
+      expect(options.redirect).toBe("error");
+      expect(options.signal).toBe(signal);
+      expect(new Headers(options.headers).get("content-type")).toBe(
+        "application/json",
+      );
+      expect(new Headers(options.headers).has("authorization")).toBe(false);
+      queries.push(JSON.parse(options.body as string));
+      return Response.json(pages[queries.length - 1]);
+    },
+  );
+  expect(queries).toEqual([
+    data,
+    { ...data, page_token: "first" },
+    { ...data, page_token: "second" },
+  ]);
+  expect(actual.map((x) => x.id).sort()).toEqual([cve, "MAL-2000-2"]);
+  expect(actual.find((x) => x.id === cve)?.advisories).toEqual([
+    { url: publicUrl + "BRIDGE-3", affected: [] },
+    {
+      url: publicUrl + alias,
+      overview: "Affected under the documented conditions.",
+      affected,
+    },
+    { url: publicUrl + "SECONDARY-2", affected: [] },
+  ]);
+});
+
+test("an empty package result is distinct from an OSV error, repeated cursor or cancellation", async () => {
+  const pkg = parseDependencyPackage("PyPI:example-package");
+  expect(
+    await lookupPackageAdvisories(pkg, undefined, async () =>
+      Response.json({}),
+    ),
+  ).toEqual([]);
+  await expect(
+    lookupPackageAdvisories(
+      pkg,
+      undefined,
+      async () => new Response(null, { status: 503 }),
+    ),
+  ).rejects.toThrow("503");
+  const repeated = mock(async () => Response.json({ next_page_token: "same" }));
+  await expect(
+    lookupPackageAdvisories(pkg, undefined, repeated),
+  ).rejects.toThrow(/page token/iu);
+  expect(repeated).toHaveBeenCalledTimes(2);
+  const cancelled = mock(async () => Response.json({}));
+  await expect(
+    lookupPackageAdvisories(
+      pkg,
+      AbortSignal.abort(new Error("cancelled")),
+      cancelled,
+    ),
+  ).rejects.toThrow("cancelled");
+  expect(cancelled).not.toHaveBeenCalled();
 });

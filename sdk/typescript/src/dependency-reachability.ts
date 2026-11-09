@@ -131,7 +131,7 @@ export async function validateDependencyAssessment(
   signal?: AbortSignal,
   observedInventoryServers: readonly string[] = [],
   onExcerpt?: (excerpt: DependencyExcerpt) => void,
-  coverage: DependencyAssessmentCoverage = {},
+  coverage?: DependencyAssessmentCoverage,
 ): Promise<DependencyAssessment> {
   const assessment = dependencyAssessmentSchema.parse(value);
   // Read each cited file once and retain only its submitted ranges.
@@ -215,7 +215,12 @@ export async function validateDependencyAssessment(
   }
   signal?.throwIfAborted();
 
-  assessment.status = aggregateDependencyVerdict(assessment.uses, coverage);
+  // Without an independent coverage decision, reconciling individual uses
+  // cannot turn an inconclusive report into a checkout-wide exclusion.
+  assessment.status = aggregateDependencyVerdict(
+    assessment.uses,
+    coverage ?? { unresolved: assessment.status !== "ruled_out" },
+  );
   return assessment;
 }
 
@@ -252,3 +257,21 @@ export const dependencyReachabilityReportSchema =
       })
       .nullable(),
   });
+
+export const reviewedDependencyCheckSchema =
+  dependencyReachabilityReportSchema.omit({ cve: true });
+
+// The CVE form keeps its original result. A package can have zero or more
+// independent issues, so each reviewed verdict belongs to a particular check.
+export const dependencyCheckOutputSchema = z.union([
+  dependencyReachabilityReportSchema,
+  z.object({
+    package: z.object({ ecosystem: z.string(), name: z.string() }),
+    vulnDescription: z.string().optional(),
+    checks: z.array(
+      reviewedDependencyCheckSchema.extend({
+        advisoryId: z.string().nullable(),
+      }),
+    ),
+  }),
+]);

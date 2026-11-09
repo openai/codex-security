@@ -72,11 +72,62 @@ const osvRecord = z.object({
     .transform((entries) => entries ?? []),
 });
 
-type Advisory = Pick<z.infer<typeof osvRecord>, "summary" | "affected"> & {
+type OsvRecord = z.infer<typeof osvRecord>;
+type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
+const cvePattern = /^CVE-\d{4}-\d{4,}$/u;
+
+type Advisory = Pick<OsvRecord, "summary" | "affected"> & {
   url: string;
   overview?: string;
   applicability?: string;
 };
+
+export interface DependencyPackage {
+  ecosystem: string;
+  name: string;
+}
+
+export interface PackageAdvisory {
+  id: string;
+  advisories: Advisory[];
+}
+
+export type DependencyIssue =
+  | Awaited<ReturnType<typeof lookupDependencyAdvisory>>
+  | (PackageAdvisory & { package: DependencyPackage })
+  | { package: DependencyPackage; vulnDescription: string };
+
+export function parseDependencyPackage(subject: string): DependencyPackage {
+  const parts = subject.trim().split(":");
+  const [base = ""] = parts;
+  // Ecosystems can include a distribution release (Debian:12). Maven names
+  // have two parts, and Android identifiers and Git URLs can contain colons.
+  const maven = base === "Maven" || parts.at(-3) === "Maven";
+  let nameIndex = parts.length - 1;
+  if (["npm", "Android", "GIT", "SwiftURL"].includes(base)) nameIndex = 1;
+  else if (maven) nameIndex--;
+  const name = parts.slice(nameIndex).join(":");
+  if (
+    nameIndex < 1 ||
+    (nameIndex > 1 && !parts[1]?.trim()) ||
+    parts[1]?.startsWith("//") ||
+    !/^[A-Za-z][A-Za-z0-9.-]*(?: [A-Za-z0-9.-]+)*$/u.test(base) ||
+    !name ||
+    name.startsWith("/") ||
+    /[\s\\]/u.test(name) ||
+    (maven && !/^[^:]+:[^:]+$/u.test(name))
+  ) {
+    throw new CodexSecurityError(
+      "Expected a CVE ID or ecosystem:package, for example npm:example-package or PyPI:example-package.",
+    );
+  }
+  if (base === "npm" && !/^(?:@[^@/:]+\/)?[^@/:]+$/u.test(name)) {
+    throw new CodexSecurityError(
+      "Expected an unversioned npm package, for example npm:example-package or npm:@scope/example-package.",
+    );
+  }
+  return { ecosystem: parts.slice(0, nameIndex).join(":"), name };
+}
 
 /** Keep opening prose, excluding code blocks and later sections. */
 function openingOverview(details: string | undefined): string | undefined {
@@ -142,6 +193,37 @@ function applicabilityText(details: string | undefined): string | undefined {
   return prose || undefined;
 }
 
+function projectAdvisory(record: OsvRecord): Advisory {
+  const overview = openingOverview(record.details);
+  const applicability = applicabilityText(record.details);
+  return {
+    url: `https://osv.dev/vulnerability/${encodeURIComponent(record.id)}`,
+    ...(record.summary && { summary: record.summary }),
+    ...(overview && { overview }),
+    ...(applicability && { applicability }),
+    affected: record.affected,
+  };
+}
+
+async function requestOsv(
+  url: string,
+  subject: string,
+  signal: AbortSignal | undefined,
+  fetcher: Fetcher,
+  init?: RequestInit,
+) {
+  signal?.throwIfAborted();
+  try {
+    return await fetcher(url, { ...init, redirect: "error", signal });
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw new CodexSecurityError(
+      `OSV lookup failed for ${subject}: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+}
+
 // GetVulnById returns gRPC NOT_FOUND with space-separated IDs when only an
 // alias exists. Confirm the CVE on the fetched records before using them.
 const aliasHint = "Vulnerability not found, but the following aliases were: ";
@@ -149,10 +231,10 @@ const aliasHint = "Vulnerability not found, but the following aliases were: ";
 export async function lookupDependencyAdvisory(
   input: string,
   signal?: AbortSignal,
-  fetcher: (url: string, init: RequestInit) => Promise<Response> = fetch,
+  fetcher: Fetcher = fetch,
 ) {
   const cve = input.trim().toUpperCase();
-  if (!/^CVE-\d{4}-\d{4,}$/u.test(cve))
+  if (!cvePattern.test(cve))
     throw new CodexSecurityError(
       "Expected a CVE ID, for example CVE-2023-4863.",
     );
@@ -160,22 +242,14 @@ export async function lookupDependencyAdvisory(
   const advisories: Advisory[] = [];
   const ids = new Set([cve]);
   for (const id of ids) {
-    signal?.throwIfAborted();
     const key = encodeURIComponent(id);
     if (!key || key === "." || key === "..") continue;
-    let response: Response;
-    try {
-      response = await fetcher(`https://api.osv.dev/v1/vulns/${key}`, {
-        redirect: "error",
-        signal,
-      });
-    } catch (error) {
-      signal?.throwIfAborted();
-      throw new CodexSecurityError(
-        `OSV lookup failed for ${id}: ${errorMessage(error)}`,
-        { cause: error },
-      );
-    }
+    const response = await requestOsv(
+      `https://api.osv.dev/v1/vulns/${key}`,
+      id,
+      signal,
+      fetcher,
+    );
     if (response.status === 404) {
       if (id === cve) {
         const missing = await response.json();
@@ -203,19 +277,72 @@ export async function lookupDependencyAdvisory(
     if (record.withdrawn || (id !== cve && !record.aliases.includes(cve)))
       continue;
 
-    const overview = openingOverview(record.details);
-    const applicability = applicabilityText(record.details);
-    advisories.push({
-      url: `https://osv.dev/vulnerability/${key}`,
-      ...(record.summary && { summary: record.summary }),
-      ...(overview && { overview }),
-      ...(applicability && { applicability }),
-      affected: record.affected,
-    });
+    advisories.push(projectAdvisory(record));
   }
   if (!advisories.length)
     throw new CodexSecurityError(
       `No active public OSV advisory was found for ${cve}.`,
     );
   return { cve, advisories };
+}
+
+const queryPage = z.object({
+  vulns: z.array(osvRecord).default([]),
+  next_page_token: z.string().optional(),
+});
+
+export async function lookupPackageAdvisories(
+  { ecosystem, name }: DependencyPackage,
+  signal?: AbortSignal,
+  fetcher: Fetcher = fetch,
+): Promise<PackageAdvisory[]> {
+  const subject = `${ecosystem}:${name}`;
+  const records = new Map<string, Advisory>();
+  const groups = new Map<string, Set<string>>();
+  const tokens = new Set<string>();
+  let pageToken: string | undefined;
+  do {
+    const response = await requestOsv(
+      "https://api.osv.dev/v1/query",
+      subject,
+      signal,
+      fetcher,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          package: { ecosystem, name },
+          page_token: pageToken,
+        }),
+      },
+    );
+    if (!response.ok)
+      throw new CodexSecurityError(
+        `OSV returned HTTP ${response.status} for ${subject}.`,
+      );
+    const page = queryPage.parse(await response.json());
+    for (const record of page.vulns) {
+      if (record.withdrawn) continue;
+      records.set(record.id, projectAdvisory(record));
+      // OSV aliases identify the same issue, even when discovered on different pages.
+      const ids = [record.id, ...record.aliases];
+      const group = new Set(ids);
+      for (const id of ids)
+        for (const member of groups.get(id) ?? []) group.add(member);
+      for (const member of group) groups.set(member, group);
+    }
+    pageToken = page.next_page_token;
+    if (pageToken && tokens.has(pageToken))
+      throw new CodexSecurityError(`OSV repeated a page token for ${subject}.`);
+    if (pageToken) tokens.add(pageToken);
+  } while (pageToken);
+
+  return Array.from(new Set(groups.values()), (group) => {
+    const ids = [...group].sort();
+    const published = ids.filter((id) => records.has(id));
+    return {
+      id: ids.find((id) => cvePattern.test(id)) ?? published[0]!,
+      advisories: published.map((id) => records.get(id)!),
+    };
+  }).sort((left, right) => left.id.localeCompare(right.id));
 }

@@ -125,8 +125,16 @@ import {
   type DeepScanProgress,
 } from "./scan-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
-import { lookupDependencyAdvisory } from "./dependency-advisory.js";
-import { dependencyReachabilityReportSchema } from "./dependency-reachability.js";
+import {
+  lookupDependencyAdvisory,
+  lookupPackageAdvisories,
+  parseDependencyPackage,
+  type DependencyIssue,
+} from "./dependency-advisory.js";
+import {
+  dependencyCheckOutputSchema,
+  reviewedDependencyCheckSchema,
+} from "./dependency-reachability.js";
 import {
   createDependencyReportSubmission,
   dependencyReportInputSchema,
@@ -1369,6 +1377,7 @@ interface CliDependencies {
   classifyScanSeverity?: typeof classifyScanSeverityInternal;
   classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
   lookupDependencyAdvisory?: typeof lookupDependencyAdvisory;
+  lookupPackageAdvisories?: typeof lookupPackageAdvisories;
   reviewDependencyReport?: typeof runReadOnlyCodex;
   resolveDependencyServices?: typeof resolveDependencyServices;
   suggestOwners?: typeof suggestOwnersInternal;
@@ -2902,31 +2911,48 @@ export async function main(
     });
   }
   const exploitability = Cli.create("exploitability", {
-    description: "Assess dependency advisories against the current checkout.",
+    description: "Assess dependency vulnerabilities in the current checkout.",
   }).command("check", {
     description:
-      "Check whether a dependency CVE affects this checkout. Requires OpenGrep on PATH.",
+      "Check a CVE or an ecosystem-qualified package against this checkout. Requires OpenGrep on PATH.",
     alias: { config: "c" },
     destructive: false,
     mcp: false,
     args: z.object({
-      cve: z.string().describe("Public CVE identifier."),
+      subject: z
+        .string()
+        .trim()
+        .min(1)
+        .describe("CVE ID or package, for example npm:example-package."),
     }),
     options: modelOptions(
       "Model for dependency assessment.",
       "Reasoning effort for dependency assessment.",
-    ).extend({ config: PROJECT_CONFIG_OPTION }),
-    output: dependencyReachabilityReportSchema,
+    ).extend({
+      config: PROJECT_CONFIG_OPTION,
+      vulnDescription: z
+        .string()
+        .trim()
+        .min(1, "--vuln-description must not be empty.")
+        .optional()
+        .describe(
+          "Assess this suspected vulnerability in the named package instead of looking up published advisories.",
+        ),
+    }),
+    output: dependencyCheckOutputSchema,
     async run({ args, options }) {
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       let temporary: string | undefined;
-      let dependencyGraph: DependencyGraphTools | undefined;
-      let serviceCatalog:
-        ReturnType<typeof createDependencyServiceCatalog> | undefined;
-      let reportSubmission:
-        ReturnType<typeof createDependencyReportSubmission> | undefined;
       try {
+        const pkg = /^CVE-/iu.test(args.subject)
+          ? undefined
+          : parseDependencyPackage(args.subject);
+        if (!pkg && options.vulnDescription !== undefined) {
+          throw new CodexSecurityError(
+            "--vuln-description requires an ecosystem-qualified package, such as npm:example-package.",
+          );
+        }
         const project = await selectedProjectConfig(
           options.config,
           dependencies,
@@ -2966,70 +2992,144 @@ export async function main(
             { cause: error },
           );
         }
-        const advisory = await (
-          dependencies.lookupDependencyAdvisory ?? lookupDependencyAdvisory
-        )(args.cve, controller.signal);
-        let investigatorUsage: ScanTokenUsage | null = null;
-        let helperUsage: ScanTokenUsage | null = null;
-        function recordHelperUsage(observed: unknown) {
-          const usage = tokenUsage(observed);
-          if (usage) helperUsage = addTokenUsage(helperUsage, usage);
+        function issueScope() {
+          const local = new AbortController();
+          return {
+            signal: AbortSignal.any([controller.signal, local.signal]),
+            close: () => local.abort(),
+          };
         }
-        let selectedRuntime:
-          | Pick<
-              Parameters<typeof runReadOnlyCodex>[2],
-              "selectedEnvironment" | "config" | "cyberAccessProgram"
-            >
-          | undefined;
-        const candidates = await createDependencyCandidates(repository);
-        const submission = createDependencyReportSubmission({
-          repository,
-          advisory,
-          candidates,
-          signal: controller.signal,
-          review: (prompt, schema, reviewSignal) => {
-            if (!selectedRuntime && !dependencies.reviewDependencyReport)
-              throw new CodexSecurityError(
-                "Codex did not select a runtime for report verification.",
+
+        async function assess(advisory: DependencyIssue, scope = issueScope()) {
+          const { signal } = scope;
+          let dependencyGraph: DependencyGraphTools | undefined;
+          let serviceCatalog:
+            ReturnType<typeof createDependencyServiceCatalog> | undefined;
+          let investigatorUsage: ScanTokenUsage | null = null;
+          let helperUsage: ScanTokenUsage | null = null;
+          function recordHelperUsage(observed: unknown) {
+            const usage = tokenUsage(observed);
+            if (usage) helperUsage = addTokenUsage(helperUsage, usage);
+          }
+          let selectedRuntime:
+            | Pick<
+                Parameters<typeof runReadOnlyCodex>[2],
+                "selectedEnvironment" | "config" | "cyberAccessProgram"
+              >
+            | undefined;
+          const candidates = await createDependencyCandidates(repository);
+          const submission = createDependencyReportSubmission({
+            repository,
+            advisory,
+            candidates,
+            signal,
+            review: (prompt, schema, reviewSignal) => {
+              if (!selectedRuntime && !dependencies.reviewDependencyReport)
+                throw new CodexSecurityError(
+                  "Codex did not select a runtime for report verification.",
+                );
+              return (dependencies.reviewDependencyReport ?? runReadOnlyCodex)(
+                prompt,
+                schema,
+                {
+                  ...selectedRuntime,
+                  model: options.model,
+                  reasoningEffort: "low",
+                  workingDirectory: reviewDirectory,
+                  signal: reviewSignal ?? signal,
+                  onUsage: recordHelperUsage,
+                },
+                {
+                  surface: "cli",
+                  command: "exploitability check",
+                  threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
+                },
               );
-            return (dependencies.reviewDependencyReport ?? runReadOnlyCodex)(
-              prompt,
-              schema,
-              {
-                ...selectedRuntime,
-                model: options.model,
-                reasoningEffort: "low",
-                workingDirectory: reviewDirectory,
-                signal: reviewSignal ?? controller.signal,
-                onUsage: recordHelperUsage,
-              },
-              {
-                surface: "cli",
-                command: "exploitability check",
-                threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
-              },
+            },
+          });
+          try {
+            signal.throwIfAborted();
+            dependencyGraph = await openDependencyGraph(
+              await bundledPluginRoot(),
+              repository,
+              Object.keys(serviceCatalogServers).length
+                ? (requests) => {
+                    if (!selectedRuntime)
+                      throw new CodexSecurityError(
+                        "Codex did not select a runtime for service catalog lookups.",
+                      );
+                    const catalogOptions = {
+                      servers: serviceCatalogServers,
+                      repository,
+                      recordInventory: (
+                        server: string,
+                        result: unknown,
+                        metadata?: DependencyInventoryReceiptMetadata,
+                      ) => {
+                        if (Object.hasOwn(serviceCatalogServers, server))
+                          return submission.recordInventory(
+                            server,
+                            result,
+                            metadata,
+                          );
+                      },
+                      runtime: {
+                        ...selectedRuntime,
+                        model: options.model,
+                        reasoningEffort: "low",
+                        workingDirectory: reviewDirectory,
+                        onUsage: recordHelperUsage,
+                      },
+                      signal,
+                    };
+                    if (dependencies.resolveDependencyServices)
+                      return dependencies.resolveDependencyServices({
+                        ...catalogOptions,
+                        requests,
+                      });
+                    serviceCatalog ??=
+                      createDependencyServiceCatalog(catalogOptions);
+                    return serviceCatalog.resolve(requests);
+                  }
+                : undefined,
+              signal,
             );
-          },
-        });
-        reportSubmission = submission;
-        controller.signal.throwIfAborted();
-        dependencyGraph = await openDependencyGraph(
-          await bundledPluginRoot(),
-          repository,
-          Object.keys(serviceCatalogServers).length
-            ? (requests) => {
-                if (!selectedRuntime)
-                  throw new CodexSecurityError(
-                    "Codex did not select a runtime for service catalog lookups.",
-                  );
-                const catalogOptions = {
-                  servers: serviceCatalogServers,
-                  repository,
-                  recordInventory: (
-                    server: string,
-                    result: unknown,
-                    metadata?: DependencyInventoryReceiptMetadata,
+            exitCode = await runSkill(
+              "dependency-exploitability",
+              [],
+              { ...options, codex: [] },
+              { write: () => true },
+              errorOutput,
+              dependencies,
+              {
+                directory: repository,
+                signal,
+                context: JSON.stringify(advisory),
+                dependencyGraph,
+                serviceCatalogServers,
+                shellEnvironmentPolicy:
+                  project?.input.codex?.["shell_environment_policy"],
+                dependencyReport: {
+                  bindReviewer: (
+                    selectedEnvironment,
+                    providerConfig,
+                    cyberAccessProgram,
                   ) => {
+                    selectedRuntime = {
+                      selectedEnvironment,
+                      config: { codexOverrides: providerConfig },
+                      ...(cyberAccessProgram === undefined
+                        ? {}
+                        : { cyberAccessProgram }),
+                    };
+                  },
+                  submit: submission.submit,
+                  queue: submission.queue,
+                  status: submission.readStatus,
+                  continuationPrompt: submission.continuationPrompt,
+                  recordGraphEvent: submission.recordGraphEvent,
+                  observeGraph: candidates.observeGraph,
+                  recordInventory: (server, result, metadata) => {
                     if (Object.hasOwn(serviceCatalogServers, server))
                       return submission.recordInventory(
                         server,
@@ -3037,84 +3137,70 @@ export async function main(
                         metadata,
                       );
                   },
-                  runtime: {
-                    ...selectedRuntime,
-                    model: options.model,
-                    reasoningEffort: "low",
-                    workingDirectory: reviewDirectory,
-                    onUsage: recordHelperUsage,
-                  },
-                  signal: controller.signal,
-                };
-                if (dependencies.resolveDependencyServices)
-                  return dependencies.resolveDependencyServices({
-                    ...catalogOptions,
-                    requests,
-                  });
-                serviceCatalog ??=
-                  createDependencyServiceCatalog(catalogOptions);
-                return serviceCatalog.resolve(requests);
+                },
+                onUsage: (observed) => {
+                  investigatorUsage = observed;
+                },
+              },
+            );
+            if (exitCode !== 0)
+              throw new CodexSecurityError(
+                `Dependency assessment exited with status ${exitCode}.`,
+              );
+            return reviewedDependencyCheckSchema.parse({
+              ...submission.acceptedReport(),
+              advisories:
+                "advisories" in advisory
+                  ? advisory.advisories.map((entry) => entry.url)
+                  : [],
+              usage: investigatorUsage
+                ? addTokenUsage(helperUsage, investigatorUsage)
+                : helperUsage,
+            });
+          } finally {
+            scope.close();
+            try {
+              await submission.close();
+            } finally {
+              try {
+                await dependencyGraph?.close();
+              } finally {
+                await serviceCatalog?.close();
               }
-            : undefined,
-          controller.signal,
-        );
-        exitCode = await runSkill(
-          "dependency-exploitability",
-          [],
-          { ...options, codex: [] },
-          { write: () => true },
-          errorOutput,
-          dependencies,
-          {
-            directory: repository,
-            signal: controller.signal,
-            context: JSON.stringify(advisory),
-            dependencyGraph,
-            serviceCatalogServers,
-            shellEnvironmentPolicy:
-              project?.input.codex?.["shell_environment_policy"],
-            dependencyReport: {
-              bindReviewer: (
-                selectedEnvironment,
-                providerConfig,
-                cyberAccessProgram,
-              ) => {
-                selectedRuntime = {
-                  selectedEnvironment,
-                  config: { codexOverrides: providerConfig },
-                  ...(cyberAccessProgram === undefined
-                    ? {}
-                    : { cyberAccessProgram }),
-                };
-              },
-              submit: submission.submit,
-              queue: submission.queue,
-              status: submission.readStatus,
-              continuationPrompt: submission.continuationPrompt,
-              recordGraphEvent: submission.recordGraphEvent,
-              observeGraph: candidates.observeGraph,
-              recordInventory: (server, result, metadata) => {
-                if (Object.hasOwn(serviceCatalogServers, server))
-                  return submission.recordInventory(server, result, metadata);
-              },
-            },
-            onUsage: (observed) => {
-              investigatorUsage = observed;
-            },
-          },
-        );
-        if (exitCode !== 0)
-          throw new CodexSecurityError(
-            `Dependency assessment exited with status ${exitCode}.`,
-          );
-        return dependencyReachabilityReportSchema.parse({
-          ...submission.acceptedReport(),
-          cve: advisory.cve,
-          advisories: advisory.advisories.map((entry) => entry.url),
-          usage: investigatorUsage
-            ? addTokenUsage(helperUsage, investigatorUsage)
-            : helperUsage,
-        });
+            }
+          }
+        }
+
+        if (!pkg) {
+          const scope = issueScope();
+          const advisory = await (
+            dependencies.lookupDependencyAdvisory ?? lookupDependencyAdvisory
+          )(args.subject, scope.signal);
+          return { cve: advisory.cve, ...(await assess(advisory, scope)) };
+        }
+        if (options.vulnDescription !== undefined) {
+          const issue = {
+            package: pkg,
+            vulnDescription: options.vulnDescription,
+          };
+          return {
+            ...issue,
+            checks: [{ advisoryId: null, ...(await assess(issue)) }],
+          };
+        }
+
+        const advisories = await (
+          dependencies.lookupPackageAdvisories ?? lookupPackageAdvisories
+        )(pkg, controller.signal);
+        const checks = [];
+        for (const advisory of advisories) {
+          controller.signal.throwIfAborted();
+          checks.push({
+            advisoryId: advisory.id,
+            ...(await assess({ package: pkg, ...advisory })),
+          });
+        }
+        return { package: pkg, checks };
       } catch (error) {
         exitCode = interruptedExitCode(controller.signal) ?? (exitCode || 2);
         errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
@@ -3122,20 +3208,7 @@ export async function main(
       } finally {
         removeSignals();
         controller.abort();
-        try {
-          await reportSubmission?.close();
-        } finally {
-          try {
-            await dependencyGraph?.close();
-          } finally {
-            try {
-              await serviceCatalog?.close();
-            } finally {
-              if (temporary)
-                await rm(temporary, { recursive: true, force: true });
-            }
-          }
-        }
+        if (temporary) await rm(temporary, { recursive: true, force: true });
       }
     },
   });
