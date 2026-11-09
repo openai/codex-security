@@ -52,6 +52,7 @@ import {
 } from "../artifact-storage.js";
 
 export interface CompactArtifactToolOptions {
+  threadIdFromExtra: (requestContext: unknown) => string | undefined;
   runWorkbench: RunArtifactWorkbench;
   pluginRoot: string;
   resolveScanRoot: () => Promise<string>;
@@ -353,6 +354,7 @@ async function scanContext(
   return createScanArtifactContext(input.scanId, options.runWorkbench, {
     requireRunning,
     requireClaim: true,
+    modelThreadId: options.threadIdFromExtra(requestContext) ?? "",
     handoffClaimToken:
       input.handoffClaimToken ??
       options.resolveHandoffClaimToken?.(input.scanId, requestContext),

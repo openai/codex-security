@@ -547,27 +547,13 @@ function validateOverrideKeys(value: JsonValue): void {
   }
 }
 
-function validateOverrides(overrides: JsonObject): void {
-  if ("plugins" in overrides || "marketplaces" in overrides) {
-    throw new ConfigurationError(
-      "Codex Security owns plugin loading configuration.",
-    );
-  }
-  const features = overrides["features"];
-  if ("features" in overrides && !isObject(features)) {
-    throw new ConfigurationError(
-      "Codex override features must be a TOML table.",
-    );
-  }
-  if (isObject(features) && "plugins" in features) {
-    throw new ConfigurationError(
-      "Codex Security owns plugin loading configuration.",
-    );
-  }
+// Validate the root before visiting profiles in configuration order.
+function* overrideTables(
+  overrides: JsonObject,
+): Generator<[JsonObject, string?]> {
+  yield [overrides];
   const profiles = overrides["profiles"];
-  if (profiles === undefined) {
-    return;
-  }
+  if (profiles === undefined) return;
   if (!isObject(profiles)) {
     throw new ConfigurationError(
       "Codex override profiles must be TOML tables.",
@@ -579,80 +565,62 @@ function validateOverrides(overrides: JsonObject): void {
         `Codex override profile ${name} must be a TOML table.`,
       );
     }
-    if ("plugins" in profile || "marketplaces" in profile) {
+    yield [profile, name];
+  }
+}
+
+function validateOverrides(overrides: JsonObject): void {
+  for (const [table, name] of overrideTables(overrides)) {
+    const features = table["features"];
+    if (
+      "plugins" in table ||
+      "marketplaces" in table ||
+      (isObject(features) && "plugins" in features)
+    ) {
+      const location = name === undefined ? "" : ` in profile ${name}`;
       throw new ConfigurationError(
-        `Codex Security owns plugin loading configuration in profile ${name}.`,
+        `Codex Security owns plugin loading configuration${location}.`,
       );
     }
-    const profileFeatures = profile["features"];
-    if (profileFeatures !== undefined && !isObject(profileFeatures)) {
+    if (
+      !isObject(features) &&
+      (features !== undefined || (name === undefined && "features" in table))
+    ) {
+      const location = name === undefined ? "" : ` profile ${name}`;
       throw new ConfigurationError(
-        `Codex override profile ${name} features must be a TOML table.`,
-      );
-    }
-    if (isObject(profileFeatures) && "plugins" in profileFeatures) {
-      throw new ConfigurationError(
-        `Codex Security owns plugin loading configuration in profile ${name}.`,
+        `Codex override${location} features must be a TOML table.`,
       );
     }
   }
 }
 
 function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
-  const agents = overrides["agents"];
-  if (isObject(agents) && "max_threads" in agents) {
-    throw new ConfigurationError(
-      "The selected Codex Security plugin requires native multi-agent v2; " +
-        "agents.max_threads is a legacy v1 setting. Use " +
-        "features.multi_agent_v2.max_concurrent_threads_per_session instead.",
-    );
-  }
-  const features = overrides["features"];
-  if (isObject(features)) {
-    if ("multi_agent_v2" in features) {
-      const multiAgentV2 = features["multi_agent_v2"];
-      if (!isObject(multiAgentV2)) {
-        throw new ConfigurationError(
-          "The selected Codex Security plugin requires native multi-agent v2; " +
-            "features.multi_agent_v2 must remain a table with enabled = true.",
-        );
-      }
-      if ("enabled" in multiAgentV2 && multiAgentV2["enabled"] !== true) {
-        throw new ConfigurationError(
-          "The selected Codex Security plugin requires native multi-agent v2; " +
-            "features.multi_agent_v2.enabled cannot be disabled.",
-        );
-      }
+  const required =
+    "The selected Codex Security plugin requires native multi-agent v2; ";
+  for (const [table, name] of overrideTables(overrides)) {
+    const agents = table["agents"];
+    if (isObject(agents) && "max_threads" in agents) {
+      const message =
+        name === undefined
+          ? "agents.max_threads is a legacy v1 setting. Use features.multi_agent_v2.max_concurrent_threads_per_session instead."
+          : `profile ${name} agents.max_threads is a legacy v1 setting.`;
+      throw new ConfigurationError(required + message);
     }
-  }
-
-  const profiles = overrides["profiles"];
-  if (!isObject(profiles)) {
-    return;
-  }
-  for (const [name, profile] of Object.entries(profiles)) {
-    if (!isObject(profile)) {
-      continue;
-    }
-    const profileAgents = profile["agents"];
-    if (isObject(profileAgents) && "max_threads" in profileAgents) {
-      throw new ConfigurationError(
-        `The selected Codex Security plugin requires native multi-agent v2; profile ${name} agents.max_threads is a legacy v1 setting.`,
-      );
-    }
-    const profileFeatures = profile["features"];
-    if (!isObject(profileFeatures) || !("multi_agent_v2" in profileFeatures)) {
-      continue;
-    }
-    const profileV2 = profileFeatures["multi_agent_v2"];
+    const features = table["features"];
+    if (!isObject(features) || !("multi_agent_v2" in features)) continue;
+    const setting = features["multi_agent_v2"];
     if (
-      !isObject(profileV2) ||
-      ("enabled" in profileV2 && profileV2["enabled"] !== true)
-    ) {
-      throw new ConfigurationError(
-        `The selected Codex Security plugin requires native multi-agent v2; profile ${name} features.multi_agent_v2 cannot be disabled.`,
-      );
-    }
+      isObject(setting) &&
+      (!("enabled" in setting) || setting["enabled"] === true)
+    )
+      continue;
+    const message =
+      name !== undefined
+        ? `profile ${name} features.multi_agent_v2 cannot be disabled.`
+        : isObject(setting)
+          ? "features.multi_agent_v2.enabled cannot be disabled."
+          : "features.multi_agent_v2 must remain a table with enabled = true.";
+    throw new ConfigurationError(required + message);
   }
 }
 
