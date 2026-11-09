@@ -20,6 +20,7 @@ import {
   parseSeverityDecision,
   reviewSeverity,
   classificationRunsSchema,
+  reviewRunsOption,
 } from "./severity-review.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 
@@ -126,9 +127,7 @@ export async function classifySeverityInternal(
   documentSelection?: DocumentSourceSelection,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
-  const classificationRuns = classificationRunsSchema
-    .default(3)
-    .parse(options.classificationRuns);
+  const classificationRuns = reviewRunsOption.parse(options.classificationRuns);
   const ids = new Set<string>();
   for (const finding of findings) {
     if (!finding.findingId?.trim() || ids.has(finding.findingId)) {

@@ -1280,6 +1280,42 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   }
 }
 
+export interface RuntimeDatabase {
+  exec(sql: string): unknown;
+  prepare(sql: string): {
+    all(...parameters: (string | number)[]): unknown[];
+    finalize?(): void;
+  };
+  close(): void;
+}
+
+export function sqliteDatabaseOpener(
+  access: "read-existing" | "read-write" = "read-write",
+) {
+  const require = createRequire(import.meta.url);
+  const bun = process.versions["bun"] !== undefined;
+  const Database = (
+    bun ? require("bun:sqlite").Database : require("node:sqlite").DatabaseSync
+  ) as new (filename: string, options?: object) => RuntimeDatabase;
+
+  return (path: string): RuntimeDatabase => {
+    const filename = sqliteFilename(path);
+    if (access === "read-write") return new Database(filename);
+    // Apple's SQLite requires write access to initialize missing WAL sidecars.
+    // The history reader sets PRAGMA query_only on this existing-file connection.
+    return new Database(
+      filename,
+      bun
+        ? {
+            readonly: process.platform !== "darwin",
+            readwrite: process.platform === "darwin",
+            create: false,
+          }
+        : { readOnly: true },
+    );
+  };
+}
+
 export async function withCredentialHomeLock<T>(
   codexHome: string,
   operation: () => Promise<T>,
@@ -1318,21 +1354,11 @@ export async function acquireCodexSecurityCredentialHomeLock(
   if (existingDatabaseMetadata !== null) {
     requireCredentialLockDatabaseFile(existingDatabaseMetadata, databasePath);
   }
-  const require = createRequire(import.meta.url);
-  // Both supported runtimes bundle SQLite. Keep the transaction in the process
-  // doing the protected work, so pausing it cannot expire its lock.
-  const Database = process.versions["bun"]
-    ? (require("bun:sqlite") as { Database: CredentialLockDatabaseConstructor })
-        .Database
-    : (
-        require("node:sqlite") as {
-          DatabaseSync: CredentialLockDatabaseConstructor;
-        }
-      ).DatabaseSync;
+  const openDatabase = sqliteDatabaseOpener();
   // Let SQLite create a missing guard so no separate descriptor can close after
   // another connection acquires its process-owned POSIX lock. Keep the guard
   // across releases so every contender locks the same inode.
-  const database = new Database(sqliteFilename(databasePath));
+  const database = openDatabase(databasePath);
   let databaseLocked = false;
 
   try {
@@ -1466,13 +1492,6 @@ function requireCredentialLockDatabaseFile(
       `Codex Security credential-home lock must be a regular file, not a symlink or hard link: ${path}`,
     );
   }
-}
-
-interface CredentialLockDatabaseConstructor {
-  new (path: string): {
-    exec(sql: string): unknown;
-    close(): void;
-  };
 }
 
 async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
@@ -1977,8 +1996,10 @@ export async function validateOutputDir(
         throw new OutputDirectoryNotEmptyError(path);
       }
       requireOutputDirectoryOwnership(metadata, path);
-      await requireSecureOutputAncestry(path);
-      const canonical = await realpath(path);
+      const writableLeaf =
+        !archiveExisting ||
+        (process.platform === "win32" && (await readdir(path)).length === 0);
+      const canonical = await checkedOutputPath(path, writableLeaf);
       requireModelSafeOutputDir(canonical);
       return canonical;
     }
@@ -2216,16 +2237,15 @@ async function prepareOutputDirectory(
   existingOutput: "reject" | "archive" | "preserve",
   onOutputArchived?: (archiveDir: string) => void,
 ): Promise<string> {
-  if (outputDirectory === undefined) {
-    requireModelSafeOutputDir(temporaryRoot);
-    requireModelSafeOutputDir(await realpath(temporaryRoot));
-  }
   const path = await validateOutputDir(
     outputDirectory,
     existingOutput !== "reject",
   );
-  validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
+    requireModelSafeOutputDir(temporaryRoot);
+    const canonicalRoot = await realpath(temporaryRoot);
+    requireModelSafeOutputDir(canonicalRoot);
+    validateLocation?.(canonicalRoot);
     const prefix = `codex-security-${safePrefix(repositoryName)}`;
     let created: string;
     if (process.platform === "win32") {
@@ -2234,12 +2254,12 @@ async function prepareOutputDirectory(
       // The SDK suffix is longer than the workbench's .previous-<tempname> suffix.
       const prefixLength = 255 - suffix.length - outputArchiveSuffix().length;
       created = join(
-        temporaryRoot,
+        canonicalRoot,
         `${prefix.slice(0, prefixLength)}${suffix}`,
       );
       await createWindowsOutputDirectory(created, false);
     } else {
-      created = await mkdtemp(join(temporaryRoot, `${prefix}-`));
+      created = await mkdtemp(join(canonicalRoot, `${prefix}-`));
     }
     try {
       if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
@@ -2249,6 +2269,7 @@ async function prepareOutputDirectory(
       throw error;
     }
   }
+  validateLocation?.(path);
   let createdRoot: string | undefined;
   try {
     let existing = await lstat(path).catch(nullIfMissingFileError);
@@ -2267,10 +2288,15 @@ async function prepareOutputDirectory(
           : await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
+    // Registration retains a populated scan for archival. An empty Windows
+    // directory must still satisfy the checks for a writable scan output.
+    const preserveContents =
+      existingOutput === "preserve" &&
+      (process.platform !== "win32" || (await readdir(path)).length !== 0);
     return await validatePreparedOutputDir(
       path,
       validateLocation,
-      existingOutput === "preserve",
+      preserveContents,
     );
   } catch (error) {
     if (createdRoot !== undefined) {
@@ -2286,11 +2312,8 @@ async function prepareOutputDirectory(
   }
 }
 
-export async function createWindowsOutputDirectory(
-  path: string,
-  recursive: boolean,
-): Promise<string | undefined> {
-  const native = createRequire(import.meta.url)(
+async function windowsOutputBinding() {
+  return createRequire(import.meta.url)(
     join(
       await bundledPluginRoot(),
       "mcp",
@@ -2298,11 +2321,43 @@ export async function createWindowsOutputDirectory(
       `win32-${process.arch}`,
       "windows.node",
     ),
-  ) as { createPrivateWindowsDirectory(path: Buffer): number };
+  ) as {
+    createPrivateWindowsDirectory(path: Buffer, checkOutput: boolean): number;
+    validateWindowsOutputPath(
+      path: Buffer,
+      writableLeaf?: boolean,
+      retainedDirectory?: string,
+    ): number;
+  };
+}
+
+export async function requireWindowsOutputPath(
+  path: string,
+  writableLeaf?: boolean,
+  retainedDirectory?: string,
+): Promise<void> {
+  const native = await windowsOutputBinding();
+  const error = native.validateWindowsOutputPath(
+    Buffer.from(win32.toNamespacedPath(path), "utf16le"),
+    writableLeaf,
+    retainedDirectory,
+  );
+  if (error !== 0)
+    throw new OutputDirectoryError(
+      `Scan output directory or its parent could not be trusted (Windows error ${error}): ${path}`,
+    );
+}
+
+export async function createWindowsOutputDirectory(
+  path: string,
+  recursive: boolean,
+): Promise<string | undefined> {
+  const native = await windowsOutputBinding();
   const create = async (target: string): Promise<string | undefined> => {
     const createOne = () =>
       native.createPrivateWindowsDirectory(
         Buffer.from(win32.toNamespacedPath(target), "utf16le"),
+        true,
       );
     let error = createOne();
     let firstCreated: string | undefined;
@@ -2315,8 +2370,10 @@ export async function createWindowsOutputDirectory(
       error = createOne();
     }
     if (error === 0) return firstCreated ?? target;
-    if (recursive && error === 183 && (await stat(target)).isDirectory())
+    if (recursive && error === 183 && (await stat(target)).isDirectory()) {
+      await requireWindowsOutputPath(target, target === path);
       return firstCreated;
+    }
     throw new OutputDirectoryError(
       `Unable to create private Windows output directory (Windows error ${error}): ${target}`,
     );
@@ -2333,7 +2390,7 @@ export async function validatePreparedOutputDir(
   if (!metadata.isDirectory()) {
     throw new OutputDirectoryError(`Scan output is not a directory: ${path}`);
   }
-  const canonical = await realpath(path);
+  const canonical = await checkedOutputPath(path, !allowNonempty);
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
   if (!allowNonempty && (await readdir(canonical)).length !== 0) {
@@ -2342,7 +2399,39 @@ export async function validatePreparedOutputDir(
     );
   }
   requireOutputDirectoryOwnership(metadata, path);
-  await requireSecureOutputAncestry(canonical);
+  return canonical;
+}
+
+async function checkedOutputPath(
+  path: string,
+  writableLeaf: boolean,
+): Promise<string> {
+  if (process.platform === "win32") {
+    // Keep the selected leaf for the no-follow check, including across an
+    // in-place directory change between lstat and canonicalization.
+    const directory = dirname(path);
+    const parent = await realpath(directory);
+    const selected = join(parent, relative(directory, path));
+    await requireWindowsOutputPath(selected, writableLeaf);
+    const canonical = await realpath(selected);
+    if (canonical === selected) return selected;
+    // Accept a canonical leaf spelling (case or short name) within the checked parent.
+    if (dirname(canonical) === parent) {
+      const [leaf, resolved] = await Promise.all([
+        lstat(selected, { bigint: true }),
+        lstat(canonical, { bigint: true }),
+      ]);
+      if (leaf.isDirectory() && leaf.ino !== 0n && sameInode(leaf, resolved)) {
+        return canonical;
+      }
+    }
+    throw new OutputDirectoryError(
+      `Scan output directory changed during preparation: ${path}`,
+    );
+  }
+  await requireSecureOutputAncestry(path);
+  const canonical = await realpath(path);
+  if (canonical !== path) await requireSecureOutputAncestry(canonical);
   return canonical;
 }
 
@@ -2378,7 +2467,7 @@ export async function requireSecureOutputAncestry(
   path: string,
   effectiveUid = process.geteuid?.(),
 ): Promise<void> {
-  if (process.platform === "win32") return;
+  if (process.platform === "win32") return requireWindowsOutputPath(path);
   let current = dirname(resolve(path));
   while (true) {
     try {

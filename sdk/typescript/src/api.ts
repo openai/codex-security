@@ -203,7 +203,6 @@ import {
   type TurnResultMetadata,
   type ScanResultOptions,
 } from "./result.js";
-import type { SeverityLevel } from "./models.js";
 import {
   formatSecurityPolicyText,
   inspectSecurityPolicySources,
@@ -2747,14 +2746,9 @@ export class CodexSecurity {
         repositoryRevision: expectation.repositoryRevision,
         pluginVersion: runtime.plugin.version,
         config: recipeConfig,
-        failOnSeverity: options.failureSeverity,
+        options,
         knowledgeBasePaths: knowledgeBase?.sources,
-        maxCostUsd: options.maxCostUsd,
         deepScan: deepScanConfiguration?.settings,
-        maxTimeMinutes: options.maxTimeMinutes,
-        auth: options.auth,
-        cyberAccessProgram: options.cyberAccessProgram,
-        ownerSuggestions: options.ownerSuggestions,
       });
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
@@ -5247,13 +5241,8 @@ export class CodexSecurity {
               repositoryRevision: revision,
               pluginVersion: plugin.version,
               config: { model },
-              failOnSeverity: options.failureSeverity,
+              options,
               knowledgeBasePaths: options.knowledgeBasePaths,
-              maxCostUsd: options.maxCostUsd,
-              maxTimeMinutes: options.maxTimeMinutes,
-              auth: options.auth,
-              cyberAccessProgram: options.cyberAccessProgram,
-              ownerSuggestions: options.ownerSuggestions,
             }),
             mock: true,
           },
@@ -6232,14 +6221,9 @@ function scanRecipe({
   repositoryRevision,
   pluginVersion,
   config,
-  failOnSeverity,
+  options,
   knowledgeBasePaths,
-  maxCostUsd,
-  maxTimeMinutes,
   deepScan,
-  auth,
-  cyberAccessProgram,
-  ownerSuggestions,
 }: {
   repository: string;
   target: NormalizedTarget;
@@ -6247,15 +6231,19 @@ function scanRecipe({
   repositoryRevision: string | null;
   pluginVersion: string;
   config: JsonObject;
-  failOnSeverity?: SeverityLevel;
+  options: ScanSettings;
   knowledgeBasePaths?: string[];
-  maxCostUsd?: number;
-  maxTimeMinutes?: number;
   deepScan?: Required<DeepScanOptions>;
-  auth?: ScanAuthMode;
-  cyberAccessProgram?: ScanSettings["cyberAccessProgram"];
-  ownerSuggestions?: boolean;
 }): JsonObject {
+  const optionalSettings = {
+    ownerSuggestions: options.ownerSuggestions,
+    auth: options.auth,
+    cyberAccessProgram: options.cyberAccessProgram,
+    failOnSeverity: options.failureSeverity,
+    knowledgeBasePaths,
+    maxCostUsd: options.maxCostUsd,
+    maxTimeMinutes: options.maxTimeMinutes,
+  } satisfies Partial<JsonObject>;
   return {
     repository,
     target: { ...target, paths: [...target.paths] },
@@ -6263,13 +6251,11 @@ function scanRecipe({
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
     config,
-    ...(ownerSuggestions === undefined ? {} : { ownerSuggestions }),
-    ...(auth === undefined ? {} : { auth }),
-    ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
-    ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
-    ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
-    ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
-    ...(maxTimeMinutes === undefined ? {} : { maxTimeMinutes }),
+    ...Object.fromEntries(
+      Object.entries(optionalSettings).filter(
+        ([, value]) => value !== undefined,
+      ),
+    ),
     ...(deepScan === undefined
       ? {}
       : { deepScan: { ...deepScan }, deepScanResolved: true }),

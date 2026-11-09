@@ -83,7 +83,9 @@ The local workbench keeps findings omitted from later exports. Use a separate
 source key if you want to retain both formats' evidence for a finding.
 [Imported finding identity and evidence](schema-guide.md)
 
-SARIF keeps finding links, direct repository paths and reported SAST or
+For SARIF, `source_finding_id` is the Endor finding UUID and `evidence.url`
+is the vendor's `finding-url` when supplied. Use the URL to open the finding in
+Endor. Use `locations` for direct repository paths and reported SAST or
 Secrets lines. Look in the original evidence for diagnostic levels, CVSS and
 indexed or base-relative artifact references. If the report includes repository
 URLs, they must match a comparable local Git remote when available, or the

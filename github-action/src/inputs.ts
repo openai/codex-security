@@ -1,10 +1,3 @@
-export const INPUT_NAMES = [
-  'repository', 'scope', 'paths', 'diff-base', 'mode',
-  'provider', 'model', 'cyber-access-program', 'effort', 'max-cost', 'max-time-hours', 'fail-on-severity', 'verbose', 'dry-run',
-  'summary', 'annotations',
-  'upload-artifacts', 'artifact-name', 'retention-days',
-] as const;
-
 export type Inputs = ReturnType<typeof parseInputs>;
 
 export function parseInputs(read: (name: string) => string, workspace: string) {
