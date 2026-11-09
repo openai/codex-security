@@ -16,24 +16,43 @@ const agent = readPluginFile(`${skillRoot}/agents/openai.yaml`);
 const plugin = JSON.parse(readPluginFile(".codex-plugin/plugin.json"));
 
 assert.match(skill, /references\/ticket-intake\.md/);
-assert.match(
-  ticketIntake,
-  /\bsearchJiraIssuesUsingJql`?\s+for\s+collections\b|\bfor\s+collections,\s+use\s+`?searchJiraIssuesUsingJql\b/i,
+const paragraphs = ticketIntake.split(/\n\s*\n/u);
+const paragraphWords = paragraphs.map(
+  (paragraph) => new Set(paragraph.match(/\w+/g)),
 );
+for (const [tool, ...fields] of [
+  ["searchJiraIssuesUsingJql", "nextPageToken", "isLast"],
+  ["listJiraIssueComments", "startAt", "isLast"],
+  ["list_issues", "parentId"],
+]) {
+  assert.ok(
+    paragraphWords.some(
+      (words) => words.has(tool) && fields.every((field) => words.has(field)),
+    ),
+    `Expected the ${tool} instructions to include ${fields.join(", ")}`,
+  );
+}
 assert.match(ticketIntake, /natural-language search[\s\S]*discover[\s\S]*JQL/);
-assert.match(ticketIntake, /exhaust[\s\S]*pag(?:es|ination)/i);
-assert.match(ticketIntake, /workitem search .*--fields "\$fields" --paginate/);
-assert.match(ticketIntake, /workitem view .*--fields "\$fields"/);
+const searchArgs =
+  ticketIntake.match(/`acli jira workitem search ([^`]+)`/u)?.[1] ?? "";
+const viewArgs =
+  ticketIntake.match(/`acli jira workitem view ([^`]+)`/u)?.[1] ?? "";
+assert.match(searchArgs, /(?:^|\s)--jql\s+"\$jql"(?=\s|$)/u);
+assert.match(searchArgs, /(?:^|\s)--paginate(?=\s|$)/u);
+assert.match(viewArgs, /(?:^|\s)"\$key"(?=\s|$)/u);
+for (const args of [searchArgs, viewArgs]) {
+  assert.match(args, /(?:^|\s)--fields\s+"\$fields"(?=\s|$)/u);
+  assert.match(args, /(?:^|\s)--json(?=\s|$)/u);
+}
 assert.match(ticketIntake, /missing connector|connector.*unavailable/i);
 assert.match(ticketIntake, /authentication|reauthorize/i);
 assert.match(ticketIntake, /insufficient permission|request access/i);
 assert.match(ticketIntake, /not found|inaccessible/i);
 assert.match(ticketIntake, /transient/i);
 const provenance =
-  ticketIntake
-    .split(/\n\s*\n/u)
-    .find((paragraph) => paragraph.includes("normalized_input.references")) ??
-  "";
+  paragraphs.find((paragraph) =>
+    paragraph.includes("normalized_input.references"),
+  ) ?? "";
 for (const field of [
   "issue key",
   "URL",

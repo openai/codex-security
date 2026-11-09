@@ -90,8 +90,9 @@ violations.
 [Install the plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex) · [Studio export scope](https://github.com/snyk/studio-recipes/blob/3752dd05a462184dcce44af3c247f287b41e35de/plugins/codex/skills/snyk-findings-export/SKILL.md#L15-L20) · [Evo MCP tools](https://docs.snyk.io/agent-security/evo-by-snyk/platform-surfaces/evo-mcp-server#policies-and-issues)
 
 The bundle keeps collection context, ignored status and each selected MCP
-record. The mapper can shorten descriptions and omit alternate dependency
-paths. Paths are relative to the scan target. The reader records a commit
+record. Use `evidence.advisory_ids` for the Snyk advisory and its CVE aliases.
+The export can shorten descriptions and omit alternate dependency paths.
+Paths are relative to the scan target. The reader records a commit
 only for a clean workspace with a known revision.
 [SCA mapper](https://github.com/snyk/studio-mcp/blob/main/internal/oss/map.go)
 

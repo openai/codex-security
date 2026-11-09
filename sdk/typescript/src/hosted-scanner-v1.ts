@@ -1,46 +1,36 @@
+import { canonicalNumber } from "./external-import-contract.js";
 import {
   hostedNumberToken,
   parseHostedScannerJson,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
 
-const decimalToken = /^-?(0|[1-9]\d*)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu;
-
-// Compare decimal values and check integral IDs without expanding unbounded exponents.
-function magnitude(token: string) {
-  const parts = decimalToken.exec(token);
-  if (!parts) return;
-  const fraction = parts[2] ?? "";
-  const digits = (parts[1]! + fraction).replace(/^0+/u, "");
-  const point = digits.length
-    ? digits.length - fraction.length + Number(parts[3] ?? 0)
-    : 0;
-  let end = digits.length;
-  while (end > 0 && digits[end - 1] === "0") end--;
-  return { digits: digits.slice(0, end), point };
-}
+const jsonNumber = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?$/iu;
 
 export function legacyDecimalInteger(token: string): string | undefined {
-  const value = magnitude(token);
-  if (!value || token.startsWith("-")) return;
-  const { digits, point } = value;
-  if (!digits || point < digits.length || point > 19) return;
-  const id = digits.padEnd(point, "0");
-  return point < 19 || id <= "9223372036854775807" ? id : undefined;
+  if (!jsonNumber.test(token)) return;
+  const value = Number(token);
+  // Rule out unbounded exponents cheaply. Rounded boundary values still need an exact check.
+  if (!Number.isInteger(value) || value < 1 || value > 2 ** 63) return;
+  const id = canonicalNumber(token);
+  return /^[1-9]\d{0,18}$/u.test(id) &&
+    (id.length < 19 || id <= "9223372036854775807")
+    ? id
+    : undefined;
 }
 
 /** A legacy export needs a type witness when JSON.parse cannot preserve a decimal. */
 export function isLegacyWitness(token: string): boolean {
-  const exact = magnitude(token);
-  if (!exact) return false;
-  const parsed = Number(token);
+  if (!jsonNumber.test(token)) return false;
+  const value = Number(token);
   if (
-    !Number.isFinite(parsed) ||
-    (Number.isInteger(parsed) && !Number.isSafeInteger(parsed))
+    !Number.isFinite(value) ||
+    (Number.isInteger(value) && !Number.isSafeInteger(value))
   )
     return true;
-  const rounded = magnitude(String(parsed))!;
-  return rounded.point !== exact.point || rounded.digits !== exact.digits;
+  // Distinguish zero from underflow without converting an unbounded exponent.
+  if (value === 0) return /[1-9]/u.test(token.split(/e/iu, 1)[0]!);
+  return canonicalNumber(token) !== String(value);
 }
 
 function restoreField(value: unknown, witness: unknown): unknown {

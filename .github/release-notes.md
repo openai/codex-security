@@ -1,12 +1,12 @@
-<!-- release-version: 0.8.3 -->
+<!-- release-version: 0.9.0 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-- **Scans and reporting.** Run a local scan without connecting an app. Standard and Deep scans include more concrete guidance for finding issues in source. The GitHub Action lists the highest-severity findings first in its job summary and annotations. Published evidence links to Markdown files open the cited source lines on GitHub.
-- **Scanner imports.** Import Black Duck SCA project-version vulnerabilities, Veracode static policy flaws and AWS Continuum code findings. The [scanner guides](https://github.com/openai/codex-security/tree/npm-v0.8.3/docs/scanner-imports) describe the accepted formats and destinations.
-- **Severity and remediation.** Standard scans can use a host-supplied severity rubric. Standalone classification reports the rubric it used. Generated patches for completed scans can be saved with the scan.
+- Deep Scan runs independent Standard reviews in batches. Workers can share leads and verify each other's evidence. The final report groups observations that have the same fix and retains the source locations from each review. [Deep Scan guide](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#configure-deep-scans)
+- External scanner imports are enabled by default in the CLI, SDK, and plugin. You can preview supported reports, save findings locally, and publish supported findings to Cloud. The scanner guides list the accepted formats and which inputs are local-only. [Scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md)
+- `scans logs` finds sessions faster in large compressed histories. The GitHub Action also includes scan scope limitations in its job summary, including when a scan returns zero findings.
 
 <!-- release-section: highlights:end -->
 
@@ -14,6 +14,10 @@
 
 ## Upgrade notes
 
-- See [Upgrading to 0.8.3](https://github.com/openai/codex-security/blob/main/CHANGELOG.md#upgrading-to-083) for changes to cost limits, required PR checks, and the tracking and deduplication helpers.
+- **Deep Scan budgets.** `--stop-after-no-new` now counts consecutive completed Standard reviews that add no findings. If you depend on a particular run length, review this threshold alongside `--max-discovery-runs` and `--max-time`. [Deep Scan settings](https://github.com/openai/codex-security/blob/main/docs/project-configuration.md#deep-settings-and-limits)
+- **Scanner imports.** Remove `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS` from launch scripts. A legacy value of `0` no longer disables imports. [Scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md)
+- **Linux Compose deployments.** The bundled seccomp profile restricts direct socket families and blocks `ptrace`, `process_vm_readv`, and `process_vm_writev`. If a custom tool needs one of these operations, test it against your deployment's profile before upgrading. [Container guide](https://github.com/openai/codex-security/blob/main/docker/README.md)
+- **Source builds.** Sparse SDK checkouts must include `plugins/codex-security/mcp-app/src/deep-scan-settings.ts`. Upgrade or roll back the bundled plugin as a unit. [Source build change](https://github.com/openai/codex-security/pull/2452)
+- **Package verification.** The source package checker rejects sparse tar entries. If an unsigned candidate was built with a sparse-aware archiver, recreate it with `pnpm pack` from `sdk/typescript`. Use the original published archive for release recovery. [Package verification change](https://github.com/openai/codex-security/pull/2456)
 
 <!-- release-section: upgrades:end -->
