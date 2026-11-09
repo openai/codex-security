@@ -1162,6 +1162,45 @@ the current checks. Sign in again if needed; a new state directory has separate
 scan history and does not migrate credentials or reports from the old state
 directory.
 
+#### Recover from a sandbox-writable Windows profile
+
+If Codex's elevated sandbox has granted `CodexSandboxUsers` or a capability SID
+Modify access to your profile, the default state directory under that profile
+cannot pass the ancestor check. The error names the outermost rejected ancestor.
+Choosing another folder under the same profile, including `AppData`, or removing
+inheritance only from the state directory does not protect it from replacement
+through that ancestor. Do not remove sandbox grants from your profile to make
+Codex Security run.
+
+Provision a new private state directory outside the rejected ancestor and the
+repository. For example, when `ProgramData` has trusted ancestry and permits
+directory creation, run this once in PowerShell as the account that will run
+Codex Security:
+
+```powershell
+$sid = (whoami /user /fo csv /nh | ConvertFrom-Csv -Header Name, Sid).Sid
+$state = Join-Path $env:ProgramData "codex-security-$sid"
+New-Item -ItemType Directory -Path $state -ErrorAction Stop | Out-Null
+icacls $state /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'
+if ($LASTEXITCODE -ne 0) { throw 'Could not secure the new state directory' }
+$env:CODEX_SECURITY_STATE_DIR = $state
+codex-security login status
+```
+
+The creation step deliberately fails if that path already exists. Do not take
+over or reset an existing directory; have its ownership and ancestry checked
+before reusing it. If creation is denied or an ancestor is rejected, have an
+administrator provision a private directory for your account under a trusted
+ancestor. Do not grant broader access or change a volume root's permissions.
+
+`login status` validates the new credential home without signing in. A "not
+logged in" result (exit code 1) means directory setup succeeded; use the
+existing `codex-security login` command if needed. Keep
+`CODEX_SECURITY_STATE_DIR` set to this same path in subsequent shells and SDK
+processes, using your normal environment configuration. The default path stays
+unchanged; old credentials, reports, and history stay in the original directory
+and are not migrated. Preserve that directory rather than deleting it to retry.
+
 ### Progress and cost
 
 Interactive scans show full-screen progress. The dashboard title uses the resolved

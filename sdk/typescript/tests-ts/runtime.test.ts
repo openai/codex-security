@@ -5135,12 +5135,26 @@ describe("runtime directories and plugin Python boundary", () => {
     expect((failure as Error).message).toContain(
       "Choose a location outside this ancestor with trusted ownership and permissions.",
     );
+    expect((failure as Error).message).toContain("CODEX_SECURITY_STATE_DIR");
+    expect((failure as Error).message).toContain(
+      "separate sign-in and scan history",
+    );
     expect((failure as Error).cause).toMatchObject({
       cause: {
         message:
           "Windows credential ACL owner is not a trusted principal: S-1-1-0",
       },
     });
+    const outputFailure = await preparePolicyOutputDirectory(root, {
+      platform: "win32",
+      secureWindowsHome: async () => {
+        throw (failure as Error).cause;
+      },
+    }).catch((error: unknown) => error);
+    expect(outputFailure).toBeInstanceOf(Error);
+    expect((outputFailure as Error).message).not.toContain(
+      "CODEX_SECURITY_STATE_DIR",
+    );
   });
 
   test("preserves Windows ACL subprocess failures", async () => {
@@ -5660,6 +5674,97 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(inspection.status).toBe(0);
         expect(JSON.parse(inspection.stdout).everyone).toBeGreaterThan(0);
       }
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "recovers outside a sandbox-writable profile while preserving default state and ancestor ACLs",
+    async () => {
+      const root = await temporaryDirectory();
+      const profile = join(root, "profile");
+      const codexHome = join(profile, ".codex");
+      const environment = { CODEX_HOME: codexHome };
+      const oldState = codexSecurityStateDirectory(environment);
+      const report = join(oldState, "saved-report.txt");
+      await mkdir(profile);
+      const sid = windowsUserSid();
+      const sandboxSid = "S-1-5-21-111-222-333-1002";
+      const capabilitySid = "S-1-15-3-111-222-333-444";
+      const python = await resolvePluginPython();
+      setWindowsTestDacl(
+        python,
+        profile,
+        `D:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;${sandboxSid})(A;OICI;0x1301bf;;;${capabilitySid})`,
+      );
+      await mkdir(oldState, { recursive: true });
+      await writeFile(report, "synthetic saved report\n");
+      const readProfileAcl = () => {
+        const result = inspectWindowsTestAcl(
+          [
+            "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+          ],
+          { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: profile },
+        );
+        expect(result.status).toBe(0);
+        return result.stdout.trim();
+      };
+      const profileAcl = readProfileAcl();
+      const expectRejectedProfile = async (
+        selected: typeof environment & {
+          CODEX_SECURITY_STATE_DIR?: string;
+        },
+      ) => {
+        const failure = await prepareCodexSecurityCredentialHome(
+          selected,
+        ).catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toContain(
+          `ancestor could not be trusted: ${profile}.`,
+        );
+        expect((failure as Error).message).toContain(
+          "CODEX_SECURITY_STATE_DIR",
+        );
+      };
+
+      await expectRejectedProfile(environment);
+      const childState = join(profile, "private-state");
+      await mkdir(childState);
+      const isolateChild = windowsTestCommand("icacls.exe", [
+        childState,
+        "/inheritance:r",
+        "/grant:r",
+        `*${sid}:(OI)(CI)F`,
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+      ]);
+      expect(isolateChild.status).toBe(0);
+      await expectRejectedProfile({
+        ...environment,
+        CODEX_SECURITY_STATE_DIR: childState,
+      });
+
+      const recoveredState = join(root, `codex-security-${sid}`);
+      await mkdir(recoveredState);
+      const secured = windowsTestCommand("icacls.exe", [
+        recoveredState,
+        "/inheritance:r",
+        "/grant:r",
+        `*${sid}:(OI)(CI)F`,
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+      ]);
+      expect(secured.status).toBe(0);
+      const recoveredHome = await prepareCodexSecurityCredentialHome({
+        ...environment,
+        CODEX_SECURITY_STATE_DIR: recoveredState,
+      });
+      expect(recoveredHome).toBe(
+        await realpath(join(recoveredState, "codex-home")),
+      );
+      expect(await readdir(recoveredHome)).toEqual([]);
+      expect(await readFile(report, "utf8")).toBe("synthetic saved report\n");
+      expect(codexSecurityStateDirectory(environment)).toBe(oldState);
+      expect(readProfileAcl()).toBe(profileAcl);
     },
   );
 

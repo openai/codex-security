@@ -429,8 +429,13 @@ export async function requirePrivateDirectory(
     await (options.secureWindowsHome ?? secureWindowsCredentialHome)(path);
   } catch (error) {
     const detail = windowsCredentialAclFailure(error);
+    const recovery =
+      description === "credential home" &&
+      error instanceof UntrustedWindowsCredentialAncestorError
+        ? "\nSet CODEX_SECURITY_STATE_DIR to a private, writable directory outside the rejected ancestor and the repository. Keep existing state; the new directory has separate sign-in and scan history."
+        : "";
     throw new OutputDirectoryError(
-      `Unable to create a private Windows ${description}: ${path}${detail}`,
+      `Unable to create a private Windows ${description}: ${path}${detail}${recovery}`,
       { cause: error },
     );
   }
@@ -524,6 +529,8 @@ class UntrustedWindowsCredentialOwnerError extends Error {
     super(`Windows credential ACL owner is not a trusted principal: ${owner}`);
   }
 }
+
+class UntrustedWindowsCredentialAncestorError extends Error {}
 
 class RepairableWindowsCredentialAclError extends Error {
   public constructor(cause: unknown) {
@@ -922,7 +929,7 @@ export async function inspectWindowsCredentialAclSnapshot(
                   ? "This share root is unsupported. Choose a location outside this share with trusted ownership and permissions."
                   : "This volume root is unsupported. Choose a location on a volume with trusted ancestry; another directory on the same volume will not resolve this.";
               }
-              throw new Error(
+              throw new UntrustedWindowsCredentialAncestorError(
                 `Windows private-directory ancestor could not be trusted: ${ancestorPath}. ${errorMessage(error)}. ${guidance}`,
                 { cause: error },
               );
