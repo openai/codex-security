@@ -232,7 +232,7 @@ def inspect_selected_setup(args: argparse.Namespace) -> dict[str, Any]:
     )
     if args.mode == "deep":
         inspected["deepScanConfig"] = resolve_deep_scan_setup(
-            os.cpu_count() or 1, args.deep_scan_project_json
+            project_json=args.deep_scan_project_json
         )
     elif args.deep_scan_project_json is not None:
         raise SystemExit("Project Deep Scan settings require Deep Scan mode.")
