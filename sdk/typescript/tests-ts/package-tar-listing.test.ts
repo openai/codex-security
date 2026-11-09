@@ -328,6 +328,36 @@ describe("npm package tar listings", () => {
     ).toThrow("npm tarball contains a non-regular entry");
   });
 
+  test.each([
+    ["shebang", "#!/bin/sh\r\nexit 0\n"],
+    ["body", "#!/bin/sh\nexit 0\r\n"],
+  ])(
+    "rejects CRLF in the packaged POSIX MCP launcher's %s",
+    async (_part, script) => {
+      const root = mkdtempSync(join(tmpdir(), "codex-package-launcher-"));
+      try {
+        const path =
+          "package/_bundled_plugin/scripts/launch_codex_security_mcp";
+        const launcher = tarRecord(Buffer.from(script), {
+          name: path,
+          mode: 0o755,
+        });
+        const archivePath = join(root, "launcher.tgz");
+        writeFileSync(
+          archivePath,
+          gzipSync(packageTar({ overrides: new Map([[path, launcher]]) })),
+        );
+        const contractPath = join(root, "plugin contract.json");
+        writeFileSync(contractPath, JSON.stringify(pluginContract));
+        const result = await checkPackage(root, archivePath, contractPath);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("POSIX MCP launcher contains CRLF");
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
+
   test.each([false, true])(
     "rejects invalid package paths before Brotli expansion, complete=%p",
     async (complete) => {

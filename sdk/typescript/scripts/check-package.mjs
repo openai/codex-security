@@ -183,15 +183,24 @@ const listingSizes = assertTarListingSizes(
 );
 if (rawEntries.some(({ size }, index) => size !== listingSizes[index]))
   invalidTarEntry();
+const posixMcpLauncher =
+  "package/_bundled_plugin/scripts/launch_codex_security_mcp";
 for (const [path, name] of [
   ["package/bin/codex-security.mjs", "CLI"],
-  ["package/_bundled_plugin/scripts/launch_codex_security_mcp", "MCP"],
+  [posixMcpLauncher, "MCP"],
 ]) {
   const permissions =
     listingLines[entries.indexOf(path)]?.split(/\s/u, 1)[0] ?? "";
   if ([3, 6, 9].some((index) => permissions[index] !== "x")) {
     throw new Error(`npm package ${name} launcher is not executable.`);
   }
+}
+if (
+  [storedArchive.files, storedArchive.npmFiles].some((files) =>
+    files.get(posixMcpLauncher)?.includes("\r\n"),
+  )
+) {
+  throw new Error("npm package POSIX MCP launcher contains CRLF line endings.");
 }
 
 function privateExtractionDirectories(directory) {
