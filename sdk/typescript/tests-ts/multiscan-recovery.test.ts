@@ -521,6 +521,8 @@ describe("multiscan", () => {
     ["fractional attempt", { attempt: 1.5 }, true],
     ["blank ID", { id: " " }, false],
     ["padded ID", { id: " receipt " }, false],
+    ["ID ending in a period", { id: "receipt." }, false],
+    ["reserved device ID", { id: "CON" }, false],
     ["unknown status", { status: "pending" }, true],
     ["missing output directory", { outputDir: undefined }, false],
     ["non-boolean knowledge failure", { knowledgeBaseFailure: "false" }, false],

@@ -71,7 +71,6 @@ const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = ["scan-manifest.json", "findings.json", "report.md"];
 const LOCK_LEASE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = 5_000;
-const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
@@ -1123,7 +1122,7 @@ async function readReceipts(
     let saved;
     try {
       saved = JSON.parse(line);
-      if (typeof saved?.id !== "string" || !TASK_ID_PATTERN.test(saved.id))
+      if (!isValidTaskId(saved?.id))
         throw new Error("Expected a receipt with a valid task id");
       if (!Number.isSafeInteger(saved.attempt) || saved.attempt < 1)
         throw new Error("Expected a positive integer receipt attempt");
@@ -1193,6 +1192,15 @@ async function hasCompletedContract(
   }
 }
 
+function isValidTaskId(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) &&
+    !id.endsWith(".") &&
+    !WINDOWS_DEVICE_PATH_NAME.test(id)
+  );
+}
+
 function parseInventory(
   source: string,
   directory: string,
@@ -1225,11 +1233,7 @@ function parseInventory(
     const get = (name: string): string =>
       fields[headers.indexOf(name)]?.trim() ?? "";
     const id = get("id");
-    if (
-      !TASK_ID_PATTERN.test(id) ||
-      id.endsWith(".") ||
-      WINDOWS_DEVICE_PATH_NAME.test(id)
-    ) {
+    if (!isValidTaskId(id)) {
       throw new Error("Multiscan task IDs must be safe, unique path names.");
     }
     if (seen.has(id.toLowerCase()))
