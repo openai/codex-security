@@ -2381,6 +2381,8 @@ export async function main(
     }
     return incurError({ code, message: outcome.error, exitCode });
   };
+  const useDefaultOutput = (format: string) =>
+    format === "toon" && !argv.some((argument) => OUTPUT_OPTION.test(argument));
   const finishScanCommand: typeof finishScan = (
     outcome,
     format,
@@ -2389,8 +2391,7 @@ export async function main(
   ) => {
     if (
       (outcome.error === undefined || outcome.patchReviewCanceled) &&
-      format === "toon" &&
-      !argv.some((argument) => OUTPUT_OPTION.test(argument))
+      useDefaultOutput(format)
     ) {
       exitCode = outcome.exitCode;
       return;
@@ -2531,9 +2532,7 @@ export async function main(
       );
     }, selection);
   const useInteractiveHistory = (format: string) =>
-    format === "toon" &&
-    output.isTTY === true &&
-    !argv.some((argument) => OUTPUT_OPTION.test(argument));
+    useDefaultOutput(format) && output.isTTY === true;
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -2564,11 +2563,7 @@ export async function main(
     format: string,
     selection?: string,
   ): Promise<void> => {
-    if (
-      format !== "toon" ||
-      argv.some((argument) => OUTPUT_OPTION.test(argument))
-    )
-      return;
+    if (!useDefaultOutput(format)) return;
     await withTerminalErrorsHandled(errorOutput, async () => {
       try {
         printScanReference(scan, errorOutput, selection);
@@ -2811,10 +2806,7 @@ export async function main(
           try {
             scanId = (await latestScans())?.[0]?.scanId;
           } catch (error) {
-            if (
-              format === "toon" &&
-              !argv.some((argument) => OUTPUT_OPTION.test(argument))
-            ) {
+            if (useDefaultOutput(format)) {
               errorOutput.write(
                 "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
               );
@@ -3844,12 +3836,7 @@ export async function main(
               );
             }
           }
-          if (
-            format === "toon" &&
-            !formatExplicit &&
-            !options.dryRun &&
-            !argv.some((argument) => OUTPUT_OPTION.test(argument))
-          ) {
+          if (!formatExplicit && !options.dryRun && useDefaultOutput(format)) {
             renderedOutput = renderPublicationSummary(
               result,
               output.isTTY === true &&
@@ -3949,10 +3936,7 @@ export async function main(
           const controller = new AbortController();
           const removeSignals = listenForAbort(dependencies, controller);
           const structured = formatExplicit && format !== "toon";
-          const humanSummary =
-            format === "toon" &&
-            !formatExplicit &&
-            !argv.some((argument) => OUTPUT_OPTION.test(argument));
+          const humanSummary = !formatExplicit && useDefaultOutput(format);
           const showExclusions = (excluded: ExternalFindings["excluded"]) => {
             const sample = excluded.slice(0, 5);
             for (const item of sample)
@@ -4634,10 +4618,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options, format, formatExplicit, error: incurError }) {
         return await withTerminalErrorsHandled(errorOutput, async () => {
-          const humanSummary =
-            format === "toon" &&
-            !formatExplicit &&
-            !argv.some((arg) => OUTPUT_OPTION.test(arg));
+          const humanSummary = !formatExplicit && useDefaultOutput(format);
           const controller = new AbortController();
           const removeSignals = listenForAbort(dependencies, controller);
           const note = (line: string) =>
@@ -7751,11 +7732,7 @@ export async function main(
               exitCode,
             });
           }
-          if (
-            !options.dryRun &&
-            format === "toon" &&
-            !argv.some((argument) => OUTPUT_OPTION.test(argument))
-          ) {
+          if (!options.dryRun && useDefaultOutput(format)) {
             return;
           }
           return outcome.data;
