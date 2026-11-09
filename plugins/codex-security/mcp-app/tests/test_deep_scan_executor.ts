@@ -1505,6 +1505,9 @@ async function testWorkerRuntimeSettings() {
         "bin",
         "python",
       );
+      const systemPython = process.platform === "win32" ? "python" : "python3";
+      const workerPython = (index: number) =>
+        index === 0 ? systemPython : `${helperPython}-${index} `;
       process.env.PYTHON = python;
       const gitEnvironment = workerGitEnvironment(fixture.root);
       await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
@@ -2068,7 +2071,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ? ["api", `background jobs ${index}`]
                   : undefined,
               filePaths: index % 2 === 0 ? [`background jobs ${index}`] : [],
-              pythonCommand: `${helperPython}-${index} `,
+              pythonCommand: workerPython(index),
             },
           }),
       );
@@ -2488,7 +2491,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             "mcp_servers.cs_artifacts.command": process.execPath,
             "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
               undefined,
-            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
+              workerPython(index),
             "mcp_servers.cs_artifacts.args.0": path.join(
               fixture.root,
               `plugin-${index}`,
