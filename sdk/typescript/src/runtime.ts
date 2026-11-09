@@ -1,7 +1,7 @@
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
-import { gitProtectionRoots } from "./targets.js";
+import { abortable, gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
 import {
   execFile as execFileCallback,
@@ -2923,12 +2923,14 @@ export async function prepareWindowsScanPluginZip(
   );
   // PowerShell may fail to launch the selected plugin's .cmd at a long path.
   // Prefer the shorter canonical parent, retaining the output parent on ties.
-  const candidates = await Promise.allSettled(
-    parents.map((path) => realpath(path)),
+  const candidates = await abortable(
+    () => Promise.allSettled(parents.map((path) => realpath(path))),
+    signal,
   );
   const length = (candidate: PromiseSettledResult<string>) =>
     candidate.status === "fulfilled" ? candidate.value.length : Infinity;
   for (const candidate of candidates.sort((a, b) => length(a) - length(b))) {
+    throwIfSignalAborted(signal);
     try {
       if (candidate.status === "rejected") throw candidate.reason;
       const canonical = candidate.value;

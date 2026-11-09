@@ -108,6 +108,72 @@ test.skipIf(process.platform !== "win32").each(["changed", "canceled"])(
 );
 
 test.skipIf(process.platform !== "win32")(
+  "cancels ZIP staging while a candidate parent is still being resolved",
+  async () => {
+    const root = await temporaryDirectory();
+    const temp = join(root, "temp");
+    const output = join(root, "longer-output-parent", "scan");
+    const bootstrap = join(root, "bootstrap");
+    const archive = join(root, "selected.zip");
+    await mkdir(temp);
+    await mkdir(bootstrap);
+    await mkdir(output, { recursive: true });
+    await writeFile(
+      archive,
+      zipSync({
+        ".codex-plugin/plugin.json": strToU8(
+          '{"name":"codex-security","version":"1.2.3"}',
+        ),
+      }),
+    );
+    const { zip } = await runtime.resolvePluginSource(
+      archive,
+      bootstrap,
+      undefined,
+      true,
+    );
+    using temporary = spyOn(os, "tmpdir").mockReturnValue(temp);
+    const started = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<string>();
+    const canonicalize = fsPromises.realpath;
+    using lookup = spyOn(fsPromises, "realpath").mockImplementation(
+      new Proxy(canonicalize, {
+        apply(target, receiver, args) {
+          if (args[0] !== temp) return Reflect.apply(target, receiver, args);
+          started.resolve();
+          return held.promise;
+        },
+      }),
+    );
+    const controller = new AbortController();
+    const reason = new Error("Canceled during scan input placement");
+    let canceled: unknown;
+    const operation = runtime
+      .prepareWindowsScanPluginZip(
+        zip!,
+        output,
+        [bootstrap],
+        () => {},
+        controller.signal,
+      )
+      .catch((error: unknown) => {
+        canceled = error;
+      });
+    try {
+      await started.promise;
+      controller.abort(reason);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(canceled).toBe(reason);
+    } finally {
+      held.resolve(temp);
+      await operation;
+    }
+    expect(await readdir(temp)).toEqual([]);
+    expect(await readdir(dirname(output))).toEqual(["scan"]);
+  },
+);
+
+test.skipIf(process.platform !== "win32")(
   "prepares the pinned ZIP from its original source for explicit and default Windows scan outputs",
   async () => {
     const root = await temporaryDirectory();
