@@ -183,6 +183,7 @@
 - stop passing host CPU counts to worker setup ([#2482](https://github.com/openai/codex-security/pull/2482))
 - share public Git host classification with Sonar ([#2474](https://github.com/openai/codex-security/pull/2474))
 - validate Tenable repository URLs and CSV line numbers at capture ([#2454](https://github.com/openai/codex-security/pull/2454))
+- fetch calibration revisions as source refs ([#2425](https://github.com/openai/codex-security/pull/2425))
 
 </details>
 
