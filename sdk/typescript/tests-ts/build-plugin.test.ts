@@ -181,6 +181,7 @@ describe("bundled plugin build", () => {
     if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
 
     const destination = join(root, "mcp");
+    await writeFixture(destination, "helpers.mjs.br.part-000", "stale");
     await execFileAsync(
       "node",
       [
@@ -211,15 +212,8 @@ describe("bundled plugin build", () => {
         .map((path) => path.slice(4))
         .sort(),
     );
-    const chunks = (await readdir(destination))
-      .filter((name) => name.startsWith("helpers.mjs.br.part-"))
-      .sort();
     const runtime = brotliDecompressSync(
-      Buffer.concat(
-        await Promise.all(
-          chunks.map((name) => readFile(join(destination, name))),
-        ),
-      ),
+      await readFile(join(destination, "helpers.mjs.br")),
     ).toString("utf8");
     for (const marker of [
       "platform-source-marker",

@@ -225,18 +225,6 @@ export async function readExternalFindings(
     if (target === "cloud") requireCloudReader(options);
     return { findings: await readTenableFindings(path, url) };
   }
-  if (provider === "trivy") {
-    const args = [
-      await readScannerJson(path),
-      target,
-      options.trivyScanRoot,
-    ] as const;
-    return withReplay(
-      normalizeTrivyFindings(...args),
-      needsPreviousTrivyProjection,
-      () => normalizePreviousTrivyFindings(...args),
-    );
-  }
   if (provider === "sonar") {
     const findings = await readSonarFindings(path, url, target);
     const binding = findings.report?.["repositoryUrl"];
@@ -256,20 +244,6 @@ export async function readExternalFindings(
     const input = await readSnykReport(path);
     const findings = await normalizeSnykFile(input, target, references);
     return { findings, sourceRepositories: snykFileRepositories(input) };
-  }
-  if (provider === "endor") {
-    const input = await readScannerJson(path);
-    const findings = normalizeEndorFindings(input, target);
-    return {
-      ...withReplay(findings, hasPreviousCloudProjection, () =>
-        normalizePreviousEndorFindings(input, target),
-      ),
-      sourceRepositories:
-        sarifFileRepositories(input, "Endor") ??
-        findings.findings.flatMap((row) =>
-          localFindingRepositories(provider, row),
-        ),
-    };
   }
   if (provider === "semgrep") {
     const input = await readSemgrepReport(path);
@@ -303,9 +277,28 @@ export async function readExternalFindings(
       sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
     };
   }
-  const mapping =
-    options.inspectorProjectMap && new Map(options.inspectorProjectMap);
   const input = await readScannerJson(path);
+  if (provider === "trivy") {
+    const args = [input, target, options.trivyScanRoot] as const;
+    return withReplay(
+      normalizeTrivyFindings(...args),
+      needsPreviousTrivyProjection,
+      () => normalizePreviousTrivyFindings(...args),
+    );
+  }
+  if (provider === "endor") {
+    const findings = normalizeEndorFindings(input, target);
+    return {
+      ...withReplay(findings, hasPreviousCloudProjection, () =>
+        normalizePreviousEndorFindings(input, target),
+      ),
+      sourceRepositories:
+        sarifFileRepositories(input, "Endor") ??
+        findings.findings.flatMap((row) =>
+          localFindingRepositories(provider, row),
+        ),
+    };
+  }
   const [normalize, previous, couldDiffer] = (
     {
       inspector: [
@@ -330,7 +323,7 @@ export async function readExternalFindings(
       ],
     } as const
   )[provider];
-  const args = [input, url, target, mapping] as const;
+  const args = [input, url, target, options.inspectorProjectMap] as const;
   return {
     ...withReplay(normalize(...args), couldDiffer, () => previous(...args)),
     sourceRepositories: [{ url }],

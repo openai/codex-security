@@ -31,7 +31,6 @@
   },
   "dependencies": {
     "@openai/codex-sdk": "0.167.0",
-    "@opencode-ai/sdk": "1.19.5",
     "promptfoo": "0.124.1"
   },
   "devDependencies": {
