@@ -95,7 +95,9 @@ async function* scanSessions(codexHome: string, directory = "sessions") {
       parentThreadId: sessionParentThreadId(metadata),
       startedAt: sessionStartedAt(metadata["timestamp"]),
       timestamp:
-        typeof metadata["timestamp"] === "string" ? metadata["timestamp"] : null,
+        typeof metadata["timestamp"] === "string"
+          ? metadata["timestamp"]
+          : null,
       workingDirectory:
         typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
       path,
