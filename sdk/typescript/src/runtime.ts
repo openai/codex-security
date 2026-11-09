@@ -3399,12 +3399,13 @@ export async function resolvePluginPython(
     );
   }
 
-  const home = options.homeDirectory ?? homedir();
-  const cacheDirectory =
-    environmentValue(environment, "XDG_CACHE_HOME", true) ||
-    join(home, ".cache");
   const managedRoots = options.managedRuntimeRoots ?? [
-    join(cacheDirectory, "codex-runtimes", "codex-primary-runtime"),
+    join(
+      environmentValue(environment, "XDG_CACHE_HOME", true) ||
+        join(options.homeDirectory ?? homedir(), ".cache"),
+      "codex-runtimes",
+      "codex-primary-runtime",
+    ),
   ];
   const relativeCandidates =
     process.platform === "win32"
@@ -3872,16 +3873,16 @@ export function expandHome(
   value: string,
   environment: ProcessEnvironment = process.env,
 ): string {
-  const home =
+  const home = () =>
     (process.platform === "win32"
       ? (environmentValue(environment, "USERPROFILE") ??
         environmentValue(environment, "HOME"))
       : (environmentValue(environment, "HOME") ??
         environmentValue(environment, "USERPROFILE"))) ?? homedir();
-  if (value === "~") return home;
-  if (value.startsWith("~/")) return join(home, value.slice(2));
+  if (value === "~") return home();
+  if (value.startsWith("~/")) return join(home(), value.slice(2));
   if (value.startsWith("~\\")) {
-    return join(home, ...value.slice(2).split("\\"));
+    return join(home(), ...value.slice(2).split("\\"));
   }
   return value;
 }
