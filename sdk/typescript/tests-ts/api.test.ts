@@ -122,9 +122,12 @@ import { importScan } from "../src/import-scan.js";
 import { restoreScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { VERSION } from "../src/version.js";
 import { createProviderProfile } from "../src/provider-profile.js";
-import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
+import { nodeCommand, gitText } from "./support/shell.js";
+import { useTestPython } from "./support/python.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
+
+const pythonExecutable = useTestPython();
 
 async function registerEightFileScan(
   _options: unknown,
