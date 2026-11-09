@@ -6,6 +6,7 @@ import {
   resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
+import { selectedScanEnvironment } from "../src/api.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -139,6 +140,20 @@ async function effectiveProvider(
   );
   return config.model_providers?.[config.model_provider];
 }
+
+test("OpenAI scans omit ambient Standard Compute credentials", () => {
+  const environment = {
+    OPENAI_API_KEY: "synthetic-account-key",
+    StandardCompute_API_Key: "synthetic-provider-key",
+  };
+  for (const auth of ["auto", "api-key", "chatgpt"] as const) {
+    for (const provider of [undefined, "openai"]) {
+      expect(
+        selectedScanEnvironment(environment, auth, provider),
+      ).not.toHaveProperty("StandardCompute_API_Key");
+    }
+  }
+});
 
 test("native worker override tables retain inherited features and MCP servers", async () => {
   const root = await temporaryDirectory();
@@ -1267,7 +1282,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     await writeFile(process.argv[2], JSON.stringify({
       inherited: Object.fromEntries([
         "SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER",
-        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY",
+        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY", "STANDARDCOMPUTE_API_KEY",
       ].map((name) => [name, process.env[name] ?? null])),
       recovered: settings.environment,
     }));
@@ -1297,6 +1312,7 @@ test.each([
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
   "FIREWORKS_API_KEY",
+  "STANDARDCOMPUTE_API_KEY",
 ])(
   "native plugin workers recover the selected %s and other provider variables",
   async (providerKey) => {
@@ -1309,9 +1325,11 @@ test.each([
     await mkdir(scan, { mode: 0o700 });
     await mkdir(sourceHome, { mode: 0o700 });
     const plugin = await createPluginProbe(root, report);
-    const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
-      providerKey,
-    );
+    const external = [
+      "OPENROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
+      "STANDARDCOMPUTE_API_KEY",
+    ].includes(providerKey);
     const providerId = external
       ? providerKey.split("_")[0]!.toLowerCase()
       : "synthetic.gateway";
@@ -1395,6 +1413,7 @@ test.each([
                   SYNTHETIC_CUSTOM_HEADER: null,
                   SYNTHETIC_REQUIRED_KEY: null,
                   SYNTHETIC_UNUSED_KEY: null,
+                  STANDARDCOMPUTE_API_KEY: null,
                 },
                 recovered: {
                   ...providerEnvironment,

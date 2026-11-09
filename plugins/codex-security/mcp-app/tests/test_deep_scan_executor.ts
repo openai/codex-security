@@ -2846,6 +2846,7 @@ async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
+    ["standardcompute", "STANDARDCOMPUTE_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
   ] as const) {
@@ -2898,6 +2899,7 @@ async function testExternalProviderCredentialsReachWorker() {
         CODEX_API_KEY: undefined,
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
+        STANDARDCOMPUTE_API_KEY: undefined,
         SYNTHETIC_GATEWAY_KEY: undefined,
       };
       const saved = Object.keys(environment).map(

@@ -6561,6 +6561,12 @@ export function selectedScanEnvironment(
     : null;
   const selectedProviderKey = providerEnvKey ?? standardProviderKey;
   const bedrockProvider = modelProvider === "amazon-bedrock";
+  if (selectedProviderKey === null) {
+    environment = withoutProviderKey(
+      environment,
+      EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key,
+    );
+  }
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
