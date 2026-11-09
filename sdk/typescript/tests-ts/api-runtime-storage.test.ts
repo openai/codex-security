@@ -23,6 +23,32 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
+test("preflights with explicit storage paths when the account has no home directory", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  await mkdir(repository);
+  await writeFile(join(repository, "source.py"), "value = 1\n");
+  const client = new TestClient(
+    {},
+    {
+      environment: {
+        CODEX_HOME: join(root, "codex"),
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+    },
+  );
+  const home = spyOn(os, "homedir").mockImplementation(() => {
+    throw new Error("No home directory for this account");
+  });
+  try {
+    const scan = await client.preflight(repository, { target: ["source.py"] });
+    expect(scan.target.paths).toEqual(["source.py"]);
+  } finally {
+    home.mockRestore();
+    await client.close();
+  }
+});
+
 function stubPluginInstall() {
   return spyOn(runtime, "bootstrapPlugin").mockImplementation(
     async (_home, pluginRoot) => ({
@@ -46,6 +72,7 @@ test.each(["ready", "denied", "canceled"])(
     const original = runtime.requirePrivateCredentialHome;
     let protectedDirectory: string | undefined;
     let workerFile: string | undefined;
+    const stagedPlugins: string[] = [];
     let launched = false;
     let operation: "deep" | "standard" | "validation" = "deep";
     const controller = new AbortController();
@@ -73,7 +100,6 @@ test.each(["ready", "denied", "canceled"])(
     });
     const client = new TestClient(
       {
-        pluginPath: PLUGIN_ROOT,
         codexOverrides: {
           model_provider: "synthetic.provider",
           model_providers: {
@@ -130,14 +156,22 @@ test.each(["ready", "denied", "canceled"])(
                 value.startsWith("permissions.codex_security_scan.filesystem="),
               )!,
             )["permissions"] as Record<string, Record<string, unknown>>;
-            expect(
-              (
-                filesystem["codex_security_scan"]!["filesystem"] as Record<
-                  string,
-                  unknown
-                >
-              )[dirname(profileFile)],
-            ).toEqual({ ".": "deny" });
+            const roots = filesystem["codex_security_scan"]![
+              "filesystem"
+            ] as Record<string, unknown>;
+            expect(roots[dirname(profileFile)]).toEqual({ ".": "deny" });
+            if (process.platform === "win32" && operation !== "validation") {
+              const staged = options.env!["CODEX_SECURITY_PLUGIN_ROOT"]!;
+              expect(dirname(staged)).toBe(protectedDirectory!);
+              expect(roots[staged]).toEqual({ ".": "read" });
+              expect(roots[protectedDirectory!]).toBeUndefined();
+              expect(roots[await realpath(PLUGIN_ROOT)]).toBeUndefined();
+              const skill = join("skills", "security-scan", "SKILL.md");
+              expect(await readFile(join(staged, skill))).toEqual(
+                await readFile(join(PLUGIN_ROOT, skill)),
+              );
+              stagedPlugins.push(staged);
+            }
             if (process.platform !== "win32") {
               expect((await stat(profileFile)).mode & 0o777).toBe(0o600);
               expect((await stat(file)).mode & 0o777).toBe(0o600);
@@ -173,6 +207,9 @@ test.each(["ready", "denied", "canceled"])(
         await expect(client.run(repository)).rejects.toThrow(
           "synthetic scan reached",
         );
+        expect(existsSync(protectedDirectory!)).toBe(true);
+        for (const staged of stagedPlugins)
+          expect(existsSync(staged)).toBe(false);
         operation = "validation";
         await expect(
           client.validate({

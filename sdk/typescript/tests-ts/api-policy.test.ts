@@ -789,9 +789,9 @@ describe("CodexSecurity policy API", () => {
           {},
           { environment: { CODEX_SECURITY_STATE_DIR: outputDir } },
         );
-        await expect(state.preflightPolicy(repository)).rejects.toThrow(
-          "outside the protected scan root",
-        );
+        await expect(state.preflightPolicy(repository)).rejects.toMatchObject({
+          pathKind: "state",
+        });
         if (kind === "linked" && metadata === gitDirectory) {
           await expect(state.generatePolicy(repository)).rejects.toThrow(
             "outside the protected scan root",

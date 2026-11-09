@@ -1528,6 +1528,114 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
   });
 
+  test.skipIf(process.platform !== "win32").each(["released", "held"])(
+    "handles plugin ZIP publication when a Windows directory lock is %s",
+    async (lock) => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const destination = join(root, "extracted");
+      const manifest = ".codex-plugin/plugin.json";
+      const contents = JSON.stringify({
+        name: "codex-security",
+        version: "1.2.3",
+      });
+      await writeFile(archive, zipSync({ [manifest]: strToU8(contents) }));
+      const nativeRename = fsPromises.rename;
+      let blocked: NodeJS.ErrnoException | undefined;
+      let staging = "";
+      let release: (() => Promise<void>) | undefined;
+      using publication = spyOn(fsPromises, "rename").mockImplementation(
+        async (from, to) => {
+          if (to !== destination || staging) return nativeRename(from, to);
+          staging = String(from);
+          // Windows keeps a process's current directory open until the process exits.
+          const holder = childProcess.spawn(
+            "node",
+            ["-e", 'process.stdout.write("ready"); process.stdin.resume()'],
+            {
+              cwd: join(staging, ".codex-plugin"),
+              windowsHide: true,
+            },
+          );
+          const exited = once(holder, "exit");
+          release = async () => {
+            holder.stdin.end();
+            await exited;
+          };
+          await once(holder.stdout, "data");
+          try {
+            await nativeRename(from, to);
+          } catch (error) {
+            blocked = error as NodeJS.ErrnoException;
+            throw error;
+          } finally {
+            if (lock === "released") await release();
+          }
+        },
+      );
+      try {
+        const result = extractPluginZip(archive, destination);
+        if (lock === "held") {
+          const failure = await result.catch((error: unknown) => error);
+          expect((failure as Error).message).toContain(
+            `Could not remove staging directory ${staging}:`,
+          );
+          expect(failure).toMatchObject({
+            message: expect.stringMatching(/publish.*ZIP.*rename/iu),
+            cause: { syscall: "rename", dest: destination },
+          });
+          expect(existsSync(staging)).toBe(true);
+          expect(existsSync(destination)).toBe(false);
+        } else {
+          expect(await result).toBe(destination);
+          expect(await readFile(join(destination, manifest), "utf8")).toBe(
+            contents,
+          );
+          expect(existsSync(staging)).toBe(false);
+        }
+        expect(["EPERM", "EACCES", "EBUSY"]).toContain(blocked?.code ?? "");
+        expect(publication.mock.calls.length).toBeGreaterThan(1);
+      } finally {
+        if (lock === "held") await release?.();
+      }
+    },
+  );
+
+  test.each(["empty", "nonempty"])(
+    "preserves platform behavior for an existing %s plugin ZIP destination",
+    async (kind) => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const destination = join(root, "extracted");
+      await mkdir(destination);
+      const sentinel = join(destination, "previous");
+      if (kind === "nonempty") await writeFile(sentinel, "keep");
+      await writeFile(
+        archive,
+        zipSync({
+          ".codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+        }),
+      );
+      const result = extractPluginZip(archive, destination);
+      if (process.platform === "win32" || kind === "nonempty") {
+        await expect(result).rejects.toThrow(
+          process.platform === "win32"
+            ? "Destination already exists"
+            : "Invalid plugin ZIP",
+        );
+        if (kind === "nonempty")
+          expect(await readFile(sentinel, "utf8")).toBe("keep");
+        else expect(await readdir(destination)).toEqual([]);
+      } else {
+        expect(await result).toBe(destination);
+        expect(await readdir(destination)).toEqual([".codex-plugin"]);
+      }
+      expect((await readdir(root)).sort()).toEqual(["extracted", "plugin.zip"]);
+    },
+  );
+
   test("decodes flag-clear ZIP filenames with the legacy CP437 encoding", async () => {
     const root = await temporaryDirectory();
     const archive = Buffer.from(
@@ -6861,6 +6969,11 @@ describe("runtime directories and plugin Python boundary", () => {
 
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
+    using _home = spyOn(await import("node:os"), "homedir").mockImplementation(
+      () => {
+        throw new Error("No home directory for this account");
+      },
+    );
     const configured = join(root, "configured-python");
     await writeFile(
       configured,
@@ -6914,7 +7027,6 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(
         await resolvePluginPython({
           environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
-          homeDirectory: join(root, "unused-home"),
         }),
       ).toBe(cachedPython);
     }

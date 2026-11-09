@@ -12,31 +12,12 @@ import {
   rm,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { retryWindowsRename } from "../src/retry-windows-rename.js";
 import { isMain } from "./is-main.mjs";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const packageRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(packageRoot, "../..");
-
-async function retryWindowsRename(operation, rollback) {
-  // Windows can temporarily deny a directory rename while a file inside is open.
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      await rollback?.();
-      if (
-        process.platform !== "win32" ||
-        !["EPERM", "EACCES", "EBUSY"].includes(error.code) ||
-        attempt === 5
-      ) {
-        throw error;
-      }
-      await delay(100 * (attempt + 1));
-    }
-  }
-}
 
 function validatePath(path) {
   const parts = path.split("/");
@@ -153,9 +134,24 @@ export async function buildBundledPlugin({
         }
       },
     );
+    if (preservePrevious && process.platform === "win32") {
+      // A loaded addon can still prevent unlinking. Use the publication backoff
+      // for the whole old tree because recursive rm retries vary by runtime.
+      try {
+        await retryWindowsRename(() =>
+          rm(previous, { recursive: true, force: true }),
+        );
+      } catch (error) {
+        if (!["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+        console.warn(
+          `Published bundled plugin at ${destination}. Remove staging directory ${staging} after readers exit. ${error.message}`,
+        );
+        return files;
+      }
+    }
     preservePrevious = false;
   } finally {
-    // Leave the previous bundle available if restoring it fails.
+    // Retain the previous bundle if rollback fails or a reader keeps it open.
     if (!preservePrevious) await rm(staging, { recursive: true, force: true });
   }
 
