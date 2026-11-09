@@ -1,8 +1,10 @@
 # Import AWS Continuum code findings
 
 Use `GetCodeFinding` JSON to import selected findings with their locations,
-mitigation, and AWS validation evidence. Use `ListCodeFindings` JSON for
-summaries from an environment dedicated to one repository.
+mitigation, and AWS validation evidence. Findings that Continuum detects include
+its validation result; findings you submitted to Continuum can omit it. Use
+`ListCodeFindings` JSON for summaries from an environment dedicated to one
+repository.
 
 ## Quick start
 
@@ -20,7 +22,8 @@ report=/private/path/continuum.json
 ### Export findings for one repository
 
 To create a report, sign in to the environment's AWS account and Region with
-an AWS CLI that supports `continuum`. Choose one export.
+AWS CLI v2.38.5 or later, the first release with `aws continuum`. Choose one
+export.
 
 **One finding.** Set `FINDING_ID` to the Continuum ID of the finding you
 verified. In an environment with several repositories, use this command to

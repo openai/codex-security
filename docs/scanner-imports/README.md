@@ -32,8 +32,10 @@ The guides cover local and Cloud imports unless an input is marked local only.
 
 [Install the CLI](../../README.md#quick-start) and open the repository the
 findings apply to. Keep reports and preview output in a private directory
-outside that checkout. For commands that use `mktemp`, set `TMPDIR` there
-if needed. In CI, redirect stdout and stderr to private files.
+outside that checkout. For commands that use `mktemp -d`, set `TMPDIR` there
+if needed. macOS `mktemp -d` ignores `TMPDIR`; pass a template there instead,
+such as `mktemp -d "$PRIVATE_DIR/report.XXXXXX"`. In CI, redirect stdout and
+stderr to private files.
 
 **In the terminal**, follow your scanner's guide. Run examples that use
 `--repository .` from the checkout root. For a saved report, `publish findings`

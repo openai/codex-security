@@ -143,7 +143,8 @@ print(json.dumps({"_meta": {"href": url}, "totalCount": total, "items": items}))
 ```
 
 Run the script in isolated mode so Python loads packages from the trusted
-environment. Point `TMPDIR` to a private directory outside the checkout.
+environment. Point `TMPDIR` to a private directory outside the checkout. On
+macOS, also pass that directory to `mktemp -d` as a template.
 
 ```sh
 report=
