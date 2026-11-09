@@ -10,7 +10,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync, renameSync, symlinkSync } from "node:fs";
+import { existsSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -81,12 +81,15 @@ import {
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
+  isLocalWindowsCredentialVolume,
+  parseWindowsTokenGroupSids,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   prepareScanRegistrationOutput,
+  requireWindowsOutputPath,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -197,6 +200,30 @@ function windowsUserSid() {
   const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
   expect(sid).toBeDefined();
   return sid;
+}
+
+function setWindowsTestDacl(
+  python: Parameters<typeof runNodePython>[0],
+  path: string,
+  descriptor: string,
+) {
+  const setup = runNodePython(python, [
+    "-c",
+    [
+      "import ctypes, sys",
+      "from ctypes import wintypes",
+      "adv = ctypes.WinDLL('advapi32', use_last_error=True)",
+      "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+      "sd = wintypes.LPVOID()",
+      "if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sys.argv[2], 1, ctypes.byref(sd), None): raise ctypes.WinError(ctypes.get_last_error())",
+      "try:",
+      "    if not adv.SetFileSecurityW(sys.argv[1], wintypes.DWORD(0x80000004), sd): raise ctypes.WinError(ctypes.get_last_error())",
+      "finally: kernel.LocalFree(sd)",
+    ].join("\n"),
+    win32.toNamespacedPath(path),
+    descriptor,
+  ]);
+  expect(setup.status).toBe(0);
 }
 
 function inspectWindowsTestAcl(
@@ -1877,6 +1904,107 @@ for await (const line of createInterface({ input: process.stdin })) {
         '{"token":"linked"}\n',
       );
     },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "explains access denied when the SDK cannot reopen its Windows plugin installation receipt",
+    async () => {
+      const user = windowsUserSid()!;
+      if (user === "S-1-5-18") return; // SYSTEM is the independent file trustee.
+      const python = await resolvePluginPython();
+      const root = await temporaryDirectory();
+      // This fixture needs a local volume with FILE_PERSISTENT_ACLS.
+      const volume = runNodePython(python, [
+        "-c",
+        [
+          "import ctypes, sys",
+          "from ctypes import wintypes",
+          "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+          "volume = ctypes.create_unicode_buffer(32768)",
+          "if not kernel.GetVolumePathNameW(sys.argv[1], volume, len(volume)): raise ctypes.WinError(ctypes.get_last_error())",
+          "kind = kernel.GetDriveTypeW(volume.value)",
+          "if kind in (0, 1): raise RuntimeError('Could not determine the test volume type')",
+          "flags = wintypes.DWORD()",
+          "if kind in (2, 3, 6):",
+          "    if not kernel.GetVolumeInformationW(volume.value, None, 0, None, None, ctypes.byref(flags), None, 0): raise ctypes.WinError(ctypes.get_last_error())",
+          "print('supported' if flags.value & 0x8 else 'unsupported')",
+        ].join("\n"),
+        win32.toNamespacedPath(root),
+      ]);
+      expect(volume.status, volume.stderr).toBe(0);
+      const support = volume.stdout.trim();
+      expect(["supported", "unsupported"]).toContain(support);
+      if (support === "unsupported") return;
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = await createMarketplace(home, selected);
+      const installed = join(root, "installed");
+      await cp(selected, installed, { recursive: true });
+      await writeFile(
+        join(home, "config.toml"),
+        '[marketplaces.codex-security-sdk]\nsource_type="local"\nsource=' +
+          JSON.stringify(marketplace) +
+          '\n[plugins."codex-security@codex-security-sdk"]\nenabled=true\n',
+      );
+      const deny = "(D;OICI;FR;;;S-1-5-21-0-0-0-424242)";
+      const system = "(A;OICI;FA;;;SY)";
+      const full = "D:P" + deny + "(A;OICI;FA;;;" + user + ")" + system;
+      const receipt = join(marketplace, "installed-plugin.json");
+      let installs = 0;
+      const options = {
+        codexCommand: { command: "unused" },
+        environment: {},
+        runCodex: async (_command: unknown, args: readonly string[]) => {
+          expect(args.slice(0, 2)).toEqual(["plugin", "add"]);
+          installs++;
+          return JSON.stringify({ installedPath: installed, version: "1.2.3" });
+        },
+      };
+      setWindowsTestDacl(
+        python,
+        marketplace,
+        "D:P" + deny + "(A;;FA;;;" + user + ")" + system,
+      );
+      try {
+        expect(
+          (await bootstrapPlugin(home, selected, options)).installedRoot,
+        ).toBe(installed);
+        const original = await readFile(receipt, "utf8").then(
+          () => undefined,
+          (error: NodeJS.ErrnoException) => error,
+        );
+        expect(["EPERM", "EACCES"]).toContain(original?.code ?? "");
+        const failure = await bootstrapPlugin(home, selected, options).then(
+          () => {
+            throw new Error("Expected Windows to reject reopening the receipt");
+          },
+          (error: NodeJS.ErrnoException) => error,
+        );
+        expect(failure.code).toBe(original!.code);
+        expect(failure.path).toBe(receipt);
+        expect(failure.syscall).toBe(original!.syscall);
+        expect(failure.message).toContain(original!.message);
+        expect(failure.message).toContain("permissions new files inherit");
+        expect(installs).toBe(1);
+      } finally {
+        // Correct this fixture's grant on the directory and its existing receipt.
+        setWindowsTestDacl(python, marketplace, full);
+        if (existsSync(receipt))
+          setWindowsTestDacl(
+            python,
+            receipt,
+            "D:P" + deny + "(A;;FA;;;" + user + ")" + system,
+          );
+      }
+      // A receipt newly created under the corrected parent also reopens normally.
+      await rm(receipt);
+      await bootstrapPlugin(home, selected, options);
+      expect(
+        (await bootstrapPlugin(home, selected, options)).installedRoot,
+      ).toBe(installed);
+      expect(installs).toBe(2);
+    },
+    60_000,
   );
 
   test("uses the installed plugin path returned by Codex", async () => {
@@ -4457,6 +4585,69 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("allows OWNER RIGHTS on a Windows ancestor only after verifying its owner", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const stranger = "S-1-5-21-111-222-333-1002";
+    for (const trustee of ["OW", "S-1-3-4"]) {
+      for (const owner of [user, "SY", "BA"]) {
+        const descriptor = `O:${owner}G:SYD:P(A;OICI;FA;;;${trustee})(A;;FA;;;${stranger})`;
+        expect(
+          inspectWindowsCredentialAcl(descriptor, user, { scope: "ancestor" })
+            .untrustedPrincipals,
+        ).toEqual([stranger]);
+      }
+      for (const owner of [stranger, "OW"]) {
+        expect(() =>
+          inspectWindowsCredentialAcl(
+            `O:${owner}G:SYD:P(A;;FA;;;${trustee})`,
+            user,
+            { scope: "ancestor" },
+          ),
+        ).toThrow(/owner/u);
+      }
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "prepares a Windows credential home beneath a protected OWNER RIGHTS ancestor",
+    async () => {
+      const parent = join(await temporaryDirectory(), "private-parent");
+      await mkdir(parent);
+      const environment = { ...process.env, QA_OWNER_RIGHTS_PARENT: parent };
+      const grant = windowsTestCommand("icacls.exe", [
+        parent,
+        "/inheritance:r",
+        "/grant:r",
+        `*${windowsUserSid()}:(OI)(CI)F`,
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+        "*S-1-3-4:(OI)(CI)F",
+      ]);
+      expect(grant.status, grant.stderr).toBe(0);
+      const readParent = () =>
+        inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:QA_OWNER_RIGHTS_PARENT).Sddl",
+          ],
+          environment,
+        );
+      const before = readParent();
+      expect(before.status, before.stderr).toBe(0);
+      expect(before.stdout).toMatch(/;;;(?:OW|S-1-3-4)\)/u);
+      const state = join(parent, "state");
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }),
+      ).toBe(join(state, "codex-home"));
+      const after = readParent();
+      expect(after.status, after.stderr).toBe(0);
+      expect(after.stdout).toBe(before.stdout);
+    },
+  );
+
   test("identifies broad, foreign, and inherited Windows ACL grants", () => {
     const user = "S-1-5-21-111-222-333-1001";
     const stranger = "S-1-5-21-111-222-333-1002";
@@ -4499,6 +4690,61 @@ describe("runtime directories and plugin Python boundary", () => {
       untrustedPrincipals: [],
       deniedPrincipals: ["S-1-1-0"],
     });
+  });
+
+  test("uses local group membership only on local Windows volumes", async () => {
+    const readType = mock(async () => "4");
+    for (const path of [
+      String.raw`\\server\share\home`,
+      String.raw`\\?\UNC\server\share\home`,
+    ]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+    }
+    expect(readType).not.toHaveBeenCalled();
+    for (const path of [String.raw`X:\home`, String.raw`\\?\X:\home`]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+      expect(readType).toHaveBeenLastCalledWith("X:");
+      expect(
+        await isLocalWindowsCredentialVolume(path, async () => "3\r\n"),
+      ).toBe(true);
+      expect(await isLocalWindowsCredentialVolume(path, async () => "")).toBe(
+        false,
+      );
+    }
+  });
+
+  test("preserves account denies only after excluding current token membership", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const group = "S-1-5-21-111-222-333-512";
+    const other = "S-1-5-21-0-0-0-424242";
+    const currentGroupSids = parseWindowsTokenGroupSids(
+      `"Domain, Group","Group","${group}","Group used for deny only"\r\n`,
+    );
+    const descriptor = `O:${user}D:P(D;OICI;FR;;;${other})(A;OICI;FA;;;${user})`;
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user).grantsCurrentUserAccess,
+    ).toBe(false);
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user, { currentGroupSids }),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      deniedPrincipals: [],
+    });
+    for (const principal of [user, "DA", "WD", "OW"]) {
+      expect(
+        inspectWindowsCredentialAcl(
+          descriptor.replace(other, principal),
+          user,
+          {
+            currentGroupSids,
+            resolvedAliases: { DA: group },
+          },
+        ).grantsCurrentUserAccess,
+      ).toBe(false);
+    }
+    for (const invalid of ["", `"a","b","${group}","c"\r\ninvalid`]) {
+      expect(() => parseWindowsTokenGroupSids(invalid)).toThrow();
+    }
   });
 
   test("requires effective, inheritable Windows credential access", () => {
@@ -5094,6 +5340,105 @@ describe("runtime directories and plugin Python boundary", () => {
       expect([sid!, "S-1-5-18", "S-1-5-32-544"]).toContain(access.owner);
       expect(new Set(access.principals)).toEqual(
         new Set([sid!, "S-1-5-18", "S-1-5-32-544"]),
+      );
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "preserves an unmapped Windows deny SID on a private credential home and its children",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      const home = join(state, "codex-home");
+      await mkdir(home, { recursive: true });
+      const child = join(home, "sessions");
+      const file = join(child, "fixture.txt");
+      const unmappedSid = "S-1-5-21-0-0-0-424242";
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_TEST_ACL_PATH: win32.toNamespacedPath(home),
+        CODEX_SECURITY_TEST_CHILD: win32.toNamespacedPath(child),
+        CODEX_SECURITY_TEST_FILE: win32.toNamespacedPath(file),
+      };
+      const identity = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
+      expect(identity.status).toBe(0);
+      const userSid = identity.stdout.match(/"(S-1-[0-9-]+)"\s*$/iu)?.[1];
+      if (!userSid)
+        throw new Error("Could not identify the Windows fixture user SID");
+      const sddl = `D:P(D;OICI;FR;;;${unmappedSid})(A;OICI;FA;;;${userSid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`;
+      // Set the raw DACL without resolving the synthetic trustee or invoking PowerShell methods.
+      const python = await resolvePluginPython();
+
+      setWindowsTestDacl(python, home, sddl);
+      await mkdir(child);
+      await writeFile(file, "synthetic credential fixture\n");
+      // A subtree reset would replace this distinct protected file ACL with the home ACL.
+      setWindowsTestDacl(
+        python,
+        file,
+        `D:P(D;;FR;;;${unmappedSid})(A;;FA;;;${userSid})`,
+      );
+
+      const readDescriptors = () => {
+        const result = inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH).Sddl",
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_CHILD).Sddl",
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_FILE).Sddl",
+          ],
+          environment,
+        );
+        if (result.status !== 0)
+          throw new Error(
+            "Fixture ACL read failed: " +
+              (result.stderr.match(
+                /FullyQualifiedErrorId\s*:\s*([\w.,-]+)/u,
+              )?.[1] ?? "unknown"),
+          );
+        return result.stdout.trim().split(/\r?\n/u);
+      };
+      const before = readDescriptors();
+      expect(before.length).toBe(3);
+      expect(before[0]!.includes("D:P") && before[2]!.includes("D:P")).toBe(
+        true,
+      );
+      expect(before[2] !== before[1]).toBe(true);
+      expect(
+        before.every((descriptor) => descriptor.includes(`;;;${unmappedSid})`)),
+      ).toBe(true);
+      const expectedHome = await realpath(home);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const prepared = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }).catch((error: unknown) => {
+          const cause = error instanceof Error ? error.cause : undefined;
+          if (
+            cause instanceof Error &&
+            "cmd" in cause &&
+            typeof cause.cmd === "string" &&
+            /\bicacls\.exe\b/iu.test(cause.cmd) &&
+            cause.cmd.includes(" /remove:d ") &&
+            cause.cmd.includes(`*${unmappedSid}`)
+          ) {
+            throw new Error("icacls attempted to remove the synthetic DENY");
+          }
+          throw error;
+        });
+        expect(prepared === expectedHome).toBe(true);
+        const after = readDescriptors();
+        expect(
+          after.map((descriptor, index) => descriptor === before[index]),
+        ).toEqual([true, true, true]);
+      }
+      expect(await readFile(file, "utf8")).toBe(
+        "synthetic credential fixture\n",
       );
     },
   );
@@ -6094,6 +6439,94 @@ describe("runtime directories and plugin Python boundary", () => {
           chmodFailure.mockRestore();
           umask.mockRestore();
         }
+      }
+    },
+  );
+
+  testPosix(
+    "rejects a selected directory replaced in a shared parent during validation",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      const output = join(shared, "output");
+      const unrelated = join(root, "unrelated");
+      await mkdir(output, { recursive: true });
+      await chmod(shared, 0o777);
+      await mkdir(unrelated);
+      const uid = process.geteuid!();
+      using _swap = spyOn(process, "geteuid").mockImplementationOnce(() => {
+        renameSync(output, join(shared, "moved"));
+        symlinkSync(unrelated, output);
+        return uid;
+      });
+      await expect(validateOutputDir(output)).rejects.toThrow("writable");
+      expect(await realpath(output)).toBe(unrelated);
+    },
+  );
+
+  test("creates temporary output under the directory selected before an alias changes", async () => {
+    const root = await temporaryDirectory();
+    const selected = join(root, "selected");
+    const replacement = join(root, "replacement");
+    const alias = join(root, "alias");
+    await mkdir(selected);
+    await mkdir(replacement);
+    await symlink(selected, alias, "junction");
+    const output = await prepareOutputDir(undefined, "repo", alias, (path) => {
+      if (path === selected) {
+        unlinkSync(alias);
+        symlinkSync(replacement, alias, "junction");
+      }
+    });
+    expect(await realpath(alias)).toBe(replacement);
+    expect(dirname(output)).toBe(selected);
+    expect(await readdir(replacement)).toEqual([]);
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "keeps existing output validation on the selected Windows directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const output = join(root, "output");
+      for (const writable of [false, true]) {
+        await expect(
+          requireWindowsOutputPath(output, writable),
+        ).rejects.toThrow();
+      }
+      await mkdir(output);
+      await writeFile(join(output, "old"), "");
+      expect(await validateOutputDir(join(root, "OUTPUT"), true)).toBe(output);
+
+      const staged = join(root, "staged");
+      const unrelated = join(staged, "output");
+      await mkdir(unrelated, { recursive: true });
+      await writeFile(join(unrelated, "keep"), "");
+      const original = fsPromises.realpath;
+      const substitution = spyOn(fsPromises, "realpath").mockImplementation(
+        new Proxy(original, {
+          async apply(target, receiver, args) {
+            if (args[0] !== output)
+              return Reflect.apply(target, receiver, args);
+            const moved = join(root, "moved");
+            renameSync(output, moved);
+            symlinkSync(unrelated, output, "junction");
+            const redirected = await original(output);
+            unlinkSync(output);
+            renameSync(moved, output);
+            renameSync(staged, join(root, "saved"));
+            symlinkSync(root, staged, "junction");
+            return redirected;
+          },
+        }),
+      );
+      try {
+        // The redirected path now identifies the original leaf under a different parent.
+        await expect(validateOutputDir(output, true)).rejects.toThrow(
+          "changed during preparation",
+        );
+        expect(await readdir(join(root, "saved", "output"))).toEqual(["keep"]);
+      } finally {
+        substitution.mockRestore();
       }
     },
   );

@@ -1264,7 +1264,7 @@ test("a projected Snyk issue resumes its approved private repository after a ren
 
 async function privateUploadFixture(
   raw: unknown,
-  provider: "endor" | "snyk" | "wiz",
+  provider: "endor" | "semgrep" | "snyk" | "wiz",
   repositoryUrl?: string,
 ) {
   const f = await fixture(raw, repositoryUrl);
@@ -1752,7 +1752,100 @@ test("an undefined optional Snyk context permits generic SDK evidence", async ()
   ).rejects.toThrow("Expected a versioned Snyk REST report context");
 });
 
-test("a saved selection with Guardian evidence cannot resume a Cloud upload", async () => {
+test.each(["sast", "sca"])(
+  "Guardian %s files publish and replay only at their selected repository",
+  async (product) => {
+    const url = "https://github.com/example/project";
+    const repository = "example/project";
+    const ref = "refs/heads/topic";
+    const id = "09007199254740993";
+    const report = {
+      format: "semgrep-guardian-selection/v1",
+      sourceRepositoryUrl: url,
+      request: {
+        name:
+          product === "sast"
+            ? "get_semgrep_sast_findings"
+            : "get_semgrep_supply_chain_findings",
+        arguments: {
+          deployment_name: "example",
+          repository_name: repository,
+          ref,
+        },
+      },
+      findingIds: [id],
+      structuredContent: {
+        findings: [
+          {
+            id,
+            ref,
+            repository: { name: repository },
+            issueType: product,
+            severity: "HIGH",
+            rulePath: "example.rule",
+            message: "Example finding",
+            filePath: "src/app.ts",
+            line: 3,
+          },
+        ],
+      },
+    };
+    const f = await fixture(report, url);
+    const binding = { ...options, provider: "semgrep" as const };
+    const local = normalizeSemgrepFindings(report, {}, "local");
+    const prepare = () => prepareExternalPublication(f.file, binding, f.deps);
+    const prepared = await prepare();
+    expect(prepared.preview.findings).toEqual(local.findings);
+    await f.loseResponse(prepared);
+    expect((await (await prepare()).publish()).verified).toBe(1);
+    const unscored = structuredClone(report);
+    unscored.structuredContent.findings[0]!.severity = "UNSPECIFIED";
+    const inbox = await privateUploadFixture(unscored, "semgrep", url);
+    const headers = inbox.f.state.catalogHeaders;
+    headers["Codex-Security-Repository-Import-Severities"] = "high";
+    delete headers["Codex-Security-Private-Import-Providers"];
+    await expect(inbox.prepareFile()).rejects.toMatchObject({
+      selection: { findings: [], excluded: [{ position: 1 }] },
+    });
+    headers["Codex-Security-Private-Import-Providers"] = "semgrep";
+    const privatePreview = (await inbox.prepareFile()).preview;
+    expect(privatePreview.privateImport?.format).toBe("security.findings.v1");
+    expect(privatePreview.findings[0]!.evidence.severity).toBe("unknown");
+    const elsewhere = await fixture(report, "https://github.com/other/project");
+    await expect(
+      prepareExternalPublication(elsewhere.file, binding, elsewhere.deps),
+    ).rejects.toThrow(/repository/iu);
+    await expect(
+      prepareNormalizedExternalPublication(
+        { ...local, report: undefined },
+        binding,
+        elsewhere.deps,
+      ),
+    ).rejects.toThrow(/repository/iu);
+    expect(elsewhere.posts).toHaveLength(0);
+    const missingSource = structuredClone(local);
+    delete missingSource.findings[0]!.evidence.source_data![
+      "sourceRepositoryUrl"
+    ];
+    await expect(
+      prepareNormalizedExternalPublication(missingSource, binding, f.deps),
+    ).rejects.toThrow(/Guardian --source-repository-url/u);
+    const wrongRef = structuredClone(local);
+    wrongRef.findings[0]!.evidence.branch = "refs/heads/other";
+    await expect(
+      prepareNormalizedExternalPublication(wrongRef, binding, f.deps),
+    ).rejects.toThrow(/selected ref/u);
+    const changed = {
+      ...local,
+      findings: [{ ...local.findings[0]!, source_finding_id: "another-id" }],
+    };
+    await expect(
+      prepareNormalizedExternalPublication(changed, binding, f.deps),
+    ).rejects.toThrow(/original Guardian finding/);
+  },
+);
+
+test("a saved selection with Guardian evidence cannot resume under another provider", async () => {
   const f = await fixture([normalized()]);
   const prepare = () => prepareExternalPublication(f.file, options, f.deps);
   const path = await f.loseResponse(await prepare());
@@ -1766,9 +1859,7 @@ test("a saved selection with Guardian evidence cannot resume a Cloud upload", as
   );
   const bytes = JSON.stringify(saved);
   await writeFile(path, bytes);
-  await expect(prepare()).rejects.toThrow(
-    /Guardian findings require a local import/,
-  );
+  await expect(prepare()).rejects.toThrow(/semgrep provider/);
   expect(f.posts).toHaveLength(1);
   expect(await readFile(path, "utf8")).toBe(bytes);
 });

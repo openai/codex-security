@@ -4,6 +4,7 @@ import { constants } from "node:os";
 import { basename, join } from "node:path";
 import {
   composeReleaseNotes,
+  releaseHistory,
   resolveReleaseSummary,
   verifyGitHubRelease,
 } from "./release-automation.mjs";
@@ -60,10 +61,45 @@ export function publishGitHubRelease(env, workspace, run = runCommand) {
     RELEASE_VERSION: version,
     RELEASE_SHA: sha,
     RELEASE_ARCHIVE: archive,
-    PREVIOUS_TAG: previousTag,
-    MAKE_LATEST: makeLatest,
   } = env;
   const base = `repos/${repository}`;
+  const npmVersions = output(
+    run("npm", [
+      "view",
+      "@openai/codex-security",
+      "versions",
+      "--json",
+      "--registry=https://registry.npmjs.org/",
+    ]),
+  );
+  const publishedTags = output(
+    run("gh", [
+      "api",
+      "--paginate",
+      `${base}/releases?per_page=100`,
+      "--jq",
+      ".[] | select(.draft == false and .prerelease == false) | .tag_name",
+    ]),
+  );
+  const parent = `${sha}^`;
+  let reachableTags = [];
+  if (run("git", ["rev-parse", parent], "ignore", "ignore").status === 0) {
+    reachableTags = output(
+      run("git", [
+        "tag",
+        "--merged",
+        parent,
+        "--list",
+        "npm-v*",
+        "--sort=-version:refname",
+      ]),
+    ).split("\n");
+  }
+  const { previousTag, makeLatest } = releaseHistory(tag, {
+    registryVersions: JSON.parse(npmVersions),
+    githubReleaseTags: publishedTags.split("\n"),
+    reachableTags,
+  });
   const release = (action, args, assets = []) => {
     const result = run(
       "gh",
@@ -179,7 +215,7 @@ export function publishGitHubRelease(env, workspace, run = runCommand) {
       (typeof latest.tag_name !== "string" || latest.tag_name.length === 0)
     )
       throw new Error("Unable to resolve the current Latest GitHub Release.");
-    const currentlyLatest = String(latest?.tag_name === tag);
+    const currentlyLatest = latest?.tag_name === tag;
     const notesChanged = !Buffer.from(existingNotes).equals(Buffer.from(notes));
     if (notesChanged || currentlyLatest !== makeLatest) {
       const args = [`--latest=${makeLatest}`];
