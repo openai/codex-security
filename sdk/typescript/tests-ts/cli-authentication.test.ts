@@ -149,6 +149,47 @@ describe("CLI authentication", () => {
     }
   });
 
+  test("signs in with the credential storage set in the user's Codex config", async () => {
+    const home = await createCredentialHome();
+    const ambient = join(stateDirectory, "ambient");
+    await mkdir(ambient, { mode: 0o700 });
+    const scanned = 'cli_auth_credentials_store = "auto"\nmodel = "kept"\n';
+    for (const argv of [["login"], ["login", "status"], ["logout"]] as const) {
+      await writeFile(join(home, "config.toml"), scanned);
+      const unset = createCliTest(main);
+      const deps = dependencies();
+      deps.runCodex = mock<typeof deps.runCodex>(resolving(0));
+      expect(await unset.runCli(argv, deps)).toBe(0);
+      // Without a setting, existing credentials stay where they are stored.
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(scanned);
+
+      await writeFile(
+        join(ambient, "config.toml"),
+        'cli_auth_credentials_store = "file"\nforced_login_method = "chatgpt"\nmodel = "ambient"\n',
+      );
+      const configured = createCliTest(main);
+      let forwarded: readonly string[] | undefined;
+      deps.runCodex = async (args) => {
+        forwarded = args;
+        return 0;
+      };
+      expect(await configured.runCli(argv, deps)).toBe(0);
+      expect(forwarded).toEqual([...argv]);
+      expect(
+        parseToml(await readFile(join(home, "config.toml"), "utf8")),
+      ).toEqual(
+        argv[0] === "logout"
+          ? { cli_auth_credentials_store: "auto", model: "kept" }
+          : {
+              cli_auth_credentials_store: "file",
+              forced_login_method: "chatgpt",
+              model: "kept",
+            },
+      );
+      await rm(join(ambient, "config.toml"));
+    }
+  });
+
   test("logout detaches only a separate ambient hard link before native failure", async () => {
     const home = await createCredentialHome();
     const auth = join(home, "auth.json");

@@ -198,6 +198,7 @@ import {
   resolveCommandAuthConfig,
   resolveCodexProfile,
   mergedCodexConfig,
+  readCodexAuthConfig,
   readCodexFileProfile,
   scanPricingContext,
   scanModel,
@@ -1694,6 +1695,26 @@ export async function runCodexSkillCommand(
     });
     throw error;
   }
+}
+
+/**
+ * Sign in with the storage and login restrictions the user's Codex config
+ * sets, as scans do. Unset settings keep where existing credentials are stored.
+ */
+async function applyAmbientAuthConfig(
+  credentialHome: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  const ambient = await readCodexAuthConfig(scanCodexHome(environment));
+  if (Object.keys(ambient).length === 0) return;
+  const config = await readCodexHomeConfig({
+    ...environment,
+    CODEX_HOME: credentialHome,
+  });
+  await writeCodexConfig(join(credentialHome, "config.toml"), {
+    ...config,
+    ...ambient,
+  });
 }
 
 async function runCodexSkillProcess(
@@ -7109,16 +7130,19 @@ export async function main(
           dependencies.environment,
         );
         const authentication = scanAuthentication(dependencies.environment);
-        if (args.action === "status" && authentication.method !== "api_key") {
-          const ambientHome = scanCodexHome(dependencies.environment);
-          await withCredentialHomeLock(credentialHome, () =>
-            initialCredentialsAvailable(
-              dependencies.environment,
-              ambientHome,
-              credentialHome,
-            ),
+        await withCredentialHomeLock(credentialHome, async () => {
+          await applyAmbientAuthConfig(
+            credentialHome,
+            dependencies.environment,
           );
-        }
+          if (args.action === "status" && authentication.method !== "api_key") {
+            await initialCredentialsAvailable(
+              dependencies.environment,
+              scanCodexHome(dependencies.environment),
+              credentialHome,
+            );
+          }
+        });
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,

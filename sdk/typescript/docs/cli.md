@@ -1564,9 +1564,12 @@ Enterprise repository URL or its Cloud ID. Either works for retries. If
 several connectors share the URL, use the ID. You can import before the
 repository's first native scan.
 
-Cloud requires a file-backed ChatGPT login. To use your regular Codex login,
-set `cli_auth_credentials_store = "file"` in Codex `config.toml`, then sign in
-again with the ChatGPT account you want to use.
+Cloud requires a file-backed ChatGPT login. Codex Security signs in with the
+`cli_auth_credentials_store` set in your Codex `config.toml`
+(`~/.codex/config.toml`, or `$CODEX_HOME/config.toml`). Without it, the login
+can be saved in the system keyring. To publish, set
+`cli_auth_credentials_store = "file"` there, then run `codex-security login`
+with the ChatGPT account you want to use.
 
 ### Review the Cloud destination
 
@@ -1713,7 +1716,9 @@ prefix of at least eight characters, or `latest` for the current repository.
 Local sealed artifacts are required. Dry runs need no login or network access.
 
 Uploads require ChatGPT credentials saved to a file. Set
-`cli_auth_credentials_store = "file"` in Codex `config.toml`, then sign in again.
+`cli_auth_credentials_store = "file"` in Codex `config.toml`, then run
+`codex-security login` again. Login, scans and other commands use that setting
+for the Codex Security sign-in.
 Cloud publication rejects automatic/keyring storage even when `auth.json` exists,
 because that file may be stale or belong to another account.
 

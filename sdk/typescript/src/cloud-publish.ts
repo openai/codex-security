@@ -26,7 +26,7 @@ import {
 import { VERSION } from "./version.js";
 import { cloudBaseUrl } from "./cloud-endpoint.js";
 const CHATGPT_LOGIN_REQUIRED =
-  "Cloud publication requires a ChatGPT login already available to Codex Security. Run a scan or sign in with ChatGPT using Codex file credential storage, then retry.";
+  "Cloud publication requires a ChatGPT login already available to Codex Security and saved to a file. Set cli_auth_credentials_store = \"file\" in ~/.codex/config.toml (or $CODEX_HOME/config.toml), run 'codex-security login', then retry.";
 
 const credentialsSchema = z.object({
   auth_mode: z.literal("chatgpt").optional(),
