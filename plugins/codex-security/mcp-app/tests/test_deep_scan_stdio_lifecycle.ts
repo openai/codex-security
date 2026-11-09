@@ -1514,9 +1514,18 @@ async function testCliDeepScanEngine({
   const manifest = await readJson(
     path.join(completed.scanDir, "scan-manifest.json"),
   );
-  assert.equal(manifest.scan.status, "completed");
+  assert.equal(manifest.scan.status, "failed");
   assert.ok(manifest.scan.sealedAt);
   assert.deepEqual(manifest.scan.scope.includePaths, paths);
+  assert.ok(
+    manifest.scan.scope.limitations.includes(
+      "Validation was deferred because the scan reached its cost limit.",
+    ),
+  );
+  const sarif = await readJson(
+    path.join(completed.scanDir, "exports/results.sarif"),
+  );
+  assert.equal(sarif.runs[0].invocations[0].executionSuccessful, false);
   assert.ok(
     (await readFile(path.join(completed.scanDir, "report.md"), "utf8")).length >
       0,

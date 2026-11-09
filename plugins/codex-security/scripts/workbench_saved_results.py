@@ -685,6 +685,16 @@ def preserve_scan_results_locked(
             existing_sources = existing_scan.get("preservedSources")
             existing_heads = existing_scan.get("preservedCheckpointHeads")
             if frozen_source_digests is None:
+                if (
+                    existing_sources is None
+                    and not pending_recovery
+                    and scan["seal_manifest_digest"] is not None
+                    and deep_run is not None
+                    and deep_run["status"] == "succeeded"
+                ):
+                    # A cost stop can directly seal the authoritative parent draft.
+                    # This verified result has no worker source projection to refresh.
+                    return True
                 frozen_source_digests = _source_digests(
                     existing_sources, "Stopped scan source digests could not be frozen."
                 )

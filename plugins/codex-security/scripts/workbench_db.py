@@ -1147,14 +1147,7 @@ def complete_budget_exhausted_scan(
                 (json.dumps([*warnings, warning]), scan_id),
             )
             connection.commit()
-        failure = argparse.Namespace(
-            claim_token=None,
-            cost_json=cost_json,
-            message=warning,
-            model_thread_id=None,
-            scan_id=scan_id,
-        )
-        return saved_results.fail_scan_locked(_WORKBENCH_DB_CONTEXT, connection, failure)
+        return complete_scan_locked(connection, scan_id, None, cost_json, cost_stop=warning)
 
 
 def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
@@ -1241,6 +1234,7 @@ def complete_scan_locked(
     claim_token: str | None,
     cost_json: str | None,
     *,
+    cost_stop: str | None = None,
     prepare_only: bool = False,
     thread_id: str | None = None,
     turn_id: str | None = None,
@@ -1282,6 +1276,9 @@ def complete_scan_locked(
         and manifest_is_sealed(current_manifest["scan"])
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
+    if cost_stop is not None:
+        # The budget draft already contains the settled discovery and validation decisions.
+        completion_binding["status"] = "failed"
     if scan["recipe_json"] is not None:
         missing_drafts = []
         for file_name in (
@@ -1364,7 +1361,7 @@ def complete_scan_locked(
                 )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
-            prepared, projection_warnings=warnings
+            prepared, projection_warnings=warnings, replace_review_checkpoint=cost_stop is not None
         )
     except ContractError as exc:
         # Only a coordinator-selected parent is fenced for output-write replay.
@@ -1460,11 +1457,13 @@ def complete_scan_locked(
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'complete', phase = 'reporting', completed_at = ?, updated_at = ?,
+            SET status = ?, failure_message = ?, phase = 'reporting', completed_at = ?, updated_at = ?,
                 seal_manifest_digest = ?, cost_json = ?, completion_warnings_json = ?
             WHERE id = ? AND status = 'running'
             """,
             (
+                "failed" if cost_stop is not None else "complete",
+                cost_stop,
                 timestamp,
                 timestamp,
                 manifest_digest,
