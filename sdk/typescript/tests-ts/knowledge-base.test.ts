@@ -539,7 +539,8 @@ describe("scan knowledge bases", () => {
           "<w:sdt><w:sdtPr><w:showingPlcHdr/></w:sdtPr><w:sdtContent>" +
           "<w:r><w:t>Click here to enter text.</w:t></w:r></w:sdtContent></w:sdt></w:p>" +
           '<w:p><w:r><w:t xml:space="preserve">Data: </w:t></w:r>' +
-          "<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>Confidential</w:t></w:r>" +
+          '<w:sdt><w:sdtPr><w:showingPlcHdr w:val="0"/></w:sdtPr><w:sdtContent>' +
+          "<w:r><w:t>Confidential</w:t></w:r>" +
           "</w:sdtContent></w:sdt></w:p>",
       ),
     );
