@@ -68,6 +68,7 @@ from workbench_constants import (
     DELIVERED_ACTION_LEASE_SECONDS,
     FINDING_ABSOLUTE_PATH_BYTES,
     FINDING_LEVEL_BYTES,
+    FINDING_LOCATION_ORDER_SQL,
     FINDING_LOCATION_PATH_BYTES,
     FINDING_LOCATION_ROLE_BYTES,
     FINDING_LOCATIONS_LIMIT,
@@ -639,7 +640,9 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
     root = resolve_scan_root(scan_root)
-    target_root = (root / safe_segment(target.name)).resolve()
+    target_root = root / safe_segment(target.name)
+    if os.name != "nt":
+        target_root = target_root.resolve()
     if target_root == target or target in target_root.parents:
         raise SystemExit("The scan artifact directory must be outside the selected target.")
     return target_root
@@ -719,7 +722,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target_kind=diff_target["kind"] if diff_target is not None else None,
         )
         target_root = scan_target_root(args.scan_root, target)
-        create_private_directory(target_root)
+        create_private_directory(target_root, scan_output=True)
         require_working_tree_unchanged(target, diff_target)
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
@@ -853,7 +856,8 @@ def _start_prompt_driven_scan(
                 """
                 SELECT scans.* FROM scans
                 JOIN workspaces ON workspaces.active_scan_id = scans.id
-                WHERE workspaces.thread_id = ? AND workspaces.target_path = ?
+                WHERE COALESCE(scans.continuation_thread_id, workspaces.thread_id) = ?
+                    AND scans.recipe_json IS NULL AND workspaces.target_path = ?
                     AND workspaces.default_scope = ? AND workspaces.default_mode = ?
                     AND workspaces.user_context IS ? AND workspaces.target_summary IS ?
                     AND workspaces.diff_target_kind IS ? AND workspaces.diff_base_revision IS ?
@@ -866,7 +870,7 @@ def _start_prompt_driven_scan(
                         (? = 0 AND scans.handoff_claim_token IS NULL)
                         OR (
                             ? = 1 AND scans.handoff_claim_token IS NOT NULL
-                            AND scans.continuation_thread_id = ?
+                            AND scans.continuation_thread_id = workspaces.thread_id
                         )
                     )
                 ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id LIMIT 1
@@ -882,16 +886,15 @@ def _start_prompt_driven_scan(
                     *target_identity,
                     int(headless_standard),
                     int(headless_standard),
-                    thread_id,
                 ),
             ).fetchone()
             if existing is not None:
                 connection.commit()
                 return {
-                    **scan_context(connection, existing["id"]),
+                    **scan_context(connection, existing["id"], model_thread_id=thread_id),
                     "startDisposition": "joined",
                 }
-            create_private_directory(target_root)
+            create_private_directory(target_root, scan_output=True)
             workspace_id = str(uuid.uuid4())
             scan_id = str(uuid.uuid4())
             timestamp = now()
@@ -1026,6 +1029,7 @@ def complete_scan(
             prepare_only=prepare_only,
             thread_id=getattr(args, "thread_id", None),
             turn_id=getattr(args, "turn_id", None),
+            model_thread_id=getattr(args, "model_thread_id", None),
         )
 
 
@@ -1233,19 +1237,21 @@ def complete_scan_locked(
     prepare_only: bool = False,
     thread_id: str | None = None,
     turn_id: str | None = None,
+    model_thread_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
-    if scan["status"] == "complete":
-        return saved_results.refresh_completed_scan(
-            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
-        )
-    if scan["status"] != "running":
+    handoff.require_tokenless_scan_owner(connection, scan, model_thread_id)
+    if scan["status"] not in {"running", "complete"}:
         raise SystemExit("Only a running scan can be completed.")
     handoff.require_current_continuation(
         scan,
         claim_token,
         error_message="Scan completion is owned by another continuation.",
     )
+    if scan["status"] == "complete":
+        return saved_results.refresh_completed_scan(
+            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
+        )
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
@@ -1412,17 +1418,18 @@ def complete_scan_locked(
     with connection:
         timestamp = manifest["scan"]["completedAt"]
         scan = require_scan(connection, scan["id"])
-        if scan["status"] == "complete":
-            connection.commit()
-            return scan_context(connection, scan["id"])
-        if scan["status"] != "running":
+        handoff.require_tokenless_scan_owner(connection, scan, model_thread_id)
+        if scan["status"] not in {"running", "complete"}:
             raise SystemExit("Only a running scan can be completed.")
-        deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
         handoff.require_current_continuation(
             scan,
             claim_token,
             error_message="Scan completion is owned by another continuation.",
         )
+        if scan["status"] == "complete":
+            connection.commit()
+            return scan_context(connection, scan["id"])
+        deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
         connection.execute("DELETE FROM scan_artifacts WHERE scan_id = ?", (scan["id"],))
         for kind, path in artifacts.items():
             if path is not None:
@@ -1467,7 +1474,11 @@ def complete_scan_locked(
 
 
 def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Path:
-    scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
+    # Registration uses an empty output, including the replacement created with
+    # the original DACL after archival. Check that ACL before moving any results.
+    scan_dir = require_canonical_scan_directory(
+        Path(args.scan_dir).expanduser(), writable_output=True
+    )
     if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
         raise SystemExit(
             "The scan artifact directory must be outside and not contain the selected target."
@@ -2264,9 +2275,62 @@ def set_finding_remediation(
                 )
             except (ContractError, OSError, SystemExit) as exc:
                 raise SystemExit(f"Could not save the remediation patch: {exc}") from exc
-    return scan_context(
-        connection, occurrence["scan_id"], occurrence["id"] if patch is not None else None
-    )
+    if getattr(args, "assigned_finding", False):
+        return assigned_remediation_context(
+            connection,
+            occurrence["scan_id"],
+            occurrence["id"],
+            request_id,
+            action_token,
+            written_version=args.expected_version + 1,
+        )
+    return scan_context(connection, occurrence["scan_id"], occurrence["id"])
+
+
+def assigned_remediation_context(
+    connection: sqlite3.Connection,
+    scan_id: str,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+    *,
+    written_version: int | None = None,
+) -> dict[str, Any]:
+    """After authorization, project only the assigned finding and check the returned action state."""
+    occurrence = require_occurrence(connection, occurrence_id)
+    if occurrence["details_json"] == "{}":
+        backfill_legacy_finding_details(connection, require_scan(connection, scan_id))
+        occurrence = require_occurrence(connection, occurrence_id)
+    if occurrence["scan_id"] != scan_id:
+        raise SystemExit("This finding does not belong to the selected scan.")
+    scan = require_scan(connection, scan_id)
+    finding = finding_result(connection, scan, occurrence, related=None)
+    state = finding["remediationState"]
+    if written_version is None:
+        if not (
+            state.get("requestId") == request_id
+            and state.get("actionClaimToken") == action_token
+            and state.get("pendingAction")
+        ):
+            raise SystemExit(
+                "This remediation action is no longer owned by the supplied request and action token."
+            )
+    elif (
+        state.get("requestId") != request_id
+        or state.get("version") != written_version
+        or state.get("actionClaimToken") not in (None, action_token)
+    ):
+        # The next action may already have started since this write committed.
+        return {"occurrenceId": occurrence_id, "requestId": request_id, "version": written_version}
+    return {
+        "scan": {
+            "scanId": scan["id"],
+            "targetPath": scan["target_path"],
+            "targetRevision": scan["target_revision"],
+            "scanDir": scan["scan_dir"],
+            "findings": [finding],
+        }
+    }
 
 
 def require_reviewed_patch_applied(
@@ -2454,11 +2518,10 @@ def workspace_state(
     }
     selected_scan_id = result_scan_id or workspace["active_scan_id"]
     if selected_scan_id:
-        selected_scan = require_scan(connection, selected_scan_id)
-        result["userContext"] = selected_scan["user_context"]
-        result["results"] = (
-            result_scan if result_scan is not None else scan_result(connection, selected_scan)
-        )
+        if result_scan is None:
+            result_scan = scan_result(connection, require_scan(connection, selected_scan_id))
+        result["userContext"] = result_scan["userContext"]
+        result["results"] = result_scan
         return result
 
     target_metadata = None
@@ -2499,9 +2562,15 @@ def scan_context(
     connection: sqlite3.Connection,
     scan_id: str,
     occurrence_id: str | None = None,
+    *,
+    model_thread_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
-    result = scan_result(connection, scan, occurrence_id=occurrence_id)
+    # Legacy backfill may write before scan_result reloads the row for its response.
+    handoff.require_tokenless_scan_owner(connection, scan, model_thread_id)
+    result = scan_result(
+        connection, scan, occurrence_id=occurrence_id, model_thread_id=model_thread_id
+    )
     workspace_result = result
     if len(result["findings"]) > FINDINGS_RESULT_LIMIT:
         workspace_result = dict(
@@ -2539,7 +2608,63 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
             raise SystemExit("Codex Security scan not found.")
         progress, _ = scan_progress_result(connection, scan)
         return {"scan": {"progress": progress}}
-    result = scan_context(connection, args.scan_id, args.occurrence_id)
+    request_id = getattr(args, "request_id", None)
+    action_token = getattr(args, "action_token", None)
+    if request_id is not None or action_token is not None:
+        scan_id = require_uuid(args.scan_id, "scan-id")
+        request_id = require_uuid(request_id or "", "request-id")
+        action_token = require_uuid(action_token or "", "action-token")
+        authorized = connection.execute(
+            """
+            SELECT 1 FROM finding_remediation_attempts AS action
+            JOIN finding_occurrences AS finding ON finding.id = action.occurrence_id
+            WHERE finding.scan_id = ? AND finding.id = ? AND action.request_id = ?
+                AND action.pending_action_claim_token = ? AND action.pending_action IS NOT NULL
+            """,
+            (scan_id, args.occurrence_id, request_id, action_token),
+        ).fetchone()
+        if authorized is None:
+            raise SystemExit(
+                "This remediation action is no longer owned by the supplied request and action token."
+            )
+        return assigned_remediation_context(
+            connection, scan_id, args.occurrence_id, request_id, action_token
+        )
+    context_claim = getattr(args, "context_claim_token", None)
+    model_thread = getattr(args, "model_thread_id", None)
+    if context_claim is not None:
+        scan = require_scan(connection, args.scan_id)
+        handoff.require_tokenless_scan_owner(connection, scan, model_thread)
+        if scan["handoff_status"] == "pending":
+            detail = (
+                "Pass the handoffClaimToken returned by the Codex Security scan launcher."
+                if scan["handoff_claim_token"]
+                else "Claim the pending Codex Security scan handoff before loading its context."
+            )
+            raise SystemExit(f"This Codex Security scan handoff has not been delivered. {detail}")
+        if context_claim:
+            context_claim = handoff.require_handoff_claim_token(context_claim)
+        if scan["handoff_claim_token"] and scan["handoff_claim_token"] != context_claim:
+            if not model_thread:
+                raise SystemExit("Scan context requires its current continuation claim.")
+            owner = (
+                scan["continuation_thread_id"]
+                or require_workspace(connection, scan["workspace_id"])["thread_id"]
+            )
+            if model_thread != owner:
+                raise SystemExit("Scan context is owned by another continuation.")
+        if (
+            args.occurrence_id is not None
+            and connection.execute(
+                "SELECT 1 FROM finding_occurrences WHERE scan_id = ? AND id = ?",
+                (scan["id"], args.occurrence_id),
+            ).fetchone()
+            is None
+        ):
+            raise SystemExit("This finding was not found in the selected scan.")
+    result = scan_context(
+        connection, args.scan_id, args.occurrence_id, model_thread_id=model_thread
+    )
     if result["scan"]["progress"]["status"] != "running":
         scan = require_scan(connection, args.scan_id)
         try:
@@ -2635,6 +2760,7 @@ def scan_result(
     scan: sqlite3.Row,
     *,
     occurrence_id: str | None = None,
+    model_thread_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the workbench view of a saved scan, backfilling older finding details as needed.
 
@@ -2643,6 +2769,7 @@ def scan_result(
     """
     backfill_legacy_finding_details(connection, scan)
     scan = scan_history.scan_with_progress(connection, scan["id"])
+    handoff.require_tokenless_scan_owner(connection, scan, model_thread_id)
     artifact_rows = connection.execute(
         "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (scan["id"],)
     )
@@ -2847,7 +2974,7 @@ def finding_result(
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
     *,
-    related: list[dict[str, Any]],
+    related: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
     confidence = details.get("confidence")
@@ -2861,11 +2988,11 @@ def finding_result(
     except SystemExit:
         target = None
     for row in connection.execute(
-        """
+        f"""
         SELECT relative_path, start_line, end_line, role
         FROM finding_locations
         WHERE occurrence_id = ?
-        ORDER BY CASE WHEN role = 'root_control' THEN 0 ELSE 1 END, sort_order
+        ORDER BY {FINDING_LOCATION_ORDER_SQL}
         LIMIT ?
         """,
         (occurrence["id"], FINDING_LOCATIONS_LIMIT),
@@ -2916,15 +3043,16 @@ def finding_result(
         "title": bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES),
         "triage": finding_triage_result(connection, occurrence["id"]),
     }
-    matches, known_since, known_scan_ids = scan_history.finding_matches(
-        connection, occurrence["id"], scan["id"], scan["started_at"]
-    )
-    if matches:
-        result["matches"] = matches
-        result["knownSince"] = known_since
-        result["knownScanIds"] = known_scan_ids
-    if related:
-        result["related"] = related
+    if related is not None:
+        matches, known_since, known_scan_ids = scan_history.finding_matches(
+            connection, occurrence["id"], scan["id"], scan["started_at"]
+        )
+        if matches:
+            result["matches"] = matches
+            result["knownSince"] = known_since
+            result["knownScanIds"] = known_scan_ids
+        if related:
+            result["related"] = related
     source_excerpt = finding_source_excerpt(
         scan, target, excerpt_locations, requested_scan_paths(scan)
     )
@@ -3161,7 +3289,7 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
     return resolved
 
 
-def require_canonical_scan_directory(scan_dir: Path) -> Path:
+def require_canonical_scan_directory(scan_dir: Path, *, writable_output: bool = False) -> Path:
     scan_dir = scan_dir.absolute()
     try:
         metadata = scan_dir.lstat()
@@ -3175,7 +3303,14 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
     ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
     # Re-check ownership and parents so the scan directory cannot be substituted.
-    if os.name != "nt":
+    if os.name == "nt":
+        from windows_scan_local_files import require_windows_output_path
+
+        try:
+            require_windows_output_path(scan_dir, writable_output=writable_output)
+        except OSError as exc:
+            raise SystemExit(str(exc)) from exc
+    else:
         geteuid = getattr(os, "geteuid", None)
         effective_uid = geteuid() if geteuid is not None else None
         if effective_uid is not None and metadata.st_uid != effective_uid:

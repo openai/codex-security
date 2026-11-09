@@ -27,6 +27,7 @@ export interface ArtifactContext {
   targetContract?: Readonly<Record<string, unknown>>;
   targetRevision?: string;
   handoffClaimToken?: string;
+  modelThreadId?: string;
   status?: string;
   mode?: string;
 }

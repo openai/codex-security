@@ -81,8 +81,9 @@ def test_start_scan_returns_selected_scan_when_replaced_before_response(
     assert result["results"]["progress"]["status"] == "canceled"
 
 
+@pytest.mark.parametrize("app", [False, True])
 def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, app
 ):
     workbench = load_script("workbench_db")
     state_dir, target = empty_target_paths(tmp_path)
@@ -106,14 +107,18 @@ def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
         canceled = workbench.saved_results.cancel_scan(
             workbench._WORKBENCH_DB_CONTEXT,
             connection,
-            argparse.Namespace(scan_id=scan_id, thread_id=thread_id),
+            argparse.Namespace(scan_id=scan_id, thread_id=None if app else thread_id),
         )
-    replay = cancel_scan(state_dir, scan_id, thread_id)
+    replay = (
+        scan_command(state_dir, "cancel-scan", scan_id)
+        if app
+        else cancel_scan(state_dir, scan_id, thread_id)
+    )
     assert replacement_id and replacement_id != scan_id
     for response in (canceled, replay):
         assert response["canceledScanId"] == scan_id
-        assert response["results"]["scanId"] == replacement_id
-        assert response["results"]["progress"]["status"] == "running"
+        assert response["results"]["scanId"] == (replacement_id if app else scan_id)
+        assert response["results"]["progress"]["status"] == ("running" if app else "canceled")
 
 
 def test_workbench_records_scan_failure(tmp_path: Path) -> None:
