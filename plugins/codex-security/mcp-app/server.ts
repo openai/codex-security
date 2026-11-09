@@ -2083,7 +2083,7 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
   }
   const {
     startDisposition,
-    scan: { scanId, scanDir },
+    scan: { scanId },
   } = start;
   return scanActionResult(
     promptOnly,
