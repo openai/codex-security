@@ -205,7 +205,7 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
         scan_command(state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", str(limit))
     saved = scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]
     assert saved == {**original, "maxCostUsd": 0.006}
-    assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "complete"
+    assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "failed"
     stopped = scan_command(
         state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", "1", check=False
     )
@@ -242,13 +242,14 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
 
     completed = complete_budget_scan(state_dir, scan_id, warning=warning)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findings"] == []
     assert completed["cost"] == BUDGET_COST
     assert completed["warnings"] == [warning]
     assert get_scan(state_dir, scan_id)["scan"]["warnings"] == [warning]
     assert ledger.read_bytes() == original_ledger
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["status"] == "failed"
     assert manifest["scan"]["target"]["displayName"] == target.name
     assert manifest["scan"]["target"]["targetId"] == stable_target_id(target)
     assert manifest["scan"]["sealedAt"]
@@ -283,7 +284,7 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     coverage = read_review_state(state_dir, scan_dir)
@@ -329,7 +330,7 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findings"] == []
     coverage = read_review_state(state_dir, scan_dir)
 
@@ -401,7 +402,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     preserved = read_review_state(state_dir, scan_dir)
     assert preserved["deferred"][0] == existing
     assert len(preserved["deferred"]) == 1 + marker_added
@@ -418,7 +419,7 @@ def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert read_review_state(state_dir, scan_dir)["deferred"][0]["id"] == "candidate-1"
 
 
@@ -427,7 +428,7 @@ def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findings"] == []
     coverage = read_review_state(state_dir, scan_dir)
 
@@ -444,7 +445,7 @@ def test_budget_exhaustion_preserves_scoped_path_inventory(tmp_path: Path) -> No
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "scoped_path"
     assert coverage["inventoryStrategy"] == "scoped_path"
@@ -524,7 +525,7 @@ def test_budget_exhaustion_preserves_out_of_scope_supporting_evidence(tmp_path: 
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["app.py", "shared/control.py"]
 
@@ -543,7 +544,7 @@ def test_budget_exhaustion_preserves_unicode_line_separator_inventory(tmp_path: 
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["dir\u2028name.py"]
 

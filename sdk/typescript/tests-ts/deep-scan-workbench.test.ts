@@ -571,7 +571,7 @@ describe("deep scan workbench ownership", () => {
         progress: { status: string };
         warnings: string[];
       };
-      expect(scan.progress.status).toBe("complete");
+      expect(scan.progress.status).toBe("failed");
       expect(scan.warnings).toContain(warning);
       const findings = JSON.parse(
         await readFile(join(scanDir, "findings.json"), "utf8"),

@@ -39,6 +39,7 @@ Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format.
 | `interrupted` | The scan stopped before normal completion because execution was interrupted; retained artifacts may be partial. |
 
 Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and review state while treating absence of findings as inconclusive.
+Reaching a configured scan cost limit is a stopped outcome, including when Deep Scan discovery finished before the limit was observed. The sealed bundle uses `failed`, preserves validated findings and deferred candidates, and does not support a completed-scan conclusion.
 
 Optional `scan.warnings` records run-level diagnostics available when the bundle is first sealed. SARIF exports include these messages alongside deferred-task reasons in `toolExecutionNotifications`; warnings do not change `executionSuccessful`, which follows `scan.status`. Missing or empty warnings add no notifications. Existing sealed bundles remain unchanged, and export or publication warnings discovered afterward remain separate operation diagnostics.
 

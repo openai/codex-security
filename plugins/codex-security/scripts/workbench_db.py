@@ -1091,7 +1091,7 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
 def complete_budget_exhausted_scan(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
-    """Complete a running CLI Deep Scan using the measured cost and saved results after its budget is exhausted."""
+    """Stop a running CLI Deep Scan and preserve its results after its budget is exhausted."""
     scan_id = require_uuid(args.scan_id, "scan-id")
     cost_json = parse_scan_cost(args.cost_json)
     if cost_json is None:
@@ -1147,7 +1147,14 @@ def complete_budget_exhausted_scan(
                 (json.dumps([*warnings, warning]), scan_id),
             )
             connection.commit()
-        return complete_scan_locked(connection, scan_id, None, cost_json)
+        failure = argparse.Namespace(
+            claim_token=None,
+            cost_json=cost_json,
+            message=warning,
+            model_thread_id=None,
+            scan_id=scan_id,
+        )
+        return saved_results.fail_scan_locked(_WORKBENCH_DB_CONTEXT, connection, failure)
 
 
 def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
