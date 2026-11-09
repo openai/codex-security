@@ -894,32 +894,6 @@ function main() {
     return;
   }
 
-  if (command === "release-history" && process.argv.length === 4) {
-    const registryVersions = JSON.parse(
-      process.env.CODEX_SECURITY_PUBLISHED_NPM_VERSIONS ?? "[]",
-    );
-    const githubReleaseTags = (
-      process.env.CODEX_SECURITY_PUBLISHED_GITHUB_TAGS ?? ""
-    )
-      .split("\n")
-      .filter(Boolean);
-    const reachableTags = (
-      process.env.CODEX_SECURITY_REACHABLE_RELEASE_TAGS ?? ""
-    )
-      .split("\n")
-      .filter(Boolean);
-    console.log(
-      JSON.stringify(
-        releaseHistory(process.argv[3], {
-          registryVersions,
-          githubReleaseTags,
-          reachableTags,
-        }),
-      ),
-    );
-    return;
-  }
-
   if (
     (command === "verify-publication" && process.argv.length === 6) ||
     (command === "verify-github-publication" && process.argv.length === 8) ||
@@ -961,7 +935,6 @@ function main() {
       "(published npm versions JSON from stdin), " +
       "release-mode <version> (published npm versions JSON from stdin), " +
       "validate-release-notes <version> <release-notes-file>, " +
-      "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +
       "verify-github-publication <archive> <version> <git-head> " +

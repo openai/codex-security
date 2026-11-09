@@ -405,68 +405,6 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-      - name: Resolve published release history
-        id: history
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
-        run: |
-          set -euo pipefail
-
-          published_versions="$(
-            npm view @openai/codex-security versions \
-              --json \
-              --registry=https://registry.npmjs.org/
-          )"
-          published_github_tags="$(
-            gh api --paginate \
-              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'
-          )"
-          reachable_tags=""
-          if git rev-parse "$RELEASE_SHA^" >/dev/null 2>&1; then
-            reachable_tags="$(
-              git tag --merged "$RELEASE_SHA^" \
-                --list 'npm-v*' \
-                --sort=-version:refname
-            )"
-          fi
-
-          history="$(
-            CODEX_SECURITY_PUBLISHED_NPM_VERSIONS="$published_versions" \
-            CODEX_SECURITY_PUBLISHED_GITHUB_TAGS="$published_github_tags" \
-            CODEX_SECURITY_REACHABLE_RELEASE_TAGS="$reachable_tags" \
-              node sdk/typescript/scripts/release-automation.mjs \
-                release-history "$RELEASE_TAG"
-          )"
-
-          previous_tag="$(
-            printf '%s\n' "$history" |
-              node --input-type=module --eval '
-                import { readFileSync } from "node:fs";
-                const history = JSON.parse(readFileSync(0, "utf8"));
-                process.stdout.write(history.previousTag ?? "");
-              '
-          )"
-          make_latest="$(
-            printf '%s\n' "$history" |
-              node --input-type=module --eval '
-                import { readFileSync } from "node:fs";
-                const history = JSON.parse(readFileSync(0, "utf8"));
-                if (typeof history.makeLatest !== "boolean") {
-                  throw new Error("Release latest status must be explicit.");
-                }
-                process.stdout.write(String(history.makeLatest));
-              '
-          )"
-
-          {
-            printf 'previous-tag=%s\n' "$previous_tag"
-            printf 'make-latest=%s\n' "$make_latest"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Publish GitHub Release and generated notes
         shell: bash
         env:
@@ -475,8 +413,6 @@ jobs:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
           RELEASE_ARCHIVE: ${{ steps.artifact.outputs.archive }}
-          PREVIOUS_TAG: ${{ steps.history.outputs.previous-tag }}
-          MAKE_LATEST: ${{ steps.history.outputs.make-latest }}
         run: |
           set -euo pipefail
           release_workspace="$(mktemp -d)"
