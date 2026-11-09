@@ -2071,6 +2071,17 @@ def test_legacy_delivered_scan_waits_for_its_thread(
         state_dir, "begin-deep-scan", scan_id, "--model-thread-id", "fixture-thread", *begin
     )
     assert begun["deepScan"]["scanId"] == scan_id
+    rejoined = run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--target-path",
+        str(target),
+        "--model-thread-id",
+        "fixture-thread",
+        *begin,
+    )
+    assert rejoined["startDisposition"] == "joined"
+    assert rejoined["deepScan"]["scanId"] == scan_id
     read_context = ("--model-thread-id", "fixture-thread", "--context-claim-token", "")
     assert get_scan(state_dir, scan_id, *read_context)["scan"]["scanId"] == scan_id
     previous = get_scan(state_dir, previous_id, *read_context, check=False)

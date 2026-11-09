@@ -524,7 +524,7 @@ def existing_deep_scan_for_target(
         SELECT scans.*
         FROM scans
         JOIN workspaces ON workspaces.id = scans.workspace_id
-        WHERE workspaces.thread_id = ?
+        WHERE (workspaces.thread_id = ? OR workspaces.thread_id IS NULL)
             AND COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id) = ?
             AND scans.target_path = ?
             AND scans.scope = ?
@@ -630,7 +630,7 @@ def begin_deep_scan_for_scan(
         )
         timestamp = dependencies().now()
         with connection:
-            # Registered scans have a dedicated workspace; legacy scans can share one.
+            # Legacy scans can share a workspace. Only registered scans claim the workspace.
             if candidate["recipe_json"] is not None:
                 claimed_workspace = connection.execute(
                     "UPDATE workspaces SET thread_id = ?, updated_at = ? "
