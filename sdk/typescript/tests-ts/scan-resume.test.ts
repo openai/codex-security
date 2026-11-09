@@ -229,8 +229,6 @@ async function interruptedScan(
       scanId,
       "--thread-id",
       threadId,
-      "--available-parallelism",
-      "4",
       "--workflow-version",
       "deep-scan-mcp/v1",
     ]);
@@ -523,8 +521,6 @@ test("CLI resumes through native execution with current permissions and preserve
                   f.scanId,
                   "--thread-id",
                   threadId,
-                  "--available-parallelism",
-                  "4",
                 ]);
                 expect(joined["deepScan"]).toMatchObject({
                   scanId: f.scanId,

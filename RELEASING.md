@@ -293,9 +293,11 @@ for that exact commit:
 
 1. `node-release-cut` verifies that the version increased, checks the reviewed
    summary, and creates the exact `npm-vX.Y.Z` tag.
-2. `node-release` installs the committed dependency graph and packs the
-   package. Three TypeScript test shards and the MCP tests run in parallel
-   with package verification.
+2. For a new npm version, `node-release` signs the arm64 and x64 Darwin
+   addons before packing the package. An arm64 macOS runner extracts that
+   exact archive and prepares a diff inventory with a released desktop Node
+   that enforces library validation. Three TypeScript test shards and the MCP
+   tests also run before publication.
    After every shard and package check passes, approve the **npm** deployment
    for **Publish npm and container images**. This authorizes the npm archive
    and the matching container images built from the tagged release. The job
@@ -319,6 +321,22 @@ for that exact commit:
    The companion links to the `npm-vX.Y.Z` changelog and lists the full Action
    distribution commit SHA. It is never marked Latest. A final status job
    reports publication, installation smoke, Action, and container results.
+
+Before the first signed release, restrict the `codesigning` GitHub environment
+to `npm-v*` tags and configure its secrets for both steps:
+
+- **Download tools.** The `AKV_CODESIGN_*` inputs in `node-release.yml` select
+  a blob-reader identity and pin the downloads of `rcodesign` and a PKCS#11
+  provider that supports Signer Service. The identity needs read access to
+  those blobs only.
+- **Sign addons.** Authorize the tagged release workflow's GitHub OIDC
+  identity in Signer Service to read the public key and sign with the
+  Developer ID Application key for the desktop runtime's Apple Developer team.
+  Set `SIGNER_SERVICE_ENDPOINT`, `SIGNER_SERVICE_PURPOSE`, and
+  `SIGNER_SERVICE_KEY_ID` for that key. Set `SIGNING_CERTIFICATE_PEM` to the
+  matching public leaf certificate in PEM format.
+
+Recovery of an already published version uses the original npm archive.
 
 The Action tag points to a generated distribution commit whose parent is the
 CLI release commit. That additional commit contains the runnable Action bundle

@@ -53,42 +53,67 @@ export interface ScanTokenUsage {
   total_tokens: number;
 }
 
-const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
-  // GPT-5.5 has no additional cache-write charge.
-  "gpt-5.5": [5_000, 500, 5_000, 30_000],
-  "gpt-5.5-2026-04-23": [5_000, 500, 5_000, 30_000],
-  "gpt-6-sol": [2_000, 200, 2_500, 10_000],
-  "gpt-6.1-sol": [2_000, 100, 2_500, 10_000],
-  "gpt-6-astra": [10_000, 1_000, 12_500, 50_000],
-  "gpt-6-luna": [100, 10, 125, 500],
-  "gpt-5.6": [4_000, 400, 5_000, 20_000],
-  "gpt-5.6-sol": [4_000, 400, 5_000, 20_000],
-  "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
-  "gpt-5.6-luna": [200, 20, 250, 1_200],
-  // https://developers.openai.com/api/docs/pricing#cyber-models
-  "gpt-5.6-cyber": [12_500, 1_250, 15_625, 75_000],
-  "gpt-6-cyber": [20_000, 2_000, 25_000, 100_000],
-};
+// Direct Standard rates in nanodollars per token. Omit the long-context
+// rate when there is no verified upper estimate for a model.
+function directRate(
+  asOf: string,
+  short: ModelPricing,
+  long?: ModelPricing,
+  source = "https://developers.openai.com/api/docs/pricing",
+) {
+  return { short, long, unitsPerUsd: 1_000_000_000, source, asOf };
+}
 
-// Verified Standard rates: https://developers.openai.com/api/docs/pricing
-// GPT-5.5: https://developers.openai.com/api/docs/models/gpt-5.5
-// GPT-6 Sol: https://developers.openai.com/api/docs/models/gpt-6-sol
-// Do not infer tiers from aggregate scan tokens: the runtime does not report
-// which usage received long-context pricing. GPT-5.6-Cyber and GPT-6-Cyber have no
-// verified long-context rates, so their upper estimates stay unavailable.
-const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
-  {
-    "gpt-5.5": [10_000, 1_000, 10_000, 45_000],
-    "gpt-5.5-2026-04-23": [10_000, 1_000, 10_000, 45_000],
-    "gpt-6-sol": [4_000, 400, 5_000, 15_000],
-    "gpt-6.1-sol": [4_000, 200, 5_000, 15_000],
-    "gpt-6-astra": [20_000, 2_000, 25_000, 75_000],
-    "gpt-6-luna": [200, 20, 250, 750],
-    "gpt-5.6": [8_000, 800, 10_000, 30_000],
-    "gpt-5.6-sol": [8_000, 800, 10_000, 30_000],
-    "gpt-5.6-terra": [4_000, 400, 5_000, 18_000],
-    "gpt-5.6-luna": [400, 40, 500, 1_800],
-  };
+const gpt55 = directRate(
+  "2026-09-14",
+  [5_000, 500, 5_000, 30_000],
+  [10_000, 1_000, 10_000, 45_000],
+  "https://developers.openai.com/api/docs/models/gpt-5.5",
+);
+const gpt56Sol = directRate(
+  "2026-09-14",
+  [4_000, 400, 5_000, 20_000],
+  [8_000, 800, 10_000, 30_000],
+);
+const directPricing: Readonly<Record<string, ReturnType<typeof directRate>>> = {
+  "gpt-5.5": gpt55,
+  "gpt-5.5-2026-04-23": gpt55,
+  "gpt-6-sol": directRate(
+    "2026-10-10",
+    [2_000, 200, 2_500, 10_000],
+    [4_000, 400, 5_000, 15_000],
+    "https://developers.openai.com/api/docs/models/gpt-6-sol",
+  ),
+  "gpt-6.1-sol": directRate(
+    "2026-09-30",
+    [2_000, 100, 2_500, 10_000],
+    [4_000, 200, 5_000, 15_000],
+  ),
+  "gpt-6-astra": directRate(
+    "2026-09-14",
+    [10_000, 1_000, 12_500, 50_000],
+    [20_000, 2_000, 25_000, 75_000],
+  ),
+  "gpt-6-luna": directRate(
+    "2026-09-30",
+    [100, 10, 125, 500],
+    [200, 20, 250, 750],
+  ),
+  "gpt-5.6": gpt56Sol,
+  "gpt-5.6-sol": gpt56Sol,
+  "gpt-5.6-terra": directRate(
+    "2026-09-14",
+    [2_000, 200, 2_500, 12_000],
+    [4_000, 400, 5_000, 18_000],
+  ),
+  "gpt-5.6-luna": directRate(
+    "2026-09-14",
+    [200, 20, 250, 1_200],
+    [400, 40, 500, 1_800],
+  ),
+  "gpt-5.6-cyber": directRate("2026-10-06", [12_500, 1_250, 15_625, 75_000]),
+  "gpt-6-cyber": directRate("2026-11-05", [20_000, 2_000, 25_000, 100_000]),
+};
 
 function usdPerMillionTokens(pricing: ModelPricing, unitsPerUsd: number) {
   const [input, cacheRead, cacheWrite, output] = pricing;
@@ -147,6 +172,8 @@ function providerModelPricing(
   model: string,
   context?: ScanPricingContext | string | null,
 ) {
+  if (context === undefined && Object.hasOwn(directPricing, model))
+    return directPricing[model];
   if (context == null || typeof context === "string") {
     return bedrockModelPricing(model, context);
   }
@@ -170,16 +197,10 @@ export function estimateScanCost(
   context?: ScanPricingContext | string | null,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const providerPricing = providerModelPricing(model, context);
-  const unitsPerUsd = providerPricing?.unitsPerUsd ?? 1_000_000_000;
-  const pricing =
-    providerPricing?.short ??
-    (context === undefined && Object.hasOwn(MODEL_PRICING_NANODOLLARS, model)
-      ? MODEL_PRICING_NANODOLLARS[model]
-      : undefined);
+  const rate = providerModelPricing(model, context);
   const normalized = tokenUsage(usage);
-  if (pricing === undefined || normalized === null) return null;
-  const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;
+  if (rate === undefined || normalized === null) return null;
+  const { short, long, unitsPerUsd, source, asOf } = rate;
   const {
     input_tokens: inputTokens,
     cached_input_tokens: cachedInputTokens,
@@ -187,75 +208,49 @@ export function estimateScanCost(
     output_tokens: outputTokens,
   } = normalized;
 
-  const costUnits =
-    (inputTokens - cachedInputTokens - cacheWriteInputTokens) * inputRate +
-    cachedInputTokens * cachedInputRate +
-    cacheWriteInputTokens * cacheWriteInputRate +
-    outputTokens * outputRate;
-  if (!Number.isSafeInteger(costUnits)) return null;
+  const uncachedTokens =
+    inputTokens - cachedInputTokens - cacheWriteInputTokens;
 
-  const longPricing = providerPricing
-    ? providerPricing.long
-    : LONG_CONTEXT_PRICING_NANODOLLARS[model];
-  let maximumUnits: number | null = null;
-  if (longPricing !== undefined) {
-    const [longInput, longRead, longWrite, longOutput] = longPricing;
-    // Unclassified input may include additional cache writes. Preserve the
-    // reported subtotal, but include that uncertainty in the upper estimate.
-    const uncachedRate =
-      normalized.cache_write_input_tokens_reported === false
-        ? Math.max(longInput, longWrite)
-        : longInput;
-    const maximum =
-      (inputTokens - cachedInputTokens - cacheWriteInputTokens) * uncachedRate +
-      cachedInputTokens * longRead +
-      cacheWriteInputTokens * longWrite +
-      outputTokens * longOutput;
-    if (Number.isSafeInteger(maximum)) maximumUnits = maximum;
+  function priceInUsd(
+    [input, read, write, output]: ModelPricing,
+    unknownWrites: boolean,
+  ) {
+    // Unclassified input may include writes. Account for them only in the upper bound.
+    const units =
+      uncachedTokens * (unknownWrites ? Math.max(input, write) : input) +
+      cachedInputTokens * read +
+      cacheWriteInputTokens * write +
+      outputTokens * output;
+    return Number.isSafeInteger(units) ? units / unitsPerUsd : null;
   }
+  const estimatedUsd = priceInUsd(short, false);
+  if (estimatedUsd === null) return null;
+  const unknownWrites = normalized.cache_write_input_tokens_reported === false;
 
   return {
     model,
     inputTokens,
     cachedInputTokens,
     cacheWriteInputTokens,
-    ...(normalized.cache_write_input_tokens_reported === false
-      ? { cacheWriteInputTokensReported: false }
-      : {}),
+    ...(unknownWrites ? { cacheWriteInputTokensReported: false } : {}),
     outputTokens,
-    estimatedUsd: costUnits / unitsPerUsd,
+    estimatedUsd,
     estimatedUsdRange: {
-      min: costUnits / unitsPerUsd,
-      max: maximumUnits === null ? null : maximumUnits / unitsPerUsd,
+      min: estimatedUsd,
+      max: long === undefined ? null : priceInUsd(long, unknownWrites),
       context: "unknown",
     },
     pricing: {
-      source: providerPricing
-        ? providerPricing.source
-        : model.startsWith("gpt-5.5")
-          ? "https://developers.openai.com/api/docs/models/gpt-5.5"
-          : model === "gpt-6-sol"
-            ? "https://developers.openai.com/api/docs/models/gpt-6-sol"
-            : "https://developers.openai.com/api/docs/pricing",
-      asOf: providerPricing
-        ? providerPricing.asOf
-        : model === "gpt-6-sol"
-          ? "2026-10-10"
-          : model === "gpt-5.6-cyber"
-            ? "2026-10-06"
-            : model === "gpt-6-cyber"
-              ? "2026-11-05"
-              : model === "gpt-6.1-sol" || model === "gpt-6-luna"
-                ? "2026-09-30"
-                : "2026-09-14",
+      source,
+      asOf,
       serviceTier: "standard",
       context: "short",
-      usdPerMillionTokens: usdPerMillionTokens(pricing, unitsPerUsd),
-      ...(longPricing === undefined
+      usdPerMillionTokens: usdPerMillionTokens(short, unitsPerUsd),
+      ...(long === undefined
         ? {}
         : {
             longContextUsdPerMillionTokens: usdPerMillionTokens(
-              longPricing,
+              long,
               unitsPerUsd,
             ),
           }),

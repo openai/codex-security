@@ -28,6 +28,7 @@ from finalize_scan_contract import (
     write_sarif_projection,
 )
 from validate_scan_contract import validate_contract
+from workbench_constants import PRIMARY_FINDING_LOCATION_SQL
 
 
 def destination_key(destination: Any) -> str:
@@ -422,7 +423,7 @@ def write_csv_export(
 
 def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Cursor:
     return connection.execute(
-        """
+        f"""
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
@@ -440,15 +441,8 @@ def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3
         FROM finding_occurrences AS occurrences
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         LEFT JOIN finding_locations AS locations
-            ON locations.occurrence_id = occurrences.id
-            AND locations.sort_order = (
-                SELECT primary_location.sort_order
-                FROM finding_locations AS primary_location
-                WHERE primary_location.occurrence_id = occurrences.id
-                ORDER BY
-                    CASE WHEN primary_location.role = 'root_control' THEN 0 ELSE 1 END,
-                    primary_location.sort_order
-                LIMIT 1
+            ON locations.id = (
+                SELECT id {PRIMARY_FINDING_LOCATION_SQL}
             )
         WHERE occurrences.scan_id = ?
         ORDER BY occurrences.created_at, occurrences.id

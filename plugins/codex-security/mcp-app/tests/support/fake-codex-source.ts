@@ -152,6 +152,7 @@ export function workerRuntimeEnvironment(root: string, virtualenv?: string) {
         : path.join(virtualenv, "bin"),
       path.dirname(process.execPath),
     ].join(path.delimiter),
+    CODEX_MCP_NODE_PATH: process.execPath,
     HOME: path.join(root, "home"),
     PYTHON:
       virtualenv === undefined
