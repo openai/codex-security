@@ -8,7 +8,7 @@ import {
   workbenchCommand,
 } from "./support/workbench-command.js";
 import { runNodePython } from "./support/python-probe.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
@@ -16,6 +16,8 @@ import { main } from "../src/cli.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { dependencies, fakeSecurity } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+
+const pythonExecutable = useTestPython();
 
 type FindingsDocument = {
   findings: Array<{

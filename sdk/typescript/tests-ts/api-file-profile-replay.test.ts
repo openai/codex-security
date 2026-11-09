@@ -30,8 +30,10 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { rejecting } from "./support/errors.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const pythonExecutable = useTestPython();
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "file-profile-replay-",
