@@ -1223,7 +1223,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     mode: "deep",
     model: "gpt-5.6-terra",
     reasoningEffort: "high",
-    maxConcurrentThreadsPerSession: 4,
+    configuredParentSessionThreadLimit: 4,
     target: { kind: "paths", paths: ["src"] },
     workers: 8,
     subagents: 0,

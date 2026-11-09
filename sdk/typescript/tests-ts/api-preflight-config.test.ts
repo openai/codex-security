@@ -25,6 +25,13 @@ describe("CodexSecurity preflight configuration", () => {
   test.each([
     ["default", {}, 9],
     [
+      "minimum",
+      {
+        features: { multi_agent_v2: { max_concurrent_threads_per_session: 1 } },
+      },
+      1,
+    ],
+    [
       "selected profile",
       {
         profile: "review",
@@ -55,8 +62,30 @@ describe("CodexSecurity preflight configuration", () => {
       );
 
       await expect(client.preflight(repository)).resolves.toMatchObject({
-        maxConcurrentThreadsPerSession: expected,
+        configuredParentSessionThreadLimit: expected,
       });
+    },
+  );
+
+  test.each([0, -1, 1.5])(
+    "rejects invalid parent session thread limit %s during preflight",
+    async (limit) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            features: {
+              multi_agent_v2: { max_concurrent_threads_per_session: limit },
+            },
+          },
+        },
+        { environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") } },
+      );
+      await expect(client.preflight(repository)).rejects.toThrow(
+        "max_concurrent_threads_per_session must be a positive integer",
+      );
     },
   );
 

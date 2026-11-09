@@ -92,7 +92,7 @@ import {
   scanApprovalPolicy,
   scanPricingContext,
   scanCyberAccessConfig,
-  scanMaxConcurrentThreadsPerSession,
+  configuredParentSessionThreadLimit,
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
@@ -694,8 +694,8 @@ export interface ScanPreflight extends DeepScanOptions, ScanModelConfiguration {
   archiveDir?: string;
   authentication: ScanAuthentication;
   modelProvider?: string;
-  /** Configured Codex thread ceiling for one session, including its parent. */
-  maxConcurrentThreadsPerSession?: number;
+  /** Configured thread limit of the parent Codex session, including its root thread. */
+  configuredParentSessionThreadLimit?: number;
   maxCostUsd?: number;
   deepScanSources?: DeepScanSources;
 }
@@ -1725,8 +1725,7 @@ export class CodexSecurity {
     );
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
-    const maxConcurrentThreadsPerSession =
-      scanMaxConcurrentThreadsPerSession(configuration);
+    const parentThreadLimit = configuredParentSessionThreadLimit(configuration);
     validateScanCostLimit(
       options.maxCostUsd,
       model.model,
@@ -1760,9 +1759,9 @@ export class CodexSecurity {
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
-      ...(maxConcurrentThreadsPerSession === undefined
+      ...(parentThreadLimit === undefined
         ? {}
-        : { maxConcurrentThreadsPerSession }),
+        : { configuredParentSessionThreadLimit: parentThreadLimit }),
       ...(options.maxCostUsd === undefined
         ? {}
         : { maxCostUsd: options.maxCostUsd }),

@@ -114,8 +114,8 @@ export function scanModelConfiguration(
   return { model, reasoningEffort };
 }
 
-/** Effective native multi-agent capacity for one scan session, including its parent. */
-export function scanMaxConcurrentThreadsPerSession(
+/** Configured thread limit for a parent Codex session, including its root thread. */
+export function configuredParentSessionThreadLimit(
   config: JsonObject,
 ): number | undefined {
   const features = resolveCodexProfile(config)["features"];
@@ -123,7 +123,13 @@ export function scanMaxConcurrentThreadsPerSession(
   const multiAgent = features["multi_agent_v2"];
   if (!isObject(multiAgent)) return undefined;
   const capacity = multiAgent["max_concurrent_threads_per_session"];
-  return isSafeNonNegativeInteger(capacity) ? capacity : undefined;
+  if (capacity === undefined) return undefined;
+  if (!isSafeNonNegativeInteger(capacity) || capacity === 0) {
+    throw new ConfigurationError(
+      "features.multi_agent_v2.max_concurrent_threads_per_session must be a positive integer.",
+    );
+  }
+  return capacity;
 }
 
 export function scanModel(config: Readonly<JsonObject>): unknown {
