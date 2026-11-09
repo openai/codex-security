@@ -1504,11 +1504,15 @@ def budget_exhausted_draft(
                 "surfaceIds": [surface_id],
             }
         )
+    deferred_reason = "Validation was deferred because the scan reached its cost limit."
+    limitations = manifest["scan"].setdefault("scope", {}).setdefault("limitations", [])
+    if deferred_reason not in limitations:
+        limitations.append(deferred_reason)
     if not any(
         isinstance(item, dict)
         and isinstance(reason := item.get("reason"), str)
         and (
-            reason == "Validation was deferred because the scan reached its cost limit."
+            reason == deferred_reason
             or reason.startswith(
                 "Validation was deferred because the scan reached its cost limit: "
             )
@@ -1518,7 +1522,7 @@ def budget_exhausted_draft(
         coverage["deferred"].append(
             {
                 "id": "scan-cost-limit",
-                "reason": "Validation was deferred because the scan reached its cost limit.",
+                "reason": deferred_reason,
             }
         )
     coverage.pop("completeness", None)
