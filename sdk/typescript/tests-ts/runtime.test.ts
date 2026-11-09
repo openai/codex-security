@@ -10,7 +10,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync, renameSync, symlinkSync } from "node:fs";
+import { existsSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -89,6 +89,7 @@ import {
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   prepareScanRegistrationOutput,
+  requireWindowsOutputPath,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -199,6 +200,30 @@ function windowsUserSid() {
   const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
   expect(sid).toBeDefined();
   return sid;
+}
+
+function setWindowsTestDacl(
+  python: Parameters<typeof runNodePython>[0],
+  path: string,
+  descriptor: string,
+) {
+  const setup = runNodePython(python, [
+    "-c",
+    [
+      "import ctypes, sys",
+      "from ctypes import wintypes",
+      "adv = ctypes.WinDLL('advapi32', use_last_error=True)",
+      "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+      "sd = wintypes.LPVOID()",
+      "if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sys.argv[2], 1, ctypes.byref(sd), None): raise ctypes.WinError(ctypes.get_last_error())",
+      "try:",
+      "    if not adv.SetFileSecurityW(sys.argv[1], wintypes.DWORD(0x80000004), sd): raise ctypes.WinError(ctypes.get_last_error())",
+      "finally: kernel.LocalFree(sd)",
+    ].join("\n"),
+    win32.toNamespacedPath(path),
+    descriptor,
+  ]);
+  expect(setup.status).toBe(0);
 }
 
 function inspectWindowsTestAcl(
@@ -1879,6 +1904,107 @@ for await (const line of createInterface({ input: process.stdin })) {
         '{"token":"linked"}\n',
       );
     },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "explains access denied when the SDK cannot reopen its Windows plugin installation receipt",
+    async () => {
+      const user = windowsUserSid()!;
+      if (user === "S-1-5-18") return; // SYSTEM is the independent file trustee.
+      const python = await resolvePluginPython();
+      const root = await temporaryDirectory();
+      // This fixture needs a local volume with FILE_PERSISTENT_ACLS.
+      const volume = runNodePython(python, [
+        "-c",
+        [
+          "import ctypes, sys",
+          "from ctypes import wintypes",
+          "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+          "volume = ctypes.create_unicode_buffer(32768)",
+          "if not kernel.GetVolumePathNameW(sys.argv[1], volume, len(volume)): raise ctypes.WinError(ctypes.get_last_error())",
+          "kind = kernel.GetDriveTypeW(volume.value)",
+          "if kind in (0, 1): raise RuntimeError('Could not determine the test volume type')",
+          "flags = wintypes.DWORD()",
+          "if kind in (2, 3, 6):",
+          "    if not kernel.GetVolumeInformationW(volume.value, None, 0, None, None, ctypes.byref(flags), None, 0): raise ctypes.WinError(ctypes.get_last_error())",
+          "print('supported' if flags.value & 0x8 else 'unsupported')",
+        ].join("\n"),
+        win32.toNamespacedPath(root),
+      ]);
+      expect(volume.status, volume.stderr).toBe(0);
+      const support = volume.stdout.trim();
+      expect(["supported", "unsupported"]).toContain(support);
+      if (support === "unsupported") return;
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = await createMarketplace(home, selected);
+      const installed = join(root, "installed");
+      await cp(selected, installed, { recursive: true });
+      await writeFile(
+        join(home, "config.toml"),
+        '[marketplaces.codex-security-sdk]\nsource_type="local"\nsource=' +
+          JSON.stringify(marketplace) +
+          '\n[plugins."codex-security@codex-security-sdk"]\nenabled=true\n',
+      );
+      const deny = "(D;OICI;FR;;;S-1-5-21-0-0-0-424242)";
+      const system = "(A;OICI;FA;;;SY)";
+      const full = "D:P" + deny + "(A;OICI;FA;;;" + user + ")" + system;
+      const receipt = join(marketplace, "installed-plugin.json");
+      let installs = 0;
+      const options = {
+        codexCommand: { command: "unused" },
+        environment: {},
+        runCodex: async (_command: unknown, args: readonly string[]) => {
+          expect(args.slice(0, 2)).toEqual(["plugin", "add"]);
+          installs++;
+          return JSON.stringify({ installedPath: installed, version: "1.2.3" });
+        },
+      };
+      setWindowsTestDacl(
+        python,
+        marketplace,
+        "D:P" + deny + "(A;;FA;;;" + user + ")" + system,
+      );
+      try {
+        expect(
+          (await bootstrapPlugin(home, selected, options)).installedRoot,
+        ).toBe(installed);
+        const original = await readFile(receipt, "utf8").then(
+          () => undefined,
+          (error: NodeJS.ErrnoException) => error,
+        );
+        expect(["EPERM", "EACCES"]).toContain(original?.code ?? "");
+        const failure = await bootstrapPlugin(home, selected, options).then(
+          () => {
+            throw new Error("Expected Windows to reject reopening the receipt");
+          },
+          (error: NodeJS.ErrnoException) => error,
+        );
+        expect(failure.code).toBe(original!.code);
+        expect(failure.path).toBe(receipt);
+        expect(failure.syscall).toBe(original!.syscall);
+        expect(failure.message).toContain(original!.message);
+        expect(failure.message).toContain("permissions new files inherit");
+        expect(installs).toBe(1);
+      } finally {
+        // Correct this fixture's grant on the directory and its existing receipt.
+        setWindowsTestDacl(python, marketplace, full);
+        if (existsSync(receipt))
+          setWindowsTestDacl(
+            python,
+            receipt,
+            "D:P" + deny + "(A;;FA;;;" + user + ")" + system,
+          );
+      }
+      // A receipt newly created under the corrected parent also reopens normally.
+      await rm(receipt);
+      await bootstrapPlugin(home, selected, options);
+      expect(
+        (await bootstrapPlugin(home, selected, options)).installedRoot,
+      ).toBe(installed);
+      expect(installs).toBe(2);
+    },
+    60_000,
   );
 
   test("uses the installed plugin path returned by Codex", async () => {
@@ -5247,30 +5373,16 @@ describe("runtime directories and plugin Python boundary", () => {
       const sddl = `D:P(D;OICI;FR;;;${unmappedSid})(A;OICI;FA;;;${userSid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`;
       // Set the raw DACL without resolving the synthetic trustee or invoking PowerShell methods.
       const python = await resolvePluginPython();
-      const setDacl = (path: string, descriptor: string) => {
-        const setup = runNodePython(python, [
-          "-c",
-          [
-            "import ctypes, sys",
-            "from ctypes import wintypes",
-            "adv = ctypes.WinDLL('advapi32', use_last_error=True)",
-            "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
-            "sd = wintypes.LPVOID()",
-            "if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sys.argv[2], 1, ctypes.byref(sd), None): raise ctypes.WinError(ctypes.get_last_error())",
-            "try:",
-            "    if not adv.SetFileSecurityW(sys.argv[1], wintypes.DWORD(0x80000004), sd): raise ctypes.WinError(ctypes.get_last_error())",
-            "finally: kernel.LocalFree(sd)",
-          ].join("\n"),
-          win32.toNamespacedPath(path),
-          descriptor,
-        ]);
-        expect(setup.status).toBe(0);
-      };
-      setDacl(home, sddl);
+
+      setWindowsTestDacl(python, home, sddl);
       await mkdir(child);
       await writeFile(file, "synthetic credential fixture\n");
       // A subtree reset would replace this distinct protected file ACL with the home ACL.
-      setDacl(file, `D:P(D;;FR;;;${unmappedSid})(A;;FA;;;${userSid})`);
+      setWindowsTestDacl(
+        python,
+        file,
+        `D:P(D;;FR;;;${unmappedSid})(A;;FA;;;${userSid})`,
+      );
 
       const readDescriptors = () => {
         const result = inspectWindowsTestAcl(
@@ -6327,6 +6439,94 @@ describe("runtime directories and plugin Python boundary", () => {
           chmodFailure.mockRestore();
           umask.mockRestore();
         }
+      }
+    },
+  );
+
+  testPosix(
+    "rejects a selected directory replaced in a shared parent during validation",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      const output = join(shared, "output");
+      const unrelated = join(root, "unrelated");
+      await mkdir(output, { recursive: true });
+      await chmod(shared, 0o777);
+      await mkdir(unrelated);
+      const uid = process.geteuid!();
+      using _swap = spyOn(process, "geteuid").mockImplementationOnce(() => {
+        renameSync(output, join(shared, "moved"));
+        symlinkSync(unrelated, output);
+        return uid;
+      });
+      await expect(validateOutputDir(output)).rejects.toThrow("writable");
+      expect(await realpath(output)).toBe(unrelated);
+    },
+  );
+
+  test("creates temporary output under the directory selected before an alias changes", async () => {
+    const root = await temporaryDirectory();
+    const selected = join(root, "selected");
+    const replacement = join(root, "replacement");
+    const alias = join(root, "alias");
+    await mkdir(selected);
+    await mkdir(replacement);
+    await symlink(selected, alias, "junction");
+    const output = await prepareOutputDir(undefined, "repo", alias, (path) => {
+      if (path === selected) {
+        unlinkSync(alias);
+        symlinkSync(replacement, alias, "junction");
+      }
+    });
+    expect(await realpath(alias)).toBe(replacement);
+    expect(dirname(output)).toBe(selected);
+    expect(await readdir(replacement)).toEqual([]);
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "keeps existing output validation on the selected Windows directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const output = join(root, "output");
+      for (const writable of [false, true]) {
+        await expect(
+          requireWindowsOutputPath(output, writable),
+        ).rejects.toThrow();
+      }
+      await mkdir(output);
+      await writeFile(join(output, "old"), "");
+      expect(await validateOutputDir(join(root, "OUTPUT"), true)).toBe(output);
+
+      const staged = join(root, "staged");
+      const unrelated = join(staged, "output");
+      await mkdir(unrelated, { recursive: true });
+      await writeFile(join(unrelated, "keep"), "");
+      const original = fsPromises.realpath;
+      const substitution = spyOn(fsPromises, "realpath").mockImplementation(
+        new Proxy(original, {
+          async apply(target, receiver, args) {
+            if (args[0] !== output)
+              return Reflect.apply(target, receiver, args);
+            const moved = join(root, "moved");
+            renameSync(output, moved);
+            symlinkSync(unrelated, output, "junction");
+            const redirected = await original(output);
+            unlinkSync(output);
+            renameSync(moved, output);
+            renameSync(staged, join(root, "saved"));
+            symlinkSync(root, staged, "junction");
+            return redirected;
+          },
+        }),
+      );
+      try {
+        // The redirected path now identifies the original leaf under a different parent.
+        await expect(validateOutputDir(output, true)).rejects.toThrow(
+          "changed during preparation",
+        );
+        expect(await readdir(join(root, "saved", "output"))).toEqual(["keep"]);
+      } finally {
+        substitution.mockRestore();
       }
     },
   );

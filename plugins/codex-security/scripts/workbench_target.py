@@ -16,12 +16,12 @@ import tempfile
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Callable
+from typing import Any, BinaryIO, Callable, cast
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from windows_scan_local_files import copy_directory_junction
+from windows_scan_local_files import copy_directory_junction, pinned_root_git_marker
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
@@ -861,6 +861,54 @@ def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str
     return path
 
 
+def _windows_inventory_query(
+    target: Path,
+    *args: str,
+    git_dir: Path,
+    work_tree: Path,
+    input_data: bytes | None = None,
+    environment_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Retry a root inventory's metadata length error with its verified literal marker."""
+
+    def query(
+        directory: Path, environment: dict[str, str] | None
+    ) -> subprocess.CompletedProcess[bytes]:
+        return cast(
+            subprocess.CompletedProcess[bytes],
+            git_command(
+                target,
+                *args,
+                text=False,
+                git_dir=directory,
+                work_tree=work_tree,
+                input_data=input_data,
+                environment_overrides=environment,
+            ),
+        )
+
+    result = query(git_dir, environment_overrides)
+    if (
+        result.returncode != 128
+        or result.stdout
+        or str(target) != str(work_tree)
+        or b"GIT_DIR" not in result.stderr
+    ):
+        return result
+    diagnostic = b"fatal: '$GIT_DIR' too big"
+    if diagnostic not in result.stderr.splitlines():
+        # Confirm translated diagnostics without changing the actual inventory's environment.
+        probe = query(git_dir, {**(environment_overrides or {}), "LC_ALL": "C", "LANGUAGE": "C"})
+        if probe.returncode != 128 or probe.stdout or diagnostic not in probe.stderr.splitlines():
+            return result
+    with pinned_root_git_marker(target, git_dir) as marker:
+        if marker is not None:
+            retry = query(marker, environment_overrides)
+            if retry.returncode == 0 or (retry.returncode == 1 and "check-ignore" in args):
+                return retry
+    return result
+
+
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
@@ -954,7 +1002,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         git_directory = git_output(target, "rev-parse", "--absolute-git-dir")
         if git_directory is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
-        directories = git_bytes(
+        directories = _windows_inventory_query(
             target,
             "--no-literal-pathspecs",
             "ls-files",
@@ -968,9 +1016,9 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             git_dir=Path(git_directory),
             work_tree=repository,
         )
-        if directories is None:
+        if directories.returncode != 0:
             raise SystemExit("Could not inspect directories in the selected Git working tree.")
-        pending = [target / os.fsdecode(path) for path in directories.split(b"\0") if path]
+        pending = [target / os.fsdecode(path) for path in directories.stdout.split(b"\0") if path]
         while pending:
             children: list[Path] = []
             for path in pending:
@@ -1009,13 +1057,12 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             if not candidates:
                 break
             # Filter a directory level at once, retaining the outer repository context.
-            ignored = git_command(
+            ignored = _windows_inventory_query(
                 repository,
                 "--no-literal-pathspecs",
                 "check-ignore",
                 "-z",
                 "--stdin",
-                text=False,
                 input_data=b"\0".join(candidates) + b"\0",
                 git_dir=Path(git_directory),
                 work_tree=repository,

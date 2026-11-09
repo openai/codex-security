@@ -81,11 +81,7 @@ export async function buildBundledPlugin({
   source = join(repositoryRoot, "plugins", "codex-security"),
 } = {}) {
   const contract = JSON.parse(await readFile(contractPath, "utf8"));
-  const files = pluginContractFiles(contract);
-  files.forEach(validatePath);
-  if (new Set(files).size !== files.length) {
-    throw new Error("Plugin projection contract contains duplicate paths.");
-  }
+  const files = pluginContractFiles(contract, validatePath);
 
   const copiedPaths = files.filter((path) => !path.startsWith("mcp/"));
   const sourceFiles = await Promise.all(
@@ -115,7 +111,7 @@ export async function buildBundledPlugin({
   const previous = join(staging, "previous");
   let preservePrevious = false;
   try {
-    if (files.some((path) => path.startsWith("mcp/"))) {
+    if (copiedPaths.length < files.length) {
       const mcpApp = join(source, "mcp-app");
       execFileSync(
         process.execPath,

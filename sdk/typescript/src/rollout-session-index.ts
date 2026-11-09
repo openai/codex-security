@@ -35,6 +35,7 @@ const segment = z.strictObject({
     .regex(/^events-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.jsonl$/u),
 });
 const sessionEntry = z.strictObject({
+  attribution: z.enum(["recorded", "inferred"]).optional(),
   threadId: id,
   parentThreadId: id.nullable(),
   eventSegments: z.array(segment).optional(),
@@ -237,14 +238,17 @@ export async function writeRolloutSessionIndex(options: {
     const entries = new Map(
       previous?.sessions.map((entry) => [entry.threadId, entry]),
     );
-    for (const { threadId, parentThreadId } of sessions) {
+    for (const { threadId, parentThreadId, attribution } of sessions) {
       const saved = entries.get(threadId);
       if (saved && saved.parentThreadId !== parentThreadId) {
         throw new CodexSecurityError(
           "The rollout session parent changed for an existing thread.",
         );
       }
-      entries.set(threadId, saved ?? { threadId, parentThreadId });
+      const entry = saved ?? { threadId, parentThreadId };
+      if (attribution && entry.attribution !== "recorded")
+        entry.attribution = attribution;
+      entries.set(threadId, entry);
     }
     const index = indexSchema.parse({
       schemaVersion: 1,

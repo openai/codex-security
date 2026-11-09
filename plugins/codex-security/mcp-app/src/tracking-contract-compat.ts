@@ -14,81 +14,7 @@ export function adaptTrackingSchema(
 ): void {
   const findingProperties = ["properties", "findings", "items", "properties"];
   const scanProperties = ["properties", "scan", "properties"];
-  const patterns =
-    filename === "findings.json"
-      ? [
-          {
-            path: [
-              ...findingProperties,
-              "codeEvidence",
-              "items",
-              "properties",
-              "id",
-            ],
-            before: "^[a-z0-9][a-z0-9._/-]*$",
-            after: "^[a-z0-9][a-z0-9._/-]*(?:\\n)?$",
-          },
-          {
-            path: [...findingProperties, "writeup", "properties", "reportPath"],
-            before: "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$",
-            after: "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md(?:\\n)?$",
-          },
-        ]
-      : filename === "scan-manifest.json"
-        ? [
-            {
-              path: [
-                ...scanProperties,
-                "artifacts",
-                "items",
-                "properties",
-                "path",
-              ],
-              before: "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$",
-              after:
-                "^(?!/)(?![^\\n]*(?:^|/)\\.\\.(?:/|$))(?![^\\n]*\\\\)[^\\n]+$",
-            },
-            {
-              path: [
-                ...scanProperties,
-                "target",
-                "properties",
-                "snapshotDigest",
-              ],
-              before: "^codex-security-snapshot/v1:sha256:[a-f0-9]{64}$",
-              after: "^codex-security-snapshot/v1:sha256:[a-f0-9]{64}(?:\\n)?$",
-            },
-            {
-              path: [
-                ...scanProperties,
-                "threatModel",
-                "anyOf",
-                1,
-                "properties",
-                "content",
-              ],
-              before: "^[\\s\\S]*\\S[\\s\\S]*$",
-              after: "^[\\s\\S]*[^\\p{White_Space}\\u001c-\\u001f][\\s\\S]*$",
-            },
-          ]
-        : filename === "coverage.json"
-          ? [
-              {
-                path: [
-                  "properties",
-                  "surfaces",
-                  "items",
-                  "properties",
-                  "receiptRefs",
-                  "items",
-                ],
-                before: "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$",
-                after:
-                  "^(?![^\\n]*(?:^|/)\\.\\.(?:/|$))(?![^\\n]*\\\\)artifacts/[^\\n]+$",
-              },
-            ]
-          : [];
-  for (const { path, before, after } of patterns) {
+  function adapt(path: (string | number)[], before: string, after: string) {
     let field: unknown = schema;
     for (const key of path) {
       field =
@@ -101,6 +27,41 @@ export function adaptTrackingSchema(
     if (isRecord(field) && field["pattern"] === before) {
       field["pattern"] = after;
     }
+  }
+
+  if (filename === "findings.json") {
+    adapt(
+      [...findingProperties, "codeEvidence", "items", "properties", "id"],
+      "^[a-z0-9][a-z0-9._/-]*$",
+      "^[a-z0-9][a-z0-9._/-]*(?:\\n)?$",
+    );
+    adapt(
+      [...findingProperties, "writeup", "properties", "reportPath"],
+      "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$",
+      "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md(?:\\n)?$",
+    );
+  } else if (filename === "scan-manifest.json") {
+    adapt(
+      [...scanProperties, "artifacts", "items", "properties", "path"],
+      "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$",
+      "^(?!/)(?![^\\n]*(?:^|/)\\.\\.(?:/|$))(?![^\\n]*\\\\)[^\\n]+$",
+    );
+    adapt(
+      [...scanProperties, "target", "properties", "snapshotDigest"],
+      "^codex-security-snapshot/v1:sha256:[a-f0-9]{64}$",
+      "^codex-security-snapshot/v1:sha256:[a-f0-9]{64}(?:\\n)?$",
+    );
+    adapt(
+      [...scanProperties, "threatModel", "anyOf", 1, "properties", "content"],
+      "^[\\s\\S]*\\S[\\s\\S]*$",
+      "^[\\s\\S]*[^\\p{White_Space}\\u001c-\\u001f][\\s\\S]*$",
+    );
+  } else if (filename === "coverage.json") {
+    adapt(
+      ["properties", "surfaces", "items", "properties", "receiptRefs", "items"],
+      "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$",
+      "^(?![^\\n]*(?:^|/)\\.\\.(?:/|$))(?![^\\n]*\\\\)artifacts/[^\\n]+$",
+    );
   }
 }
 

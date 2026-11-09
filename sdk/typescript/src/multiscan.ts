@@ -49,6 +49,7 @@ import {
   canonicalConfigPath,
   createWindowsOutputDirectory,
   requireSecureOutputAncestry,
+  requireWindowsOutputPath,
   resolvePluginPath,
   validateOutputDir,
 } from "./runtime.js";
@@ -237,8 +238,8 @@ export async function runMultiscan(
     if (!manifest?.isFile())
       throw new Error("Bulk recovery requires an existing campaign manifest.");
   }
-  const output = await ensureOutputDirectory(requestedOutput);
-  await requireSecureOutputAncestry(output);
+  const output = await ensureOutputDirectory(requestedOutput, "artifacts");
+  if (process.platform !== "win32") await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   let pluginWorkspace: string | undefined;
   let pluginRoot: Promise<string> | undefined;
@@ -762,7 +763,12 @@ async function removeCheckout(path: string): Promise<string | undefined> {
   );
 }
 
-async function ensureOutputDirectory(path: string): Promise<string> {
+async function ensureOutputDirectory(
+  path: string,
+  retainedDirectory?: string,
+): Promise<string> {
+  const linkedOutput =
+    "Multiscan output directories must not be symbolic links.";
   let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
@@ -770,14 +776,21 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     if (process.platform === "win32") {
       // Resolve parent aliases while leaving the leaf for lstat to verify.
       path = join(await canonicalConfigPath(dirname(path)), basename(path));
-      await createWindowsOutputDirectory(path, true);
+      try {
+        await createWindowsOutputDirectory(path, true);
+      } catch (error) {
+        if ((await lstat(path).catch(() => undefined))?.isSymbolicLink()) {
+          throw new Error(linkedOutput, { cause: error });
+        }
+        throw error;
+      }
     } else {
       await mkdir(path, { recursive: true, mode: 0o700 });
     }
     metadata = await lstat(path, { bigint: true });
   }
   if (metadata.isSymbolicLink()) {
-    throw new Error("Multiscan output directories must not be symbolic links.");
+    throw new Error(linkedOutput);
   }
   if (!metadata.isDirectory()) {
     throw new Error("Multiscan output paths must be directories.");
@@ -787,7 +800,10 @@ async function ensureOutputDirectory(path: string): Promise<string> {
   if (directory.dev !== metadata.dev || directory.ino !== metadata.ino) {
     throw new Error("Multiscan output directories changed during preparation.");
   }
-  if (process.platform === "win32") return canonical;
+  if (process.platform === "win32") {
+    await requireWindowsOutputPath(canonical, true, retainedDirectory);
+    return canonical;
+  }
   if ((directory.mode & 0o022n) !== 0n) {
     throw new Error(
       "Multiscan output directories must not be group- or world-writable.",

@@ -426,8 +426,9 @@ For retired progress hooks, see [older progress integrations](#older-progress-in
 contain source code or credentials. Deep scans additionally expose durable
 independent-review counts through `onDeepProgress`: `completed`, `active`, and
 `maximum`. The maximum is a configured cap, not a percentage denominator. The
-optional `consolidating` flag reports when results are being combined or the
-coordinator has finished.
+optional `consolidating` flag is true while the running scan combines results or
+waits for finalization after its coordinator finishes. It is false once the scan
+completes, fails, or is canceled.
 `ScanOptions` lists all callbacks.
 
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription

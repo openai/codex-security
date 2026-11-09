@@ -47,8 +47,16 @@ test("indexes lineage without reading rollout contents by default", async () => 
   const scanDir = await temporaryDirectory();
   expect(await readRolloutSessionIndex(scanDir, scanId)).toBeNull();
   const lineage = [
-    { threadId: "parent", parentThreadId: null },
-    { threadId: "child", parentThreadId: "parent" },
+    {
+      threadId: "parent",
+      parentThreadId: null,
+      attribution: "recorded" as const,
+    },
+    {
+      threadId: "child",
+      parentThreadId: "parent",
+      attribution: "inferred" as const,
+    },
   ];
   let opened = false;
   const path = await writeRolloutSessionIndex({

@@ -5,8 +5,8 @@ import { main } from "../src/cli.js";
 import {
   readRolloutSessionIndex,
   ROLLOUT_SESSION_INDEX_RELATIVE_PATH,
-  ScanResult,
-} from "../src/index.js";
+} from "../src/rollout-session-index.js";
+import { ScanResult } from "../src/result.js";
 import type { JsonObject } from "../src/config.js";
 import { dependencies, fakeResult } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -86,7 +86,7 @@ describe("scan navigation", () => {
           expect(show.stderr.text()).toContain(
             `updated ${completed.updatedAt}`,
           );
-          expect(show.stderr.text()).toContain(`scans logs ${completedId}`);
+          expect(show.stderr.text()).not.toContain(`scans logs ${completedId}`);
           expect(show.stderr.text()).not.toContain(latestId);
 
           const logs = createCliTest(main, { stdout: interactive });
@@ -205,7 +205,7 @@ describe("scan navigation", () => {
   });
 
   test("completion navigation uses the complete scan ID without changing JSON", async () => {
-    const result = fakeResult(["high"]);
+    const result = new ScanResult({ ...fakeResult(["high"]), threadId: "" });
     result.manifest.scan.id = completedId;
     const cli = createCliTest(main);
     expect(await cli.runCli(["scan", "--json"], dependencies({ result }))).toBe(
@@ -219,6 +219,19 @@ describe("scan navigation", () => {
     expect(cli.stderr.text()).toContain(`scans show ${completedId}`);
     expect(cli.stderr.text()).toContain(`scans logs ${completedId}`);
     expect(cli.stderr.text()).toContain(result.scanDir);
+  });
+
+  test("mock scan completion points to its saved result without offering session logs", async () => {
+    const result = new ScanResult({ ...fakeResult(), threadId: "" });
+    result.manifest.scan.scope.runtimeStatus = "mock";
+    const cli = createCliTest(main);
+    expect(await cli.runCli(["scan", "--mock"], dependencies({ result }))).toBe(
+      0,
+    );
+    expect(cli.stderr.text()).toContain(
+      `scans show ${result.manifest.scan.id}`,
+    );
+    expect(cli.stderr.text()).not.toContain("scans logs");
   });
 
   test.each([false, true])(

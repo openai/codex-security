@@ -180,6 +180,7 @@ const distModules = [
   "server/storage",
   "targets",
   "terminal-columns",
+  "terminal-stream",
   "thread-source",
   "timestamps",
   "trusted-executable",
