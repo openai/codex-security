@@ -58,6 +58,7 @@ pnpm run test:package
 ```
 
 Replace `X.Y.Z` with the version in the filename printed by `pnpm pack`.
+Packing regenerates SDK defaults and project schemas before building the MCP runtime.
 
 The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
 the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during
