@@ -61,7 +61,8 @@ async function nativeRequest(
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill();
+    // A descendant may retain stdout, so EOF cannot be the signal to stop reading.
+    lines.close();
   }, probeTimeoutMs);
   const send = (message: unknown) =>
     child.stdin.write(JSON.stringify(message) + "\n");
@@ -90,6 +91,9 @@ async function nativeRequest(
   } finally {
     clearTimeout(timer);
     lines.close();
+    // Bun on Windows can keep these pipes open after the app-server process exits.
+    child.stdout.destroy();
+    child.stderr.destroy();
     child.kill();
     await closed;
   }
