@@ -1809,13 +1809,13 @@ def before_output_change():
         control.write(b"?")
         if control.read(1) != b"!":
             raise SystemExit("Scan registration canceled before changing the output.")
+sys._codex_security_before_output_change = before_output_change
 if "--archive-existing" in sys.argv[1:] and "--archived-scan-dir" not in sys.argv[1:]:
     # Released workbenches accept this callback before moving an existing output.
     runpy.run_path(sys.argv[0])["main"](before_archive=before_output_change)
 else:
     # A selected plugin keeps its script entrypoint, argv, stdin and stdout.
-    runpy.run_path(sys.argv[0], run_name="__main__",
-                   init_globals={"_codex_security_before_output_change": before_output_change})
+    runpy.run_path(sys.argv[0], run_name="__main__")
 `;
 
 export async function runWorkbench(

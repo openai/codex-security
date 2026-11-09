@@ -2409,8 +2409,12 @@ describe("CodexSecurity orchestration", () => {
           ? "insert_running_scan"
           : "directory_snapshot_regular_file_count";
       const framedArgument = "--fixture-message=出力\0literal\nsecond line";
+      const entrypoint = join(pluginRoot, "scripts", "workbench_db.py");
+      const controlledScript = guardCreated
+        ? join(pluginRoot, "scripts", "registration_fixture.py")
+        : entrypoint;
       await writeFile(
-        join(pluginRoot, "scripts", "workbench_db.py"),
+        controlledScript,
         `import io, runpy, socket, sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -2452,6 +2456,18 @@ if __name__ == "__main__":
     main()
 `,
       );
+      if (guardCreated) {
+        // Select a wrapper that starts the delegated workbench as a new __main__.
+        await writeFile(
+          entrypoint,
+          `import runpy
+def main(**kwargs):
+    runpy.run_path(${JSON.stringify(controlledScript)}, run_name="__main__")
+if __name__ == "__main__":
+    main()
+`,
+        );
+      }
       let submitted: string | undefined;
       const registration: typeof runWorkbench = async (
         options,

@@ -1505,9 +1505,9 @@ def register_cli_scan(
     an output directory, coordinate archiving with registration so previous results
     can still be located. Return the scan ID, contract, and target metadata.
     """
-    # Selected plugin scripts can delegate to this workbench from their own __main__.
+    # A selected plugin may replace __main__ while delegating to this workbench.
     before_output_change = before_archive or getattr(
-        sys.modules["__main__"], "_codex_security_before_output_change", None
+        sys, "_codex_security_before_output_change", None
     )
 
     def acknowledge_output_change() -> None:
