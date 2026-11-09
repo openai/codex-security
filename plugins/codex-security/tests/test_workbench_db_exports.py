@@ -815,6 +815,7 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     assert closed_rows == {closed_occurrence: "wont_fix"}
 
 
+@pytest.mark.cross_platform
 def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
@@ -828,7 +829,7 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
 
     scan_command(state_dir, "complete-scan", scan_id)
     exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
-    with Path(exported["path"]).open(newline="") as source:
+    with Path(exported["path"]).open(encoding="utf-8", newline="") as source:
         row = next(csv.DictReader(source))
 
     assert row["title"] == "'\n=1+1"
