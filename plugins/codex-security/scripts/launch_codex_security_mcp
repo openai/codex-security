@@ -79,15 +79,11 @@ can_load_native() {
   # This Linux runtime can still run helpers without SQLite. Prefer a system
   # installation if available, without expanding discovery into the caller's PATH.
   for system_candidate in /usr/local/bin/node /usr/bin/node /bin/node; do
-    [ -x "$system_candidate" ] || continue
-    system_node=$(command -p realpath "$system_candidate" 2>&-) || continue
-    case "${system_node%/*}" in
-      /usr/local/bin|/usr/bin|/bin)
-        if _native_probe_output=$("$system_node" -e 'require("node:sqlite")' </dev/null 2>&1); then
-          selected_node=$system_node
-          break
-        fi ;;
-    esac
+    if [ -x "$system_candidate" ] &&
+      _native_probe_output=$("$system_candidate" -e 'require("node:sqlite")' </dev/null 2>&1); then
+      selected_node=$system_candidate
+      break
+    fi
   done
   return 0
 }

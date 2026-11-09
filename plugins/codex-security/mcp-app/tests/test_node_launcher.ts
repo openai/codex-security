@@ -6,7 +6,6 @@ import {
   mkdir,
   readdir,
   readFile,
-  realpath,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -271,43 +270,49 @@ test(
       "scripts",
       "launch_codex_security_mcp",
     );
-    const result = spawnSync(
-      "/bin/sh",
-      [launcher, "--helper", "database-info"],
-      {
-        cwd: root,
-        encoding: "utf8",
-        input: JSON.stringify(root),
-        env: {
-          HOME: root,
-          PATH: root,
-          NODE_DEBUG: "module",
-          CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
+    const installedNode = path.join(root, "installed-node");
+    const systemLink = path.join(root, "system-node");
+    await writeFile(
+      installedNode,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    await symlink(installedNode, systemLink);
+    const source = await readFile(launcher, "utf8");
+    // Relocate only the fixed system paths so the test can supply a system symlink.
+    const systemPaths = "/usr/local/bin/node /usr/bin/node /bin/node";
+    assert.ok(source.includes(systemPaths));
+    const run = (candidate: string) =>
+      spawnSync(
+        "/bin/sh",
+        [
+          "-c",
+          source.replace(systemPaths, shellQuote(candidate)),
+          launcher,
+          "--helper",
+          "database-info",
+        ],
+        {
+          cwd: root,
+          encoding: "utf8",
+          input: JSON.stringify(root),
+          env: {
+            HOME: root,
+            PATH: root,
+            NODE_DEBUG: "module",
+            CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
+          },
         },
-      },
-    );
+      );
+    const linked = run(systemLink);
+    assert.equal(linked.status, 0, linked.stderr);
+    assert.deepEqual(JSON.parse(linked.stdout), {
+      databasePath: path.join(root, "workbench.sqlite3"),
+    });
+    const missing = run(path.join(root, "missing-node"));
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /node:sqlite/);
     assert.equal(existsSync(marker), false);
-    const systemBins = ["/usr/local/bin", "/usr/bin", "/bin"];
-    const systemNodes = await Promise.all(
-      systemBins.map((bin) =>
-        realpath(path.join(bin, "node")).catch(() => null),
-      ),
-    );
-    const hasSystemSqlite = systemNodes.some(
-      (node) =>
-        node !== null &&
-        systemBins.includes(path.dirname(node)) &&
-        spawnSync(node, ["-e", 'require("node:sqlite")']).status === 0,
-    );
-    if (hasSystemSqlite) {
-      assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(JSON.parse(result.stdout), {
-        databasePath: path.join(root, "workbench.sqlite3"),
-      });
-    } else {
-      assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /node:sqlite/);
-    }
   },
 );
 
