@@ -6893,6 +6893,11 @@ describe("runtime directories and plugin Python boundary", () => {
 
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
+    using _home = spyOn(await import("node:os"), "homedir").mockImplementation(
+      () => {
+        throw new Error("No home directory for this account");
+      },
+    );
     const configured = join(root, "configured-python");
     await writeFile(
       configured,
@@ -6946,7 +6951,6 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(
         await resolvePluginPython({
           environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
-          homeDirectory: join(root, "unused-home"),
         }),
       ).toBe(cachedPython);
     }

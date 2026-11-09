@@ -1,4 +1,5 @@
 #!/bin/sh
+# Use LF line endings so POSIX can execute this script directly from Windows-built packages.
 set -eu
 
 PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
