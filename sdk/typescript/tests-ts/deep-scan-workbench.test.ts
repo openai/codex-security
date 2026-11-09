@@ -658,7 +658,7 @@ describe("deep scan workbench ownership", () => {
         ]),
       );
       const report = await readFile(join(scanDir, "report.md"), "utf8");
-      expect(report).toContain("No findings were reported.");
+      expect(report).toContain("No vulnerability conclusion can be drawn.");
     },
   );
 

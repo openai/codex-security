@@ -37,6 +37,7 @@ from workbench_test_support import (
     save_workspace,
     scan_claim_command,
     scan_command,
+    select_checkpoint,
     set_triage,
     stable_target_id,
     start_delivered_scan,
@@ -45,6 +46,7 @@ from workbench_test_support import (
     start_workspace_scan,
     update_progress,
     workspace_command,
+    write_checkpoint,
     write_completed_contract,
     write_remediation_patch,
 )
@@ -263,7 +265,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert "User input reaches a SQL statement" in coverage["deferred"][0]["reason"]
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
-    assert "No findings were reported." in report
+    assert "No vulnerability conclusion can be drawn." in report
     assert "Validation was deferred because the scan reached its cost limit." in report
 
 
@@ -282,6 +284,11 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     draft["scan"]["scope"]["limitations"] = ["The deployment configuration was unavailable."]
     manifest_path.write_text(json.dumps(draft))
 
+    previous = write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "complete": False, "findings": [], "reviewState": {"deferred": []}},
+    )
+    head = select_checkpoint(scan_dir, previous)
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "failed"
@@ -296,6 +303,13 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
         limitation,
     ]
     assert limitation in (scan_dir / "report.md").read_text()
+
+    checkpoint = scan_dir / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    assert checkpoint != previous
+    assert json.loads(checkpoint.read_text())["reviewState"]["deferred"][0]["id"] == "candidate-1"
+    sealed = manifest_path.read_bytes()
+    scan_command(state_dir, "preserve-scan-results", scan_id)
+    assert manifest_path.read_bytes() == sealed
 
 
 @pytest.mark.parametrize(
@@ -411,7 +425,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
             "id": "scan-cost-limit",
             "reason": "Validation was deferred because the scan reached its cost limit.",
         }
-    assert "No findings were reported." in (scan_dir / "report.md").read_text()
+    assert "No vulnerability conclusion can be drawn." in (scan_dir / "report.md").read_text()
 
 
 def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
