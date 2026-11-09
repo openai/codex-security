@@ -421,7 +421,7 @@ describe("project configuration resolution", () => {
     },
   );
 
-  test.skipIf(process.platform === "win32")(
+  test.skipIf(process.platform !== "linux")(
     "does not select a replacement-character directory for a non-UTF-8 parent",
     async () => {
       const root = await temporaryDirectory();
