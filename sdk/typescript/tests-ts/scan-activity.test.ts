@@ -577,6 +577,16 @@ describe("scan activity", () => {
       const paths = inside ? ["Src/A.ts"] : [];
       const cmd = `type "${path}"`;
       expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "local_shell_call",
+            call_id: "worker-argv",
+            action: { type: "exec", command: ["cat", path] },
+          }),
+          repository,
+        ),
+      ).toMatchObject({ paths });
+      expect(
         scanActivityFromEvent(toolEvent("read_file", { path }), repository),
       ).toMatchObject({ paths });
       expect(
