@@ -12,7 +12,7 @@ runs:
 
     - name: Install provenance-capable npm
       shell: bash
-      run: |
+      run: | # zizmor: ignore[github-env] -- The verified npm bin directory is fixed under RUNNER_TEMP.
         set -euo pipefail
         source .github/scripts/release-npm.sh
         install_release_npm
