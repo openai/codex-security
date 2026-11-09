@@ -1098,9 +1098,7 @@ test.each([
             );
             expect(status.data[0].toolsError).toBeNull();
             const worker = JSON.parse(await readFile(report, "utf8"));
-            expect(worker.inherited.AZURE_OPENAI_API_KEY).toBe(
-              azureCredential === "selected header" ? headerValue : null,
-            );
+            expect(worker.inherited.AZURE_OPENAI_API_KEY).toBeNull();
             expect(worker.recovered).toEqual({
               AZURE_OPENAI_API_KEY: headerValue,
             });
