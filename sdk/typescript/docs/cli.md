@@ -1313,8 +1313,10 @@ selection. It lists repositories pushed in the last 90 days, excluding forks
 and archives, asks for output, and saves the selection as `repositories.csv`.
 Private checkouts use your GitHub CLI login.
 
-A usable local Git source selected by its directory protects document links
-inside it. For a standard SHA-1 repository created with `git init --bare` or
+Each existing local directory selected in the CSV protects document links
+inside it, even when its checkout fails. Select shared external documents
+directly or through an operator-managed alias outside the selected directories
+and Git sources. For a standard SHA-1 repository created with `git init --bare` or
 `git clone --bare`, a `.git` marker can identify the storage alone. With a
 custom repository configuration or inherited command-scope Git settings, bulk
 scans may also protect the marker's parent. Pass the canonical path to select

@@ -84,7 +84,7 @@ describe("multiscan", () => {
       ["marker", marker, "failed"],
       ["stale-marker", staleMarker, "failed"],
       ["directory", localDirectory, "failed"],
-      ["plain-directory", aliases, "failed"],
+      ["plain-directory", join(source.path, "src"), "failed"],
       ["first", join(linked, ".git"), "completed"],
       ["second", join(source.path, ".git"), "completed"],
       ["bundle", bundle, "completed"],
@@ -958,6 +958,39 @@ describe("multiscan", () => {
     expect(await readFile(join(standard, "checkpoint"), "utf8")).toBe("keep");
     expect(await readFile(join(deep, "checkpoint"), "utf8")).toBe("keep");
   });
+
+  test.each([false, true])(
+    "keeps an explicitly selected directory as a document boundary with a suffixed Git source: %p",
+    async (suffixed) => {
+      const { paths, source } = await repositoryFixture("valid");
+      const selected = join(paths.root, "selected");
+      await mkdir(selected);
+      if (suffixed)
+        git(paths.root, "clone", "--bare", source.path, selected + ".git");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nfirst,${selected},${source.revision}\nsecond,${source.path},${source.revision}\n`,
+      );
+      await writeFile(join(paths.root, "guide.md"), "Shared policy.");
+      await filesystem.symlink(paths.root, join(selected, "docs"), "junction");
+      const linked = join(selected, "docs", "guide.md");
+      const settings = options(paths, client(completeRun), { maxAttempts: 1 });
+      await expect(
+        runMultiscan({ ...settings, scanPromptFile: linked }),
+      ).rejects.toThrow("directory links outside the selected repository");
+      const result = await runMultiscan({
+        ...settings,
+        knowledgeBasePaths: [linked],
+      });
+      expect(await results(result.resultsPath)).toMatchObject(
+        ["first", "second"].map((id) => ({
+          id,
+          status: "failed",
+          error: expect.stringContaining("repository symbolic link"),
+        })),
+      );
+    },
+  );
 
   test("keeps document boundaries for a fetchable source with packed refs", async () => {
     const { paths, source } = await repositoryFixture("packed-refs");

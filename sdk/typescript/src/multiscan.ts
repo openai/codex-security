@@ -13,6 +13,7 @@ import {
   rename,
   rm,
   rmdir,
+  stat,
   truncate,
   utimes,
   writeFile,
@@ -192,28 +193,15 @@ export async function runMultiscan(
       "Bulk scans do not support diff or working-tree scopes because their checkouts are clean, shallow snapshots. Use repository or path scopes instead.",
     );
   }
-  const repositories: string[] = [];
-  if (
-    [
-      [options.scanPrompt, options.scanPromptFile],
-      [options.validationPrompt, options.validationPromptFile],
-      [options.postScanPrompt, options.postScanPromptFile],
-    ].some(([inline, file]) => inline === undefined && file !== undefined)
-  ) {
-    for (const repository of new Set(tasks.map((task) => task.repository))) {
-      if (!isAbsolute(repository)) continue;
-      try {
-        repositories.push(
-          ...(await localGitSourceRoots(repository, options.signal)),
-        );
-      } catch (error) {
-        nullIfUnavailableInputRoot(error as NodeJS.ErrnoException);
-      }
-    }
-  }
-  // Shared inputs use actual local CSV sources as directory-link boundaries,
-  // not the invocation directory, and are read once before any scan starts.
-  const prompts = await resolveScanPrompts(options, repositories);
+  const hasPromptFile = [
+    [options.scanPrompt, options.scanPromptFile],
+    [options.validationPrompt, options.validationPromptFile],
+    [options.postScanPrompt, options.postScanPromptFile],
+  ].some(([inline, file]) => inline === undefined && file !== undefined);
+  const prompts = await resolveScanPrompts(
+    options,
+    hasPromptFile ? await bulkDocumentRoots(tasks, options.signal) : [],
+  );
   const resolvedOptions: MultiscanOptions = {
     ...options,
     ...prompts,
@@ -277,14 +265,21 @@ export async function runMultiscan(
   }
 }
 
-/** An unavailable CSV source fails its own checkout without claiming shared document paths. */
-async function availableLocalSources(
+async function bulkDocumentRoots(
   tasks: readonly MultiscanTask[],
   signal?: AbortSignal,
 ) {
   const sources = new Set<string>();
   for (const repository of new Set(tasks.map((task) => task.repository))) {
     if (!isAbsolute(repository)) continue;
+    // The selected directory can supply links even if its checkout later fails.
+    const directory = await stat(repository).catch(nullIfUnavailableInputRoot);
+    if (directory?.isDirectory()) {
+      const selected = await realpath(repository).catch(
+        nullIfUnavailableInputRoot,
+      );
+      if (selected !== null) sources.add(selected);
+    }
     const roots = await localGitSourceRoots(repository, signal).catch(
       nullIfUnavailableInputRoot,
     );
@@ -305,7 +300,7 @@ async function runCampaign(
   const knowledgeByMode: MultiscanKnowledge = {};
   let sources: Promise<string[]> | undefined;
   const readDocuments = async (paths: readonly string[]) => {
-    sources ??= availableLocalSources(tasks, options.signal);
+    sources ??= bulkDocumentRoots(tasks, options.signal);
     return readKnowledgeBaseSnapshot(paths, options.signal, {
       directories: await sources,
     });
