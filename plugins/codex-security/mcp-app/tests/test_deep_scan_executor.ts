@@ -1646,7 +1646,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             `scan-${index}`,
           );
           const receiptRoot = path.parse(workerUsageDirectory).root;
+          const pluginReadRoot =
+            index === 0
+              ? path.join(fixture.root, `plugin-${index}`)
+              : undefined;
           const parentSandbox = {
+            pluginReadRoot,
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
               ...(nestedReceipts ? [] : [workerUsageDirectory]),
@@ -1715,6 +1720,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...deniedWorkerPermissionProfile,
               filesystem: {
                 ...deniedWorkerPermissionProfile.filesystem,
+                ...(pluginReadRoot === undefined
+                  ? {}
+                  : { [pluginReadRoot]: { ".": "read" } }),
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
                 ...(!nestedReceipts || process.platform !== "linux"
@@ -2157,7 +2165,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
-            path.join(fixture.root, "ambient-plugin"),
+            workerConfigurations[index].parentSandbox.pluginReadRoot ??
+              path.join(fixture.root, "ambient-plugin"),
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
