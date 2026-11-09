@@ -1197,7 +1197,9 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
     apply_migrations(connection)
 
     after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
-    assert after == [{**row, "log_completed_at": None} for row in before]
+    assert after == [
+        {**row, "log_completed_at": None, "windows_resume_output_identity": None} for row in before
+    ]
 
 
 @pytest.mark.parametrize(

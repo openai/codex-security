@@ -78,6 +78,7 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_RENAME_INFO_CLASS = 3
 _FILE_DISPOSITION_INFO_CLASS = 4
 _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
+_FILE_ID_INFO_CLASS = 18
 
 _FILE_TYPE_DISK = 0x0001
 _FILE_NAME_OPENED = 0x00000008
@@ -127,6 +128,25 @@ class _FileAttributeTagInfo(ctypes.Structure):
     _fields_ = [
         ("FileAttributes", wintypes.DWORD),
         ("ReparseTag", wintypes.DWORD),
+    ]
+
+
+class _FileIdInfo(ctypes.Structure):
+    _fields_ = [("VolumeSerialNumber", ctypes.c_uint64), ("FileId", ctypes.c_ubyte * 16)]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
     ]
 
 
@@ -230,6 +250,12 @@ if os.name == "nt":
         wintypes.DWORD,
     ]
     _GetFileInformationByHandleEx.restype = wintypes.BOOL
+    _GetFileInformationByHandle = _kernel32.GetFileInformationByHandle
+    _GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    ]
+    _GetFileInformationByHandle.restype = wintypes.BOOL
 
     _GetFileType = _kernel32.GetFileType
     _GetFileType.argtypes = [wintypes.HANDLE]
@@ -655,8 +681,8 @@ def _require_stable_output(path: Path, parent_grants: int, child_grants: int = 0
 
 
 @contextlib.contextmanager
-def _checked_output_directory(path: Path) -> Iterator[tuple[int, int]]:
-    """Hold the checked canonical chain and expose its final directory handle and grants."""
+def _checked_output_directory(path: Path) -> Iterator[tuple[int | None, int, int]]:
+    """Hold the checked chain and expose its parent, final directory handle and grants."""
     parent_grants = 0
     parent = None
     with contextlib.ExitStack() as pins:
@@ -682,12 +708,12 @@ def _checked_output_directory(path: Path) -> Iterator[tuple[int, int]]:
             _verify_directory(handle.value, directory)
             grants = _output_directory_grants(handle.value, directory)
             _require_stable_output(directory, parent_grants, grants)
-            parent, parent_grants = handle.value, grants
-        yield parent, parent_grants
+            containing, parent, parent_grants = parent, handle.value, grants
+        yield containing, parent, parent_grants
 
 
 def require_windows_output_path(path: Path, *, writable_output: bool = False) -> None:
-    with _checked_output_directory(path) as (_, grants):
+    with _checked_output_directory(path) as (_, _, grants):
         if writable_output and grants & _SET_REPARSE_POINT:
             raise _invalid_path(
                 path, "Another user can turn the output directory into a reparse point when empty."
@@ -700,20 +726,37 @@ DEEP_RESUME_DIRECTORY = ".codex-security-resume"
 def deep_resume_output_identity(scan_dir: Path) -> list[int]:
     """Bind the output and its protected child while every directory is pinned."""
     retained = scan_dir / DEEP_RESUME_DIRECTORY
-    with _checked_output_directory(retained) as (_, grants):
-        return _pinned_resume_identity(retained, grants)
+    with _checked_output_directory(retained) as (parent, child, grants):
+        assert parent is not None
+        return _pinned_resume_identity(parent, child, retained, grants)
 
 
-def _pinned_resume_identity(retained: Path, grants: int) -> list[int]:
+def _resume_directory_id(handle: int, path: Path) -> tuple[int, int]:
+    info = _FileIdInfo()
+    if _GetFileInformationByHandleEx(
+        handle, _FILE_ID_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        volume, file_id = info.VolumeSerialNumber, int.from_bytes(info.FileId, "little")
+    elif ctypes.get_last_error() in {50, 87}:  # ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER.
+        # Some filesystems expose only the legacy 64-bit file index.
+        legacy = _ByHandleFileInformation()
+        if not _GetFileInformationByHandle(handle, ctypes.byref(legacy)):
+            _raise_last_error("GetFileInformationByHandle", path)
+        volume = legacy.dwVolumeSerialNumber
+        file_id = (legacy.nFileIndexHigh << 32) | legacy.nFileIndexLow
+    else:
+        _raise_last_error("GetFileInformationByHandleEx(FileIdInfo)", path)
+    if not file_id:
+        raise _invalid_path(path, "The resume directory has no stable file identity.")
+    return volume, file_id
+
+
+def _pinned_resume_identity(parent: int, child: int, retained: Path, grants: int) -> list[int]:
     # A nonreplaceable, protected child keeps the scan root nonempty after
     # the sandbox receives Modify there. The caller holds both directories.
     if grants:
         raise _invalid_path(retained, "The retained resume directory must be protected.")
-    root = retained.parent.lstat()
-    child = retained.lstat()
-    if not root.st_ino or not child.st_ino:
-        raise _invalid_path(retained, "The resume directory has no stable file identity.")
-    return [root.st_dev, root.st_ino, child.st_dev, child.st_ino]
+    return [*_resume_directory_id(parent, retained.parent), *_resume_directory_id(child, retained)]
 
 
 class _UnicodeString(ctypes.Structure):
@@ -774,7 +817,7 @@ def _relative_output_directory(
 
 
 def create_windows_output_directory(path: Path, descriptor: wintypes.LPVOID) -> int:
-    with _checked_output_directory(path.parent) as (parent, grants):
+    with _checked_output_directory(path.parent) as (_, parent, grants):
         _require_stable_output(path, grants)
         error, handle = _relative_output_directory(parent, path.name, descriptor)
         if not error:
@@ -841,7 +884,7 @@ def create_deep_resume_output(scan_dir: Path, committed: Callable[[], bool]) -> 
     retained = scan_dir / DEEP_RESUME_DIRECTORY
     with (
         _private_directory_descriptor(retained, explicit_owner=True) as descriptor,
-        _checked_output_directory(scan_dir) as (parent, grants),
+        _checked_output_directory(scan_dir) as (_, parent, grants),
     ):
         _require_stable_output(retained, grants)
         error, child = _relative_output_directory(
@@ -856,7 +899,7 @@ def create_deep_resume_output(scan_dir: Path, committed: Callable[[], bool]) -> 
                 child_grants = _output_directory_grants(
                     child, retained, expected_descriptor=descriptor
                 )
-                yield _pinned_resume_identity(retained, child_grants)
+                yield _pinned_resume_identity(parent, child, retained, child_grants)
             except BaseException:
                 if not committed():
                     _mark_handle_for_deletion(child)

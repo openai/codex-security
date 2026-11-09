@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import json
 import os
 import sqlite3
@@ -75,9 +76,55 @@ def deep_registration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return state, output, register
 
 
+@pytest.mark.parametrize("legacy_ids", [False, True], ids=["full-file-id", "legacy-file-index"])
+def test_deep_resume_reads_both_pinned_directory_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_ids: bool
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    child = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    lstat = Path.lstat
+
+    def directory_entry_stat(path: Path) -> os.stat_result:
+        if path not in (output, child):
+            return lstat(path)
+        # Windows directory enumeration can supply attributes without a file index.
+        with os.scandir(path.parent) as entries:
+            entry = next(entry for entry in entries if entry.name == path.name)
+            return entry.stat(follow_symlinks=False)
+
+    monkeypatch.setattr(Path, "lstat", directory_entry_stat)
+    if legacy_ids:
+        get_info = windows_scan_local_files._GetFileInformationByHandleEx
+
+        def without_file_id(handle, info_class, *arguments):
+            if info_class == windows_scan_local_files._FILE_ID_INFO_CLASS:
+                ctypes.set_last_error(50)  # ERROR_NOT_SUPPORTED.
+                return False
+            return get_info(handle, info_class, *arguments)
+
+        monkeypatch.setattr(
+            windows_scan_local_files, "_GetFileInformationByHandleEx", without_file_id
+        )
+
+    with windows_scan_local_files.create_deep_resume_output(output, lambda: False) as saved:
+        assert output.lstat().st_ino == child.lstat().st_ino == 0
+        root_volume, root_id, child_volume, child_id = saved
+        assert root_volume == child_volume
+        assert root_id and child_id and root_id != child_id
+    assert windows_scan_local_files.deep_resume_output_identity(output) == saved
+
+
 @pytest.mark.parametrize(
     "change",
-    ["replaced root", "replaced child", "missing child", "deletable child", "delete child right"],
+    [
+        "replaced root",
+        "replaced child",
+        "different recorded volume",
+        "missing child",
+        "deletable child",
+        "delete child right",
+    ],
 )
 def test_deep_resume_requires_the_registered_protected_directories(
     deep_registration, tmp_path: Path, change: str
@@ -101,6 +148,14 @@ def test_deep_resume_requires_the_registered_protected_directories(
         windows_scan_local_files.create_private_directory(
             retained, exist_ok=False, scan_output=True
         )
+    elif change == "different recorded volume":
+        identity = windows_scan_local_files.deep_resume_output_identity(output)
+        identity[0] ^= 1 << 32  # The low 32 bits and both file IDs still match.
+        with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
+            connection.execute(
+                "UPDATE scans SET windows_resume_output_identity = ? WHERE id = ?",
+                (json.dumps(identity), scan_id),
+            )
     elif change == "missing child":
         retained.rmdir()
     elif change == "deletable child":
