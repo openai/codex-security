@@ -355,7 +355,7 @@ export class WorkbenchDeepScanStore {
   async fail(
     scanId: string,
     message: string,
-    status: "failed" | "interrupted" = "failed",
+    status: "failed" | "interrupted" | "usage_limit" = "failed",
     manifestPath?: string,
     stagedManifestPath?: string,
   ): Promise<DeepScanRunState> {
@@ -370,7 +370,7 @@ export class WorkbenchDeepScanStore {
         ...(stagedManifestPath
           ? ["--staged-manifest-path", stagedManifestPath]
           : []),
-        ...(status === "interrupted" ? ["--deep-status", "interrupted"] : []),
+        ...(status === "failed" ? [] : ["--deep-status", status]),
       ]),
     );
   }

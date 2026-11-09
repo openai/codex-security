@@ -183,7 +183,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     fail_deep_scan.add_argument("--manifest-path")
     fail_deep_scan.add_argument("--staged-manifest-path")
     fail_deep_scan.add_argument(
-        "--deep-status", choices=("failed", "interrupted"), default="failed"
+        "--deep-status", choices=("failed", "interrupted", "usage_limit"), default="failed"
     )
     fail_deep_scan.add_argument("--coordinator-generation", type=positive_int)
 

@@ -1688,8 +1688,10 @@ def fail_deep_scan_locked(
         require_current_coordinator(run, args)
         scan = dependencies().require_scan(connection, scan_id)
         recorded_manifest = archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
+        usage_limit = args.deep_status == "usage_limit"
+        terminal_status = "interrupted" if usage_limit else args.deep_status
         if (
-            args.deep_status == "interrupted"
+            usage_limit
             and not args.manifest_path
             and not args.staged_manifest_path
             and recorded_manifest is None
@@ -1737,7 +1739,7 @@ def fail_deep_scan_locked(
             manifest_path = recorded_manifest
         if run["status"] in {"failed", "interrupted"} or scan["status"] == "failed":
             if (
-                run["status"] == args.deep_status
+                run["status"] == terminal_status
                 and scan["status"] == "failed"
                 and run["error_message"] == message
                 and recorded_manifest == manifest_path
@@ -1750,7 +1752,7 @@ def fail_deep_scan_locked(
                 "manifest path, and parent failure must exactly match."
             )
         terminal_before_manifest = (
-            args.deep_status in {"failed", "interrupted"}
+            terminal_status in {"failed", "interrupted"}
             and run["status"] == "succeeded"
             and run["terminal_reason"] in {"saturated", "capped"}
             and run["manifest_path"] is None
@@ -1780,7 +1782,7 @@ def fail_deep_scan_locked(
                 error_message = ?, manifest_path = ?, completed_at = ?, updated_at = ?
             WHERE scan_id = ?
             """,
-            (args.deep_status, message, manifest_path, timestamp, timestamp, scan_id),
+            (terminal_status, message, manifest_path, timestamp, timestamp, scan_id),
         )
         cancel_active_workers(connection, scan_id, timestamp)
         if not saved_results.mark_running_scan_failed(connection, scan_id, message, timestamp):

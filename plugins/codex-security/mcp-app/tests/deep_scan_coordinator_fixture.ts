@@ -283,7 +283,7 @@ export class FakeStore {
   async fail(
     _scanId: string,
     message: string,
-    status: "failed" | "interrupted" = "failed",
+    status: "failed" | "interrupted" | "usage_limit" = "failed",
     manifestPath?: string,
     stagedManifestPath?: string,
   ) {
@@ -295,10 +295,10 @@ export class FakeStore {
     }
     if (stagedManifestPath && manifestPath)
       await rename(stagedManifestPath, manifestPath);
-    this.run.status = status;
+    this.run.status = status === "usage_limit" ? "interrupted" : status;
     this.run.error = message;
     this.run.manifestPath = manifestPath;
-    if (status === "interrupted" && !manifestPath) {
+    if (status === "usage_limit" && !manifestPath) {
       this.run.resumeAvailable = true;
       for (const worker of this.workers.values()) {
         if (worker.status === "failed" && worker.error === message) {

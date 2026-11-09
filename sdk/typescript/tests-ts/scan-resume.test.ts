@@ -325,7 +325,7 @@ test("usage-limit pauses retain the original CLI resume context", async () => {
     "--scan-id",
     f.scanId,
     "--deep-status",
-    "interrupted",
+    "usage_limit",
     "--message",
     "Quota exceeded. Check your plan and billing details.",
   ]);

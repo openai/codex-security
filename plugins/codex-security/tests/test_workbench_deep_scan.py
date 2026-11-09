@@ -1011,7 +1011,7 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
     paused = deep.command(
         "fail-deep-scan",
         "--deep-status",
-        "interrupted",
+        "usage_limit",
         "--message",
         message,
         "--coordinator-generation",
@@ -1025,7 +1025,7 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
         deep.command(
             "fail-deep-scan",
             "--deep-status",
-            "interrupted",
+            "usage_limit",
             "--message",
             message,
             "--coordinator-generation",
@@ -1085,7 +1085,7 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
     deep.command(
         "fail-deep-scan",
         "--deep-status",
-        "interrupted",
+        "usage_limit",
         "--message",
         message,
         "--coordinator-generation",
@@ -1110,7 +1110,7 @@ def test_usage_limit_pause_rejects_changed_target_on_resume(tmp_path: Path) -> N
     deep.command(
         "fail-deep-scan",
         "--deep-status",
-        "interrupted",
+        "usage_limit",
         "--message",
         "You’ve hit your usage limit. Try again later.",
     )

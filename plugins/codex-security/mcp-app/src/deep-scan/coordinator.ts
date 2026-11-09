@@ -443,7 +443,7 @@ export class DeepScanCoordinator {
         const failed = await this.options.store.fail(
           this.state.scanId,
           persistedMessage,
-          error instanceof DeepScanUsageLimitError ? "interrupted" : "failed",
+          error instanceof DeepScanUsageLimitError ? "usage_limit" : "failed",
         );
         if (this.canceled || this.externallyFailed) return;
         this.state = failed;
