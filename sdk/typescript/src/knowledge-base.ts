@@ -366,6 +366,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     let instructionText = false;
     // Paragraph properties list tab stops as w:tab elements inside w:tabs.
     let tabStops = false;
+    // Content controls mark unfilled prompt text with w:showingPlcHdr.
+    const placeholders: boolean[] = [];
     const append = (value: string) => {
       if (deletedDepth > 0) return;
       const field = fields.at(-1);
@@ -401,6 +403,11 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       ) {
         deletedDepth++;
       }
+      if (localName === "sdt") placeholders.push(false);
+      else if (localName === "showingPlcHdr" && placeholders.length > 0)
+        placeholders[placeholders.length - 1] = true;
+      else if (localName === "sdtContent" && placeholders.at(-1))
+        deletedDepth++;
       if (deletedDepth > 0) return;
       if (localName === "txbxContent") {
         // Text boxes have their own field boundaries.
@@ -451,6 +458,9 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       ) {
         deletedDepth--;
       }
+      if (localName === "sdt") placeholders.pop();
+      else if (localName === "sdtContent" && placeholders.at(-1))
+        deletedDepth--;
     });
     // Word stores drawing positions and relative sizes as character data.
     const appendCharacters = (value: string) => {
