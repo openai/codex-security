@@ -101,6 +101,9 @@ what will run, ask for the effective worker count, subagents per worker, stop
 conditions, review cap, and discovery time limit. The plugin returns each value
 and its source in `setup.deepScanConfig` from `inspect_codex_security_setup`.
 Both setup and `start_codex_security_deep_scan` accept `projectConfigPath`.
+For a file under your home directory, `~/security/scan.yaml` and
+`~\security\scan.yaml` both select the same file. On POSIX, use the `~/`
+spelling when the filename itself contains a backslash.
 
 Explicit project settings override per-user `[deep_scan]` settings, which override
 built-in defaults. The per-user file remains
