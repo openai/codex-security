@@ -506,6 +506,7 @@ const PROVIDER_OPTION = z
     "openrouter",
     "fireworks",
     "cheaperinference",
+    "standardcompute",
     "amazon-bedrock",
   ])
   .default("openai")

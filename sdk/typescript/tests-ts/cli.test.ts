@@ -61,6 +61,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  STANDARDCOMPUTE_CODEX_PROVIDER,
   scanModelConfiguration,
   mergedCodexConfig,
 } from "../src/config.js";
@@ -871,6 +872,7 @@ describe("CLI", () => {
               "openrouter",
               "fireworks",
               "cheaperinference",
+              "standardcompute",
               "amazon-bedrock",
             ],
           },
@@ -3274,6 +3276,13 @@ describe("CLI", () => {
       "gpt-5.4",
       "claude-sonnet-5",
       CHEAPERINFERENCE_CODEX_PROVIDER,
+    ],
+    [
+      "Standard Compute",
+      "standardcompute",
+      "StandardCompute",
+      "anthropic/claude-sonnet-5",
+      STANDARDCOMPUTE_CODEX_PROVIDER,
     ],
   ] as const)(
     "routes scans through %s",

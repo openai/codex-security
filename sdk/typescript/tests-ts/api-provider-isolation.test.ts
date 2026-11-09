@@ -860,6 +860,7 @@ for (const mode of ["standard", "deep"] as const) {
                     "OPENROUTER_API_KEY",
                     "FIREWORKS_API_KEY",
                     "CHEAPER_INFERENCE_API_KEY",
+                    "STANDARDCOMPUTE_API_KEY",
                   ]) {
                     expect(environment[name]).toBe(
                       name === providerKey ||

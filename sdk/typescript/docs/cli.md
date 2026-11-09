@@ -250,6 +250,9 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 
 export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
+
+export STANDARDCOMPUTE_API_KEY="<your-standardcompute-api-key>"
+codex-security scan . --provider standardcompute --model StandardCompute
 ```
 
 ### Hugging Face compatibility

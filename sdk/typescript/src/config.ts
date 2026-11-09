@@ -44,10 +44,18 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const STANDARDCOMPUTE_CODEX_PROVIDER = {
+  name: "Standard Compute",
+  base_url: "https://api.stdcmpt.com/v1",
+  env_key: "STANDARDCOMPUTE_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
   cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
+  standardcompute: STANDARDCOMPUTE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;

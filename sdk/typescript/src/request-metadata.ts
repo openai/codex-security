@@ -64,6 +64,7 @@ function providerFamily(provider: unknown): string {
     case "openai":
     case "amazon-bedrock":
     case "cheaperinference":
+    case "standardcompute":
     case "openrouter":
     case "fireworks":
     case "ollama":
