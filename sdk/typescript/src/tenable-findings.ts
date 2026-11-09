@@ -15,6 +15,7 @@ import {
   readScannerJson,
   repositoryFilePath,
   scannerSeverity,
+  text,
   trackReaderSelection,
 } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -181,7 +182,7 @@ export async function readTenableFindings(
           severity: scannerSeverity(
             severity === "info" ? "informational" : severity,
           ),
-          description: finding.description,
+          description: text(finding.description),
           locations,
           source_data: {
             format: tenableReportFormat,

@@ -44,6 +44,7 @@ test("the reader preserves vendor state and optional severity and locations", as
         ...row,
         finding_id: "00018",
         severity: "unrated",
+        description: "  ",
         code_file_path: "src/app.ts",
       },
     ],
@@ -57,7 +58,12 @@ test("the reader preserves vendor state and optional severity and locations", as
       finding: { state: "FIXED", solution: "Update the dependency" },
     },
   });
+  const cloud = await readTenableFindings(fixture.file, repositoryUrl, "cloud");
+  expect(cloud.excluded).toEqual([]);
+  expect(cloud.findings).toEqual(findings);
+  expect(findings[1]!.evidence.description).toBeNull();
   expect(findings[1]!.evidence).toMatchObject({
+    source_data: { finding: { description: "  " } },
     severity: "unknown",
     locations: [{ path: "src/app.ts", line: null }],
   });
