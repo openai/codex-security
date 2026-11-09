@@ -40,7 +40,7 @@ import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
 import { runWorkbench } from "../src/runtime.js";
 import { readSavedScanLifecycle } from "../src/saved-scan-bootstrap.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
@@ -50,6 +50,8 @@ import {
 import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
+
+const pythonExecutable = useTestPython();
 
 const { severityRubric } = hostedContract.run.params;
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
