@@ -2722,8 +2722,10 @@ describe("scan and patch workflow", () => {
       let savedBody = `Synthetic saved report\n\n\t/close\n\n${summary}`;
       if (mode === "resume CRLF")
         savedBody = savedBody.replaceAll("\n", "\r\n");
-      if (mode === "resume embedded CR")
-        savedBody = "Synthetic saved report\n\n>\r>>\n/label ~example";
+      if (mode === "resume embedded CR") {
+        // A Markdown heading makes older Git quote the config value and preserve its CR.
+        savedBody = "## Synthetic saved report\n\n>\r>>\n/label ~example";
+      }
       if (resumed) {
         git("branch", branch);
         git(
