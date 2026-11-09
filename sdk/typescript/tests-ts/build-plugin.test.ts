@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   stat,
   symlink,
   writeFile,
@@ -112,7 +113,16 @@ describe("bundled plugin build", () => {
     const plugin = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
     );
-    const source = join(root, "plugin");
+    const ordinarySource = join(root, "plugin");
+    const manifestLength = join(
+      ordinarySource,
+      "mcp-app",
+      "package.json",
+    ).length;
+    const source =
+      process.platform === "win32"
+        ? ordinarySource + "p".repeat(Math.max(0, 263 - manifestLength))
+        : ordinarySource;
     await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
       recursive: true,
       filter: (path) => !["node_modules", ".preview"].includes(basename(path)),
@@ -179,6 +189,23 @@ describe("bundled plugin build", () => {
       process.platform === "win32" ? "@exit /b 91\r\n" : "#!/bin/sh\nexit 91\n",
     );
     if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
+    if (process.platform === "win32") {
+      const manifest = join(source, "mcp-app", "package.json");
+      const pkg = JSON.parse(await readFile(manifest, "utf8"));
+      pkg.scripts.build += " && node scripts/record-build.mjs";
+      await writeFile(manifest, JSON.stringify(pkg));
+      await writeFixture(
+        source,
+        "mcp-app/scripts/record-build.mjs",
+        'import { writeFileSync } from "node:fs"; writeFileSync("build-receipt.json", JSON.stringify([process.env.NODE_RUN_SCRIPT_NAME, process.env.NODE_RUN_PACKAGE_JSON_PATH]));\n',
+      );
+      await writeFixture(
+        root,
+        "package.json",
+        JSON.stringify({ scripts: { build: 'node -e "process.exit(91)"' } }),
+      );
+      await writeFixture(bin, "tsc.cmd", "@exit /b 92\r\n");
+    }
 
     const destination = join(root, "mcp");
     await writeFixture(destination, "helpers.mjs.br.part-000", "stale");
@@ -197,6 +224,15 @@ describe("bundled plugin build", () => {
       },
     );
 
+    if (process.platform === "win32") {
+      const [script, manifest] = JSON.parse(
+        await readFile(join(source, "mcp-app", "build-receipt.json"), "utf8"),
+      );
+      expect(script).toBe("build");
+      expect(await realpath(manifest)).toBe(
+        await realpath(join(source, "mcp-app", "package.json")),
+      );
+    }
     const contract = JSON.parse(
       await readFile(
         new URL(
