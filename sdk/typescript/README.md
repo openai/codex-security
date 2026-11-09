@@ -417,8 +417,9 @@ For retired progress hooks, see [older progress integrations](#older-progress-in
 contain source code or credentials. Deep scans additionally expose durable
 independent-review counts through `onDeepProgress`: `completed`, `active`, and
 `maximum`. The maximum is a configured cap, not a percentage denominator. The
-optional `consolidating` flag reports when results are being combined or the
-coordinator has finished.
+optional `consolidating` flag is true while the running scan combines results or
+waits for finalization after its coordinator finishes. It is false once the scan
+completes, fails, or is canceled.
 `ScanOptions` lists all callbacks.
 
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription
@@ -772,7 +773,7 @@ Local tools running under the same account are trusted.
 The scan profile allows reads across the local filesystem and writes to workspace
 roots. Execution approvals are reviewed automatically and may grant extra
 permissions for an operation. Set `codexOverrides.approval_policy: "never"`
-(or CLI `--codex 'approval_policy="never"'`) to deny permission requests.
+(or CLI `--codex "approval_policy='never'"`) to deny permission requests.
 If you select a Codex profile, its explicit `approval_policy` takes precedence
 over the root setting.
 Host and network restrictions still apply.
