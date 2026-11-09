@@ -5,11 +5,14 @@ import {
   readFile,
   readdir,
   realpath,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import * as fsPromises from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import * as os from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
@@ -22,6 +25,166 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
+
+test.skipIf(process.platform !== "win32").each(["changed", "canceled"])(
+  "retains a %s ZIP error when Windows holds the scan input open",
+  async (result) => {
+    const root = await temporaryDirectory();
+    const bootstrap = join(root, "bootstrap");
+    const output = join(root, "scan");
+    const archive = join(root, "selected.zip");
+    await mkdir(bootstrap);
+    await mkdir(output);
+    const plugin = (description: string) =>
+      zipSync({
+        ".codex-plugin/plugin.json": strToU8(
+          JSON.stringify({
+            name: "codex-security",
+            version: "1.2.3",
+            description,
+          }),
+        ),
+      });
+    await writeFile(archive, plugin("original"));
+    const { zip } = await runtime.resolvePluginSource(
+      archive,
+      bootstrap,
+      undefined,
+      true,
+    );
+    if (result === "changed") await writeFile(archive, plugin("replacement"));
+    const controller = new AbortController();
+    const reason = new Error("Canceled while preparing the scan input");
+    const nativeRename = fsPromises.rename;
+    let held = "";
+    let release: (() => Promise<void>) | undefined;
+    using publication = spyOn(fsPromises, "rename").mockImplementation(
+      async (from, to) => {
+        await nativeRename(from, to);
+        if (basename(String(to)) !== "plugin") return;
+        held = dirname(String(to));
+        const holder = spawn(
+          "node",
+          ["-e", 'process.stdout.write("ready"); process.stdin.resume()'],
+          { cwd: held, windowsHide: true },
+        );
+        const exited = once(holder, "exit");
+        release = async () => {
+          holder.stdin.end();
+          await exited;
+        };
+        await once(holder.stdout, "data");
+        if (result === "canceled") controller.abort(reason);
+      },
+    );
+    try {
+      const operation = runtime.prepareWindowsScanPluginZip(
+        zip!,
+        output,
+        [bootstrap],
+        () => {},
+        controller.signal,
+      );
+      if (result === "canceled") await expect(operation).rejects.toBe(reason);
+      else {
+        const failure = await operation.catch((error: unknown) => error);
+        expect((failure as Error).message).toContain(
+          `Could not remove scan input directory ${held}:`,
+        );
+        expect(failure).toMatchObject({
+          cause: {
+            name: "LocalPluginBootstrapError",
+            message: expect.stringContaining("ZIP changed"),
+          },
+        });
+      }
+      expect(publication).toHaveBeenCalled();
+      expect(existsSync(held)).toBe(true);
+    } finally {
+      await release?.();
+    }
+  },
+);
+
+test.skipIf(process.platform !== "win32")(
+  "prepares the pinned ZIP from its original source for explicit and default Windows scan outputs",
+  async () => {
+    const root = await temporaryDirectory();
+    const archive = join(root, "workflow [source].ZIP");
+    const ambient = join(root, "ambient");
+    const bootstrap = join(root, "bootstrap");
+    const ordinaryTemp = join(root, "scan-temporary");
+    const explicit = join(root, "explicit", "scan");
+    const configuredDefault = join(root, "state", "scans", "fixture", "scan");
+    const privateDefault = join(ambient, "state", "scans", "fixture", "scan");
+    for (const path of [
+      bootstrap,
+      ordinaryTemp,
+      explicit,
+      configuredDefault,
+      privateDefault,
+    ])
+      await mkdir(path, { recursive: true });
+    const contents = (skill: string) =>
+      zipSync({
+        "release/.codex-plugin/plugin.json": strToU8(
+          JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+        ),
+        "release/skills/security-scan/SKILL.md": strToU8(skill),
+      });
+    const original = Buffer.from(contents("# Selected workflow"));
+    await writeFile(archive, original);
+    const { zip } = await runtime.resolvePluginSource(
+      archive,
+      bootstrap,
+      undefined,
+      true,
+    );
+    expect(zip).toBeDefined();
+    // Removing the synthetic install proves every scan reads its selected ZIP.
+    await rm(bootstrap, { recursive: true });
+    using temporary = spyOn(os, "tmpdir").mockReturnValue(ordinaryTemp);
+    const prepare = (scan: string) =>
+      runtime.prepareWindowsScanPluginZip(
+        zip!,
+        scan,
+        [ambient, bootstrap],
+        () => {},
+      );
+    for (const [output, expectedParent] of [
+      [explicit, dirname(explicit)],
+      [configuredDefault, dirname(configuredDefault)],
+      [privateDefault, ordinaryTemp],
+    ] as const) {
+      const staged = await prepare(output);
+      expect(staged).toBeDefined();
+      try {
+        expect(dirname(staged!.workspace)).toBe(expectedParent);
+        expect(staged!.root).toBe(join(staged!.workspace, "plugin", "release"));
+        expect(
+          await readFile(
+            join(staged!.root, "skills/security-scan/SKILL.md"),
+            "utf8",
+          ),
+        ).toBe("# Selected workflow");
+      } finally {
+        await runtime.cleanupSdkDirectory(staged!.workspace);
+      }
+    }
+    expect(await readFile(archive)).toEqual(original);
+    await writeFile(archive, contents("different bytes at the same version"));
+    await expect(prepare(explicit)).rejects.toThrow(
+      "changed after runtime preparation",
+    );
+    expect(await readdir(dirname(explicit))).toEqual(["scan"]);
+    await rm(archive);
+    expect(await prepare(explicit)).toBeUndefined();
+    expect(await readdir(dirname(explicit))).toEqual(["scan"]);
+    await writeFile(archive, original);
+    temporary.mockReturnValue(ambient);
+    expect(await prepare(privateDefault)).toBeUndefined();
+  },
+);
 
 function stubPluginInstall() {
   return spyOn(runtime, "bootstrapPlugin").mockImplementation(
@@ -229,7 +392,7 @@ test.each(["directory", "zip"])(
         await writeFile(join(pluginPath, name), contents);
       }
     }
-    const snapshotAcl = () => {
+    const snapshotAcl = (path = temporary) => {
       const system = join(process.env["SystemRoot"]!, "System32");
       const result = spawnSync(
         join(system, "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -248,7 +411,7 @@ test.each(["directory", "zip"])(
                 ([name]) => name.toUpperCase() !== "PSMODULEPATH",
               ),
             ),
-            CODEX_SECURITY_TEST_TEMP: temporary,
+            CODEX_SECURITY_TEST_TEMP: path,
             PSModulePath: join(system, "WindowsPowerShell", "v1.0", "Modules"),
           },
           windowsHide: true,
@@ -258,6 +421,8 @@ test.each(["directory", "zip"])(
       return result.stdout.trim();
     };
     let temporaryAcl: string | undefined;
+    const sourceAcl =
+      process.platform === "win32" ? snapshotAcl(pluginPath) : undefined;
     if (process.platform === "win32") {
       const grant = spawnSync(
         join(process.env["SystemRoot"]!, "System32", "icacls.exe"),
@@ -282,6 +447,9 @@ test.each(["directory", "zip"])(
     const temporaryRoot = spyOn(os, "tmpdir").mockReturnValue(temporary);
     const install = stubPluginInstall();
     const workspaces = new Map<number, string>();
+    const zipInputs = new Set<string>();
+    let defaultOutput = false;
+    let movedArchive = false;
     const clients: TestClient[] = [];
     const createClient = (index: number, stateDirectory = state) => {
       const client = new TestClient(
@@ -327,19 +495,64 @@ test.each(["directory", "zip"])(
             const previous = workspaces.get(index);
             if (previous !== undefined) expect(workspace).toBe(previous);
             workspaces.set(index, workspace);
-            expect(environment["CODEX_SECURITY_PLUGIN_ROOT"]).toBe(
-              source === "zip"
-                ? join(workspace, "extracted-plugin")
-                : pluginPath,
-            );
+            const plugin = environment["CODEX_SECURITY_PLUGIN_ROOT"]!;
+            if (
+              source === "zip" &&
+              process.platform === "win32" &&
+              !movedArchive
+            ) {
+              const input = dirname(plugin);
+              expect(dirname(input)).toBe(
+                dirname(environment["CODEX_SECURITY_SCAN_DIR"]!),
+              );
+              expect(zipInputs.has(input)).toBe(false);
+              zipInputs.add(input);
+              expect(
+                existsSync(join(plugin, "skills/security-scan/SKILL.md")),
+              ).toBe(true);
+              const overrides = options.configOverrides!.find((entry) =>
+                entry.startsWith("permissions.codex_security_scan.filesystem="),
+              )!;
+              expect(parseToml(overrides)).toEqual({
+                permissions: {
+                  codex_security_scan: {
+                    filesystem: {
+                      ":root": "read",
+                      ":workspace_roots": "write",
+                      [plugin]: { ".": "read" },
+                      [environment["CODEX_HOME"]!]: { ".": "deny" },
+                    },
+                  },
+                },
+              });
+            } else {
+              expect(plugin).toBe(
+                source === "zip"
+                  ? join(workspace, "extracted-plugin")
+                  : pluginPath,
+              );
+              if (movedArchive)
+                expect(
+                  options.configOverrides!.some((entry) =>
+                    entry.startsWith(
+                      "permissions.codex_security_scan.filesystem=",
+                    ),
+                  ),
+                ).toBe(false);
+            }
             const codex = codexFactory(async function () {
               throw new Error("synthetic scan reached");
             })();
             return {
               startThread: (threadOptions) => {
-                expect(threadOptions.workingDirectory).toBe(
-                  join(root, `scan-${index}`),
-                );
+                if (defaultOutput) {
+                  expect(dirname(threadOptions.workingDirectory!)).toBe(
+                    join(stateDirectory, "scans", "repository"),
+                  );
+                } else
+                  expect(threadOptions.workingDirectory).toBe(
+                    join(root, `scan-${index}`),
+                  );
                 return codex.startThread();
               },
             };
@@ -359,18 +572,39 @@ test.each(["directory", "zip"])(
         expect(run(second, 1)).rejects.toThrow("synthetic scan reached"),
       ]);
       expect(workspaces.size).toBe(2);
+      for (const input of zipInputs) expect(existsSync(input)).toBe(false);
       expect(workspaces.get(0)).not.toBe(workspaces.get(1));
       await first.close();
       expect(existsSync(workspaces.get(0)!)).toBe(false);
       expect(existsSync(workspaces.get(1)!)).toBe(true);
       await expect(run(second, 1)).rejects.toThrow("synthetic scan reached");
+      for (const input of zipInputs) expect(existsSync(input)).toBe(false);
       if (process.platform === "win32") {
+        if (source === "zip") {
+          defaultOutput = true;
+          await expect(second.run(repository)).rejects.toThrow(
+            "synthetic scan reached",
+          );
+          defaultOutput = false;
+          for (const input of zipInputs) expect(existsSync(input)).toBe(false);
+          movedArchive = true;
+          await fsPromises.rename(pluginPath, `${pluginPath}.moved`);
+          try {
+            await expect(run(second, 1)).rejects.toThrow(
+              "synthetic scan reached",
+            );
+          } finally {
+            await fsPromises.rename(`${pluginPath}.moved`, pluginPath);
+            movedArchive = false;
+          }
+        }
         const rejected = createClient(2, join(temporary, "untrusted-state"));
         await expect(run(rejected, 2)).rejects.toThrow(
           "allows another identity to replace",
         );
         expect(workspaces.has(2)).toBe(false);
         expect(snapshotAcl()).toBe(temporaryAcl!);
+        expect(snapshotAcl(pluginPath)).toBe(sourceAcl!);
       }
       expect({ TEMP: process.env["TEMP"], TMP: process.env["TMP"] }).toEqual(
         processTemporary,

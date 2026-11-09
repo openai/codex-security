@@ -9,7 +9,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, type Hash } from "node:crypto";
 import {
   chmodSync,
   close as closeCallback,
@@ -2637,6 +2637,15 @@ export async function extractPluginZip(
   destination: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  return extractValidatedPluginZip(archive, destination, signal);
+}
+
+async function extractValidatedPluginZip(
+  archive: string,
+  destination: string,
+  signal?: AbortSignal,
+  digest?: Hash,
+): Promise<string> {
   const archivePath = resolve(expandHome(archive));
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   const staging = await realpath(
@@ -2690,6 +2699,7 @@ export async function extractPluginZip(
         const output = join(staging, ...path.split("/"));
         const entryMode = (entry.externalFileAttributes >>> 16) & 0xffff;
         const permissions = (entryMode || (directory ? 0o700 : 0o600)) & 0o777;
+        digest?.update(JSON.stringify([path, directory, permissions]));
         await mkdir(directory ? output : dirname(output), {
           recursive: true,
           ...(directory ? { mode: permissions } : {}),
@@ -2714,6 +2724,7 @@ export async function extractPluginZip(
           `Plugin ZIP entry failed CRC-32 validation: ${path}`,
         );
       }
+      digest?.update(createHash("sha256").update(bytes).digest());
     }
     const pluginRoot = await discoverPluginRoot(staging);
     throwIfSignalAborted(signal);
@@ -2827,23 +2838,46 @@ export async function resolvePluginPath(
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  return (await resolvePluginSource(pluginPath, workspace, signal)).root;
+}
+
+/** @internal */
+export interface PluginZipSource {
+  path: string;
+  digest: string;
+}
+
+/** @internal */
+export async function resolvePluginSource(
+  pluginPath: string | undefined,
+  workspace: string,
+  signal?: AbortSignal,
+  pinZip = false,
+): Promise<{ root: string; zip?: PluginZipSource }> {
   try {
     if (pluginPath === undefined) {
-      return await bundledPluginRoot();
+      return { root: await bundledPluginRoot() };
     }
 
     const path = resolve(expandHome(pluginPath));
     const metadata = await lstat(path).catch(() => null);
     if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
-      return await extractPluginZip(
-        path,
+      const digest = pinZip ? createHash("sha256") : undefined;
+      const archive = digest ? await realpath(path) : path;
+      const root = await extractValidatedPluginZip(
+        archive,
         join(workspace, "extracted-plugin"),
         signal,
+        digest,
       );
+      return {
+        root,
+        ...(digest && { zip: { path: archive, digest: digest.digest("hex") } }),
+      };
     }
     if (metadata?.isDirectory()) {
       throwIfSignalAborted(signal);
-      return await validatePluginRoot(path);
+      return { root: await validatePluginRoot(path) };
     }
     throw new PluginBootstrapError(
       `Plugin path must be a directory or ZIP: ${path}`,
@@ -2852,6 +2886,91 @@ export async function resolvePluginPath(
     if (signal?.aborted || error instanceof LocalPluginBootstrapError)
       throw error;
     throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
+  }
+}
+
+/** @internal */
+export async function prepareWindowsScanPluginZip(
+  source: PluginZipSource,
+  scanDirectory: string,
+  protectedDirectories: readonly string[],
+  validateLocation: (path: string) => void,
+  signal?: AbortSignal,
+): Promise<{ workspace: string; root: string } | undefined> {
+  throwIfSignalAborted(signal);
+  const protectedPath = (path: string) =>
+    protectedDirectories.some((directory) => isWithin(directory, path));
+  if (protectedPath(source.path)) return;
+  const metadata = await lstat(source.path).catch(nullIfMissingFileError);
+  if (metadata === null) return;
+  const changed = "The selected plugin ZIP changed after runtime preparation.";
+  if (!metadata.isFile()) throw new LocalPluginBootstrapError(changed);
+  const canonicalSource = await realpath(source.path).catch(
+    nullIfMissingFileError,
+  );
+  if (canonicalSource === null) return;
+  if (protectedPath(canonicalSource))
+    throw new LocalPluginBootstrapError(changed);
+  let workspace: string | undefined;
+  for (const parent of new Set([dirname(scanDirectory), tmpdir()])) {
+    try {
+      const canonical = await realpath(parent);
+      if (protectedPath(canonical) || isWithin(scanDirectory, canonical))
+        continue;
+      // Host-side plugin helpers may execute from this copy. A sibling keeps it
+      // outside the writable scan, and the native creator verifies its parents.
+      workspace = await prepareOutputDir(
+        undefined,
+        "plugin-input",
+        canonical,
+        validateLocation,
+      );
+      break;
+    } catch (error) {
+      if (
+        !(error instanceof OutputDirectoryError) &&
+        !["EACCES", "EPERM", "ENOENT"].includes(nodeErrorCode(error) ?? "")
+      )
+        throw error;
+    }
+  }
+  // Keep existing plugin handling where neither scan input location is usable.
+  if (workspace === undefined) return;
+  try {
+    throwIfSignalAborted(signal);
+    const digest = createHash("sha256");
+    const root = await extractValidatedPluginZip(
+      source.path,
+      join(workspace, "plugin"),
+      signal,
+      digest,
+    );
+    throwIfSignalAborted(signal);
+    if (digest.digest("hex") !== source.digest) {
+      throw new LocalPluginBootstrapError(changed);
+    }
+    return { workspace, root };
+  } catch (error) {
+    try {
+      await cleanupSdkDirectory(workspace);
+    } catch (cleanupError) {
+      throwIfSignalAborted(signal);
+      throw new LocalPluginBootstrapError(
+        `${errorMessage(error)}\nCould not remove scan input directory ${workspace}: ${errorMessage(cleanupError)}`,
+        { cause: error },
+      );
+    }
+    throwIfSignalAborted(signal);
+    const cause =
+      error instanceof PluginBootstrapError ? error.cause : undefined;
+    if (
+      isRecord(cause) &&
+      cause["code"] === "ENOENT" &&
+      cause["syscall"] === "open" &&
+      cause["path"] === source.path
+    )
+      return;
+    throw error;
   }
 }
 
