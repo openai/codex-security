@@ -255,7 +255,11 @@ test.each(["directory", "zip"])(
       );
       expect(grant.status, grant.stderr).toBe(0);
       temporaryAcl = snapshotAcl();
-      const rejected = await runtime.createIsolatedHome(temporary);
+      await expect(runtime.createIsolatedHome(temporary)).rejects.toThrow(
+        "could not be trusted",
+      );
+      const rejected = join(temporary, "credential-home");
+      await mkdir(rejected);
       await expect(
         runtime.requirePrivateCredentialHome(await lstat(rejected), rejected),
       ).rejects.toThrow("allows another identity to replace");
