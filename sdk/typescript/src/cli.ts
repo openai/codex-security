@@ -428,6 +428,7 @@ import {
   meetsSeverity,
   type FailureSeverity,
   type ResolvedScanSettings,
+  type ScanPromptSettings,
 } from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
@@ -473,22 +474,26 @@ const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
     .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
 });
 type SkillConfiguration = z.infer<typeof SKILL_CONFIG_OPTIONS>;
-const CODEX_OVERRIDE_DESCRIPTION =
-  'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.';
-const PLUGIN_PATH_DESCRIPTION =
-  "Codex Security plugin directory or ZIP (default: bundled plugin).";
-const PYTHON_PATH_DESCRIPTION =
-  "Python interpreter (default: PYTHON or automatic discovery).";
-const RUNTIME_OPTION_SCHEMAS = {
-  pluginPath: optionValue("--plugin-path")
-    .optional()
-    .describe(PLUGIN_PATH_DESCRIPTION),
-  python: optionValue("--python").optional().describe(PYTHON_PATH_DESCRIPTION),
-  codex: z
-    .array(optionValue("--codex"))
-    .default([])
-    .describe(CODEX_OVERRIDE_DESCRIPTION),
-};
+const RUNTIME_OPTION_SCHEMAS = runtimeOptions(optionValue);
+
+function runtimeOptions(value: typeof optionValue) {
+  return {
+    pluginPath: value("--plugin-path")
+      .optional()
+      .describe(
+        "Codex Security plugin directory or ZIP (default: bundled plugin).",
+      ),
+    python: value("--python")
+      .optional()
+      .describe("Python interpreter (default: PYTHON or automatic discovery)."),
+    codex: z
+      .array(value("--codex"))
+      .default([])
+      .describe(
+        'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.',
+      ),
+  };
+}
 const SKILL_AUTH_OPTION = z
   .enum(SCAN_AUTH_MODES)
   .default("auto")
@@ -1217,7 +1222,6 @@ interface ScanArguments extends ResolvedScanSettings {
   dryRun: boolean;
   parentScanId?: string;
   expectedPluginVersion?: string;
-  includeFailureResults?: boolean;
 }
 
 interface ScanOutcome {
@@ -2402,6 +2406,16 @@ export async function main(
     }
     return finishScan(outcome, format, incurError, code);
   };
+  const runScan = (format: string, args: ScanArguments) =>
+    withTerminalErrorsHandled(errorOutput, () =>
+      executeScan(
+        args,
+        errorOutput,
+        dependencies,
+        format !== "json" && format !== "jsonl",
+        includeFailureResults(format),
+      ),
+    );
   const runImport = (options: ImportScanOptions) =>
     withTerminalErrorsHandled(errorOutput, () =>
       runScanImport(options, errorOutput, dependencies),
@@ -2944,14 +2958,8 @@ export async function main(
             );
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
-            saved["recipe"],
+            saved,
             "resume",
-            {
-              scanPrompt:
-                typeof saved["userContext"] === "string"
-                  ? saved["userContext"]
-                  : undefined,
-            },
             dependencies.currentDirectory(),
             dependencies.environment,
           );
@@ -2967,8 +2975,6 @@ export async function main(
               (saved["recipe"] as JsonObject)["scanInputs"],
             );
           }
-          // Resume uses the installed engine with the saved recipe and checkpoints.
-          scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
         } catch (error) {
@@ -2981,13 +2987,7 @@ export async function main(
             "SCAN_RESUME_UNAVAILABLE",
           );
         }
-        scanArguments.includeFailureResults = includeFailureResults(format);
-        const outcome = await runScan(
-          scanArguments,
-          errorOutput,
-          dependencies,
-          format !== "json" && format !== "jsonl",
-        );
+        const outcome = await runScan(format, scanArguments);
         return finishScanCommand(outcome, format, incurError);
       },
     })
@@ -3051,11 +3051,11 @@ export async function main(
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
-          const { recipe, scanId: resolvedScanId } =
-            await dependencies.runWorkbench(
-              workbenchArgs("get-scan-recipe", { scanId }),
-            );
-          const parentScanId = resolvedScanId as string;
+          const saved = await dependencies.runWorkbench(
+            workbenchArgs("get-scan-recipe", { scanId }),
+          );
+          const recipe = saved["recipe"];
+          const parentScanId = saved["scanId"] as string;
           if (
             isJsonObject(recipe) &&
             recipe["import"] !== undefined &&
@@ -3097,33 +3097,15 @@ export async function main(
             );
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
-            recipe,
+            saved,
             "rerun",
-            {
-              scanPromptFile:
-                options.scanPromptFile === undefined
-                  ? undefined
-                  : resolveCliPath(
-                      dependencies.currentDirectory(),
-                      options.scanPromptFile,
-                    ),
-              validationPromptFile:
-                options.validationPromptFile === undefined
-                  ? undefined
-                  : resolveCliPath(
-                      dependencies.currentDirectory(),
-                      options.validationPromptFile,
-                    ),
-            },
             dependencies.currentDirectory(),
             dependencies.environment,
+            options,
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
           scanArguments.parentScanId = parentScanId;
-          scanArguments.rerunInputIdentity = isJsonObject(recipe)
-            ? (recipe["scanInputs"] ?? null)
-            : null;
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
@@ -3134,13 +3116,7 @@ export async function main(
             "SCAN_REPLAY_UNAVAILABLE",
           );
         }
-        scanArguments.includeFailureResults = includeFailureResults(format);
-        const outcome = await runScan(
-          scanArguments,
-          errorOutput,
-          dependencies,
-          format !== "json" && format !== "jsonl",
-        );
+        const outcome = await runScan(format, scanArguments);
         return finishScanCommand(outcome, format, incurError);
       },
     })
@@ -4908,12 +4884,8 @@ export async function main(
           if (argumentError !== undefined) return fail(argumentError, 2);
           const directory = dependencies.currentDirectory();
           const codexOverrides = await parseScanCodexOverrides(
-            options.codex,
-            options.model,
-            options.effort,
-            options.provider,
-            undefined,
-            scanCodexHome(dependencies.environment),
+            options,
+            dependencies.environment,
           );
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
@@ -5216,12 +5188,9 @@ export async function main(
               maxCostUsd: options.maxCost,
               maxTimeMinutes: options.maxTime,
               codexOverrides: await parseScanCodexOverrides(
-                options.codex,
-                options.model,
-                options.effort,
-                options.provider,
+                options,
+                dependencies.environment,
                 project?.input.codex,
-                scanCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -5237,36 +5206,30 @@ export async function main(
               "--validate cannot be combined with a scan cost limit because standalone validation is not cost-tracked.",
             );
           }
-          outcome = await runScan(
-            {
-              ...settings,
-              rubricPath:
-                options.rubric === undefined
-                  ? undefined
-                  : resolveCliPath(directory, options.rubric),
-              codexOverrides: config.codexOverrides,
-              projectConfig: provenance,
-              workflowId: options.workflowId,
-              safetyIdentifier: options.safetyIdentifier,
-              verbose: options.verbose,
-              repository: args.repository,
-              archiveExisting: options.archiveExisting,
-              pluginPath: options.pluginPath,
-              pythonPath: options.python,
-              patch: options.patch,
-              validate: options.validate,
-              patchSeverity: options.patchSeverity,
-              createPr: options.createPr,
-              showCost: options.showCost,
-              headless: options.headless,
-              dryRun: options.dryRun,
-              mock: options.mock,
-              includeFailureResults: includeFailureResults(format),
-            },
-            errorOutput,
-            dependencies,
-            format !== "json" && format !== "jsonl",
-          );
+          outcome = await runScan(format, {
+            ...settings,
+            rubricPath:
+              options.rubric === undefined
+                ? undefined
+                : resolveCliPath(directory, options.rubric),
+            codexOverrides: config.codexOverrides,
+            projectConfig: provenance,
+            workflowId: options.workflowId,
+            safetyIdentifier: options.safetyIdentifier,
+            verbose: options.verbose,
+            repository: args.repository,
+            archiveExisting: options.archiveExisting,
+            pluginPath: options.pluginPath,
+            pythonPath: options.python,
+            patch: options.patch,
+            validate: options.validate,
+            patchSeverity: options.patchSeverity,
+            createPr: options.createPr,
+            showCost: options.showCost,
+            headless: options.headless,
+            dryRun: options.dryRun,
+            mock: options.mock,
+          });
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`${diagnosticLines(message)}\n`);
@@ -5845,12 +5808,9 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               maxCostUsd: options.maxCost,
               codexOverrides: await parseScanCodexOverrides(
-                options.codex,
-                options.model,
-                options.effort,
-                options.provider,
+                options,
+                dependencies.environment,
                 project?.input.codex,
-                scanCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -6061,16 +6021,7 @@ export async function main(
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
         ),
-        pluginPath: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(PLUGIN_PATH_DESCRIPTION),
-        python: z.string().min(1).optional().describe(PYTHON_PATH_DESCRIPTION),
-        codex: z
-          .array(z.string().min(1))
-          .default([])
-          .describe(CODEX_OVERRIDE_DESCRIPTION),
+        ...runtimeOptions(() => z.string().min(1)),
       }),
       examples: [
         {
@@ -6174,12 +6125,9 @@ export async function main(
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
                 await parseScanCodexOverrides(
-                  options.codex,
-                  options.model,
-                  options.effort,
-                  options.provider,
+                  options,
+                  dependencies.environment,
                   project?.input.codex,
-                  scanCodexHome(dependencies.environment),
                 ),
               ),
               pluginPath: options.pluginPath,
@@ -6246,14 +6194,8 @@ export async function main(
                       return undefined;
                     }
                     const recipe = await prepareScanArgumentsFromRecipe(
-                      saved["recipe"],
+                      saved,
                       "resume",
-                      {
-                        scanPrompt:
-                          typeof saved["userContext"] === "string"
-                            ? saved["userContext"]
-                            : undefined,
-                      },
                       currentDirectory,
                       dependencies.environment,
                     );
@@ -7414,70 +7356,24 @@ export async function main(
 
   const commands = Cli.toCommands.get(cli)!;
   const valueOptions = cliValueOptions(commands);
-  function isScanImportCommand(argv: readonly string[]): boolean {
-    const commandIndex = cliCommandIndex(argv);
-    return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
+  const commandIndex = argv.findIndex((value, index) => {
+    if (value.startsWith("-")) return false;
+    return index === 0 || !valueOptions.has(argv[index - 1]!);
+  });
+  const command = argv[commandIndex];
+  const following = argv[commandIndex + 1];
+  const scanImport = command === "scan" && following === "import";
+  if (
+    (command === "scans" || command === "findings") &&
+    !argv.includes("--help") &&
+    !argv.includes("-h") &&
+    (following === undefined || following.startsWith("-"))
+  ) {
+    argv = argv.toSpliced(commandIndex + 1, 0, "list");
   }
 
-  function normalizeScanImportArguments(
-    argv: readonly string[],
-  ): readonly string[] {
-    if (!isScanImportCommand(argv)) return argv;
-    const normalized: string[] = [];
-    const subcommandIndex = cliCommandIndex(argv) + 1;
-    for (let index = 0; index < argv.length; index += 1) {
-      const argument = argv[index]!;
-      const next = argv[index + 1];
-      // Incur reserves bare --json for output, but parses --json=FILE normally.
-      if (
-        index > subcommandIndex &&
-        argument === "--json" &&
-        next !== undefined &&
-        !next.startsWith("--") &&
-        next !== "-h"
-      ) {
-        normalized.push(`--json=${next}`);
-        index += 1;
-      } else {
-        normalized.push(argument);
-      }
-    }
-    return normalized;
-  }
-
-  function cliCommandIndex(argv: readonly string[]): number {
-    return argv.findIndex((value, index) => {
-      if (value.startsWith("-")) return false;
-      return index === 0 || !valueOptions.has(argv[index - 1]!);
-    });
-  }
-
-  function defaultListCommand(argv: readonly string[]): readonly string[] {
-    const commandIndex = cliCommandIndex(argv);
-    if (
-      commandIndex < 0 ||
-      !["scans", "findings"].includes(argv[commandIndex]!) ||
-      argv.includes("--help") ||
-      argv.includes("-h")
-    ) {
-      return argv;
-    }
-    const following = argv[commandIndex + 1];
-    if (following !== undefined && !following.startsWith("-")) return argv;
-    return [
-      ...argv.slice(0, commandIndex + 1),
-      "list",
-      ...argv.slice(commandIndex + 1),
-    ];
-  }
-
-  function validateCliArguments(
-    argv: readonly string[],
-    positionals: string[],
-  ): string | undefined {
+  function validateCliArguments(): string | undefined {
     if (argv.includes("--help") || argv.includes("-h")) return undefined;
-    const commandIndex = cliCommandIndex(argv);
-    const command = argv[commandIndex];
     if (command === undefined || !commands.has(command)) return undefined;
     const structuredOutput = argv.some(
       (value, index) =>
@@ -7541,7 +7437,6 @@ export async function main(
         return "Markdown output is not supported for scan results.";
       }
     }
-    const scanImport = isScanImportCommand(argv);
     const nestedCommand =
       scanImport ||
       command === "scans" ||
@@ -7634,20 +7529,38 @@ export async function main(
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
     }
   }
-  argv = normalizeScanImportArguments(defaultListCommand(argv));
-  const frameworkArgv = argv.flatMap((argument) => {
+  const firstImportOption = scanImport ? commandIndex + 2 : argv.length;
+  const frameworkArgv: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]!;
+    const next = argv[index + 1];
     const separator = argument.indexOf("=");
     if (
-      separator < 0 ||
-      !FRAMEWORK_VALUE_OPTIONS.has(argument.slice(0, separator))
-    )
-      return [argument];
-    return [argument.slice(0, separator), argument.slice(separator + 1)];
-  });
+      index >= firstImportOption &&
+      argument === "--json" &&
+      next !== undefined &&
+      !next.startsWith("--") &&
+      next !== "-h"
+    ) {
+      // Incur reserves bare --json for output, but parses --json=FILE normally.
+      frameworkArgv.push(`--json=${next}`);
+      index++;
+    } else if (
+      separator >= 0 &&
+      FRAMEWORK_VALUE_OPTIONS.has(argument.slice(0, separator))
+    ) {
+      frameworkArgv.push(
+        argument.slice(0, separator),
+        argument.slice(separator + 1),
+      );
+    } else {
+      frameworkArgv.push(argument);
+    }
+  }
   const frameworkFlags = frameworkOutputFlags(frameworkArgv);
   const policyFullOutput =
-    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
-  const argumentError = validateCliArguments(argv, positionals);
+    command === "policy" && argv.includes("--full-output");
+  const argumentError = validateCliArguments();
   if (argumentError !== undefined && !policyFullOutput) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
@@ -7676,7 +7589,7 @@ export async function main(
 
   // Incur cannot mount a command with both a handler and subcommands.
   // Select the nested import route while preserving scan [repository].
-  if (isScanImportCommand(argv)) {
+  if (scanImport) {
     cli.command(
       Cli.create("scan", {
         description: "Run or import a saved scan.",
@@ -7949,18 +7862,14 @@ async function runScanImport(
 }
 
 async function prepareScanArgumentsFromRecipe(
-  recipe: JsonValue | undefined,
+  { recipe, userContext }: JsonObject,
   operation: "resume" | "rerun",
-  {
-    scanPrompt,
-    scanPromptFile,
-    validationPromptFile,
-  }: Pick<
-    ScanArguments,
-    "scanPrompt" | "scanPromptFile" | "validationPromptFile"
-  >,
   directory: string,
   environment: CliDependencies["environment"],
+  {
+    scanPromptFile,
+    validationPromptFile,
+  }: Pick<ScanPromptSettings, "scanPromptFile" | "validationPromptFile"> = {},
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -8115,6 +8024,10 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe contains invalid launch settings.",
     );
   }
+  const scanPrompt =
+    operation === "resume" && typeof userContext === "string"
+      ? userContext
+      : undefined;
   const prompts = await resolveScanPrompts(
     { scanPrompt, scanPromptFile, validationPromptFile },
     repository,
@@ -8166,8 +8079,12 @@ async function prepareScanArgumentsFromRecipe(
     maxTimeMinutes,
     dryRun: false,
     ...(recipe["mock"] === true ? { mock: true } : {}),
+    ...(operation === "rerun"
+      ? { rerunInputIdentity: recipe["scanInputs"] ?? null }
+      : {}),
+    // Resumes use the installed engine with the saved checkpoints.
     expectedPluginVersion:
-      typeof recipe["pluginVersion"] === "string"
+      operation === "rerun" && typeof recipe["pluginVersion"] === "string"
         ? recipe["pluginVersion"]
         : undefined,
   };
@@ -10329,17 +10246,6 @@ async function chooseInteractiveAuthentication(
   );
 }
 
-async function runScan(
-  arguments_: ScanArguments,
-  errorOutput: Writable,
-  dependencies: CliDependencies,
-  interactive = true,
-): Promise<ScanOutcome> {
-  return await withTerminalErrorsHandled(errorOutput, () =>
-    executeScan(arguments_, errorOutput, dependencies, interactive),
-  );
-}
-
 async function withTerminalErrorsHandled<T>(
   errorOutput: Writable,
   operation: () => Promise<T>,
@@ -10361,7 +10267,8 @@ async function executeScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
   dependencies: CliDependencies,
-  interactive = true,
+  interactive: boolean,
+  retainFailureResults: boolean,
 ): Promise<ScanOutcome> {
   let registeredScan:
     Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0] | undefined;
@@ -11260,10 +11167,7 @@ async function executeScan(
   }
 
   let failureData: Record<string, unknown> | undefined;
-  if (
-    arguments_.includeFailureResults &&
-    (failed || requestedSignal !== null)
-  ) {
+  if (retainFailureResults && (failed || requestedSignal !== null)) {
     if (result !== null) {
       failureData = result.toJSON();
       if (validation !== undefined)
@@ -12265,13 +12169,15 @@ function resolveCliScope(
 }
 
 async function parseScanCodexOverrides(
-  values: readonly string[],
-  model: string | undefined,
-  effort: ModelCliOptions["effort"],
-  provider: "openai" | "amazon-bedrock" | ExternalModelProvider | undefined,
-  defaults: JsonObject | undefined,
-  profileHome: string,
+  options: ModelCliOptions & {
+    codex: readonly string[];
+    provider: z.infer<typeof PROVIDER_OPTION>;
+  },
+  environment: NodeJS.ProcessEnv,
+  defaults?: JsonObject,
 ): Promise<JsonObject> {
+  const { codex: values, model, effort, provider } = options;
+  const profileHome = scanCodexHome(environment);
   if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
     return parseCodexOverrides(values, model, effort, provider, defaults);
   }

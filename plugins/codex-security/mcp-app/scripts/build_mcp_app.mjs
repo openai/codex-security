@@ -27,16 +27,14 @@ export async function buildMcpApp({ output, native = "universal" }) {
   const contract = JSON.parse(
     await readFile(join(root, "../plugin-files.json"), "utf8"),
   );
-  const nativeFiles = contract.shippedExact.filter((path) =>
-    path.startsWith("mcp/native/"),
+  const nativeFiles = contract.shippedExact.filter(
+    (file) =>
+      file.startsWith("mcp/native/") &&
+      (!hostTarget ||
+        !file.endsWith(".node") ||
+        file.startsWith(`mcp/native/${hostTarget}/`)),
   );
-  if (
-    hostTarget &&
-    !nativeFiles.some(
-      (path) =>
-        path.startsWith(`mcp/native/${hostTarget}/`) && path.endsWith(".node"),
-    )
-  ) {
+  if (hostTarget && !nativeFiles.some((file) => file.endsWith(".node"))) {
     throw new Error(`Unsupported native target: ${hostTarget}.`);
   }
 
@@ -53,13 +51,6 @@ export async function buildMcpApp({ output, native = "universal" }) {
   await writeRuntime("server", "main.ts");
   for (const file of nativeFiles) {
     const path = file.slice("mcp/native/".length);
-    if (
-      hostTarget &&
-      path.endsWith(".node") &&
-      !path.startsWith(`${hostTarget}/`)
-    ) {
-      continue;
-    }
     const destination = join(mcpDir, "native", path);
     await mkdir(dirname(destination), { recursive: true });
     try {

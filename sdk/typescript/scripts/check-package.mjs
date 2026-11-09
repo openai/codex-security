@@ -117,30 +117,19 @@ function validatePackagePaths(entries) {
     "package/_bundled_plugin/.codex-plugin/plugin.json",
   ];
 
-  for (const file of required) {
-    if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+  const allowedFiles = new Set();
+  function requireFile(path) {
+    if (!files.has(path)) throw new Error(`npm tarball is missing ${path}.`);
+    allowedFiles.add(path);
   }
+  for (const path of required) requireFile(path);
 
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
   const pluginPaths = pluginContractFiles(contract);
-  if (new Set(pluginPaths).size !== pluginPaths.length) {
-    throw new Error("Plugin projection contract contains duplicate paths.");
-  }
 
-  const pluginEntries = new Set();
-  for (const file of pluginPaths) {
-    const pluginArchivePath = `package/_bundled_plugin/${file}`;
-    pluginEntries.add(pluginArchivePath);
-    if (!files.has(pluginArchivePath)) {
-      throw new Error(`npm tarball is missing ${pluginArchivePath}.`);
-    }
-  }
-
-  const distFiles = new Set(packageDistFiles);
-  for (const file of distFiles) {
-    if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
-  }
-  const allowedFiles = new Set([...required, ...distFiles, ...pluginEntries]);
+  for (const path of pluginPaths)
+    requireFile(`package/_bundled_plugin/${path}`);
+  for (const path of packageDistFiles) requireFile(path);
   for (const file of [...allowedFiles]) {
     const parts = file.split("/");
     for (let index = 1; index < parts.length; index++) {
@@ -215,19 +204,15 @@ function privateExtractionDirectories(directory) {
 }
 
 function extractedArchiveFiles() {
-  const expectedPaths = new Map();
-  for (const { path } of rawEntries) {
-    const directory = path.endsWith("/");
-    const extractedPath = directory ? path.slice(0, -1) : path;
-    const type = directory ? "directory" : "file";
-    const previousType = expectedPaths.get(extractedPath);
-    if (previousType !== undefined && previousType !== type) invalidTarEntry();
-    expectedPaths.set(extractedPath, type);
-    const parts = extractedPath.split("/");
-    for (let index = 1; index < parts.length; index++) {
-      const directory = parts.slice(0, index).join("/");
-      if (storedArchive.files.has(directory)) invalidTarEntry();
-      expectedPaths.set(directory, "directory");
+  const expectedSizes = new Map(
+    entries.map((path, index) => [path, listingSizes[index]]),
+  );
+  for (const path of entries) {
+    const parts = path.split("/");
+    for (let depth = 1; depth < parts.length; depth++) {
+      const parent = parts.slice(0, depth).join("/");
+      if (expectedSizes.has(parent)) invalidTarEntry();
+      expectedSizes.set(parent + "/", 0);
     }
   }
 
@@ -237,7 +222,8 @@ function extractedArchiveFiles() {
   try {
     chmodSync(extractionRoot, 0o700);
     const fileList = join(extractionRoot, "members.list");
-    writeFileSync(fileList, [...storedArchive.files.keys(), ""].join("\0"));
+    const fileNames = entries.filter((path) => !path.endsWith("/"));
+    writeFileSync(fileList, [...fileNames, ""].join("\0"));
     try {
       tar([
         "-m",
@@ -260,47 +246,33 @@ function extractedArchiveFiles() {
     rmSync(fileList);
 
     const archiveFiles = new Map();
-    let expandedBytes = 0;
     function visit(directory, relative = "") {
       for (const name of readdirSync(directory)) {
         const path = relative === "" ? name : `${relative}/${name}`;
-        const expectedType = expectedPaths.get(path);
-        if (expectedType === undefined) invalidTarEntry();
         const extractedPath = join(extractionRoot, path);
         const stats = lstatSync(extractedPath);
-        expectedPaths.delete(path);
-
-        if (expectedType === "directory") {
+        if (expectedSizes.delete(path + "/")) {
           if (!stats.isDirectory()) invalidTarEntry();
           visit(extractedPath, path);
           continue;
         }
-
-        const stored = storedArchive.files.get(path);
         if (
           !stats.isFile() ||
           stats.nlink !== 1 ||
-          stats.size !== stored?.length ||
-          stats.size > MAX_EXPANDED_ASSET_BYTES ||
-          expandedBytes > MAX_EXPANDED_ASSET_BYTES - stats.size
+          stats.size !== expectedSizes.get(path)
         ) {
           invalidTarEntry();
         }
-        expandedBytes += stats.size;
+        expectedSizes.delete(path);
         chmodSync(extractedPath, 0o600);
         const contents = readFileSync(extractedPath);
-        if (!contents.equals(stored)) invalidTarEntry();
+        if (!storedArchive.files.get(path)?.equals(contents)) invalidTarEntry();
         archiveFiles.set(path, contents);
       }
     }
     visit(extractionRoot);
 
-    if (
-      expectedPaths.size !== 0 ||
-      archiveFiles.size !== storedArchive.files.size
-    ) {
-      invalidTarEntry();
-    }
+    if (expectedSizes.size !== 0) invalidTarEntry();
     return archiveFiles;
   } finally {
     rmSync(extractionRoot, { force: true, recursive: true });
