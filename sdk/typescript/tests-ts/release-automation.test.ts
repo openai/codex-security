@@ -9,12 +9,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { publishGitHubRelease } from "../scripts/publish-github-release.mjs";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { bashCommand, runCommand, writeSource } from "./support/shell.js";
+import { workflow } from "./support/workflow.js";
 
 import {
   type ReleaseMetadata,
@@ -308,6 +309,13 @@ const protectedReleaseWorkflow = readFileSync(
   new URL("../../../.github/workflows/node-release.yml", import.meta.url),
   "utf8",
 );
+const darwinSigningWorkflow = readFileSync(
+  new URL(
+    "../../../.github/workflows/sign-darwin-release.yml",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const releaseCutWorkflow = readFileSync(
   new URL("../../../.github/workflows/node-release-cut.yml", import.meta.url),
   "utf8",
@@ -522,11 +530,17 @@ function verifySignatureFixture(options: SignatureAuditFixture = {}) {
 }
 
 type WorkflowContract = {
+  on?: { workflow_call?: { secrets?: Record<string, { required?: boolean }> } };
   concurrency?: Record<string, unknown>;
   jobs: Record<
     string,
     {
       name?: string;
+      uses?: string;
+      with?: Record<string, unknown>;
+      secrets?: Record<string, string>;
+      "cache-mode"?: string;
+      outputs?: Record<string, string>;
       permissions?: Record<string, string>;
       env?: Record<string, string>;
       needs?: string | string[];
@@ -1895,8 +1909,8 @@ describe("GitHub release workflow safeguards", () => {
     ).toBe(scenario.expected);
   });
 
-  test("only consults release metadata for a CI commit on main", async () => {
-    const cwd = directories.create("release-cut-ancestry-");
+  async function createReleaseAncestryFixture() {
+    const cwd = directories.create("release-ancestry-");
     // A maintainer may be running with GIT_DIR, a custom template or global hooks.
     const env = {
       PATH: process.env["PATH"],
@@ -1920,6 +1934,7 @@ tree=$(git mktree </dev/null)
 qualified=$(git commit-tree "$tree" -m qualified)
 main=$(git commit-tree "$tree" -p "$qualified" -m main)
 candidate=$(git commit-tree "$tree" -p "$qualified" -m off-main)
+git update-ref refs/heads/main "$main"
 git push --quiet ./remote.git "$main:refs/heads/main"
 git remote add origin ./remote.git
 printf '%s\\n%s\\n%s\\n' "$qualified" "$main" "$candidate"
@@ -1929,6 +1944,12 @@ printf '%s\\n%s\\n%s\\n' "$qualified" "$main" "$candidate"
     );
     expect(setup.status, setup.stderr).toBe(0);
     const [qualified, main, candidate] = setup.stdout.trim().split(/\r?\n/u);
+    return { cwd, env, qualified, main, candidate };
+  }
+
+  test("only consults release metadata for a CI commit on main", async () => {
+    const { cwd, env, qualified, main, candidate } =
+      await createReleaseAncestryFixture();
     const script = `
 # actions/checkout detaches HEAD at the selected release SHA.
 git update-ref --no-deref HEAD "$RELEASE_SHA" || exit 1
@@ -1964,6 +1985,48 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       expect(result.status, result.stderr).toBe(expectedStatus);
       expect(result.stderr).toContain(expectedMessage);
       expect(result.stderr).not.toContain("unexpected registry lookup");
+    }
+  });
+
+  test("only builds a release tag whose exact commit is on protected main", async () => {
+    const { cwd, env, qualified, candidate } =
+      await createReleaseAncestryFixture();
+    const { jobs } = Bun.YAML.parse(darwinSigningWorkflow) as WorkflowContract;
+    const validation = jobs["validate"]!.steps!;
+    expect(validation[0]?.with?.["ref"]).toBe("refs/heads/main");
+    const validate = workflowStepShell(
+      darwinSigningWorkflow,
+      "Verify the release tag is on main",
+    );
+    for (const [tag, commit, eventSha, allowed] of [
+      ["npm-v1", qualified, qualified, true],
+      ["npm-v2", candidate, candidate, false],
+      ["npm-v3", candidate, qualified, false],
+    ] as const) {
+      const result = await runCommand(
+        bash,
+        [
+          "--noprofile",
+          "--norc",
+          "-c",
+          `set -eu
+git tag -a "$GITHUB_REF_NAME" "$TAG_COMMIT" -m fixture
+${validate}`,
+        ],
+        {
+          cwd,
+          env: {
+            ...env,
+            GITHUB_SHA: eventSha,
+            GITHUB_REF_TYPE: "tag",
+            GITHUB_REF_NAME: tag,
+            GITHUB_REF: `refs/tags/${tag}`,
+            GITHUB_OUTPUT: "/dev/null",
+            TAG_COMMIT: commit,
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(allowed ? 0 : 1);
     }
   });
 
@@ -2542,12 +2605,18 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       status: 0,
     },
   ])(
-    "revalidates the authoritative $kind immediately before npm publication",
+    "revalidates the authoritative $kind before signing and publication",
     async ({ tagType, tagObject, peeledCommit = "", status }) => {
-      const script = workflowStepShell(
-        protectedReleaseWorkflow,
-        "Revalidate protected release tag",
-      );
+      const action = Bun.YAML.parse(
+        readFileSync(
+          new URL(
+            "../../../.github/actions/revalidate-release-tag/action.yml",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ) as { runs: { steps: { run: string }[] } };
+      const script = action.runs.steps[0]!.run;
       const mock = [
         "gh() {",
         '  if [[ "$1" != "api" ]]; then return 64; fi',
@@ -2588,31 +2657,89 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     },
   );
 
-  test("binds signing and packaging to the verified native artifact and rechecks the live tag", () => {
+  test("binds signing to both verified Darwin builds and packaging to the signed artifact", () => {
     const { jobs } = Bun.YAML.parse(
       protectedReleaseWorkflow,
     ) as WorkflowContract;
-    const check = workflowStepShell(
-      protectedReleaseWorkflow,
-      "Revalidate protected release tag",
+    const signing = Bun.YAML.parse(darwinSigningWorkflow) as WorkflowContract;
+    expect(jobs["sign-darwin"]?.needs).toBe("eligibility");
+    expect(jobs["sign-darwin"]?.if).toBe(
+      "needs.eligibility.outputs.mode == 'publish'",
     );
-    for (const job of ["sign-darwin", "verify"]) {
-      const download = jobs[job]?.steps?.find(
-        (step) => step.name === "Download verified native payload",
+    expect(jobs["recover-native"]).toMatchObject({
+      needs: "eligibility",
+      if: "needs.eligibility.outputs.mode == 'recover'",
+      uses: "./.github/workflows/native-artifacts.yml",
+    });
+    expect(jobs["sign-darwin"]?.uses).toBe(
+      "openai/codex-security/.github/workflows/sign-darwin-release.yml@main",
+    );
+    const sign = signing.jobs["sign"]!;
+    expect(signing.jobs["build"]).toMatchObject({
+      needs: "validate",
+      uses: "./.github/workflows/native-artifacts.yml",
+      "cache-mode": "none",
+      with: { ref: "${{ github.sha }}", "reuse-verified": false },
+    });
+    expect(sign.needs).toBe("build");
+    expect(sign.environment).toBe("codesigning");
+    const signer = sign.steps!;
+    const usedSecrets = [
+      ...JSON.stringify(signer).matchAll(/\$\{\{ secrets\.(\w+) \}\}/gu),
+    ].map(([reference, name]) => [name!, reference] as const);
+    expect(jobs["sign-darwin"]?.secrets).toEqual(
+      Object.fromEntries(usedSecrets),
+    );
+    for (const [name] of usedSecrets) {
+      expect(signing.on?.workflow_call?.secrets?.[name]?.required).toBe(true);
+    }
+    const requireIds = signer.find(
+      (step) => step.name === "Require both build artifact IDs",
+    )!;
+    const digestCheck = signer.find(
+      (step) => step.name === "Verify both addon digests",
+    );
+    for (const arch of ["arm64", "x64"]) {
+      const download = signer.find(
+        (step) => step.name === `Download the ${arch} build`,
+      );
+      const artifactId = `\${{ needs.build.outputs.darwin-${arch}-artifact-id }}`;
+      expect(requireIds.env?.[arch.toUpperCase() + "_ID"]).toBe(artifactId);
+      expect(signer.indexOf(requireIds)).toBeLessThan(
+        signer.indexOf(download!),
       );
       expect(download?.with).toMatchObject({
-        "artifact-ids": "${{ needs.native.outputs.artifact-id }}",
+        "artifact-ids": artifactId,
         "digest-mismatch": "error",
+        path: `${arch}-build`,
       });
+      expect(digestCheck?.env?.[arch.toUpperCase() + "_SHA256"]).toBe(
+        `\${{ needs.build.outputs.darwin-${arch}-sha256 }}`,
+      );
     }
-    const signer = jobs["sign-darwin"]!.steps!;
+    const verify = jobs["verify"]!.steps!;
+    expect(
+      verify.find((step) => step.name === "Download verified native payload")
+        ?.with,
+    ).toMatchObject({
+      "artifact-ids": "${{ needs.native.outputs.artifact-id }}",
+      "digest-mismatch": "error",
+    });
+    expect(
+      verify.find(
+        (step) => step.name === "Overlay signed Darwin addons for publication",
+      )?.with,
+    ).toMatchObject({
+      "artifact-ids": "${{ needs.native.outputs.signed-darwin-id }}",
+      "digest-mismatch": "error",
+    });
     const setup = signer.findIndex(
       (step) => step.name === "Set up Developer ID signing",
     );
     expect(signer[setup]?.with?.["setup-mode"]).toBe("tools-only");
     expect(signer[setup - 1]).toMatchObject({
       name: "Revalidate tag before Developer ID signing",
-      run: check,
+      uses: "$/.github/actions/revalidate-release-tag",
     });
     const publisher = jobs["publish"]!.steps!;
     const publishIndex = publisher.findIndex(
@@ -2621,72 +2748,297 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(publisher[publishIndex - 1]).toMatchObject({
       name: "Revalidate protected release tag",
       if: "needs.verify.outputs.mode == 'publish'",
-      run: check,
+      uses: "$/.github/actions/revalidate-release-tag",
     });
   });
 
-  test("signs both Darwin addons with the configured provider and certificate", async () => {
+  test("publication and recovery select only their own successful native build", async () => {
     const { jobs } = Bun.YAML.parse(
       protectedReleaseWorkflow,
     ) as WorkflowContract;
-    const step = jobs["sign-darwin"]!.steps!.find(
-      (step) => step.name === "Sign Darwin addons",
+    const native = jobs["native"]!;
+    const select = native.steps!.find(
+      (step) =>
+        step.name === "Select the native artifact IDs for this release mode",
     )!;
-    expect(step.env).toMatchObject({
-      RCODESIGN: "${{ steps.signing-tools.outputs.rcodesign }}",
-      PKCS11_LIBRARY: "${{ steps.signing-tools.outputs.pkcs11-library }}",
-      AKV_PKCS11_BACKEND: "signer-service",
-      SIGNER_SERVICE_ENDPOINT: "${{ secrets.SIGNER_SERVICE_ENDPOINT }}",
-      SIGNER_SERVICE_PURPOSE: "${{ secrets.SIGNER_SERVICE_PURPOSE }}",
-      SIGNER_SERVICE_KEY_ID: "${{ secrets.SIGNER_SERVICE_KEY_ID }}",
-      SIGNER_SERVICE_KEY_LABEL: expect.stringMatching(/\S/),
-      SIGNING_CERTIFICATE_PEM: "${{ secrets.SIGNING_CERTIFICATE_PEM }}",
+    expect(select.env).toMatchObject({
+      PUBLISH_NATIVE_ID: "${{ needs.sign-darwin.outputs.native-artifact-id }}",
+      SIGNED_ID: "${{ needs.sign-darwin.outputs.artifact-id }}",
+      RECOVER_NATIVE_ID: "${{ needs.recover-native.outputs.artifact-id }}",
     });
-
-    const cwd = directories.create("release signer ");
-    const targets = ["darwin-arm64", "darwin-x64"];
-    for (const target of targets) {
-      writeSource(
-        cwd,
-        `plugins/codex-security/native/prebuilt/${target}/unix.node`,
-        target,
-      );
-    }
-    const env = {
-      ...step.env,
-      RCODESIGN: "./fixture signer",
-      PKCS11_LIBRARY: "fixture provider.so",
-      SIGNER_SERVICE_CERTIFICATE_FILE: "fixture certificate.pem",
-      SIGNING_CERTIFICATE_PEM:
-        "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
-    };
-    writeFileSync(
-      join(cwd, env.RCODESIGN),
-      '#!/usr/bin/env bash\nprintf "<%s>" "$@" >> "${!#}"\n',
-      { mode: 0o755 },
-    );
-    const result = await runShell(step.run!, env, { cwd });
-    expect(result.status).toBe(0);
-    const pem = readFileSync(
-      join(cwd, env.SIGNER_SERVICE_CERTIFICATE_FILE),
-      "utf8",
-    );
-    expect(pem.trimEnd()).toBe(env.SIGNING_CERTIFICATE_PEM);
-    for (const target of targets) {
-      const signed = readFileSync(
-        join(cwd, "signed", target, "unix.node"),
-        "utf8",
-      );
-      expect(signed).toStartWith(`${target}<sign>`);
-      expect(signed).toContain(`<--pkcs11-library><${env.PKCS11_LIBRARY}>`);
-      expect(signed).toContain(
-        `<--pkcs11-certificate-file><${env.SIGNER_SERVICE_CERTIFICATE_FILE}>`,
-      );
-      expect(signed).toContain(
-        `<--pkcs11-key-label><${step.env!["SIGNER_SERVICE_KEY_LABEL"]}>`,
+    for (const mode of ["publish", "recover"]) {
+      const publish = mode === "publish";
+      const context = {
+        "!cancelled()": "true",
+        "needs.eligibility.result": "success",
+        "needs.eligibility.outputs.mode": mode,
+        "needs.sign-darwin.result": publish ? "success" : "skipped",
+        "needs.recover-native.result": publish ? "skipped" : "success",
+      };
+      expect(await evaluateWorkflowCondition(native.if!, context)).toBe(true);
+      const requiredJob = publish ? "sign-darwin" : "recover-native";
+      expect(
+        await evaluateWorkflowCondition(native.if!, {
+          ...context,
+          [`needs.${requiredJob}.result`]: "failure",
+        }),
+      ).toBe(false);
+      const output = join(
+        directories.create("release-native-"),
+        "outputs",
+      ).replaceAll("\\", "/");
+      const result = await runShell(select.run!, {
+        RELEASE_MODE: mode,
+        PUBLISH_NATIVE_ID: "101",
+        SIGNED_ID: "102",
+        RECOVER_NATIVE_ID: "201",
+        GITHUB_OUTPUT: output,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(output, "utf8").trim().split(/\r?\n/u)).toEqual(
+        publish ? ["native-id=101", "signed-id=102"] : ["native-id=201"],
       );
     }
   });
+
+  test("requires the protected signing workflow before signing and consuming addons from this attempt", async () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const steps = jobs["native"]!.steps!;
+    const select = steps.findIndex(
+      (step) =>
+        step.name === "Select the native artifact IDs for this release mode",
+    );
+    const guard = steps[select - 1]!;
+    expect(guard.name).toBe("Verify reusable signing workflow ref");
+    expect(guard.if).toBe("needs.eligibility.outputs.mode == 'publish'");
+    const eligibility = jobs["eligibility"]!;
+    const early = eligibility.steps!.find(
+      (step) =>
+        step.name === "Verify reusable signing workflow ref before signing",
+    );
+    expect(early).toMatchObject({
+      if: "steps.release.outputs.mode == 'publish'",
+      run: guard.run,
+    });
+    expect(eligibility.permissions).toEqual({
+      actions: "read",
+      contents: "read",
+    });
+    expect(jobs["sign-darwin"]?.needs).toBe("eligibility");
+    expect(jobs["verify"]?.needs).toContain("native");
+    expect(
+      jobs["verify"]?.steps?.find(
+        (step) => step.name === "Overlay signed Darwin addons for publication",
+      )?.if,
+    ).toBe(guard.if);
+    const workflow = `${releaseRepository}/.github/workflows/sign-darwin-release.yml`;
+    const branch = {
+      path: `${workflow}@main`,
+      ref: "refs/heads/main",
+      sha: releaseCommit,
+    };
+    const tag = { ...branch, ref: "refs/tags/main" };
+    const other = {
+      ...branch,
+      path: `${releaseRepository}/.github/workflows/other.yml@main`,
+    };
+    const script = `set -e
+gh() {
+  [[ "$*" == "api repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" ]] || return 64
+  printf '%s\\n' "$MOCK_ATTEMPT"
+}
+${guard.run}
+echo 'overlay reached'`;
+    for (const [refs, allowed] of [
+      [[other, branch], true],
+      [[{ ...branch, path: `${workflow}@${releaseCommit}` }], true],
+      [[tag], false],
+      [[other, branch, tag], false],
+      [[{ ...branch, ref: "refs/heads/feature" }], false],
+      [[{ path: branch.path, sha: releaseCommit }], false],
+      [[other], false],
+      [[], false],
+    ] as const) {
+      const result = await runShell(script, {
+        GITHUB_REPOSITORY: releaseRepository,
+        GITHUB_RUN_ID: releaseRun,
+        GITHUB_RUN_ATTEMPT: "3",
+        MOCK_ATTEMPT: JSON.stringify({ referenced_workflows: refs }),
+      });
+      expect(result.status, JSON.stringify(refs) + result.stderr).toBe(
+        allowed ? 0 : 1,
+      );
+      expect(result.stdout.includes("overlay reached")).toBe(allowed);
+    }
+  });
+
+  test("each verified Darwin matrix leg forwards its own upload ID and addon digest", async () => {
+    const unix = workflow("native-unix");
+    const native = workflow("native-artifacts");
+    const build = unix.jobs["primitives"]!;
+    const steps = build.steps!;
+    const upload = steps.findIndex((step) => step.id === "upload");
+    const record = steps.findIndex((step) => step.id === "darwin");
+    const node20 = steps.findIndex(
+      (step) => step.with?.["node-version"] === "20.0.0",
+    );
+    expect(node20).toBeGreaterThan(0);
+    expect(
+      steps
+        .slice(node20 + 1, upload)
+        .some(
+          (step) =>
+            step.run?.includes("check.mjs") && step.run.includes("proof.mjs"),
+        ),
+    ).toBe(true);
+    expect(record).toBeGreaterThan(upload);
+    expect(steps[record]).toMatchObject({
+      if: "matrix.platform == 'darwin'",
+      env: {
+        DARWIN_TARGET: "${{ matrix.artifact }}",
+        ARTIFACT_ID: "${{ steps.upload.outputs.artifact-id }}",
+      },
+    });
+    for (const [target, id] of [
+      ["darwin-arm64", "101"],
+      ["darwin-x64", "202"],
+    ] as const) {
+      const cwd = directories.create("native-matrix-");
+      const output = join(cwd, "outputs").replaceAll("\\", "/");
+      writeSource(cwd, `dist/${target}/unix.node`, target);
+      const script = `if ! command -v shasum >/dev/null; then
+  shasum() { [[ "$1 $2" == "-a 256" ]] || return 64; shift 2; sha256sum "$@"; }
+fi
+${steps[record]!.run}`;
+      const result = await runShell(
+        script,
+        { DARWIN_TARGET: target, ARTIFACT_ID: id, GITHUB_OUTPUT: output },
+        { cwd },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(output, "utf8").trim().split(/\r?\n/u)).toEqual([
+        `${target}-artifact-id=${id}`,
+        `${target}-sha256=${createHash("sha256").update(target).digest("hex")}`,
+      ]);
+      for (const key of [`${target}-artifact-id`, `${target}-sha256`]) {
+        expect(build.outputs?.[key]).toBe(
+          `\${{ steps.darwin.outputs.${key} }}`,
+        );
+        expect(unix.on["workflow_call"]).toMatchObject({
+          outputs: {
+            [key]: { value: `\${{ jobs.primitives.outputs.${key} }}` },
+          },
+        });
+        expect(native.on["workflow_call"]).toMatchObject({
+          outputs: { [key]: { value: `\${{ jobs.unix.outputs.${key} }}` } },
+        });
+      }
+    }
+  });
+
+  test.each([
+    { scenario: "both verified builds" },
+    { scenario: "substituted arm64 addon", replaced: "darwin-arm64" },
+    { scenario: "substituted x64 addon", replaced: "darwin-x64" },
+    { scenario: "missing arm64 artifact ID", missingId: "ARM64_ID" },
+    { scenario: "missing x64 artifact ID", missingId: "X64_ID" },
+  ])(
+    "gates the Developer ID signer on $scenario",
+    async ({ replaced, missingId }) => {
+      const { jobs } = Bun.YAML.parse(
+        darwinSigningWorkflow,
+      ) as WorkflowContract;
+      const steps = jobs["sign"]!.steps!;
+      const step = steps.find((step) => step.name === "Sign Darwin addons")!;
+      expect(step.env).toMatchObject({
+        RCODESIGN: "${{ steps.signing-tools.outputs.rcodesign }}",
+        PKCS11_LIBRARY: "${{ steps.signing-tools.outputs.pkcs11-library }}",
+        AKV_PKCS11_BACKEND: "signer-service",
+        SIGNER_SERVICE_ENDPOINT: "${{ secrets.SIGNER_SERVICE_ENDPOINT }}",
+        SIGNER_SERVICE_PURPOSE: "${{ secrets.SIGNER_SERVICE_PURPOSE }}",
+        SIGNER_SERVICE_KEY_ID: "${{ secrets.SIGNER_SERVICE_KEY_ID }}",
+        SIGNER_SERVICE_KEY_LABEL: expect.stringMatching(/\S/),
+        SIGNING_CERTIFICATE_PEM: "${{ secrets.SIGNING_CERTIFICATE_PEM }}",
+      });
+
+      const cwd = directories.create("release signer ");
+      if (process.platform === "darwin" && !Bun.which("sha256sum")) {
+        writeFileSync(
+          join(cwd, "sha256sum"),
+          '#!/bin/sh\nexec shasum -a 256 "$@"\n',
+          { mode: 0o755 },
+        );
+      }
+      const architectures = ["arm64", "x64"];
+      for (const arch of architectures) {
+        const target = `darwin-${arch}`;
+        writeSource(
+          cwd,
+          `${arch}-build/${target}/unix.node`,
+          target === replaced ? "substituted artifact" : target,
+        );
+      }
+      const env = {
+        ...step.env,
+        PATH: `${cwd}${delimiter}${process.env["PATH"]}`,
+        ARM64_ID: missingId === "ARM64_ID" ? "" : "11",
+        X64_ID: missingId === "X64_ID" ? "" : "12",
+        ARM64_SHA256: createHash("sha256").update("darwin-arm64").digest("hex"),
+        X64_SHA256: createHash("sha256").update("darwin-x64").digest("hex"),
+        RCODESIGN: "./fixture signer",
+        PKCS11_LIBRARY: "fixture provider.so",
+        SIGNER_SERVICE_CERTIFICATE_FILE: "fixture certificate.pem",
+        SIGNING_CERTIFICATE_PEM:
+          "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
+      };
+      writeFileSync(
+        join(cwd, env.RCODESIGN),
+        '#!/usr/bin/env bash\nprintf "<%s>" "$@" >> "${!#}"\n',
+        { mode: 0o755 },
+      );
+      const script = steps
+        .filter((s) =>
+          [
+            "Require both build artifact IDs",
+            "Verify both addon digests",
+            "Sign Darwin addons",
+          ].includes(s.name!),
+        )
+        .map((s) => `(\n${s.run!}\n)`)
+        .join("\n");
+      const result = await runShell(`set -e\n${script}`, env, { cwd });
+      if (replaced || missingId) {
+        expect(result.status, result.stderr).toBe(1);
+        expect(existsSync(join(cwd, env.SIGNER_SERVICE_CERTIFICATE_FILE))).toBe(
+          false,
+        );
+        return;
+      }
+      expect(result.status, result.stderr).toBe(0);
+      const pem = readFileSync(
+        join(cwd, env.SIGNER_SERVICE_CERTIFICATE_FILE),
+        "utf8",
+      );
+      expect(pem.trimEnd()).toBe(env.SIGNING_CERTIFICATE_PEM);
+      for (const arch of architectures) {
+        const target = `darwin-${arch}`;
+        const signed = readFileSync(
+          join(cwd, "signed", target, "unix.node"),
+          "utf8",
+        );
+        expect(signed).toStartWith(`${target}<sign>`);
+        expect(signed).toContain(`<--pkcs11-library><${env.PKCS11_LIBRARY}>`);
+        expect(signed).toContain(
+          `<--pkcs11-certificate-file><${env.SIGNER_SERVICE_CERTIFICATE_FILE}>`,
+        );
+        expect(signed).toContain(
+          `<--pkcs11-key-label><${step.env!["SIGNER_SERVICE_KEY_LABEL"]}>`,
+        );
+      }
+    },
+  );
 
   test("rejects manually publishing a tag older than npm latest", async () => {
     const script = workflowStepShell(
@@ -2821,6 +3173,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       ),
     ) as WorkflowContract;
     expect(jobs["verify"]?.permissions).toEqual({ contents: "read" });
+    expect(jobs["native"]?.permissions).toEqual({ actions: "read" });
     expect(progress.jobs["report"]?.["continue-on-error"]).toBe(true);
     expect(progress.jobs["report"]?.permissions).toEqual({
       actions: "read",

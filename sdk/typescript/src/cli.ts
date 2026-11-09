@@ -12032,6 +12032,7 @@ function componentScanEventLine(
 function protectedRootErrorMessage(
   error: OutputInsideProtectedRootError,
 ): string {
+  if (error.pathKind === "state") return error.message;
   const description =
     error.pathKind === "output"
       ? "Scan output directory"
