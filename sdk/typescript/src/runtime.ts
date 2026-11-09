@@ -1280,6 +1280,42 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   }
 }
 
+export interface RuntimeDatabase {
+  exec(sql: string): unknown;
+  prepare(sql: string): {
+    all(...parameters: (string | number)[]): unknown[];
+    finalize?(): void;
+  };
+  close(): void;
+}
+
+export function sqliteDatabaseOpener(
+  access: "read-existing" | "read-write" = "read-write",
+) {
+  const require = createRequire(import.meta.url);
+  const bun = process.versions["bun"] !== undefined;
+  const Database = (
+    bun ? require("bun:sqlite").Database : require("node:sqlite").DatabaseSync
+  ) as new (filename: string, options?: object) => RuntimeDatabase;
+
+  return (path: string): RuntimeDatabase => {
+    const filename = sqliteFilename(path);
+    if (access === "read-write") return new Database(filename);
+    // Apple's SQLite requires write access to initialize missing WAL sidecars.
+    // The history reader sets PRAGMA query_only on this existing-file connection.
+    return new Database(
+      filename,
+      bun
+        ? {
+            readonly: process.platform !== "darwin",
+            readwrite: process.platform === "darwin",
+            create: false,
+          }
+        : { readOnly: true },
+    );
+  };
+}
+
 export async function withCredentialHomeLock<T>(
   codexHome: string,
   operation: () => Promise<T>,
@@ -1318,21 +1354,11 @@ export async function acquireCodexSecurityCredentialHomeLock(
   if (existingDatabaseMetadata !== null) {
     requireCredentialLockDatabaseFile(existingDatabaseMetadata, databasePath);
   }
-  const require = createRequire(import.meta.url);
-  // Both supported runtimes bundle SQLite. Keep the transaction in the process
-  // doing the protected work, so pausing it cannot expire its lock.
-  const Database = process.versions["bun"]
-    ? (require("bun:sqlite") as { Database: CredentialLockDatabaseConstructor })
-        .Database
-    : (
-        require("node:sqlite") as {
-          DatabaseSync: CredentialLockDatabaseConstructor;
-        }
-      ).DatabaseSync;
+  const openDatabase = sqliteDatabaseOpener();
   // Let SQLite create a missing guard so no separate descriptor can close after
   // another connection acquires its process-owned POSIX lock. Keep the guard
   // across releases so every contender locks the same inode.
-  const database = new Database(sqliteFilename(databasePath));
+  const database = openDatabase(databasePath);
   let databaseLocked = false;
 
   try {
@@ -1466,13 +1492,6 @@ function requireCredentialLockDatabaseFile(
       `Codex Security credential-home lock must be a regular file, not a symlink or hard link: ${path}`,
     );
   }
-}
-
-interface CredentialLockDatabaseConstructor {
-  new (path: string): {
-    exec(sql: string): unknown;
-    close(): void;
-  };
 }
 
 async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {

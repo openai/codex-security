@@ -53,5 +53,6 @@ invoice data. Destination owners can inspect received requests.
 - `views.mjs` and `public/`: interface templates, styles, and form handling.
 
 `GET /health` reports process readiness. JSON writes require
-`Content-Type: application/json`. Stopping the process releases all application
+`Content-Type: application/json`. The API accepts documents up to 64 KiB and
+returns HTTP 413 for larger bodies. Stopping the process releases all application
 state; no application files or databases are written to disk.

@@ -26,7 +26,6 @@ import {
   releaseTagVersion,
   compareReleaseVersions,
   requireReleaseIncrease,
-  initialPublishedVersions,
   publishedReleaseMode,
   requirePublishedReleaseIncrease,
   releaseHistory,
@@ -123,15 +122,45 @@ function runPublisher({
         RELEASE_VERSION: "0.1.2",
         RELEASE_SHA: releaseCommit,
         RELEASE_ARCHIVE: archivePath,
-        PREVIOUS_TAG: "npm-v0.1.1",
-        MAKE_LATEST: String(makeLatest),
       },
       workspace,
       (program: string, args: string[]) => {
         calls.push([program, ...args]);
+        if (program === "npm") {
+          expect(args).toEqual([
+            "view",
+            "@openai/codex-security",
+            "versions",
+            "--json",
+            "--registry=https://registry.npmjs.org/",
+          ]);
+          return {
+            status: 0,
+            stdout: JSON.stringify(makeLatest ? ["0.1.2"] : ["0.1.2", "0.1.3"]),
+          };
+        }
+        if (program === "git" && args[0] === "rev-parse")
+          return { status: 0, stdout: "" };
+        if (program === "git" && args[0] === "tag") {
+          expect(args).toEqual([
+            "tag",
+            "--merged",
+            `${releaseCommit}^`,
+            "--list",
+            "npm-v*",
+            "--sort=-version:refname",
+          ]);
+          return { status: 0, stdout: "npm-v0.1.1\nnpm-v0.1.0\n" };
+        }
         const endpoint = args.find((argument) => argument.startsWith("repos/"));
         if (program === "gh" && args[0] === "api") {
           switch (endpoint) {
+            case "repos/test/codex-security/releases?per_page=100":
+              expect(args).toContain("--paginate");
+              expect(args).toContain(
+                ".[] | select(.draft == false and .prerelease == false) | .tag_name",
+              );
+              return { status: 0, stdout: "npm-v0.1.1\n" };
             case "repos/test/codex-security/releases/tags/npm-v0.1.2":
               return existingLookup !== "existing"
                 ? lookup(existingLookup)
@@ -208,7 +237,7 @@ function runPublisher({
   return { status, stdout, stderr, calls };
 }
 
-function releaseLabelGhMock(handlers: readonly string[], shiftEndpoint = true) {
+function releaseLabelGhMock(handlers: readonly string[]) {
   return [
     "gh() {",
     '  if [[ "$1" != "api" ]]; then return 64; fi',
@@ -219,12 +248,13 @@ function releaseLabelGhMock(handlers: readonly string[], shiftEndpoint = true) {
     "    shift 2",
     "  fi",
     '  local endpoint="$1"',
-    ...(shiftEndpoint ? ["  shift"] : []),
+    "  shift",
     '  case "$method $endpoint" in',
-    ...handlers,
     '    "GET repos/test/codex-security/issues/17")',
-    "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+    '      [[ $# == 2 && "$1" == --jq ]] || return 64',
+    `      jq ${process.platform === "win32" ? "--binary " : ""}-r "$2" <<< "$MOCK_ISSUE"`,
     "      ;;",
+    ...handlers,
     '    "POST repos/test/codex-security/issues/17/labels")',
     "      printf '%s\\n' \"$@\"",
     "      ;;",
@@ -602,16 +632,15 @@ function runReleaseLabels(
   title: string,
   routes: readonly string[],
   setup: readonly string[] = [],
-  shiftEndpoint = true,
 ) {
-  const mock = [...setup, releaseLabelGhMock(routes, shiftEndpoint)].join("\n");
+  const mock = [...setup, releaseLabelGhMock(routes)].join("\n");
   const script = workflowStepShell(
     releaseLabelsWorkflow,
     "Categorize pull request without checking out its code",
   );
   return runShell(`${mock}\n${script}`, {
     GITHUB_REPOSITORY: "test/codex-security",
-    MOCK_PR_TITLE: title,
+    MOCK_ISSUE: JSON.stringify({ title }),
     PR_NUMBER: "17",
   });
 }
@@ -953,27 +982,6 @@ describe("monotonic stable release versions", () => {
   test("identifies a strictly increasing version as a new publication", () => {
     expect(publishedReleaseMode("0.1.3", ["0.1.0", "0.1.2"])).toBe("publish");
   });
-
-  test("allows a missing npm package only for its initial stable release", () => {
-    expect(
-      initialPublishedVersions("0.1.0", { error: { code: "E404" } }),
-    ).toEqual([]);
-  });
-
-  test.each([
-    { version: "0.1.1", registryError: { error: { code: "E404" } } },
-    { version: "0.1.0", registryError: { error: { code: "E403" } } },
-    { version: "0.1.0", registryError: { error: { code: "ETIMEDOUT" } } },
-    { version: "0.1.0", registryError: { error: null } },
-    { version: "0.1.0", registryError: null },
-  ])(
-    "rejects unverified npm history for $version and registry response $registryError",
-    ({ version, registryError }) => {
-      expect(() => initialPublishedVersions(version, registryError)).toThrow(
-        "Unable to verify published npm release history.",
-      );
-    },
-  );
 
   test("identifies the current published version as recoverable", () => {
     expect(publishedReleaseMode("0.1.2", ["0.1.0", "0.1.2"])).toBe("recover");
@@ -1810,9 +1818,8 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("pins both supported-minimum verification and protected signing runtimes", () => {
+  test("pins the supported-minimum release verification runtime", () => {
     expect(protectedReleaseWorkflow).toContain('node-version: "22.13.0"');
-    expect(protectedReleaseWorkflow).toContain('node-version: "24.15.0"');
   });
 
   test("restricts release cuts to main and increasing stable versions", () => {
@@ -2151,10 +2158,8 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       const outputs = readFileSync(outputPath, "utf8");
       expect(outputs).toContain(`changed=${changed}`);
       if (changed) {
-        expect(outputs).toContain(`version=${currentVersion}`);
-        expect(outputs).toContain(`tag=npm-v${currentVersion}`);
+        expect(outputs.split("\n")).toContain(`tag=npm-v${currentVersion}`);
       } else {
-        expect(outputs).not.toContain("version=");
         expect(outputs).not.toContain("tag=");
       }
     },
@@ -2221,41 +2226,35 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       workflow: "release cut",
       version: "0.1.0",
       errorCode: "E404",
-      status: 0,
     },
     {
       workflow: "protected publisher",
       version: "0.1.0",
       errorCode: "E404",
-      status: 0,
     },
     {
       workflow: "release cut",
       version: "0.1.1",
       errorCode: "E404",
-      status: 1,
     },
     {
       workflow: "protected publisher",
       version: "0.1.1",
       errorCode: "E404",
-      status: 1,
     },
     {
       workflow: "release cut",
       version: "0.1.0",
       errorCode: "ETIMEDOUT",
-      status: 1,
     },
     {
       workflow: "protected publisher",
       version: "0.1.0",
       errorCode: "E403",
-      status: 1,
     },
   ])(
-    "handles $errorCode during $workflow npm-history validation for $version",
-    async ({ workflow, version, errorCode, status }) => {
+    "stops the $workflow when npm history for $version fails with $errorCode",
+    async ({ workflow, version, errorCode }) => {
       const cutting = workflow === "release cut";
       const script = workflowStepShell(
         cutting ? releaseCutWorkflow : protectedReleaseWorkflow,
@@ -2302,12 +2301,10 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
-      expect(result.status).toBe(status);
-      if (status !== 0) {
-        expect(result.stderr).toContain(
-          "Unable to verify published npm release history.",
-        );
-      }
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "Unable to verify published npm release history.",
+      );
     },
   );
 
@@ -2618,10 +2615,10 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       run: check,
     });
     const publisher = jobs["publish"]!.steps!;
-    const initial = publisher.findIndex(
-      (step) => step.name === "Publish initial npm release",
+    const publishIndex = publisher.findIndex(
+      (step) => step.name === "Publish to npm using trusted publishing",
     );
-    expect(publisher[initial - 1]).toMatchObject({
+    expect(publisher[publishIndex - 1]).toMatchObject({
       name: "Revalidate protected release tag",
       if: "needs.verify.outputs.mode == 'publish'",
       run: check,
@@ -3269,8 +3266,10 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       import { syncBuiltinESMExports } from "node:module";
       import { readFileSync, writeFileSync } from "node:fs";
       childProcess.spawnSync = (program, args, options) => {
+        if (program === "npm") return { status: 0, stdout: '["0.1.2","0.1.3"]' };
         if (program === "git") return { status: 1, stdout: "" };
         if (program !== "gh") throw new Error("Unexpected command: " + program);
+        if (args.includes("repos/test/codex-security/releases?per_page=100")) return { status: 0, stdout: "" };
         if (args.includes("repos/test/codex-security/releases/tags/npm-v0.1.2")) {
           return { status: 1, stdout: 'HTTP/2.0 404 Not Found\\n\\n{"message":"Not Found"}' };
         }
@@ -3306,8 +3305,6 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
             RELEASE_VERSION: "0.1.2",
             RELEASE_SHA: releaseCommit,
             RELEASE_ARCHIVE: join(workspace, "verified archive.tgz"),
-            PREVIOUS_TAG: "",
-            MAKE_LATEST: "false",
           },
           { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
         );
@@ -3325,7 +3322,6 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     const result = runPublisher({ existingLookup: "missing" });
     expect(result.status).toBe(0);
     expect(result.calls.at(-1)).toContain("--latest=false");
-    expect(githubReleaseWorkflow).toContain("release-history");
   });
 
   test.each(["", "not-json"])(
@@ -3348,12 +3344,6 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
   );
 
   test("generates notes only from a previously published release", () => {
-    expect(githubReleaseWorkflow).toContain(
-      "npm view @openai/codex-security versions",
-    );
-    expect(githubReleaseWorkflow).toContain(
-      "steps.history.outputs.previous-tag",
-    );
     const result = runPublisher({ existingLookup: "missing" });
     expect(
       result.calls.find((call) =>
@@ -3379,6 +3369,10 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
     expect(result.calls.map((call) => call.slice(0, 3))).toEqual([
+      ["npm", "view", "@openai/codex-security"],
+      ["gh", "api", "--paginate"],
+      ["git", "rev-parse", `${releaseCommit}^`],
+      ["git", "tag", "--merged"],
       ["gh", "api", "--include"],
       ["gh", "release", "download"],
     ]);
@@ -3953,18 +3947,31 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
   });
 
   test("cryptographically verifies the exact npm provenance bundle", () => {
-    expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
     expect(githubReleaseWorkflow).toContain("npm audit signatures");
     expect(githubReleaseWorkflow).toContain("--include-attestations");
     expect(githubReleaseWorkflow).toContain("verify-recovered-provenance");
   });
 
   test("both release jobs require the npm installed through the Socket Firewall", async () => {
-    const both = (name: string) => {
-      const script = workflowStepShell(protectedReleaseWorkflow, name);
-      expect(workflowStepShell(githubReleaseWorkflow, name)).toBe(script);
-      return script;
+    const action = "./.github/actions/setup-release-npm";
+    for (const [workflow, job] of [
+      [protectedReleaseWorkflow, "publish"],
+      [githubReleaseWorkflow, "release"],
+    ] as const) {
+      const { jobs } = Bun.YAML.parse(workflow) as WorkflowContract;
+      expect(jobs[job]?.steps?.map((step) => step.uses)).toContain(action);
+    }
+    const manifest = new URL(`../../../${action}/action.yml`, import.meta.url);
+    const { runs } = Bun.YAML.parse(readFileSync(manifest, "utf8")) as {
+      runs: { steps: NonNullable<WorkflowContract["jobs"][string]["steps"]> };
     };
+    const [node, install, verifyPath] = runs.steps;
+    expect(node?.uses).toMatch(/^actions\/setup-node@[a-f0-9]{40}$/);
+    expect(node?.with).toEqual({
+      "node-version": "24.15.0",
+      "registry-url": "https://registry.npmjs.org",
+      "package-manager-cache": false,
+    });
     const result = await runShell(
       `RUNNER_TEMP="$(cd "$RUNNER_TEMP" && pwd)"
 GITHUB_PATH="$RUNNER_TEMP/path"
@@ -3974,10 +3981,10 @@ npm() {
   printf '#!/bin/sh\\necho "\${TEST_NPM_VERSION:-11.12.1}"\\n' > "$3/node_modules/.bin/npm"
   chmod +x "$3/node_modules/.bin/npm"
 }
-${both("Install provenance-capable npm")}
+${install!.run}
 export PATH="$(cat "$GITHUB_PATH"):$PATH"
 verify() { "$BASH" <<'VERIFY'
-${both("Verify npm on PATH")}
+${verifyPath!.run}
 VERIFY
 }
 verify && echo selected
@@ -4179,16 +4186,13 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
     "fix: preserve a trailing carriage return\r",
   ])("rejects nonconventional pull request title %s", async (title) => {
     const result = await runReleaseLabels(title, [
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-      "      ;;",
       "    *)",
       "      printf '%s\\n' 'unexpected label mutation'",
       "      return 70",
       "      ;;",
     ]);
 
-    expect(result.status).toBe(1);
+    expect(result.status, result.stderr).toBe(1);
     expect(result.stderr).toContain(
       "Pull request title must follow <type>[optional scope][!]: <description>.",
     );
@@ -4236,7 +4240,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
         ],
       );
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(
         "Preserving existing skip-release-notes label.",
       );
@@ -4259,9 +4263,6 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
 
   test("preserves the latest unattributed skip label after earlier automation", async () => {
     const result = await runReleaseLabels("feat: customer-visible change", [
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' 'feat: customer-visible change' | base64",
-      "      ;;",
       '    "GET repos/test/codex-security/issues/17/labels")',
       "      printf '%s\\n' skip-release-notes",
       "      ;;",
@@ -4278,7 +4279,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
       "      ;;",
     ]);
 
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(
       "Preserving existing skip-release-notes label.",
     );
@@ -4309,7 +4310,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
         "      ;;",
       ]);
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(
         "removed automatically applied skip-release-notes",
       );
@@ -4351,7 +4352,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
       "      ;;",
     ]);
 
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(`labels[]=${label}`);
   });
 
@@ -4365,9 +4366,6 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
       const result = await runReleaseLabels(
         title,
         [
-          '    "GET repos/test/codex-security/issues/17")',
-          "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-          "      ;;",
           '    "GET repos/test/codex-security/issues/17/labels")',
           "      return 0",
           "      ;;",
@@ -4385,10 +4383,9 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
           "    *) return 66 ;;",
         ],
         ["skip_label_exists=0"],
-        false,
       );
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain("applied skip-release-notes");
     },
   );
@@ -4418,32 +4415,17 @@ test.skipIf(process.platform === "win32").each([
 ])(
   "uses the manual $manual release category over stale $stale after retitling to $title",
   async ({ title, manual, stale }) => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
+    const result = await runReleaseLabels(
+      title,
+      [
+        `    "GET repos/test/codex-security/issues/17/labels") printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;`,
+        `    "GET repos/test/codex-security/issues/17/timeline?per_page=100") printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;`,
+        '    "DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL") echo removed-stale-label ;;',
+        '    "DELETE "*) echo removed-manual-label; return 70 ;;',
+        '    "POST "*) echo added-automatic-category ;;',
+      ],
+      [`MANUAL_LABEL=${manual}`, `STALE_LABEL=${stale}`],
     );
-    const fixture = `gh() {
-    case "$*" in
-      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' "$MOCK_PR_TITLE" | base64 ;;
-      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;
-      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;
-      "api --method DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL --silent") echo removed-stale-label ;;
-      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
-      "api --method POST "*) echo added-automatic-category ;;
-      *) return 65 ;;
-    esac
-  }`;
-    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
-      env: {
-        ...process.env,
-        GITHUB_REPOSITORY: "test/codex-security",
-        PR_NUMBER: "17",
-        MOCK_PR_TITLE: title,
-        MANUAL_LABEL: manual,
-        STALE_LABEL: stale,
-      },
-      timeout: 10_000,
-    });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(`Preserving existing ${manual} label.`);
     expect(result.stdout).toContain("removed-stale-label");

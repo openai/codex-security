@@ -465,8 +465,7 @@ def effective_deep_scan_config(
     """Use persisted workspace settings when available, otherwise resolve the current launch configuration."""
     if workspace is not None and workspace["deep_scan_config_json"] is not None:
         return json.loads(workspace["deep_scan_config_json"])
-    available_parallelism = args.available_parallelism or os.cpu_count() or 1
-    return resolve_deep_scan_setup(available_parallelism, args.deep_scan_project_json)
+    return resolve_deep_scan_setup(project_json=args.deep_scan_project_json)
 
 
 def ensure_deep_scan_run(
@@ -1695,20 +1694,9 @@ def fail_deep_scan_locked(
             (args.deep_status, message, manifest_path, timestamp, timestamp, scan_id),
         )
         cancel_active_workers(connection, scan_id, timestamp)
-        parent_update = connection.execute(
-            """
-            UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
-            WHERE id = ? AND status = 'running'
-            """,
-            (message, timestamp, timestamp, scan_id),
-        )
-        if parent_update.rowcount != 1:
+        if not saved_results.mark_running_scan_failed(connection, scan_id, message, timestamp):
             raise SystemExit("Deep Scan failure could not be persisted to its parent scan.")
-        connection.execute(
-            "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
-            (timestamp, scan_id),
-        )
+        saved_results.touch_scan_progress(connection, scan_id, timestamp)
         connection.commit()
     except BaseException:
         connection.rollback()
