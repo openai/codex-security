@@ -11,6 +11,8 @@
 *.yaml text eol=lf
 *.yml text eol=lf
 
+plugins/codex-security/scripts/launch_codex_security_mcp text eol=lf
+
 # Bundled dependencies contain intentional whitespace in strings and comments.
 github-action/dist/*.cjs linguist-generated=true -whitespace
 
