@@ -770,11 +770,14 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     assert "revision recorded by the parent repository" in str(failed["stderr"])
 
 
-@pytest.mark.cross_platform
 @pytest.mark.parametrize(
     ("target_name", "outside_name"),
-    [(":(top,glob)**", "outside.py"), ("selected[ab]", "selecteda")],
-    ids=["top-glob", "bracket-glob"],
+    [
+        pytest.param(":(top,glob)**", "outside.py", id="top-glob", marks=pytest.mark.native_macos),
+        pytest.param(
+            "selected[ab]", "selecteda", id="bracket-glob", marks=pytest.mark.cross_platform
+        ),
+    ],
 )
 def test_nested_target_name_is_a_literal_git_pathspec(
     tmp_path: Path, target_name: str, outside_name: str
