@@ -26,7 +26,6 @@ import {
   releaseTagVersion,
   compareReleaseVersions,
   requireReleaseIncrease,
-  initialPublishedVersions,
   publishedReleaseMode,
   requirePublishedReleaseIncrease,
   releaseHistory,
@@ -953,27 +952,6 @@ describe("monotonic stable release versions", () => {
   test("identifies a strictly increasing version as a new publication", () => {
     expect(publishedReleaseMode("0.1.3", ["0.1.0", "0.1.2"])).toBe("publish");
   });
-
-  test("allows a missing npm package only for its initial stable release", () => {
-    expect(
-      initialPublishedVersions("0.1.0", { error: { code: "E404" } }),
-    ).toEqual([]);
-  });
-
-  test.each([
-    { version: "0.1.1", registryError: { error: { code: "E404" } } },
-    { version: "0.1.0", registryError: { error: { code: "E403" } } },
-    { version: "0.1.0", registryError: { error: { code: "ETIMEDOUT" } } },
-    { version: "0.1.0", registryError: { error: null } },
-    { version: "0.1.0", registryError: null },
-  ])(
-    "rejects unverified npm history for $version and registry response $registryError",
-    ({ version, registryError }) => {
-      expect(() => initialPublishedVersions(version, registryError)).toThrow(
-        "Unable to verify published npm release history.",
-      );
-    },
-  );
 
   test("identifies the current published version as recoverable", () => {
     expect(publishedReleaseMode("0.1.2", ["0.1.0", "0.1.2"])).toBe("recover");
@@ -2221,41 +2199,35 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       workflow: "release cut",
       version: "0.1.0",
       errorCode: "E404",
-      status: 0,
     },
     {
       workflow: "protected publisher",
       version: "0.1.0",
       errorCode: "E404",
-      status: 0,
     },
     {
       workflow: "release cut",
       version: "0.1.1",
       errorCode: "E404",
-      status: 1,
     },
     {
       workflow: "protected publisher",
       version: "0.1.1",
       errorCode: "E404",
-      status: 1,
     },
     {
       workflow: "release cut",
       version: "0.1.0",
       errorCode: "ETIMEDOUT",
-      status: 1,
     },
     {
       workflow: "protected publisher",
       version: "0.1.0",
       errorCode: "E403",
-      status: 1,
     },
   ])(
-    "handles $errorCode during $workflow npm-history validation for $version",
-    async ({ workflow, version, errorCode, status }) => {
+    "stops the $workflow when npm history for $version fails with $errorCode",
+    async ({ workflow, version, errorCode }) => {
       const cutting = workflow === "release cut";
       const script = workflowStepShell(
         cutting ? releaseCutWorkflow : protectedReleaseWorkflow,
@@ -2302,12 +2274,10 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
-      expect(result.status).toBe(status);
-      if (status !== 0) {
-        expect(result.stderr).toContain(
-          "Unable to verify published npm release history.",
-        );
-      }
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "Unable to verify published npm release history.",
+      );
     },
   );
 

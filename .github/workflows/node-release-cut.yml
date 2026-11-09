@@ -94,11 +94,8 @@ jobs:
               --json \
               --registry=https://registry.npmjs.org/
           )"; then
-            published_versions="$(
-              printf '%s\n' "$published_versions" |
-                node sdk/typescript/scripts/release-automation.mjs \
-                  initial-published-versions "$version"
-            )"
+            echo "Unable to verify published npm release history." >&2
+            exit 1
           fi
 
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]] &&
