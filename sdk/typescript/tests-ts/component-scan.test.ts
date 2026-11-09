@@ -882,8 +882,14 @@ test.each([
   },
 );
 
-test("CLI escapes component failure controls while preserving the saved error", async () => {
+test("CLI escapes component names and errors in headless output and preserves their saved values", async () => {
   const paths = await fixture();
+  const name = "API\u001b[2J\nnext\u009bline";
+  const planFile = join(paths.root, "plan.json");
+  await writeFile(
+    planFile,
+    JSON.stringify({ components: [{ name, paths: ["apps/api"] }] }),
+  );
   const failure = "Component failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
   const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -892,25 +898,36 @@ test("CLI escapes component failure controls while preserving the saved error", 
       [
         "scan-components",
         paths.repository,
-        "--component",
-        "apps/api",
+        "--components-file",
+        planFile,
+        "--headless",
         "--output-dir",
         paths.outputDir,
         "--json",
       ],
       {
         ...dependencies({ currentDirectory: paths.root }),
-        createSecurity: client(rejecting(failure)),
+        createSecurity: client(async (_repository, options) => {
+          options.onProgress?.({
+            phase: "validation",
+            filesCompleted: 1,
+            filesTotal: 1,
+          });
+          throw new Error(failure);
+        }),
       },
     ),
   ).toBe(2);
+  expect(stderr.text()).toContain("API [2J next line validating findings");
+  expect(stderr.text()).toContain("API [2J next line failed:");
   expect(stderr.text()).toContain(
     "Component failed: token=SYNTHETIC_VALUE [2J continued\n",
   );
   expect(stderr.text()).not.toContain("\u001b");
+  expect(stderr.text()).not.toContain("\u009b");
   const result = JSON.parse(stdout.text());
   expect(await json(result.summaryPath)).toMatchObject({
-    components: [expect.objectContaining({ error: failure })],
+    components: [expect.objectContaining({ name, error: failure })],
   });
 });
 

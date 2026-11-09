@@ -460,6 +460,9 @@ Anyone signed in to GitHub with read access to the repository can download the
 reports, which can contain source code and vulnerability details. Set
 `retention-days` to change the default of seven days.
 
+When the scan records scope limitations, the job summary displays them. For
+example, a time-limited Deep scan can finish before any source review completes.
+
 The job summary includes the configured provider, reported input/cached/output
 token usage, and estimated USD cost, including a range when supplied by the CLI.
 Missing measurements or pricing appear as `unavailable`; measured zeros remain
@@ -647,53 +650,53 @@ recovery. The [quick start](#quick-start) explains which commit consumers pin.
 
 Inputs are strings. Quote booleans and use newline-separated literal paths for lists.
 
-| Input                  | Default                   | Meaning                                                                                                                                                                                                                      |
-| ---------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `repository`           | `${{ github.workspace }}` | Checkout root. Use paths to select folders within the checkout.                                                                                                                                                              |
-| `scope`                | `repository`              | repository or diff. Select diff for PR changes only; repository scans the full checkout.                                                                                                                                     |
-| `paths`                | Unset                     | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion.                                                                                                                |
-| `diff-base`            | Unset                     | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.                                                                                                                                  |
-| `mode`                 | `standard`                | standard or deep. Deep supports repository scans, including selected paths; not diff scans.                                                                                                                                  |
-| `provider`             | `openai`                  | Providers supported by the Action: openai, openrouter, fireworks, or amazon-bedrock. Pass the selected provider's credentials to the scan step.                                                                              |
-| `model`                | Unset                     | Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.                                         |
-| `cyber-access-program` | Unset                     | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
-| `effort`               | `xhigh`                   | Reasoning effort passed to Codex; supported values depend on the model and provider.                                                                                                                                         |
-| `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |
-| `max-time-hours`       | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.                                                                                                  |
-| `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail.                                                                         |
-| `verbose`              | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                                                                                                               |
-| `dry-run`              | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Requires fail-on-severity: none; use a separate non-required job.                                                    |
-| `summary`              | `true`                    | Write a human-readable job summary.                                                                                                                                                                                          |
-| `annotations`          | `true`                    | Emit up to 50 source finding annotations; complete findings remain in reports.                                                                                                                                               |
-| `upload-artifacts`     | `false`                   | Upload an allowlist of validated reports and link the artifact in the job summary. Reports may contain source and vulnerability details.                                                                                     |
-| `artifact-name`        | `codex-security`          | Report artifact name; choose distinct names for matrix jobs and multiple invocations.                                                                                                                                        |
-| `retention-days`       | `7`                       | Artifact retention, 1–90 days (subject to repository limits).                                                                                                                                                                |
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `repository` | `${{ github.workspace }}` | Checkout root. Use paths to select folders within the checkout. |
+| `scope` | `repository` | repository or diff. Select diff for PR changes only; repository scans the full checkout. |
+| `paths` | Unset | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion. |
+| `diff-base` | Unset | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff. |
+| `mode` | `standard` | standard or deep. Deep supports repository scans, including selected paths; not diff scans. |
+| `provider` | `openai` | Providers supported by the Action: openai, openrouter, fireworks, or amazon-bedrock. Pass the selected provider's credentials to the scan step. |
+| `model` | Unset | Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model. |
+| `cyber-access-program` | Unset | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
+| `effort` | `xhigh` | Reasoning effort passed to Codex; supported values depend on the model and provider. |
+| `max-cost` | Unset | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit. |
+| `max-time-hours` | Unset | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate. |
+| `fail-on-severity` | `none` | none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail. |
+| `verbose` | `true` | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only. |
+| `dry-run` | `false` | Validate local configuration without a scan or API key. Does not verify authentication or model access. Requires fail-on-severity: none; use a separate non-required job. |
+| `summary` | `true` | Write a human-readable job summary. |
+| `annotations` | `true` | Emit up to 50 source finding annotations; complete findings remain in reports. |
+| `upload-artifacts` | `false` | Upload an allowlist of validated reports and link the artifact in the job summary. Reports may contain source and vulnerability details. |
+| `artifact-name` | `codex-security` | Report artifact name; choose distinct names for matrix jobs and multiple invocations. |
+| `retention-days` | `7` | Artifact retention, 1–90 days (subject to repository limits). |
 
 ## Outputs
 
 All outputs are strings. An empty cost or count means unavailable, not zero.
 
-| Output                | Meaning                                                                                                                                |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                             |
-| `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                          |
-| `manifest-path`       | Absolute scan manifest path, including scan status and scope, or empty when unavailable or withheld.                                   |
-| `coverage-path`       | Legacy coverage JSON path. Empty for current CLI results.                                                                              |
-| `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                          |
-| `scan-status`         | completed, failed, or skipped. Completed means analysis produced a valid result. Skipped is reserved for empty diffs or dry-run.       |
-| `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                               |
-| `policy-status`       | passed, failed, or not-evaluated. Failed or skipped scans are not-evaluated.                                                           |
-| `report-status`       | ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.   |
-| `exit-code`           | CLI exit code, or empty if the CLI was not started. 0 means success, 1 means findings policy failed, and 2 means execution failed.     |
-| `scanned-sha`         | Verified checkout commit SHA.                                                                                                          |
-| `analysis-ref`        | GitHub ref matching the scanned revision.                                                                                              |
-| `sarif-upload-ready`  | true only for validated SARIF from a completed scan with a publishable immutable revision. Remains true after severity-policy failure. |
-| `critical-count`      | Available critical findings, or empty before results are available.                                                                    |
-| `high-count`          | Available high findings, or empty before results are available.                                                                        |
-| `medium-count`        | Available medium findings, or empty before results are available.                                                                      |
-| `low-count`           | Available low findings, or empty before results are available.                                                                         |
-| `informational-count` | Available informational findings, or empty before results are available.                                                               |
-| `estimated-cost`      | Estimated USD cost reported by the CLI. Empty means unavailable, not zero.                                                             |
+| Output | Meaning |
+| --- | --- |
+| `sarif-path` | Absolute validated SARIF file path, or empty when unavailable or withheld. |
+| `json-path` | Absolute canonical findings JSON path, or empty when unavailable or withheld. |
+| `manifest-path` | Absolute scan manifest path, including scan status and scope, or empty when unavailable or withheld. |
+| `coverage-path` | Legacy coverage JSON path. Empty for current CLI results. |
+| `results-directory` | Runner-local reports directory; do not upload it recursively. |
+| `scan-status` | completed, failed, or skipped. Completed means analysis produced a valid result. Skipped is reserved for empty diffs or dry-run. |
+| `skip-reason` | empty-diff or dry-run when no scan ran; otherwise empty. |
+| `policy-status` | passed, failed, or not-evaluated. Failed or skipped scans are not-evaluated. |
+| `report-status` | ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed. |
+| `exit-code` | CLI exit code, or empty if the CLI was not started. 0 means success, 1 means findings policy failed, and 2 means execution failed. |
+| `scanned-sha` | Verified checkout commit SHA. |
+| `analysis-ref` | GitHub ref matching the scanned revision. |
+| `sarif-upload-ready` | true only for validated SARIF from a completed scan with a publishable immutable revision. Remains true after severity-policy failure. |
+| `critical-count` | Available critical findings, or empty before results are available. |
+| `high-count` | Available high findings, or empty before results are available. |
+| `medium-count` | Available medium findings, or empty before results are available. |
+| `low-count` | Available low findings, or empty before results are available. |
+| `informational-count` | Available informational findings, or empty before results are available. |
+| `estimated-cost` | Estimated USD cost reported by the CLI. Empty means unavailable, not zero. |
 
 <!-- action-reference:end -->
 
