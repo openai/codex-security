@@ -17,7 +17,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
@@ -395,6 +395,8 @@ test("CLI resumes through native execution with current permissions and preserve
     sha256: hash("sha256", markdown),
   };
   const f = await interruptedScan("deep", false, { severityRubric });
+  const bootstrapWorkspace = join(f.root, "resumed-bootstrap");
+  await mkdir(bootstrapWorkspace);
   Object.assign(f.environment, {
     CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1",
   });
@@ -458,6 +460,7 @@ test("CLI resumes through native execution with current permissions and preserve
         environment: f.environment,
         prepareRuntime: async () => ({
           ...preparedRuntime(f.codexHome),
+          bootstrapWorkspace,
           deepScanConfigDirectory: join(f.codexHome, "worker-config"),
           deepScanConfigPath: join(
             f.codexHome,
@@ -500,6 +503,11 @@ test("CLI resumes through native execution with current permissions and preserve
               permissions.permissions.codex_security_scan.filesystem;
             expect(filesystem[f.codexHome]).toEqual({ ".": "deny" });
             expect(filesystem[originalHome]).toBeUndefined();
+            if (process.platform === "win32") {
+              const currentPlugin = options.env!["CODEX_SECURITY_PLUGIN_ROOT"]!;
+              expect(dirname(currentPlugin)).toBe(bootstrapWorkspace);
+              expect(filesystem[currentPlugin]).toEqual({ ".": "read" });
+            }
             expect(options.env).toMatchObject({
               CODEX_SECURITY_SCAN_ID: f.scanId,
               CODEX_SECURITY_SCAN_DIR: f.scanDir,

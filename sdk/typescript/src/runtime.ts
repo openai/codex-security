@@ -3697,7 +3697,7 @@ async function validatePluginRoot(root: string): Promise<string> {
   return await realpath(root);
 }
 
-async function copyPluginTree(
+export async function copyPluginTree(
   source: string,
   destination: string,
   signal?: AbortSignal,
