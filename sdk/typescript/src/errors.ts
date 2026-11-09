@@ -63,7 +63,8 @@ export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
     );
   }
 }
-export type ProtectedScanPathKind = "output" | "temporary" | "runtime";
+export type ProtectedScanPathKind =
+  "output" | "state" | "temporary" | "runtime";
 
 export class OutputInsideProtectedRootError extends OutputDirectoryError {
   public constructor(
@@ -72,7 +73,14 @@ export class OutputInsideProtectedRootError extends OutputDirectoryError {
     public readonly pathKind: ProtectedScanPathKind = "output",
   ) {
     super(
-      `Scan ${pathKind} directory must be outside the protected scan root: ${outputDirectory}`,
+      pathKind === "state"
+        ? [
+            "Codex Security state directory must be outside the protected scan root and cannot contain it.",
+            `  Resolved path:  ${outputDirectory}`,
+            `  Protected root: ${protectedRoot}`,
+            "Set CODEX_SECURITY_STATE_DIR to a private directory that does not overlap the protected root. For hosted scans, set stateDirectory on the request.",
+          ].join("\n")
+        : `Scan ${pathKind} directory must be outside the protected scan root: ${outputDirectory}`,
     );
   }
 }

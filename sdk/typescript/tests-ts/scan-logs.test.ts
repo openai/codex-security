@@ -62,6 +62,14 @@ function commandEvent(command: string, id: string, timestamp?: string) {
   };
 }
 
+function taskStarted(turnId: string, timestamp?: string) {
+  return {
+    type: "event_msg",
+    ...(timestamp === undefined ? {} : { timestamp }),
+    payload: { type: "task_started", turn_id: turnId },
+  };
+}
+
 describe("saved scan logs", () => {
   test.each([
     ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
@@ -318,6 +326,91 @@ describe("saved scan logs", () => {
           "No saved session logs are available for scan scan-1.",
         );
       }
+    },
+  );
+
+  const justBeforeCompletion = "2026-08-11T12:03:00.123Z";
+  const preciseCompletion = "2026-08-11T12:03:00.123789Z";
+  test.each([
+    ["complete", preciseCompletion],
+    ["failed", preciseCompletion],
+    ["canceled", preciseCompletion],
+    ["complete", null],
+    ["complete", undefined],
+  ] as const)(
+    "preserves resumed workers with status %s and log boundary %p",
+    async (status, logCompletedAt) => {
+      const home = await temporaryHome();
+      const scanDirectory = join(home, "scans", "resumed");
+      const artifacts = join(scanDirectory, "artifacts");
+      const afterCompletion = "2026-08-11T12:04:00.000Z";
+      const resumed = [
+        taskStarted("resume-turn", "2026-08-11T12:02:00.000Z"),
+        commandEvent("resumed scan work", "resume-call"),
+      ];
+      const followup = [
+        taskStarted("followup-turn", afterCompletion),
+        commandEvent("post-scan followup", "post-call"),
+      ];
+      await writeSession(
+        home,
+        "parent",
+        [...resumed, ...followup],
+        undefined,
+        "2026-08-11T12:00:00.000Z",
+        scanDirectory,
+      );
+      for (const [threadId, startedAt, directory] of [
+        ["recorded-worker", afterCompletion, artifacts],
+        ["resumed-worker", justBeforeCompletion, artifacts],
+        ["followup-worker", afterCompletion, artifacts],
+        [
+          "unrelated-worker",
+          justBeforeCompletion,
+          join(home, "other-scan", "artifacts"),
+        ],
+      ] as const) {
+        await writeSession(home, threadId, [], undefined, startedAt, directory);
+      }
+
+      await writeSession(
+        home,
+        "followup-child",
+        [commandEvent("post-scan child work", "child-call")],
+        "parent",
+        afterCompletion,
+      );
+
+      const result = await readSavedScanLogs(
+        {
+          scanId: "resumed-scan",
+          mode: "deep",
+          scanDir: scanDirectory,
+          continuationThreadId: "parent",
+          executionThreadIds: ["parent", "recorded-worker"],
+          progress: {
+            status,
+            updatedAt: "2026-08-11T12:01:00.000Z",
+          },
+          updatedAt: "2026-08-11T12:05:00.000Z",
+          ...(logCompletedAt === undefined ? {} : { logCompletedAt }),
+        },
+        home,
+      );
+
+      const expected =
+        logCompletedAt == null ? [...resumed, ...followup] : resumed;
+      expect(
+        result.events.filter(({ threadId }) => threadId === "parent").slice(1),
+      ).toEqual(expected.map((event) => ({ threadId: "parent", event })));
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+        logCompletedAt == null
+          ? ["followup-child", "parent", "recorded-worker"]
+          : ["parent", "recorded-worker", "resumed-worker"],
+      );
+      expect(
+        result.events.some(({ threadId }) => threadId === "followup-child"),
+      ).toBe(logCompletedAt == null);
     },
   );
 
@@ -740,6 +833,22 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(archivedLogs)).toContain("review archived scan");
     expect(JSON.stringify(archivedLogs)).not.toContain("PRIVATE REPLACEMENT");
 
+    for (const logCompletedAt of [null, undefined]) {
+      const legacyLogs = await readSavedScanLogs(
+        {
+          scanId: "archived-scan",
+          mode: "deep",
+          scanDir: archived,
+          continuationThreadId: "archived-parent",
+          executionThreadIds: ["archived-parent"],
+          progress: { status: "complete", updatedAt: completedAt },
+          ...(logCompletedAt === undefined ? {} : { logCompletedAt }),
+        },
+        home,
+      );
+      expect(legacyLogs).toEqual(archivedLogs);
+    }
+
     const unrelatedRoot = await readScanLogs({
       ...options,
       scanDirectory: join(home, "scans", "unrelated.previous-fixture"),
@@ -761,6 +870,84 @@ describe("saved scan logs", () => {
       ["archived-parent", "archived-worker", "replacement-worker"],
     );
   });
+
+  const scanCompletion = "2026-08-11T12:02:00.000Z";
+  const followupStart = "2026-08-11T12:03:00.000Z";
+  test.each([
+    ["without a follow-up", scanCompletion, null, false],
+    ["with a follow-up", scanCompletion, followupStart, true],
+    ["with a follow-up at completion", followupStart, followupStart, true],
+    [
+      "with a turn just before completion",
+      preciseCompletion,
+      justBeforeCompletion,
+      false,
+    ],
+    ["while running", null, followupStart, false],
+    ["without completion", undefined, followupStart, false],
+    ["with invalid completion", "invalid", followupStart, false],
+    ["without a turn timestamp", scanCompletion, undefined, false],
+    ["with an invalid turn timestamp", scanCompletion, "invalid", false],
+  ] as const)(
+    "preserves the finishing scan turn %s",
+    async (_label, completedAt, followupAt, excludeFollowup) => {
+      const home = await temporaryHome();
+      const scanEvents = [
+        taskStarted("scan-turn", "2026-08-11T12:00:00.000Z"),
+        {
+          timestamp: "2026-08-11T12:01:59.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "mcp__codex_security__complete_codex_security_scan",
+            call_id: "completion-call",
+            arguments: "{}",
+          },
+        },
+        {
+          timestamp: "2026-08-11T12:02:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "completion-call",
+            output: "Scan completed.",
+          },
+        },
+        {
+          timestamp: "2026-08-11T12:02:02.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "Scan report is ready." },
+        },
+        {
+          timestamp: "2026-08-11T12:02:03.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "scan-turn" },
+        },
+      ];
+      const followup =
+        followupAt === null
+          ? []
+          : [
+              taskStarted("followup-turn", followupAt),
+              commandEvent("post-scan followup", "post-call"),
+            ];
+      await writeSession(home, "parent", [...scanEvents, ...followup]);
+
+      const result = await readScanLogs({
+        scanId: "scan-555",
+        threadId: "parent",
+        codexHome: home,
+        logCompletedAt: completedAt,
+      });
+
+      const expected = excludeFollowup
+        ? scanEvents
+        : [...scanEvents, ...followup];
+      expect(result.events.slice(1)).toEqual(
+        expected.map((event) => ({ threadId: "parent", event })),
+      );
+    },
+  );
 
   test.each([false, true])(
     "does not parse event bodies from unrelated saved sessions (copied: %p)",

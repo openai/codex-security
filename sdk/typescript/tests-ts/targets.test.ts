@@ -874,14 +874,19 @@ describe("scan target normalization", () => {
     );
   });
 
-  test("keeps repeated home separators anchored under the home directory", async () => {
+  test("resolves home-relative scan paths using native separators", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-home-"));
     temporaryDirectories.track(root);
-    const project = join(await realpath(root), "project");
-    await mkdir(project);
+    const home = await realpath(root);
+    const names = ["project"];
+    if (process.platform !== "win32") names.push("\\project");
+    for (const name of names) await mkdir(join(home, name));
+    const inputs = names.flatMap((name) =>
+      ["~/", "~//", "~///"].map((prefix) => prefix + name),
+    );
     const script = `
       const { normalizeRepository } = await import(process.argv[1]);
-      for (const value of ["~/project", "~//project", "~///project"]) {
+      for (const value of process.argv.slice(2)) {
         console.log(await normalizeRepository(value));
       }
     `;
@@ -891,6 +896,7 @@ describe("scan target normalization", () => {
         "-e",
         script,
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        ...inputs,
       ],
       {
         encoding: "utf8",
@@ -898,12 +904,9 @@ describe("scan target normalization", () => {
       },
     );
     expect(result.status).toBe(0);
-    const canonicalProject = await realpath(project);
-    expect(result.stdout.trim().split(/\r?\n/)).toEqual([
-      canonicalProject,
-      canonicalProject,
-      canonicalProject,
-    ]);
+    expect(result.stdout.trim().split(/\r?\n/)).toEqual(
+      inputs.map((value) => join(home, value.slice(2))),
+    );
   });
 });
 
