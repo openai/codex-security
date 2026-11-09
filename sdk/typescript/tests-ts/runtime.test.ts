@@ -1528,38 +1528,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
   });
 
-  test.skipIf(process.platform !== "win32")(
-    "extracts plugin ZIPs across Windows temporary directory path limits",
-    async () => {
-      const root = await temporaryDirectory();
-      const archive = join(root, "plugin.zip");
-      const manifest = ".codex-plugin/plugin.json";
-      const data = JSON.stringify({ name: "codex-security", version: "1.2.3" });
-      await writeFile(
-        archive,
-        zipSync({ [`release/${manifest}`]: strToU8(data) }),
-      );
-      const templateLength = join(root, ".codex-security-plugin-XXXXXX").length;
-      using createStaging = spyOn(fsPromises, "mkdtemp");
-      for (const length of [247, 248, 259, 260, 280]) {
-        const padding = Math.max(1, length - templateLength - 1);
-        const parent = join(root, "p".repeat(padding));
-        const destination = join(parent, `extracted-${length}`);
-        const plugin = await extractPluginZip(archive, destination);
-        expect(createStaging).toHaveBeenLastCalledWith(
-          win32.toNamespacedPath(join(parent, ".codex-security-plugin-")),
-        );
-        expect(plugin).toBe(join(destination, "release"));
-        expect(await readFile(join(plugin, manifest), "utf8")).toBe(data);
-        expect(
-          (await readdir(parent)).some((entry) =>
-            entry.startsWith(".codex-security-plugin-"),
-          ),
-        ).toBe(false);
-      }
-    },
-  );
-
   test("decodes flag-clear ZIP filenames with the legacy CP437 encoding", async () => {
     const root = await temporaryDirectory();
     const archive = Buffer.from(
@@ -1757,6 +1725,38 @@ for await (const line of createInterface({ input: process.stdin })) {
       expect(await readdir(root)).toEqual([`${name}.zip`]);
     }
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "extracts plugin ZIPs across Windows temporary directory path limits",
+    async () => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const manifest = ".codex-plugin/plugin.json";
+      const data = JSON.stringify({ name: "codex-security", version: "1.2.3" });
+      await writeFile(
+        archive,
+        zipSync({ [`release/${manifest}`]: strToU8(data) }),
+      );
+      const templateLength = join(root, ".codex-security-plugin-XXXXXX").length;
+      using createStaging = spyOn(fsPromises, "mkdtemp");
+      for (const length of [247, 248, 259, 260, 280]) {
+        const padding = Math.max(1, length - templateLength - 1);
+        const parent = join(root, "p".repeat(padding));
+        const destination = join(parent, `extracted-${length}`);
+        const plugin = await extractPluginZip(archive, destination);
+        expect(createStaging).toHaveBeenLastCalledWith(
+          win32.toNamespacedPath(join(parent, ".codex-security-plugin-")),
+        );
+        expect(plugin).toBe(join(destination, "release"));
+        expect(await readFile(join(plugin, manifest), "utf8")).toBe(data);
+        expect(
+          (await readdir(parent)).some((entry) =>
+            entry.startsWith(".codex-security-plugin-"),
+          ),
+        ).toBe(false);
+      }
+    },
+  );
 
   test("rejects a ZIP entry with an invalid CRC-32", async () => {
     const root = await temporaryDirectory();
