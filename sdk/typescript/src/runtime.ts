@@ -2647,9 +2647,15 @@ async function extractValidatedPluginZip(
   digest?: Hash,
 ): Promise<string> {
   const archivePath = resolve(expandHome(archive));
-  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+  const parent = dirname(destination);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  // Windows mkdtemp otherwise fails at 248 UTF-16 units, including its suffix.
+  const stagingParent =
+    process.platform === "win32"
+      ? win32.toNamespacedPath(await realpath(parent))
+      : parent;
   const staging = await realpath(
-    await mkdtemp(join(dirname(destination), ".codex-security-plugin-")),
+    await mkdtemp(join(stagingParent, ".codex-security-plugin-")),
   );
   try {
     throwIfSignalAborted(signal);
