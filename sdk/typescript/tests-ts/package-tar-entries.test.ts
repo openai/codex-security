@@ -1,9 +1,7 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import {
   archive,
   blockSize,
-  cleanCompressedPayload,
   octal,
   paxRecords,
   tarRecord,
@@ -18,15 +16,11 @@ type PackageTarEntries = {
   readTarArchive: (archiveBytes: Buffer) => {
     entries: PlainTarEntry[];
     files: Map<string, Buffer>;
-    metadata: (Buffer | string)[];
+    metadata: Buffer[];
   };
-  assertStoredSparseContents: (
-    archive: ReturnType<PackageTarEntries["readTarArchive"]>,
-    files: Map<string, Buffer>,
-  ) => void;
 };
 
-const { readTarArchive, assertStoredSparseContents } = (await import(
+const { readTarArchive } = (await import(
   new URL("../scripts/package-tar-entries.mjs", import.meta.url).href
 )) as PackageTarEntries;
 const { assertPublicPackageContents } = (await import(
@@ -40,16 +34,12 @@ const { assertPublicPackageContents } = (await import(
 
 function plainTarEntries(bytes: Buffer): PlainTarEntry[] {
   const archive = readTarArchive(bytes);
-  assertPublicPackageContents(
-    archive.files,
-    Buffer.concat(
-      archive.metadata.filter((part): part is Buffer => Buffer.isBuffer(part)),
-    ),
-  );
+  assertPublicPackageContents(archive.files, Buffer.concat(archive.metadata));
   return archive.entries;
 }
 
 const invalidTarEntryError = "npm tarball contains an invalid tar entry.";
+const sparseEntryError = "npm tarball contains an unsupported sparse entry.";
 const internalReferenceError = "npm tarball contains an internal reference.";
 
 describe("plain npm tar entries", () => {
@@ -72,7 +62,8 @@ describe("plain npm tar entries", () => {
   test.each([0, 0x30])(
     "accepts regular typeflag %i and prefix paths",
     (type) => {
-      const prefix = `package/${"nested/".repeat(13)}deep`;
+      // POSIX prefix bytes can occupy all three old GNU sparse field offsets.
+      const prefix = `package/${"nested/".repeat(20)}deep`;
       const longPath = `${prefix}/README.md`;
       expect(longPath.length).toBeGreaterThan(100);
 
@@ -124,7 +115,10 @@ describe("plain npm tar entries", () => {
   });
 
   test.each([0x78, 0x67])("accepts POSIX pax metadata typeflag %i", (type) => {
-    const attributes = paxRecords({ ctime: "0.123456789" });
+    const attributes = paxRecords({
+      ctime: "0.123456789",
+      "SCHILY.xattr.user.note": "sparse",
+    });
     expect(
       plainTarEntries(
         archive(
@@ -193,124 +187,85 @@ describe("plain npm tar entries", () => {
     ).toThrow(internalReferenceError);
   });
 
-  test.each([false, true])(
-    "scans discarded sparse-map padding, marker=%j",
-    (marker) => {
-      const map = Buffer.alloc(blockSize);
-      map.write("1\n512\n512\n");
-      if (marker) map.write("go/example", 32);
-      const bytes = archive(
-        tarRecord(
-          paxRecords({
-            "GNU.sparse.major": "1",
-            "GNU.sparse.minor": "0",
-            "GNU.sparse.name": "package/README.md",
-            "GNU.sparse.realsize": "1024",
-          }),
-          { name: "package/PaxHeaders/README.md", type: 0x78 },
-        ),
-        tarRecord(Buffer.concat([map, Buffer.alloc(blockSize)]), {
-          name: "package/README.md",
-        }),
-      );
-      if (marker)
-        expect(() => plainTarEntries(bytes)).toThrow(internalReferenceError);
-      else
-        expect(plainTarEntries(bytes)).toEqual([
-          { path: "package/README.md", size: 1024 },
-        ]);
+  test("rejects the old GNU sparse typeflag", () => {
+    const member = tarRecord(Buffer.from("data"), {
+      name: "package/README.md",
+      type: 0x53,
+      magic: "ustar ",
+      version: " \0",
+    });
+    expect(() => readTarArchive(archive(member))).toThrow(sparseEntryError);
+  });
+
+  test.each([
+    [386, "00000000000"],
+    [482, "\x01"],
+    [483, "00000000004"],
+  ] as const)(
+    "rejects a regular GNU member with a sparse field at byte %i",
+    (offset, field) => {
+      const member = tarRecord(Buffer.from("data"), {
+        name: "package/README.md",
+        type: 0x30,
+        magic: "ustar ",
+        version: " \0",
+        prefix: "\0".repeat(offset - 345) + field,
+      });
+      expect(() => readTarArchive(archive(member))).toThrow(sparseEntryError);
     },
   );
 
-  for (const format of [
-    "gnu-01",
-    "gnu-nul",
-    "bsd-comments",
-    "bsd-solaris",
-  ] as const) {
-    test.each([false, true])(
-      `scans all stored sparse bytes for ${format}, marker=%j`,
-      (marker) => {
-        let attributes: Record<string, string>;
-        let contents: Buffer;
-        if (format === "gnu-01") {
-          attributes = {
-            "GNU.sparse.size": "1024",
-            "GNU.sparse.numblocks": "1",
-            "GNU.sparse.map": "512,512",
-          };
-          contents = Buffer.alloc(1024);
-          if (marker) contents.write("go/example", 512);
-        } else if (format === "bsd-solaris") {
-          attributes = { "SUN.holesdata": " 512 1024" };
-          contents = Buffer.alloc(1024);
-          if (marker) contents.write("go/example", 0);
-        } else {
-          attributes = {
-            "GNU.sparse.major": format === "gnu-nul" ? "1\0" : "1",
-            "GNU.sparse.minor": "0",
-            "GNU.sparse.name": "package/README.md",
-            "GNU.sparse.realsize": format === "bsd-comments" ? "1536" : "1024",
-          };
-          contents = Buffer.alloc(format === "bsd-comments" ? 1536 : 1024);
-          if (format === "bsd-comments") {
-            const comments = `${`# ${"x".repeat(60)}\n`.repeat(9)}# ${marker ? "go/example" : "public note"}\n1\n1024\n512\n`;
-            contents.write(comments);
-          } else {
-            contents.write("1\n512\n512\n");
-            if (marker) contents.write("go/example", 32);
-          }
-        }
-        const bytes = archive(
-          tarRecord(paxRecords(attributes), {
-            name: "package/PaxHeaders/README.md",
-            type: 0x78,
-          }),
-          tarRecord(contents, { name: "package/README.md" }),
-        );
-        if (marker)
-          expect(() => plainTarEntries(bytes)).toThrow(internalReferenceError);
-        else
-          expect(plainTarEntries(bytes)).toEqual([
-            { path: "package/README.md", size: contents.length },
-          ]);
-      },
-    );
-  }
+  test.each([0x78, 0x67])(
+    "rejects sparse PAX attributes of type %i",
+    (type) => {
+      for (const [key, value] of [
+        ["GNU.sparse", ""],
+        ["GNU.sparse.map", "0,4"],
+        ["GNU.sparse.major", "1\0"],
+        ["GNU.sparse.name", "package/README.md"],
+        ["SCHILY.realsize", "1024"],
+        ["SUN.holesdata", " 512 1024"],
+      ] as const) {
+        const header = tarRecord(paxRecords({ [key]: value }), {
+          name: "PaxHeaders/readme",
+          type,
+        });
+        expect(() =>
+          readTarArchive(
+            archive(
+              header,
+              tarRecord(Buffer.from("data"), { name: "package/README.md" }),
+            ),
+          ),
+        ).toThrow(sparseEntryError);
+      }
+    },
+  );
 
-  test("checks stored old GNU sparse bodies", () => {
-    const contents = Buffer.alloc(1024);
-    contents.write("go/example");
-    const record = tarRecord(contents, {
+  test("rejects trailing sparse metadata even when the attribute is reset", () => {
+    const attributes = Buffer.concat([
+      paxRecords({ "GNU.sparse.map": "0,4" }),
+      paxRecords({ "GNU.sparse.map": "" }),
+    ]);
+    expect(() =>
+      readTarArchive(
+        archive(
+          tarRecord(Buffer.from("data"), { name: "package/README.md" }),
+          tarRecord(attributes, { name: "PaxHeaders/readme", type: 0x78 }),
+        ),
+      ),
+    ).toThrow(sparseEntryError);
+  });
+
+  test("scans regular file contents under a GNU header", () => {
+    const member = tarRecord(Buffer.from("go/example"), {
       name: "package/README.md",
       magic: "ustar ",
       version: " \0",
     });
-    for (const offset of [386, 410]) {
-      octal(0, 12).copy(record, offset);
-      octal(512, 12).copy(record, offset + 12);
-    }
-    octal(1024, 12).copy(record, 483);
-    expect(() => plainTarEntries(archive(record))).toThrow(
+    expect(() => plainTarEntries(archive(member))).toThrow(
       internalReferenceError,
     );
-  });
-
-  test("checks stored bytes after an empty repeated sparse attribute", () => {
-    const contents = Buffer.alloc(1024);
-    contents.write("go/example", 512);
-    const attributes = Buffer.concat([
-      paxRecords({ "GNU.sparse.map": "512,512" }),
-      paxRecords({ "GNU.sparse.map": "" }),
-    ]);
-    expect(() =>
-      plainTarEntries(
-        archive(
-          tarRecord(attributes, { name: "PaxHeaders/readme", type: 0x78 }),
-          tarRecord(contents, { name: "package/README.md" }),
-        ),
-      ),
-    ).toThrow(internalReferenceError);
   });
 
   test("checks markers across concatenated archive metadata", () => {
@@ -326,132 +281,6 @@ describe("plain npm tar entries", () => {
         ),
       ),
     ).toThrow(internalReferenceError);
-  });
-
-  test.each([false, true])(
-    "keeps public Brotli content semantics across retained sparse extents, split=%j",
-    (split) => {
-      const path = "package/runtime.mjs.br";
-      const size = cleanCompressedPayload.length;
-      const middle = cleanCompressedPayload.indexOf("Go/w") + 2;
-      expect(middle).toBeGreaterThan(2);
-      const bytes = archive(
-        tarRecord(
-          paxRecords({
-            "GNU.sparse.size": String(size),
-            "GNU.sparse.numblocks": split ? "2" : "1",
-            "GNU.sparse.map": split
-              ? `0,${middle},${middle},${size - middle}`
-              : `0,${size}`,
-          }),
-          { name: "PaxHeaders/runtime", type: 0x78 },
-        ),
-        tarRecord(cleanCompressedPayload, { name: path }),
-      );
-      expect(plainTarEntries(bytes)).toEqual([{ path, size }]);
-      expect(() =>
-        assertStoredSparseContents(
-          readTarArchive(bytes),
-          new Map([[path, cleanCompressedPayload]]),
-        ),
-      ).not.toThrow();
-    },
-  );
-
-  test("keeps retained extents between separate sparse metadata segments", () => {
-    const path = "package/logo.png";
-    const logo = readFileSync(
-      new URL(
-        "../../../plugins/codex-security/assets/logo.png",
-        import.meta.url,
-      ),
-    );
-    const firstPadding = Buffer.alloc(512 - 250);
-    firstPadding.write(".openai.", firstPadding.length - 8);
-    const secondPadding = Buffer.alloc(512 - 250);
-    secondPadding.write("org");
-    const bytes = archive(
-      tarRecord(
-        paxRecords({
-          "GNU.sparse.size": String(logo.length),
-          "GNU.sparse.numblocks": "3",
-          "GNU.sparse.map": `0,250,250,250,500,${logo.length - 500}`,
-        }),
-        { name: "PaxHeaders/logo", type: 0x78 },
-      ),
-      tarRecord(
-        Buffer.concat([
-          logo.subarray(0, 250),
-          firstPadding,
-          logo.subarray(250, 500),
-          secondPadding,
-          logo.subarray(500),
-        ]),
-        { name: path },
-      ),
-    );
-    expect(() =>
-      assertStoredSparseContents(
-        readTarArchive(bytes),
-        new Map([[path, logo]]),
-      ),
-    ).not.toThrow();
-  });
-
-  test("checks markers crossing discarded padding and retained sparse bytes", () => {
-    const path = "package/logo.png";
-    const logo = readFileSync(
-      new URL(
-        "../../../plugins/codex-security/assets/logo.png",
-        import.meta.url,
-      ),
-    );
-    expect(logo.subarray(387, 390).toString()).toBe("org");
-    const padding = Buffer.alloc(512 - 387);
-    padding.write(".openai.", padding.length - 8);
-    const bytes = archive(
-      tarRecord(
-        paxRecords({
-          "GNU.sparse.size": String(logo.length),
-          "GNU.sparse.numblocks": "2",
-          "GNU.sparse.map": `0,387,387,${logo.length - 387}`,
-        }),
-        { name: "PaxHeaders/logo", type: 0x78 },
-      ),
-      tarRecord(
-        Buffer.concat([logo.subarray(0, 387), padding, logo.subarray(387)]),
-        { name: path },
-      ),
-    );
-    expect(() =>
-      assertStoredSparseContents(
-        readTarArchive(bytes),
-        new Map([[path, logo]]),
-      ),
-    ).toThrow(internalReferenceError);
-  });
-
-  test("uses the native GNU sparse name while retaining stored content", () => {
-    const path = "package/README.md";
-    const stored = Buffer.alloc(1024);
-    stored.write("1\n512\n512\n");
-    stored.fill(0x78, 512);
-    expect(
-      plainTarEntries(
-        archive(
-          tarRecord(
-            paxRecords({
-              "GNU.sparse.major": "1",
-              "GNU.sparse.minor": "0",
-              "GNU.sparse.name": path,
-              "GNU.sparse.realsize": "1024",
-            }),
-            { name: "PaxHeaders/readme", type: 0x78 },
-          ),
-          tarRecord(stored, { name: "package/GNUSparseFile.1/readme" }),
-        ),
-      ),
-    ).toEqual([{ path, size: stored.byteLength }]);
   });
 
   test("accepts an empty size field for an empty file", () => {

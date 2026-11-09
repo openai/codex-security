@@ -1,4 +1,4 @@
-export function pluginContractFiles(contract) {
+export function pluginContractFiles(contract, validatePath) {
   const publicManifest = ".codex-plugin/plugin.json";
   const { externalOwnedExact, shippedExact } = contract;
   if (
@@ -15,8 +15,13 @@ export function pluginContractFiles(contract) {
     );
   }
 
-  return [
+  const files = [
     publicManifest,
     ...shippedExact.filter((path) => !path.startsWith("sdk/")),
   ];
+  if (validatePath) files.forEach(validatePath);
+  if (new Set(files).size !== files.length) {
+    throw new Error("Plugin projection contract contains duplicate paths.");
+  }
+  return files;
 }

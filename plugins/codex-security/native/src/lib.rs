@@ -7,3 +7,5 @@ mod scan_read_windows;
 mod unix;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod windows_output;
