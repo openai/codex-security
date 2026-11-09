@@ -451,7 +451,7 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(result)).not.toContain("private unrelated scan");
   });
 
-  test("reads sessions that Codex compressed", async () => {
+  test("reads compressed sessions with metadata split across frames", async () => {
     const home = await temporaryHome();
     await writeSession(
       home,
@@ -470,7 +470,14 @@ describe("saved scan logs", () => {
     const directory = join(home, "sessions", "2026", "08", "11");
     for (const threadId of ["parent", "worker"]) {
       const path = join(directory, `rollout-${threadId}.jsonl`);
-      await writeFile(`${path}.zst`, zstdCompressSync(await readFile(path)));
+      const contents = await readFile(path);
+      await writeFile(
+        `${path}.zst`,
+        Buffer.concat([
+          zstdCompressSync(contents.subarray(0, 1)),
+          zstdCompressSync(contents.subarray(1)),
+        ]),
+      );
       unlinkSync(path);
     }
 
@@ -495,6 +502,43 @@ describe("saved scan logs", () => {
         event: commandEvent("worker work", "worker-call"),
       },
     ]);
+  });
+
+  test("treats a lone carriage return as a compressed metadata line boundary", async () => {
+    const home = await temporaryHome();
+    const directory = join(home, "sessions");
+    await mkdir(directory);
+    const contents =
+      '{"type":"session_meta",\r"payload":{"id":"wrong"}}\n' +
+      '{"type":"session_meta","payload":{"id":"actual"}}\n';
+    await writeFile(
+      join(directory, "rollout.jsonl.zst"),
+      zstdCompressSync(Buffer.from(contents)),
+    );
+
+    expect(await findScanSession(home, "wrong")).toBeNull();
+    expect(await findScanSession(home, "actual")).toMatchObject({
+      threadId: "actual",
+    });
+  });
+
+  test("rejects a truncated final frame in a selected rollout", async () => {
+    const home = await temporaryHome();
+    const directory = join(home, "sessions");
+    await mkdir(directory);
+    const header = '{"type":"session_meta","payload":{"id":"parent"}}\n';
+    const event = JSON.stringify(commandEvent("parent work", "parent-call"));
+    const tail = zstdCompressSync(Buffer.from(event + "\n"));
+    await writeFile(
+      join(directory, "rollout-parent.jsonl.zst"),
+      Buffer.concat([
+        zstdCompressSync(Buffer.from(header)),
+        tail.subarray(0, tail.length - 1),
+      ]),
+    );
+    await expect(
+      readScanLogs({ scanId: "scan-1", threadId: "parent", codexHome: home }),
+    ).rejects.toThrow();
   });
 
   test("excludes inherited parent history from worker logs", async () => {

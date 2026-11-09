@@ -32,6 +32,7 @@ import {
   preflightProviderDefinitions,
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
+import { DEEP_SCAN_SETTINGS } from "../deep-scan-settings.js";
 import { executablePathForSpawn } from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
 import { workerTokenUsage } from "./usage-receipt.js";
@@ -186,16 +187,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await writePrivateFile(
           deepConfigFile,
           stringifyToml({
-            deep_scan: {
-              workers: config.workers,
-              subagents: config.subagents,
-              stop_after_no_new: config.stopAfterNoNew,
-              stop_after_consecutive_errors: config.stopAfterConsecutiveErrors,
-              max_discovery_runs: config.maxDiscoveryRuns,
-              ...(config.maxTimeHours === undefined
-                ? {}
-                : { max_time_hours: config.maxTimeHours }),
-            },
+            deep_scan: Object.fromEntries(
+              DEEP_SCAN_SETTINGS.filter(
+                ([name]) => config[name] !== undefined,
+              ).map(([name, key]) => [key, config[name]]),
+            ),
           }),
         );
         for (const name of Object.keys(childEnv)) {
