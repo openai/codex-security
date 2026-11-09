@@ -8,6 +8,7 @@ import {
   workbenchCommand,
 } from "./support/workbench-command.js";
 import { runNodePython } from "./support/python-probe.js";
+import { pythonExecutable } from "./support/python.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
@@ -70,8 +71,7 @@ async function startDraftScan(
   recipeFromStdin = false,
 ) {
   const root = await temporaryDirectory();
-  const python =
-    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
 
   const target = join(

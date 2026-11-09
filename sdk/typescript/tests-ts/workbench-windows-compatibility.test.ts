@@ -1,7 +1,9 @@
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { PLUGIN_PYTHON_PROBE } from "../src/plugin-python-probe.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { runPython } from "./support/python-probe.js";
+import * as pythonProbe from "./support/python-probe.js";
+import { pythonExecutable } from "./support/python.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const directories = createTemporaryDirectories(true);
@@ -9,10 +11,10 @@ const directories = createTemporaryDirectories(true);
 afterEach(directories.cleanup);
 
 function probe(program: string, ...args: string[]): void {
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   if (python === null)
     throw new Error("Python is required for workbench tests.");
-  const result = runPython(python, [
+  const result = pythonProbe.runPython(python, [
     "-c",
     program,
     join(PLUGIN_ROOT, "scripts"),
@@ -20,6 +22,66 @@ function probe(program: string, ...args: string[]): void {
   ]);
   expect(result.exitCode, result.stderr.toString()).toBe(0);
 }
+
+test("uses a configured Python executable and discovers one for an empty override", () => {
+  const previous = process.env["PYTHON"];
+  try {
+    const discovered = pythonExecutable(false);
+    process.env["PYTHON"] = "";
+    expect(pythonExecutable()).toBe(discovered);
+    process.env["PYTHON"] = "  synthetic python  ";
+    expect(pythonExecutable()).toBe("synthetic python");
+    expect(pythonExecutable(false)).toBe(discovered);
+  } finally {
+    if (previous === undefined) delete process.env["PYTHON"];
+    else process.env["PYTHON"] = previous;
+  }
+});
+
+test.skipIf(process.platform !== "win32")(
+  "falls back to the Python launcher after a timeout and an unusable Windows alias",
+  () => {
+    const python = pythonExecutable();
+    expect(python).not.toBeNull();
+    using _which = spyOn(Bun, "which").mockImplementation((name) =>
+      name === "py" ? python : process.execPath,
+    );
+    using probes = spyOn(pythonProbe, "runNodePython").mockReturnValueOnce({
+      pid: 0,
+      output: [],
+      stdout: "",
+      stderr: "",
+      signal: "SIGTERM",
+      status: null,
+      error: Object.assign(new Error("Timed out"), { code: "ETIMEDOUT" }),
+    });
+    expect(pythonExecutable(false)).toBe(python);
+    expect(probes.mock.calls.map((call) => call[2]?.timeout)).toEqual([
+      30_000, 30_000, 30_000,
+    ]);
+  },
+);
+
+test("the Python probe rejects unsupported versions and checks tomli on Python 3.10", () => {
+  const python = pythonExecutable();
+  expect(python).not.toBeNull();
+  for (const [minor, tomli, status] of [
+    [9, true, 1],
+    [10, false, 1],
+    [10, true, 0],
+    [11, false, 0],
+  ] as const) {
+    const program = [
+      "import importlib.util, sys",
+      `sys.version_info = (3, ${minor})`,
+      `importlib.util.find_spec = lambda name: object() if name == 'tomli' and ${tomli ? "True" : "False"} else None`,
+      PLUGIN_PYTHON_PROBE,
+    ].join("\n");
+    expect(pythonProbe.runPython(python!, ["-c", program]).exitCode).toBe(
+      status,
+    );
+  }
+});
 
 test("normalizes absolute Windows scopes without accepting escapes", () => {
   probe(
