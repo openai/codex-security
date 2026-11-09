@@ -1827,6 +1827,7 @@ describe("CLI", () => {
           '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
           '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
           '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"info","arguments":{}}}',
+          '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"scans_list","arguments":{}}}',
           "",
         ].join("\n"),
         timeout: 30_000,
@@ -1853,6 +1854,12 @@ describe("CLI", () => {
         },
       },
     });
+    expect(responses.find((response) => response.id === 4).error).toMatchObject(
+      {
+        code: -32602,
+        message: "Tool scans_list not found",
+      },
+    );
     const metadata = responses.find((response) => response.id === 3).result;
     expect(metadata.structuredContent).toMatchObject({
       sdkVersion: VERSION,
