@@ -1,4 +1,5 @@
 import { createReadStream } from "node:fs";
+import zlib from "node:zlib";
 import { createInterface } from "node:readline";
 import { pipeline, type Transform } from "node:stream";
 import { join } from "node:path";
@@ -18,6 +19,32 @@ export async function* sessionLines(path: string): AsyncGenerator<string> {
     yield* lines;
   } finally {
     lines.close();
+    stream.destroy();
+  }
+}
+
+/** Native zstd can stop at the first frame. Only a newline completes a header. */
+export async function firstNativeSessionLine(
+  path: string,
+): Promise<string | undefined> {
+  if (!path.endsWith(".zst") || typeof zlib.createZstdDecompress !== "function")
+    return;
+  const stream = pipeline(
+    createReadStream(path),
+    zlib.createZstdDecompress(),
+    () => {},
+  );
+  try {
+    stream.setEncoding("utf8");
+    let line = "";
+    for await (const chunk of stream as AsyncIterable<string>) {
+      const newline = chunk.search(/[\r\n]/u);
+      if (newline >= 0) return line + chunk.slice(0, newline);
+      line += chunk;
+    }
+  } catch {
+    // The complete portable reader handles unsupported or damaged frames.
+  } finally {
     stream.destroy();
   }
 }
