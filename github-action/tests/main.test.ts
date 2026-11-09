@@ -10,13 +10,14 @@ import * as core from '@actions/core';
 import { DefaultArtifactClient } from '@actions/artifact';
 import { BlobClient } from '@azure/storage-blob';
 import { runAction } from '../src/main.ts';
-import { INPUT_NAMES } from '../src/inputs.ts';
+import { parse } from 'yaml';
 import { gitEnvironment } from '../src/targets.ts';
 import { runtimeEnvironment, type Runtime } from '../src/runtime.ts';
 import type { ProcessResult } from '../src/process.ts';
 import { copyCompletedScan } from './fixtures.ts';
 
 type Scenario = 'schedule' | 'pr' | 'policy-pr' | 'empty-pr';
+const inputNames = Object.keys(parse(await readFile(new URL('../../action.yml', import.meta.url), 'utf8')).inputs);
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
 
 function assertAttribution(args: readonly string[], provider: string): void {
@@ -69,7 +70,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
     process.exitCode = previousExitCode;
     await rm(root, { recursive: true, force: true });
   });
-  for (const name of INPUT_NAMES) delete process.env[inputKey(name)];
+  for (const name of inputNames) delete process.env[inputKey(name)];
   const eventPath = join(root, 'event.json');
   const outputPath = join(root, 'outputs');
   const statePath = join(root, 'state');
