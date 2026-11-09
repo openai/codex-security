@@ -89,6 +89,33 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
   }),
 });
 
+/** @internal Authentication settings shared by login and model commands. */
+export const CODEX_AUTH_CONFIG_KEYS = [
+  "cli_auth_credentials_store",
+  "forced_login_method",
+  "forced_chatgpt_workspace_id",
+] as const;
+
+/**
+ * @internal Read the sign-in settings a Codex home's config.toml sets. A file
+ * that cannot be read or parsed sets none; commands that use it report why.
+ */
+export async function readCodexAuthConfig(home: string): Promise<JsonObject> {
+  let config: JsonObject;
+  try {
+    config = parse(
+      await readFile(join(home, "config.toml"), "utf8"),
+    ) as JsonObject;
+  } catch {
+    return {};
+  }
+  return Object.fromEntries(
+    CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
+      config[key] === undefined ? [] : [[key, config[key]]],
+    ),
+  );
+}
+
 export function scanModelConfiguration(
   config: Readonly<JsonObject>,
 ): ScanModelConfiguration {
@@ -455,7 +482,13 @@ export async function mergedCodexConfig(
       }
     }
   }
-  const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
+  const defaults: JsonObject = {
+    ...structuredClone(DEFAULT_CODEX_CONFIG),
+    // The user's Codex config chooses sign-in storage unless an override does.
+    ...(profileHome === undefined
+      ? {}
+      : await readCodexAuthConfig(profileHome)),
+  };
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
