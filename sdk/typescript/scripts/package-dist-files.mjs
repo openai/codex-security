@@ -129,6 +129,7 @@ const distModules = [
   "record",
   "remediation",
   "request-metadata",
+  "retry-windows-rename",
   "runtime",
   "scan-activity",
   "scan-comparison",

@@ -38,6 +38,23 @@ async function writeFixture(
   await writeFile(destination, contents);
 }
 
+async function copyBuildEntrypoint(root: string): Promise<void> {
+  for (const path of [
+    "package.json",
+    "scripts/build-plugin.mjs",
+    "scripts/check-plugin-source.mjs",
+    "scripts/is-main.mjs",
+    "scripts/plugin-contract.mjs",
+    "src/retry-windows-rename.js",
+  ]) {
+    await writeFixture(
+      root,
+      path,
+      await readFile(new URL(`../${path}`, import.meta.url), "utf8"),
+    );
+  }
+}
+
 async function files(root: string, prefix = ""): Promise<string[]> {
   const entries = await readdir(join(root, prefix), { withFileTypes: true });
   const paths = await Promise.all(
@@ -435,16 +452,7 @@ describe("bundled plugin build", () => {
       const packageRoot = join(root, "sdk", "typescript");
       const source = join(root, "plugins", "codex-security");
       const destination = join(packageRoot, "_bundled_plugin");
-      for (const script of ["build-plugin", "plugin-contract", "is-main"]) {
-        await writeFixture(
-          packageRoot,
-          `scripts/${script}.mjs`,
-          await readFile(
-            new URL(`../scripts/${script}.mjs`, import.meta.url),
-            "utf8",
-          ),
-        );
-      }
+      await copyBuildEntrypoint(packageRoot);
       await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
       await writeFixture(
         source,
@@ -491,26 +499,7 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
     const packageRoot = join(root, "sdk", "typescript");
     const source = join(root, "plugins", "codex-security");
 
-    await writeFixture(
-      packageRoot,
-      "package.json",
-      await readFile(new URL("../package.json", import.meta.url), "utf8"),
-    );
-    for (const script of [
-      "build-plugin",
-      "check-plugin-source",
-      "is-main",
-      "plugin-contract",
-    ]) {
-      await writeFixture(
-        packageRoot,
-        `scripts/${script}.mjs`,
-        await readFile(
-          new URL(`../scripts/${script}.mjs`, import.meta.url),
-          "utf8",
-        ),
-      );
-    }
+    await copyBuildEntrypoint(packageRoot);
     await writeFixture(
       source,
       "plugin-files.json",

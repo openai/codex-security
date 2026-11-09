@@ -1,4 +1,5 @@
 import { executablePathForSpawn } from "./executable-path.js";
+import { retryWindowsRename } from "./retry-windows-rename.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
@@ -2642,6 +2643,7 @@ export async function extractPluginZip(
   const staging = await realpath(
     await mkdtemp(join(dirname(destination), ".codex-security-plugin-")),
   );
+  let publishingOnWindows = false;
   try {
     throwIfSignalAborted(signal);
     let expandedSize = 0;
@@ -2718,11 +2720,36 @@ export async function extractPluginZip(
     const pluginRoot = await discoverPluginRoot(staging);
     throwIfSignalAborted(signal);
     const relativeRoot = relative(staging, pluginRoot);
-    await rename(staging, destination);
+    if (process.platform === "win32") {
+      publishingOnWindows = true;
+      await retryWindowsRename(
+        async () => {
+          throwIfSignalAborted(signal);
+          if (await lstat(destination).catch(nullIfMissingFileError))
+            throw new Error(`Destination already exists: ${destination}`);
+          await rename(staging, destination);
+        },
+        undefined,
+        signal,
+      );
+      publishingOnWindows = false;
+    } else {
+      await rename(staging, destination);
+    }
     return await validatePluginRoot(join(destination, relativeRoot));
   } catch (error) {
-    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    let cleanupDiagnostic = "";
+    await rm(staging, { recursive: true, force: true }).catch(
+      (cleanupError) => {
+        cleanupDiagnostic = `\nCould not remove staging directory ${staging}: ${errorMessage(cleanupError)}`;
+      },
+    );
     throwIfSignalAborted(signal);
+    if (publishingOnWindows)
+      throw new PluginBootstrapError(
+        `Could not publish extracted plugin ZIP: ${errorMessage(error)}${cleanupDiagnostic}`,
+        { cause: error },
+      );
     if (error instanceof PluginBootstrapError) throw error;
     throw new PluginBootstrapError(`Invalid plugin ZIP: ${archivePath}`, {
       cause: error,
