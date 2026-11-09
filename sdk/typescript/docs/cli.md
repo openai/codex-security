@@ -1125,6 +1125,12 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
+If a scan reports that its state directory overlaps a protected root, choose a
+private directory in a separate tree, such as a sibling of the protected root.
+Set `CODEX_SECURITY_STATE_DIR` for local scans or `stateDirectory` on a hosted
+scan request. SDK callers handling `OutputInsideProtectedRootError.pathKind`
+can match `"state"` for this case.
+
 If credential-home preparation fails, the error includes the underlying
 filesystem diagnostic. For permission or read-only filesystem errors, check
 the reported path or set `CODEX_SECURITY_STATE_DIR` to a private, writable
@@ -2093,6 +2099,12 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Keep it private,
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
+
+Saved scan logs retain the finishing turn, including its final response, and
+exclude later turns once the scan records a completion boundary. Older scans
+retain the full history of their attributed sessions and keep their existing
+worker-selection boundaries. This also applies to logs attached with
+`feedback --include-logs`.
 
 Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
 work on all supported Node.js versions, including logs, feedback attachments,
