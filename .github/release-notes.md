@@ -192,6 +192,7 @@
 - escape component names in terminal output ([#2424](https://github.com/openai/codex-security/pull/2424))
 - hide session log hints for mock scans ([#2488](https://github.com/openai/codex-security/pull/2488))
 - speed up compressed scan session discovery ([#2489](https://github.com/openai/codex-security/pull/2489))
+- sign macOS addons for packaged review items ([#2331](https://github.com/openai/codex-security/pull/2331))
 
 </details>
 
