@@ -1696,6 +1696,34 @@ export async function runCodexSkillCommand(
   }
 }
 
+const NATIVE_LOGIN_COMMAND = "`codex login";
+
+/**
+ * Native sign-in hints name Codex's own CLI, which signs in to a different home.
+ * Point them at this command while streaming everything else unchanged.
+ */
+function nativeSignInHintRewriter() {
+  let pending = "";
+  const rewrite = (text: string) =>
+    text.replaceAll(NATIVE_LOGIN_COMMAND, "`codex-security login");
+  return {
+    write(chunk: string): string {
+      const text = pending + chunk;
+      // Hold back only a suffix that could start the native command.
+      let held = Math.min(text.length, NATIVE_LOGIN_COMMAND.length - 1);
+      while (held > 0 && !NATIVE_LOGIN_COMMAND.startsWith(text.slice(-held)))
+        held -= 1;
+      pending = text.slice(text.length - held);
+      return rewrite(text.slice(0, text.length - held));
+    },
+    end(): string {
+      const rest = pending;
+      pending = "";
+      return rest;
+    },
+  };
+}
+
 async function runCodexSkillProcess(
   args: readonly string[],
   output: SkillCommandOutput | undefined,
@@ -1898,9 +1926,7 @@ async function runCodexSkillProcess(
         cwd: output?.appServer?.directory ?? parse(process.execPath).root,
         stdio:
           output === undefined
-            ? input === undefined
-              ? "inherit"
-              : ["pipe", "inherit", "inherit"]
+            ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
             : [
                 output.appServer !== undefined || input !== undefined
                   ? "pipe"
@@ -1958,12 +1984,23 @@ async function runCodexSkillProcess(
     process.on("SIGTERM", onTerminate);
     try {
       let diagnostic = "";
+      const signInHints =
+        output === undefined ? nativeSignInHintRewriter() : undefined;
       invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
-        diagnostic += chunk;
+        if (signInHints) process.stderr.write(signInHints.write(chunk));
+        else diagnostic += chunk;
+      });
+      // Sign-in commands forward native stderr; finish it before returning.
+      const forwarded = new Promise<void>((resolve) => {
+        if (!signInHints || invocation.stderr === null) return resolve();
+        invocation.stderr.once("close", () => {
+          process.stderr.write(signInHints.end());
+          resolve();
+        });
       });
       const captured =
         output === undefined || invocation.stdout === null
-          ? Promise.resolve(undefined)
+          ? forwarded.then(() => undefined)
           : Promise.race([
               readSkillCommandOutput(
                 invocation.stdout,

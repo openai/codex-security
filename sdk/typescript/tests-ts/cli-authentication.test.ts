@@ -122,6 +122,40 @@ describe("CLI authentication", () => {
     }
   });
 
+  test("points native sign-in hints at this CLI without buffering other output", async () => {
+    const source = [
+      "const write = (text) => new Promise((done) => process.stderr.write(text, done));",
+      "(async () => {",
+      '  await write("Open the URL.\\nOn a remote machine? Use `codex lo");',
+      "  await new Promise((done) => setTimeout(done, 20));",
+      '  await write("gin --device-auth` instead.\\nRun `codex logout` or `codex login`");',
+      "  process.exit(3);",
+      "})();",
+    ].join("\n");
+    const write = process.stderr.write;
+    let stderr = "";
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderr += chunk.toString();
+      return true;
+    }) as typeof process.stderr.write;
+    let status: number;
+    try {
+      status = await runCodexSkillCommand(
+        ["-e", source],
+        undefined,
+        { command: process.execPath },
+        { PATH: process.env["PATH"] },
+      );
+    } finally {
+      process.stderr.write = write;
+    }
+    expect(status).toBe(3);
+    expect(stderr).toBe(
+      "Open the URL.\nOn a remote machine? Use `codex-security login --device-auth` instead.\n" +
+        "Run `codex logout` or `codex-security login`",
+    );
+  });
+
   test("uses the same stable credential home for login, status, and logout", async () => {
     const expectedHome = join(stateDirectory, "codex-home");
 
