@@ -1082,6 +1082,7 @@ def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     assert row["path"] == "root.py"
 
 
+@pytest.mark.cross_platform
 def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
@@ -1101,7 +1102,9 @@ def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> 
         }
     )
     manifest_path = scan_dir / "scan-manifest.json"
-    manifest_path.write_text(json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n")
+    manifest_path.write_bytes(
+        (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
     run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     sealed_manifest = manifest_path.read_bytes()
 
