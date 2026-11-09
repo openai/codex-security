@@ -351,6 +351,10 @@ import {
 import { ScanDashboard } from "./scan-dashboard.js";
 import { fitCell, graphemes } from "./terminal-columns.js";
 import {
+  TerminalErrorListener,
+  type TerminalStream,
+} from "./terminal-stream.js";
+import {
   ACCOUNT_LIMITS_UNAVAILABLE,
   formatAccountLimits,
   formatUsageFreshness,
@@ -444,13 +448,12 @@ const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
 const DUPLICATE_SIGNAL_WINDOW_MS = 500;
 
-type Writable = Pick<NodeJS.WriteStream, "write"> & {
-  on?(event: "error", listener: (error: Error) => void): unknown;
-  off?(event: "error", listener: (error: Error) => void): unknown;
+interface Writable extends TerminalStream {
+  write: NodeJS.WriteStream["write"];
   readonly isTTY?: boolean;
   readonly fd?: number;
   readonly columns?: number;
-};
+}
 type SignalName = "SIGINT" | "SIGTERM";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
@@ -10102,25 +10105,16 @@ async function withTerminalErrorsHandled<T>(
   errorOutput: Writable,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const observeTerminalErrors =
+  const listener =
     typeof errorOutput.on === "function" &&
-    typeof errorOutput.off === "function";
-  const ignoreTerminalError = (): void => {};
-  if (observeTerminalErrors) {
-    errorOutput.on?.("error", ignoreTerminalError);
-  }
+    typeof errorOutput.off === "function"
+      ? new TerminalErrorListener(errorOutput)
+      : undefined;
+  listener?.start();
   try {
     return await operation();
   } finally {
-    if (observeTerminalErrors) {
-      try {
-        errorOutput.write("", () => {
-          queueMicrotask(() => errorOutput.off?.("error", ignoreTerminalError));
-        });
-      } catch {
-        errorOutput.off?.("error", ignoreTerminalError);
-      }
-    }
+    listener?.stop();
   }
 }
 
@@ -12187,9 +12181,7 @@ export class Progress {
   #timerMessage: string | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
-  #observingStreamErrors = false;
-  #streamErrorGeneration = 0;
-  readonly #onStreamError = (): void => {};
+  readonly #terminalErrors: TerminalErrorListener;
 
   public constructor(
     stream: Writable = process.stderr,
@@ -12200,6 +12192,7 @@ export class Progress {
     interactive = true,
   ) {
     this.#stream = stream;
+    this.#terminalErrors = new TerminalErrorListener(stream);
     this.#dependencies = dependencies;
     this.#startedAt = dependencies.now();
     this.#interactive = interactive;
@@ -12217,12 +12210,12 @@ export class Progress {
   }
 
   public stage(message: string): void {
-    this.#observeStreamErrors();
+    this.#terminalErrors.start();
     this.#stream.write(`${this.#line(message)}\n`);
   }
 
   public startTimer(message: string): void {
-    this.#observeStreamErrors();
+    this.#terminalErrors.start();
     if (!this.interactive) {
       this.stage(message);
       return;
@@ -12254,25 +12247,7 @@ export class Progress {
         this.#cursorHidden = false;
       }
     } finally {
-      if (this.#observingStreamErrors) {
-        const generation = this.#streamErrorGeneration;
-        try {
-          this.#stream.write("", () => {
-            queueMicrotask(() => {
-              if (
-                generation === this.#streamErrorGeneration &&
-                this.#observingStreamErrors
-              ) {
-                this.#stream.off?.("error", this.#onStreamError);
-                this.#observingStreamErrors = false;
-              }
-            });
-          });
-        } catch {
-          this.#stream.off?.("error", this.#onStreamError);
-          this.#observingStreamErrors = false;
-        }
-      }
+      this.#terminalErrors.stop();
     }
   }
 
@@ -12293,14 +12268,6 @@ export class Progress {
   #line(message: string): string {
     const elapsedSeconds = this.elapsedSeconds;
     return `[${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}] ${message}`;
-  }
-
-  #observeStreamErrors(): void {
-    this.#streamErrorGeneration += 1;
-    if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
-      this.#stream.on("error", this.#onStreamError);
-      this.#observingStreamErrors = true;
-    }
   }
 
   #renderTimer(message: string): void {
