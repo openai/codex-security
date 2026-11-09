@@ -3327,7 +3327,8 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
       // chmod; fall back to the process temp root when it is already sticky.
-      let stickyParent = join(root, "shared");
+      const shared = join(root, "shared");
+      let stickyParent = shared;
       await mkdir(stickyParent, { mode: 0o1777 });
       await chmod(stickyParent, 0o1777);
       if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
@@ -3340,7 +3341,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.track(stateDirectory);
+      if (stickyParent !== shared) temporaryDirectories.track(stateDirectory);
       await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -6362,7 +6363,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.track(output);
+      if (stickyParent !== shared) temporaryDirectories.track(output);
 
       await expect(
         requireSecureOutputAncestry(output),
