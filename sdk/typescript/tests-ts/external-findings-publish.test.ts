@@ -4545,6 +4545,29 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
   expect(f.posts[1]).toBe(f.posts[0]!);
 });
 
+test("explains a Cloud account or deployment without the import catalog", async () => {
+  const f = await fixture(continuumDetail(), continuumRepository);
+  const missing = (status: number) => ({
+    ...f.deps,
+    fetch: async () =>
+      Response.json({ error: { message: "Not found" } }, { status }),
+  });
+  const selected = {
+    ...options,
+    provider: "continuum" as const,
+    sourceKey: "continuum/example/project",
+    sourceRepositoryUrl: continuumRepository,
+  };
+  await expect(
+    prepareExternalPublication(f.file, selected, missing(404)),
+  ).rejects.toThrow(
+    "Cloud import failed (HTTP 404). Not found. Cloud import is not available for this account or deployment.",
+  );
+  await expect(
+    prepareExternalPublication(f.file, selected, missing(500)),
+  ).rejects.toThrow(/^Cloud import failed \(HTTP 500\)\. Not found$/u);
+});
+
 test("Continuum Cloud publication checks repository and provider and replays an interrupted request", async () => {
   const detail = continuumDetail();
   const f = await fixture(detail, continuumRepository);
