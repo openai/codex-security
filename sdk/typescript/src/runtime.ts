@@ -1,5 +1,10 @@
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
+import {
+  PLUGIN_PYTHON_PROBE,
+  PLUGIN_PYTHON_PROBE_TIMEOUT_MS,
+  PLUGIN_PYTHON_READY,
+} from "./plugin-python-probe.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
@@ -3813,23 +3818,16 @@ async function usablePython(
   try {
     const { stdout } = await execFile(
       command.executable,
-      [
-        "-I",
-        "-c",
-        "import importlib.util,sys\nif sys.version_info < (3, 10): raise SystemExit(1)\nif sys.version_info < (3, 11) and importlib.util.find_spec('tomli') is None: raise SystemExit(1)\nprint('codex-security-python-ok')",
-      ],
+      ["-I", "-c", PLUGIN_PYTHON_PROBE],
       {
         env: command.environment,
         encoding: "utf8",
-        // Cold Python startup can exceed five seconds on busy Windows hosts.
-        timeout: 30_000,
+        timeout: PLUGIN_PYTHON_PROBE_TIMEOUT_MS,
         windowsHide: true,
         signal,
       },
     );
-    return stdout.trim() === "codex-security-python-ok"
-      ? command.executable
-      : null;
+    return stdout.trim() === PLUGIN_PYTHON_READY ? command.executable : null;
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;
