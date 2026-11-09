@@ -17319,10 +17319,13 @@ if __name__ == "__main__":
         `#!${interpreter}\nprintf ran > "${marker}"\n`,
         { mode: 0o700 },
       );
+      const tools = join(root, "tools");
+      await mkdir(tools);
+      await symlink(Bun.which("git")!, join(tools, "git"));
       const environment = {
         OPENAI_API_KEY: "ambient-key",
         CODEX_CLI_PATH: executable,
-        PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+        PATH: tools,
       };
       const createCodex = mock(completedCodex(root));
       const client = TestClient.withDependencies({
@@ -17334,20 +17337,19 @@ if __name__ == "__main__":
         createCodex,
       });
       try {
-        const attempts = await withProtectedExecutableRoots([repository], () =>
-          Promise.allSettled([
-            runtime.probeCodexSandbox({ command: executable }, environment),
-            client.run(repository),
-          ]),
-        );
-        for (const attempt of attempts) {
-          expect(attempt).toMatchObject({
-            status: "rejected",
-            reason: {
-              message: expect.stringContaining(`trusted PATH: ${executable}`),
-            },
-          });
-        }
+        await withProtectedExecutableRoots([repository], async () => {
+          const refused = `trusted PATH: ${executable}`;
+          const timeout = spyOn(AbortSignal, "timeout");
+          try {
+            await expect(
+              runtime.probeCodexSandbox({ command: executable }, environment),
+            ).rejects.toThrow(refused);
+            expect(timeout).not.toHaveBeenCalled();
+          } finally {
+            timeout.mockRestore();
+          }
+          await expect(client.run(repository)).rejects.toThrow(refused);
+        });
         expect(existsSync(marker)).toBe(false);
         expect(createCodex).not.toHaveBeenCalled();
         await runtime.probeCodexSandbox({ command: executable }, environment);

@@ -3444,7 +3444,7 @@ export async function runCodexCommand(
   args: readonly string[] | ((executable: string) => readonly string[]),
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
-  signal?: AbortSignal,
+  launchSignal?: AbortSignal | (() => AbortSignal),
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
@@ -3452,6 +3452,8 @@ export async function runCodexCommand(
   const selected = campaign && (await campaign);
   const executable = selected?.executable ?? command.command;
   const commandArgs = typeof args === "function" ? args(executable) : args;
+  const signal =
+    typeof launchSignal === "function" ? launchSignal() : launchSignal;
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
@@ -3545,7 +3547,8 @@ export async function probeCodexSandbox(
     executable,
     "--version",
   ];
-  const timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
+  signal?.throwIfAborted();
+  let timeout: AbortSignal | undefined;
   let detail: string;
   try {
     const result = await runCodexCommand(
@@ -3553,7 +3556,13 @@ export async function probeCodexSandbox(
       args,
       environment,
       undefined,
-      signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+      () => {
+        // Campaign tool selection happens before the sandbox process starts.
+        timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
+        return signal === undefined
+          ? timeout
+          : AbortSignal.any([signal, timeout]);
+      },
     );
     if (result.success) return;
     detail =
@@ -3562,7 +3571,7 @@ export async function probeCodexSandbox(
       `Codex exited with status ${result.exitCode}.`;
   } catch (error) {
     signal?.throwIfAborted();
-    if (timeout.aborted)
+    if (timeout?.aborted)
       throw new SandboxUnavailableError(
         `Codex sandbox probe timed out after ${SANDBOX_PROBE_TIMEOUT_MILLISECONDS / 1000} seconds.`,
         { cause: error },
