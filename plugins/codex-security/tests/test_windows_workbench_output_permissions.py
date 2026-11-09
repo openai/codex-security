@@ -39,7 +39,7 @@ def make_junction(path: Path, target: Path) -> None:
 
 
 @pytest.fixture
-def deep_registration(tmp_path: Path):
+def deep_registration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / "source.py").write_text("# synthetic source\n")
@@ -48,23 +48,29 @@ def deep_registration(tmp_path: Path):
     state = tmp_path / "state"
     recipe = {
         "config": {},
-        "mode": "deep",
         "repository": str(repository),
         "target": {"kind": "repository", "paths": []},
     }
 
-    def register(**options):
-        return run_workbench(
-            state,
+    def register(mode="deep", *, archive=False, connection=None, **options):
+        arguments = [
             "register-cli-scan",
             "--repository",
             str(repository),
             "--scan-dir",
             str(output),
             "--recipe-json",
-            json.dumps(recipe),
-            **options,
-        )
+            json.dumps({**recipe, "mode": mode}),
+        ]
+        if archive:
+            arguments.append("--archive-existing")
+        if connection is None:
+            return run_workbench(state, *arguments, **options)
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "argv", ["workbench", *arguments])
+            return workbench_db.register_cli_scan(
+                connection, workbench_db.parse_args("test workbench")
+            )
 
     return state, output, register
 
@@ -153,6 +159,102 @@ def test_deep_registration_rolls_back_the_retained_child(deep_registration) -> N
         [(scan_id,)] = connection.execute("SELECT id FROM scans").fetchall()
     scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
     assert scan_command(state, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
+
+
+@pytest.mark.parametrize("archive", [False, True], ids=["fresh", "archive-existing"])
+def test_resume_verification_failure_rolls_back_the_created_handle(
+    deep_registration, monkeypatch: pytest.MonkeyPatch, archive: bool
+) -> None:
+    state, output, register = deep_registration
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    retained = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    previous_file = output / "previous result"
+
+    with closing(workbench_db.connect()) as connection:
+        old_id = None
+        if archive:
+            old_id = register("standard", connection=connection)["scanId"]
+            connection.execute("UPDATE scans SET status = 'failed' WHERE id = ?", (old_id,))
+            connection.commit()
+            previous_file.write_bytes(b"original result")
+        original_grants = windows_scan_local_files._output_directory_grants
+
+        def competing_reader(handle, path, **options):
+            if path == retained and "expected_descriptor" in options:
+                # The original handle is already held when verification starts.
+                # Propagate the real sharing error to interrupt this registration.
+                contender = windows_scan_local_files._create_file(
+                    retained,
+                    access=windows_scan_local_files._FILE_TRAVERSE,
+                    share=0,
+                    disposition=windows_scan_local_files._OPEN_EXISTING,
+                    flags=windows_scan_local_files._FILE_FLAG_BACKUP_SEMANTICS
+                    | windows_scan_local_files._FILE_FLAG_OPEN_REPARSE_POINT,
+                )
+                with contender:
+                    pytest.fail("An exclusive reader opened the tentative resume directory")
+            return original_grants(handle, path, **options)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(windows_scan_local_files, "_output_directory_grants", competing_reader)
+            with pytest.raises(OSError) as failure:
+                register(archive=archive, connection=connection)
+        assert (getattr(failure.value, "winerror", None) or failure.value.errno) == 32
+        assert not retained.exists()
+        assert not list(output.parent.glob(f"{output.name}.previous-*"))
+        rows = connection.execute("SELECT id, scan_dir FROM scans").fetchall()
+        if archive:
+            assert [tuple(row) for row in rows] == [(old_id, str(output))]
+            assert previous_file.read_bytes() == b"original result"
+        else:
+            assert rows == []
+            assert list(output.iterdir()) == []
+        assert register(archive=archive, connection=connection)["scanDir"] == str(output)
+
+
+def test_resume_cleanup_cannot_remove_an_existing_or_substituted_child(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    retained = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    original = tmp_path / "another directory"
+    original.mkdir()
+    sentinel = original / "keep"
+    sentinel.write_bytes(b"owned by another operation")
+    original.rename(retained)
+    with (
+        pytest.raises(FileExistsError),
+        windows_scan_local_files.create_deep_resume_output(output, lambda: False),
+    ):
+        pytest.fail("An existing child was adopted")
+    retained.rename(original)
+    with (
+        pytest.raises(PermissionError) as failure,
+        windows_scan_local_files.create_deep_resume_output(output, lambda: False),
+    ):
+        retained.rename(tmp_path / "moved")
+    assert failure.value.winerror == 32
+    assert not retained.exists()
+    assert sentinel.read_bytes() == b"owned by another operation"
+
+
+def test_post_commit_interrupt_keeps_the_registered_resume_directory(deep_registration) -> None:
+    state, output, register = deep_registration
+    run_workbench(state, "list-scans")
+
+    class InterruptedCommit(sqlite3.Connection):
+        def commit(self):
+            super().commit()
+            raise KeyboardInterrupt
+
+    with closing(
+        sqlite3.connect(state / "workbench.sqlite3", factory=InterruptedCommit)
+    ) as connection:
+        connection.row_factory = sqlite3.Row
+        with pytest.raises(KeyboardInterrupt):
+            register(connection=connection)
+        [(scan_id,)] = connection.execute("SELECT id FROM scans").fetchall()
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    assert scan_command(state, "get-cli-scan-resume", scan_id)["scanDir"] == str(output)
 
 
 def test_missing_output_drive_reports_a_filesystem_error() -> None:
