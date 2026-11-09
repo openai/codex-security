@@ -100,6 +100,7 @@ test.skipIf(process.platform !== "win32").each(["changed", "canceled"])(
         });
       }
       expect(publication).toHaveBeenCalled();
+      expect(temporary).toHaveBeenCalled();
       expect(existsSync(held)).toBe(true);
     } finally {
       await release?.();
@@ -169,6 +170,8 @@ test.skipIf(process.platform !== "win32")(
       await operation;
     }
     expect(await readdir(temp)).toEqual([]);
+    expect(temporary).toHaveBeenCalled();
+    expect(lookup).toHaveBeenCalledWith(temp);
     expect(await readdir(dirname(output))).toEqual(["scan"]);
   },
 );
