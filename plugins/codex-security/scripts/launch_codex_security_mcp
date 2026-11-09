@@ -54,6 +54,7 @@ fi
 
 first_node=
 can_load_native() {
+  selected_node=$1
   if [ -z "$first_node" ]; then
     first_node=$1
   fi
@@ -61,12 +62,30 @@ can_load_native() {
   # prevent a managed runtime from loading the plugin's addon.
   # Capture output without opening a writable file for read-only callers.
   _native_probe_output=$("$1" -e '
-    require("node:sqlite");
-    if (process.platform === "darwin") {
+    if (process.platform === "linux") {
+      try { require("node:sqlite"); } catch { console.log("linux-without-sqlite"); }
+    } else if (process.platform === "darwin") {
+      require("node:sqlite");
       require(require("node:path").join(process.argv[1], "native",
         `${process.platform}-${process.arch}`, "unix.node"));
     }
-  ' "$launcher_dir/../mcp" </dev/null 2>&1)
+  ' "$launcher_dir/../mcp" </dev/null 2>&1) || return 1
+  [ "$_native_probe_output" = linux-without-sqlite ] || return 0
+
+  # This Linux runtime can still run helpers without SQLite. Prefer a system
+  # installation if available, without expanding discovery into the caller's PATH.
+  for system_candidate in /usr/local/bin/node /usr/bin/node /bin/node; do
+    [ -x "$system_candidate" ] || continue
+    system_node=$(command -p realpath "$system_candidate" 2>&-) || continue
+    case "${system_node%/*}" in
+      /usr/local/bin|/usr/bin|/bin)
+        if _native_probe_output=$("$system_node" -e 'require("node:sqlite")' </dev/null 2>&1); then
+          selected_node=$system_node
+          break
+        fi ;;
+    esac
+  done
+  return 0
 }
 
 for candidate in \
@@ -76,7 +95,7 @@ for candidate in \
   "$cache_root/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
 do
   if [ -n "$candidate" ] && [ -x "$candidate" ] && can_load_native "$candidate"; then
-    launch_node "$candidate" "$@"
+    launch_node "$selected_node" "$@"
   fi
 done
 
@@ -85,7 +104,7 @@ while :; do
   path_entry=${remaining_path%%:*}
   node_path=${path_entry:-.}/node
   if [ -x "$node_path" ] && can_load_native "$node_path"; then
-    launch_node "$node_path" "$@"
+    launch_node "$selected_node" "$@"
   fi
   case "$remaining_path" in
     *:*) remaining_path=${remaining_path#*:} ;;

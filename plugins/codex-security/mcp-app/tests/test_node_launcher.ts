@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   copyFile,
   mkdir,
   readdir,
   readFile,
+  realpath,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -248,11 +250,17 @@ launcherTest(
 );
 
 test(
-  "Linux database helpers skip an automatic Node runtime without SQLite",
+  "Linux helpers use a system SQLite fallback without probing the checkout PATH",
   { skip: process.platform !== "linux" },
   async () => {
     const root = await directories.create("codex-security-linux-launcher-");
     const withoutSqlite = path.join(root, "node-without-sqlite");
+    const marker = path.join(root, "path-node-ran");
+    await writeFile(
+      path.join(root, "node"),
+      `#!/bin/sh\n: > ${shellQuote(marker)}\nexit 0\n`,
+      { mode: 0o755 },
+    );
     await writeFile(
       withoutSqlite,
       `#!/bin/sh\nexec ${shellQuote(process.execPath)} --no-experimental-sqlite "$@"\n`,
@@ -267,19 +275,38 @@ test(
       "/bin/sh",
       [launcher, "--helper", "database-info"],
       {
+        cwd: root,
         encoding: "utf8",
         input: JSON.stringify(root),
         env: {
           HOME: root,
-          PATH: path.dirname(process.execPath),
+          PATH: root,
           CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
         },
       },
     );
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout), {
-      databasePath: path.join(root, "workbench.sqlite3"),
-    });
+    assert.equal(existsSync(marker), false);
+    const systemBins = ["/usr/local/bin", "/usr/bin", "/bin"];
+    const systemNodes = await Promise.all(
+      systemBins.map((bin) =>
+        realpath(path.join(bin, "node")).catch(() => null),
+      ),
+    );
+    const hasSystemSqlite = systemNodes.some(
+      (node) =>
+        node !== null &&
+        systemBins.includes(path.dirname(node)) &&
+        spawnSync(node, ["-e", 'require("node:sqlite")']).status === 0,
+    );
+    if (hasSystemSqlite) {
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        databasePath: path.join(root, "workbench.sqlite3"),
+      });
+    } else {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /node:sqlite/);
+    }
   },
 );
 
