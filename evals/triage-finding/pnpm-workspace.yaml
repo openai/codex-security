@@ -13,7 +13,6 @@ overrides:
   "promptfoo@0.124.1>@hono/node-server": 2.1.5
   "@openai/codex": "$@openai/codex-sdk"
   "@openai/codex-sdk": "$@openai/codex-sdk"
-  "@opencode-ai/sdk": "$@opencode-ai/sdk"
   "ibm-cloud-sdk-core@5.6.0>axios": 1.20.0
   "get-uri@8.0.1>basic-ftp": 6.2.1
 
@@ -24,3 +23,16 @@ allowBuilds:
   onnxruntime-node: false
   protobufjs: false
   sharp: false
+
+# Triage uses the Codex provider, JSON and YAML fixtures, and JavaScript assertions.
+ignoredOptionalDependencies:
+  - "@anthropic-ai/claude-agent-sdk"
+  - "@aws-sdk/*"
+  - "@aws/bedrock-token-generator"
+  - "@azure/*"
+  - "@opencode-ai/sdk"
+  - natural
+  - node-sql-parser
+  - pdf-parse
+  - read-excel-file
+  - sharp
