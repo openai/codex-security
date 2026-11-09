@@ -9,6 +9,7 @@ import { git } from "./git-fixture.js";
 import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
+const decoder = { ecosystem: "npm", name: "sample-decoder" };
 const advisory = {
   cve: "CVE-2024-1000",
   advisories: [
@@ -17,7 +18,7 @@ const advisory = {
       summary: "Synthetic decoder advisory",
       affected: [
         {
-          package: { ecosystem: "npm", name: "sample-decoder" },
+          package: decoder,
           ranges: [
             { type: "SEMVER", events: [{ introduced: "0" }, { fixed: "2" }] },
           ],
@@ -27,6 +28,25 @@ const advisory = {
   ],
 };
 const args = ["exploitability", "check", advisory.cve, "--json"];
+
+const unresolvedDecoder = {
+  status: "unknown",
+  uses: [
+    {
+      location: "app",
+      component: decoder.name,
+      version: null as string | null,
+      verdict: "unknown",
+      deployment: "unknown",
+      reason: "The import does not identify a resolved version.",
+      evidence: [
+        { path: "app/index.ts", startLine: 1, endLine: 1, supports: [] },
+      ],
+      observations: [],
+    },
+  ],
+  limitations: ["No resolved version."],
+};
 
 function reviewDecision(
   prompt: string,
@@ -94,24 +114,6 @@ test("returns only the report accepted after the investigator corrects a rejecte
     join(nested, "index.ts"),
     'import "sample-decoder"; // checkout-only marker\n',
   );
-  const assessment = {
-    status: "unknown",
-    uses: [
-      {
-        location: "app",
-        component: "sample-decoder",
-        version: null as string | null,
-        verdict: "unknown",
-        deployment: "unknown",
-        reason: "The import does not identify a resolved version.",
-        evidence: [
-          { path: "app/index.ts", startLine: 1, endLine: 1, supports: [] },
-        ],
-        observations: [],
-      },
-    ],
-    limitations: ["No resolved version."],
-  };
   const usage = {
     input_tokens: 120,
     cached_input_tokens: 40,
@@ -190,12 +192,12 @@ test("returns only the report accepted after the investigator corrects a rejecte
 
       const tool = session.dependencyReport!;
       tool.bindReviewer!(selectedEnvironment, provider);
-      const first = structuredClone(assessment);
+      const first = structuredClone(unresolvedDecoder);
       first.uses[0]!.version = "1.0.0";
       const rejection = await tool.submit(first);
       expect(rejection.accepted).toBe(false);
       expect(rejection.feedback).toContain(gap);
-      expect((await tool.submit(assessment)).accepted).toBe(true);
+      expect((await tool.submit(unresolvedDecoder)).accepted).toBe(true);
       output!.onUsage?.({ ...usage, total_tokens: 132 });
       output!.stdout.write(JSON.stringify(first));
       return 0;
@@ -222,7 +224,7 @@ test("returns only the report accepted after the investigator corrects a rejecte
   const { runCli, stdout, stderr } = createCliTest(main);
   expect(await runCli(args, deps), stderr.text()).toBe(0);
   expect(JSON.parse(stdout.text())).toEqual({
-    ...assessment,
+    ...unresolvedDecoder,
     status: "unknown",
     cve: advisory.cve,
     advisories: [advisory.advisories[0]!.url],
@@ -235,6 +237,142 @@ test("returns only the report accepted after the investigator corrects a rejecte
     },
   });
   expect(review).toHaveBeenCalledTimes(2);
+});
+
+async function runPackageCheck(
+  repo: string,
+  records: { id: string; advisories: typeof advisory.advisories }[],
+  ...flags: string[]
+) {
+  git(repo, "init", "--quiet");
+  await mkdir(join(repo, "app"));
+  await writeFile(join(repo, "app", "index.ts"), 'import "sample-decoder";\n');
+  const prompts: string[] = [];
+  const reviews: unknown[] = [];
+  const signals: AbortSignal[] = [];
+  const deps = dependencies({
+    currentDirectory: repo,
+    onCodex: async (_argv, output) => {
+      const signal = output!.signal!;
+      expect(signals.every((previous) => previous.aborted)).toBe(true);
+      expect(signal.aborted).toBe(false);
+      signals.push(signal);
+      const session = output!.appServer!;
+      prompts.push(session.prompt);
+      const record = records.find(({ id }) => session.prompt.includes(id));
+      const result = await session.dependencyReport!.submit({
+        ...unresolvedDecoder,
+        limitations: record
+          ? [`The installed version for ${record.id} is unknown.`]
+          : unresolvedDecoder.limitations,
+      });
+      expect(result.accepted, result.feedback).toBe(true);
+      return 0;
+    },
+  });
+  deps.lookupDependencyAdvisory = mock(async () => advisory);
+  const packageLookup = mock<NonNullable<typeof deps.lookupPackageAdvisories>>(
+    async () => records,
+  );
+  deps.lookupPackageAdvisories = packageLookup;
+  deps.reviewDependencyReport = async (prompt) => {
+    reviews.push(
+      JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)).advisory,
+    );
+    return reviewDecision(prompt, true);
+  };
+  const { runCli, stdout, stderr } = createCliTest(main);
+  const exit = await runCli(
+    ["exploitability", "check", "npm:sample-decoder", ...flags, "--json"],
+    deps,
+  );
+  expect(exit, stderr.text()).toBe(0);
+  expect(deps.lookupDependencyAdvisory).not.toHaveBeenCalled();
+  return {
+    report: JSON.parse(stdout.text()),
+    packageLookup,
+    prompts,
+    reviews,
+    signals,
+  };
+}
+
+test("assesses a supplied vulnerability description without looking it up in OSV", async () => {
+  await using temp = await scopedTemporaryDirectory("package-description-");
+  const description =
+    'The "raw" decoder may ignore a limit.\nSee the local release notes.';
+  const { report, packageLookup, prompts, reviews } = await runPackageCheck(
+    temp.path,
+    [],
+    "--vuln-description",
+    description,
+  );
+  expect(packageLookup).not.toHaveBeenCalled();
+  expect(prompts).toHaveLength(1);
+  expect(prompts[0]).toContain(decoder.name);
+  expect(prompts[0]).toContain("See the local release notes.");
+  expect(prompts[0]).not.toContain(description);
+  expect(reviews).toEqual([
+    expect.objectContaining({ package: decoder, vulnDescription: description }),
+  ]);
+  expect(report).toMatchObject({
+    package: decoder,
+    vulnDescription: description,
+    checks: [{ advisoryId: null, advisories: [], status: "unknown" }],
+  });
+  expect(report).not.toHaveProperty("cve");
+  expect(report.checks[0]).not.toHaveProperty("cve");
+});
+
+test("reviews each published advisory for a package independently", async () => {
+  await using temp = await scopedTemporaryDirectory("package-advisories-");
+  const records = ["OSV-EXAMPLE-1", "OSV-EXAMPLE-2"].map((id) => ({
+    id,
+    advisories: [
+      { ...advisory.advisories[0]!, url: "https://example.invalid/" + id },
+    ],
+  }));
+  const { packageLookup, prompts, reviews, report, signals } =
+    await runPackageCheck(temp.path, records);
+  expect(signals.map((signal) => signal.aborted)).toEqual([true, true]);
+  expect(packageLookup).toHaveBeenCalledTimes(1);
+  expect(packageLookup).toHaveBeenCalledWith(decoder, expect.any(AbortSignal));
+  expect(prompts).toHaveLength(records.length);
+  expect(reviews).toHaveLength(records.length);
+  expect(report.package).toEqual(decoder);
+  expect(report.checks).toHaveLength(records.length);
+  for (const record of records) {
+    expect(prompts.filter((prompt) => prompt.includes(record.id))).toHaveLength(
+      1,
+    );
+    expect(reviews).toContainEqual(
+      expect.objectContaining({
+        package: decoder,
+        id: record.id,
+        advisories: record.advisories,
+      }),
+    );
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        advisoryId: record.id,
+        advisories: [record.advisories[0]!.url],
+        limitations: [`The installed version for ${record.id} is unknown.`],
+        status: "unknown",
+      }),
+    );
+  }
+});
+
+test("returns an empty package result without investigating when OSV has no advisories", async () => {
+  await using temp = await scopedTemporaryDirectory("package-no-advisories-");
+  const { report, packageLookup, prompts, reviews } = await runPackageCheck(
+    temp.path,
+    [],
+  );
+  expect(packageLookup).toHaveBeenCalledTimes(1);
+  expect(prompts).toEqual([]);
+  expect(reviews).toEqual([]);
+  expect(report).toMatchObject({ package: decoder, checks: [] });
 });
 
 test("preserves the native skill's nonzero exit", async () => {
@@ -471,12 +609,20 @@ test("a reviewer outage fails the command without publishing the draft", async (
   expect(stdout.text()).not.toContain(draft.limitations[0]!);
 });
 
-test("requires one positional CVE before looking up the advisory", async () => {
-  const deps = dependencies();
+test("rejects invalid subjects and descriptions before looking up an advisory", async () => {
+  const onCodex = mock<OnCodex>().mockReturnValue(0);
+  const deps = dependencies({ onCodex });
   deps.lookupDependencyAdvisory = mock(async () => {
     throw new Error("Unexpected advisory lookup");
   });
-  for (const positionals of [[], [advisory.cve, "/messages"]]) {
+  deps.lookupPackageAdvisories = mock(async () => []);
+  for (const positionals of [
+    [],
+    [advisory.cve, "/messages"],
+    ["sample-decoder"],
+    [advisory.cve, "--vuln-description", "A reported condition"],
+    ["npm:sample-decoder", "--vuln-description", "   "],
+  ]) {
     expect(
       await runCapturedCli(
         main,
@@ -486,6 +632,8 @@ test("requires one positional CVE before looking up the advisory", async () => {
     ).toBe(2);
   }
   expect(deps.lookupDependencyAdvisory).not.toHaveBeenCalled();
+  expect(deps.lookupPackageAdvisories).not.toHaveBeenCalled();
+  expect(onCodex).not.toHaveBeenCalled();
 });
 
 test("shares service catalog MCPs between the resolver and investigator", async () => {
