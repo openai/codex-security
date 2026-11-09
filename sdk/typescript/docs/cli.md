@@ -1140,6 +1140,11 @@ and does not migrate existing credentials or reports.
 Sandbox startup errors include the native diagnostic followed by a command to
 reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
 
+If Windows Application Control blocks `windows.node` while validating a scan
+output directory, look for the module's block event in Event Viewer under
+Applications and Services Logs → Microsoft → Windows → CodeIntegrity → Operational.
+[Microsoft's App Control event reference](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/operations/event-id-explanations)
+
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
 the credential home and its descendants; it does not change ancestor ownership
