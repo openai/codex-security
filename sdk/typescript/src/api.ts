@@ -4519,15 +4519,19 @@ export class CodexSecurity {
       pluginVersion: session.runtime.plugin.version,
       providerFamily: requestContext.metadata["codex_security_provider"],
     });
+    const pluginPaths = {
+      ...runtimePaths,
+      [SDK_NODE_SEARCH_PATH]:
+        process.platform === "win32"
+          ? undefined
+          : await sdkNodeSearchPath(session.toolRoots),
+    };
     const hosted = this.#dependencies.hostedScan;
     if (hosted !== undefined) {
-      const environment = {
-        ...definedEnvironment(
-          environmentWithGit(session.runtime.environment, git),
-        ),
-        ...runtimePaths,
-      };
-      delete environment[SDK_NODE_SEARCH_PATH];
+      const environment = definedEnvironment({
+        ...environmentWithGit(session.runtime.environment, git),
+        ...pluginPaths,
+      });
       const model = scanModelConfiguration(session.effectiveConfig);
       return {
         environment,
@@ -4645,11 +4649,7 @@ export class CodexSecurity {
       ),
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
-      ...runtimePaths,
-      [SDK_NODE_SEARCH_PATH]:
-        process.platform === "win32"
-          ? undefined
-          : await sdkNodeSearchPath(session.toolRoots),
+      ...pluginPaths,
     };
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)

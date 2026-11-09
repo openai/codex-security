@@ -561,9 +561,12 @@ describe("trusted executable resolution", () => {
       const source = join(root, "source"),
         aliases = join(root, "aliases"),
         pending = join(root, "pending"),
+        nodeAliases = join(root, "node-aliases"),
         tools = join(root, "tools");
       await Promise.all(
-        [source, aliases, pending, tools].map((path) => mkdir(path)),
+        [source, aliases, pending, nodeAliases, tools].map((path) =>
+          mkdir(path),
+        ),
       );
       const alternate = join(root, "SOURCE");
       const spelling = existsSync(alternate) ? alternate : source;
@@ -571,19 +574,26 @@ describe("trusted executable resolution", () => {
       if (route === "linked parent") await symlink(spelling, via, "junction");
       if (route === "relay") {
         await mkdir(via);
-        for (const name of ["git.exe", "rg.exe"])
+        for (const name of ["git.exe", "rg.exe", "node.exe"])
           await symlink(join(spelling, name), join(via, name), "file");
       }
       const node = nodeCommand().command;
       await symlink(node, join(tools, "git.exe"), "file");
+      await symlink(node, join(tools, "node.exe"), "file");
       await symlink(node, join(source, "git.exe"), "file");
+      await writeFile(join(source, "node.exe"), "checkout-owned executable");
+      await symlink(
+        join(via, "node.exe"),
+        join(nodeAliases, "node.exe"),
+        "file",
+      );
       await symlink(join(via, "git.exe"), join(aliases, "git.exe"), "file");
       await symlink(join(via, "rg.exe"), join(pending, "rg.com"), "file");
       if (process.platform !== "win32")
         await symlink(join(pending, "rg.com"), join(pending, "rg"));
       const command = await resolveWindowsExecutable(
         "git",
-        [pending, aliases, tools].join(delimiter),
+        [pending, aliases, nodeAliases, tools].join(delimiter),
         source,
         true,
       );
@@ -609,7 +619,7 @@ describe("trusted executable resolution", () => {
       await mkdir(checkout);
       await writeFile(join(checkout, "visible.ts"), "");
       const inventory = spawnSync(
-        command!.executable,
+        "node.exe",
         [
           join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           "generate-in-scope-files",

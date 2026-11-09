@@ -1330,7 +1330,8 @@ temporary PATH. Scripts using the system `/bin/sh` or `/usr/bin/env` run from
 their installed location when the packaged dispatcher can start. Keep other
 prefix-sensitive tools, including Python virtual environments, in directories
 where every entry can be used. On Windows, the campaign omits a tool directory
-from the child PATH if its Git or ripgrep link passes through a selected source.
+from the child PATH if its Git, ripgrep, or Node executable link passes through a
+selected source.
 
 CSV scopes are literal paths relative to each checkout, including names such
 as `~/src`.

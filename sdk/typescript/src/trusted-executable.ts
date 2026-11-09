@@ -88,7 +88,7 @@ export function campaignExecutable(
       throw new Error(
         `Campaign executable is unavailable on a trusted PATH: ${candidate}`,
       );
-    // Windows drops PATH entries containing source-backed Git and ripgrep aliases.
+    // Windows launchers inherit the same filtered PATH as checkout.
     if (process.platform === "win32" && candidate !== "git")
       command.environment = (
         await inspectTrustedExecutable("git", command.environment, [])
@@ -212,10 +212,10 @@ export async function inspectTrustedExecutable(
         ? [extname(candidate) === "" ? ".exe" : ""]
         : [".exe", ".com", ".bat", ".cmd", ""];
   const primary = suffixes.map((suffix) => candidate + suffix);
-  // Windows inventory searches for ripgrep after checkout passes PATH to the plugin.
+  // The Windows MCP launcher and inventory look up Node and ripgrep on this PATH.
   const names =
     campaign && windows && candidate === "git"
-      ? [...primary, "rg.exe", "rg.com"]
+      ? [...primary, "node.exe", "rg.exe", "rg.com"]
       : primary;
   const candidates = (pathLike ? [null] : entries).flatMap((entry) => {
     // PATH lookup traverses links before "..". join() would collapse it first.
