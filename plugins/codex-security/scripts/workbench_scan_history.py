@@ -25,7 +25,7 @@ from finalize_scan_contract import (
 )
 from report_projection import SEVERITY_ORDER
 from review_state import review_state
-from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
+from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LOCATION_SQL
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
@@ -1295,17 +1295,10 @@ def finding_occurrence_conditions(
 def _scan_findings(connection: sqlite3.Connection, scan_id: str) -> dict[str, sqlite3.Row]:
     """Index one scan's finding rows by the occurrence IDs used in comparisons."""
     rows = connection.execute(
-        """
+        f"""
         SELECT occurrences.*,
             COALESCE(triage.status, 'open') AS triage_status, triage.close_reason,
-            (
-                SELECT locations.relative_path
-                FROM finding_locations AS locations
-                WHERE locations.occurrence_id = occurrences.id
-                ORDER BY CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
-                    locations.sort_order
-                LIMIT 1
-            ) AS relative_path
+            (SELECT relative_path {PRIMARY_FINDING_LOCATION_SQL}) AS relative_path
         FROM finding_occurrences AS occurrences
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         WHERE occurrences.scan_id = ?

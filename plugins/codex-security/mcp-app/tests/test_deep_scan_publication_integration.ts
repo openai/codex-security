@@ -1,3 +1,4 @@
+import { fixturePython as python } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
@@ -69,7 +70,6 @@ const testsRoot = path.dirname(fileURLToPath(import.meta.url));
 const mcpAppRoot = path.resolve(testsRoot, "..");
 const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
-const python = process.env.PYTHON?.trim() || "python3";
 const owner = "publication-test-owner";
 const reviewState: ScanDraftInput["reviewState"] = {
   surfaces: [],

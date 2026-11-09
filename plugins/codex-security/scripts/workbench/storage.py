@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Any
+
+if os.name == "nt":
+    import windows_scan_local_files as windows_files
 
 
 def state_dir(*, canonical: bool = True) -> Path:
@@ -65,12 +69,29 @@ def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> lis
     ]
 
 
-def create_private_directory(path: Path) -> None:
+def create_private_directory(path: Path, *, scan_output: bool = False) -> None:
     """Create missing directories privately without changing existing permissions."""
-    try:
+    if path.parent != path and not path.parent.is_dir():
+        create_private_directory(path.parent, scan_output=scan_output)
+    if os.name != "nt":
         path.mkdir(mode=0o700, exist_ok=True)
-    except FileNotFoundError:
-        if path.parent == path:
-            raise
-        create_private_directory(path.parent)
-        path.mkdir(mode=0o700, exist_ok=True)
+    elif not path.is_dir():
+        windows_files.create_private_directory(path, exist_ok=True, scan_output=scan_output)
+    elif scan_output:
+        windows_files.require_windows_output_path(path)
+
+
+def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
+    """Create a unique private child without inheriting a permissive Windows DACL."""
+    if os.name != "nt":
+        return Path(tempfile.mkdtemp(prefix=prefix, dir=parent)).resolve()
+
+    import secrets
+
+    for _ in range(100):
+        path = parent / f"{prefix}{secrets.token_hex(4)}"
+        try:
+            return windows_files.create_private_directory(path, exist_ok=False, scan_output=True)
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"Could not create a unique directory beneath {parent}.")
