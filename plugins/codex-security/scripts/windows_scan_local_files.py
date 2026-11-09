@@ -469,12 +469,12 @@ def _open_directory(
     missing_ok: bool = False,
     missing_is_path_error: bool = True,
     movable: bool = False,
-    require_traverse: bool = False,
 ) -> _OwnedHandle | None:
     try:
         handle = _create_file(
             path,
-            access=_FILE_READ_ATTRIBUTES | (_FILE_TRAVERSE if require_traverse else 0),
+            # Attribute-only handles do not participate in Win32 sharing checks.
+            access=_FILE_READ_ATTRIBUTES | (0 if movable else _FILE_TRAVERSE),
             share=_FILE_SHARE_READ | _FILE_SHARE_WRITE | (_FILE_SHARE_DELETE if movable else 0),
             disposition=_OPEN_EXISTING,
             flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
@@ -644,7 +644,7 @@ def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
                 # Pin each literal ancestor before opening the next component. Never resolve
                 # a repository-controlled reparse point to find the directory to be pinned.
                 for directory in (*reversed(path.parents), path):
-                    handle = _open_directory(directory, require_traverse=True)
+                    handle = _open_directory(directory)
                     assert handle is not None
                     pins.enter_context(handle)
                 assert handle.value is not None
