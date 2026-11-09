@@ -50,6 +50,7 @@ import {
   AuthenticationRequiredError,
   CodexSecurityError,
   ConfigurationError,
+  errorMessage,
 } from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
@@ -827,7 +828,13 @@ export async function disabledMcpServers(
     environment,
     undefined,
     options.signal,
-  );
+  ).catch((error: unknown) => {
+    options.signal?.throwIfAborted();
+    throw new ConfigurationError(
+      `Could not read MCP configuration for a read-only helper: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  });
   if (!success)
     throw new ConfigurationError(
       `Could not read MCP configuration for a read-only helper: ${stderr.trim()}`,

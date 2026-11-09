@@ -1307,14 +1307,30 @@ describe("CLI workbench", () => {
       );
     });
 
-    test.each(["malformed", "unreadable", "rejected"])(
-      "stops on %s native config after saving an empty pair",
-      async (problem) => {
+    test.each([
+      [
+        "malformed configuration",
+        "Could not read the configured Codex provider",
+      ],
+      [
+        "unreadable configuration",
+        "Could not read the configured Codex provider",
+      ],
+      [
+        "rejected configuration",
+        "Could not read MCP configuration for a read-only helper",
+      ],
+      ["missing executable", "missing-codex.exe"],
+    ] as const)(
+      "stops on %s after saving an empty pair",
+      async (problem, expected) => {
         await using home = await scopedTemporaryDirectory("match-all-config-");
         const file = join(home.path, "config.toml");
-        if (problem === "malformed") await writeFile(file, "[broken\n");
-        else if (problem === "unreadable") await mkdir(file);
-        else await writeFile(file, "model = []\n");
+        if (problem === "malformed configuration")
+          await writeFile(file, "[broken\n");
+        else if (problem === "unreadable configuration") await mkdir(file);
+        else if (problem === "rejected configuration")
+          await writeFile(file, "model = []\n");
         const { batches, saved, onWorkbench } = batchWorkbench([
           "empty",
           "match",
@@ -1329,6 +1345,9 @@ describe("CLI workbench", () => {
             currentDirectory: home.path,
             environment: {
               CODEX_HOME: home.path,
+              ...(problem === "missing executable" && {
+                CODEX_CLI_PATH: join(home.path, "missing-codex.exe"),
+              }),
               OPENAI_API_KEY: "synthetic-key",
             },
             onWorkbench,
@@ -1338,12 +1357,9 @@ describe("CLI workbench", () => {
         expect(code).toBe(2);
         expect(saved).toEqual([["source", "empty"]]);
         expect(stdout.text()).toBe("");
-        expect(stderr.text()).toContain(
-          problem === "rejected"
-            ? "Could not read MCP configuration for a read-only helper"
-            : "Could not read the configured Codex provider",
-        );
-        if (problem === "rejected") expect(stderr.text()).toContain("model");
+        expect(stderr.text()).toContain(expected);
+        if (problem === "rejected configuration")
+          expect(stderr.text()).toContain("model");
       },
     );
 
