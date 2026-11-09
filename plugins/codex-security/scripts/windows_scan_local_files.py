@@ -690,6 +690,24 @@ def require_windows_output_path(path: Path, *, writable_output: bool = False) ->
             )
 
 
+DEEP_RESUME_DIRECTORY = ".codex-security-resume"
+
+
+def deep_resume_output_identity(scan_dir: Path) -> list[int]:
+    """Bind the output and its protected child while every directory is pinned."""
+    retained = scan_dir / DEEP_RESUME_DIRECTORY
+    with _checked_output_directory(retained) as (_, grants):
+        # Checking the full chain rejects a replaceable child. Its private DACL
+        # keeps the scan root nonempty after the sandbox receives Modify there.
+        if grants:
+            raise _invalid_path(retained, "The retained resume directory must be protected.")
+        root = scan_dir.lstat()
+        child = retained.lstat()
+        if not root.st_ino or not child.st_ino:
+            raise _invalid_path(scan_dir, "The resume directory has no stable file identity.")
+        return [root.st_dev, root.st_ino, child.st_dev, child.st_ino]
+
+
 class _UnicodeString(ctypes.Structure):
     _fields_ = [
         ("length", wintypes.USHORT),

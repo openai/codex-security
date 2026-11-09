@@ -2409,7 +2409,7 @@ export class CodexSecurity {
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
-      if (!options.archiveExisting) {
+      if (!options.archiveExisting && options.resumeScanId === undefined) {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       checkOpen();
@@ -3161,7 +3161,7 @@ export class CodexSecurity {
           "onOutputArchived",
         )(registration["archivedScanDir"]);
       }
-      if (options.archiveExisting) {
+      if (options.archiveExisting || options.resumeScanId !== undefined) {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       throwIfAborted(signal, scanDir);

@@ -86,6 +86,7 @@ from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
     loaded_plugin_version,
+    register_windows_resume_output,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -1668,6 +1669,8 @@ def register_cli_scan(
             )
             if workflow_id is not None:
                 register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
+            if os.name == "nt" and mode == "deep" and launch_kind == "scan":
+                archive.enter_context(register_windows_resume_output(connection, scan_id, scan_dir))
             scan = connection.execute(
                 "SELECT scans.*, snapshot AS lifecycle_json FROM scans "
                 "JOIN scan_lifecycles ON scan_id = scans.id WHERE scans.id = ?",

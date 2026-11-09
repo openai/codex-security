@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
+import sqlite3
 import string
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import pytest
+from workbench_test_support import run_workbench, scan_command
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -31,6 +36,123 @@ def grant(path: Path, rights: str) -> None:
 
 def make_junction(path: Path, target: Path) -> None:
     subprocess.run(["cmd", "/c", "mklink", "/J", str(path), str(target)], check=True)
+
+
+@pytest.fixture
+def deep_registration(tmp_path: Path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "source.py").write_text("# synthetic source\n")
+    output = tmp_path / "output"
+    output.mkdir()
+    state = tmp_path / "state"
+    recipe = {
+        "config": {},
+        "mode": "deep",
+        "repository": str(repository),
+        "target": {"kind": "repository", "paths": []},
+    }
+
+    def register(**options):
+        return run_workbench(
+            state,
+            "register-cli-scan",
+            "--repository",
+            str(repository),
+            "--scan-dir",
+            str(output),
+            "--recipe-json",
+            json.dumps(recipe),
+            **options,
+        )
+
+    return state, output, register
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["replaced root", "replaced child", "missing child", "deletable child", "delete child right"],
+)
+def test_deep_resume_requires_the_registered_protected_directories(
+    deep_registration, tmp_path: Path, change: str
+) -> None:
+    state, output, register = deep_registration
+    scan_id = register()["scanId"]
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    retained = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    assert list(output.iterdir()) == [retained]
+    assert list(retained.iterdir()) == []
+    grant(output, "(OI)(CI)M")
+    assert scan_command(state, "get-cli-scan-resume", scan_id)["threadId"] == "original-thread"
+
+    if change == "replaced root":
+        previous = tmp_path / "original root"
+        output.rename(previous)
+        output.mkdir()
+        (previous / retained.name).rename(retained)
+    elif change == "replaced child":
+        retained.rename(tmp_path / "original child")
+        windows_scan_local_files.create_private_directory(
+            retained, exist_ok=False, scan_output=True
+        )
+    elif change == "missing child":
+        retained.rmdir()
+    elif change == "deletable child":
+        grant(retained, "(DE)")
+    else:
+        grant(output, "(DC)")
+
+    # Even a populated replacement cannot downgrade a recorded binding to legacy recovery.
+    (output / "checkpoint.json").write_text("{}")
+    rejected = scan_command(state, "get-cli-scan-resume", scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "Windows" in rejected["stderr"]
+    assert (output / "checkpoint.json").read_text() == "{}"
+
+
+def test_legacy_windows_resume_keeps_populated_output_and_rejects_unbound_empty_output(
+    deep_registration,
+) -> None:
+    state, output, register = deep_registration
+    scan_id = register()["scanId"]
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
+        connection.execute(
+            "UPDATE scans SET windows_resume_output_identity = NULL WHERE id = ?", (scan_id,)
+        )
+    retained = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    # Neither a private directory nor a lookalike retained child proves legacy ownership.
+    for has_guard in (True, False):
+        if not has_guard:
+            retained.rmdir()
+            grant(output, "(OI)(CI)M")
+        rejected = scan_command(state, "get-cli-scan-resume", scan_id, check=False)
+        assert rejected["returncode"] != 0
+        assert f"scans rerun {scan_id}" in rejected["stderr"]
+    (output / "checkpoint.json").write_text("{}")
+    assert scan_command(state, "get-cli-scan-resume", scan_id)["scanDir"] == str(output)
+
+
+def test_deep_registration_rolls_back_the_retained_child(deep_registration) -> None:
+    state, output, register = deep_registration
+    run_workbench(state, "list-scans")
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
+        connection.execute(
+            "CREATE TRIGGER fail_binding BEFORE UPDATE OF windows_resume_output_identity ON scans "
+            "BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END"
+        )
+    assert "synthetic registration failure" in register(check=False)["stderr"]
+    assert list(output.iterdir()) == []
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
+        assert connection.execute("SELECT count(*) FROM scans").fetchone()[0] == 0
+        connection.execute("DROP TRIGGER fail_binding")
+    with ThreadPoolExecutor(max_workers=2) as retries:
+        outcomes = [retries.submit(register, check=False) for _ in range(2)]
+        assert sorted(outcome.result()["returncode"] for outcome in outcomes) == [0, 1]
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
+        [(scan_id,)] = connection.execute("SELECT id FROM scans").fetchall()
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    assert scan_command(state, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
 
 
 def test_missing_output_drive_reports_a_filesystem_error() -> None:

@@ -108,6 +108,7 @@ EXPECTED_MIGRATIONS = [
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
     (63, "retain unverified Deep Scan worker attempts"),
+    (64, "bind Windows Deep Scan resume output directories"),
 ]
 
 

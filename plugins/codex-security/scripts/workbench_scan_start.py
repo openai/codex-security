@@ -269,6 +269,36 @@ def archive_scan(
         raise
 
 
+@contextmanager
+def register_windows_resume_output(
+    connection: sqlite3.Connection, scan_id: str, scan_dir: Path
+) -> Iterator[None]:
+    from windows_scan_local_files import (
+        DEEP_RESUME_DIRECTORY,
+        create_private_directory,
+        deep_resume_output_identity,
+    )
+
+    retained = scan_dir / DEEP_RESUME_DIRECTORY
+    create_private_directory(retained, exist_ok=False, scan_output=True)
+    try:
+        identity = deep_resume_output_identity(scan_dir)
+        connection.execute(
+            "UPDATE scans SET windows_resume_output_identity = ? WHERE id = ?",
+            (json.dumps(identity), scan_id),
+        )
+        yield
+    except BaseException:
+        # A signal can arrive after commit. The registered scan then owns the
+        # child, just as it owns its output after a successful archive.
+        if (
+            connection.in_transaction
+            or connection.execute("SELECT 1 FROM scans WHERE id = ?", (scan_id,)).fetchone() is None
+        ):
+            retained.rmdir()
+        raise
+
+
 def insert_running_scan(
     connection: sqlite3.Connection,
     *,
