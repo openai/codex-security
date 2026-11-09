@@ -65,11 +65,14 @@ for (const raw of [false, true]) {
           {
             pluginRoot: path.resolve(import.meta.dirname, "../.."),
             resolveScanRoot: async () => root,
+            threadIdFromExtra: () => undefined,
             runWorkbench: async (args: string[]) => {
               assert.deepEqual(args, [
                 "get-scan",
                 "--scan-id",
                 "11111111-1111-4111-8111-111111111111",
+                "--model-thread-id",
+                "",
               ]);
               return {
                 scan: {
