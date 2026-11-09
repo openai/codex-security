@@ -6785,10 +6785,11 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
     return undefined;
   }
   const delay =
-    /\b(?:try again|retry)\s+in\s+(\d{1,6}(?:\.\d{1,3})?)\s*(?:s\b|seconds?\b)/iu.exec(
+    /\b(?:try again|retry)\s+in\s+(\d{1,7}(?:\.\d{1,3})?)\s*(?:(ms)\b|s\b|seconds?\b)/iu.exec(
       message,
     );
-  const retryAfterSeconds = delay === null ? NaN : Number(delay[1]);
+  const retryAfterSeconds =
+    delay === null ? NaN : Number(delay[1]) / (delay[2] ? 1000 : 1);
   return {
     reason: "rate_limit",
     ...(Number.isFinite(retryAfterSeconds) &&
