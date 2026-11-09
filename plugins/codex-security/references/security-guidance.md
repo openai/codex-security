@@ -16,7 +16,11 @@ In Windows PowerShell, the SDK supplies `$env:CODEX_SECURITY_PLUGIN_ROOT` and `$
 
 ```powershell
 $global:LASTEXITCODE = $null
-cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper resolve-security-md --repo "%CODEX_SECURITY_REPOSITORY%\." --scope "%scopePolicyPath%" --out -"'
+& {
+  $PSNativeCommandArgumentPassing = 'Legacy'
+  $PSNativeCommandUseErrorActionPreference = $false
+  cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper resolve-security-md --repo "%CODEX_SECURITY_REPOSITORY%\." --scope "%scopePolicyPath%" --out -"'
+}
 if ($null -eq $global:LASTEXITCODE) { throw 'PowerShell did not return a cmd.exe exit code. Check PATH and PATHEXT.' }
 if ($global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
 ```

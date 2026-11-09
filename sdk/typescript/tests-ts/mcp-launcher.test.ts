@@ -69,6 +69,7 @@ test.skipIf(process.platform !== "win32")(
           plugin: string,
           scopePath: string,
           pathExtensions = ".COM;.EXE;.BAT;.CMD",
+          strict = false,
         ) =>
           spawnSync(
             shell,
@@ -77,7 +78,18 @@ test.skipIf(process.platform !== "win32")(
               "-NonInteractive",
               "-EncodedCommand",
               Buffer.from(
-                `$global:LASTEXITCODE = 0\n${command}\nWrite-Output after-policy`,
+                [
+                  ...(strict
+                    ? [
+                        "$PSNativeCommandArgumentPassing = 'Standard'",
+                        "$PSNativeCommandUseErrorActionPreference = $true",
+                        "$ErrorActionPreference = 'Stop'",
+                      ]
+                    : []),
+                  "$global:LASTEXITCODE = 0",
+                  command,
+                  'Write-Output "after-policy $PSNativeCommandArgumentPassing/$PSNativeCommandUseErrorActionPreference/$ErrorActionPreference"',
+                ].join("\n"),
                 "utf16le",
               ).toString("base64"),
             ],
@@ -119,6 +131,17 @@ test.skipIf(process.platform !== "win32")(
           expect(unavailable.status).not.toBe(0);
           expect(unavailable.stderr).toContain("cmd.exe exit code");
           expect(unavailable.stdout).not.toContain("after-policy");
+        } else {
+          const strictSuccess = run(selected, scope, undefined, true);
+          expect(strictSuccess.status, strictSuccess.stderr).toBe(0);
+          expect(strictSuccess.stdout).toContain("literal scope policy");
+          expect(strictSuccess.stdout).toContain(
+            "after-policy Standard/True/Stop",
+          );
+          const strictFailure = run(custom, scope, undefined, true);
+          expect(strictFailure.status).toBe(23);
+          expect(strictFailure.stderr).toContain("selected custom launcher");
+          expect(strictFailure.stdout).not.toContain("after-policy");
         }
       }
     } finally {

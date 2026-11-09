@@ -3285,7 +3285,11 @@ export class CodexSecurity {
           "",
           "When the selected workflow uses its launcher to resolve SECURITY.md, set $env:scopePolicyPath to the repository-relative scope without a trailing separator (use . for the root). Run these PowerShell lines together and give them to workers that resolve inherited policy.",
           "$global:LASTEXITCODE = $null",
-          String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper resolve-security-md --repo "%CODEX_SECURITY_REPOSITORY%\." --scope "%scopePolicyPath%" --out -"'`,
+          "& {",
+          "  $PSNativeCommandArgumentPassing = 'Legacy'",
+          "  $PSNativeCommandUseErrorActionPreference = $false",
+          String.raw`  cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper resolve-security-md --repo "%CODEX_SECURITY_REPOSITORY%\." --scope "%scopePolicyPath%" --out -"'`,
+          "}",
           "if ($null -eq $global:LASTEXITCODE) { throw 'PowerShell did not return a cmd.exe exit code. Check PATH and PATHEXT.' }",
           "if ($global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }",
         ].join("\n");
