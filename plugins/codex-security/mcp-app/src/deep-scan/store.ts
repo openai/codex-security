@@ -137,11 +137,13 @@ export class WorkbenchDeepScanStore {
     reasoningEffort?: string;
     serviceTier?: string;
     threadId: string;
+    modelThreadId?: string;
     scanRoot: string;
   }): Promise<DeepScanRunState> {
     const userContext = input.userContext;
     const args = {
       threadId: input.threadId,
+      modelThreadId: input.modelThreadId,
       scanId: input.scanId || undefined,
       targetPath: input.targetPath || undefined,
       projectConfigPath: input.projectConfigPath,

@@ -2577,14 +2577,23 @@ export async function main(
     return result;
   };
   const showHistoryNavigation = async (
-    scan: JsonObject,
+    scan: ScanLogSource,
     format: string,
     selection?: string,
   ): Promise<void> => {
     if (!useDefaultOutput(format)) return;
     await withTerminalErrorsHandled(errorOutput, async () => {
       try {
-        printScanReference(scan, errorOutput, selection);
+        printScanReference(
+          scan,
+          errorOutput,
+          Boolean(
+            scan.continuationThreadId ||
+            scan.threadIds?.length ||
+            scan.executionThreadIds?.length,
+          ),
+          selection,
+        );
       } catch {
         // Optional navigation must not prevent reading saved results or logs.
       }
@@ -2837,7 +2846,7 @@ export async function main(
           await history(["get-scan", "--scan-id", scanId], async (value) => {
             const { scan, recipe, parentScanId } = value;
             await showHistoryNavigation(
-              scan as JsonObject,
+              scan as ScanLogSource,
               format,
               args.scanId === undefined ? "latest completed scan" : undefined,
             );
@@ -11808,6 +11817,7 @@ async function readDeepScanStop(
 function printScanReference(
   scan: JsonObject,
   output: Writable,
+  showLogs: boolean,
   selection?: string,
 ): void {
   const scanId = scan["scanId"];
@@ -11832,7 +11842,7 @@ function printScanReference(
     `\n${detail.join(" · ")}\n` +
       (selection === undefined ? "" : `Selected ${selection}.\n`) +
       `Inspect: codex-security scans show ${argument}\n` +
-      `Logs:    codex-security scans logs ${argument}\n`,
+      (showLogs ? `Logs:    codex-security scans logs ${argument}\n` : ""),
   );
 }
 
@@ -11844,7 +11854,7 @@ function printFailedScanReference(
 ): void {
   if (scan === undefined) return;
   try {
-    printScanReference(scan, output);
+    printScanReference(scan, output, !arguments_.mock);
     if (phase !== null)
       output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
     output.write(
@@ -11956,6 +11966,7 @@ function printScanSummary(
       startedAt: result.manifest.scan.startedAt,
     },
     errorOutput,
+    result.manifest.scan.scope.runtimeStatus !== "mock",
   );
   if (deepScanStop?.nextStep !== undefined) {
     errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);

@@ -274,6 +274,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         "--checkpoint-path",
         checkpointPath,
       ];
+      if (context.modelThreadId !== undefined) {
+        arguments_.push(`--model-thread-id=${context.modelThreadId}`);
+      }
       if (expectedDigest !== undefined) {
         arguments_.push("--expected-draft-digest", expectedDigest);
       }

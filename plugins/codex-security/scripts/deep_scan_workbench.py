@@ -15,7 +15,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
-from workbench.handoff import require_current_continuation
+from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench.storage import (
     archived_deep_path,
     create_private_directory,
@@ -610,6 +610,8 @@ def begin_deep_scan_for_scan(
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
     candidate = dependencies().require_scan(connection, scan_id)
+    model_thread_id = getattr(args, "model_thread_id", None)
+    require_tokenless_scan_owner(connection, candidate, model_thread_id)
     workspace = dependencies().require_workspace(connection, candidate["workspace_id"])
     if (
         candidate["mode"] == "deep"
@@ -634,8 +636,17 @@ def begin_deep_scan_for_scan(
             claimed_scan = connection.execute(
                 "UPDATE scans SET deep_scan_owner_thread_id = ?, updated_at = ? "
                 "WHERE id = ? AND deep_scan_owner_thread_id IS NULL "
-                "AND handoff_status = 'delivered' AND handoff_claim_token IS ?",
-                (thread_id, timestamp, scan_id, candidate["handoff_claim_token"]),
+                "AND handoff_status = 'delivered' AND handoff_claim_token IS ? "
+                "AND (handoff_claim_token IS NOT NULL OR continuation_thread_id = ? "
+                "OR (? IS NULL AND continuation_thread_id IS NULL))",
+                (
+                    thread_id,
+                    timestamp,
+                    scan_id,
+                    candidate["handoff_claim_token"],
+                    thread_id,
+                    model_thread_id,
+                ),
             )
             if claimed_workspace.rowcount != 1 or claimed_scan.rowcount != 1:
                 raise SystemExit("A scan can only be orchestrated from its owning Codex thread.")
@@ -782,11 +793,8 @@ def begin_deep_scan_for_target(
         workflow_version = optional_text(args.workflow_version, maximum=256)
         if workflow_version is None:
             raise SystemExit("workflow-version is required.")
-        root = dependencies().resolve_scan_root(args.scan_root)
-        target_root = (root / dependencies().safe_segment(target.name)).resolve()
-        if target_root == target or target in target_root.parents:
-            raise SystemExit("The scan artifact directory must be outside the selected target.")
-        create_private_directory(target_root)
+        target_root = dependencies().scan_target_root(args.scan_root, target)
+        create_private_directory(target_root, scan_output=True)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
