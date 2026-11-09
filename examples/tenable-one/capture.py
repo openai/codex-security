@@ -109,6 +109,8 @@ def read_findings(chunks, asset_id, path_column, line_column):
             if not line.isascii() or not line.isdecimal():
                 raise ValueError(f"{context}: {line_column} must be a nonnegative integer")
             number = int(line)
+            if number > 2**53 - 1:
+                raise ValueError(f"{context}: {line_column} exceeds the maximum exact line number")
             if number > 0:
                 if "code_file_path" not in finding:
                     raise ValueError(
