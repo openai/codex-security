@@ -23,6 +23,32 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
+test("preflights with explicit storage paths when the account has no home directory", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  await mkdir(repository);
+  await writeFile(join(repository, "source.py"), "value = 1\n");
+  const client = new TestClient(
+    {},
+    {
+      environment: {
+        CODEX_HOME: join(root, "codex"),
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+    },
+  );
+  const home = spyOn(os, "homedir").mockImplementation(() => {
+    throw new Error("No home directory for this account");
+  });
+  try {
+    const scan = await client.preflight(repository, { target: ["source.py"] });
+    expect(scan.target.paths).toEqual(["source.py"]);
+  } finally {
+    home.mockRestore();
+    await client.close();
+  }
+});
+
 function stubPluginInstall() {
   return spyOn(runtime, "bootstrapPlugin").mockImplementation(
     async (_home, pluginRoot) => ({
