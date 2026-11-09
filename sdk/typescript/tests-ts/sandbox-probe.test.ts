@@ -151,6 +151,27 @@ describe("Codex sandbox probe", () => {
   );
 
   test.skipIf(process.platform === "win32")(
+    "does not launch a probe canceled during campaign tool selection",
+    async () => {
+      const tools = await temporaryDirectory();
+      const command = await syntheticCodex(tools, 0);
+      const controller = new AbortController();
+      const source = await temporaryDirectory();
+      await withProtectedExecutableRoots([source], async () => {
+        using timeout = spyOn(AbortSignal, "timeout");
+        const probe = probeCodexSandbox(
+          { command },
+          { PATH: tools },
+          controller.signal,
+        );
+        controller.abort(new Error("scan canceled"));
+        await expect(probe).rejects.toBe(controller.signal.reason);
+        expect(timeout).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "reports an executable that cannot be started",
     async () => {
       const root = await temporaryDirectory();

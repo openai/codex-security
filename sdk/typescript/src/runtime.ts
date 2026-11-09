@@ -3558,6 +3558,7 @@ export async function probeCodexSandbox(
       undefined,
       () => {
         // Campaign tool selection happens before the sandbox process starts.
+        signal?.throwIfAborted();
         timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
         return signal === undefined
           ? timeout
