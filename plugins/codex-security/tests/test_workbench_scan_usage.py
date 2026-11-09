@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -1397,11 +1398,15 @@ def test_missing_usage_preserves_measured_parent_or_descendant(
 
 @pytest.mark.native_macos
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS system path aliases")
-@pytest.mark.parametrize("temporary_root", [tempfile.gettempdir(), "/tmp"], ids=["var", "tmp"])
+@pytest.mark.parametrize("temporary_root", [None, "/tmp"], ids=["var", "tmp"])
 def test_completion_accepts_macos_system_rollout_alias(
     tmp_path: Path,
-    temporary_root: str,
+    temporary_root: str | None,
 ) -> None:
+    if temporary_root is None:
+        temporary_root = subprocess.check_output(
+            ["getconf", "DARWIN_USER_TEMP_DIR"], text=True
+        ).strip()
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     with tempfile.TemporaryDirectory(dir=temporary_root) as directory:

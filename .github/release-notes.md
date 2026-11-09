@@ -190,6 +190,8 @@
 - pin directories during scan artifact operations ([#2427](https://github.com/openai/codex-security/pull/2427))
 - publish verified saved-finding changes ([#2429](https://github.com/openai/codex-security/pull/2429))
 - escape component names in terminal output ([#2424](https://github.com/openai/codex-security/pull/2424))
+- hide session log hints for mock scans ([#2488](https://github.com/openai/codex-security/pull/2488))
+- speed up compressed scan session discovery ([#2489](https://github.com/openai/codex-security/pull/2489))
 
 </details>
 

@@ -761,7 +761,8 @@ runs, four with new identities, and two duplicate pairs for testing deduplicatio
 Paths and snippets are fictional; repository files remain unchanged.
 
 Use a separate `CODEX_SECURITY_STATE_DIR` for disposable data. Output, exports,
-archiving, and severity thresholds work normally. Reruns preserve mock mode.
+archiving, and severity thresholds work normally. Use `scans show` to inspect a
+mock scan. Mock scans have no Codex session logs. Reruns preserve mock mode.
 Separate matching or deduplication commands still make their usual model calls.
 
 Mock mode supports Standard repository, path, and diff scans. It cannot combine
