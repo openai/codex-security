@@ -78,8 +78,6 @@ def begin_target_scan(
         ".",
         "--scan-root",
         str(scan_root),
-        "--available-parallelism",
-        "16",
         *(("--user-context-stdin",) if user_context is not None else ()),
         *(("--service-tier", service_tier) if service_tier is not None else ()),
         environment=deep_environment(codex_home),
@@ -1116,16 +1114,34 @@ def test_usage_limit_pause_rejects_changed_target_on_resume(tmp_path: Path) -> N
         "--message",
         "You’ve hit your usage limit. Try again later.",
     )
+    paused = deep.read("thread-deep-scan")
+    by_target = begin_target_scan(
+        deep.state_dir,
+        deep.codex_home,
+        tmp_path / "target",
+        tmp_path / "scans",
+        user_context="a different review request",
+    )
+    assert by_target["deepScan"] == paused
     (tmp_path / "target" / "changed.py").write_text("print('changed')\n")
     rejected = resume_deep_scan(
         deep.state_dir,
         deep.id,
         "thread-deep-scan",
+        "--model",
+        "rejected-model",
+        "--reasoning-effort",
+        "high",
         environment=deep_environment(deep.codex_home),
         check=False,
     )
     assert "checkout revision or contents changed" in rejected["stderr"]
     assert deep.read("thread-deep-scan")["status"] == "interrupted"
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+        model = connection.execute(
+            "SELECT model, reasoning_effort FROM scans WHERE id = ?", (deep.id,)
+        ).fetchone()
+    assert model == (None, None)
     deep.command("cancel-scan", "--thread-id", "thread-deep-scan")
     canceled = deep.read("thread-deep-scan")
     assert canceled["status"] == "canceled"
@@ -1332,8 +1348,6 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
         ".",
         "--scan-root",
         str(tmp_path / "scans"),
-        "--available-parallelism",
-        "16",
         environment={
             **deep_environment(codex_home),
             "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH": str(isolated_config_path),
@@ -1461,11 +1475,28 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
     )
     assert "orchestration must finish and persist its manifest" in str(premature["stderr"])
 
+    def model_begin(thread: str) -> dict[str, object]:
+        return begin_deep_scan(
+            state_dir,
+            thread,
+            "--scan-id",
+            scan_id,
+            "--model-thread-id",
+            thread,
+            environment=deep_environment(codex_home),
+            check=False,
+        )
+
+    assert "awaiting its owning Codex thread" in str(model_begin("other-thread")["stderr"])
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "sdk-thread")
+    assert "owning Codex thread" in str(model_begin("other-thread")["stderr"])
     begun = begin_deep_scan(
         state_dir,
         "sdk-thread",
         "--scan-id",
         scan_id,
+        "--model-thread-id",
+        "sdk-thread",
         "--service-tier",
         "priority",
         environment=deep_environment(codex_home),
@@ -1714,8 +1745,6 @@ def assert_rejected_config(tmp_path: Path, setting: str, value: str, requirement
         "thread-deep-scan",
         "--target-path",
         str(target),
-        "--available-parallelism",
-        "8",
         environment=deep_environment(codex_home),
         check=False,
     )
@@ -2172,8 +2201,6 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         scan_id,
         "--claim-token",
         claim_token,
-        "--available-parallelism",
-        "8",
         environment=deep_environment(codex_home),
     )
     assert begun["startDisposition"] == "created"
