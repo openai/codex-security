@@ -134,9 +134,24 @@ export async function buildBundledPlugin({
         }
       },
     );
+    if (preservePrevious && process.platform === "win32") {
+      // A loaded addon can still prevent unlinking. Use the publication backoff
+      // for the whole old tree because recursive rm retries vary by runtime.
+      try {
+        await retryWindowsRename(() =>
+          rm(previous, { recursive: true, force: true }),
+        );
+      } catch (error) {
+        if (!["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+        console.warn(
+          `Published bundled plugin at ${destination}. Remove staging directory ${staging} after readers exit. ${error.message}`,
+        );
+        return files;
+      }
+    }
     preservePrevious = false;
   } finally {
-    // Leave the previous bundle available if restoring it fails.
+    // Retain the previous bundle if rollback fails or a reader keeps it open.
     if (!preservePrevious) await rm(staging, { recursive: true, force: true });
   }
 
