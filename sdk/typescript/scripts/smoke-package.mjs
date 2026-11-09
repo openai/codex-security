@@ -18,6 +18,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { resolveNpm } from "./package-smoke-npm.mjs";
+import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const {
   commandTimeoutMs: PACKAGE_SMOKE_TIMEOUT_MS,
@@ -297,27 +298,7 @@ assert.equal(
   `Packed npm tarball is not a regular file: ${archive}.`,
 );
 
-const publicPluginManifest = ".codex-plugin/plugin.json";
-assert.ok(
-  Array.isArray(pluginContract.externalOwnedExact) &&
-    pluginContract.externalOwnedExact.includes(publicPluginManifest),
-  "Plugin contract must include its public manifest.",
-);
-assert.ok(
-  Array.isArray(pluginContract.shippedExact) &&
-    pluginContract.shippedExact.every((path) => typeof path === "string"),
-  "Plugin contract must declare its shipped files.",
-);
-
-const expectedPluginFiles = [
-  publicPluginManifest,
-  ...pluginContract.shippedExact.filter((path) => !path.startsWith("sdk/")),
-].sort();
-assert.equal(
-  new Set(expectedPluginFiles).size,
-  expectedPluginFiles.length,
-  "Plugin contract must not contain duplicate installed paths.",
-);
+const expectedPluginFiles = pluginContractFiles(pluginContract).sort();
 
 const consumer = await mkdtemp(join(tmpdir(), "codex-security-package-"));
 try {

@@ -601,6 +601,25 @@ function readProvenance(verified) {
  * @param {WorkflowRelease} expected
  */
 export function verifySignatureAudit(report, archive, expected) {
+  return verifyAuditForRun(report, archive, expected, String(expected.runId));
+}
+
+/**
+ * @param {ReleaseMetadata} report
+ * @param {Uint8Array} archive
+ * @param {RepositoryRelease} expected
+ */
+export function verifyRecoveredSignatureAudit(report, archive, expected) {
+  return verifyAuditForRun(report, archive, expected, null);
+}
+
+/**
+ * @param {ReleaseMetadata} report
+ * @param {Uint8Array} archive
+ * @param {RepositoryRelease} expected
+ * @param {string | null} expectedRunId Null recovers the original signed run.
+ */
+function verifyAuditForRun(report, archive, expected, expectedRunId) {
   if (
     !Array.isArray(report?.invalid) ||
     !Array.isArray(report.missing) ||
@@ -701,21 +720,24 @@ export function verifySignatureAudit(report, archive, expected) {
     expected.gitHead,
   );
 
-  const runId = String(expected.runId);
-  if (!/^[1-9][0-9]*$/u.test(runId)) {
+  if (expectedRunId !== null && !/^[1-9][0-9]*$/u.test(expectedRunId)) {
     throw new Error(
       "Verified provenance requires a valid release workflow run.",
     );
   }
   const invocation = statement.predicate?.runDetails?.metadata?.invocationId;
-  const invocationPrefix = `${repository}/actions/runs/${runId}/attempts/`;
-  if (
-    typeof invocation !== "string" ||
-    !invocation.startsWith(invocationPrefix) ||
-    !/^[1-9][0-9]*$/u.test(invocation.slice(invocationPrefix.length))
-  ) {
+  const prefix = `${repository}/actions/runs/`;
+  const match =
+    typeof invocation === "string" && invocation.startsWith(prefix)
+      ? /^([1-9][0-9]*)\/attempts\/([1-9][0-9]*)$/u.exec(
+          invocation.slice(prefix.length),
+        )
+      : null;
+  if (!match || (expectedRunId !== null && match[1] !== expectedRunId)) {
     throw new Error(
-      "Verified SLSA provenance must identify the successful release run.",
+      expectedRunId === null
+        ? "Verified SLSA provenance must identify the protected release run."
+        : "Verified SLSA provenance must identify the successful release run.",
     );
   }
 
@@ -739,64 +761,10 @@ export function verifySignatureAudit(report, archive, expected) {
     version,
     gitHead: expected.gitHead,
     repository: expected.repository,
-    runId,
-    runAttempt: invocation.slice(invocationPrefix.length),
+    runId: match[1],
+    runAttempt: match[2],
     sha512,
   };
-}
-
-/**
- * @param {ReleaseMetadata} report
- * @param {Uint8Array} archive
- * @param {RepositoryRelease} expected
- */
-export function verifyRecoveredSignatureAudit(report, archive, expected) {
-  const version = releaseVersion({
-    name: packageName,
-    version: expected.version,
-  });
-  if (
-    typeof expected.repository !== "string" ||
-    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(expected.repository)
-  ) {
-    throw new Error("Verified provenance requires an exact GitHub repository.");
-  }
-
-  const verified = Array.isArray(report?.verified)
-    ? report.verified.find(
-        (candidate) =>
-          candidate?.name === packageName && candidate.version === version,
-      )
-    : undefined;
-  if (verified === undefined) {
-    throw new Error(
-      "The published package must have a cryptographically verified attestation.",
-    );
-  }
-
-  const { statement } = readProvenance(verified);
-
-  const prefix = `https://github.com/${expected.repository}/actions/runs/`;
-  const invocation = statement?.predicate?.runDetails?.metadata?.invocationId;
-  if (typeof invocation !== "string" || !invocation.startsWith(prefix)) {
-    throw new Error(
-      "Verified SLSA provenance must identify the protected release run.",
-    );
-  }
-  const match = /^([1-9][0-9]*)\/attempts\/([1-9][0-9]*)$/u.exec(
-    invocation.slice(prefix.length),
-  );
-  if (match === null) {
-    throw new Error(
-      "Verified SLSA provenance must identify the protected release run.",
-    );
-  }
-
-  return verifySignatureAudit(report, archive, {
-    ...expected,
-    version,
-    runId: match[1],
-  });
 }
 
 /**
@@ -874,17 +842,14 @@ function main() {
     return;
   }
 
-  if (command === "require-published-increase" && process.argv.length === 4) {
-    const publishedVersions = JSON.parse(readFileSync(0, "utf8"));
-    console.log(
-      requirePublishedReleaseIncrease(process.argv[3], publishedVersions),
-    );
-    return;
-  }
-
-  if (command === "release-mode" && process.argv.length === 4) {
-    const publishedVersions = JSON.parse(readFileSync(0, "utf8"));
-    console.log(publishedReleaseMode(process.argv[3], publishedVersions));
+  const historyCommands = {
+    "require-published-increase": requirePublishedReleaseIncrease,
+    "release-mode": publishedReleaseMode,
+  };
+  if (process.argv.length === 4 && Object.hasOwn(historyCommands, command)) {
+    const input = JSON.parse(readFileSync(0, "utf8"));
+    const result = historyCommands[command](process.argv[3], input);
+    console.log(result);
     return;
   }
 

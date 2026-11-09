@@ -237,7 +237,7 @@ function runPublisher({
   return { status, stdout, stderr, calls };
 }
 
-function releaseLabelGhMock(handlers: readonly string[], shiftEndpoint = true) {
+function releaseLabelGhMock(handlers: readonly string[]) {
   return [
     "gh() {",
     '  if [[ "$1" != "api" ]]; then return 64; fi',
@@ -248,12 +248,13 @@ function releaseLabelGhMock(handlers: readonly string[], shiftEndpoint = true) {
     "    shift 2",
     "  fi",
     '  local endpoint="$1"',
-    ...(shiftEndpoint ? ["  shift"] : []),
+    "  shift",
     '  case "$method $endpoint" in',
-    ...handlers,
     '    "GET repos/test/codex-security/issues/17")',
-    "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+    '      [[ $# == 2 && "$1" == --jq ]] || return 64',
+    `      jq ${process.platform === "win32" ? "--binary " : ""}-r "$2" <<< "$MOCK_ISSUE"`,
     "      ;;",
+    ...handlers,
     '    "POST repos/test/codex-security/issues/17/labels")',
     "      printf '%s\\n' \"$@\"",
     "      ;;",
@@ -631,16 +632,15 @@ function runReleaseLabels(
   title: string,
   routes: readonly string[],
   setup: readonly string[] = [],
-  shiftEndpoint = true,
 ) {
-  const mock = [...setup, releaseLabelGhMock(routes, shiftEndpoint)].join("\n");
+  const mock = [...setup, releaseLabelGhMock(routes)].join("\n");
   const script = workflowStepShell(
     releaseLabelsWorkflow,
     "Categorize pull request without checking out its code",
   );
   return runShell(`${mock}\n${script}`, {
     GITHUB_REPOSITORY: "test/codex-security",
-    MOCK_PR_TITLE: title,
+    MOCK_ISSUE: JSON.stringify({ title }),
     PR_NUMBER: "17",
   });
 }
@@ -2158,10 +2158,8 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       const outputs = readFileSync(outputPath, "utf8");
       expect(outputs).toContain(`changed=${changed}`);
       if (changed) {
-        expect(outputs).toContain(`version=${currentVersion}`);
-        expect(outputs).toContain(`tag=npm-v${currentVersion}`);
+        expect(outputs.split("\n")).toContain(`tag=npm-v${currentVersion}`);
       } else {
-        expect(outputs).not.toContain("version=");
         expect(outputs).not.toContain("tag=");
       }
     },
@@ -4079,16 +4077,13 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
     "fix: preserve a trailing carriage return\r",
   ])("rejects nonconventional pull request title %s", async (title) => {
     const result = await runReleaseLabels(title, [
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-      "      ;;",
       "    *)",
       "      printf '%s\\n' 'unexpected label mutation'",
       "      return 70",
       "      ;;",
     ]);
 
-    expect(result.status).toBe(1);
+    expect(result.status, result.stderr).toBe(1);
     expect(result.stderr).toContain(
       "Pull request title must follow <type>[optional scope][!]: <description>.",
     );
@@ -4136,7 +4131,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
         ],
       );
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(
         "Preserving existing skip-release-notes label.",
       );
@@ -4159,9 +4154,6 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
 
   test("preserves the latest unattributed skip label after earlier automation", async () => {
     const result = await runReleaseLabels("feat: customer-visible change", [
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' 'feat: customer-visible change' | base64",
-      "      ;;",
       '    "GET repos/test/codex-security/issues/17/labels")',
       "      printf '%s\\n' skip-release-notes",
       "      ;;",
@@ -4178,7 +4170,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
       "      ;;",
     ]);
 
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(
       "Preserving existing skip-release-notes label.",
     );
@@ -4209,7 +4201,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
         "      ;;",
       ]);
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(
         "removed automatically applied skip-release-notes",
       );
@@ -4251,7 +4243,7 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
       "      ;;",
     ]);
 
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(`labels[]=${label}`);
   });
 
@@ -4265,9 +4257,6 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
       const result = await runReleaseLabels(
         title,
         [
-          '    "GET repos/test/codex-security/issues/17")',
-          "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-          "      ;;",
           '    "GET repos/test/codex-security/issues/17/labels")',
           "      return 0",
           "      ;;",
@@ -4285,10 +4274,9 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
           "    *) return 66 ;;",
         ],
         ["skip_label_exists=0"],
-        false,
       );
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain("applied skip-release-notes");
     },
   );
@@ -4318,32 +4306,17 @@ test.skipIf(process.platform === "win32").each([
 ])(
   "uses the manual $manual release category over stale $stale after retitling to $title",
   async ({ title, manual, stale }) => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
+    const result = await runReleaseLabels(
+      title,
+      [
+        `    "GET repos/test/codex-security/issues/17/labels") printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;`,
+        `    "GET repos/test/codex-security/issues/17/timeline?per_page=100") printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;`,
+        '    "DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL") echo removed-stale-label ;;',
+        '    "DELETE "*) echo removed-manual-label; return 70 ;;',
+        '    "POST "*) echo added-automatic-category ;;',
+      ],
+      [`MANUAL_LABEL=${manual}`, `STALE_LABEL=${stale}`],
     );
-    const fixture = `gh() {
-    case "$*" in
-      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' "$MOCK_PR_TITLE" | base64 ;;
-      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;
-      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;
-      "api --method DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL --silent") echo removed-stale-label ;;
-      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
-      "api --method POST "*) echo added-automatic-category ;;
-      *) return 65 ;;
-    esac
-  }`;
-    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
-      env: {
-        ...process.env,
-        GITHUB_REPOSITORY: "test/codex-security",
-        PR_NUMBER: "17",
-        MOCK_PR_TITLE: title,
-        MANUAL_LABEL: manual,
-        STALE_LABEL: stale,
-      },
-      timeout: 10_000,
-    });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(`Preserving existing ${manual} label.`);
     expect(result.stdout).toContain("removed-stale-label");

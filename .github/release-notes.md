@@ -204,5 +204,6 @@
 - deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
 - restrict sockets and process tracing in Compose ([#160](https://github.com/openai/codex-security/pull/160))
 - reject sparse entries in release tarballs ([#2456](https://github.com/openai/codex-security/pull/2456))
+- consolidate scan, workbench and release rules ([#2452](https://github.com/openai/codex-security/pull/2452))
 
 <!-- release-section: upgrades:end -->

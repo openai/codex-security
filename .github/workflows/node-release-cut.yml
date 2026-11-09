@@ -147,7 +147,6 @@ jobs:
 
           {
             printf 'changed=true\n'
-            printf 'version=%s\n' "$version"
             printf 'tag=npm-v%s\n' "$version"
           } >> "$GITHUB_OUTPUT"
 
