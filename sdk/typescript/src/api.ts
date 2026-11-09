@@ -262,6 +262,7 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
+  copyPluginTree,
   createIsolatedHome,
   logoutCredentialHome,
   executablePathForSpawn,
@@ -308,6 +309,7 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
+import { startHeadDriftMonitor } from "./target-drift.js";
 import {
   inspectTrustedExecutable,
   isWithin,
@@ -2187,6 +2189,7 @@ export class CodexSecurity {
     let notifiedLimit: number | undefined;
     let scanDir = "";
     let targetPathsFile: string | null = null;
+    let stagedPluginRoot: string | undefined;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let scanProgressTracker: ScanProgressTracker | null = null;
@@ -2215,6 +2218,7 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    let stopHeadDriftMonitor: (() => void) | undefined;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
@@ -2464,8 +2468,9 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const shellPluginRoot = runtime.plugin.pluginRoot;
-      const canonicalShellPluginRoot = await realpath(shellPluginRoot);
+      const canonicalShellPluginRoot = await realpath(
+        runtime.plugin.pluginRoot,
+      );
       const pluginRelativeToHome = relative(
         runtimeHome,
         canonicalShellPluginRoot,
@@ -2480,6 +2485,24 @@ export class CodexSecurity {
           `Shell-visible plugin root must be outside CODEX_HOME: ${canonicalShellPluginRoot}`,
         );
       }
+      // Windows grants directory reads to its sandbox account through inheritable
+      // ACLs. Keep those grants on a disposable copy of the SDK's shipped plugin.
+      if (
+        process.platform === "win32" &&
+        this.config.pluginPath === undefined &&
+        runtime.bootstrapWorkspace !== undefined &&
+        this.#dependencies.hostedScan === undefined
+      ) {
+        stagedPluginRoot = await mkdtemp(
+          join(runtime.bootstrapWorkspace, "bundled-plugin-"),
+        );
+        await copyPluginTree(
+          canonicalShellPluginRoot,
+          stagedPluginRoot,
+          signal,
+        );
+      }
+      const shellPluginRoot = stagedPluginRoot ?? runtime.plugin.pluginRoot;
       const skillName = skillNameFor(normalized, mode);
       // Native no-turn resume retains saved permissions; exec refreshes them.
       // Keep the parent for its ChatGPT advisory and configured Node launcher.
@@ -2513,11 +2536,11 @@ export class CodexSecurity {
         );
       }
       checkOpen();
+      const readRepositoryRevision =
+        this.#dependencies.repositoryRevision ?? repositoryRevision;
       const expectation: ScanExpectation = {
         repository: repo,
-        repositoryRevision: await (
-          this.#dependencies.repositoryRevision ?? repositoryRevision
-        )(repo, signal),
+        repositoryRevision: await readRepositoryRevision(repo, signal),
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
@@ -3145,6 +3168,27 @@ export class CodexSecurity {
       }
       throwIfAborted(signal, scanDir);
       if (
+        options.onWarning !== undefined &&
+        targetRevision !== null &&
+        (targetKind === "git_revision" ||
+          targetKind === "git_worktree" ||
+          (targetKind === "git_diff" && normalized.kind === "working_tree"))
+      ) {
+        stopHeadDriftMonitor = startHeadDriftMonitor({
+          expectedRevision: registeredRevision,
+          readRevision: (revisionSignal) =>
+            readRepositoryRevision(repo, revisionSignal),
+          signal,
+          onDrift: () =>
+            notifyObserver(
+              options,
+              "onWarning",
+            )(
+              `Repository HEAD changed while the scan was running. This scan remains bound to ${registeredRevision}. To scan the new revision, stop this scan and restart it.`,
+            ),
+        });
+      }
+      if (
         this.#dependencies.hostedScan === undefined &&
         ((mode !== "deep" && options.onProgress !== undefined) ||
           (mode === "deep" && options.onDeepProgress !== undefined))
@@ -3330,7 +3374,7 @@ export class CodexSecurity {
       const { codex, environment, codexOptions } =
         await this.#createSessionCodex(
           session,
-          { command: "scan", mode },
+          { command: "scan", mode, pluginReadRoot: stagedPluginRoot },
           runtimePaths,
           options.auth,
           git,
@@ -3469,6 +3513,8 @@ export class CodexSecurity {
             codexOptions,
             preflightCommand:
               await this.#providerPreflightCommand(effectiveConfig),
+            // Host imports must use the stable install URL. The engine receives
+            // the scan's shell-visible plugin through codexOptions.env.
             pluginRoot: runtime.plugin.pluginRoot,
             repository: repo,
             scanDir,
@@ -3689,6 +3735,7 @@ export class CodexSecurity {
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
+      stopHeadDriftMonitor?.();
       activeScan = null;
       const completedScan = completion["scan"];
       notifyScanLifecycle(options, completedScan);
@@ -4107,6 +4154,7 @@ export class CodexSecurity {
           activeScan = null;
         } catch {}
       }
+      stopHeadDriftMonitor?.();
       if (runPostScan !== null && !signal.aborted) {
         scanProgressTracker?.stop();
         try {
@@ -4134,6 +4182,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      stopHeadDriftMonitor?.();
       budgetAbortController.abort();
       scanProgressTracker?.stop();
       // Temporary-input cleanup must not replace the scan's outcome.
@@ -4141,6 +4190,9 @@ export class CodexSecurity {
         for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
+          stagedPluginRoot === undefined
+            ? undefined
+            : cleanupSdkDirectory(stagedPluginRoot),
           savedProviderProfile?.cleanup(),
         ])) {
           if (cleanup.status === "rejected") {
@@ -4480,7 +4532,15 @@ export class CodexSecurity {
 
   async #createSessionCodex(
     session: PreparedSession,
-    { command, mode }: { command: string; mode?: ScanMode },
+    {
+      command,
+      mode,
+      pluginReadRoot,
+    }: {
+      command: string;
+      mode?: ScanMode;
+      pluginReadRoot?: string;
+    },
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
@@ -4641,13 +4701,20 @@ export class CodexSecurity {
     }
     const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
     // This snapshot outlives a Deep Scan when the client reuses its runtime.
-    if (runtime.deepScanConfigPath !== undefined) {
+    if (
+      runtime.deepScanConfigPath !== undefined ||
+      pluginReadRoot !== undefined
+    ) {
       configOverrides = [
         `permissions.${SCAN_PERMISSION_PROFILE}.filesystem=${inlineToml({
           ":root": "read",
           ":workspace_roots": "write",
+          ...(pluginReadRoot === undefined
+            ? {}
+            : { [pluginReadRoot]: { ".": "read" } }),
           [runtimeHome]: { ".": "deny" },
-          ...(runtime.deepScanConfigDirectory === undefined
+          ...(runtime.deepScanConfigPath !== undefined &&
+          runtime.deepScanConfigDirectory === undefined
             ? { [runtime.deepScanConfigPath]: { ".": "deny" } }
             : {}),
         })}`,
@@ -5463,7 +5530,11 @@ export class CodexSecurity {
       this.#dependencies.environment,
     );
     const canonicalStateDirectory = await canonicalConfigPath(stateDirectory);
-    requireOutputOutsideRepositories(protectedRoots, canonicalStateDirectory);
+    requireOutputOutsideRepositories(
+      protectedRoots,
+      canonicalStateDirectory,
+      "state",
+    );
     return {
       repository: repo,
       target: normalized,
@@ -6744,10 +6815,11 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
     return undefined;
   }
   const delay =
-    /\b(?:try again|retry)\s+in\s+(\d{1,6}(?:\.\d{1,3})?)\s*(?:s\b|seconds?\b)/iu.exec(
+    /\b(?:try again|retry)\s+in\s+(\d{1,7}(?:\.\d{1,3})?)\s*(?:(ms)\b|s\b|seconds?\b)/iu.exec(
       message,
     );
-  const retryAfterSeconds = delay === null ? NaN : Number(delay[1]);
+  const retryAfterSeconds =
+    delay === null ? NaN : Number(delay[1]) / (delay[2] ? 1000 : 1);
   return {
     reason: "rate_limit",
     ...(Number.isFinite(retryAfterSeconds) &&

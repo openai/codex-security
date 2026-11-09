@@ -108,6 +108,7 @@ EXPECTED_MIGRATIONS = [
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
     (63, "retain unverified Deep Scan worker attempts"),
+    (64, "persist scan log completion boundaries"),
 ]
 
 
@@ -1144,6 +1145,58 @@ def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
         "pluginVersion": None,
         "mock": None,
     }
+
+
+@pytest.mark.parametrize("preview_version", [48, 50, 63])
+def test_log_boundary_preview_preserves_saved_boundary_and_repairs_history(preview_version):
+    name = "persist scan log completion boundaries"
+    connection, apply_migrations = create_historical_database(
+        preview_version,
+        ((preview_version, name, "ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"),),
+    )
+    insert_historical_row(connection, "workspaces", "created", id="workspace")
+    insert_legacy_scan(
+        connection, "created", id="preview", workspace_id="workspace", log_completed_at="boundary"
+    )
+
+    apply_migrations(connection)
+    apply_migrations(connection)
+
+    assert (
+        connection.execute("SELECT log_completed_at FROM scans WHERE id = 'preview'").fetchone()[0]
+        == "boundary"
+    )
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (63,64) ORDER BY version"
+        )
+    ] == [(63, "retain unverified Deep Scan worker attempts"), (64, name)]
+    assert "worker_usage_gap" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
+
+
+def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
+    connection, apply_migrations = create_historical_database(64)
+    insert_historical_row(connection, "workspaces", "created", id="legacy-workspace")
+    for case in ("running", "complete", "failed", "canceled"):
+        insert_legacy_scan(
+            connection,
+            "later-edit",
+            id=case,
+            scan_dir=f"/legacy/{case}",
+            status="failed" if case == "canceled" else case,
+            completed_at=None if case == "running" else "artifact-time",
+            canceled_at="cancel-time" if case == "canceled" else None,
+        )
+    connection.commit()
+    before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+
+    apply_migrations(connection)
+
+    after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+    assert after == [{**row, "log_completed_at": None} for row in before]
 
 
 @pytest.mark.parametrize(

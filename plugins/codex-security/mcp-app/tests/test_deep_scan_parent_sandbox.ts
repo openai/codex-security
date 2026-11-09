@@ -17,6 +17,26 @@ const pinnedReadOnly = {
   network: "restricted",
 };
 
+const stagedPlugin = path.resolve("bundled plugin [fixture]");
+assert.deepEqual(
+  resolveDeepWorkerParentSandbox(
+    restricted([
+      rootRead,
+      { path: { type: "path", path: stagedPlugin }, access: "read" },
+      {
+        path: { type: "path", path: path.dirname(stagedPlugin) },
+        access: "write",
+      },
+      {
+        path: { type: "path", path: path.resolve("other-plugin") },
+        access: "read",
+      },
+    ]),
+    stagedPlugin,
+  ),
+  { filesystemDenies: [], pluginReadRoot: stagedPlugin },
+);
+
 assert.equal(CODEX_SANDBOX_STATE_META_CAPABILITY, "codex/sandbox-state-meta");
 assert.deepEqual(resolveDeepWorkerParentSandbox(extra(pinnedReadOnly)), {
   filesystemDenies: [],

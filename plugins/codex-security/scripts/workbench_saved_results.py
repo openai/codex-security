@@ -1243,10 +1243,11 @@ def mark_running_scan_failed(
 ) -> bool:
     updated = connection.execute(
         """
-        UPDATE scans SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
+        UPDATE scans SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
+            log_completed_at = ?
         WHERE id = ? AND status = 'running'
         """,
-        (message, timestamp, timestamp, scan_id),
+        (message, timestamp, timestamp, timestamp, scan_id),
     )
     return updated.rowcount == 1
 
@@ -1328,10 +1329,10 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?, log_completed_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, timestamp, scan["id"]),
+            (timestamp, timestamp, timestamp, timestamp, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be canceled.")

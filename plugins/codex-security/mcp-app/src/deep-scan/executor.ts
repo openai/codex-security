@@ -180,6 +180,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         }
         childEnv[name] = value;
       }
+      if (parentSandbox.pluginReadRoot !== undefined)
+        childEnv.CODEX_SECURITY_PLUGIN_ROOT = parentSandbox.pluginReadRoot;
       if (deepConfigFile !== undefined) {
         const config = this.modelSettings.deepScanConfig!;
         // The saved run owns these limits, including after a coordinator restart.
@@ -605,10 +607,11 @@ function workerPermissionProfile(
   const literalDenies = sandbox.literalFilesystemDenies ?? [];
   const filesystem = new Map<string, string | Record<string, string>>([
     [":root", "read"],
-    ...[...sandbox.filesystemDenies, ...literalDenies].map(
-      (key): [string, string] => [key, "deny"],
-    ),
   ]);
+  if (sandbox.pluginReadRoot !== undefined)
+    filesystem.set(sandbox.pluginReadRoot, { ".": "read" });
+  for (const path of [...sandbox.filesystemDenies, ...literalDenies])
+    filesystem.set(path, "deny");
   const pointDenies = literalDenies.filter((path) => /[*?[\]]/u.test(path));
   // Bubblewrap cannot mount a second mask inside a directory it already hid.
   if (

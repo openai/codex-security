@@ -1,5 +1,5 @@
 import { asRecord as record, isNonEmptyString } from "../record.js";
-import { isAbsolute } from "node:path";
+import { isAbsolute, relative, toNamespacedPath } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { DeepScanNonRetryableError } from "./errors.js";
 
@@ -8,18 +8,22 @@ export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 export type DeepWorkerParentSandbox = {
   /**
    * Validated glob keys copied into the worker's stricter root-read
-   * profile. Grants are intentionally not transported because Deep Scan
-   * workers never inherit parent write access.
+   * profile. Workers never inherit parent write access.
    */
   readonly filesystemDenies: readonly string[];
   /** Preserve literal paths separately from glob patterns. */
   readonly literalFilesystemDenies?: readonly string[];
+  /** Windows needs the parent's named read root for the selected plugin. */
+  readonly pluginReadRoot?: string;
   readonly globScanMaxDepth?: number;
 };
 
 /** Resolve the effective host policy, never a model-supplied scan argument. */
 export function resolveDeepWorkerParentSandbox(
   extra: unknown,
+  pluginRoot = process.platform === "win32"
+    ? process.env.CODEX_SECURITY_PLUGIN_ROOT
+    : undefined,
 ): DeepWorkerParentSandbox {
   const state = trustedSandboxState(extra);
 
@@ -52,6 +56,7 @@ export function resolveDeepWorkerParentSandbox(
   let hasRootRead = false;
   const filesystemDenies: string[] = [];
   const literalFilesystemDenies: string[] = [];
+  let pluginReadRoot: string | undefined;
   for (const value of filesystem.entries) {
     const entry = record(value);
     if (!entry || !isKnownFilesystemAccess(entry.access)) {
@@ -98,6 +103,14 @@ export function resolveDeepWorkerParentSandbox(
           );
         }
         literalFilesystemDenies.push(path.path);
+      } else if (
+        entry.access === "read" &&
+        pluginRoot !== undefined &&
+        isAbsolute(path.path) &&
+        relative(toNamespacedPath(path.path), toNamespacedPath(pluginRoot)) ===
+          ""
+      ) {
+        pluginReadRoot = path.path;
       }
     } else if (path.type === "glob_pattern") {
       if (!isNonEmptyString(path.pattern)) {
@@ -136,6 +149,7 @@ export function resolveDeepWorkerParentSandbox(
 
   return {
     filesystemDenies,
+    ...(pluginReadRoot === undefined ? {} : { pluginReadRoot }),
     ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),
   };
