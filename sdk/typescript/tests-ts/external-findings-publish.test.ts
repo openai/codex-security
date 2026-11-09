@@ -12185,6 +12185,65 @@ const readerReports = {
   ],
 } satisfies Record<ExternalFindingsReader, [unknown, (2 | 3)?]>;
 
+// Private structured evidence uses nullable severity and start/end lines.
+// Pin those wire fields to the native fixtures, including the second Continuum
+// location and Endor package paths with no reported line.
+const privateReaderFields = {
+  blackduck: { severity: "high", locations: [] },
+  checkmarx: { severity: "medium", locations: [] },
+  continuum: {
+    severity: "critical",
+    locations: [
+      { path: "src/example.ts", start_line: 3, end_line: 5 },
+      { path: "src/other.ts", start_line: 12 },
+    ],
+  },
+  endor: {
+    severity: "critical",
+    locations: [
+      { path: "package.json", start_line: null },
+      { path: "package-lock.json", start_line: null },
+    ],
+  },
+  github: {
+    severity: "high",
+    locations: [{ path: "src/query.ts", start_line: 12, end_line: 14 }],
+  },
+  inspector: {
+    severity: "high",
+    locations: [{ path: "apps/web/package.json", start_line: null }],
+  },
+  opengrep: {
+    severity: null,
+    locations: [{ path: "src/example.ts", start_line: 3, end_line: 3 }],
+  },
+  semgrep: {
+    severity: "critical",
+    locations: [{ path: "src/example.ts", start_line: 3, end_line: 3 }],
+  },
+  snyk: { severity: "high", locations: [] },
+  sonar: {
+    severity: "high",
+    locations: [{ path: "src/example.ts", start_line: null }],
+  },
+  tenable: {
+    severity: "high",
+    locations: [{ path: "src/app.ts", start_line: 7 }],
+  },
+  trivy: {
+    severity: "high",
+    locations: [{ path: "package-lock.json", start_line: 12 }],
+  },
+  veracode: { severity: "high", locations: [] },
+  wiz: { severity: "high", locations: [] },
+} satisfies Record<
+  ExternalFindingsReader,
+  {
+    severity: string | null;
+    locations: { path: string; start_line: number | null; end_line?: number }[];
+  }
+>;
+
 test.each(EXTERNAL_FINDINGS_READERS)(
   "the SDK sends the reviewed %s source identity and evidence to either Cloud destination",
   async (reader) => {
@@ -12230,13 +12289,12 @@ test.each(EXTERNAL_FINDINGS_READERS)(
     const { source_finding_id, evidence } = structuredClone(
       repository.preview.findings[0]!,
     );
-    const reviewed = { source_finding_id, evidence: { title: evidence.title } };
     const source = { provider, source_key: options.sourceKey };
     expect(f.posts).toHaveLength(0);
     expect((await repository.publish()).verified).toBe(1);
     const stored = f.reports.get(source_finding_id);
-    expect(stored).toMatchObject({ source, ...reviewed });
-    expect(stored?.evidence.source_data).toEqual(evidence.source_data);
+    expect(stored).toMatchObject({ source, source_finding_id });
+    expect(stored?.evidence).toEqual(evidence);
 
     // An unsupported inbox format must not silently switch back to the still
     // connected repository publisher.
@@ -12256,8 +12314,15 @@ test.each(EXTERNAL_FINDINGS_READERS)(
     expect((await prepared.publish()).privateJob?.status).toBe("completed");
     expect(uploads).toHaveLength(1);
     const uploaded = JSON.parse(uploads[0]!.bytes).findings;
-    expect(uploaded).toMatchObject([reviewed]);
-    expect(uploaded[0].evidence.source_data).toEqual(evidence.source_data);
+    expect(uploaded).toEqual([
+      {
+        source_finding_id,
+        evidence: {
+          ...evidence,
+          ...privateReaderFields[reader],
+        },
+      },
+    ]);
     expect(jobs).toMatchObject([
       privateJobFields(provider, fileId, "security.findings.v1"),
     ]);
