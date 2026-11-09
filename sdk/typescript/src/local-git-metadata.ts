@@ -1,5 +1,12 @@
 import { constants } from "node:fs";
-import { lstat, open, readlink, realpath, stat } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  open,
+  readlink,
+  realpath,
+  stat,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { buffer } from "node:stream/consumers";
 import { environmentEntry } from "./auth.js";
@@ -152,13 +159,21 @@ async function associatedMetadataRoots(
     : undefined;
   if (hasCommon && common === undefined) return [];
   const storage = common ?? directory;
-  for (const name of ["objects", "refs"]) {
-    const metadata = await abortable(
-      () => stat(join(storage, name)).catch(nullIfMissingPath),
-      signal,
-    );
-    if (!metadata?.isDirectory()) return [];
-  }
+  const objects = await abortable(
+    () => stat(join(storage, "objects")).catch(nullIfMissingPath),
+    signal,
+  );
+  if (!objects?.isDirectory()) return [];
+  // With packed refs, a pinned fetch only needs refs to pass Git's access(X_OK) check.
+  const refs = await abortable(
+    () =>
+      access(join(storage, "refs"), constants.X_OK).then(
+        () => true,
+        nullIfUnavailableInputRoot,
+      ),
+    signal,
+  );
+  if (!refs) return [];
   const roots = common === undefined ? [directory] : [directory, common];
   if (
     process.platform === "win32" &&

@@ -55,7 +55,9 @@ describe("multiscan", () => {
     await writeFile(prompt, "Review synthetic boundaries.");
     const config = join(paths.root, "operator");
     const staleMarker = join(config, ".git");
-    await mkdir(staleMarker, { recursive: true });
+    await mkdir(join(staleMarker, "refs"), { recursive: true });
+    await writeFile(join(staleMarker, "HEAD"), source.revision + "\n");
+    await writeFile(join(staleMarker, "objects"), "", { mode: 0o755 });
     const operator = join(config, "policy");
     await mkdir(operator);
     const marker = join(operator, ".git");
@@ -955,6 +957,42 @@ describe("multiscan", () => {
     expect(runs).toBe(2);
     expect(await readFile(join(standard, "checkpoint"), "utf8")).toBe("keep");
     expect(await readFile(join(deep, "checkpoint"), "utf8")).toBe("keep");
+  });
+
+  test("keeps document boundaries for a fetchable source with packed refs", async () => {
+    const { paths, source } = await repositoryFixture("packed-refs");
+    git(source.path, "pack-refs", "--all");
+    const refs = join(source.path, ".git", "refs");
+    await rm(refs, { recursive: true });
+    await writeFile(refs, "", { mode: 0o755 });
+
+    const direct = join(paths.root, "guide.md");
+    await writeFile(direct, "Shared policy.");
+    const alias = join(source.path, "docs");
+    await filesystem.symlink(paths.root, alias, "junction");
+    const linked = join(alias, "guide.md");
+    const settings = options(paths, client(completeRun), { maxAttempts: 1 });
+    await expect(
+      runMultiscan({ ...settings, scanPromptFile: linked }),
+    ).rejects.toThrow("directory links outside the selected repository");
+    const summary = await runMultiscan({
+      ...settings,
+      knowledgeBasePaths: [linked],
+    });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      {
+        status: "failed",
+        error: expect.stringContaining("repository symbolic link"),
+      },
+    ]);
+    await expect(
+      runMultiscan({
+        ...settings,
+        outputDir: join(paths.root, "direct"),
+        scanPromptFile: direct,
+        knowledgeBasePaths: [direct],
+      }),
+    ).resolves.toMatchObject({ completed: 1 });
   });
 
   test.each([
