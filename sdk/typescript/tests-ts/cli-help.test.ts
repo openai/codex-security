@@ -174,13 +174,30 @@ describe("CLI help", () => {
     },
   );
 
-  test("discovers the exploitability check and its required CVE from group help", async () => {
+  test("discovers CVE and package checks and their report shapes", async () => {
     expect(await help(["exploitability", "--help"])).toMatch(/^  check\s/mu);
-    const schema = JSON.parse(
-      await help(["exploitability", "check", "--schema", "--json"]),
+    const check = ["exploitability", "check"];
+    expect(
+      option(await help([...check, "--help"]), "--vuln-description"),
+    ).toContain("<text>");
+    const schema = JSON.parse(await help([...check, "--schema", "--json"]));
+    expect(schema.args.required).toEqual(["subject"]);
+    expect(schema.options.properties.vulnDescription.type).toBe("string");
+    const branchWith = (field: string) =>
+      schema.output.anyOf.find(({ required }: { required: string[] }) =>
+        required.includes(field),
+      );
+    const cveReport = branchWith("cve");
+    const packageReport = branchWith("package");
+    expect(cveReport.required).toEqual(
+      expect.arrayContaining(["cve", "uses", "status"]),
     );
-    expect(schema.args.required).toEqual(["cve"]);
-    expect(schema.output.required).toContain("uses");
+    expect(packageReport.required).toEqual(
+      expect.arrayContaining(["package", "checks"]),
+    );
+    expect(packageReport.properties.checks.items.required).toContain(
+      "advisoryId",
+    );
   });
 
   test("documents optional validation context and structured output", async () => {
