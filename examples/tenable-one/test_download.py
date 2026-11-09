@@ -46,6 +46,12 @@ class DownloadTests(unittest.TestCase):
         self.request.side_effect = responses
         download(ASSET, ids, URL, self.output, self.request, self.sleep)
 
+    def test_repository_host_alone_is_rejected_before_export(self):
+        for url in ("https://example.org", "https://example.org/"):
+            with self.subTest(url=url), self.assertRaisesRegex(ValueError, "repository path"):
+                download(ASSET, [FIRST], url, self.output, self.request)
+        self.request.assert_not_called()
+
     def test_scoped_exports_poll_and_read_all_chunks(self):
         # Give each job an ID distinct from its requested asset or finding ID.
         self.run_download(
