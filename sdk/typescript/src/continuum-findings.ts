@@ -170,6 +170,14 @@ function reportRows(input: unknown, previous: boolean) {
   };
 }
 
+// Continuum's own findings name their weakness only as "CWE-89: ..." in subCategory.
+function weaknessIds(row: Record<string, unknown>) {
+  const ids = strings(row["cweIds"]);
+  if (ids.length > 0) return ids;
+  const named = /^(CWE-[1-9]\d*):/u.exec(text(row["subCategory"]) ?? "")?.[1];
+  return named ? [named] : [];
+}
+
 function statusUpdatedAt(value: unknown) {
   const seconds = Math.floor(awsTimestampSeconds(value));
   return Number.isSafeInteger(seconds) && seconds >= 0 ? seconds : null;
@@ -293,7 +301,8 @@ function normalize(
             scanner_origin: source,
             scanner_verdict: text(validation["verdict"]),
             source_status: status,
-            weakness_ids: strings(row["cweIds"]),
+            // Earlier releases read cweIds only; keep their replay projection.
+            weakness_ids: previous ? strings(row["cweIds"]) : weaknessIds(row),
             remediation_instructions: text(row["mitigation"]),
             code,
           },

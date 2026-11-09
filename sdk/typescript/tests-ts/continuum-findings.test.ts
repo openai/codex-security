@@ -141,6 +141,28 @@ test("preserves dependency and posture evidence without classifying it as a code
   });
 });
 
+test("reads the weakness Continuum names in subCategory for its own findings", () => {
+  const { cweIds: _, vulnerabilities: __, ...detail } = continuumDetail();
+  const native = {
+    ...detail,
+    type: "CONTINUUM_CODE_VULN",
+    category: "CWE-137: Data Neutralization Issues",
+    subCategory: "CWE-89: Improper Neutralization of Special Elements",
+    vulnerabilities: [],
+  };
+  const weaknesses = (finding: unknown) =>
+    normalize(finding).findings[0]!.evidence.details?.weakness_ids;
+
+  expect(weaknesses(native)).toEqual(["CWE-89"]);
+  // Explicit IDs win, and other category text is not a weakness.
+  expect(weaknesses({ ...native, cweIds: ["CWE-20"] })).toEqual(["CWE-20"]);
+  expect(weaknesses({ ...native, subCategory: "Injection" })).toEqual([]);
+  expect(
+    normalizePreviousContinuumFindings(native, continuumRepository).findings[0]!
+      .evidence.details?.weakness_ids,
+  ).toEqual([]);
+});
+
 test("keeps package-manager selectors in the native finding", () => {
   const finding = {
     ...continuumSummary(),
