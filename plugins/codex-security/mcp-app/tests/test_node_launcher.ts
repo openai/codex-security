@@ -271,7 +271,7 @@ test(
       "launch_codex_security_mcp",
     );
     const installedNode = path.join(root, "installed-node");
-    const systemLink = path.join(root, "system-node");
+    const systemLink = path.join(root, "system Node's link");
     await writeFile(
       installedNode,
       `#!/bin/sh\nexec ${shellQuote(process.execPath)} "$@"\n`,
@@ -282,28 +282,26 @@ test(
     // Relocate only the fixed system paths so the test can supply a system symlink.
     const systemPaths = "/usr/local/bin/node /usr/bin/node /bin/node";
     assert.ok(source.includes(systemPaths));
+    const fixtureLauncher = path.join(root, "scripts", "launch");
+    await mkdir(path.dirname(fixtureLauncher));
+    await symlink(path.join(pluginRoot, "mcp"), path.join(root, "mcp"));
+    await writeFile(
+      fixtureLauncher,
+      source.replace(systemPaths, '"$FIXTURE_SYSTEM_NODE"'),
+    );
     const run = (candidate: string) =>
-      spawnSync(
-        "/bin/sh",
-        [
-          "-c",
-          source.replace(systemPaths, shellQuote(candidate)),
-          launcher,
-          "--helper",
-          "database-info",
-        ],
-        {
-          cwd: root,
-          encoding: "utf8",
-          input: JSON.stringify(root),
-          env: {
-            HOME: root,
-            PATH: root,
-            NODE_DEBUG: "module",
-            CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
-          },
+      spawnSync("/bin/sh", [fixtureLauncher, "--helper", "database-info"], {
+        cwd: root,
+        encoding: "utf8",
+        input: JSON.stringify(root),
+        env: {
+          HOME: root,
+          PATH: root,
+          NODE_DEBUG: "module",
+          CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
+          FIXTURE_SYSTEM_NODE: candidate,
         },
-      );
+      });
     const linked = run(systemLink);
     assert.equal(linked.status, 0, linked.stderr);
     assert.deepEqual(JSON.parse(linked.stdout), {
