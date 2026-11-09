@@ -281,6 +281,7 @@ test(
         env: {
           HOME: root,
           PATH: root,
+          NODE_DEBUG: "module",
           CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
         },
       },

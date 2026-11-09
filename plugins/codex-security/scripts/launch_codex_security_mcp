@@ -61,16 +61,19 @@ can_load_native() {
   # Database helpers need SQLite. On macOS, library validation can also
   # prevent a managed runtime from loading the plugin's addon.
   # Capture output without opening a writable file for read-only callers.
-  _native_probe_output=$("$1" -e '
+  if _native_probe_output=$("$1" -e '
     if (process.platform === "linux") {
-      try { require("node:sqlite"); } catch { console.log("linux-without-sqlite"); }
+      try { require("node:sqlite"); } catch { process.exitCode = 78; }
     } else if (process.platform === "darwin") {
       require("node:sqlite");
       require(require("node:path").join(process.argv[1], "native",
         `${process.platform}-${process.arch}`, "unix.node"));
     }
-  ' "$launcher_dir/../mcp" </dev/null 2>&1) || return 1
-  [ "$_native_probe_output" = linux-without-sqlite ] || return 0
+  ' "$launcher_dir/../mcp" </dev/null 2>&1); then
+    return 0
+  elif [ "$?" -ne 78 ]; then
+    return 1
+  fi
 
   # This Linux runtime can still run helpers without SQLite. Prefer a system
   # installation if available, without expanding discovery into the caller's PATH.
