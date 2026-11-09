@@ -1505,6 +1505,17 @@ def register_cli_scan(
     an output directory, coordinate archiving with registration so previous results
     can still be located. Return the scan ID, contract, and target metadata.
     """
+    # Selected plugin scripts can delegate to this workbench from their own __main__.
+    before_output_change = before_archive or getattr(
+        sys.modules["__main__"], "_codex_security_before_output_change", None
+    )
+
+    def acknowledge_output_change() -> None:
+        nonlocal before_output_change
+        if before_output_change is not None:
+            before_output_change()
+            before_output_change = None
+
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = None
@@ -1589,7 +1600,7 @@ def register_cli_scan(
                             scan_dir,
                             timestamp,
                             require_canonical_scan_directory,
-                            before_archive=before_archive,
+                            before_archive=acknowledge_output_change,
                         )
                     )
                     break
@@ -1608,7 +1619,6 @@ def register_cli_scan(
                     if remaining <= 0:
                         raise
                     connection.rollback()
-                    before_archive = None  # The host already acknowledged this registration.
                     scan_dir = None  # Revalidate the directory and its owner under the next lock.
                     time.sleep(min(0.05, remaining))
                     connection.execute("BEGIN IMMEDIATE")
@@ -1672,6 +1682,7 @@ def register_cli_scan(
             if workflow_id is not None:
                 register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
             if os.name == "nt" and mode == "deep" and launch_kind == "scan":
+                acknowledge_output_change()
                 archive.enter_context(register_windows_resume_output(connection, scan_id, scan_dir))
             scan = connection.execute(
                 "SELECT scans.*, snapshot AS lifecycle_json FROM scans "

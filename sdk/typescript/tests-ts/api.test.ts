@@ -2300,18 +2300,35 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each(
-    (["preparation", "empty", "commit", "rollback"] as const).flatMap(
+  test.each([
+    ...(["preparation", "empty", "commit", "rollback"] as const).flatMap(
       (boundary) =>
         (["real", "mock", "import"] as const).flatMap((mode) =>
           (mode === "import"
             ? (["signal"] as const)
             : (["signal", "close"] as const)
-          ).map((cancel) => ({ boundary, cancel, mode })),
+          ).map((cancel) => ({
+            registration: "archived registration",
+            boundary,
+            cancel,
+            mode,
+          })),
         ),
     ),
-  )(
-    "cancels archived registration at $boundary via $cancel, mode=$mode",
+    ...(process.platform === "win32"
+      ? (
+          [
+            { boundary: "before fresh guard", cancel: "signal", mode: "real" },
+            { boundary: "fresh guard", cancel: "signal", mode: "real" },
+            { boundary: "empty archive guard", cancel: "close", mode: "real" },
+          ] as const
+        ).map((entry) => ({
+          ...entry,
+          registration: "Windows Deep registration",
+        }))
+      : []),
+  ])(
+    "cancels $registration at $boundary via $cancel, mode=$mode",
     async ({ boundary, cancel, mode }) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const python = pythonExecutable()!;
@@ -2331,8 +2348,12 @@ describe("CodexSecurity orchestration", () => {
           join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
         ),
       );
+      const guardCreated =
+        boundary === "fresh guard" || boundary === "empty archive guard";
+      const deep = guardCreated || boundary === "before fresh guard";
+      const archiveExisting = !deep || boundary === "empty archive guard";
       let previousId: string | undefined;
-      if (boundary !== "empty") {
+      if (boundary !== "empty" && !deep) {
         const previous = await runWorkbench(workbenchOptions, [
           "register-cli-scan",
           "--repository",
@@ -2372,35 +2393,47 @@ describe("CodexSecurity orchestration", () => {
       const pluginRoot = join(root, "controlled-plugin");
       for (const file of [
         ".codex-plugin/plugin.json",
-        "skills/security-scan/SKILL.md",
+        `skills/${deep ? "deep-security-scan" : "security-scan"}/SKILL.md`,
         "schemas/findings.schema.json",
       ]) {
         await cp(join(PLUGIN_ROOT, file), join(pluginRoot, file));
       }
       await mkdir(join(pluginRoot, "scripts"), { recursive: true });
       const afterRename = boundary === "commit" || boundary === "rollback";
-      const hook = afterRename
-        ? "insert_running_scan"
-        : "directory_snapshot_regular_file_count";
+      const hook = guardCreated
+        ? "register_windows_resume_output"
+        : afterRename
+          ? "insert_running_scan"
+          : "directory_snapshot_regular_file_count";
       const framedArgument = "--fixture-message=出力\0literal\nsecond line";
       await writeFile(
         join(pluginRoot, "scripts", "workbench_db.py"),
         `import io, runpy, socket, sys
+from contextlib import contextmanager
 from pathlib import Path
 
 workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})
 namespace = workbench["main"].__globals__
 original = namespace["${hook}"]
 
-def paused(*args, **options):
+def wait_at_boundary():
     with socket.create_connection(("127.0.0.1", ${address.port})) as connection:
         connection.sendall(b"ready")
         if connection.recv(1) == b"p":
             connection.sendall(b"alive")
             connection.recv(1)
+
+def paused(*args, **options):
+    wait_at_boundary()
     if ${JSON.stringify(boundary)} == "rollback":
         raise RuntimeError("synthetic registration failure after rename")
     return original(*args, **options)
+
+@contextmanager
+def paused_guard(*args, **options):
+    with original(*args, **options):
+        wait_at_boundary()
+        yield
 
 def main(**kwargs):
     sys.stdout.reconfigure(newline="\\r\\n")
@@ -2409,7 +2442,7 @@ def main(**kwargs):
         payload = sys.stdin.buffer.read()
         Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)
         sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")
-        namespace["${hook}"] = paused
+        namespace["${hook}"] = ${guardCreated ? "paused_guard" : "paused"}
     workbench["main"](**kwargs)
 
 if __name__ == "__main__":
@@ -2454,7 +2487,7 @@ if __name__ == "__main__":
       const connected = once(server, "connection", { signal: deadline });
       const options = {
         outputDir: scanDir,
-        archiveExisting: true,
+        archiveExisting,
         signal: controller.signal,
       };
       const operation = (
@@ -2474,6 +2507,7 @@ if __name__ == "__main__":
             )
           : client.run(repository, {
               ...options,
+              mode: deep ? "deep" : "standard",
               mock: mode === "mock",
               scanPrompt: "Review café boundaries.\nPreserve the second line.",
             })
@@ -2514,9 +2548,9 @@ if __name__ == "__main__":
         });
         if (cancel === "close") closing = client.close();
         else controller.abort();
-        if (afterRename) {
-          // This child has already renamed the directory. A request/response
-          // proves it remains alive after cancellation until we let it settle.
+        if (afterRename || guardCreated) {
+          // The filesystem transaction has started. Prove the child remains
+          // alive after cancellation until we allow its commit or rollback.
           const alive = once(socket, "data", { signal: deadline });
           socket.write("p");
           expect(String((await alive)[0])).toBe("alive");
@@ -2533,8 +2567,11 @@ if __name__ == "__main__":
         const scans = (await runWorkbench(workbenchOptions, ["list-scans"]))[
           "scans"
         ] as Array<{ scanId: string; scanDir: string }>;
-        expect(scans).toHaveLength(
-          boundary === "empty" ? 0 : boundary === "commit" ? 2 : 1,
+        const registrations = scans.filter(
+          (scan) => scan.scanId !== previousId,
+        );
+        expect(registrations).toHaveLength(
+          boundary === "commit" || guardCreated ? 1 : 0,
         );
         if (previousId !== undefined) {
           const previous = scans.find((scan) => scan.scanId === previousId)!;
@@ -2548,6 +2585,33 @@ if __name__ == "__main__":
             name.startsWith("scan.previous-"),
           ),
         ).toHaveLength(boundary === "commit" ? 1 : 0);
+        if (deep) {
+          expect(await readdir(scanDir)).toEqual(
+            guardCreated ? [".codex-security-resume"] : [],
+          );
+          if (guardCreated)
+            expect(scans[0]).toMatchObject({
+              scanDir,
+              lifecycle: { status: "canceled" },
+            });
+          const retry = await runWorkbench(workbenchOptions, [
+            "register-cli-scan",
+            "--repository",
+            repository,
+            "--scan-dir",
+            scanDir,
+            ...(guardCreated ? ["--archive-existing"] : []),
+            "--recipe-json",
+            JSON.stringify({
+              repository,
+              target: { kind: "repository", paths: [] },
+              mode: "deep",
+              config: {},
+            }),
+          ]);
+          expect(retry["scanId"]).toBeString();
+          expect(retry["scanId"]).not.toBe(scans[0]?.scanId);
+        }
       } finally {
         cleaningUp = true;
         clearTimeout(guardTimer);
