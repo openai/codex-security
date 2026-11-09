@@ -974,6 +974,9 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
+        db.handoff.require_tokenless_scan_owner(
+            connection, scan, getattr(args, "model_thread_id", None)
+        )
         db.handoff.require_current_continuation(
             scan,
             args.claim_token,
@@ -1011,6 +1014,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
+        db.handoff.require_tokenless_scan_owner(
+            connection, scan, getattr(args, "model_thread_id", None)
+        )
         db.handoff.require_current_continuation(
             scan, args.claim_token, error_message="Scan draft is owned by another continuation."
         )
@@ -1264,10 +1270,9 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     with connection:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
-        if scan["status"] == "failed":
-            connection.commit()
-            record_stopped_scan_usage(db, connection, scan_id, cost_json)
-            return db.scan_context(connection, scan["id"])
+        db.handoff.require_tokenless_scan_owner(
+            connection, scan, getattr(args, "model_thread_id", None)
+        )
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
         db.handoff.require_current_continuation(
@@ -1275,6 +1280,10 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
         )
+        if scan["status"] == "failed":
+            connection.commit()
+            record_stopped_scan_usage(db, connection, scan_id, cost_json)
+            return db.scan_context(connection, scan["id"])
         message = db.optional_text(args.message)
         if not mark_running_scan_failed(connection, scan_id, message, timestamp):
             raise SystemExit("Only a running scan can be marked failed.")
@@ -1295,6 +1304,8 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     thread_id = db.optional_text(args.thread_id, maximum=512)
     cost_json = db.parse_scan_cost(getattr(args, "cost_json", None))
+    # The app displays the active scan. A conversation may only receive the scan it canceled.
+    result_scan_id = scan_id if thread_id is not None else None
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = db.now()
@@ -1307,7 +1318,9 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return {
-                **db.workspace_state(connection, scan["workspace_id"]),
+                **db.workspace_state(
+                    connection, scan["workspace_id"], result_scan_id=result_scan_id
+                ),
                 "canceledScanId": scan["id"],
             }
         if scan["status"] != "running":
@@ -1327,7 +1340,10 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
-    return {**db.workspace_state(connection, scan["workspace_id"]), "canceledScanId": scan["id"]}
+    return {
+        **db.workspace_state(connection, scan["workspace_id"], result_scan_id=result_scan_id),
+        "canceledScanId": scan["id"],
+    }
 
 
 def record_stopped_scan_usage(

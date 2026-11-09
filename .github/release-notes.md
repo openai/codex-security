@@ -193,6 +193,9 @@
 - hide session log hints for mock scans ([#2488](https://github.com/openai/codex-security/pull/2488))
 - speed up compressed scan session discovery ([#2489](https://github.com/openai/codex-security/pull/2489))
 - sign macOS addons for packaged review items ([#2331](https://github.com/openai/codex-security/pull/2331))
+- keep redirects within the configured service origin ([#2426](https://github.com/openai/codex-security/pull/2426))
+- keep workbench lifecycle results scoped to the selected scan ([#2421](https://github.com/openai/codex-security/pull/2421))
+- verify scan output directory ownership and ancestry ([#2432](https://github.com/openai/codex-security/pull/2432))
 
 </details>
 
