@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -93,7 +94,7 @@ for (const ordering of [
       );
       const runWorkbench = async (args: string[]) => {
         const { stdout } = await execFileAsync(
-          process.env.PYTHON || "python3",
+          fixturePython,
           [join(pluginRoot, "scripts", "workbench_db.py"), ...args],
           { cwd: pluginRoot, env: environment },
         );
@@ -267,7 +268,7 @@ for (const ordering of [
         failureCommit.release();
         await fail(
           { scanId: run.scanId, message: "synthetic no-op failure" },
-          {},
+          { _meta: { "openai/threadId": "fixture-owner" } },
         );
         assert.equal(
           (await runWorkbench(["get-scan", "--scan-id", run.scanId])).workspace
@@ -308,7 +309,7 @@ for (const ordering of [
       if (ordering !== "lost cancellation response") {
         failure = fail(
           { scanId: run.scanId, message: "synthetic committed parent failure" },
-          {},
+          { _meta: { "openai/threadId": "fixture-owner" } },
         );
         void failure!.catch(() => {});
         await failureCommit.entered;

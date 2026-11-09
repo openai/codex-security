@@ -180,6 +180,7 @@ const distModules = [
   "target-drift",
   "targets",
   "terminal-columns",
+  "terminal-stream",
   "thread-source",
   "timestamps",
   "trusted-executable",

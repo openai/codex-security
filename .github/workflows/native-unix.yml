@@ -54,6 +54,7 @@ jobs:
         uses: ./.github/actions/setup-tools
         with:
           compile: true
+          cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Set up Rust
         run: |
           # Rustup 1.29 retries component downloads, but not manifest checksums.

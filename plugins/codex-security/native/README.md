@@ -32,12 +32,11 @@ node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/c
 
 The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git. `unixEnvironment` reads one named environment value as raw bytes, preserving the distinction between empty and unset values. This keeps configured filesystem locations such as `CODEX_HOME` intact when Node would replace undecodable bytes.
 
-Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
+With the pinned Rust toolchain installed, build and verify the Unix binding from the repository root:
 
 ```sh
-pnpm --dir sdk/typescript install --frozen-lockfile
-pnpm --dir sdk/typescript run build:ci
-node plugins/codex-security/native/build.mjs
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/native/proof.mjs
 (cd plugins/codex-security/native && cargo fmt --check && cargo clippy --locked -- -D warnings)
 ```
