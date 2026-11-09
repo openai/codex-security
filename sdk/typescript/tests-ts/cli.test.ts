@@ -1350,12 +1350,33 @@ describe("CLI", () => {
         code: "ENOENT",
       });
       expect(trustedHook).not.toMatch(/^exec\s+npx(?:\s|$)/m);
-      expect(trustedHook).toContain(await realpath(process.execPath));
-      expect(trustedHook).toContain(
+      // Let Git invoke the declared /bin/sh, including its bundled shell on Windows.
+      const displayArgs = trustedHook.replace(/^exec /m, "printf '%s\\0' ");
+      expect(displayArgs).not.toBe(trustedHook);
+      const decoded = await runCommand(
+        "git",
+        [
+          "-C",
+          root,
+          "-c",
+          "alias.report-hook-argv=!/bin/sh -s",
+          "report-hook-argv",
+        ],
+        { input: displayArgs, windowsHide: true },
+      );
+      expect(decoded.status, decoded.stderr).toBe(0);
+      expect(decoded.stdout.split("\0")).toEqual([
+        await realpath(process.execPath),
         await realpath(
           fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
         ),
-      );
+        "scan",
+        ".",
+        "--working-tree",
+        "--fail-on-severity",
+        "medium",
+        "",
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1806,6 +1827,7 @@ describe("CLI", () => {
           '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
           '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
           '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"info","arguments":{}}}',
+          '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"scans_list","arguments":{}}}',
           "",
         ].join("\n"),
         timeout: 30_000,
@@ -1832,6 +1854,12 @@ describe("CLI", () => {
         },
       },
     });
+    expect(responses.find((response) => response.id === 4).error).toMatchObject(
+      {
+        code: -32602,
+        message: "Tool scans_list not found",
+      },
+    );
     const metadata = responses.find((response) => response.id === 3).result;
     expect(metadata.structuredContent).toMatchObject({
       sdkVersion: VERSION,

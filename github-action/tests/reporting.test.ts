@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { plain, resultSummary, resultTitle } from '../src/reporting.js';
-import { parseInputs } from '../src/inputs.js';
-import type { ScanResults } from '../src/results.js';
+import { plain, resultSummary, resultTitle } from '../src/reporting.ts';
+import { parseInputs } from '../src/inputs.ts';
+import type { ScanResults } from '../src/results.ts';
 
 test('credential-shaped text and encodings remain in diagnostics',()=>{
   assert.equal(plain('CANA\x01RY_VALUE'),'CANARY_VALUE');
