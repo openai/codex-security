@@ -6,6 +6,7 @@ import json
 import sys
 from io import TextIOWrapper
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID
 
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[2] / "plugins/codex-security/scripts"
@@ -69,8 +70,11 @@ def required_values(fields, row, context):
 
 def validate_repository_url(repository_url):
     _validate_remote(repository_url, "--repository-url")
-    if not repository_url.lower().startswith("https://"):
+    parsed = urlsplit(repository_url)
+    if parsed.scheme != "https":
         raise ValueError("--repository-url must be the repository's HTTPS URL")
+    if not parsed.path.strip("/"):
+        raise ValueError("--repository-url must include a repository path")
 
 
 def read_asset(chunks, asset_id, *, exact=False):
