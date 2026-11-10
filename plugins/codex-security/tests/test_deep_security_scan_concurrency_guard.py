@@ -49,9 +49,9 @@ def test_scan_context_reports_only_other_running_deep_scans(
             "UPDATE scans SET handoff_status = 'delivered' WHERE id IN (?, ?)",
             (scans["other"]["scanId"], scans["failed"]["scanId"]),
         )
-    current_id = scans["current"]["scanId"]
+    current = Namespace(scan_id=scans["current"]["scanId"], occurrence_id=None)
     other = scans["other"]
-    assert workbench_api["get_scan"](workbench_db, current_id)["otherRunningDeepScans"] == [
+    assert workbench_api["get_scan"](workbench_db, current)["otherRunningDeepScans"] == [
         {
             "phase": "preflight",
             "scanId": other["scanId"],
@@ -66,4 +66,4 @@ def test_scan_context_reports_only_other_running_deep_scans(
             "UPDATE scans SET status = 'failed', completed_at = updated_at WHERE id = ?",
             (other["scanId"],),
         )
-    assert workbench_api["get_scan"](workbench_db, current_id)["otherRunningDeepScans"] == []
+    assert workbench_api["get_scan"](workbench_db, current)["otherRunningDeepScans"] == []
