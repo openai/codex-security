@@ -8,7 +8,7 @@ test('defaults are stable across events', () => {
   assert.deepEqual(input, {
     repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard', cyberAccessProgram: undefined,
     provider: 'openai', model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
-    verbose: true, dryRun: false, summary: true, annotations: true,
+    verbose: true, dryRun: false, useRunnerNpmConfig: false, summary: true, annotations: true,
     uploadArtifacts: false, artifactName: 'codex-security', retentionDays: 7,
   });
   const args = scanArguments(input, {repository:'/checkout'}, '/results');
@@ -17,6 +17,12 @@ test('defaults are stable across events', () => {
   assert.ok(!args.includes('--fail-on-severity'));
   assert.ok(!args.includes('--python'));
   assert.ok(!args.includes('--cyber-access-program'));
+});
+test('runner npm configuration requires explicit opt-in', () => {
+  assert.equal(parse().useRunnerNpmConfig, false);
+  assert.equal(parse({'use-runner-npm-config':'true'}).useRunnerNpmConfig, true);
+  for (const value of ['yes', 'TRUE', '1'])
+    assert.throws(() => parse({'use-runner-npm-config':value}), /use-runner-npm-config must be one of: true, false/);
 });
 test('provider and model inputs map directly to scan CLI arguments in both modes', () => {
   for (const provider of ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'])

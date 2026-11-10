@@ -541,6 +541,12 @@ setup and requirements for self-hosted runners and job containers.
 npm and Python are found on the runner's `PATH`; `actions/setup-node` and `actions/setup-python` can select installations.
 Python helpers preserve the selected virtual environment and library settings.
 The runner's process tracking marker is retained by the scan coordinator and Deep Scan workers.
+By default, CLI installation ignores runner npm configuration. On trusted runners
+whose registry setup provides `NPM_CONFIG_USERCONFIG` or `NODE_EXTRA_CA_CERTS`, set
+`use-runner-npm-config: 'true'` on the Action step. The selected regular files are
+used only by the pinned `npm ci` installation; the npm configuration and CA path
+are not forwarded to the CLI or its scan workers. Lifecycle scripts remain disabled
+and the committed runtime lockfile remains authoritative.
 See [inference providers](#inference-providers) for the environment variables
 to pass to the scan step.
 Temporary runtime files are removed after the job; reports remain available to
@@ -666,6 +672,7 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `fail-on-severity` | `none` | none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail. |
 | `verbose` | `true` | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only. |
 | `dry-run` | `false` | Validate local configuration without a scan or API key. Does not verify authentication or model access. Requires fail-on-severity: none; use a separate non-required job. |
+| `use-runner-npm-config` | `false` | Use runner-provided NPM_CONFIG_USERCONFIG and NODE_EXTRA_CA_CERTS only while installing the pinned CLI. Supplied values must be absolute regular-file paths. |
 | `summary` | `true` | Write a human-readable job summary. |
 | `annotations` | `true` | Emit up to 50 source finding annotations; complete findings remain in reports. |
 | `upload-artifacts` | `false` | Upload an allowlist of validated reports and link the artifact in the job summary. Reports may contain source and vulnerability details. |

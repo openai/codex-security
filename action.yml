@@ -40,6 +40,9 @@ inputs:
   dry-run:
     description: 'Validate local configuration without a scan or API key. Does not verify authentication or model access. Requires fail-on-severity: none; use a separate non-required job.'
     default: 'false'
+  use-runner-npm-config:
+    description: 'Use runner-provided NPM_CONFIG_USERCONFIG and NODE_EXTRA_CA_CERTS only while installing the pinned CLI. Supplied values must be absolute regular-file paths.'
+    default: 'false'
   summary:
     description: Write a human-readable job summary.
     default: 'true'

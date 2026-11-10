@@ -53789,6 +53789,7 @@ function parseInputs(read, workspace) {
     failOnSeverity,
     verbose: bool("verbose", true),
     dryRun,
+    useRunnerNpmConfig: bool("use-runner-npm-config", false),
     summary: bool("summary", true),
     annotations: bool("annotations", true),
     uploadArtifacts: bool("upload-artifacts", false),
@@ -54204,6 +54205,15 @@ async function regularFile(path6) {
   if (!info2.isFile()) throw new Error("Runtime prerequisite must be a regular file.");
   return target;
 }
+async function runnerConfigurationFile(path6, name) {
+  const invalid = `${name} must be an absolute path to a regular file.`;
+  if (!(0, import_node_path4.isAbsolute)(path6)) throw new Error(invalid);
+  try {
+    return await regularFile(path6);
+  } catch {
+    throw new Error(invalid);
+  }
+}
 function captureRunnerPath(value = process.env.PATH ?? "/usr/bin:/bin", cwd = process.cwd()) {
   return value.split(import_node_path4.delimiter).map((entry) => (0, import_node_path4.resolve)(cwd, entry)).join(import_node_path4.delimiter);
 }
@@ -54316,6 +54326,10 @@ async function setupRuntime(options) {
   const runnerLibraryPath = process.env.LD_LIBRARY_PATH;
   const tempRoot = await (0, import_promises3.realpath)(options.tempRoot);
   const actionRoot = await (0, import_promises3.realpath)(options.actionRoot);
+  const runnerNpmConfig = options.runnerNpmConfig && {
+    userConfig: options.runnerNpmConfig.userConfig === void 0 ? void 0 : await runnerConfigurationFile(options.runnerNpmConfig.userConfig, "NPM_CONFIG_USERCONFIG"),
+    extraCaCerts: options.runnerNpmConfig.extraCaCerts === void 0 ? void 0 : await runnerConfigurationFile(options.runnerNpmConfig.extraCaCerts, "NODE_EXTRA_CA_CERTS")
+  };
   const npmPath = await resolveTool("npm", runnerPath);
   const pythonPath = await resolveTool("python3", runnerPath);
   const nodePath = process.execPath;
@@ -54341,11 +54355,31 @@ async function setupRuntime(options) {
     const destination = (0, import_node_path4.join)(root, "install");
     await (0, import_promises3.copyFile)(packagePath, (0, import_node_path4.join)(destination, "package.json"));
     await (0, import_promises3.writeFile)((0, import_node_path4.join)(destination, "package-lock.json"), lockBytes, { mode: 384, flag: "wx" });
-    const userConfig = (0, import_node_path4.join)(root, "npm-user.conf");
+    const userConfig = runnerNpmConfig?.userConfig ?? (0, import_node_path4.join)(root, "npm-user.conf");
     const globalConfig = (0, import_node_path4.join)(root, "npm-global.conf");
-    await (0, import_promises3.writeFile)(userConfig, "", { mode: 384, flag: "wx" });
+    if (!runnerNpmConfig?.userConfig) await (0, import_promises3.writeFile)(userConfig, "", { mode: 384, flag: "wx" });
     await (0, import_promises3.writeFile)(globalConfig, "", { mode: 384, flag: "wx" });
-    const install = await runProcess(npmPath, ["ci", "--ignore-scripts", "--include=optional", `--registry=${REGISTRY}`, `--userconfig=${userConfig}`, `--globalconfig=${globalConfig}`, `--cache=${(0, import_node_path4.join)(root, "npm-cache")}`, "--no-audit", "--no-fund", "--loglevel=error"], { cwd: destination, env, timeoutMs: 10 * 60 * 1e3, log: options.log });
+    const installEnv = {
+      ...env,
+      ...runnerNpmConfig?.userConfig ? { NPM_CONFIG_USERCONFIG: runnerNpmConfig.userConfig } : {},
+      ...runnerNpmConfig?.extraCaCerts ? { NODE_EXTRA_CA_CERTS: runnerNpmConfig.extraCaCerts } : {}
+    };
+    const install = await runProcess(
+      npmPath,
+      [
+        "ci",
+        "--ignore-scripts",
+        "--include=optional",
+        ...!runnerNpmConfig?.userConfig ? [`--registry=${REGISTRY}`] : [],
+        `--userconfig=${userConfig}`,
+        `--globalconfig=${globalConfig}`,
+        `--cache=${(0, import_node_path4.join)(root, "npm-cache")}`,
+        "--no-audit",
+        "--no-fund",
+        "--loglevel=error"
+      ],
+      { cwd: destination, env: installEnv, timeoutMs: 10 * 60 * 1e3, log: options.log }
+    );
     if (install.exitCode !== 0 || install.timedOut || install.interrupted) {
       const details = safeLogLines([install.stderr, install.stdout].join("\n")).join("\n");
       throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ", timed out" : ""}${install.interrupted ? ", interrupted" : ""}).
@@ -97642,6 +97676,10 @@ async function runAction(actionRoot, overrides = {}) {
   try {
     inputs = parseInputs((name) => getInput(name), process.env.GITHUB_WORKSPACE ?? "");
     const credentials = scanCredentials(inputs.provider, process.env);
+    const runnerNpmConfig = inputs.useRunnerNpmConfig ? {
+      userConfig: process.env.NPM_CONFIG_USERCONFIG,
+      extraCaCerts: process.env.NODE_EXTRA_CA_CERTS
+    } : void 0;
     const event = await context5();
     target = await resolveTarget(inputs, event);
     setOutput("scanned-sha", target.scannedSha);
@@ -97664,7 +97702,15 @@ async function runAction(actionRoot, overrides = {}) {
       const preparationStarted = performance.now();
       let timer = heartbeat("CLI preparation", preparationStarted);
       try {
-        runtime = await deps.setupRuntime({ actionRoot, tempRoot, repository: target.repository, provider: inputs.provider, model: inputs.model, log: inputs.verbose ? info : void 0 });
+        runtime = await deps.setupRuntime({
+          actionRoot,
+          tempRoot,
+          repository: target.repository,
+          provider: inputs.provider,
+          model: inputs.model,
+          runnerNpmConfig,
+          log: inputs.verbose ? info : void 0
+        });
       } finally {
         clearInterval(timer);
       }

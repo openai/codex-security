@@ -68,6 +68,10 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
   try {
     inputs = parseInputs(name => core.getInput(name), process.env.GITHUB_WORKSPACE ?? '');
     const credentials = scanCredentials(inputs.provider, process.env);
+    const runnerNpmConfig = inputs.useRunnerNpmConfig ? {
+      userConfig: process.env.NPM_CONFIG_USERCONFIG,
+      extraCaCerts: process.env.NODE_EXTRA_CA_CERTS,
+    } : undefined;
     const event = await context();
     target = await resolveTarget(inputs, event);
     core.setOutput('scanned-sha', target.scannedSha);
@@ -92,7 +96,8 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
       const preparationStarted = performance.now();
       let timer = heartbeat('CLI preparation', preparationStarted);
       try {
-        runtime = await deps.setupRuntime({actionRoot, tempRoot, repository: target.repository, provider: inputs.provider, model: inputs.model, log: inputs.verbose ? core.info : undefined});
+        runtime = await deps.setupRuntime({actionRoot, tempRoot, repository: target.repository, provider: inputs.provider,
+          model: inputs.model, runnerNpmConfig, log: inputs.verbose ? core.info : undefined});
       }
       finally { clearInterval(timer); }
       core.info(`CLI preparation completed in ${elapsed(preparationStarted)}.`);

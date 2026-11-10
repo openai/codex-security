@@ -131,6 +131,109 @@ NODE
   await cleanupRuntime(runtime.root, root);
 });
 
+test('runtime installation opts into validated runner npm configuration without exposing it to scans',
+  {skip:process.platform !== 'linux' || process.arch !== 'x64'}, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-runner-npm-')));
+  const python = await resolveTool('python3');
+  const previousPath = process.env.PATH;
+  const previousNpmToken = process.env.NPM_TOKEN;
+  const previousGithubToken = process.env.GITHUB_TOKEN;
+  t.after(async () => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousNpmToken === undefined) delete process.env.NPM_TOKEN;
+    else process.env.NPM_TOKEN = previousNpmToken;
+    if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousGithubToken;
+    await rm(root, {recursive:true, force:true});
+  });
+  const bin = join(root, 'tools');
+  const repository = join(root, 'checkout');
+  const userConfig = join(root, 'runner-auth.npmrc');
+  const extraCaCerts = join(root, 'runner-ca.pem');
+  await mkdir(bin); await mkdir(repository);
+  await symlink(python, join(bin, 'python3'));
+  await writeFile(userConfig, 'registry=https://registry.example.invalid/\n//registry.example.invalid/:_authToken=synthetic-install-token\n', {mode:0o600});
+  await writeFile(extraCaCerts, 'synthetic runner CA certificate\n', {mode:0o600});
+  await writeFile(join(bin, 'npm'), `#!${process.execPath}
+    const fs = require('node:fs'); const path = require('node:path');
+    const args = process.argv.slice(2);
+    const expectedUserConfig = ${JSON.stringify(userConfig)};
+    const expectedCa = ${JSON.stringify(extraCaCerts)};
+    const configured = process.env.NPM_CONFIG_USERCONFIG === expectedUserConfig
+      && process.env.NODE_EXTRA_CA_CERTS === expectedCa
+      && args.includes('--userconfig=' + expectedUserConfig)
+      && !args.some(value => value.startsWith('--registry='));
+    fs.writeFileSync(path.join(${JSON.stringify(root)}, 'npm-invocation-' + (configured ? 'configured' : 'isolated') + '.json'), JSON.stringify({args,env:process.env}));
+    if (!configured) { console.error('npm error synthetic registry configuration unavailable'); process.exit(43); }
+    const packageRoot = path.join('node_modules', '@openai', 'codex-security');
+    fs.mkdirSync(path.join(packageRoot, 'bin'), {recursive:true});
+    fs.writeFileSync(path.join(packageRoot, 'bin', 'codex-security.mjs'), '// fixture');
+  `, {mode:0o755});
+  process.env.PATH = bin;
+  process.env.NPM_TOKEN = 'unrelated-ambient-npm-token';
+  process.env.GITHUB_TOKEN = 'unrelated-ambient-github-token';
+  const actionRoot = fileURLToPath(new URL('../', import.meta.url));
+  const baseOptions = {actionRoot, tempRoot:root, repository, provider:'openai' as const, model:''};
+  const logs: string[] = [];
+  await assert.rejects(setupRuntime({...baseOptions, log:line => logs.push(line)}), error =>
+    error instanceof Error && error.message.includes('synthetic registry configuration unavailable'));
+  assert.ok(logs.some(line => line.includes('synthetic registry configuration unavailable')));
+  assert.ok(!logs.join('\n').includes('synthetic-install-token'));
+  const isolated = JSON.parse(await readFile(join(root, 'npm-invocation-isolated.json'), 'utf8'));
+  assert.ok(isolated.args.includes('--registry=https://registry.npmjs.org/'));
+  assert.equal(isolated.env.NPM_CONFIG_USERCONFIG, undefined);
+  assert.equal(isolated.env.NODE_EXTRA_CA_CERTS, undefined);
+  assert.equal(isolated.env.NPM_TOKEN, undefined);
+  assert.equal(isolated.env.GITHUB_TOKEN, undefined);
+  assert.deepEqual(fs.readdirSync(root).filter(name => name.startsWith('codex-security-runtime-')), []);
+
+  const runtime = await setupRuntime({...baseOptions, runnerNpmConfig:{userConfig, extraCaCerts}});
+  const invocation = JSON.parse(await readFile(join(root, 'npm-invocation-configured.json'), 'utf8'));
+  assert.ok(invocation.args.includes('--ignore-scripts'));
+  assert.ok(invocation.args.includes('--include=optional'));
+  assert.ok(invocation.args.includes(`--userconfig=${userConfig}`));
+  assert.ok(!invocation.args.some((value: string) => value.startsWith('--registry=')));
+  assert.equal(invocation.env.NPM_CONFIG_USERCONFIG, userConfig);
+  assert.equal(invocation.env.NODE_EXTRA_CA_CERTS, extraCaCerts);
+  assert.equal(invocation.env.NPM_TOKEN, undefined);
+  assert.equal(invocation.env.GITHUB_TOKEN, undefined);
+  const scan = runtime.env(scanCredentials('openai', {OPENAI_API_KEY:'synthetic-scan-key'}));
+  assert.equal(scan.NPM_CONFIG_USERCONFIG, undefined);
+  assert.equal(scan.NODE_EXTRA_CA_CERTS, undefined);
+  await cleanupRuntime(runtime.root, root);
+});
+
+test('runner npm configuration rejects invalid paths without disclosing their values',
+  {skip:process.platform !== 'linux' || process.arch !== 'x64'}, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-runner-npm-invalid-')));
+  const python = await resolveTool('python3');
+  const previousPath = process.env.PATH;
+  t.after(async () => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    await rm(root, {recursive:true, force:true});
+  });
+  const bin = join(root, 'tools'); const repository = join(root, 'checkout');
+  await mkdir(bin); await mkdir(repository);
+  await symlink(python, join(bin, 'python3'));
+  await writeFile(join(bin, 'npm'), '#!/bin/sh\nexit 70\n', {mode:0o755});
+  process.env.PATH = bin;
+  const cases = [
+    ['NPM_CONFIG_USERCONFIG', {userConfig:join(root, 'missing-secret-named-config')}],
+    ['NODE_EXTRA_CA_CERTS', {extraCaCerts:'relative-secret-ca.pem'}],
+  ] as const;
+  for (const [name, runnerNpmConfig] of cases) {
+    await assert.rejects(setupRuntime({
+      actionRoot:fileURLToPath(new URL('../', import.meta.url)), tempRoot:root, repository,
+      provider:'openai', model:'', runnerNpmConfig,
+    }), error => error instanceof Error
+      && new RegExp(`${name} must be an absolute path to a regular file`).test(error.message)
+      && !error.message.includes(Object.values(runnerNpmConfig)[0]));
+  }
+  assert.deepEqual(fs.readdirSync(root).filter(name => name.startsWith('codex-security-runtime-')), []);
+});
+
 test('hosted Ubuntu sandbox setup uses system commands despite checkout PATH shadows', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-hosted-sandbox-')));
   t.after(() => rm(root, {recursive:true, force:true}));
@@ -305,7 +408,7 @@ test('Python preflight reports a failed or terminated prerequisite check', async
 });
 
 test('scan environment excludes all inherited credential/config channels', () => {
-  const poison = { INPUT_GITHUB_TOKEN: 'secret', GITHUB_TOKEN: 'secret', ACTIONS_RUNTIME_TOKEN: 'secret', GITHUB_OUTPUT: 'file', NODE_OPTIONS: '--require=evil', PYTHONPATH: 'evil', NPM_CONFIG_REGISTRY: 'evil', AWS_SECRET_ACCESS_KEY: 'secret', CODEX_CLI_PATH: 'evil', CODEX_MCP_NODE_PATH: 'evil', OPENAI_BASE_URL: 'evil', HTTPS_PROXY: 'evil' };
+  const poison = { INPUT_GITHUB_TOKEN: 'secret', GITHUB_TOKEN: 'secret', ACTIONS_RUNTIME_TOKEN: 'secret', GITHUB_OUTPUT: 'file', NODE_OPTIONS: '--require=evil', NODE_EXTRA_CA_CERTS: '/runner/ca.pem', PYTHONPATH: 'evil', NPM_CONFIG_REGISTRY: 'evil', NPM_CONFIG_USERCONFIG: '/runner/auth.npmrc', AWS_SECRET_ACCESS_KEY: 'secret', CODEX_CLI_PATH: 'evil', CODEX_MCP_NODE_PATH: 'evil', OPENAI_BASE_URL: 'evil', HTTPS_PROXY: 'evil' };
   const previous = Object.fromEntries(Object.keys(poison).map((key) => [key, process.env[key]]));
   Object.assign(process.env, poison);
   try {
