@@ -2,10 +2,7 @@ import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
-import {
-  normalizeContinuumFindings,
-  normalizePreviousContinuumFindings,
-} from "../src/continuum-findings.js";
+import { normalizeContinuumFindings } from "../src/continuum-findings.js";
 import {
   createAndReplayFinding,
   localReportFixture,
@@ -157,10 +154,6 @@ test("reads the weakness Continuum names in subCategory for its own findings", (
   // Explicit IDs win, and other category text is not a weakness.
   expect(weaknesses({ ...native, cweIds: ["CWE-20"] })).toEqual(["CWE-20"]);
   expect(weaknesses({ ...native, subCategory: "Injection" })).toEqual([]);
-  expect(
-    normalizePreviousContinuumFindings(native, continuumRepository).findings[0]!
-      .evidence.details?.weakness_ids,
-  ).toEqual([]);
 });
 
 test("an inferred weakness cannot exclude a Cloud finding at its evidence limit", () => {
@@ -172,11 +165,15 @@ test("an inferred weakness cannot exclude a Cloud finding at its evidence limit"
     vulnerabilities: [],
     stepsToReproduce: Array<string>(31).fill("x".repeat(8192)).concat(""),
   };
-  const original = normalizePreviousContinuumFindings(
-    finding,
-    continuumRepository,
-  ).findings[0]!.evidence;
-  const bytes = Buffer.byteLength(JSON.stringify(original));
+  const original = normalize(finding).findings[0]!.evidence;
+  const bytes = Buffer.byteLength(
+    JSON.stringify({
+      ...original,
+      packages: [],
+      source_updated_at: null,
+      details: { ...original.details, weakness_ids: [] },
+    }),
+  );
   finding.stepsToReproduce[31] = "x".repeat(256 * 1024 - bytes);
   const result = normalize(finding);
   expect(result.excluded).toEqual([]);
@@ -254,12 +251,9 @@ test("a Cloud finding that fits with native packages alone still imports", () =>
     ],
     padding: "",
   };
-  const previous = normalizePreviousContinuumFindings(
-    finding,
-    continuumRepository,
-  );
+  const original = normalize(finding).findings[0]!.evidence;
   const bytes = Buffer.byteLength(
-    JSON.stringify(previous.findings[0]!.evidence),
+    JSON.stringify({ ...original, packages: [], source_updated_at: null }),
   );
   finding.padding = "x".repeat(256 * 1024 - bytes);
   const result = normalize(finding);

@@ -1,4 +1,3 @@
-import { previousReaderSelection } from "../src/reader-selection.js";
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,7 +7,6 @@ import type { ExternalImportTarget } from "../src/external-import-contract.js";
 import {
   inspectorReportRepository,
   normalizeInspectorFindings,
-  normalizePreviousInspectorFindings,
   readInspectorFindings,
 } from "../src/inspector-findings.js";
 import {
@@ -107,12 +105,6 @@ test("related vulnerabilities stay in native evidence even when they exceed the 
     native.packageVulnerabilityDetails.vulnerabilityId,
   ]);
   expect(findings[0]!.evidence.source_data?.["finding"]).toEqual(native);
-  const previous = normalizePreviousInspectorFindings(
-    report,
-    inspectorRepositoryUrl,
-  );
-  expect(previous.findings).toHaveLength(0);
-  expect(previous.excluded[0]?.reason).toContain("advisory_ids");
 });
 
 test.each([
@@ -235,12 +227,6 @@ test("projects only repository-relative code locations with a matching filename"
     evidence(codeFinding("src/example.ts", "example.ts", 13)).details?.code
       ?.end_line ?? null,
   ).toBeNull();
-  expect(
-    normalizePreviousInspectorFindings(
-      { findings: [code] },
-      inspectorRepositoryUrl,
-    ).findings[0]!.evidence.details,
-  ).toBeUndefined();
   expect(evidence(code).locations).toEqual([
     { path: "src/example.ts", line: 8 },
   ]);
@@ -279,12 +265,10 @@ test("oversized optional SAST fields preserve the complete Inspector finding", (
 
 test("SAST details do not displace native evidence at the Cloud byte limit", () => {
   const native = { ...codeFinding(), padding: "" };
-  const previous = normalizePreviousInspectorFindings(
-    { findings: [native] },
-    inspectorRepositoryUrl,
-  );
+  const evidence = normalize([native]).findings[0]!.evidence;
   native.padding = " ".repeat(
-    262_144 - Buffer.byteLength(JSON.stringify(previous.findings[0]!.evidence)),
+    262_144 -
+      Buffer.byteLength(JSON.stringify({ ...evidence, details: undefined })),
   );
   expect(
     normalize([native]).findings[0]!.evidence.source_data?.["finding"],
@@ -693,7 +677,7 @@ test.each([
   [1e-7, 262_144, true],
 ] as const)(
   "a size change rechecks provider proof for each selected subset (%d)",
-  (score, bytes, previouslyAccepted) => {
+  (score, bytes, rejectsWitness) => {
     const { rows, witness, independent } = scopedProjectRows();
     Object.assign(witness, { score: new Number(score), pad: "" });
     const evidence = normalize(rows, enterprise).findings[0]!.evidence;
@@ -701,18 +685,11 @@ test.each([
       pad: "p".repeat(bytes - Buffer.byteLength(JSON.stringify(evidence))),
     });
     const current = normalize(rows, enterprise);
-    const previous = previousReaderSelection(
-      current,
-      JSON.parse(JSON.stringify(current)),
-    );
     const all = rows.map((row) => row.findingArn);
     const onlyIndependent = [independent.findingArn];
     expect(current.findings.map((row) => row.source_finding_id)).toEqual(
-      previouslyAccepted ? onlyIndependent : all,
+      rejectsWitness ? onlyIndependent : all,
     );
-    expect(
-      previous?.snapshot?.findings.map((row) => row.source_finding_id),
-    ).toEqual(previouslyAccepted ? all : onlyIndependent);
   },
 );
 
@@ -720,18 +697,13 @@ test("an uncertain Inspector row can obscure the membership of its dependent", (
   const { rows, witness, dependent, independent } = scopedProjectRows();
   Object.assign(witness, { score: new Number(NaN) });
   const current = normalize(rows, enterprise);
-  const prior = previousReaderSelection(
-    current,
-    JSON.parse(JSON.stringify(current)),
-  );
-  expect(prior?.uncertainFindingIds).toEqual([
+  expect(current.findings.map((row) => row.source_finding_id)).toEqual([
+    independent.findingArn,
+  ]);
+  expect(current.excluded.map((row) => row.source_finding_id)).toEqual([
     witness.findingArn,
     dependent.findingArn,
   ]);
-  expect(prior?.knownFindings?.map((row) => row.source_finding_id)).toEqual([
-    independent.findingArn,
-  ]);
-  expect(prior?.snapshot).toBeUndefined();
 });
 
 test("after the only provider hint is excluded, valid local rows still share their native URL", () => {

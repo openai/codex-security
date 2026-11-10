@@ -28,7 +28,6 @@ const distModules = [
   "external-findings-local",
   "external-findings-import",
   "external-findings-read",
-  "reader-selection",
   "scanner-import",
   "inspector-findings",
   "continuum-findings",

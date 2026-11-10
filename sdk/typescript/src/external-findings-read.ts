@@ -21,46 +21,25 @@ import {
   readSemgrepReport,
 } from "./semgrep-findings.js";
 import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
-import {
-  normalizeTrivyFindings,
-  needsPreviousTrivyProjection,
-  normalizePreviousTrivyFindings,
-} from "./trivy-findings.js";
+import { normalizeTrivyFindings } from "./trivy-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import {
   normalizeEndorFindings,
-  normalizePreviousEndorFindings,
   endorRepositoryUrls,
 } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSonarFindings } from "./sonar-findings.js";
-import {
-  normalizeVeracodeFindings,
-  normalizePreviousVeracodeFindings,
-} from "./veracode-findings.js";
-import {
-  needsPreviousBlackDuckProjection,
-  normalizeBlackDuckFindings,
-  normalizePreviousBlackDuckFindings,
-} from "./blackduck-findings.js";
-import {
-  normalizeContinuumFindings,
-  normalizePreviousContinuumFindings,
-} from "./continuum-findings.js";
+import { normalizeVeracodeFindings } from "./veracode-findings.js";
+import { normalizeBlackDuckFindings } from "./blackduck-findings.js";
+import { normalizeContinuumFindings } from "./continuum-findings.js";
 import { readCheckmarxFindings } from "./checkmarx-findings.js";
-import {
-  normalizeInspectorFindings,
-  normalizePreviousInspectorFindings,
-} from "./inspector-findings.js";
-import { hasPreviousCloudProjection } from "./reader-selection.js";
+import { normalizeInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
   readLocalWizFindings,
   readVendorFindingsForPublication,
   wizFindingRepository,
 } from "./wiz-findings.js";
-
-export type LocalFindingProvider = Provider;
 
 /** File reader names mapped to the provider stored with each finding. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
@@ -79,7 +58,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   continuum: "continuum",
   checkmarx: "checkmarx",
   tenable: "tenable",
-} as const satisfies Record<string, LocalFindingProvider>;
+} as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
 export const EXTERNAL_FINDINGS_READERS = Object.keys(
@@ -94,11 +73,10 @@ export interface ExternalFindingsReaderOptions {
   trivyScanRoot?: string;
 }
 
-/** @internal Shared parser output, including immutable Cloud retry projections. */
+/** @internal Validated scanner output and source repository claims. */
 export interface ReadExternalFindings {
   findings: ExternalFindings;
-  previousFindings?: () => ExternalFindings;
-  /** Preserve previous Wiz projections when resuming immutable Cloud requests. */
+  /** Wiz binds publication identity to its raw rows and source repository. */
   publication?: ExternalPublicationInput;
   sourceRepositories?: ExternalSourceRepository[];
 }
@@ -195,18 +173,6 @@ export async function readExternalFindings(
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
   const url = options.sourceRepositoryUrl ?? "";
-  // Both projections describe the same captured rows, including exclusions.
-  function withReplay(
-    findings: ExternalFindings,
-    couldDiffer: (findings: ExternalFindings) => boolean,
-    previous: () => ExternalFindings,
-  ): ReadExternalFindings {
-    return {
-      findings,
-      previousFindings:
-        target === "cloud" && couldDiffer(findings) ? previous : undefined,
-    };
-  }
   if (provider === "tenable")
     return { findings: await readTenableFindings(path, url, target) };
   if (provider === "sonar") {
@@ -257,25 +223,19 @@ export async function readExternalFindings(
     );
     return {
       findings: wiz.current,
-      ...("legacy" in wiz && { publication: wiz }),
+      ...("currentIdentity" in wiz && { publication: wiz }),
       sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
     };
   }
   const input = await readScannerJson(path);
-  if (provider === "trivy") {
-    const args = [input, target, options.trivyScanRoot] as const;
-    return withReplay(
-      normalizeTrivyFindings(...args),
-      needsPreviousTrivyProjection,
-      () => normalizePreviousTrivyFindings(...args),
-    );
-  }
+  if (provider === "trivy")
+    return {
+      findings: normalizeTrivyFindings(input, target, options.trivyScanRoot),
+    };
   if (provider === "endor") {
     const findings = normalizeEndorFindings(input, target);
     return {
-      ...withReplay(findings, hasPreviousCloudProjection, () =>
-        normalizePreviousEndorFindings(input, target),
-      ),
+      findings,
       sourceRepositories:
         sarifFileRepositories(input, "Endor") ??
         findings.findings.flatMap((row) =>
@@ -283,33 +243,14 @@ export async function readExternalFindings(
         ),
     };
   }
-  const [normalize, previous, couldDiffer] = (
-    {
-      inspector: [
-        normalizeInspectorFindings,
-        normalizePreviousInspectorFindings,
-        () => true,
-      ],
-      continuum: [
-        normalizeContinuumFindings,
-        normalizePreviousContinuumFindings,
-        () => !Array.isArray(input),
-      ],
-      blackduck: [
-        normalizeBlackDuckFindings,
-        normalizePreviousBlackDuckFindings,
-        needsPreviousBlackDuckProjection,
-      ],
-      veracode: [
-        normalizeVeracodeFindings,
-        normalizePreviousVeracodeFindings,
-        hasPreviousCloudProjection,
-      ],
-    } as const
-  )[provider];
-  const args = [input, url, target, options.inspectorProjectMap] as const;
+  const normalize = {
+    inspector: normalizeInspectorFindings,
+    continuum: normalizeContinuumFindings,
+    blackduck: normalizeBlackDuckFindings,
+    veracode: normalizeVeracodeFindings,
+  }[provider];
   return {
-    ...withReplay(normalize(...args), couldDiffer, () => previous(...args)),
+    findings: normalize(input, url, target, options.inspectorProjectMap),
     sourceRepositories: [{ url }],
   };
 }

@@ -7,7 +7,6 @@ import {
   normalizeOpenGrepFindings as normalize,
   readOpenGrepFindings,
 } from "../src/opengrep-findings.js";
-import { previousReaderSelection } from "../src/reader-selection.js";
 import {
   opengrepJson,
   opengrepTraceJson,
@@ -199,27 +198,16 @@ test.each(["group", "trace"] as const)(
       (row) => row.source_finding_id !== group.source_finding_id,
     );
     expect(known).toHaveLength(1);
-    const previous = previousReaderSelection(
-      current,
-      JSON.parse(JSON.stringify(current)),
-    );
-    expect(previous?.uncertainFindingIds).toEqual([group.source_finding_id]);
-    expect(previous?.knownFindings).toEqual(known);
-    const local = normalize(input, options, "local");
-    expect(
-      previousReaderSelection(local, JSON.parse(JSON.stringify(local))),
-    ).toBeUndefined();
   },
 );
 
 test.each([
-  { score: 0.00001, bytes: 262_145, freshCount: 2, priorCount: 1 },
-  { score: 1e-7, bytes: 262_144, freshCount: 1, priorCount: 2 },
+  { score: 0.00001, bytes: 262_145, freshCount: 2 },
+  { score: 1e-7, bytes: 262_144, freshCount: 1 },
 ])(
   "retains exact singleton membership at $bytes bytes",
-  ({ score, bytes, freshCount, priorCount }) => {
+  ({ score, bytes, freshCount }) => {
     const input = opengrepJson();
-    const stable = normalize(input, options).findings[0]!;
     const candidate = {
       ...input.results[0]!,
       check_id: "example.boundary",
@@ -234,18 +222,6 @@ test.each([
     input.results.push(candidate);
     const current = normalize(input, options);
     expect(current.findings).toHaveLength(freshCount);
-    const prior = previousReaderSelection(
-      current,
-      JSON.parse(JSON.stringify(current)),
-    );
-    const expectedIds =
-      priorCount === 1
-        ? [stable.source_finding_id]
-        : [stable.source_finding_id, selected.source_finding_id].sort();
-    expect(
-      prior?.snapshot?.findings.map((row) => row.source_finding_id),
-    ).toEqual(expectedIds);
-    expect(prior?.uncertainFindingIds).toBeUndefined();
   },
 );
 

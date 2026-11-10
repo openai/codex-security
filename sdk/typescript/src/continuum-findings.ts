@@ -149,8 +149,8 @@ function codeLocations(
   return { locations, code: { end_line: endLine, snippet } };
 }
 
-function reportRows(input: unknown, previous: boolean) {
-  if (Array.isArray(input) && !previous) return { rows: input, summary: false };
+function reportRows(input: unknown) {
+  if (Array.isArray(input)) return { rows: input, summary: false };
   const document = record(input, "Continuum report");
   if (
     Object.hasOwn(document, "nextToken") ||
@@ -172,37 +172,6 @@ function reportRows(input: unknown, previous: boolean) {
 
 function subcategoryCwe(row: Record<string, unknown>) {
   return /^(CWE-[1-9]\d*):/u.exec(text(row["subCategory"]) ?? "")?.[1];
-}
-
-/** @internal Match 0.9.x checkpoints for both raw imports and saved SDK output. */
-export function previousContinuumCweProjection(
-  current: ExternalFindings,
-): ExternalFindings {
-  let changed = false;
-  const findings = current.findings.map((finding) => {
-    const { details, source_data } = finding.evidence;
-    const native = source_data?.["finding"];
-    // Remove only the inferred field. Caller edits and all other evidence must
-    // still match the immutable checkpoint before it can be resumed.
-    if (
-      source_data?.["format"] !== format ||
-      !isRecord(native) ||
-      details?.kind !== "sast" ||
-      details.weakness_ids?.length !== 1 ||
-      strings(native["cweIds"]).length ||
-      details.weakness_ids[0] !== subcategoryCwe(native)
-    )
-      return finding;
-    changed = true;
-    return {
-      ...finding,
-      evidence: {
-        ...finding.evidence,
-        details: { ...details, weakness_ids: [] },
-      },
-    };
-  });
-  return changed ? { ...current, findings } : current;
 }
 
 function statusUpdatedAt(value: unknown) {
@@ -253,18 +222,17 @@ function affectedPackages(
   return [...unique.values()];
 }
 
-function normalize(
+export function normalizeContinuumFindings(
   input: unknown,
   sourceRepositoryUrl: string,
-  target: ExternalImportTarget,
-  previous: boolean,
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repository = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
     "Continuum",
     target,
   );
-  const { rows, summary } = reportRows(input, previous);
+  const { rows, summary } = reportRows(input);
   const scopes = new Set<string>();
   const output = normalizeRecords(
     rows,
@@ -339,24 +307,20 @@ function normalize(
           finding: structuredClone(row),
         },
       };
-      const updatedAt = previous
-        ? null
-        : statusUpdatedAt(row["statusUpdatedAt"]);
-      const enrichment = previous
-        ? undefined
-        : {
-            packages: affectedPackages(packages, target),
-            source_updated_at: updatedAt,
-          };
+      const updatedAt = statusUpdatedAt(row["statusUpdatedAt"]);
+      const enrichment = {
+        packages: affectedPackages(packages, target),
+        source_updated_at: updatedAt,
+      };
       // Native code findings can identify a CWE only in subCategory.
       const namedCwe =
-        !previous && evidence.details?.weakness_ids.length === 0
+        evidence.details?.weakness_ids.length === 0
           ? subcategoryCwe(row)
           : undefined;
       const inferred = namedCwe
         ? { details: { ...evidence.details, weakness_ids: [namedCwe] } }
         : undefined;
-      // Keep previously admissible evidence if an optional projection exceeds the Cloud budget.
+      // Keep the original finding when optional fields exceed the Cloud evidence limit.
       return validateEnrichedExternalEvidence(
         evidence,
         target,
@@ -378,23 +342,6 @@ function normalize(
   if (scopes.size > 1)
     throw new Error("Continuum findings must belong to the same environment.");
   return output;
-}
-
-export function normalizeContinuumFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalize(input, sourceRepositoryUrl, target, false);
-}
-
-/** @internal Reconstruct the original evidence for an interrupted Cloud request. */
-export function normalizePreviousContinuumFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalize(input, sourceRepositoryUrl, target, true);
 }
 
 export async function readContinuumFindings(

@@ -519,7 +519,6 @@ function evidence(
   id: string,
   source: string,
   target: ExternalImportTarget,
-  previousProjection: boolean,
 ) {
   const {
     description,
@@ -589,10 +588,7 @@ function evidence(
     description: requiredText(description, "Inspector description"),
     severity: scannerSeverity(level),
     url: text(pkg?.sourceUrl),
-    advisory_ids:
-      previousProjection && pkg?.relatedVulnerabilities
-        ? [...new Set(advisoryIds.concat(pkg.relatedVulnerabilities))]
-        : advisoryIds,
+    advisory_ids: advisoryIds,
     packages,
     locations,
     source_updated_at: updatedAt === undefined ? null : timestamp(updatedAt),
@@ -602,18 +598,17 @@ function evidence(
       finding: structuredClone(finding),
     },
   };
-  const enrichment =
-    code && !previousProjection
-      ? {
-          details: {
-            kind: "sast",
-            repository: { url: source },
-            rule: { id: code.detectorId, name: code.detectorName },
-            weakness_ids: strings(code.cwes),
-            code: endLine === null ? null : { end_line: endLine },
-          },
-        }
-      : undefined;
+  const enrichment = code
+    ? {
+        details: {
+          kind: "sast",
+          repository: { url: source },
+          rule: { id: code.detectorId, name: code.detectorName },
+          weakness_ids: strings(code.cwes),
+          code: endLine === null ? null : { end_line: endLine },
+        },
+      }
+    : undefined;
   return validateEnrichedExternalEvidence(base, target, enrichment);
 }
 
@@ -622,26 +617,6 @@ export function normalizeInspectorFindings(
   sourceRepositoryUrl: string,
   target: ExternalImportTarget = "cloud",
   projectMap?: ReadonlyMap<string, string>,
-): ExternalFindings {
-  return normalizeReport(input, sourceRepositoryUrl, target, projectMap, false);
-}
-
-/** @internal Reconstruct the prior evidence when matching a pending publication. */
-export function normalizePreviousInspectorFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-  projectMap?: ReadonlyMap<string, string>,
-): ExternalFindings {
-  return normalizeReport(input, sourceRepositoryUrl, target, projectMap, true);
-}
-
-function normalizeReport(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget,
-  projectMap: ReadonlyMap<string, string> | undefined,
-  previousProjection: boolean,
 ): ExternalFindings {
   const source = repositoryUrl(sourceRepositoryUrl);
   if (
@@ -663,10 +638,7 @@ function normalizeReport(
     claims: repositoryClaims(finding),
   }));
   checkReportScope(rows, target, projectMap);
-  function checkRetainedScope(
-    result: ExternalFindings,
-    removedIds?: Set<string>,
-  ) {
+  function checkRetainedScope(result: ExternalFindings) {
     if (!result.excluded.length || !result.findings.length) return;
     // Only surviving rows can supply shared provider and host evidence on replay.
     const skipped = new Set(result.excluded.map((row) => row.position));
@@ -680,23 +652,14 @@ function normalizeReport(
         reason: errorMessage(error),
       });
     });
-    result.findings = result.findings.filter((finding, i) => {
-      if (!skipped.has(retained[i]!.position)) return true;
-      removedIds?.add(finding.source_finding_id);
-      return false;
-    });
+    result.findings = result.findings.filter(
+      (_, i) => !skipped.has(retained[i]!.position),
+    );
     result.excluded.sort((a, b) => a.position - b.position);
   }
   return normalizeRecords(
     rows,
-    ({ finding }, id) =>
-      evidence(
-        selectedFinding(finding),
-        id,
-        source,
-        target,
-        previousProjection,
-      ),
+    ({ finding }, id) => evidence(selectedFinding(finding), id, source, target),
     ({ finding }) => identity(record(finding, "Inspector finding")).arn,
     target,
     { filter: checkRetainedScope },

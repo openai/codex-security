@@ -6,7 +6,7 @@ import type {
   ExternalSourceRepository,
 } from "./external-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
-import type { LocalFindingProvider } from "./external-findings-read.js";
+import type { Provider } from "./external-import-models.js";
 import { readHostedGitRemotes } from "./hosted-git-remotes.js";
 import { hasGitMetadata } from "./local-git-metadata.js";
 import { isRecord } from "./record.js";
@@ -147,7 +147,7 @@ function isRetainedTrivyFinding(finding: ExternalFinding) {
 
 /** Retained rows keep their scanner identity even if the report header is projected out. */
 export function checkRetainedTrivyProvider(
-  provider: LocalFindingProvider,
+  provider: Provider,
   finding: ExternalFinding,
   target: ExternalImportTarget = "cloud",
 ): void {
@@ -162,7 +162,7 @@ export function checkRetainedTrivyProvider(
 }
 
 export function checkTrivyReportProvider(
-  provider: LocalFindingProvider,
+  provider: Provider,
   report: unknown,
 ): void {
   if (provider !== "trivy" && identifiesTrivyReport(report))

@@ -370,11 +370,10 @@ function blackDuckPackages(row: Record<string, unknown>) {
   return { packages: fallback };
 }
 
-function normalizeReport(
+export function normalizeBlackDuckFindings(
   input: unknown,
   sourceRepositoryUrl: string,
-  target: ExternalImportTarget,
-  previous: boolean,
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repository = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
@@ -435,7 +434,7 @@ function normalizeReport(
           },
         },
         target,
-        previous ? undefined : enrichment,
+        enrichment,
       );
     },
     (entry) => occurrenceId(entry, projectVersion),
@@ -457,34 +456,6 @@ function normalizeReport(
     }
   }
   return result;
-}
-
-export function normalizeBlackDuckFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalizeReport(input, sourceRepositoryUrl, target, false);
-}
-
-/** @internal Earlier readers used the native origin fallback for GitHub package URLs. */
-export function needsPreviousBlackDuckProjection({
-  findings,
-}: ExternalFindings) {
-  return findings.some(({ evidence }) =>
-    evidence.packages?.some(
-      (pkg) => pkg.ecosystem === "github" && pkg.name.includes("/"),
-    ),
-  );
-}
-
-/** @internal Reconstruct the original evidence for an interrupted Cloud request. */
-export function normalizePreviousBlackDuckFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalizeReport(input, sourceRepositoryUrl, target, true);
 }
 
 export async function readBlackDuckFindings(

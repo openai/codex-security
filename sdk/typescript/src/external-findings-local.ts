@@ -46,7 +46,6 @@ import type {
 import {
   localFindingRepositories,
   semgrepSarifRepositories,
-  type LocalFindingProvider,
 } from "./external-findings-read.js";
 import {
   tenableReportFormat,
@@ -107,7 +106,7 @@ import {
 export interface StoredExternalFinding {
   id: string;
   repository: string;
-  provider: LocalFindingProvider;
+  provider: Provider;
   sourceKey: string;
   sourceFindingId: string;
   evidence: ExternalFindingEvidence;
@@ -120,7 +119,7 @@ export interface StoredExternalFinding {
 export interface NormalizedLocalImportOptions {
   /** Local checkout or source directory to associate with these records. */
   repository: string;
-  provider: LocalFindingProvider;
+  provider: Provider;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
   /** Verified Git repository URL for readers that bind a finding to a checkout. */
@@ -139,7 +138,7 @@ export interface LocalExternalImportDependencies {
 
 export interface LocalExternalImportPreview extends ExternalFindings {
   repository: string;
-  source: { provider: LocalFindingProvider; source_key: string };
+  source: { provider: Provider; source_key: string };
 }
 
 export interface LocalExternalImportResult {

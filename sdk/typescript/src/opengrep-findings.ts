@@ -1,5 +1,4 @@
 import {
-  previousAdmission,
   validateExternalEvidenceJson,
   validateExternalReport,
   type ExternalImportTarget,
@@ -15,7 +14,7 @@ import {
   sourceRepositoryUrl,
 } from "./native-json-findings.js";
 import {
-  trackReaderSelection,
+  appendFinding,
   array,
   readScannerJson,
   record,
@@ -59,14 +58,11 @@ export function normalizeOpenGrepFindings(
     excluded: [],
     report: structuredClone(report),
   };
-  const selection = trackReaderSelection(output);
   type Observation = {
     position: number;
     parsed: ReturnType<typeof parseNativeJsonResult>;
   };
   function exclude(position: number, id: string | null, error: unknown) {
-    if (id && error instanceof Error && previousAdmission(error) !== undefined)
-      selection.uncertainIds.add(id);
     output.excluded.push({
       position,
       source_finding_id: id,
@@ -137,8 +133,6 @@ export function normalizeOpenGrepFindings(
           projectedBytes,
         );
       } catch (error) {
-        if (error instanceof Error && previousAdmission(error) !== undefined)
-          selection.uncertainIds.add(id);
         singletonErrors.set(observation, errorMessage(error));
       }
     }
@@ -192,7 +186,7 @@ export function normalizeOpenGrepFindings(
   )) {
     if (observations.length === 1) {
       const { position } = observations[0]!;
-      selection.append(position, id, () => projectGroup(observations));
+      appendFinding(output, position, id, () => projectGroup(observations));
       continue;
     }
     const ordered = observations
@@ -204,11 +198,6 @@ export function normalizeOpenGrepFindings(
           validateExternalEvidenceJson(
             { source_data: { results: [result] } },
             target,
-            0,
-            (previousBytes, currentBytes) => {
-              if (previousBytes !== currentBytes)
-                selection.uncertainIds.add(id);
-            },
           );
           observation.parsed.result = result;
           return [{ observation, key: canonicalJson(result) }];
@@ -234,7 +223,6 @@ export function normalizeOpenGrepFindings(
         if (retained.length === ordered.length) throw error;
         evidence = projectGroup(retained);
       }
-      if (previousAdmission(evidence) === null) selection.uncertainIds.add(id);
       output.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
       for (const observation of retained)
@@ -242,7 +230,7 @@ export function normalizeOpenGrepFindings(
     }
   }
   output.excluded.sort((left, right) => left.position - right.position);
-  return selection.finish();
+  return output;
 }
 
 export async function readOpenGrepFindings(
