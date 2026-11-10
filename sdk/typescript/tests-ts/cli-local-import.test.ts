@@ -209,7 +209,7 @@ test("CLI imports a vendor report, reads local evidence, and updates the same so
     await terminal.runCli([...f.command.slice(0, -2), "--yes"], f.deps),
   ).toBe(0);
   expect(terminal.stdout.text()).toContain(
-    `codex-security findings imported '${f.repository}'`,
+    `Stored evidence${process.platform === "win32" ? " (PowerShell)" : ""}: codex-security findings imported '${f.repository}'`,
   );
 
   const repeated = createCliTest(main);

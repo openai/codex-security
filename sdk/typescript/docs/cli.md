@@ -2139,8 +2139,8 @@ codex-security scans resume SCAN_ID
 ```
 
 The terminal list shows the full scan ID and labels the last activity of a
-`running` scan after 24 hours without an update. For a Deep Scan with its
-original session, it also shows the resume command to use after interruption.
+`running` scan after 24 hours without an update. For a Deep Scan with a saved
+launch recipe and its original session, it also shows the resume command to use after interruption.
 
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and

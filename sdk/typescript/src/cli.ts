@@ -371,7 +371,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
-import { quoteCliPath } from "./cli-argument.js";
+import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import type { PatchSelection } from "./patch-tui.js";
@@ -4135,7 +4135,7 @@ export async function main(
               const summary =
                 disposition === "empty"
                   ? "The report contains no findings. Nothing was stored.\n"
-                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nStored evidence: ${importedFindingsCommand(preview.repository)}\n`;
+                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\n${importedFindingsCommand(preview.repository)}\n`;
               if (humanSummary) renderedOutput = summary;
               else if (!structured) writeDiagnostic(summary);
               return { ...result };
@@ -4834,7 +4834,7 @@ export async function main(
               );
             if (humanSummary) {
               const { created, updated, unchanged } = result.local.counts;
-              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\nStored evidence: ${importedFindingsCommand(info.repository)}\n`;
+              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\n${importedFindingsCommand(info.repository)}\n`;
               if (result.cloud)
                 renderedOutput += renderExternalPublicationSummary(
                   result.cloud,
@@ -11300,7 +11300,7 @@ async function executeScan(
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
       const scanId = quoteCliPath(diagnosticValue(result.manifest.scan.id));
-      const message = `Validation interrupted. Original output directory: ${errorMessage(result.scanDir)}. Run codex-security scans show ${scanId} to inspect the completed scan.`;
+      const message = `Validation interrupted. Original output directory: ${errorMessage(result.scanDir)}. Run${cliShellLabel(scanId)} codex-security scans show ${scanId} to inspect the completed scan.`;
       errorOutput.write(`codex-security: ${message}\n`);
       return {
         exitCode,
@@ -11933,8 +11933,10 @@ function printScanReference(
   output.write(
     `\n${detail.join(" · ")}\n` +
       (selection === undefined ? "" : `Selected ${selection}.\n`) +
-      `Inspect: codex-security scans show ${argument}\n` +
-      (showLogs ? `Logs:    codex-security scans logs ${argument}\n` : ""),
+      `Inspect${cliShellLabel(argument)}: codex-security scans show ${argument}\n` +
+      (showLogs
+        ? `Logs${cliShellLabel(argument)}:    codex-security scans logs ${argument}\n`
+        : ""),
   );
 }
 
@@ -12144,7 +12146,7 @@ function protectedRootErrorMessage(
     error.pathKind === "output"
       ? suggestion === undefined
         ? "Choose an output directory outside the protected root."
-        : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
+        : `Re-run${cliShellLabel(quoteCliPath(suggestion))} with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
         : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`,
@@ -12185,7 +12187,8 @@ function suggestedOutputDirectory(protectedRoot: string): string | undefined {
 function importedFindingsCommand(repository: string): string {
   if (diagnosticValue(repository) !== repository)
     return "From the repository directory, run codex-security findings imported.";
-  return `codex-security findings imported ${quoteCliPath(repository)}`;
+  const path = quoteCliPath(repository);
+  return `Stored evidence${cliShellLabel(path)}: codex-security findings imported ${path}`;
 }
 
 async function selectedProjectConfig(

@@ -1,6 +1,6 @@
 import { basename, relative } from "node:path";
 import stringWidth from "string-width";
-import { quoteCliPath } from "./cli-argument.js";
+import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { fitCell, graphemes } from "./terminal-columns.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -261,11 +261,14 @@ export function renderScanHistory(
         lines.push(`    ${dim(`Last activity: ${clean(updatedAt)}`)}`);
         if (
           scan["mode"] === "deep" &&
+          scan["recipeAvailable"] === true &&
           scan["handoffStatus"] === "delivered" &&
           scan["continuationThreadId"]
         ) {
           const id = quoteCliPath(clean(scan["scanId"]));
-          lines.push(`    If interrupted: codex-security scans resume ${id}`);
+          lines.push(
+            `    If interrupted${cliShellLabel(id)}: codex-security scans resume ${id}`,
+          );
         }
       }
     }

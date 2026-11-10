@@ -1900,6 +1900,19 @@ describe("CLI", () => {
             mode: "deep",
             continuationThreadId: "thread-for-deep",
             handoffStatus: "delivered",
+            recipeAvailable: true,
+            progress: { status: "running" },
+            findingCount: 0,
+            startedAt: "2026-07-20T12:00:00Z",
+            updatedAt: "2026-07-20T12:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "recipe-less-scan",
+            mode: "deep",
+            continuationThreadId: "retained-thread",
+            handoffStatus: "delivered",
+            recipeAvailable: false,
             progress: { status: "running" },
             findingCount: 0,
             startedAt: "2026-07-20T12:00:00Z",
@@ -1947,7 +1960,9 @@ describe("CLI", () => {
     expect(text).toContain("Last activity: 2026-07-20T12:00:00Z");
     expect(text).toContain("codex-security scans resume abandoned-scan");
     expect(text).not.toContain("scans resume active-scan");
-    expect(text).toContain("4 scans");
+    expect(text).toContain("recipe-less-scan");
+    expect(text).not.toContain("scans resume recipe-less-scan");
+    expect(text).toContain("5 scans");
     expect(text).not.toContain("juice-shop-remediated");
     expect(text).not.toContain("/private/tmp");
     expect(text).not.toContain("target-internal-id");
