@@ -7,8 +7,10 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { syncBuiltinESMExports } from "node:module";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
+import { mock } from "node:test";
 import {
   isUsablePythonExecutable,
   missingPythonHelperMessage,
@@ -62,6 +64,27 @@ assert.equal(
 );
 
 const unixHome = "/home/fixture";
+const missingHome = mock.method(os, "homedir", () => {
+  throw Object.assign(new Error("No home directory for this UID"), {
+    code: "ERR_SYSTEM_ERROR",
+    info: { code: "ENOENT" },
+  });
+});
+try {
+  syncBuiltinESMExports();
+  assert.equal(
+    await resolvePythonCommand({
+      configuredPython: "",
+      cacheDirectory: "",
+      platform: "linux",
+    }),
+    "python3",
+  );
+} finally {
+  missingHome.mock.restore();
+  syncBuiltinESMExports();
+}
+
 const unixRoot = path.posix.join(
   unixHome,
   ".cache",

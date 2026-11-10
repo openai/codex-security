@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
-from workbench.storage import create_private_temporary_directory, state_dir
+from workbench.storage import (
+    archive_source_directory,
+    create_private_temporary_directory,
+    short_archive_prefix,
+    state_dir,
+)
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -82,6 +89,25 @@ def scan_target_identity(
     )
 
 
+@dataclass(frozen=True)
+class WindowsResumeTarget:
+    path: Path
+    snapshot: tuple[str, str | None, int | str, int | str]
+    native_id: tuple[int, int] | None
+
+
+def prepare_cli_scan_target(
+    target: Path, diff_target: dict[str, str] | None, mode: str, launch_kind: str
+) -> tuple[tuple[str, str | None, int | str, int | str], WindowsResumeTarget | None]:
+    if os.name == "nt" and mode == "deep" and launch_kind == "scan":
+        from windows_scan_local_files import pinned_resume_checkout
+
+        with pinned_resume_checkout(target) as native:
+            snapshot = scan_target_identity(target, diff_target)
+            return snapshot, WindowsResumeTarget(target, snapshot, native)
+    return scan_target_identity(target, diff_target), None
+
+
 def scan_diff_identity(
     diff_target: dict[str, str] | None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
@@ -129,7 +155,7 @@ def archive_scan(
     if archived_scan_dir is not None and (
         not args.archive_existing
         or archived_scan_dir.parent != scan_dir.parent
-        or not archived_scan_dir.name.startswith(f"{scan_dir.name}.previous-")
+        or archive_source_directory(archived_scan_dir, scan_dir) != scan_dir
     ):
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
@@ -179,9 +205,17 @@ def archive_scan(
                 )
             if before_archive is not None:
                 before_archive()
-            archived_scan_dir = Path(
-                tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
-            ).resolve()
+            try:
+                reserved = tempfile.mkdtemp(
+                    prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent
+                )
+            except OSError as error:
+                if os.name != "posix" or error.errno != errno.ENAMETOOLONG:
+                    raise
+                reserved = tempfile.mkdtemp(
+                    prefix=short_archive_prefix(scan_dir.name), dir=scan_dir.parent
+                )
+            archived_scan_dir = Path(reserved).resolve()
             archived_scan_dir.rmdir()
             scan_dir.rename(archived_scan_dir)
             moved = True
@@ -271,9 +305,13 @@ def archive_scan(
 
 @contextmanager
 def register_windows_resume_output(
-    connection: sqlite3.Connection, scan_id: str, scan_dir: Path
+    connection: sqlite3.Connection,
+    scan_id: str,
+    scan_dir: Path,
+    target: WindowsResumeTarget,
+    before_create: Callable[[], None],
 ) -> Iterator[None]:
-    from windows_scan_local_files import create_deep_resume_output
+    from windows_scan_local_files import create_deep_resume_output, pinned_resume_checkout
 
     def committed() -> bool:
         # A signal can arrive after commit. The registered scan then owns its child.
@@ -283,12 +321,24 @@ def register_windows_resume_output(
             is not None
         )
 
-    with create_deep_resume_output(scan_dir, committed) as identity:
-        connection.execute(
-            "UPDATE scans SET windows_resume_output_identity = ? WHERE id = ?",
-            (json.dumps(identity), scan_id),
-        )
-        yield
+    with pinned_resume_checkout(target.path) as current:
+        if current != target.native_id or (
+            current is None and scan_target_identity(target.path, None) != target.snapshot
+        ):
+            raise SystemExit(
+                "The selected scan target changed while the scan was starting. Try again."
+            )
+        before_create()
+        with create_deep_resume_output(scan_dir, committed) as identity:
+            connection.execute(
+                "UPDATE scans SET windows_resume_output_identity = ?, windows_resume_target_identity = ? WHERE id = ?",
+                (
+                    json.dumps(identity),
+                    json.dumps(target.native_id) if target.native_id is not None else None,
+                    scan_id,
+                ),
+            )
+            yield
 
 
 def insert_running_scan(
