@@ -1337,6 +1337,9 @@ export class CodexSecurity {
       const validationPermissions = {
         ...scanPermissions,
         filesystem: {
+          ...(process.platform === "win32"
+            ? { [inputs.repository]: { ".": "read" } }
+            : {}),
           ...(scanPermissions["filesystem"] as JsonObject),
           ":workspace_roots": "read",
           ...(runtime.deepScanConfigPath === undefined ||
@@ -1973,7 +1976,10 @@ export class CodexSecurity {
             : [runtime.deepScanConfigPath]),
           ...inputs.gitMetadataPaths,
         ],
-        await codexExecutableReadPaths(this.#codexCommand().command),
+        [
+          ...(process.platform === "win32" ? policyReadRoots : []),
+          ...(await codexExecutableReadPaths(this.#codexCommand().command)),
+        ],
         ambientHome,
       );
       const { codex } = await this.#createSessionCodex(
@@ -4718,15 +4724,24 @@ export class CodexSecurity {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
     const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
+    // Windows configures sandbox ACL access for named roots, including private sources.
+    const sourceReadRoot =
+      process.platform === "win32" && command === "scan"
+        ? runtimePaths["CODEX_SECURITY_REPOSITORY"]
+        : undefined;
     // This snapshot outlives a Deep Scan when the client reuses its runtime.
     if (
       runtime.deepScanConfigPath !== undefined ||
-      pluginReadRoot !== undefined
+      pluginReadRoot !== undefined ||
+      sourceReadRoot !== undefined
     ) {
       configOverrides = [
         `permissions.${SCAN_PERMISSION_PROFILE}.filesystem=${inlineToml({
           ":root": "read",
           ":workspace_roots": "write",
+          ...(sourceReadRoot !== undefined
+            ? { [sourceReadRoot]: { ".": "read" } }
+            : {}),
           ...(pluginReadRoot === undefined
             ? {}
             : { [pluginReadRoot]: { ".": "read" } }),
@@ -6966,7 +6981,7 @@ export function scanRuntimeCodexConfig(
 
 function policyFilesystemPermissions(
   deniedPaths: readonly string[] = [],
-  codexPaths: readonly string[] = [],
+  readPaths: readonly string[] = [],
   ambientHome?: string,
 ): JsonObject {
   const filesystem: JsonObject = {
@@ -6974,7 +6989,7 @@ function policyFilesystemPermissions(
     [process.platform === "win32" ? ":root" : ":minimal"]: "read",
     ":workspace_roots": "read",
     // Linux's sandbox re-executes Codex, including installations outside /usr.
-    ...Object.fromEntries(codexPaths.map((path) => [path, { ".": "read" }])),
+    ...Object.fromEntries(readPaths.map((path) => [path, { ".": "read" }])),
     // A scoped "." keeps native permission paths literal, including glob characters.
     ...Object.fromEntries(deniedPaths.map((path) => [path, { ".": "deny" }])),
   };

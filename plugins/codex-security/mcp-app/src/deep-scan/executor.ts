@@ -610,6 +610,8 @@ function workerPermissionProfile(
   ]);
   if (sandbox.pluginReadRoot !== undefined)
     filesystem.set(sandbox.pluginReadRoot, { ".": "read" });
+  if (sandbox.sourceReadRoot !== undefined)
+    filesystem.set(sandbox.sourceReadRoot, { ".": "read" });
   for (const path of [...sandbox.filesystemDenies, ...literalDenies])
     filesystem.set(path, "deny");
   const pointDenies = literalDenies.filter((path) => /[*?[\]]/u.test(path));
