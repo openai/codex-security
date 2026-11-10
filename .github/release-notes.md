@@ -41,6 +41,7 @@
 - preserve explicit usage database paths ([#2556](https://github.com/openai/codex-security/pull/2556))
 - grant scan workers explicit source read access ([#2545](https://github.com/openai/codex-security/pull/2545))
 - verify assumed-unchanged files for committed diffs ([#2554](https://github.com/openai/codex-security/pull/2554))
+- resolve temporary paths before patching a saved checkout ([#2558](https://github.com/openai/codex-security/pull/2558))
 
 </details>
 
