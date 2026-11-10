@@ -799,6 +799,7 @@ export class CodexSecurity {
   readonly #onDeepScanDiagnostic: CodexSecurityRuntimeOptions["onDeepScanDiagnostic"];
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
+  readonly #loginPreparation = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
   #operationTelemetry: OperationTelemetry | null = null;
   #operationTelemetryStart: Promise<void> | null = null;
@@ -4353,8 +4354,9 @@ export class CodexSecurity {
   async #finishClose(): Promise<void> {
     const activeOperation = this.#activeOperation;
     const loginHandles = [...this.#loginHandles];
-    // Also cancel logins still waiting to acquire the shared credential home.
-    this.#abortController.abort();
+    // A login waiting on the credential home does not yet have a child handle.
+    this.#loginPreparation.abort();
+    if (activeOperation !== null) this.#abortController.abort();
     for (const handle of loginHandles) handle.cancel();
     await Promise.allSettled(
       [activeOperation, ...loginHandles.map((handle) => handle.wait())].filter(
@@ -4422,7 +4424,7 @@ export class CodexSecurity {
     this.#requireOpen();
     const release = await acquireCodexSecurityCredentialHomeLock(
       authentication.codexHome,
-      this.#abortController.signal,
+      this.#loginPreparation.signal,
     );
     try {
       await prepareLoginConfig(

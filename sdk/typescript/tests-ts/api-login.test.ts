@@ -2,9 +2,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse } from "smol-toml";
-import { prepareCodexSecurityCredentialHome } from "../src/runtime.js";
+import * as runtime from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import { nodeCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -54,6 +54,40 @@ process.exit(1);
   },
 );
 
+test("close cancels a login queued behind another credential-home owner", async () => {
+  const root = await temporaryDirectory();
+  const environment = {
+    CODEX_HOME: root,
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  const home = await runtime.prepareCodexSecurityCredentialHome(environment);
+  const acquire = runtime.acquireCodexSecurityCredentialHomeLock;
+  const release = await acquire(home);
+  const queued = Promise.withResolvers<void>();
+  const observer = spyOn(
+    runtime,
+    "acquireCodexSecurityCredentialHomeLock",
+  ).mockImplementation((...args) => {
+    queued.resolve();
+    return acquire(...args);
+  });
+  const client = new TestClient(
+    {},
+    { environment, resolveCodexCommand: nodeCommand },
+  );
+  try {
+    const login = client.loginChatGPT();
+    await queued.promise;
+    const closed = client.close();
+    await expect(login).rejects.toMatchObject({ name: "AbortError" });
+    await closed;
+  } finally {
+    observer.mockRestore();
+    await release();
+    await client.close();
+  }
+});
+
 test("SDK sign-in honors the ambient login restriction and explicit overrides", async () => {
   const root = await temporaryDirectory();
   const ambient = join(root, "ambient");
@@ -65,7 +99,7 @@ test("SDK sign-in honors the ambient login restriction and explicit overrides", 
     CODEX_HOME: ambient,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
-  const home = await prepareCodexSecurityCredentialHome(environment);
+  const home = await runtime.prepareCodexSecurityCredentialHome(environment);
   await writeFile(
     join(home, "config.toml"),
     'cli_auth_credentials_store = "ephemeral"\n',
