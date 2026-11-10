@@ -1503,14 +1503,17 @@ async function testWorkerRuntimeSettings() {
       );
       const browserNode = path.join(fixture.root, "browser node");
       process.env.CODEX_BROWSER_USE_NODE_PATH = browserNode;
-      const python = path.join(fixture.root, "selected venv", "bin", "python");
+      const systemPython = process.platform === "win32" ? "python" : "python3";
+      const python =
+        configuration === "" && process.platform !== "win32"
+          ? systemPython
+          : path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
         fixture.root,
         "helper venv",
         "bin",
         "python",
       );
-      const systemPython = process.platform === "win32" ? "python" : "python3";
       const workerPython = (index: number) =>
         index === 0 ? systemPython : `${helperPython}-${index} `;
       process.env.PYTHON = python;
