@@ -15,7 +15,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   close as closeCallback,
@@ -3133,8 +3133,6 @@ export async function bootstrapPlugin(
     );
   const stagedMatches =
     staged?.version === version && (await matchesSelected(stagedRoot));
-  const migratedCommands = (plugin: string) =>
-    join(plugin, ".codex-plugin", "migrated-command-skills");
   const matchesNativeInstall = async (installedRoot: string) =>
     (await matchesSelected(stagedRoot)) &&
     (await matchesSelected(
@@ -3142,6 +3140,22 @@ export async function bootstrapPlugin(
       false,
       migratedCommands(installedRoot),
     ));
+  const nativeMigration = (installedRoot: string) =>
+    verifiedCommandMigration(
+      installedRoot,
+      matchesNativeInstall,
+      options.signal,
+    );
+  const matchesReceipt = async (installedRoot: string, migration: unknown) => {
+    if (
+      typeof migration === "string" &&
+      options.runCodex === undefined &&
+      (await isBundledPluginInstaller(command))
+    ) {
+      return (await nativeMigration(installedRoot)) === migration;
+    }
+    return matchesSelected(installedRoot, true);
+  };
 
   if (!stagedMatches) {
     if (existing !== null) {
@@ -3220,11 +3234,10 @@ export async function bootstrapPlugin(
     isRecord(previous) &&
     typeof previous["installedPath"] === "string" &&
     previous["version"] === version &&
-    ((await matchesSelected(previous["installedPath"], true)) ||
-      (previous["nativeCommandMigration"] === true &&
-        options.runCodex === undefined &&
-        (await isBundledPluginInstaller(command)) &&
-        (await matchesNativeInstall(previous["installedPath"]))))
+    (await matchesReceipt(
+      previous["installedPath"],
+      previous["nativeCommandMigration"],
+    ))
   ) {
     return {
       pluginRoot: root,
@@ -3301,15 +3314,18 @@ export async function bootstrapPlugin(
     (
       await lstat(migratedCommands(root)).catch(nullIfMissingFileError)
     )?.isDirectory() === true;
-  let nativeCommandMigration = false;
-  if (retried || hasSourceMigration) {
-    const verified = await matchesNativeInstall(installed["installedPath"]);
-    if (retried && !verified) {
-      throw new PluginBootstrapError(
-        "The retried Codex plugin install did not install the selected plugin contents.",
-      );
-    }
-    nativeCommandMigration = hasSourceMigration && verified;
+  const nativeCommandMigration = hasSourceMigration
+    ? await nativeMigration(installed["installedPath"])
+    : undefined;
+  if (
+    retried &&
+    !(hasSourceMigration
+      ? nativeCommandMigration !== undefined
+      : await matchesNativeInstall(installed["installedPath"]))
+  ) {
+    throw new PluginBootstrapError(
+      "The retried Codex plugin install did not install the selected plugin contents.",
+    );
   }
 
   await writeFile(
@@ -3339,6 +3355,101 @@ async function isBundledPluginInstaller(
     return await sameFile(command.command, resolveBundledCodexExecutable());
   } catch {
     return false;
+  }
+}
+
+function migratedCommands(plugin: string): string {
+  return join(plugin, ".codex-plugin", "migrated-command-skills");
+}
+
+// Bind a receipt to the generated files observed in this installation.
+// Entry names come from its directories, never from the saved digest.
+async function verifiedCommandMigration(
+  installedRoot: string,
+  matchesSelected: (installedRoot: string) => Promise<boolean>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const digest = createHash("sha256");
+  const record = (...fields: (string | number)[]) =>
+    digest.update(JSON.stringify(fields)).update("\n");
+  async function visit(path: string, name: string): Promise<boolean> {
+    throwIfSignalAborted(signal);
+    const metadata = await lstat(path, { bigint: true });
+    if (
+      metadata.isSymbolicLink() ||
+      relative(path, await realpath(path)) !== ""
+    )
+      return false;
+    if (metadata.isDirectory()) {
+      record("directory", name);
+      for (const entry of (await readdir(path)).sort()) {
+        const child = join(path, entry);
+        if (!(await visit(child, name ? `${name}/${entry}` : entry)))
+          return false;
+      }
+      return sameInode(metadata, await lstat(path, { bigint: true }));
+    }
+    if (!metadata.isFile()) return false;
+    const file = await open(
+      path,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+    try {
+      const opened = await file.stat({ bigint: true });
+      if (!opened.isFile()) return false;
+      if (!sameInode(metadata, opened)) {
+        if (process.platform !== "win32") return false;
+        // Some Windows Node versions report a different device on an open handle.
+        const { sameCheckedFileDevice } = await import("./contract.js");
+        if (!(await sameCheckedFileDevice(file, { path, metadata }, opened)))
+          return false;
+      }
+      const contents = createHash("sha256")
+        .update(await file.readFile({ signal }))
+        .digest("hex");
+      record("file", name, Number(opened.mode & 0o111n), contents);
+    } finally {
+      await file.close();
+    }
+    return true;
+  }
+  throwIfSignalAborted(signal);
+  const installation = await lstat(installedRoot, { bigint: true }).catch(
+    nullIfMissingFileError,
+  );
+  if (
+    !installation?.isDirectory() ||
+    installation.ino === 0n ||
+    !(await matchesSelected(installedRoot))
+  )
+    return;
+  try {
+    const directory = migratedCommands(await realpath(installedRoot));
+    const parent = dirname(directory);
+    if (
+      !(await lstat(parent)).isDirectory() ||
+      relative(parent, await realpath(parent)) !== ""
+    )
+      return;
+    const root = await lstat(directory, { bigint: true }).catch(
+      nullIfMissingFileError,
+    );
+    if (root && (!root.isDirectory() || !(await visit(directory, "")))) return;
+    // Native activation replaces the installed directory even at the same version.
+    if (!sameInode(installation, await lstat(installedRoot, { bigint: true })))
+      return;
+    throwIfSignalAborted(signal);
+    return root ? `sha256:${digest.digest("hex")}` : "absent";
+  } catch (error) {
+    throwIfSignalAborted(signal);
+    if (
+      !["ENOENT", "ENOTDIR", "ELOOP", "EISDIR", "EACCES", "EPERM"].includes(
+        nodeErrorCode(error) ?? "",
+      )
+    )
+      throw error;
   }
 }
 

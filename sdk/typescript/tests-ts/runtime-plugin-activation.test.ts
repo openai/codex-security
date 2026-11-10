@@ -1,9 +1,11 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import * as files from "node:fs/promises";
 import {
   cp,
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -291,6 +293,155 @@ test("a link replacing the installed command migration directory requires reinst
   await f.install();
   expect(await f.remaining()).toHaveLength(0);
   expect(await readFile(join(outside, "marker.txt"), "utf8")).toBe("unrelated");
+  expect(resolver).toHaveBeenCalled();
+});
+
+test.each([
+  "missing file",
+  "changed bytes",
+  "renamed skill",
+  "changed file type",
+  "restored source with changed output",
+  "extra output",
+  "missing directory",
+  "nested link",
+  "previously absent",
+] as const)(
+  "repairs %s in a recorded native command migration",
+  async (damage) => {
+    const absent = damage === "previously absent";
+    const f = await fixture([{}, {}], absent ? "removed" : "regenerated");
+    using resolver = spyOn(
+      executable,
+      "resolveBundledCodexExecutable",
+    ).mockReturnValue(f.command);
+    const { installedRoot } = await f.install();
+    const migration = join(
+      installedRoot,
+      ".codex-plugin",
+      "migrated-command-skills",
+    );
+    const skill = join(migration, "source-command-sample");
+    const file = join(skill, "SKILL.md");
+    const outside = await temporaryDirectory();
+    const sentinel = join(outside, "SKILL.md");
+    await writeFile(sentinel, "outside");
+    switch (damage) {
+      case "missing file":
+        await rm(file);
+        break;
+      case "restored source with changed output":
+        await cp(
+          join(f.selected, ".codex-plugin", "migrated-command-skills"),
+          migration,
+          { recursive: true },
+        );
+        await writeFile(file, "different skill");
+        break;
+      case "changed bytes":
+        await writeFile(file, "different skill");
+        break;
+      case "renamed skill":
+        await rename(skill, join(migration, "other-command-name"));
+        break;
+      case "changed file type":
+        await rm(file);
+        await mkdir(file);
+        break;
+      case "extra output":
+        await writeFile(join(skill, "extra.md"), "unselected");
+        break;
+      case "missing directory":
+        await rm(migration, { recursive: true });
+        break;
+      case "nested link":
+        await rm(skill, { recursive: true });
+        await symlink(
+          outside,
+          skill,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        break;
+      case "previously absent":
+        await mkdir(migration);
+        break;
+    }
+    await f.install();
+    expect(await f.remaining()).toHaveLength(0);
+    if (absent) {
+      await expect(readdir(migration)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } else {
+      expect(await readdir(migration)).toEqual(["source-command-sample"]);
+      expect(await readdir(skill)).toEqual(["SKILL.md"]);
+      expect(await readFile(file, "utf8")).toBe("synthetic skill");
+    }
+    expect(await readFile(sentinel, "utf8")).toBe("outside");
+    expect(resolver).toHaveBeenCalled();
+  },
+);
+
+test("canceling a generated skill read leaves its native receipt and caller reason intact", async () => {
+  const f = await fixture([{}], "regenerated");
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.command);
+  const { installedRoot } = await f.install();
+  const generated = join(
+    installedRoot,
+    ".codex-plugin",
+    "migrated-command-skills",
+    "source-command-sample",
+    "SKILL.md",
+  );
+  const receipt = await readFile(f.record);
+  const controller = new AbortController();
+  const reason = new Error(
+    "synthetic cancellation while reading generated skill",
+  );
+  const prior = files.open;
+  using opening = spyOn(files, "open").mockImplementation(async (...args) => {
+    const result = await prior(...args);
+    if (String(args[0]) === generated) controller.abort(reason);
+    return result;
+  });
+  await expect(f.install(controller.signal)).rejects.toBe(reason);
+  expect(await f.remaining()).toHaveLength(0);
+  expect(await readFile(f.record)).toEqual(receipt);
+  expect(opening).toHaveBeenCalled();
+  expect(resolver).toHaveBeenCalled();
+});
+
+test("checks the generated output and selected files in the same installation", async () => {
+  const f = await fixture([{}, {}], "regenerated");
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.command);
+  const { installedRoot } = await f.install();
+  const previous = join(await temporaryDirectory(), "previous");
+  const original = files.realpath;
+  let replaced = false;
+  using resolving = spyOn(files, "realpath").mockImplementation((async (
+    ...args: Parameters<typeof original>
+  ) => {
+    if (!replaced && args[0] === installedRoot) {
+      replaced = true;
+      await rename(installedRoot, previous);
+      await cp(previous, installedRoot, { recursive: true });
+      await writeFile(join(installedRoot, "marker.txt"), "other selection");
+    }
+    return original(...args);
+  }) as typeof original);
+  await f.install();
+  expect(replaced).toBe(true);
+  expect(await f.remaining()).toHaveLength(0);
+  expect(await readFile(join(installedRoot, "marker.txt"), "utf8")).toBe(
+    "selected",
+  );
+  expect(resolving).toHaveBeenCalled();
   expect(resolver).toHaveBeenCalled();
 });
 
