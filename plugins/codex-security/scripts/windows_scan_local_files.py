@@ -1088,6 +1088,55 @@ def pinned_root_git_marker(
         yield marker
 
 
+def pin_replay_metadata(
+    pins: contextlib.ExitStack, metadata: Path | None, scratch: Path
+) -> Path | None:
+    """Bind the selected metadata and fresh private Windows scratch before copying into it."""
+    if os.name != "nt" or metadata is None:
+        return None
+    try:
+        with contextlib.ExitStack() as checked:
+            checked.enter_context(_locked_parent(metadata, "HEAD", create=False))
+            checked.enter_context(_locked_parent(scratch.parent, scratch.name, create=False))
+            directory = _create_file(
+                scratch,
+                access=_FILE_TRAVERSE | _FILE_READ_ATTRIBUTES | _READ_CONTROL,
+                share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                disposition=_OPEN_EXISTING,
+                flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+            assert directory is not None and directory.value is not None
+            checked.enter_context(directory)
+            _verify_directory(directory.value, scratch)
+            if _output_directory_grants(directory.value, scratch):
+                return None
+            pins.enter_context(checked.pop_all())
+    except (OSError, ValueError):
+        return None
+    return metadata
+
+
+@contextlib.contextmanager
+def pinned_replay_gitfile(checkout: Path, metadata: Path) -> Iterator[Path]:
+    """Keep Git's short metadata pointer outside the replay and immutable while Git uses it."""
+    with _locked_parent(checkout, ".git", create=False):
+        # Git reads this path relative to its unchanged worktree cwd. Both volumes'
+        # literal ancestors are pinned, including the temporary directory above checkout.
+        marker = checkout.parent / "reviewed.git"
+        handle = _create_file(
+            marker,
+            access=_GENERIC_WRITE | _FILE_READ_ATTRIBUTES,
+            share=_FILE_SHARE_READ,
+            disposition=_CREATE_NEW,
+            flags=_FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+        assert handle is not None and handle.value is not None
+        with handle:
+            _verify_regular_file(handle.value, marker)
+            _write_all(handle.value, f"gitdir: {metadata.as_posix()}\n".encode("utf-8"))
+            yield Path("..") / marker.name
+
+
 def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
     """Open a verified regular file and return an owned binary read descriptor."""
 
