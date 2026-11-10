@@ -6,7 +6,7 @@ source of finding IDs.
 | Starting point                                                                   | What to collect                                                                                                                                                                                | Destination    |
 | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
 | [CLI or CI report](#quick-start)                                                 | A Code-only JSON or self-contained SARIF 2.1.0 file, optionally gzipped. Native JSON keeps Semgrep severity and available snippets.                                                            | Local or Cloud |
-| [Hosted AppSec Platform MCP](#import-selected-code-findings-from-the-hosted-mcp) | Selected Code findings for a verified project and Git ref, using the local SDK example.                                                                                                        | Local          |
+| [Hosted AppSec Platform MCP](#import-selected-code-findings-from-the-hosted-mcp) | Selected rule-based Code (SAST) findings from a verified project and Git ref.                                                                                                                  | Local or Cloud |
 | [Guardian in Codex](#import-selected-guardian-findings)                          | Selected Code or Supply Chain findings through the connected Guardian account.                                                                                                                 | Local or Cloud |
 | [Selected Web API IDs](#existing-platform-findings)                              | Original project response and SAST findings pages for one full Git ref. Use the SDK to save a selection or [import it directly](#import-selected-semgrep-platform-sast-findings-with-the-sdk). | Local or Cloud |
 | [Whole Platform project](#collect-a-platform-project-and-branch)                 | All findings for one project, full ref and product using a Web API token.                                                                                                                      | Local or Cloud |
@@ -79,80 +79,97 @@ repository references in the third argument's `sourceRepositories`. Use
 
 ## Import selected Code findings from the hosted MCP
 
-This example uses Semgrep’s hosted AppSec Platform MCP (beta) at
-`semgrep.dev` to read existing Code findings into the local Codex Security
-workbench. Use the
-[Guardian workflow](#import-selected-guardian-findings) if your connection
-exposes `get_semgrep_sast_findings`.
+Use Semgrep’s hosted AppSec Platform MCP (beta) at `semgrep.dev` to import
+existing rule-based Code (SAST) findings. You can save the same capture to a
+local workbench or Codex Security Cloud. Cloud uses your private findings
+inbox when available and otherwise publishes to the connected repository.
 
-### Connect Codex to Semgrep
+### Connect and capture
 
-Add Semgrep’s read-only endpoint to Codex. Sign in with an account that
-can read the project, then select its Teams or Enterprise organization
-(trials included). If adding the server completes browser sign-in, skip
-the second command.
+Add the read-only server to Codex. Sign in to the Teams or Enterprise
+organization (including trials) that owns the project. If adding the server
+completes browser sign-in, skip the second command.
 
 ```sh
 codex mcp add semgrep --url https://semgrep.dev/api/mcp/read-only
 codex mcp login semgrep
 ```
 
-Start a new Codex session or reload MCP servers. Ask Codex to call
-`semgrep_account` and check the organization in `structuredContent.orgs`.
+Reload MCP servers or start a new Codex session. Ask Codex to list open
+Code findings for your repository and full Git ref, then choose the IDs you
+want to import. For example, give Codex this request with your own values:
+
+> Use the hosted Semgrep MCP to capture rule-based Code findings `101` and
+> `103` from `https://github.com/example/project` on `refs/heads/main`.
+> Save the capture to `/path/to/private/capture.json` for the Codex Security
+> hosted MCP import example.
+
+For the capture, use `semgrep_account` to identify the organization and
+`ProjectsService_ListProjects` to match the project by its SCM URL. Its
+display name can differ from the repository path. Call
+`ProjectsService_GetProject` for that project and `IssuesService_ListIssues`
+with `body.issueTypes: ["ISSUE_TYPE_SAST"]` and the project ID, full ref
+and requested string IDs in `body.filter.repositoryIds`, `refs` and `ids`.
+Follow the cursor until every selected ID is accounted for. Save the
+original selected `structuredContent.issues` rows programmatically, including
+the nested `issue` and sibling fields. This captures list-level evidence.
+For snippets or dataflow traces, inspect the issue with `IssuesService_GetIssue`. The capture contains `deploymentId`
+(string), `ref`, `findingIds` (requested strings), `project` (from
+`structuredContent.project`) and `issues` (the selected rows).
 [Semgrep connection and authentication guide](https://docs.semgrep.dev/semgrep-appsec-platform/mcp)
 
-### Capture the selected findings
+### Preview, save and verify
 
-From the checkout you want to import into, inspect its Git fetch URL.
-Have Codex call `ProjectsService_ListProjects` for the selected deployment
-and find the project by its SCM URL. Project display names can differ from
-the repository path. Use `discover` to inspect the tools and filters
-available to your account.
-
-For example, give Codex the following request with your checkout, private
-output path, full ref and issue IDs. To pick IDs first, ask it to list open
-Code findings for that project and ref.
-
-> Use the read-only Semgrep MCP. Match the project’s SCM URL to the fetch
-> remote of `/path/to/checkout`. Capture Code findings `101` and `103` on
-> `refs/heads/main` in `/private/path/capture.json`. Get the project with
-> `ProjectsService_GetProject`. Call `IssuesService_ListIssues` with the
-> deployment ID in `path.deploymentId`, `body.issueTypes` set to
-> `["ISSUE_TYPE_SAST"]`, and `body.filter` containing `repositoryIds`,
-> `refs` and `ids`. Pass the IDs as strings. Check that the returned issue
-> IDs match my selection exactly, following the cursor if necessary.
-> Write a JSON object with `deploymentId` (string), `ref` (the full ref),
-> `findingIds` (my requested string IDs), `project` (the original
-> `structuredContent.project`) and `issues` (the original selected rows from
-> `structuredContent.issues`). Copy the rows programmatically, including
-> their nested `issue` and sibling fields.
-
-### Preview, save and read back locally
-
-Copy the [local import example](examples/semgrep-hosted-mcp.mjs) into a private
-directory outside the checkout. Install the SDK there and run the example
-with the capture and the checkout path. These commands were tested with
-version 0.9.1.
+Copy the [import example](examples/semgrep-hosted-mcp.mjs) and capture into
+a private directory outside the checkout. From that directory, install the
+SDK used by the example:
 
 ```sh
 npm install @openai/codex-security@0.9.1
+```
+
+**Local workbench.** In your own terminal, compare the intended remote's
+effective fetch URL (`git -C /path/to/checkout remote get-url origin`)
+with the capture’s `project.url`. A remote URL can contain credentials.
+Keep it out of the Codex transcript. For a custom transport helper, verify
+its configured target. Preview using the root of that worktree.
+
+```sh
 node semgrep-hosted-mcp.mjs capture.json /path/to/checkout
 ```
 
-Check the repository, source IDs, ref, severity and locations in the
-preview. Save the same capture and read it back with the installed CLI.
+After checking the source URL, checkout and selected findings, save the
+same capture and read back the records.
 
 ```sh
 node semgrep-hosted-mcp.mjs capture.json /path/to/checkout --save
 ./node_modules/.bin/codex-security findings imported /path/to/checkout --format json
 ```
 
-The example checks the returned IDs against the requested IDs and verifies
-each issue’s project ID, product and ref. The SDK matches the project URL
-to the checkout. The workbench stores the exact issue ID and original row under the `semgrep`
-provider. The source key scopes those IDs to the hosted MCP deployment,
-project, ref and Code product. Repeat the save with the same capture and
-checkout to verify the receipt reports the findings as unchanged.
+**Codex Security Cloud.** The SDK needs a file-backed ChatGPT sign-in. If
+you need one, run these commands from the private example directory and
+choose the intended account. Keep the same state directory for previews,
+saves and retries.
+
+```sh
+export CODEX_SECURITY_STATE_DIR="$PWD/cloud-state"
+mkdir -p -m 700 "$CODEX_SECURITY_STATE_DIR" "$CODEX_SECURITY_STATE_DIR/codex-home"
+CODEX_HOME="$CODEX_SECURITY_STATE_DIR/codex-home" codex login -c 'cli_auth_credentials_store="file"'
+```
+
+Pass `cloud` and the connected repository’s SCM URL. If several connectors
+share the URL, use the intended Cloud repository ID instead. Check the
+account, repository, selected findings and exclusions before confirming.
+
+```sh
+node semgrep-hosted-mcp.mjs capture.json cloud https://github.com/example/project
+node semgrep-hosted-mcp.mjs capture.json cloud https://github.com/example/project --save
+```
+
+If the preview shows `privateImport`, check the completed private job and
+its counts. If it shows repository requests, check the receipts and verified
+count for the selected reports. Keep the capture and source key for retries.
+[Verify the Cloud import](README.md#verify-the-import) · [Resume an interrupted submission](schema-guide.md#retry-a-cloud-submission)
 
 ## Import selected Guardian findings
 
