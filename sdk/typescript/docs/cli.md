@@ -509,7 +509,8 @@ be clean and at the commit recorded by the parent.
 Committed-diff scans require a clean, full checkout at the requested head
 revision, including when using `--validate`. A different checkout revision or
 local changes are rejected before scanning; check out the requested head and
-commit or stash local changes before retrying.
+commit or stash local changes before retrying. The check also verifies tracked
+files marked `assume-unchanged` and preserves their Git index flags.
 
 `--owner-suggestions` writes optional `owner-suggestions.json` after a completed
 committed Git scan, using the same checkout, model, and reasoning effort. Owner
