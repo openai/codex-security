@@ -2306,11 +2306,30 @@ function handleDisconnectedResize(error: NodeJS.ErrnoException): void {
   }
 }
 
+/** Run the standalone CLI, which owns the process and its stdio. */
+export async function runCli(): Promise<number> {
+  let signInInterrupted = false;
+  const exitCode = await main(
+    process.argv.slice(2),
+    process.stdout,
+    process.stderr,
+    DEFAULT_DEPENDENCIES,
+    () => {
+      signInInterrupted = true;
+    },
+  );
+  // Managed output and child cleanup are complete. An interrupted prompt may
+  // still have a write pending on stderr if its reader stopped draining.
+  if (signInInterrupted) process.exit(exitCode);
+  return exitCode;
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   output: Writable = process.stdout,
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
+  onInterruptedSignIn?: () => void,
 ): Promise<number> {
   const remediationOperation =
     argv[0] === "patch"
@@ -7755,6 +7774,11 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  if (
+    (command === "login" || command === "logout") &&
+    (exitCode === 130 || exitCode === 143)
+  )
+    onInterruptedSignIn?.();
   let frameworkOutput = frameworkCapture.text();
   if (filteredScanFailure !== undefined) {
     // Success-field filters do not apply to diagnostics. Reuse Incur's format
@@ -12541,7 +12565,7 @@ const interruptedExitCode = (signal: AbortSignal): number | undefined =>
       : undefined;
 
 if (invokedAsMain()) {
-  void main().then(
+  void runCli().then(
     (exitCode) => {
       process.exitCode = exitCode;
     },
