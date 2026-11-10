@@ -4864,12 +4864,18 @@ export async function main(
     configuration: z.record(z.string(), z.unknown()),
   });
 
-  const inspecting = argv.some((arg) =>
-    ["-h", "--help", "--version", "--schema", "--llms", "--llms-full"].includes(
-      arg,
-    ),
-  );
-  if (inspecting && argv.includes("--update"))
+  const inspectionFlags = [
+    "-h",
+    "--help",
+    "--version",
+    "--schema",
+    "--llms",
+    "--llms-full",
+  ];
+  if (
+    argv.includes("--update") &&
+    argv.some((arg) => inspectionFlags.includes(arg))
+  )
     argv = argv.filter((arg) => arg !== "--update");
   const cliOptions: Cli.create.Options = {
     aliases: ["cs"],
@@ -7666,9 +7672,9 @@ export async function main(
     errorOutput.isTTY === true &&
     argv.length > 0 &&
     argv[0] !== "completions" &&
-    !inspecting &&
-    !argv.includes("--dry-run") &&
-    !argv.includes("--update") &&
+    !argv.some((argument) =>
+      [...inspectionFlags, "--dry-run", "--update"].includes(argument),
+    ) &&
     updateNoticeEnabled(dependencies.environment)
       ? dependencies
           .checkForUpdate(updateController.signal)
