@@ -1307,6 +1307,44 @@ def test_usage_finds_state_database_in_configured_home(
     assert scan_usage._codex_state_database() == database.resolve()
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("spelling", ["leading-relative", "trailing-absolute", "literal-tilde"])
+def test_completion_reads_the_literal_usage_database(
+    tmp_path: Path, spelling: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if spelling == "trailing-absolute" and sys.platform == "win32":
+        pytest.skip("Windows removes trailing spaces from ordinary file names.")
+    if spelling == "literal-tilde" and sys.platform == "win32":
+        pytest.skip("POSIX expands a named home only when that user exists.")
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    fixture.write_parent_rollout([_token_event(counted, 18, 2)])
+    original = Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+    selected = (
+        tmp_path
+        / {
+            "leading-relative": " usage.sqlite",
+            "trailing-absolute": "usage.sqlite ",
+            "literal-tilde": "~synthetic-usage.sqlite",
+        }[spelling]
+    )
+    original.rename(selected)
+
+    neighbor = tmp_path / "neighbor"
+    neighbor.mkdir()
+    other_rollout = _rollout(neighbor, "scan-parent", [_token_event(counted, 96, 2)])
+    _state_graph(fixture.environment, {"scan-parent": other_rollout}, [])
+    original.rename(tmp_path / "usage.sqlite")
+    monkeypatch.chdir(tmp_path)
+    fixture.environment["CODEX_STATE_DB"] = (
+        str(selected) if spelling == "trailing-absolute" else selected.name
+    )
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "complete"
+    assert usage["totalTokens"] == 20
+
+
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     usage = _complete_scan(fixture)["scan"]["usage"]
