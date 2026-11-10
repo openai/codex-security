@@ -1,4 +1,5 @@
-import { runNodePython } from "./support/python-probe.js";
+import { execNodePython, runNodePython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import {
@@ -119,6 +120,11 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const { temporaryDirectory, cleanup, temporaryDirectories } =
   createApiTestFixtures("codex-security-runtime-");
+const pythonWithLauncher = useTestPython(false);
+const pythonOnPath =
+  process.platform === "win32"
+    ? pythonWithLauncher
+    : () => Bun.which("python3") ?? Bun.which("python");
 const testPosix = process.platform === "win32" ? test.skip : test;
 const restoreSpawn = (spawn: typeof childProcess.spawn) =>
   mock.module("node:child_process", () => ({ ...childProcess, spawn }));
@@ -530,7 +536,7 @@ describe("plugin runtime preparation", () => {
   );
 
   test("preserves remediation when the filesystem device changes", async () => {
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     expect(python).not.toBeNull();
     const target = await temporaryDirectory("codex-security-remounted-target-");
     const verification = runNodePython(python!, [
@@ -6132,7 +6138,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await mkdir(stateDirectory);
     await mkdir(scanDirectory, { mode: 0o700 });
 
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     expect(python).not.toBeNull();
     const fixture = runNodePython(python!, [
       "-c",
@@ -6247,7 +6253,7 @@ describe("runtime directories and plugin Python boundary", () => {
   ] as const)(
     "rejects recipe scans when the agent did not create %s",
     async (_description, present) => {
-      const python = Bun.which("python3") ?? Bun.which("python");
+      const python = pythonOnPath();
       expect(python).not.toBeNull();
       const requiredDrafts = ["scan-manifest.json", "findings.json"] as const;
       const root = await temporaryDirectory("codex-security-missing-drafts-");
@@ -6871,8 +6877,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("resolves inherited Python names case-insensitively", async () => {
-    const discovered =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    const discovered = pythonWithLauncher();
     expect(discovered).not.toBeNull();
     const interpreter = join(
       await realpath(dirname(discovered!)),
@@ -7185,7 +7190,7 @@ describe("runtime directories and plugin Python boundary", () => {
   test.skipIf(process.platform !== "win32")(
     "uses a configured Windows Python path without the executable suffix",
     async () => {
-      const discovered = Bun.which("python3") ?? Bun.which("python");
+      const discovered = pythonOnPath();
       expect(discovered).not.toBeNull();
       if (discovered === null) return;
       const python = await realpath(discovered);
@@ -7211,9 +7216,18 @@ describe("runtime directories and plugin Python boundary", () => {
     async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
-      const installedPython = process.env["PYTHON"] ?? Bun.which("python");
-      expect(installedPython).not.toBeNull();
-      if (installedPython === null) return;
+      let installedPython = process.env["PYTHON"];
+      if (installedPython === undefined) {
+        const command = pythonWithLauncher();
+        expect(command).not.toBeNull();
+        if (command === null) return;
+        // The Windows py launcher and the interpreter's DLLs can live in different directories.
+        installedPython = execNodePython(
+          command,
+          ["-X", "utf8", "-c", "import sys; print(sys.executable)"],
+          process.env,
+        ).trimEnd();
+      }
       await mkdir(repository);
       const launcher = join(root, "py.exe");
       await copyFile(installedPython, launcher);
