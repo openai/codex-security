@@ -16989,6 +16989,13 @@ if __name__ == "__main__":
     expect(policyCommand).toMatch(
       /^<plugin_dir>\/scripts\/launch_codex_security_mcp --helper resolve-security-md /,
     );
+    if (process.platform === "win32") {
+      const windowsCommand = policyReference.match(
+        /```powershell\r?\n([\s\S]+?)\r?\n```/u,
+      )?.[1];
+      expect(windowsCommand).toBeDefined();
+      expect(prompt).toContain(windowsCommand!.replaceAll("\r\n", "\n"));
+    }
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",
       "/scripts/launch_codex_security_mcp",
