@@ -428,6 +428,34 @@ describe("security policy generation", () => {
     },
   );
 
+  test.skipIf(process.platform !== "linux")(
+    "keeps a tracked policy distinct from an ignored non-UTF-8 filename",
+    async () => {
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const directory = "dependency-\uFFFD";
+      const policy = `${directory}/SECURITY.md`;
+      await mkdir(join(f.repository, directory));
+      await writeFile(join(f.repository, policy), POLICY);
+      policyGit(f.repository, "add", "--", policy);
+      await writeFile(join(f.repository, ".gitignore"), "dependency-*\n");
+
+      const ignored = Buffer.concat([
+        Buffer.from(join(f.repository, "dependency-")),
+        Buffer.from([0xff]),
+      ]);
+      await writeFile(ignored, "ignored file\n");
+      try {
+        const inventory = await inspectSecurityPolicySources(
+          await resolveSecurityPolicyTarget(f.repository),
+        );
+        expect(inventory.policyPaths).toEqual([policy]);
+      } finally {
+        await rm(ignored);
+      }
+    },
+  );
+
   test("leaves Git-ignored dependencies out of the policy inventory", async () => {
     const f = await fixture();
     policyGit(f.repository, "init", "--quiet");

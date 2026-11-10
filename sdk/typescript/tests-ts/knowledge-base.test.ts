@@ -919,7 +919,6 @@ describe("scan knowledge bases", () => {
       const expected = await filesystem.realpath(temporary);
       using _temporary = spyOn(os, "tmpdir").mockReturnValue(temporary);
       const prepared = await prepareKnowledgeBase([source]);
-      temporaryDirectories.track(prepared.path);
       expect(dirname(prepared.path)).toBe(expected);
       expect(await extractedDocuments(prepared.path)).toEqual([
         "Synthetic policy.",
