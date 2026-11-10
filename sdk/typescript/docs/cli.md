@@ -515,8 +515,9 @@ files marked `assume-unchanged` and preserves their Git index flags.
 `--owner-suggestions` writes optional `owner-suggestions.json` after a completed
 committed Git scan, using the same checkout, model, and reasoning effort. Owner
 errors leave the base scan completed. The JSON result includes
-`ownerSuggestionsPath` or `ownerSuggestionsError`; the sealed findings and
-manifest stay unchanged. This option is unsupported for working-tree and
+`ownerSuggestionsPath` or `ownerSuggestionsError`. For path scans with the bundled
+plugin, each finding can also carry the verified candidates and scanned revision
+in `extensions.ownerSuggestion` before the findings are sealed. This option is unsupported for working-tree and
 directory snapshots. It works with `--max-cost`: hints are recorded within the
 existing scan execution and budget, and the report is finalized without another
 model call. Missing hints abstain; invalid hints produce per-finding owner errors.

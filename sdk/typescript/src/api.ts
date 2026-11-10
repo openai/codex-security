@@ -2825,6 +2825,9 @@ export class CodexSecurity {
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
           ...environmentWithGit(git.environment, git),
+          CODEX_MCP_NODE_PATH:
+            environmentValue(git.environment, "CODEX_MCP_NODE_PATH") ??
+            process.execPath,
           CODEX_HOME: runtime.codexHome,
           ...sqliteEnvironment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -2832,6 +2835,15 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
+      // Custom plugins from older releases only support the post-scan owner report.
+      const inlineOwners =
+        options.ownerSuggestions &&
+        normalized.kind === "paths" &&
+        (
+          await lstat(
+            join(workbenchOptions.pluginRoot, "mcp", "scan-owners.mjs"),
+          ).catch(() => null)
+        )?.isFile();
       checkOpen();
       const registration =
         options.resumeScanId !== undefined
@@ -3736,7 +3748,10 @@ export class CodexSecurity {
           try {
             preparation = await workbench(
               workbenchOptions,
-              workbenchArgs("prepare-scan-completion", { scanId }),
+              workbenchArgs("prepare-scan-completion", {
+                scanId,
+                ownerSuggestions: inlineOwners,
+              }),
             );
           } catch (error) {
             const saved = await workbench(
@@ -3785,6 +3800,7 @@ export class CodexSecurity {
         "complete-scan",
         "--scan-id",
         scanId,
+        ...(inlineOwners ? ["--owner-suggestions"] : []),
         ...(completionCost === null
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
