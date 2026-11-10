@@ -62,6 +62,7 @@
 - inventory policies in list-only POSIX directories ([#2572](https://github.com/openai/codex-security/pull/2572))
 - compare ignored policy paths by their Git filename bytes ([#2573](https://github.com/openai/codex-security/pull/2573))
 - require thread attachment for legacy scan continuations ([#2428](https://github.com/openai/codex-security/pull/2428))
+- report exit status when the scan helper fails ([#2406](https://github.com/openai/codex-security/pull/2406))
 
 </details>
 
