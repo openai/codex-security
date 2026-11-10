@@ -101,11 +101,12 @@ async function connect(overrides: Record<string, string | undefined> = {}) {
   return async <Name extends keyof ArtifactToolResults>(
     name: Name,
     args: Record<string, unknown>,
+    threadId = "artifact-regression-owner",
   ): Promise<ArtifactToolResults[Name]> => {
     const result = await client.callTool({
       name,
       arguments: args,
-      _meta: { "openai/threadId": "artifact-regression-owner" },
+      _meta: { "openai/threadId": threadId },
     });
     assert.notEqual(result.isError, true, JSON.stringify(result));
     return result.structuredContent as ArtifactToolResults[Name];
@@ -160,6 +161,70 @@ try {
     );
     assert.equal(read.content, "temporary evidence");
     await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
+  });
+
+  await test("archived and replacement scans keep their own temporary evidence", async () => {
+    const call = await connect();
+    const output = path.join(fixture, "reused-output");
+    await fs.mkdir(output);
+    const recipe = {
+      config: {},
+      mode: "standard",
+      repository,
+      target: { kind: "repository", paths: [] },
+    };
+    const register = async (owner: string, ...options: string[]) => {
+      const { scanId } = await workbench([
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        output,
+        "--recipe-json",
+        JSON.stringify(recipe),
+        ...options,
+      ]);
+      await workbench([
+        "set-scan-thread",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        owner,
+      ]);
+      return { scanId, storage: "temporary", path: "evidence.txt" };
+    };
+
+    const first = await register("first-owner");
+    const evidence = await call(
+      "save_codex_security_artifact",
+      { ...first, content: "first scan" },
+      "first-owner",
+    );
+    temporaryDirectories.push(evidence.directory);
+    await workbench([
+      "fail-scan",
+      "--scan-id",
+      first.scanId,
+      "--message",
+      "scan stopped",
+    ]);
+    const next = await register("next-owner", "--archive-existing");
+    const replacement = await call(
+      "save_codex_security_artifact",
+      { ...next, content: "next scan" },
+      "next-owner",
+    );
+    temporaryDirectories.push(replacement.directory);
+    assert.equal(await fs.readFile(evidence.path, "utf8"), "first scan");
+    assert.equal(
+      (await call("read_codex_security_artifact", first, "first-owner"))
+        .content,
+      "first scan",
+    );
+    assert.equal(
+      (await call("read_codex_security_artifact", next, "next-owner")).content,
+      "next scan",
+    );
   });
 
   await test("option-shaped temporary artifact names survive save, read and import", async () => {

@@ -194,8 +194,10 @@ test("source CI opts in to native artifact reuse", () => {
     true,
   );
   for (const caller of ["node-release", "container-publish", "container-ci"]) {
-    expect(
-      workflow(caller).jobs["native"]?.with?.["reuse-verified"],
-    ).toBeUndefined();
+    const build = Object.values(workflow(caller).jobs).find(
+      (job) => job.uses === "./.github/workflows/native-artifacts.yml",
+    );
+    expect(build).toBeDefined();
+    expect(build!.with?.["reuse-verified"]).toBeUndefined();
   }
 });

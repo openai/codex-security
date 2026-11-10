@@ -43,15 +43,17 @@ from the same application and context.
 
 The API origin, application, context and native `issue_id` identify a policy
 flaw. Build number, source line, CWE and Pipeline flaw ID are separate fields.
-The original row keeps the numeric severity, CWE, description, status,
-mitigation and resolution. The reader accepts the numeric CWE and category name
-defined in the Findings API schema, as well as expanded CWE and category objects
-in HAL exports. [Findings API schema](https://api.swaggerhub.com/apis/Veracode/veracode-findings_api_specification/2.1)
+The finding title uses the category name, then the CWE name or ID when a name
+is missing. The description and status come from the flaw. The original
+row retains the Veracode severity (0–5), CWE, mitigation and resolution.
+The reader accepts numeric CWEs and category names as well as expanded CWE
+and category objects in HAL exports. [Findings API schema](https://api.swaggerhub.com/apis/Veracode/veracode-findings_api_specification/2.1)
 
 If you export with a numeric category filter, the rows must include category
-IDs so the reader can verify the selection. Veracode reports the static analysis
-path, line and module. Check the path against the checkout yourself. The import
-supplies no column or Git commit.
+IDs so the reader can verify the selection. To locate a flaw, use its
+`issue_id` in the application identified by `applicationUrl`. The module,
+file path and line in `row.finding_details` refer to the analyzed artifact.
+Check that path against the checkout before citing a source location.
 
 A Veracode resolution records upstream status. Assess the fix separately.
 The workbench keeps flaws omitted from later exports.

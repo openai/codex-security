@@ -1,4 +1,5 @@
 #!/bin/sh
+# Use LF line endings so POSIX can execute this script directly from Windows-built packages.
 set -eu
 
 # The SDK may have removed directories containing repository-owned executables.
@@ -18,10 +19,10 @@ launch_node() {
   if [ "${1:-}" = "--helper" ]; then
     shift
     # Preserve POSIX argv and HOME bytes without temporary files or consuming stdin.
-    helper_stdin=-
+    helper_stdin_open=false
     if (exec 4<&0) 2>&-; then
       exec 4<&0
-      helper_stdin=4
+      helper_stdin_open=true
     fi
     wait_helper() {
       if wait "$!" 2>&-; then exit 0; else exit $?; fi
@@ -36,8 +37,15 @@ launch_node() {
     trap 'forward_signal HUP 129' HUP
     trap 'forward_signal INT 130' INT
     trap 'forward_signal TERM 143' TERM
-    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | command -p od -An -v -tx1 | command -p tr -d ' \n' |
-      "$node_command" "$server_path" --helper 3<&0 0<&"$helper_stdin" 4<&- &
+    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | command -p od -An -v -tx1 | command -p tr -d ' \n' | {
+      # BusyBox ash requires a literal close redirection for a closed stdin.
+      if [ "$helper_stdin_open" = true ]; then
+        exec 0<&4
+      else
+        exec 0<&-
+      fi
+      exec "$node_command" "$server_path" --helper 4<&-
+    } 3<&0 &
     exec 4<&-
     wait_helper
   fi
@@ -57,19 +65,37 @@ fi
 
 first_node=
 can_load_native() {
+  selected_node=$1
   if [ -z "$first_node" ]; then
     first_node=$1
   fi
-  # Some managed macOS runtimes enforce library validation and cannot load the
-  # plugin's addon. Check before starting a server or helper with side effects.
+  # Database helpers need SQLite. On macOS, library validation can also
+  # prevent a managed runtime from loading the plugin's addon.
   # Capture output without opening a writable file for read-only callers.
-  _native_probe_output=$("$1" -e '
-    if (process.platform === "darwin") {
+  if _native_probe_output=$("$1" -e '
+    if (process.platform === "linux") {
+      try { require("node:sqlite"); } catch { process.exitCode = 78; }
+    } else if (process.platform === "darwin") {
       require("node:sqlite");
       require(require("node:path").join(process.argv[1], "native",
         `${process.platform}-${process.arch}`, "unix.node"));
     }
-  ' "$launcher_dir/../mcp" </dev/null 2>&1)
+  ' "$launcher_dir/../mcp" </dev/null 2>&1); then
+    return 0
+  elif [ "$?" -ne 78 ]; then
+    return 1
+  fi
+
+  # This Linux runtime can still run helpers without SQLite. Prefer a system
+  # installation if available, without expanding discovery into the caller's PATH.
+  for system_candidate in /usr/local/bin/node /usr/bin/node /bin/node; do
+    if [ -x "$system_candidate" ] &&
+      _native_probe_output=$("$system_candidate" -e 'require("node:sqlite")' </dev/null 2>&1); then
+      selected_node=$system_candidate
+      break
+    fi
+  done
+  return 0
 }
 
 for candidate in \
@@ -79,7 +105,7 @@ for candidate in \
   "$cache_root/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
 do
   if [ -n "$candidate" ] && [ -x "$candidate" ] && can_load_native "$candidate"; then
-    launch_node "$candidate" "$@"
+    launch_node "$selected_node" "$@"
   fi
 done
 
@@ -92,7 +118,7 @@ while [ -n "$remaining_path" ]; do
   path_entry=${remaining_path%%:*}
   node_path=${path_entry:-.}/node
   if [ -x "$node_path" ] && can_load_native "$node_path"; then
-    launch_node "$node_path" "$@"
+    launch_node "$selected_node" "$@"
   fi
   case "$remaining_path" in
     *:*) remaining_path=${remaining_path#*:} ;;
