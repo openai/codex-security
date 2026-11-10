@@ -265,9 +265,7 @@ async function deduplicateResolvedScan(
   const selectedFindingIds = new Set(
     contract.findings.findings.map((finding) => finding.findingId),
   );
-  function withScanRepresentatives(
-    result: DeduplicationResult & { scanId: string },
-  ): DeduplicateScanResult {
+  function scanResult(result: DeduplicationResult): DeduplicateScanResult {
     // Groups are already ranked by severity and then by finding ID.
     const representatives = new Map<string, string>();
     for (const group of result.duplicateGroups) {
@@ -277,6 +275,7 @@ async function deduplicateResolvedScan(
     }
     return {
       ...result,
+      scanId,
       scanRepresentativeFindingIds: result.uniqueFindingIds.map(
         (id) => representatives.get(id) ?? id,
       ),
@@ -427,7 +426,7 @@ async function deduplicateResolvedScan(
     const reviewed = await deduplicator.run([...selectedFindingIds]);
     await checkpoints?.assertSourceUnchanged();
     options.signal?.throwIfAborted();
-    const result = withScanRepresentatives({ scanId, ...reviewed });
+    const result = scanResult(reviewed);
     await workflow?.prepareDedupe(result, {
       groups: result.duplicateGroups,
       ...(local
@@ -450,7 +449,7 @@ async function deduplicateResolvedScan(
   options.signal?.throwIfAborted();
   // Completed workflows and pending receipts from older releases omit this field.
   return result.scanRepresentativeFindingIds === undefined
-    ? withScanRepresentatives(result)
+    ? scanResult(result)
     : result;
 }
 

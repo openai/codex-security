@@ -2632,10 +2632,7 @@ export async function main(
         dependencies.environment["NO_COLOR"] === undefined &&
         dependencies.environment["TERM"] !== "dumb",
       now: dependencies.now(),
-      repository: settings.repository,
-      scanRoot: settings.scanRoot,
-      showLinkedFindings: settings.showLinkedFindings,
-      missingRepositoryHistory: settings.missingRepositoryHistory,
+      ...settings,
     });
     return result;
   };
@@ -12368,7 +12365,7 @@ function protectedRootErrorMessage(
     error.pathKind === "output"
       ? "Scan artifacts cannot be written inside the protected scan root."
       : "Temporary and runtime files cannot be created inside the protected scan root.";
-  const suggestion = suggestedOutputDirectory(error.protectedRoot);
+  const suggestion = suggestedOutputArgument(error.protectedRoot);
   return [
     `${description} must be outside the scanned directory and any enclosing Git worktree.`,
     `  Resolved path:  ${error.outputDirectory}`,
@@ -12377,14 +12374,14 @@ function protectedRootErrorMessage(
     error.pathKind === "output"
       ? suggestion === undefined
         ? "Choose an output directory outside the protected root."
-        : `Re-run${cliShellLabel(quoteCliPath(suggestion))} with --output-dir ${quoteCliPath(suggestion)}.`
+        : `Re-run${cliShellLabel(suggestion)} with --output-dir ${suggestion}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
-        : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`,
+        : `Set TMPDIR (or TEMP on Windows) to ${suggestion} after creating that directory.`,
   ].join("\n");
 }
 
-function suggestedOutputDirectory(protectedRoot: string): string | undefined {
+function suggestedOutputArgument(protectedRoot: string): string | undefined {
   const parent = dirname(protectedRoot);
   if (parent === protectedRoot) return undefined;
   try {
@@ -12407,7 +12404,7 @@ function suggestedOutputDirectory(protectedRoot: string): string | undefined {
         "code" in error &&
         error.code === "ENOENT"
       ) {
-        return candidate;
+        return quoteCliPath(candidate);
       }
       return undefined;
     }

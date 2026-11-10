@@ -6176,7 +6176,7 @@ describe("CLI", () => {
       );
       expect(stderr.text()).toContain(
         process.platform === "win32"
-          ? `Re-run with --output-dir "${suggestion}".`
+          ? `Re-run (PowerShell) with --output-dir '${suggestion.replaceAll("'", "''")}'.`
           : `Re-run with --output-dir '${suggestion.replaceAll("'", `'"'"'`)}'.`,
       );
     } finally {
