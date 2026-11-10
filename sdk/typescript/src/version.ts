@@ -1,6 +1,9 @@
 import { isNonEmptyString } from "./value.js";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join, normalize, win32 } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir, userInfo } from "node:os";
+import { dirname, join, resolve, win32 } from "node:path";
+import { isWithin } from "./trusted-executable.js";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import semverGt from "semver/functions/gt.js";
@@ -150,7 +153,7 @@ function resolveUpdate(
     manager = "bun";
     args = global ? ["add", "-g"] : ["add"];
   }
-  if (fields.length === 1) {
+  if (!global && fields.length === 1) {
     switch (fields[0]) {
       case "devDependencies":
         args.push("-D");
@@ -167,7 +170,6 @@ function resolveUpdate(
   return {
     command: [manager, ...args].join(" "),
     manager,
-    args,
     global,
     directory,
     direct: fields.length === 1,
@@ -182,63 +184,119 @@ export function updateCommand(
   return resolveUpdate(environment, entrypoint, nodeExecutable).command;
 }
 
-/** Run the package manager in the installation that owns this CLI. */
+/** Update a known npm global installation, or explain how to update it manually. */
 export async function installUpdate(
   environment: NodeJS.ProcessEnv,
   entrypoint = fileURLToPath(import.meta.url),
+  nodeExecutable = process.execPath,
 ): Promise<void> {
-  const update = resolveUpdate(environment, entrypoint);
+  const windows = process.platform === "win32";
+  const update = resolveUpdate(
+    environment,
+    entrypoint,
+    windows ? nodeExecutable : undefined,
+  );
   if (!update.manager)
     throw new Error(`To use the latest version, ${update.command}.`);
-  // Hoisted and transitive dependencies can have multiple workspace consumers.
-  if (!update.global && !update.direct) {
-    throw new Error(
-      `Run ${update.command} from the project that declares ${PACKAGE_NAME}.`,
-    );
+  if (!update.global) {
+    const project = update.direct
+      ? JSON.stringify(resolve(update.directory))
+      : `the project that declares ${PACKAGE_NAME}`;
+    throw new Error(`Run ${update.command} from ${project}.`);
   }
-  // Pin npm to the same global prefix, even when the invoking shell selects a
-  // different default. A local install must also ignore npm_config_global.
-  const env = { ...environment };
-  delete env["NPM_CONFIG_GLOBAL"];
-  env["npm_config_global"] = String(update.global);
-  if (update.manager === "npm") {
-    delete env["NPM_CONFIG_PREFIX"];
-    env["npm_config_prefix"] =
-      update.global && process.platform !== "win32"
-        ? dirname(update.directory)
-        : normalize(update.directory);
-  } else if (update.global && update.manager === "bun") {
-    env["BUN_INSTALL_GLOBAL_DIR"] = update.directory;
-  } else if (update.global && update.manager === "yarn") {
-    env["YARN_GLOBAL_FOLDER"] = update.directory;
-  } else if (update.global && update.manager === "pnpm") {
-    env["npm_config_global_dir"] = dirname(update.directory);
-  }
-  process.stderr.write(
-    `Running ${update.command} in ${JSON.stringify(update.directory)}\n`,
-  );
-  await new Promise<void>((resolve, reject) => {
-    // Windows package-manager launchers are usually .cmd files. Only fixed
-    // manager names, flags and the constant package name enter the shell.
-    const windows = process.platform === "win32";
-    const child = spawn(
-      windows ? update.command : update.manager,
-      windows ? [] : update.args,
-      {
-        cwd: update.directory,
-        env,
-        shell: windows,
-        stdio: ["ignore", process.stderr, process.stderr],
-      },
-    );
 
-    child.once("error", reject);
-    child.once("close", (code, signal) => {
-      if (code === 0) resolve();
-      else
-        reject(new Error(`${update.command} exited with ${signal ?? code}.`));
+  // Only Node's own npm can run without consulting PATH, shims or project
+  // package-manager plugins. Point other global installations to their owner.
+  const prefix =
+    !windows && update.manager === "npm"
+      ? dirname(update.directory)
+      : resolve(update.directory);
+  const manual = `Use the installation at ${JSON.stringify(prefix)} to run ${update.command}.`;
+  if (update.manager !== "npm") throw new Error(manual);
+  const node = realpathSync(nodeExecutable);
+  const nodeBin = dirname(node);
+  const nodePrefix = windows ? nodeBin : dirname(nodeBin);
+  if (
+    resolve(prefix) !== nodePrefix &&
+    !(
+      windows &&
+      resolve(prefix) === join(userInfo().homedir, "AppData", "Roaming", "npm")
+    )
+  )
+    throw new Error(manual);
+  const npm = join(
+    windows ? nodePrefix : join(nodePrefix, "lib"),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  // A project may itself supply a Node distribution or a linked npm script.
+  const { hasGitMetadata } = await import("./local-git-metadata.js");
+  if (
+    !existsSync(npm) ||
+    realpathSync(npm) !== npm ||
+    isWithin(realpathSync(process.cwd()), nodeBin) ||
+    (await hasGitMetadata(nodeBin))
+  )
+    throw new Error(manual);
+
+  process.stderr.write(
+    `Running ${update.command} for ${JSON.stringify(prefix)}\n`,
+  );
+  await runGlobalNpm(node, npm, prefix);
+}
+
+/** @internal Install the official package using a verified Node and npm pair. */
+export async function runGlobalNpm(
+  node: string,
+  npm: string,
+  prefix: string,
+): Promise<void> {
+  const scratch = realpathSync(
+    await mkdtemp(join(tmpdir(), "codex-security-update-")),
+  );
+  try {
+    // A fresh home and cache avoid user credentials and registry overrides.
+    // Global npm ignores project configuration; explicitly disable lifecycle
+    // scripts and pin both the default registry and the @openai scope.
+    const env: NodeJS.ProcessEnv = {
+      HOME: scratch,
+      USERPROFILE: scratch,
+      PATH: dirname(node),
+      npm_config_cache: join(scratch, "cache"),
+      npm_config_userconfig: join(scratch, "user.npmrc"),
+      npm_config_globalconfig: join(scratch, "global.npmrc"),
+      ...(process.platform === "win32" && {
+        SystemRoot: process.env["SystemRoot"],
+      }),
+    };
+    const args = [
+      npm,
+      "install",
+      "-g",
+      `${PACKAGE_NAME}@latest`,
+      "--prefix",
+      prefix,
+      "--ignore-scripts",
+      "--registry=https://registry.npmjs.org/",
+      "--@openai:registry=https://registry.npmjs.org/",
+    ];
+    await new Promise<void>((fulfilled, reject) => {
+      const child = spawn(node, args, {
+        cwd: scratch,
+        env,
+        stdio: ["ignore", process.stderr, process.stderr],
+      });
+      child.once("error", reject);
+      child.once("close", (code, signal) => {
+        if (code === 0) fulfilled();
+        else reject(new Error(`npm install exited with ${signal ?? code}.`));
+      });
     });
-  });
+  } finally {
+    await rm(scratch, { force: true, recursive: true });
+  }
 }
 
 export async function checkForUpdate({

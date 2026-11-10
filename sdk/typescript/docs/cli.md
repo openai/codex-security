@@ -39,13 +39,16 @@ codex-security info --json
 
 ## Updating the CLI
 
-Use `cs --update` for a package-manager installation. The command runs the
-package manager for that installation and prints its command and working
-directory to stderr. Project-local updates run in the project that declares
-the CLI dependency. An indirect or hoisted dependency may require running the
-displayed command in its owning workspace. For an npx invocation, use
-`npx @openai/codex-security@latest` on the next run. For a standalone release,
-download and extract the latest release.
+Run `cs --update` to update an npm global installation managed by the running
+Node distribution. It uses Node’s bundled npm, the public npm registry, and
+disabled lifecycle scripts. If you use a custom registry or proxy, run your
+package manager’s update command directly.
+
+For a project dependency, `cs --update` prints the package-manager command for
+you to run in the declaring project. For other global installations it prints
+the corresponding package-manager command and installation location. For npx,
+use `npx @openai/codex-security@latest` on the next run. For a standalone
+release, download and extract the latest release.
 
 Interactive update notices use the same installation detection. Set
 `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to disable these notices. Explicit updates
