@@ -603,7 +603,8 @@ envelope with `error.code` and `error.message`. Command schema validation errors
 with JSON or JSONL retain their field details and name missing options by their
 CLI flags. Diagnostics stay on stderr.
 `scan --schema --format json` describes optional caller inputs before defaults
-and the fields returned by preflight, completed scans and execution failures.
+and the fields returned by preflight, completed scans, and execution failures,
+including sealed results recovered after an interruption.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
 
 ### Follow-up finding validation

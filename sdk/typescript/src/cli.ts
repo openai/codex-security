@@ -1246,12 +1246,19 @@ interface ScanOutcome {
 }
 
 const jsonDocument = z.record(z.string(), z.unknown());
-const completedScanOutput = z.looseObject({
+const scanArtifactFields = {
   manifest: jsonDocument,
   findings: jsonDocument,
   review: jsonDocument,
   scanDir: z.string(),
   reportPath: z.string(),
+};
+const retainedScanOutput = z.object({
+  ...scanArtifactFields,
+  mode: z.string(),
+});
+const completedScanOutput = z.looseObject({
+  ...scanArtifactFields,
   artifactsDir: z.string(),
   sarifPath: z.string().nullable(),
   threadId: z.string(),
@@ -1317,6 +1324,7 @@ function scanOutputSchema(
   return z
     .union([
       completedScanOutput,
+      retainedScanOutput,
       scanPreflightOutput,
       cliFailureSchema(...codes),
     ])

@@ -485,6 +485,17 @@ test("scan discovery accepts caller inputs and validates the reported result var
   expect(
     data({ status: "failed", code: "SCAN_FAILED", message: "Example" }),
   ).toBe(true);
+  const retained = fakeResult(["medium"]);
+  expect(
+    data({
+      mode: retained.mode,
+      manifest: retained.manifest,
+      findings: retained.findings,
+      review: retained.review,
+      scanDir: retained.scanDir,
+      reportPath: retained.reportPath,
+    }),
+  ).toBe(true);
   expect(data({})).toBe(false);
   expect(data({ status: "failed", code: 0, message: 42 })).toBe(false);
 });
