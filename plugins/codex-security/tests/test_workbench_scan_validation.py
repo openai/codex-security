@@ -119,6 +119,33 @@ def test_check_scan_target_rejects_changed_revision(
         workbench_api["remediation_checkout_snapshot"](stored_scan)
 
 
+def test_check_committed_diff_target_rechecks_assume_unchanged_files(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    state_dir, scan_id = start_validation_scan(
+        tmp_path, repository, target={"kind": "refs", "paths": [], "base": "HEAD", "head": "HEAD"}
+    )
+    source = repository / "README.md"
+    original = source.read_bytes()
+    subprocess.run(
+        ["git", "update-index", "--assume-unchanged", "--", source.name], cwd=repository, check=True
+    )
+    assert get_scan(state_dir, scan_id, "--check-target")["scan"]["scanId"] == scan_id
+
+    source.write_bytes(b"Changed locally.\n")
+    changed = get_scan(state_dir, scan_id, "--check-target", check=False)
+    assert changed["returncode"] != 0
+    assert "changed" in changed["stderr"]
+    assert (
+        subprocess.check_output(["git", "ls-files", "-v", "--", source.name], cwd=repository).split(
+            maxsplit=1
+        )[0]
+        == b"h"
+    )
+    source.write_bytes(original)
+    assert get_scan(state_dir, scan_id, "--check-target")["scan"]["scanId"] == scan_id
+
+
 def test_check_committed_diff_target_rejects_sparse_checkout_after_scan(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     initialize_git_repository(repository)

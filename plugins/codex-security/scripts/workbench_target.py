@@ -660,14 +660,18 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
     if scan["diff_target_kind"] == "working_tree":
         expected_digest = scan["diff_content_digest"]
     elif scan["diff_target_kind"] in {"commit", "range"}:
-        tracked = git_bytes(Path(scan["target_path"]), "ls-files", "-t", "-z")
+        target = Path(scan["target_path"])
+        tracked = git_bytes(target, "ls-files", "-v", "-z")
         if tracked is None:
             raise SystemExit("Could not inspect tracked files in the scan target.")
-        if any(entry.startswith(b"S ") for entry in tracked.split(b"\0")):
+        entries = tracked.split(b"\0")
+        if any(entry.startswith((b"S ", b"s ")) for entry in entries):
             raise SystemExit(
                 "Committed-diff scans require a full repository checkout. "
                 "Sparse checkouts are not supported; materialize skipped tracked files and retry."
             )
+        if any(entry.startswith(b"h ") for entry in entries):
+            verify_assumed_unchanged_files(target)
         expected_digest = clean_worktree_content_digest()
     else:
         expected_digest = scan["target_snapshot_digest"]
@@ -675,6 +679,37 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
         raise SystemExit(
             "Scan target contents changed since the scan. "
             "Run a new scan before validating its findings."
+        )
+
+
+def verify_assumed_unchanged_files(target: Path) -> None:
+    index = git_output(target, "rev-parse", "--path-format=absolute", "--git-path", "index")
+    if index is None:
+        raise SystemExit("Could not locate the Git index for the scan target.")
+    with tempfile.TemporaryDirectory(prefix="codex-security-git-index-") as directory:
+        # Refresh a private index without running checkout hooks or updating its shared index.
+        index_copy = Path(directory) / "index"
+        shutil.copyfile(index, index_copy)
+        result = git_command(
+            target,
+            "-c",
+            f"core.hooksPath={directory}",
+            "-c",
+            "core.splitIndex=false",
+            "update-index",
+            "--really-refresh",
+            text=False,
+            environment_overrides={"GIT_INDEX_FILE": str(index_copy)},
+            offline=True,
+        )
+    if result.returncode == 1:
+        raise SystemExit(
+            "A tracked file marked assume-unchanged changed since the scan. "
+            "Run a new scan before validating its findings."
+        )
+    if result.returncode != 0:
+        raise SystemExit(
+            os.fsdecode(result.stderr) or "Could not refresh the scan target's Git index."
         )
 
 
