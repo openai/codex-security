@@ -1,13 +1,13 @@
 # Import SonarQube Cloud findings
 
 Use `import sonar` to collect security issues for one project and branch or
-pull request. Replay its saved capture without signing in to Sonar. For
-issue-search JSON, [preview the native export](#use-a-native-json-export).
+pull request. A live `--dry-run` writes a private capture and returns its path.
+Replay it without signing in to Sonar. If you already have issue-search JSON,
+[preview the native export](#use-a-native-json-export).
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the matching
-checkout, run `sonar auth login` with browse access to the project's Sonar
+From the matching checkout, run `sonar auth login` with browse access to the project's Sonar
 organization. [Sonar CLI authentication](https://docs.sonarsource.com/sonarqube-cli/quickstart-guide#step-2-authenticate)
 
 **Preview live issues.** Copy the project and issue keys from Sonar's Issues
@@ -25,11 +25,14 @@ ref. For a pull request, replace `--sonar-branch main` with
 
 Check the repository and ref. Compare the issue keys in
 `local.findings[].source_finding_id` and any `local.excluded` entries with
-your selection. Keep the private path returned in `capture`.
+your selection. Keep the private path returned in `capture` to
+[save locally](#save-locally) or [save locally and publish to Cloud](#save-locally-and-publish-to-cloud).
 
 ## Import and verify
 
-**Save locally.** From the same checkout, pass the local preview's `capture`
+### Save locally
+
+From the same checkout, pass the local preview's `capture`
 path. Omit `--yes` for an interactive prompt. In a script, use `--yes`
 after review.
 
@@ -37,7 +40,9 @@ after review.
 codex-security import sonar "/path/from/local-preview.json" --yes
 ```
 
-**Save locally and publish to Cloud.** [Sign in to Cloud](../../sdk/typescript/docs/cli.md#preview-and-publish)
+### Save locally and publish to Cloud
+
+[Sign in to Cloud](../../sdk/typescript/docs/cli.md#preview-and-publish)
 on a deployment that accepts the `sonar` provider. Preview the connected
 repository from the local capture.
 
@@ -74,9 +79,12 @@ comparable remote must match if the checkout has any. Preview again if a
 fetch URL changes.
 
 Each issue key identifies one record within its source and repository.
-Reimport updates its evidence, including file ranges and available data flows.
-In a monorepo, repository-relative locations require a verified Sonar project
-base directory.
+The title is the rule name when available, otherwise the rule key. The
+description is the issue message. Severity comes from the security impact,
+or the native severity for a legacy vulnerability. The capture supplies a
+link to that issue on the selected branch or pull request. The primary file
+range requires a verified project base directory. Other flow locations and
+their messages remain in the original issue under `evidence.source_data.issue.flows`.
 
 ## Use a native JSON export
 

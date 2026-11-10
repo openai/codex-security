@@ -12,6 +12,12 @@ exact CLI version. The npm release contains the package archive and canonical
 changelog. The Action release contains its manifest and SBOM, links to that
 changelog, and lists the full distribution commit SHA for consumers to pin.
 
+## Release checklist
+
+1. Review the [rolling release PR](#rolling-release-prs). Verify the version, edit the [highlights and migration steps](#editing-the-release-notes), and complete the [pre-merge checks](#prepare-a-release). Squash-merge the reviewed revision.
+2. Wait for CI on the merged commit and the release verification jobs. Approve the **npm** deployment for the [package and container release](#publish). Follow the progress comment on the merged PR through the installation checks and applicable Action and container jobs.
+3. If the release includes the Action, [publish its companion release to Marketplace](#publish-to-github-marketplace). [Verify the public artifacts](#verify) before announcing the version. For a partial publication, use the [recovery procedure](#recover-or-repair-a-release) with the original tag.
+
 ## Pull request titles and categories
 
 Pull request titles must follow this form:
@@ -81,9 +87,6 @@ patch release. Breaking changes use a minor release and reset the patch to
 zero. For example, changes after `0.1.23` propose `0.1.24`, or `0.2.0` if any
 included change is breaking. The category of a feature remains **Features**;
 the category does not imply a minor version bump.
-
-[Release 0.8.3](https://github.com/openai/codex-security/pull/2144) uses a patch
-version as a one-time exception. Its upgrade notes list the compatibility changes.
 
 The release PR updater recognizes breaking changes from a `!` in a
 Conventional Commit title, a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer,
@@ -165,9 +168,7 @@ additional changes, then rerun the updater to resume.
 ### Editing the release notes
 
 The committed `.github/release-notes.md` is authoritative. The updater
-drafts highlights from merged titles and lists marked breaking changes for
-migration review; it does not infer migration instructions from source code.
-Review and refine these suggestions before releasing.
+collects candidate highlights from merged titles in a disclosure and puts marked breaking changes in a separate draft section. Before merging, select the changes users will notice. Replace each breaking title with the affected audience, previous behavior and required action. Link to the versioned procedure when the migration needs several steps.
 
 Keep the published notes easy to scan:
 
@@ -292,9 +293,14 @@ for that exact commit:
 
 1. `node-release-cut` verifies that the version increased, checks the reviewed
    summary, and creates the exact `npm-vX.Y.Z` tag.
-2. `node-release` installs the committed dependency graph and packs the
-   package. Three TypeScript test shards and the MCP tests run in parallel
-   with package verification.
+2. For a new npm version, `node-release` calls
+   `sign-darwin-release.yml` on protected `main`. That workflow verifies
+   the tag points to a commit in `main`'s history and runs the native build
+   at that commit. It signs the arm64 and x64 addons selected by their
+   platform build IDs after checking their SHA-256 digests.
+   An arm64 macOS runner extracts the packed npm archive and prepares a
+   diff inventory with a released desktop Node that enforces library validation.
+   Three TypeScript test shards and the MCP tests also run before publication.
    After every shard and package check passes, approve the **npm** deployment
    for **Publish npm and container images**. This authorizes the npm archive
    and the matching container images built from the tagged release. The job
@@ -319,6 +325,29 @@ for that exact commit:
    distribution commit SHA. It is never marked Latest. A final status job
    reports publication, installation smoke, Action, and container results.
 
+Before the first signed release, restrict the `codesigning` GitHub environment
+to `npm-v*` tags and configure its secrets for both steps:
+
+- **Download tools.** The `AKV_CODESIGN_*` inputs in `sign-darwin-release.yml` select
+  a blob-reader identity and pin the downloads of `rcodesign` and a PKCS#11
+  provider that supports Signer Service. The identity needs read access to
+  those blobs only.
+- **Sign addons.** Authorize the tagged release workflow's GitHub OIDC
+  identity in Signer Service to read the public key and sign with the
+  Developer ID Application key for the desktop runtime's Apple Developer team.
+  For both tag pushes and manual dispatches on release tags, require the
+  tagged `node-release.yml` caller and the exact OIDC claim
+  `job_workflow_ref: openai/codex-security/.github/workflows/sign-darwin-release.yml@refs/heads/main`.
+  Land the reusable workflow on `main` before enabling this authorization.
+  Set `SIGNER_SERVICE_ENDPOINT`, `SIGNER_SERVICE_PURPOSE`, and
+  `SIGNER_SERVICE_KEY_ID` for that key. Set `SIGNING_CERTIFICATE_PEM` to the
+  matching public leaf certificate in PEM format.
+
+The first tag to use this policy must include the updated caller. If an
+unpublished tag still uses inline signing, cut a new version tag from a
+commit containing the updated caller. Recovery of an already published
+version uses the original npm archive.
+
 The Action tag points to a generated distribution commit whose parent is the
 CLI release commit. That additional commit contains the runnable Action bundle
 and runtime lockfile. Its release manifest records both commits, both tags,
@@ -330,10 +359,11 @@ Historical releases whose source predates `action.yml` skip Action publication
 and still run the exact-version installation checks. The workflow does not add
 Action code from a later commit to an older CLI release.
 
-After npm accepts a publication, its registry can take several minutes to expose
-the version. GitHub publication waits up to ten minutes for that version to
-become available before verifying its archive and signed provenance. Other
-registry errors fail immediately.
+After npm accepts a release, its publish-time scan can delay installation.
+GitHub publication retries a missing version every 30 seconds for up to
+30 minutes. Once the version is available, it verifies the archive and signed
+provenance. Other registry errors fail immediately. If the wait expires,
+[retry GitHub publication](#recover-or-repair-a-release) when the version is available.
 
 `node-release` generates the npm plugin payload from the canonical source under
 `plugins/codex-security/` during `prepack`. The generated

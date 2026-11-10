@@ -1,53 +1,52 @@
 # Project configuration
 
-Use `scan [repository] -c FILE` or `scan [repository] --config FILE` to load one
-YAML or JSON file:
+Use a YAML or JSON file to reuse a scan scope, cost limit, or findings threshold.
+Select the file with `-c FILE` (or `--config FILE`) on `scan`, `bulk-scan`,
+`scan-components`, or `info`. The repository is a separate command argument.
 
-```sh
-codex-security scan . -c codex-security.yaml --dry-run --json
-codex-security scan . -c codex-security.json --model gpt-5.6-terra
-```
+**Choose a file you trust.** Native Codex settings in the file can start MCP
+servers and select where model requests go. In CI, keep the configuration in an
+operator-controlled location outside the checkout being scanned.
 
-The supported extensions are `.yaml`, `.yml`, and `.json`. `scan`, `bulk-scan`,
-`scan-components`, and `info` accept `-c` / `--config`. An operator can set
-`CODEX_SECURITY_PROJECT_CONFIG` instead; an explicit `-c` takes precedence. With
-neither, no file is loaded, even if `codex-security.yaml` exists. SDK `run()` calls
-and saved reruns do not read this environment variable or discover project files.
-The repository comes from the command's target selection, not the config file.
+## Configure your first scan
 
-**Treat the selected file as trusted operator configuration, with the same
-authority as CLI options and SDK `codexOverrides`.** Native Codex settings can
-start configured MCP server processes and select model-service destinations. Do not select a
-file controlled by an untrusted repository or pull request. In CI, keep the
-scanner configuration in an operator-controlled location outside the checkout
-being assessed. Explicit selection does not make a file safe to trust.
+From your project root, run `codex-security init` to create `codex-security.yaml`.
+To choose a different name, pass a path ending in `.yaml`, `.yml`, or `.json`.
+The command refuses to overwrite an existing file.
 
-Create a starter and inspect its settings without a repository or runtime:
-
-```sh
-codex-security init
-codex-security info -c codex-security.yaml --json
-```
-
-`init [file]` defaults to `codex-security.yaml`, refuses to overwrite an existing
-file, and accepts `.yaml`, `.yml`, or `.json`. YAML starters show current defaults
-as comments so future releases can still update defaults you have not overridden.
-The editor hint is relative to the chosen file and expects the package to be
-installed in the invocation directory's `node_modules`.
-
-For a project with a `src` directory:
+For a repository with a `src` directory, save these settings in the file:
 
 ```yaml
 scan:
   scope:
     paths: [src]
-  knowledge_base: [SECURITY.md, docs/architecture.md]
-codex:
-  model: gpt-5.6-sol
-  model_reasoning_effort: xhigh
 policy:
   fail_on_severity: high
 ```
+
+To supply additional context, add `knowledge_base: [SECURITY.md, docs/architecture.md]`
+under `scan` only if both files exist relative to the configuration file.
+Use the paths to your own documents or leave the list out.
+
+```sh
+# Inspect the settings and where each one came from.
+codex-security info -c codex-security.yaml --json
+
+# Check the target, paths, and settings locally.
+codex-security scan . -c codex-security.yaml --dry-run --json
+```
+
+Check that the preview shows your intended repository and scope. To start the
+scan with those settings, keep the same file selection:
+
+```sh
+codex-security scan . -c codex-security.yaml
+```
+
+Instead of passing `-c` each time, you can set `CODEX_SECURITY_PROJECT_CONFIG`.
+An explicit `-c` takes precedence. Without either, the CLI uses its defaults
+even if the current directory contains a project file. SDK `run()` calls and
+saved reruns do not discover files or read this environment variable.
 
 All settings are optional; `{}` uses the existing defaults. No `version` field
 is needed. Unknown wrapper keys and invalid types are errors. Values are literal:
@@ -64,28 +63,24 @@ Deep Scan discovery workers, including resumes. An explicit
 `scan.cyber_access_program` takes precedence for each turn. See
 [Daybreak opt-in](../sdk/typescript/docs/cli.md#daybreak-opt-in).
 
-The [YAML example](examples/codex-security.yaml) and equivalent
-[JSON example](examples/codex-security.json) select this repository's TypeScript
-source. After [setting up the source checkout](../sdk/typescript/TESTING.md), try:
+### Try the checked-in examples
+
+The [YAML](examples/codex-security.yaml) and [JSON](examples/codex-security.json)
+examples both select this repository's `sdk/typescript/src` directory. From
+the root of the Codex Security checkout with the CLI installed, run:
 
 ```sh
-cd sdk/typescript
-pnpm run build:plugin
-pnpm run build
-cd ../..
-node sdk/typescript/bin/codex-security.mjs scan . -c docs/examples/codex-security.yaml --dry-run --json
+codex-security scan . -c docs/examples/codex-security.yaml --dry-run --json
 ```
 
-## Desktop and conversational Deep Scans
+To reuse either example in your own project, change `scan.scope.paths` to a
+directory in the repository you will scan. Both editor schema hints point to
+the schema in this checkout. For a copy at your project root with
+`@openai/codex-security` installed locally, change the hint to
+`./node_modules/@openai/codex-security/schemas/project-config.schema.json`.
+You can also omit the hint. The CLI validates the file using its bundled schema.
 
-When the Codex host supplies the launching turn’s speed, Deep Scan uses it for
-Standard scan workers, resumed workers, and finding comparisons. Selecting
-Default overrides a faster tier in the worker’s Codex config. On hosts that omit the
-turn’s speed, each worker uses the Codex configuration it loads. To keep a scan
-at Default on those hosts, leave `service_tier = "default"` in the worker’s
-config for the duration of the scan, including any resumes. Other scans that
-load the same config also use that setting. The usual config file is
-`$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `$CODEX_HOME` is unset.
+## Desktop and conversational Deep Scans
 
 Deep Scan setup accepts an explicitly selected `.yaml`, `.yml`, or `.json` project
 file using the same format. For example:
@@ -101,12 +96,14 @@ scan:
     max_discovery_runs: 4
 ```
 
-The plugin's `inspect_codex_security_setup` tool accepts `projectConfigPath` and
-returns `setup.deepScanConfig`: effective worker count, subagents per worker,
-novelty-stop threshold, consecutive-error threshold, review cap, and discovery
-time limit, with the source of each value. Desktop setup clients should display
-these values before starting a scan. Conversational scans inspect the same setup
-before passing `projectConfigPath` to `start_codex_security_deep_scan`.
+Include the path to the file when asking Codex to start a Deep Scan. To check
+what will run, ask for the effective worker count, subagents per worker, stop
+conditions, review cap, and discovery time limit. The plugin returns each value
+and its source in `setup.deepScanConfig` from `inspect_codex_security_setup`.
+Both setup and `start_codex_security_deep_scan` accept `projectConfigPath`.
+For a file under your home directory, `~/security/scan.yaml` and
+`~\security\scan.yaml` both select the same file. On POSIX, use the `~/`
+spelling when the filename itself contains a backslash.
 
 Explicit project settings override per-user `[deep_scan]` settings, which override
 built-in defaults. The per-user file remains
@@ -127,6 +124,17 @@ scan ID uses that snapshot even if the selected file or global defaults change.
 The time limit bounds discovery; scans may stop sooner after novelty or review
 limits, and aggregation and reporting can continue afterward.
 
+### Worker speed
+
+When the Codex host supplies the launching turn’s speed, Deep Scan uses it for
+Standard scan workers, resumed workers, and finding comparisons. Selecting
+Default overrides a faster tier in the worker’s Codex config. On hosts that omit the
+turn’s speed, each worker uses the Codex configuration it loads. To keep a scan
+at Default on those hosts, leave `service_tier = "default"` in the worker’s
+config for the duration of the scan, including any resumes. Other scans that
+load the same config also use that setting. The usual config file is
+`$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `$CODEX_HOME` is unset.
+
 ## Settings
 
 | Field                          | Meaning                                                                              | Default                            |
@@ -146,7 +154,7 @@ limits, and aggregation and reporting can continue afterward.
 | `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                               | Report-only                        |
 | `output.directory`             | Artifact directory outside the scanned Git worktree                                  | Existing private artifact location |
 
-See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
+See [owner suggestions](../sdk/typescript/docs/cli.md#scan-options-and-output) for
 supported scan types, cost-limit behavior, and the saved report.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific
@@ -190,7 +198,7 @@ import { CodexSecurity, loadProjectConfig } from "@openai/codex-security";
 
 const { config, options } = await loadProjectConfig("codex-security.yaml");
 await using security = new CodexSecurity(config);
-const result = await security.run(repository, options);
+const result = await security.run(process.cwd(), options);
 if (
   options.failureSeverity !== undefined &&
   result.hasFindingsAtOrAbove(options.failureSeverity)
@@ -220,7 +228,9 @@ the file loader also returns
 `projectConfig` path and source metadata. The optional directory argument defaults
 to the current directory. It locates a selected file or anchors an in-memory
 object's context, prompt, and output paths. Files anchor those paths to their own
-directory. Neither helper reads prompt contents or prepares a runtime.
+directory. On POSIX, `link/../scan.yaml` selects the file in the parent of
+the directory that `link` points to. Neither helper reads prompt contents or
+prepares a runtime.
 Resolved context, prompt, and output paths have the SDK's `AbsolutePath` type;
 scope paths remain relative to the selected repository.
 

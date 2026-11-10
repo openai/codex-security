@@ -5,8 +5,8 @@ parse errors or timeouts. The preview shows both.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the scanned checkout
-root, choose a saved report or run OpenGrep in the same shell.
+Run these commands from the root of the scanned checkout. Use a saved report or
+generate one with OpenGrep.
 
 **Saved report.** Set the path to your OpenGrep JSON file.
 
@@ -36,8 +36,13 @@ codex-security publish findings "$opengrep_report" --to local --repository . \
 ```
 
 Check the findings, exclusions and `report.errors`, even if the findings list
-is empty. A zero-result report with scanner errors fails the import. Keep `--provider opengrep`
-when you [save locally or publish to Cloud](README.md#save-or-publish-and-verify).
+is empty. A zero-result report with scanner errors fails the import. In the
+Cloud preview, compare `findings` and `excluded` by `source_finding_id`.
+An oversized trace can be excluded while other traces for the same occurrence
+are retained. If the remaining group still exceeds 256 KiB, the reader
+excludes the whole occurrence.
+Keep `--provider opengrep` for both destinations.
+[Save or publish and verify](README.md#save-or-publish-and-verify).
 
 ## Provider identity and evidence
 
@@ -46,11 +51,12 @@ Both destinations store `semgrep` as the provider and `OpenGrep` in
 Moving a match or changing the spelling of a Windows path can create a new
 record. [Imported evidence](schema-guide.md)
 
-The reader groups traces at the same occurrence. It keeps the rule level,
-snippets, ignored state and fingerprints when present. Severity is `unknown`
-because OpenGrep levels such as `ERROR` describe rule matches. Cloud excludes
-the whole occurrence if individually valid traces together exceed its 256 KiB
-evidence limit.
+The title is the rule ID and the description is the rule's message. The reader
+groups traces at the same occurrence and keeps snippets, ignored state and
+fingerprints when present. OpenGrep levels such as `ERROR` describe rule
+matches, so the vulnerability severity is `unknown`. The local workbench
+and private Cloud inbox accept that value. A Cloud repository publisher that
+requires a known severity excludes these findings in the preview.
 
 ## Diagnostics and coverage
 

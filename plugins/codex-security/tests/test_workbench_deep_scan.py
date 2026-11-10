@@ -78,8 +78,6 @@ def begin_target_scan(
         ".",
         "--scan-root",
         str(scan_root),
-        "--available-parallelism",
-        "16",
         *(("--user-context-stdin",) if user_context is not None else ()),
         *(("--service-tier", service_tier) if service_tier is not None else ()),
         environment=deep_environment(codex_home),
@@ -99,17 +97,21 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 
 @pytest.mark.cross_platform
-def test_target_admission_reads_one_entry_without_looking_up_its_type(
+def test_target_admission_stops_at_the_first_non_directory_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
     check_selected_targets = runpy.run_path(str(script))["check_selected_targets"]
     events = []
 
+    class FileEntry:
+        def is_dir(self, *, follow_symlinks):
+            assert not follow_symlinks
+            return False
+
     def entries():
         events.append("read")
-        # A filesystem can report DT_UNKNOWN. Any entry-type lookup here fails.
-        yield object()
+        yield FileEntry()
         pytest.fail("admission read a second directory entry")
 
     @contextmanager
@@ -131,6 +133,9 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
         connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
         connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("ALTER TABLE scans DROP COLUMN windows_resume_target_identity")
+        connection.execute("ALTER TABLE scans DROP COLUMN windows_resume_output_identity")
+        connection.execute("ALTER TABLE scans DROP COLUMN log_completed_at")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_kind")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_plugin_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
@@ -294,15 +299,14 @@ class DeepScan:
         prompt_path: Path,
         artifact_dir: Path,
         input_worker_ids: list[str],
-    ) -> dict[str, object]:
-        return seed_legacy_reducer(
+    ) -> None:
+        seed_legacy_reducer(
             self.state_dir,
             self.id,
             worker_id,
             str(prompt_path),
             str(artifact_dir),
-            *(item for worker in input_worker_ids for item in ("--input-worker-id", worker)),
-            environment=deep_environment(self.codex_home),
+            *input_worker_ids,
         )
 
     def finish(
@@ -801,7 +805,7 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
             deep.id,
             reducer_id,
             str(result),
-            "1",
+            1,
             environment=deep_environment(deep.codex_home),
         )
 
@@ -1182,8 +1186,6 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
         ".",
         "--scan-root",
         str(tmp_path / "scans"),
-        "--available-parallelism",
-        "16",
         environment={
             **deep_environment(codex_home),
             "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH": str(isolated_config_path),
@@ -1311,11 +1313,28 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
     )
     assert "orchestration must finish and persist its manifest" in str(premature["stderr"])
 
+    def model_begin(thread: str) -> dict[str, object]:
+        return begin_deep_scan(
+            state_dir,
+            thread,
+            "--scan-id",
+            scan_id,
+            "--model-thread-id",
+            thread,
+            environment=deep_environment(codex_home),
+            check=False,
+        )
+
+    assert "awaiting its owning Codex thread" in str(model_begin("other-thread")["stderr"])
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "sdk-thread")
+    assert "owning Codex thread" in str(model_begin("other-thread")["stderr"])
     begun = begin_deep_scan(
         state_dir,
         "sdk-thread",
         "--scan-id",
         scan_id,
+        "--model-thread-id",
+        "sdk-thread",
         "--service-tier",
         "priority",
         environment=deep_environment(codex_home),
@@ -1564,8 +1583,6 @@ def assert_rejected_config(tmp_path: Path, setting: str, value: str, requirement
         "thread-deep-scan",
         "--target-path",
         str(target),
-        "--available-parallelism",
-        "8",
         environment=deep_environment(codex_home),
         check=False,
     )
@@ -1720,6 +1737,8 @@ def test_sealed_target_result_replays_only_the_pending_request(tmp_path: Path) -
         scan_dir, scan_id, target, relative_path="source.py", coverage_mode="deep_repository"
     )
     assert scan_command(state_dir, "complete-scan", scan_id)["scan"]["reportAvailable"]
+    progress = get_scan(state_dir, scan_id, "--progress-only")["scan"]["progress"]
+    assert progress["independentReviews"]["consolidating"] is False
     project.unlink()
 
     # A probe neither reopens the selected file nor consumes the result.
@@ -2020,8 +2039,6 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         scan_id,
         "--claim-token",
         claim_token,
-        "--available-parallelism",
-        "8",
         environment=deep_environment(codex_home),
     )
     assert begun["startDisposition"] == "created"
@@ -3105,6 +3122,7 @@ def test_cancel_scan_overrides_succeeded_deep_run_during_parent_tail(
     assert canceled["manifestPath"] == (str(manifest) if with_manifest else None)
     scan = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert scan["progress"]["status"] == "canceled"
+    assert scan["progress"]["independentReviews"]["consolidating"] is False
 
 
 @pytest.mark.parametrize("deep_status", ["failed", "interrupted"])
@@ -3142,7 +3160,9 @@ def test_saturated_run_without_manifest_can_be_marked_failed_or_interrupted(
     assert terminal["error"] == message
     scan = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert scan["progress"]["status"] == "failed"
+    assert scan["progress"]["independentReviews"]["consolidating"] is False
     assert scan["failureMessage"] == terminal["error"]
+    assert scan["logCompletedAt"] == terminal["completedAt"]
 
 
 def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path) -> None:

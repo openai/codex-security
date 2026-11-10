@@ -714,26 +714,32 @@ describe("one-shot scan events", () => {
     const onReconnect = mock();
     async function* events(): AsyncGenerator<ThreadEvent> {
       for (const message of [
-        "Reconnecting... 1/7 (ECONNRESET org-private)",
-        "Reconnecting... 2/7 (Rate limit reached for org-private. Please try again in 1.2s.)",
-        "Reconnecting... 3/7 (Rate limit reached. Please try again in 999999s.)",
-        "Reconnecting... 4/7",
-        "Reconnecting... 5/7 (429 rate limit reached org-private)",
-        "Reconnecting... 6/7 (error sending request for url (https://example.test/v1?error=invalid.api.key))",
-        "Reconnecting... 7/7 (error sending request for url (https://example.test/v1#model.not.found))",
+        "Reconnecting... 1/10 (ECONNRESET org-private)",
+        "Reconnecting... 2/10 (Rate limit reached for org-private. Please try again in 1.2s.)",
+        "Reconnecting... 3/10 (Rate limit reached. Please try again in 999999s.)",
+        "Reconnecting... 4/10",
+        "Reconnecting... 5/10 (429 rate limit reached org-private)",
+        "Reconnecting... 6/10 (error sending request for url (https://example.test/v1?error=invalid.api.key))",
+        "Reconnecting... 7/10 (error sending request for url (https://example.test/v1#model.not.found))",
+        "Reconnecting... 8/10 (Rate limit reached for org-private. Please try again in 28ms.)",
+        "Reconnecting... 9/10 (Rate limit reached. Please try again in 3600000ms.)",
+        "Reconnecting... 10/10 (Rate limit reached. Please try again in 3600001ms.)",
       ])
         yield { type: "error", message };
       yield* completedEvents();
     }
     await runEvents(scanDir, events(), { onReconnect });
     expect(onReconnect.mock.calls).toEqual([
-      [1, 7, { reason: "network" }],
-      [2, 7, { reason: "rate_limit", retryAfterSeconds: 1.2 }],
-      [3, 7, { reason: "rate_limit" }],
-      [4, 7, undefined],
-      [5, 7, { reason: "rate_limit" }],
-      [6, 7, { reason: "network" }],
-      [7, 7, { reason: "network" }],
+      [1, 10, { reason: "network" }],
+      [2, 10, { reason: "rate_limit", retryAfterSeconds: 1.2 }],
+      [3, 10, { reason: "rate_limit" }],
+      [4, 10, undefined],
+      [5, 10, { reason: "rate_limit" }],
+      [6, 10, { reason: "network" }],
+      [7, 10, { reason: "network" }],
+      [8, 10, { reason: "rate_limit", retryAfterSeconds: 0.028 }],
+      [9, 10, { reason: "rate_limit", retryAfterSeconds: 3600 }],
+      [10, 10, { reason: "rate_limit" }],
     ]);
   });
 

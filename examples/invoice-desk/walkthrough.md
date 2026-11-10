@@ -74,18 +74,24 @@ a later failed or active run is not confused with an earlier completed scan.
 Start with `$invoice_run/scan/report.md`, then inspect the structured artifacts.
 Paths in this table are relative to `$invoice_run`:
 
-| Artifact                  | What to inspect                                                                                            |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `scan/scan-manifest.json` | `scan.id`, `scan.status`, target identity, revision, and requested scope.                                  |
-| `scan/findings.json`      | The actual finding's `occurrenceId`, source evidence, root cause, attack path, confidence, and validation. |
-| `scan/coverage.json`      | Assessed `surfaces`, their dispositions, `explicitExclusions`, `deferred` work, and any `openQuestions`.   |
-| `saved-scan.json`         | Saved scan settings and recipe, for reproducing or comparing the run.                                      |
+| Artifact | What to inspect |
+| --- | --- |
+| `scan/scan-manifest.json` | `scan.id`, terminal `scan.status`, target revision, and the included and excluded paths in `scan.scope`. `scan.review.excludedPaths` lists any additional exclusions. |
+| `scan/findings.json` | Each finding's `occurrenceId`, source locations, confidence, and any recorded root cause, source evidence, attack path, or validation. |
+| `scan-result.json` | The CLI result, including the `review` summary for the current scan. |
+| `saved-scan.json` | Saved settings and the recipe for reproducing the run. |
 
-When present, follow `rootCause.evidenceRefs` into `codeEvidence`; otherwise,
-inspect the finding's recorded source locations and evidence. Separate what the
-source proves from what runtime validation actually exercised. Missing runtime validation is a proof gap, not evidence that
-the issue is safe. An empty finding list also says nothing about excluded or
-deferred surfaces.
+The manifest describes the scope. It does not measure which percentage of the
+source was read. Details such as deferred work or open questions may be
+available in retained checkpoints. When reading a historical scan, check for
+`scan.coverageRef` and open `coverage.json` only if the manifest references it.
+The [CI baseline](README.md#ci-and-openai-scans) uses its own pinned CLI.
+Compare the [current and legacy layouts](../../plugins/codex-security/references/scan-contract.md#canonical-documents)
+when reading its artifacts.
+
+Follow a finding's `rootCause.evidenceRefs` into `codeEvidence` when available.
+Compare the source evidence with what validation actually exercised. If runtime
+checks were unavailable, record that limit when deciding how to act on the finding.
 
 ### Illustrative example: a workspace boundary
 

@@ -20,13 +20,39 @@ security context:
 
 The [task map](#choose-a-task) below also gives explicit skill names. Local scans
 do not require the optional Cloud connection. To read existing Cloud findings,
-follow the separate [Cloud setup](../sdk/typescript/README.md#read-existing-cloud-findings).
+follow the separate [Cloud setup](../sdk/typescript/docs/sdk.md#read-existing-cloud-findings).
 
 The terminal package includes the plugin used by its own scans. You can follow
 [the CLI quick start](../README.md#quick-start) without setting up an interactive
 Codex plugin session.
 
 ## Choose a task
+
+| Task                                                    | In Codex                                                                                                                                                                                                                                   | From the terminal                                                                                                     |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| Scan a repository or selected paths                     | Ask for a [Standard scan](../plugins/codex-security/skills/security-scan/SKILL.md) (`$security-scan`).                                                                                                                                     | `cs scan .` or `cs scan . --path src`                                                                                 |
+| Review a PR, commit, branch diff, or working-tree patch | Ask for [`$security-diff-scan`](../plugins/codex-security/skills/security-diff-scan/SKILL.md) with the change to review.                                                                                                                   | `cs scan . --diff origin/main` for committed changes, or `cs scan . --working-tree` for local changes.                |
+| Run repeated audits of the same target                  | Ask for [`$deep-security-scan`](../plugins/codex-security/skills/deep-security-scan/SKILL.md). Later audits use findings from earlier ones.                                                                                                | `cs scan . --mode deep`                                                                                               |
+| Assess supplied findings against the source             | [`$triage-finding`](../plugins/codex-security/skills/triage-finding/SKILL.md) returns a verdict and any missing evidence for each claim.                                                                                                   | `cs validate findings.json` returns a [validation report](../sdk/typescript/docs/cli.md#validate-and-patch-findings). |
+| Investigate a dependency alert                          | Give [`$resolve-dependency-alert`](../plugins/codex-security/skills/resolve-dependency-alert/SKILL.md) the alert and the checkout or image. It traces the dependency and proposes an upgrade or dismissal where the evidence supports one. | To retrieve a saved alert for that review, see below.                                                                 |
+| Prepare a fix                                           | Ask [`$fix-finding`](../plugins/codex-security/skills/fix-finding/SKILL.md) to patch a specific finding in the affected repository.                                                                                                        | [`cs patch --scan SCAN_ID`](../sdk/typescript/docs/cli.md#patch-existing-findings)                                    |
+| Check an existing fix                                   | Give [`$verify-fix`](../plugins/codex-security/skills/verify-fix/SKILL.md) the finding and current checkout.                                                                                                                               | [`cs verify-fix --scan SCAN_ID`](../sdk/typescript/docs/cli.md#verify-fixes)                                          |
+| Track a validated finding                               | Give [`$track-findings`](../plugins/codex-security/skills/track-findings/SKILL.md) the finding and destination. See [plugin connectors](plugin-connectors.md).                                                                             | For completed scans, see [publishing to Linear](../sdk/typescript/docs/cli.md#publish-completed-scans-to-linear).     |
+| Inspect a downloaded skill                              | [Review the skill before installation](#review-a-skill-before-installation) in a trusted Codex chat.                                                                                                                                       | Use the interactive Codex CLI with the plugin enabled.                                                                |
+
+**Read a saved dependency alert.** Run `cs findings imported ./project --format json`
+to list the records saved for that checkout. Give the relevant record to
+`$resolve-dependency-alert` to check installed versions and upgrade options.
+To bring in an alert from your scanner, use the [scanner import guides](scanner-imports/README.md).
+
+A scan or triage request produces findings. Ask to fix a specific finding when
+you want a patch. A separate fix verification reports `fixed`,
+`still_vulnerable`, or `inconclusive` with evidence.
+
+Existing root and component `SECURITY.md` files already guide scans. Use
+[policy generation](../README.md#generate-securitymd) to draft or update one.
+
+### Review a skill before installation
 
 To review a skill before giving it to a coding agent, ask
 [`$check-skills`](../plugins/codex-security/skills/check-skills/SKILL.md) directly:
@@ -45,36 +71,17 @@ or **INCOMPLETE** with source evidence and coverage limits. A file review covers
 only that file. Supply the folder to include helpers and references. The review
 does not install the target or require the plugin MCP server.
 
-| Task                                                    | In Codex                                                                                                                                                                                 | From the terminal                                                                                                                                                                                             |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Find vulnerabilities in a repository or selected paths  | [`$security-scan`](../plugins/codex-security/skills/security-scan/SKILL.md): one Standard audit.                                                                                         | `cs scan .`, optionally `--path src`.                                                                                                                                                                         |
-| Review a PR, commit, branch diff, or working-tree patch | [`$security-diff-scan`](../plugins/codex-security/skills/security-diff-scan/SKILL.md): review changes and trace their supporting code.                                                   | `cs scan . --diff origin/main` for committed changes, or `cs scan . --working-tree` for local changes.                                                                                                        |
-| Investigate a repository or paths deeply                | [`$deep-security-scan`](../plugins/codex-security/skills/deep-security-scan/SKILL.md): later batches use findings from earlier audits.                                                   | `cs scan . --mode deep`.                                                                                                                                                                                      |
-| Triage supplied reports or claims                       | [`$triage-finding`](../plugins/codex-security/skills/triage-finding/SKILL.md): one static-evidence verdict per finding, with proof gaps.                                                 | `cs validate findings.json` also assesses supplied claims using static evidence; its output contract differs from plugin triage. See [validation](../sdk/typescript/docs/cli.md#validate-and-patch-findings). |
-| Resolve a vulnerable dependency                         | [`$resolve-dependency-alert`](../plugins/codex-security/skills/resolve-dependency-alert/SKILL.md) traces affected versions and prepares an upgrade or dismissal proposal.                | With external imports enabled, read saved alerts with `cs findings imported ./project --format json`.                                                                                                         |
-| Fix a security finding                                  | Explicitly request [`$fix-finding`](../plugins/codex-security/skills/fix-finding/SKILL.md) with the finding and affected repository.                                                     | `cs patch --scan SCAN_ID`; see [patching](../sdk/typescript/docs/cli.md#patch-existing-findings) for individual findings and options.                                                                         |
-| Check an existing security fix                          | Explicitly request [`$verify-fix`](../plugins/codex-security/skills/verify-fix/SKILL.md) with the original finding and current checkout. Verification leaves repository files unchanged. | `cs verify-fix --scan SCAN_ID`; see [fix verification](../sdk/typescript/docs/cli.md#verify-fixes).                                                                                                           |
-
-A scan or triage request does not request a code change. Ask to fix a specific
-finding when you want a patch. Standalone fix verification is a separate request
-and reports `fixed`, `still_vulnerable`, or `inconclusive` with evidence.
-
-Policy generation is optional. Existing root and component `SECURITY.md` files
-already guide scans. Use [policy generation](../README.md#generate-securitymd)
-when that guidance needs to be drafted or updated.
-
 ## Read the result
 
-For a completed scan, start with the generated report and its saved findings,
-coverage, and threat model when present. Use the completion summary to locate the
-saved results. Use source locations and validation evidence to assess a finding;
-review coverage for assessed surfaces, exclusions, deferred candidates,
-and remaining questions.
+Open the report at the path in the completion summary. Read the source
+locations and validation evidence for each finding. Check the
+`scan.review.excludedPaths` list in `scan-manifest.json` for additional
+exclusions. To find the files selected for discovery, [check the retained
+scope list](#check-a-revision-range-scan-for-missing-files).
 
-A completed scan can retain unresolved questions. No reported findings does not
-establish that every path was reviewed or that the repository is secure. Static
-triage establishes what the source supports; it does not claim runtime testing.
-An inconclusive fix verification identifies the evidence still needed.
+A report with zero findings can still list exclusions or unresolved questions.
+Static triage reports what the source supports. An inconclusive fix verification
+identifies what evidence would resolve the question.
 
 For automation, scan exit codes distinguish these outcomes:
 
@@ -84,7 +91,7 @@ For automation, scan exit codes distinguish these outcomes:
 
 Coverage gaps and investigation notes do not by themselves fail a completed
 scan. See [scan output](../sdk/typescript/docs/cli.md#scan-options-and-output)
-and [SDK results](../sdk/typescript/README.md#read-results) for the saved fields
+and [SDK results](../sdk/typescript/docs/sdk.md#read-results) for the saved fields
 and failure output.
 
 ### Check a revision-range scan for missing files
@@ -97,6 +104,8 @@ the two commit trees directly (`base..head`). A three-dot PR comparison uses
 the merge base and can show different files when the commits have diverged.
 Current diff scans select regular text files regardless of extension. Git can
 also list changes to binary files, symlinks, and submodules.
+
+#### Missing Perl files with plugin 0.1.32
 
 Plugin 0.1.32 could omit changed Perl files (`.cgi`, `.pl`, `.pm`, and `.t`).
 CLI 0.3.0 was the first release to bundle the fix. To repeat the scan with
@@ -124,19 +133,24 @@ cs scan --schema --format json
 cs scan --help
 ```
 
-Use [the CLI reference](../sdk/typescript/docs/cli.md#command-discovery-and-integrations)
-for integrations and output formats.
+Choose a [connected app or CLI integration](plugin-connectors.md) for your
+destination. See the [CLI reference](../sdk/typescript/docs/cli.md#command-discovery-and-integrations)
+for command discovery and output formats.
+
+## Troubleshoot setup
+
+| Symptom                                                  | Next step                                                                                                                                               |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cs` is missing or opens another program                 | Check that npm’s executable directory is on `PATH`, or use `codex-security` or `npx @openai/codex-security`. See [CLI setup](../README.md#quick-start). |
+| Codex shows CLI guidance but no security workflow skills | Install and enable the full plugin in your host, then start a new chat.                                                                                 |
+| A skill is visible but its scan tools are unavailable    | Check the plugin server’s setup error and resolve it before starting a scan.                                                                            |
+| Authentication fails on a headless machine               | Use [device or SSH login](../sdk/typescript/docs/cli.md#authentication), or configured API credentials for CI.                                          |
 
 ## Recover an interrupted task
 
-| Symptom                                                      | Next step                                                                                                                                                                                       |
-| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cs` is missing or resolves to another program               | Check the npm executable directory on `PATH`, or use `codex-security` or `npx @openai/codex-security`. See [CLI setup](../README.md#quick-start).                                               |
-| The session has CLI guidance but no security workflow skills | Install and enable the full plugin through your host when available, then start a new chat. `skills add` and `mcp add` do not install it.                                                       |
-| A skill is visible but required scan tools are unavailable   | Resolve the plugin server/setup error before starting the scan. Preserve any existing scan identity and report the blocker. A skill alone does not establish working tools or a completed scan. |
-| Authentication fails on a headless machine                   | Use the documented [device or SSH login](../sdk/typescript/docs/cli.md#authentication), or configured API credentials for CI.                                                                   |
-| A Deep Scan stops waiting in chat                            | Keep the existing scan ID. Ending a turn or detaching a waiter does not cancel the durable scan; ask Codex to continue that same scan.                                                          |
-| A scan fails or completion reports an error                  | Preserve its ID, output directory, and exact error. Inspect that run before choosing recovery; retained artifacts do not imply successful completion.                                           |
+If Codex stops waiting for a Deep Scan in chat, ask it to continue the same
+scan ID. The scan can keep running after the turn ends. If a scan reports an
+error, keep its ID, output directory, and error message.
 
 For terminal scans, inspect an explicit ID so history commands refer to the same
 run:

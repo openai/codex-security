@@ -26,14 +26,12 @@ if ! version_status="$(
             if length == 0 or any(.[]; type != "array") then
                 error("Container package versions must contain at least one JSON array.")
             else
-                [.[][] | select(any(.metadata.container.tags[]?; . == $version))] as $existing |
-                [.[][] | select(any(.metadata.container.tags[]?; . == ("sha-" + $sha)))] as $source |
+                [.[][] | select(any(.metadata.container.tags[]?;
+                    . == $version or . == ("sha-" + $sha)))] as $immutable |
                 any(.[][]; any(.metadata.container.tags[]?;
                     stable_version > ($version | stable_version))) as $backfill |
-                if (($existing + $source) | length) > 0 and (
-                    ($digest | test("^sha256:[a-fA-F0-9]{64}$") | not) or
-                    any(($existing + $source)[]; .name != $digest)
-                ) then "published"
+                if any($immutable[]; .name != $digest or ($digest | test("^sha256:[a-fA-F0-9]{64}$") | not))
+                then "published"
                 elif $backfill then "backfill"
                 else
                     # An index can lose its numeric alias while it still owns latest.
@@ -64,16 +62,8 @@ case "$version_status" in
 esac
 
 case "$version_status" in
-    latest|backfill)
-        if [ -n "${GITHUB_OUTPUT:-}" ]; then
-            publish_latest=false
-            if [ "$version_status" = latest ]; then
-                publish_latest=true
-            fi
-            printf 'publish_latest=%s\n' "$publish_latest" >> "$GITHUB_OUTPUT"
-        fi
-        exit 0
-        ;;
+    latest) publish_latest=true ;;
+    backfill) publish_latest=false ;;
     published)
         printf '%s\n' "::error::Container version $version or its source tag already exists; retries require a matching verified digest." >&2
         exit 1
@@ -83,3 +73,6 @@ case "$version_status" in
         exit 1
         ;;
 esac
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    printf 'publish_latest=%s\n' "$publish_latest" >> "$GITHUB_OUTPUT"
+fi

@@ -12,6 +12,11 @@ scanner CLI and use the runner's local SQLite database for saved-scan deduplicat
 
 Version tags are immutable. Only the newest stable Debian release gets `latest`.
 
+- [Run the scanner with Compose](#workflow-runner) to scan a checkout and keep its results.
+- [Verify a Debian image](#image-metadata-and-verification) before deploying it.
+- To publish images, [prepare GHCR](#ghcr-administrator-setup), then follow the
+  [release and backfill procedure](#publishing). Wolfi also supports [OS-only updates](wolfi/README.md#wolfi-only-os-updates).
+
 ## Image metadata and verification
 
 Debian release images include OCI metadata in each platform's image labels and in the
@@ -57,11 +62,121 @@ scan data, and credentials out of them. BuildKit's maximum-mode provenance
 includes build arguments, so pass build credentials through secret mounts rather
 than build arguments.
 
+## Workflow runner
+
+[`compose.runner.yaml`](../compose.runner.yaml) runs the packaged CLI and returns
+its output and exit code. Keep the results and state directories between runs
+to look up saved scans and deduplicate findings.
+
+Run these commands from the repository root after
+[verifying an image](#image-metadata-and-verification). Keep the verified
+`reference` in the same shell. Create private output and state directories,
+then choose the host user's UID/GID so the runner can write its bind mounts:
+
+```bash
+mkdir -p results state
+chmod 700 results state
+export CODEX_SECURITY_USER="$(id -u):$(id -g)"
+export CODEX_SECURITY_IMAGE="$reference"
+docker compose -f compose.runner.yaml pull
+docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
+```
+
+The `login --device-auth` command above signs the runner in with ChatGPT and
+requires device auth to be enabled in your workspace. If device auth is
+disabled, skip that command and export `OPENAI_API_KEY` or `CODEX_API_KEY` in
+your host shell. Compose passes the key to the runner. Use API keys for
+unattended runs too.
+
+Git authentication uses `GH_TOKEN`/`GITHUB_TOKEN` and optional
+`CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs.
+Use a version or digest in `CODEX_SECURITY_IMAGE` for repeatable deployments.
+To test an unreleased checkout, build the same scanner target locally instead
+of pulling. First prepare the [universal native payload](../plugins/codex-security/native/README.md#package-inputs):
+
+```bash
+docker build --target scanner -t codex-security:local .
+export CODEX_SECURITY_IMAGE=codex-security:local
+```
+
+To build the Linux amd64 Wolfi image locally, see the
+[melange and apko recipe](wolfi/README.md).
+
+`CODEX_SECURITY_RESULTS` and `CODEX_SECURITY_STATE` settings select
+the host directories (default `./results` and `./state`):
+
+| Container path                             | Durable contents                                              |
+| ------------------------------------------ | ------------------------------------------------------------- |
+| `/output`                                  | Scan artifacts and any source checkouts stored here           |
+| `/output/.codex-security-state`            | CLI scan history and workbench database                       |
+| `/output/.codex-security-state/codex-home` | Wrapper sign-in credentials and private runtime configuration |
+| `/state`                                   | Ambient Codex configuration and credentials imported at setup |
+
+Keep both host mounts across runner replacements. The results mount also holds
+the wrapper's private credential directory. Keep the approved source checkout
+available at the same container path for later source reviews. For example,
+place a checkout under `results/repository`, then scan it with artifacts outside
+the checkout:
+
+```bash
+docker compose -f compose.runner.yaml run --rm codex-security \
+  scan /output/repository --output-dir /output/scans/run-001 --headless
+```
+
+An existing checkout elsewhere can instead be bind-mounted with
+`run --volume /absolute/repository:/input/repository`; repeat that mount on each
+stage that needs the source. Moving a host scan's files into these directories
+does not rewrite absolute paths in its saved state. Run the scan in the runner
+or preserve its original paths.
+
+### Deduplication and custom endpoints
+
+Deduplicate a saved scan against the runner's persisted local SQLite database:
+
+```bash
+docker compose -f compose.runner.yaml run --rm codex-security \
+  dedupe --scan SCAN_ID --json
+```
+
+For a compatible endpoint you operate, pass a base URL the container can reach
+through `--findings-url`. Loopback addresses refer to the runner itself.
+See the [findings guide](../sdk/typescript/docs/findings-service.md) for remote
+deduplication and publication.
+
+Run `docker compose -f compose.runner.yaml run --rm codex-security --help` to
+see which commands your image supports. Your CI system controls stage order
+and retries.
+
+### Sandbox and lifecycle
+
+The runner starts with a nonroot user, dropped capabilities,
+no-new-privileges, and the project's seccomp profile. On hosts that restrict
+nested user namespaces, install the [AppArmor profile](../sdk/typescript/docs/cli.md#containerized-bulk-scans)
+and add `-f compose.apparmor.yaml` after `-f compose.runner.yaml` in the
+Compose commands. Both files configure the `codex-security` service. Source inspection requires a host that supports
+Bubblewrap and permits its user namespaces.
+
+The bundled Compose seccomp profile allows direct socket calls for Unix sockets,
+IPv4, IPv6, and the route netlink sockets Bubblewrap uses to configure loopback.
+It blocks the legacy IPv4 packet socket type and limits direct socket pairs to
+Unix sockets. Normal IP networking remains available. Use a network policy to
+restrict outbound destinations. On amd64, 32-bit i386 programs retain a legacy
+socket interface whose arguments seccomp cannot filter.
+
+The profile also blocks `ptrace`, `process_vm_readv`, and `process_vm_writev`.
+Debuggers and other tools that rely on these calls may fail inside the container.
+
+`run --rm` removes only the finished runner container. Preserve its host mounts
+for later stages and retries; use the same image version and source paths.
+Stop active runners before backing up the entire results and state directories,
+and keep backups separately. No service ports or Docker socket are exposed by
+the runner example.
+
 ## GHCR administrator setup
 
-Before the first release, an administrator must prepare the package:
-
-Prepare the [universal native payload](../plugins/codex-security/native/README.md#package-inputs) before building an image from source.
+Before bootstrapping a package with a source build, prepare the
+[universal native payload](../plugins/codex-security/native/README.md#package-inputs).
+An organization administrator can then configure GHCR for the first release.
 
 1. Allow organization package creation and, if the package is missing, bootstrap
    it with a reviewed image and a non-release tag:
@@ -85,7 +200,7 @@ Prepare the [universal native payload](../plugins/codex-security/native/README.m
    and standalone Wolfi OS updates, protect the `container` environment with
    required reviewers and deployment rules for `main` and approved `container-v*` tags.
    Allow the workflow's pinned actions, package writes, and OIDC attestations.
-   Update branch-protection check names if they reference the old release jobs.
+   Use the release workflow’s job names for any required branch-protection checks.
 
 See GitHub's [registry authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
 and [package access settings](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
@@ -126,120 +241,3 @@ summary lists both digests when the coordinated release finishes. For a Wolfi
 OS update between scanner releases, see [Wolfi-only OS updates](wolfi/README.md#wolfi-only-os-updates).
 The `bootstrap` and `release-candidate-<commit>` tags are for registry setup
 and release validation.
-
-## Workflow runner
-
-`compose.runner.yaml` runs the packaged CLI from the **scanner** image. It does
-not start a findings service or implement another workflow engine. It passes
-commands, output, and exit codes through the existing scanner entrypoint.
-
-Run these commands from the repository root after
-[verifying an image](#image-metadata-and-verification). Keep the verified
-`reference` in the same shell. Prepare the output and state directories, keep
-state private, and choose the host user's UID/GID so the runner can write its
-bind mounts:
-
-```bash
-mkdir -p results state
-chmod 700 state
-export CODEX_SECURITY_USER="$(id -u):$(id -g)"
-export CODEX_SECURITY_IMAGE="$reference"
-docker compose -f compose.runner.yaml pull
-docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
-```
-
-The `login --device-auth` command above signs the runner in with ChatGPT and
-requires device auth to be enabled in your workspace. If device auth is
-disabled, skip that command and export `OPENAI_API_KEY` or `CODEX_API_KEY` in
-your host shell. Compose passes the key to the runner. Use API keys for
-unattended runs too.
-
-Git authentication uses the existing `GH_TOKEN`/`GITHUB_TOKEN` and optional
-`CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs.
-Use a version or digest in `CODEX_SECURITY_IMAGE` for repeatable deployments.
-To test an unreleased checkout, build the same scanner target locally instead
-of pulling. First prepare the [universal native payload](../plugins/codex-security/native/README.md#package-inputs):
-
-```bash
-docker build --target scanner -t codex-security:local .
-export CODEX_SECURITY_IMAGE=codex-security:local
-```
-
-To build the Linux amd64 Wolfi image locally, see the
-[melange and apko recipe](wolfi/README.md).
-
-The existing `CODEX_SECURITY_RESULTS` and `CODEX_SECURITY_STATE` settings select
-the host directories (default `./results` and `./state`):
-
-| Container path                             | Durable contents                                              |
-| ------------------------------------------ | ------------------------------------------------------------- |
-| `/output`                                  | Scan artifacts and any source checkouts stored here           |
-| `/output/.codex-security-state`            | CLI scan history and workbench database                       |
-| `/output/.codex-security-state/codex-home` | Wrapper sign-in credentials and private runtime configuration |
-| `/state`                                   | Ambient Codex configuration and credentials imported at setup |
-
-Keep both host mounts across runner replacements. The results mount also holds
-the wrapper's private credential directory. Keep the approved source checkout
-available at the same container path for later source reviews. For example,
-place a checkout under `results/repository`, then scan it with artifacts outside
-the checkout:
-
-```bash
-docker compose -f compose.runner.yaml run --rm codex-security \
-  scan /output/repository --output-dir /output/scans/run-001 --headless
-```
-
-An existing checkout elsewhere can instead be bind-mounted with
-`run --volume /absolute/repository:/input/repository`; repeat that mount on each
-stage that needs the source. Moving a host scan's files into these directories
-does not rewrite absolute paths in its saved state. Run the scan in the runner
-or preserve its original paths.
-
-### Deduplication and custom endpoints
-
-Deduplicate a saved scan against the runner's persisted local SQLite database:
-
-```bash
-docker compose -f compose.runner.yaml run --rm codex-security \
-  dedupe --scan SCAN_ID --json
-```
-
-For an independently operated compatible endpoint, pass its reachable base URL
-through `--findings-url`. Container loopback addresses refer to the runner, not
-the Docker host or another container. See the
-[findings guide](../sdk/typescript/docs/findings-service.md) for custom publication,
-remote deduplication, and the removed local service's compatibility changes.
-
-Only commands supported by the selected image are available. Workflow resumption,
-custom publication, and dedupe write-back require a release containing those
-SDK/CLI capabilities; durable mounts alone do not add them. The runner does not
-schedule, retry, or skip stages on its own.
-
-### Sandbox and lifecycle
-
-The runner retains the scanner's nonroot user, dropped capabilities,
-no-new-privileges, and seccomp profile. It does not override Codex approval or
-filesystem settings. On hosts that restrict nested user namespaces, install the
-existing [AppArmor profile](../sdk/typescript/README.md#containerized-bulk-scans)
-and append `-f compose.apparmor.yaml` to the runner Compose commands. This override
-works because both examples use the `codex-security` service name. Codex 0.156.1
-requires Bubblewrap for filesystem-restricted execution; the legacy Landlock
-fallback is no longer supported. The entrypoint preserves Codex sandbox settings.
-Source inspection needs a host that supports Bubblewrap; do not disable sandboxing
-to work around host restrictions.
-
-The bundled Compose seccomp profile allows direct socket calls for Unix sockets,
-IPv4, IPv6, and the route netlink sockets Bubblewrap uses to configure loopback.
-It blocks the legacy IPv4 packet socket type and limits direct socket pairs to
-Unix sockets. Normal IP networking remains available. Use a network policy to
-restrict outbound destinations. On amd64, 32-bit i386 programs retain a legacy
-socket interface whose arguments seccomp cannot filter.
-
-The profile also blocks `ptrace`, `process_vm_readv`, and `process_vm_writev`.
-Debuggers and other tools that rely on these calls may fail inside the container.
-
-`run --rm` removes only the finished runner container. Preserve its host mounts
-for later stages and retries; use the same image version and source paths.
-Stop active runners before backing up the entire results and state directories,
-and keep backups separately. No service ports or Docker socket are exposed by
-the runner example.

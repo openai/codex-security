@@ -1,11 +1,13 @@
 # Import Checkmarx SAST findings
 
 Use `--provider checkmarx` for a completed Checkmarx One scan (CLI JSON) or
-self-managed CxSAST scan (XML). Both formats support gzip. [Enable external imports](README.md#preview-a-report).
+self-managed CxSAST scan (XML). Both formats support gzip. If you need the report,
+[collect an existing scan with Codex](#collect-an-existing-scan-with-codex) or
+[export one scan manually](#export-one-scan-manually).
 
 ## Preview, import and verify
 
-From the matching checkout, preview a saved report with its verified Git URL.
+From the matching checkout, preview the report with its verified Git URL.
 Choose a source key for the product, tenant or instance, project and ref.
 Reuse it for later exports from that stream.
 
@@ -18,9 +20,10 @@ codex-security publish findings "$report" --to local --repository . \
 ```
 
 For CxSAST, use the XML path and a key such as `cxsast/example-instance/example-project/main/sast`.
-Check `report.scanId`, the SAST findings and any exclusions. A confirmed local import
-with exclusions saves the accepted findings and exits with status 1. Use the same
-file for confirmation and retries. [Save or publish and verify](README.md#save-or-publish-and-verify).
+Check `report.scanId`, the SAST findings and any exclusions. If the preview
+contains both findings and exclusions, a confirmed local import saves the
+accepted findings and exits with status 1. Use the same file for confirmation
+and retries. [Save or publish and verify](README.md#save-or-publish-and-verify).
 
 ## Collect an existing scan with Codex
 
@@ -39,8 +42,9 @@ Python 3.10+ interpreter and vendor tools installed outside the scanned source t
   CxFlow fetches by ID and exports the full XML even when issue-tracker filters are set.
   Session credentials require confirmation for that server. [CxSAST All Scans](https://docs.checkmarx.com/en/34965-46419-viewing-results-from-all-scans.html)
 
-For a subset, an older CLI, or a custom runtime, supply a native export from
-your usual environment. Keep reports in a private directory outside the checkout.
+If you need a subset or your tools differ from the collector requirements
+above, supply a native export from your usual environment. Keep reports in
+a private directory outside the checkout.
 [Supported sign-in and collection settings](../../plugins/codex-security/skills/publish-findings/references/checkmarx-import.md).
 
 ## Export one scan manually
@@ -62,11 +66,16 @@ Review the result filters before generating the file. [Generate a CxSAST report]
 
 ## Identity and evidence
 
-One combines `similarityId` and `data.resultHash` to identify each occurrence.
+Checkmarx One combines `similarityId` and `data.resultHash` to identify each occurrence.
 CxSAST uses the project, query, path similarity ID and ordered path nodes,
 or the reported result location for a path without nodes. Moving a node can
 create a new occurrence. [Checkmarx similarity IDs](https://docs.checkmarx.com/en/34965-205026-similarity-id.html)
 
-Findings start as `not_assessed` and retain the native severity, triage state,
-paths and snippets in `evidence.source_data`. A scan may cover a directory or
-archive. Verify how its paths map to the checkout before investigating a finding.
+The finding title is the Checkmarx query name. The scan ID, severity, rule,
+CWE (when supplied) and Checkmarx triage state appear in the imported evidence.
+To trace a Checkmarx One result, read `evidence.source_data.row.data.nodes`.
+For CxSAST, read `evidence.source_data.nodes` in order. If you use the
+original `DeepLink` under `evidence.source_data.result`, check its server
+against the CxSAST instance where you exported the scan.
+The scan may cover a directory or archive. Its paths stay in the scanner
+evidence until you establish how they map to the checkout.

@@ -3,9 +3,10 @@ import { readFile, type FileHandle } from "node:fs/promises";
 import { posix } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
+import validSemver from "semver/functions/valid.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
-import { SCAN_SEVERITIES } from "./scan-settings.js";
+import { REPORTABLE_SEVERITIES, SCAN_SEVERITIES } from "./scan-settings.js";
 import { asRecord, isRecord } from "./record.js";
 import { previousAdmission } from "./external-import-contract.js";
 import { rememberPreviousSelection } from "./reader-selection.js";
@@ -147,6 +148,52 @@ export function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+/** AWS APIs use epoch seconds and AWS CLI exports use timezone-qualified ISO dates. */
+export function awsTimestampSeconds(value: unknown): number {
+  if (typeof value === "number") return value;
+  if (
+    typeof value === "string" &&
+    /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/u.test(value)
+  )
+    return Date.parse(value) / 1000;
+  return NaN;
+}
+
+export function concreteVersion(
+  value: unknown,
+  ecosystem: string | null,
+  osPackage: boolean,
+): string | null {
+  const version = text(value);
+  if (!version) return null;
+  // Debian versions use internal tildes for prereleases and backports.
+  if (osPackage && version.includes("~"))
+    return /^(?:\d+:)?\d[a-z\d.+~]*(?:-[a-z\d.+~]+)*$/iu.test(version)
+      ? version
+      : null;
+  if (validSemver(version)) return version;
+  if (ecosystem === "npm" || ecosystem === "cargo") return null;
+  if (ecosystem === "java" || ecosystem === "maven") {
+    if (
+      version === "LATEST" ||
+      version === "RELEASE" ||
+      version.startsWith("latest.")
+    )
+      return null;
+    return /^[a-z\d][\w.+-]*$/iu.test(version) && !version.endsWith("+")
+      ? version
+      : null;
+  }
+  if (!ecosystem && version.endsWith("+")) return null;
+  const publicVersion =
+    ecosystem === "pypi" ? version.split("+", 1)[0]! : version;
+  return /\d/u.test(version) &&
+    /^(?:\d+:)?[a-z\d][\w.+!-]*$/iu.test(version) &&
+    !/(?:^|\.)x(?:\.|$)/iu.test(publicVersion)
+    ? version
+    : null;
+}
+
 export function requiredText(value: unknown, label: string): string {
   const result = text(value);
   if (!result) throw new Error(`${label} must be nonempty text.`);
@@ -177,6 +224,14 @@ export function sarifRunRepositories(
       },
     ];
   });
+}
+
+/** Normalize scanners whose reported severities range from low to critical. */
+export function reportableScannerSeverity(value: unknown) {
+  const level = text(value)?.toLowerCase();
+  return (
+    REPORTABLE_SEVERITIES.find((severity) => severity === level) ?? "unknown"
+  );
 }
 
 export function scannerSeverity(value: string | null | undefined) {

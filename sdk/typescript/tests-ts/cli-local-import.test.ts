@@ -11,27 +11,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import {
-  dependencies as cliDependencies,
-  FakeSignals,
-} from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { opengrepJson } from "./support/opengrep-import-fixtures.js";
 import {
   inspectorReport,
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
-
-const dependencies: typeof cliDependencies = (options = {}) => {
-  const result = cliDependencies(options);
-  return {
-    ...result,
-    environment: {
-      ...result.environment,
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-    },
-  };
-};
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -187,7 +173,7 @@ test("local preview and declined confirmation do not create database state or us
       externalPublicationPrompt: {
         isInteractive: () => true,
         confirm: async (question, defaultValue) => {
-          expect(question).toContain("Store these 1 findings locally");
+          expect(question).toBe("Store this finding locally?");
           expect(defaultValue).toBe(false);
           expect(declined.stderr.text()).toContain(f.repository);
           expect(declined.stderr.text()).toContain(f.record.id);
@@ -379,6 +365,17 @@ test("CLI imports OpenGrep evidence locally without assessing it", async () => {
       },
     },
   });
+  const terminal = createCliTest(main, { stdout: true });
+  expect(
+    await terminal.runCli(["findings", "imported", "example project"], f.deps),
+  ).toBe(0);
+  const display = terminal.stdout.text();
+  expect(display).toContain(`[unknown] ${findings[0].evidence.title}`);
+  expect(display).toContain("Message: Synthetic finding");
+  expect(display).toContain("Scanner: OpenGrep");
+  expect(display).toContain(
+    `Source: semgrep (example/opengrep)  Finding ID: ${findings[0].sourceFindingId}`,
+  );
 });
 
 test("local dry runs and imports reject an entirely excluded report before opening the workbench", async () => {
@@ -415,7 +412,9 @@ test("local import confirms exclusions and returns partial status after storing 
       externalPublicationPrompt: {
         isInteractive: () => true,
         confirm: async (question) => {
-          expect(question).toContain("skip 1 excluded records");
+          expect(question).toBe(
+            "Store this finding locally and skip 1 excluded record?",
+          );
           expect(cli.stderr.text()).toContain("Excluded: 1");
           return true;
         },
@@ -472,6 +471,81 @@ test.each(["SIGINT", "SIGTERM"] as const)(
     expect(imports).toBe(0);
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+  },
+);
+
+test.each([true, false])(
+  "imported readback summarizes only reported package versions on a terminal (installed version: %s)",
+  async (hasInstalledVersion) => {
+    const repository = resolve("workspace", "project");
+    const deps = dependencies({ currentDirectory: repository });
+    const pkg = {
+      name: "example-package",
+      vulnerable_version_range: "<2.0.0",
+      ...(hasInstalledVersion
+        ? { installed_version: "1.5.0", fixed_versions: ["2.0.0", "2.1.0"] }
+        : {}),
+    };
+    const reference = "https://example.test/alerts/42";
+    const fileUrl = hasInstalledVersion
+      ? "https://example.test/project/blob/test-fixture/src/app.ts"
+      : reference;
+    deps.listLocalExternalFindings = async () => [
+      {
+        repository,
+        id: "external-1",
+        version: 1,
+        provider: "github",
+        sourceKey: "example/project",
+        sourceFindingId: "42",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+        assessment: { state: "not_assessed" },
+        evidence: {
+          title: "Dependency\nissue",
+          severity: "high",
+          packages: [pkg],
+          locations: hasInstalledVersion
+            ? [{ path: "src/app.ts", line: 12 }]
+            : [],
+          url: reference,
+          details: { kind: "advisory", file_url: fileUrl },
+          source_data: { vendorField: "raw details" },
+        },
+      },
+    ];
+    const args = ["findings", "imported"];
+    const interactive = createCliTest(main, { stdout: true });
+    expect(await interactive.runCli(args, deps)).toBe(0);
+    const text = interactive.stdout.text();
+    expect(text).toContain("[high] Dependency issue");
+    expect(text).toContain("github (example/project)  Finding ID: 42");
+    const packageLine = text
+      .split("\n")
+      .find((line) => line.includes("Package:"));
+    expect(packageLine?.trim()).toBe(
+      hasInstalledVersion
+        ? "Package: example-package  Installed: 1.5.0  Affected: <2.0.0  Fixed: 2.0.0, 2.1.0"
+        : "Package: example-package  Affected: <2.0.0",
+    );
+    expect(text).toContain(`Reference: ${reference}`);
+    if (hasInstalledVersion) {
+      expect(text).toContain("Location: src/app.ts:12");
+      expect(text).toContain(`File: ${fileUrl}`);
+    } else {
+      expect(text).not.toContain("Location:");
+      expect(text).not.toContain("File:");
+    }
+    expect(text).not.toContain("vendorField");
+
+    const explicit = createCliTest(main, { stdout: true });
+    expect(await explicit.runCli([...args, "--format", "json"], deps)).toBe(0);
+    const stored = JSON.parse(explicit.stdout.text()).findings[0].evidence;
+    expect(stored.packages).toEqual([pkg]);
+    expect(stored.source_data.vendorField).toBe("raw details");
+    const piped = createCliTest(main, { stdout: false });
+    expect(await piped.runCli(args, deps)).toBe(0);
+    expect(piped.stdout.text()).toContain("vendorField");
   },
 );
 

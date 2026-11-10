@@ -11,6 +11,7 @@ import {
   SNYK_REST_ISSUES_V1,
 } from "./snyk-rest-v1.js";
 import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
+import { normalizeHostedGitRepositoryUrl } from "./hosted-git-repository.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -19,6 +20,7 @@ import {
   optionalArray,
   readScannerJson,
   record,
+  reportableScannerSeverity,
   requiredText,
   sarifRunRepositories,
   sarifRunContextSelector,
@@ -117,9 +119,6 @@ export function normalizeSnykFindingsExport(
         finding["remediation"] ?? {},
         "Snyk remediation",
       );
-      const severity = text(
-        record(finding["severity"], "Snyk severity")["value"],
-      )?.toLowerCase();
       const revision = text(sourceTarget["revision"]);
       return validateExternalEvidence(
         {
@@ -127,11 +126,9 @@ export function normalizeSnykFindingsExport(
           description: text(
             record(finding["description"] ?? {}, "Snyk description")["text"],
           ),
-          severity: ["critical", "high", "medium", "low"].includes(
-            severity ?? "",
-          )
-            ? severity
-            : "unknown",
+          severity: reportableScannerSeverity(
+            record(finding["severity"], "Snyk severity")["value"],
+          ),
           advisory_ids: [
             ...new Set([
               requiredText(rule["id"], "Snyk advisory ID"),
@@ -196,39 +193,12 @@ function normalizeGitRepositoryUrl(
   repository: string,
   cloudRepositoryUrl?: string,
 ): string {
-  // Cloud's selected catalog repository supplies connected GitHub host context;
-  // imported evidence alone cannot establish an Enterprise host's SSH aliases.
-  const destination = cloudRepositoryUrl
-    ? new URL(cloudRepositoryUrl)
-    : undefined;
-  const connectedHost =
-    destination?.protocol === "https:"
-      ? destination.hostname.toLowerCase()
-      : undefined;
-  const connectedTenant = /^([^.]+)\.ghe\.com$/u.exec(connectedHost ?? "")?.[1];
-  const isGitHubSshUser = (username: string, hostname: string) =>
-    (username === "git" &&
-      (hostname === "github.com" || hostname === connectedHost)) ||
-    (username === connectedTenant && hostname === connectedHost);
-  const scp = /^([^@/:]+)@([^/:]+):(.+)$/u.exec(repository);
-  if (scp && isGitHubSshUser(scp[1]!, scp[2]!.toLowerCase()))
-    return `https://${scp[2]}/${scp[3]}`;
-  // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
-  const ssh = /^ssh:\/\/([^/]+)@/u.exec(repository);
-  if (ssh) {
-    // Git retains these bytes, but URL parsing would erase them from the alias.
-    if (/[\t\r\n]/u.test(repository)) return repository;
-    const url = new URL(repository);
-    const hostname = url.hostname.toLowerCase();
-    const githubSsh =
-      isGitHubSshUser(ssh[1]!, hostname) &&
-      (url.port === "" || url.port === "22");
-    const githubSshOverHttps =
-      ssh[1] === "git" && hostname === "ssh.github.com" && url.port === "443";
-    if (githubSshOverHttps) return `https://github.com${url.pathname}`;
-    if (githubSsh) return `https://${hostname}${url.pathname}`;
-  }
-  return repository;
+  // Without a selected Cloud repository, only the public GitHub host is established.
+  return normalizeHostedGitRepositoryUrl(
+    repository,
+    cloudRepositoryUrl ?? "https://github.com",
+    cloudRepositoryUrl !== undefined,
+  );
 }
 
 function snykJsonProjectRepository(
@@ -511,7 +481,6 @@ export function normalizeSnykJson(
         vulnerability["identifiers"] ?? {},
         "Snyk identifiers",
       );
-      const severity = text(vulnerability["severity"])?.toLowerCase();
       return validateExternalEvidence(
         {
           title: requiredText(
@@ -519,11 +488,7 @@ export function normalizeSnykJson(
             "Snyk vulnerability title",
           ),
           description: text(vulnerability["description"]),
-          severity: ["critical", "high", "medium", "low"].includes(
-            severity ?? "",
-          )
-            ? severity
-            : "unknown",
+          severity: reportableScannerSeverity(vulnerability["severity"]),
           advisory_ids: [
             ...new Set([
               requiredText(vulnerability["id"], "Snyk advisory ID"),

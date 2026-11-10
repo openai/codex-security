@@ -4,7 +4,6 @@ import { basename, dirname, join } from "node:path";
 import { resolveConfigPath } from "./config-path.js";
 import { collectSonarIssues } from "./sonar-collector.js";
 import { normalizeSonarFindings, parseSonarCapture } from "./sonar-findings.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 import {
   configuredFetchRemotes,
   type ConfiguredFetchRemote,
@@ -137,7 +136,6 @@ export async function prepareSonarImport(
   },
 ) {
   const { signal, environment = process.env } = dependencies;
-  requireExternalImports(environment);
   signal?.throwIfAborted();
   if (
     options.capture &&

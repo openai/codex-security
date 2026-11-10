@@ -88,6 +88,32 @@ async function emptyLegacyRemotes(
   return true;
 }
 
+/** A source directory can be outside Git. Preserve all other command failures. */
+export async function readGitRemoteNames(
+  readGit: (args: readonly string[]) => Promise<string>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    return await readGit(["remote"]);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === 128 &&
+      "stderr" in error &&
+      typeof error.stderr === "string" &&
+      (error.stderr.trimEnd() ===
+        "fatal: not a git repository (or any of the parent directories): .git" ||
+        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
+          error.stderr.trimEnd(),
+        ))
+    )
+      return;
+    throw error;
+  }
+}
+
 /** Read effective external Git URLs without invoking a transport. An empty result means none could be verified. */
 export async function readHostedGitRemotes(
   repository: string,
@@ -136,27 +162,8 @@ export async function readHostedGitRemotes(
     const bytes = Buffer.from(raw, "latin1");
     return isUtf8(bytes) ? bytes.toString("utf8") : undefined;
   };
-  let remoteNames: string;
-  try {
-    remoteNames = await readGit(["remote"]);
-  } catch (error) {
-    signal?.throwIfAborted();
-    // A local source directory need not be a Git checkout.
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === 128 &&
-      "stderr" in error &&
-      typeof error.stderr === "string" &&
-      (error.stderr.trimEnd() ===
-        "fatal: not a git repository (or any of the parent directories): .git" ||
-        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
-          error.stderr.trimEnd(),
-        ))
-    )
-      return;
-    throw error;
-  }
+  const remoteNames = await readGitRemoteNames(readGit, signal);
+  if (remoteNames === undefined) return;
   const config = await readGit([
     "config",
     "--null",

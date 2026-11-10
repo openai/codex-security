@@ -514,7 +514,11 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
           const executable = Bun.which("rg", { PATH: env[pathKey] });
           expect(executable).not.toBeNull();
           const quoted = lookup !== "extension precedence";
-          const tools = join(f.root, quoted ? "tools;version" : "tools");
+          const quotedName =
+            lookup === "double-quoted semicolon"
+              ? "worker's tools;version"
+              : "tools;version";
+          const tools = join(f.root, quoted ? quotedName : "tools");
           mkdirSync(tools);
           // Ordinary Node lookup prefers COM; the existing raw bridge prefers EXE.
           const extension = !quoted && !bridge ? "com" : "exe";
@@ -525,7 +529,12 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
               join(tools, `rg.${extension === "com" ? "exe" : "com"}`),
             );
           const quote = lookup === "single-quoted semicolon" ? "'" : '"';
-          env[pathKey] = quoted ? `${quote}${tools}${quote}` : tools;
+          // A single-quoted absolute path can contain a quote from the host profile.
+          const entry =
+            lookup === "single-quoted semicolon"
+              ? relative(f.repo, tools)
+              : tools;
+          env[pathKey] = quoted ? `${quote}${entry}${quote}` : entry;
           if (bridge) {
             env["HOME"] = `${f.root}${sep}home-\ud800`;
             expect(env["HOME"].isWellFormed()).toBe(false);
@@ -857,6 +866,59 @@ for (const mode of ["revisions", "local-patch"]) {
     ).toBe(rows.map((row) => row.path + "\n").join(""));
   });
 }
+
+test("local diff retains the historical text when a rename destination cannot be reviewed", () => {
+  const f = fixture();
+  f.write("moved.py", "still selectable\n");
+  f.write("removed.py", "destination missing\n");
+  f.write("excluded.py", "destination excluded\n");
+  f.write("linked.py", "destination replaced by link\n");
+  f.write("binary", Buffer.from("\0historical binary"));
+  const base = f.commit();
+  git(f.repo, "config", "diff.renames", "true");
+  mkdirSync(join(f.repo, ".svn"));
+  for (const [source, destination] of [
+    ["moved.py", "live.py"],
+    ["removed.py", "missing.py"],
+    ["excluded.py", ".svn/file.py"],
+    ["linked.py", "link"],
+    ["binary", "missing.bin"],
+  ] as const) {
+    git(f.repo, "mv", source, destination);
+  }
+  git(f.repo, "update-index", "--skip-worktree", "missing.py", "missing.bin");
+  rmSync(join(f.repo, "missing.py"));
+  rmSync(join(f.repo, "missing.bin"));
+  rmSync(join(f.repo, "link"));
+  const outside = join(f.root, "outside");
+  mkdirSync(outside);
+  symlinkSync(outside, join(f.repo, "link"), "junction");
+
+  const expected = ["excluded.py", "linked.py", "live.py", "removed.py"];
+  const ranked = f.rows("make-diff-rank-input", [
+    "--base",
+    base,
+    "--mode",
+    "local-patch",
+  ]);
+  expect(ranked.map(({ path }) => path)).toEqual(expected);
+  expect(ranked.map(({ preview }) => preview)).toEqual([
+    "",
+    "",
+    "still selectable",
+    "",
+  ]);
+  expect(
+    f.success("generate-in-scope-files", [
+      "--scope",
+      ".",
+      "--diff-base",
+      base,
+      "--diff-mode",
+      "local-patch",
+    ]),
+  ).toBe(expected.join("\n") + "\n");
+});
 
 for (const [mode, undoStagedChange] of [
   ["revisions", false],

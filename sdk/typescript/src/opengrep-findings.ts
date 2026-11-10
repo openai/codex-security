@@ -1,4 +1,3 @@
-import { posix } from "node:path";
 import {
   previousAdmission,
   validateExternalEvidenceJson,
@@ -10,6 +9,7 @@ import { errorMessage } from "./errors.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
   messageText,
+  nativeResultPath,
   parseNativeJsonResult,
   projectNativeJsonResult,
   sourceRepositoryUrl,
@@ -19,7 +19,6 @@ import {
   array,
   readScannerJson,
   record,
-  relativePath,
   requiredText,
   stableId,
 } from "./scanner-import.js";
@@ -27,6 +26,16 @@ import {
 export interface OpenGrepImportOptions {
   /** Source repository declared by the caller, independent of the destination. */
   sourceRepositoryUrl: string;
+}
+
+// Occurrences are sorted by ID and can retain traces from nonadjacent input rows.
+const sourcePositions = new WeakMap<
+  ExternalFindings["findings"],
+  ReadonlyMap<string, readonly number[]>
+>();
+
+export function getOpenGrepSourcePositions(findings: unknown) {
+  return Array.isArray(findings) ? sourcePositions.get(findings) : undefined;
 }
 
 /** Import native scanner evidence without assigning a Codex assessment. */
@@ -168,15 +177,7 @@ export function normalizeOpenGrepFindings(
   for (const [index, value] of values.entries()) {
     let id: string | null = null;
     try {
-      const parsed = parseNativeJsonResult(value, "OpenGrep");
-      if (parsed.path !== null) {
-        // Validate the emitted spelling across platforms, keeping literal POSIX backslashes.
-        const path = posix.normalize(parsed.rawPath);
-        parsed.path =
-          relativePath(posix.normalize(path.replaceAll("\\", "/"))) === null
-            ? null
-            : path;
-      }
+      const parsed = parseNativeJsonResult(value, "OpenGrep", nativeResultPath);
       // Native fingerprint counters change when another analysis pass adds matches.
       // A source move creates a new occurrence; this is not cross-revision matching.
       id = stableId("opengrep-location", [
@@ -195,13 +196,17 @@ export function normalizeOpenGrepFindings(
       exclude(index + 1, id, error);
     }
   }
+  const positions = new Map<string, number[]>();
   for (const [id, observations] of [...groups].sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0,
   )) {
     if (observations.length === 1) {
-      selection.append(observations[0]!.position, id, () =>
-        projectGroup(observations),
-      );
+      const { position } = observations[0]!;
+      selection.append(position, id, () => {
+        const evidence = projectGroup(observations);
+        positions.set(id, [position]);
+        return evidence;
+      });
       continue;
     }
     const ordered = observations
@@ -245,12 +250,17 @@ export function normalizeOpenGrepFindings(
       }
       if (previousAdmission(evidence) === null) selection.uncertainIds.add(id);
       output.findings.push({ source_finding_id: id, evidence });
+      positions.set(
+        id,
+        retained.map(({ position }) => position),
+      );
     } catch (error) {
       for (const observation of retained)
         exclude(observation.position, id, error);
     }
   }
   output.excluded.sort((left, right) => left.position - right.position);
+  sourcePositions.set(output.findings, positions);
   return selection.finish();
 }
 

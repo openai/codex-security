@@ -16,8 +16,8 @@ Use its security workflows in Codex, or automate them with the
 - Draft `SECURITY.md` policies and save threat models for later review.
 - Browse saved scans and findings, identify duplicates, assess severity against
   your own rubric, and suggest owners from source and Git history.
-- Import Semgrep, Snyk, and Wiz findings locally or publish them to Codex Security Cloud. [All scanner import guides](docs/scanner-imports/README.md).
-- Export SARIF, JSON, or CSV, and publish findings to Linear or a findings service.
+- Preview third-party scanner findings, save them locally, or publish supported reports to Codex Security Cloud. [Scanner import guides](docs/scanner-imports/README.md).
+- Track findings in Linear, Jira, or GitHub, publish completed scans, or export SARIF, JSON, and CSV. [Integration workflows](docs/plugin-connectors.md).
 - Automate scans across repositories or project components, including in CI and
   containers.
 
@@ -29,10 +29,10 @@ then ask:
 > Run a Codex Security scan on this repository, focusing on authentication and
 > authorization. Return the saved report, source evidence, and coverage limits.
 
-A completed scan saves a report, findings, coverage, and a threat model when
-available. Use those results to investigate findings, request a patch, or verify
-an existing fix. See the [agent workflow guide](docs/agent-workflows.md) for plugin
-setup, task selection, and recovery when required tools are unavailable.
+A completed scan saves a report and findings. Read the report for source
+evidence and exclusions, then request a patch or ask Codex to verify an
+existing fix. See the [agent workflow guide](docs/agent-workflows.md) for setup,
+task selection, and recovery.
 
 ## Quick start
 
@@ -46,42 +46,24 @@ npm install --global @openai/codex-security
 cs login
 ```
 
-`cs` is a short alias for `codex-security`; both commands run the same CLI.
-The installation creates both commands in npm's global executable directory,
-which must be on your `PATH`. If `cs` already resolves to another tool, use
-`codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
-`npx @openai/codex-security` without a global installation.
-
-Run your scan from the repository directory:
+Run your first scan from the repository directory:
 
 ```bash
 cs scan .
 ```
 
-If you have Daybreak Blue access, add `--cyber-access-program daybreak_blue`
-to the scan command. Otherwise, omit the flag or use
-`--cyber-access-program standard`.
+When the scan completes, open the Markdown file at the **REPORT** path in the
+terminal. Run `cs scans show` from the same repository to find its latest
+completed scan again. See [scan scope and follow-up work](sdk/typescript/docs/cli.md#understand-scan-scope-and-follow-up-work)
+for how to interpret exclusions in the report.
 
-To use Codex's Daybreak toggle, pass `--codex daybreak=true`. It defaults off
-and requires compatible access. See [Daybreak configuration](sdk/typescript/docs/cli.md#daybreak-opt-in)
-for SDK and plugin usage, including Deep Scan workers.
-
-Scans use your existing `SECURITY.md` guidance. You can optionally
-[draft or update a policy](#generate-securitymd) before scanning.
-
-To run without a global installation, replace `cs` in these examples with
-`npx @openai/codex-security`, for example:
-
-```bash
-npx @openai/codex-security scan .
-```
+`cs` and `codex-security` run the same CLI. If the short name conflicts with
+another command, use `codex-security`. To skip the global install, or if npm
+reports an `EEXIST` conflict, use `npx @openai/codex-security` in place of
+`cs` for both login and scanning.
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
-On remote or headless machines, use `login --device-auth` if your workspace
-allows it, or [sign in over SSH](sdk/typescript/README.md#remote-login-with-ssh-forwarding).
-
-Some cybersecurity requests and protected findings require
-[Trusted Access for Cyber](https://chatgpt.com/cyber) approval.
+For a headless machine, see [device or SSH login](sdk/typescript/docs/cli.md#authentication).
 
 ### Scan options
 
@@ -110,9 +92,14 @@ For an application spread across repositories, see
 Use [bulk scans](sdk/typescript/docs/cli.md#bulk-scans) for independent repository
 reviews in one resumable campaign.
 
-After a scan, [inspect its scope and follow-up work](sdk/typescript/docs/cli.md#understand-scan-scope-and-follow-up-work)
-to understand recorded exclusions and decide whether to review the findings,
-run a focused scan, or recover an interrupted run.
+Scans use existing root and component `SECURITY.md` guidance. To write or
+revise it, see [Generate SECURITY.md](#generate-securitymd).
+
+Some cybersecurity requests and protected findings require
+[Trusted Access for Cyber](https://chatgpt.com/cyber). For accounts with Daybreak
+access, see [Daybreak opt-in](sdk/typescript/docs/cli.md#daybreak-opt-in) for the
+Codex toggle and [Cyber access programs](sdk/typescript/docs/cli.md#select-a-cyber-access-program)
+to select a program explicitly.
 
 ## TypeScript SDK
 
@@ -137,7 +124,7 @@ try {
 }
 ```
 
-The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
+The [SDK guide](sdk/typescript/docs/sdk.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
 
 ## Read existing Cloud findings
@@ -147,7 +134,7 @@ When Codex Security Cloud is available to your account, the Security plugin's
 verification, and scan status in Codex desktop or the Codex CLI. Cloud is an
 optional connection; local scans work without it.
 
-See [Cloud connection setup and CLI reads](sdk/typescript/README.md#read-existing-cloud-findings)
+See [Cloud connection setup and CLI reads](sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
 for authentication requirements and a read-only example.
 
 ## Generate SECURITY.md
@@ -192,51 +179,20 @@ Vulnerability Response, see [Export findings for ServiceNow](sdk/typescript/docs
 
 ## GitHub Actions
 
-Run scheduled, manual, or pull request scans with the GitHub Action. For a weekly
-repository scan, add an OpenAI API key as the repository secret
-`CODEX_SECURITY_API_KEY`, then save this workflow in
-`.github/workflows/codex-security.yml`. Replace `REPLACE_WITH_REVIEWED_COMMIT`
-with the full SHA of an Action release that includes automatic Ubuntu sandbox setup.
-For older pins, including `action-v0.6.0`, keep the [manual sandbox setup](https://github.com/openai/codex-security/blob/action-v0.6.0/github-action/README.md#ubuntu-sandbox-setup).
+To run a weekly repository scan on GitHub-hosted Ubuntu:
 
-This workflow requests Daybreak Blue. Use an API key from a project with Blue
-enabled; without Daybreak access, omit `cyber-access-program` or set it to
-`standard`.
+1. Add an OpenAI API key as the repository secret `CODEX_SECURITY_API_KEY`.
+2. Copy the [weekly workflow](github-action/examples/repository.yml) to
+   `.github/workflows/codex-security.yml`. Replace `REPLACE_WITH_REVIEWED_COMMIT`
+   with the reviewed distribution commit SHA from an Action release.
+3. To try the workflow before the next scheduled run, open **Actions → Codex
+   Security repository → Run workflow**.
 
-```yaml
-name: Codex Security
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "23 7 * * 1" # Mondays at 07:23 UTC
-
-permissions:
-  contents: read
-
-jobs:
-  security:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
-        with:
-          model: gpt-5.6-sol
-          effort: high
-          cyber-access-program: daybreak_blue
-        env:
-          OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
-```
-
-The Action sets up and verifies the sandbox on GitHub-hosted Ubuntu 24.04 VMs.
-Self-hosted runners and job containers must provide a working Codex sandbox.
-
-Findings are report-only by default. Set a severity threshold to fail on reported
-findings at or above it. Scanner and required reporting errors fail the job;
-intentional file exclusions and investigation notes do not.
-See the [Action setup and input reference](github-action/README.md) for PR scans,
-severity thresholds, and report uploads.
+The example uses an estimated $5 limit per scan and reports findings without
+failing the job. Requests in progress can exceed the limit. For a severity
+threshold, pull request checks, or runner requirements, see the
+[Action guide](github-action/README.md). For eligible accounts, see
+[Daybreak access](github-action/README.md#daybreak-access-and-refusals).
 
 ## Containerized bulk scans
 

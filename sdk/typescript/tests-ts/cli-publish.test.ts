@@ -1829,6 +1829,13 @@ describe("publish scan", () => {
         age: "4 days ago",
       },
       {
+        repository: "ｶﾅ",
+        width: 2,
+        findingCount: 1,
+        elapsed: 0,
+        age: "just now",
+      },
+      {
         repository: "服务",
         width: 4,
         findingCount: 22,
