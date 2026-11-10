@@ -448,9 +448,17 @@ process.exitCode = 23;
   },
 );
 
-test.skipIf(process.platform === "win32")(
-  "launches argument-only helpers with closed stdin",
-  async () => {
+const busybox = process.platform === "linux" ? Bun.which("busybox") : null;
+test
+  .skipIf(process.platform === "win32")
+  .each([
+    { shell: "system shell", interpreter: [] },
+    ...(busybox
+      ? [{ shell: "BusyBox ash", interpreter: [busybox, "ash"] }]
+      : []),
+  ])(
+  "launches argument-only helpers with closed stdin ($shell)",
+  async ({ interpreter }) => {
     const node = Bun.which("node");
     if (node === null)
       throw new Error("Node is required for the launcher test.");
@@ -480,9 +488,13 @@ process.exitCode = 23;
         "/bin/sh",
         [
           "-c",
-          'exec 0<&-; exec "$1" --helper probe "argument with spaces"',
+          'exec 0<&-; exec "$@"',
           "helper-test",
+          ...interpreter,
           launcher,
+          "--helper",
+          "probe",
+          "argument with spaces",
         ],
         {
           encoding: "utf8",
