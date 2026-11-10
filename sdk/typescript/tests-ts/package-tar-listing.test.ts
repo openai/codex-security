@@ -506,63 +506,57 @@ describe("npm package tar listings", () => {
     }
   });
 
-  test("accepts equivalent bounded gzip representations", async () => {
-    const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
-    try {
-      const tarBytes = packageTar({ trailingZeroBytes: 31 * 1024 * 1024 });
-      const archives = [
-        ["default", gzipSync(tarBytes)],
-        ["level-0", gzipSync(tarBytes, { level: 0 })],
-        [
-          "gnu-long-name",
-          gzipSync(
-            packageTar({
-              readmeLongName: true,
-              readmeMode: 0,
-              mtime: Math.floor(Date.now() / 1000) + 365 * 86400,
-              sizeTerminator: " \0",
-              type: 0,
-            }),
-          ),
-        ],
-        [
-          "read-only-directories",
-          gzipSync(
-            packageTar({
-              compatibleLayout: true,
-              rootDirectoryMode: 0o555,
-              directoryMode: 0o555,
-              sizeTerminator: "\0",
-            }),
-          ),
-        ],
-      ] as const;
-      expect(archives[0][1].length).toBeLessThan(1024 * 1024);
-      expect(archives[1][1].length).toBeGreaterThan(31 * 1024 * 1024);
-
-      const contractPath = join(root, "plugin contract.json");
-      writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const environment: NodeJS.ProcessEnv = { ...process.env };
-      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-      for (const [representation, contents] of archives) {
-        const archivePath = join(root, `${representation}.tgz`);
+  const paddedTar = { trailingZeroBytes: 31 * 1024 * 1024 };
+  test.each([
+    { name: "default", tar: paddedTar },
+    { name: "level-0", tar: paddedTar, gzip: { level: 0 } },
+    {
+      name: "gnu-long-name",
+      tar: {
+        readmeLongName: true,
+        readmeMode: 0,
+        mtime: Math.floor(Date.now() / 1000) + 365 * 86400,
+        sizeTerminator: " \0",
+        type: 0,
+      },
+    },
+    {
+      name: "read-only-directories",
+      tar: {
+        compatibleLayout: true,
+        rootDirectoryMode: 0o555,
+        directoryMode: 0o555,
+        sizeTerminator: "\0",
+      },
+    },
+  ])(
+    "accepts bounded gzip representation $name",
+    async ({ name, tar, gzip }) => {
+      const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
+      try {
+        const contents = gzipSync(packageTar(tar), gzip);
+        if (name === "default")
+          expect(contents.length).toBeLessThan(1024 * 1024);
+        if (name === "level-0")
+          expect(contents.length).toBeGreaterThan(paddedTar.trailingZeroBytes);
+        const archivePath = join(root, `${name}.tgz`);
         writeFileSync(archivePath, contents);
+        const contractPath = join(root, "plugin contract.json");
+        writeFileSync(contractPath, JSON.stringify(pluginContract));
+        const environment: NodeJS.ProcessEnv = { ...process.env };
+        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
         const result = await checkPackage(
           root,
           archivePath,
           contractPath,
           environment,
         );
-        expect({
-          representation,
-          status: result.status,
-          stderr: result.stderr,
-        }).toEqual({ representation, status: 0, stderr: "" });
+        expect(result).toEqual({ status: 0, stderr: "" });
+      } finally {
+        rmSync(root, { force: true, recursive: true });
       }
-    } finally {
-      rmSync(root, { force: true, recursive: true });
-    }
-  });
+    },
+  );
 
   test.each(["environment", "user-config"])(
     "keeps npm fixture installs local with global %s settings",
