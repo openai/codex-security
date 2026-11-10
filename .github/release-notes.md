@@ -22,6 +22,7 @@
 - save artifacts with long POSIX filenames ([#2533](https://github.com/openai/codex-security/pull/2533))
 - explain the Alpine tar prerequisite in release checks ([#2536](https://github.com/openai/codex-security/pull/2536))
 - archive long POSIX output directory names ([#2529](https://github.com/openai/codex-security/pull/2529))
+- identify replaced checkout parent directories ([#2537](https://github.com/openai/codex-security/pull/2537))
 
 </details>
 
