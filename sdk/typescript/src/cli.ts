@@ -7692,23 +7692,22 @@ export async function main(
   const commands = Cli.toCommands.get(cli)!;
   prepareCliExamples(commands);
   const valueOptions = cliValueOptions(commands);
-  const commandIndex = argv.findIndex((value, index) => {
-    if (value.startsWith("-")) return false;
-    return index === 0 || !valueOptions.has(argv[index - 1]!);
-  });
+  const isPositional = (value: string, index: number) =>
+    !value.startsWith("-") &&
+    (index === 0 || !valueOptions.has(argv[index - 1]!));
+  const commandIndex = argv.findIndex(isPositional);
   const command = argv[commandIndex];
   const following = argv[commandIndex + 1];
   const scanImport = command === "scan" && following === "import";
   if (
     command === "scan" &&
     !scanImport &&
-    (!argv.some((arg) =>
-      ["--help", "-h", "--schema", "--llms", "--llms-full"].includes(arg),
-    ) ||
-      (following !== undefined && !following.startsWith("-")))
+    argv.some(
+      (value, index) => index > commandIndex && isPositional(value, index),
+    )
   ) {
-    // Even directories named "imports" or "./import" are valid targets.
-    // Bypass Incur's subcommand typo suggestions for an explicit scan path.
+    // A repository such as "imports" or "./import" is a positional even when
+    // shared options precede it. Bypass Incur's subcommand typo suggestions.
     const scan = commands.get(command);
     if (scan && "_group" in scan && scan.root) commands.set(command, scan.root);
   }
@@ -8442,12 +8441,10 @@ function prepareCliExamples(
 
 function cliValueOptions(
   commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
+  options = new Set(FRAMEWORK_VALUE_OPTIONS),
 ): Set<string> {
-  const options = new Set(FRAMEWORK_VALUE_OPTIONS);
   for (const entry of commands.values()) {
-    if ("_group" in entry) {
-      for (const option of cliValueOptions(entry.commands)) options.add(option);
-    }
+    if ("_group" in entry) cliValueOptions(entry.commands, options);
     const command = "_group" in entry ? entry.root : entry;
     if (command && "options" in command && command.options) {
       for (const [name, schema] of Object.entries(

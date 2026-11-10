@@ -267,8 +267,8 @@ describe("CLI skill commands", () => {
     await using temp = await scopedTemporaryDirectory("codex-security-skills-");
     const directory = temp.path;
     for (const [command, skill, argument, status] of [
-      ["validate", "validation", "findings...", 0],
-      ["patch", "fix-finding", "issues...", 7],
+      ["validate", "validation", "<findings...>", 0],
+      ["patch", "fix-finding", "ISSUE...", 7],
     ] as const) {
       const file = join(directory, `${command}.txt`);
       await writeFile(file, `${command} file contents\n`);
@@ -381,7 +381,7 @@ describe("CLI skill commands", () => {
       const help = captureCli(main, "stdout");
       expect(await help.run([command, "--help"], dependencies())).toBe(0);
       expect(help.text()).toContain(
-        `Usage: codex-security ${command} ${command === "patch" ? `[${argument}]` : `<${argument}>`}`,
+        `Usage: codex-security ${command} ${argument}`,
       );
       expect(help.text()).toContain("--effort <effort>");
       expect(help.text()).toContain("--model <model>");
