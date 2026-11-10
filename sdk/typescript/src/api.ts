@@ -63,13 +63,13 @@ import {
 } from "./provider-profile.js";
 
 import {
-  CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
   environmentEntry,
   CodexLoginHandle,
   loginApiKey as persistApiKey,
+  prepareLoginConfig,
   logout as codexLogout,
   withoutOpenAiApiKeys,
   type AccountStatus,
@@ -80,6 +80,7 @@ import {
   shellEnvironmentReference,
 } from "./codex-prompt.js";
 import {
+  CODEX_AUTH_CONFIG_KEYS,
   EXTERNAL_CODEX_PROVIDERS,
   inlineToml,
   isExternalModelProvider,
@@ -254,10 +255,12 @@ import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
   withCredentialHomeLock,
+  writeCredentialHomeConfig,
   bootstrapPlugin,
   bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityCredentialAllowsAmbientImport,
+  credentialHomeUsesFileStorage,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
@@ -796,6 +799,7 @@ export class CodexSecurity {
   readonly #onDeepScanDiagnostic: CodexSecurityRuntimeOptions["onDeepScanDiagnostic"];
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
+  readonly #loginPreparation = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
   #operationTelemetry: OperationTelemetry | null = null;
   #operationTelemetryStart: Promise<void> | null = null;
@@ -4226,21 +4230,26 @@ export class CodexSecurity {
 
   public async loginApiKey(apiKey: string): Promise<void> {
     await this.#trackOperation(async () => {
-      const authentication = await this.#authentication();
-      this.#requireOpen();
-      const result = await persistApiKey(
-        await this.#providerPreflightCommand(),
-        authentication.environment,
-        apiKey,
-        this.#abortController.signal,
-      );
-      if (!result.success) {
-        throw new CodexSecurityError(
-          `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
+      const { command, environment, codexHome, release } =
+        await this.#prepareLogin();
+      try {
+        this.#requireOpen();
+        const result = await persistApiKey(
+          command,
+          environment,
+          apiKey,
+          this.#abortController.signal,
         );
+        if (!result.success) {
+          throw new CodexSecurityError(
+            `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
+          );
+        }
+        await this.#recordLogin(codexHome, "api_key");
+        this.#requireOpen();
+      } finally {
+        await release();
       }
-      await this.#recordLogin(authentication.codexHome, "api_key");
-      this.#requireOpen();
     });
   }
 
@@ -4253,18 +4262,24 @@ export class CodexSecurity {
   }
 
   async #startLogin(deviceCode: boolean): Promise<CodexLoginHandle> {
-    const authentication = await this.#authentication();
-    this.#requireOpen();
-    const command = await this.#providerPreflightCommand();
-    this.#requireOpen();
-    const handle = this.#trackLoginHandle(
-      new CodexLoginHandle(
-        command,
-        deviceCode ? ["login", "--device-auth"] : ["login"],
-        authentication.environment,
-        () => this.#recordLogin(authentication.codexHome, "stored_credentials"),
-      ),
-    );
+    const { command, environment, codexHome, release } =
+      await this.#prepareLogin();
+    let handle: CodexLoginHandle;
+    try {
+      this.#requireOpen();
+      handle = this.#trackLoginHandle(
+        new CodexLoginHandle(
+          command,
+          deviceCode ? ["login", "--device-auth"] : ["login"],
+          environment,
+          () => this.#recordLogin(codexHome, "stored_credentials"),
+          release,
+        ),
+      );
+    } catch (error) {
+      await release();
+      throw error;
+    }
     await handle.waitForInstructions({ deviceCode });
     this.#requireOpen();
     return handle;
@@ -4312,7 +4327,7 @@ export class CodexSecurity {
           await logoutCredentialHome(
             codexHome,
             scanCodexHome(this.#dependencies.environment),
-            () => codexLogout(command, environment, signal),
+            (store) => codexLogout(command, environment, signal, store),
             () => {
               if (this.#runtime !== null)
                 this.#runtime.credentialsAvailable = false;
@@ -4339,9 +4354,9 @@ export class CodexSecurity {
   async #finishClose(): Promise<void> {
     const activeOperation = this.#activeOperation;
     const loginHandles = [...this.#loginHandles];
-    if (activeOperation !== null || loginHandles.length > 0) {
-      this.#abortController.abort();
-    }
+    // A login waiting on the credential home does not yet have a child handle.
+    this.#loginPreparation.abort();
+    if (activeOperation !== null) this.#abortController.abort();
     for (const handle of loginHandles) handle.cancel();
     await Promise.allSettled(
       [activeOperation, ...loginHandles.map((handle) => handle.wait())].filter(
@@ -4396,6 +4411,31 @@ export class CodexSecurity {
         CODEX_HOME: codexHome,
       },
     };
+  }
+
+  async #prepareLogin() {
+    const authentication = await this.#authentication();
+    const config = await mergedCodexConfig(
+      this.config,
+      scanCodexHome(this.#dependencies.environment),
+      "login",
+    );
+    const command = await this.#providerPreflightCommand(config);
+    this.#requireOpen();
+    const release = await acquireCodexSecurityCredentialHomeLock(
+      authentication.codexHome,
+      this.#loginPreparation.signal,
+    );
+    try {
+      await prepareLoginConfig(
+        authentication.codexHome,
+        resolveCodexProfile(config),
+      );
+      return { ...authentication, command, release };
+    } catch (error) {
+      await release();
+      throw error;
+    }
   }
 
   async #recordLogin(
@@ -5134,7 +5174,7 @@ export class CodexSecurity {
       runtime.codexHome,
       sharedCredentialCodexConfig(mergedConfig, runtime.codexHome),
     );
-    await writeCodexConfig(join(runtime.codexHome, "config.toml"), config);
+    await writeCredentialHomeConfig(runtime.codexHome, config);
     runtime.plugin = await bootstrapPlugin(
       runtime.codexHome,
       runtime.plugin.pluginRoot,
@@ -5625,7 +5665,7 @@ export class CodexSecurity {
         codexHome,
         sharedCredentialCodexConfig(requestedConfig, codexHome),
       );
-      await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
+      await writeCredentialHomeConfig(codexHome, codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       throwIfAborted(signal);
       const codexCommand =
@@ -5747,7 +5787,14 @@ export async function initialCredentialsAvailable(
   if (!(await codexSecurityCredentialAllowsAmbientImport(isolatedHome))) {
     return false;
   }
+  if (
+    !(await credentialHomeUsesFileStorage(isolatedHome, {
+      allowAmbientImport: true,
+    }))
+  )
+    return false;
   if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
+  if (!(await credentialHomeUsesFileStorage(ambientHome))) return false;
   return await importer(ambientHome, isolatedHome);
 }
 
@@ -7051,8 +7098,9 @@ function sharedCredentialCodexConfig(
     approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
+  const resolved = resolveCodexProfile(config);
   for (const key of CODEX_AUTH_CONFIG_KEYS) {
-    if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
+    if (resolved[key] !== undefined) shared[key] = resolved[key];
   }
   return scanRuntimeCodexConfig(shared, credentialHome);
 }
