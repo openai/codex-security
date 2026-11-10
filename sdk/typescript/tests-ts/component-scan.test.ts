@@ -976,41 +976,36 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
 
 test("component matching requests Blue with the bundled model catalog", async () => {
   const paths = await fixture();
-  const home = await temporaryDirectory();
   const catalog = fileURLToPath(
     new URL("./fixtures/native-skill-model-catalog.json", import.meta.url),
   );
-  const turn = spyOn(Thread.prototype, "run").mockResolvedValue({
+  using turn = spyOn(Thread.prototype, "run").mockResolvedValue({
     finalResponse: JSON.stringify(noMatches),
     items: [],
     usage: null,
   });
-  try {
-    const result = await scan(paths, {
-      components: components.slice(0, 2),
-      matchFindings: undefined,
-      environment: {
-        PATH: process.env["PATH"],
-        SystemRoot: process.env["SystemRoot"],
-        CODEX_HOME: home,
-        OPENAI_API_KEY: "synthetic-key",
+  const result = await scan(paths, {
+    components: components.slice(0, 2),
+    matchFindings: undefined,
+    environment: {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: await temporaryDirectory(),
+      OPENAI_API_KEY: "synthetic-key",
+    },
+    config: {
+      codexOverrides: {
+        model: "gpt-test",
+        model_catalog_json: catalog,
+        chatgpt_base_url: "http://127.0.0.1:1",
+        openai_base_url: "http://127.0.0.1:1/v1",
       },
-      config: {
-        codexOverrides: {
-          model: "gpt-test",
-          model_catalog_json: catalog,
-          chatgpt_base_url: "http://127.0.0.1:1",
-          openai_base_url: "http://127.0.0.1:1/v1",
-        },
-      },
-    });
-    expect(result.deduplication?.error).toBeUndefined();
-    expect(
-      turn.mock.calls.map(([, options]) => options?.cyberAccessProgram),
-    ).toEqual(["daybreak_blue"]);
-  } finally {
-    turn.mockRestore();
-  }
+    },
+  });
+  expect(result.deduplication?.error).toBeUndefined();
+  expect(
+    turn.mock.calls.map(([, options]) => options?.cyberAccessProgram),
+  ).toEqual(["daybreak_blue"]);
 });
 
 test("merges confirmed root causes with complete evidence and the highest severity", async () => {

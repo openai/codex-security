@@ -177,7 +177,7 @@ describe("semantic scan comparison", () => {
   ] as const)(
     "preserves request metadata and attributes %s %s at the model boundary",
     async (surface, helper) => {
-      const root = await temporaryDirectory();
+      const root = await realpath(await temporaryDirectory());
       const home = join(root, "home");
       const checkout = join(root, "checkout");
       const repository = join(checkout, "repository");
@@ -211,9 +211,7 @@ describe("semantic scan comparison", () => {
           },
         },
         environment: {
-          PATH: [await realpath(repositoryBin), process.env["PATH"]].join(
-            delimiter,
-          ),
+          PATH: [repositoryBin, process.env["PATH"]].join(delimiter),
           SystemRoot: process.env["SystemRoot"],
           CODEX_HOME: home,
           CODEX_SECURITY_STATE_DIR: state,
@@ -226,11 +224,11 @@ describe("semantic scan comparison", () => {
           ? { components: [{ name: "Source", paths: ["source.ts"] }] }
           : { matches: [], uncertain: [] },
       );
-      const login = spyOn(auth, "accountStatus").mockResolvedValue({
+      using _login = spyOn(auth, "accountStatus").mockResolvedValue({
         authenticated: true,
         details: "Logged in using ChatGPT",
       });
-      const discovery = spyOn(
+      using discovery = spyOn(
         cyberAccess,
         "resolveScanCyberAccessProgram",
       ).mockResolvedValue("daybreak_blue");
@@ -260,13 +258,13 @@ describe("semantic scan comparison", () => {
           expect(probe.environment["CODEX_API_KEY"]).toBe(
             surface === "sdk" ? "synthetic-key" : undefined,
           );
-          expect(await realpath(probe.environment["CODEX_HOME"]!)).toBe(
-            await realpath(surface === "sdk" ? home : privateHome),
+          expect(probe.environment["CODEX_HOME"]).toBe(
+            surface === "sdk" ? home : privateHome,
           );
           expect(probe.config).not.toHaveProperty("openai_base_url");
           expect(probe.config).not.toHaveProperty("chatgpt_base_url");
           expect(probe.environment["PATH"]?.split(delimiter)).not.toContain(
-            await realpath(repositoryBin),
+            repositoryBin,
           );
           expect(probe.environment["PATH"]).toBe(captured?.env?.["PATH"]);
           expect(probe.config).toHaveProperty(
@@ -288,8 +286,6 @@ describe("semantic scan comparison", () => {
           codex_security_package_version: VERSION,
         });
       } finally {
-        login.mockRestore();
-        discovery.mockRestore();
         startThread.mockRestore();
       }
     },

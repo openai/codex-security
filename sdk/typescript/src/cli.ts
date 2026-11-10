@@ -10470,7 +10470,6 @@ async function executeScan(
   let patchOtel: JsonObject | undefined;
   let patchDaybreak: JsonValue = false;
   let patchDaybreakFeatures: JsonObject = {};
-  let followUpCyberAccessProgram = arguments_.cyberAccessProgram;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let runningMockScan = false;
@@ -11128,9 +11127,6 @@ async function executeScan(
       runningMockScan = arguments_.mock === true;
       result = await security.run(repository, options);
       runningMockScan = false;
-      followUpCyberAccessProgram ??=
-        result.requestedCyberAccessProgram ??
-        registeredScan?.cyberAccessProgram;
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
       if (arguments_.validate) {
@@ -11204,7 +11200,9 @@ async function executeScan(
                   knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
                   finding,
                   auth,
-                  cyberAccessProgram: followUpCyberAccessProgram,
+                  cyberAccessProgram:
+                    arguments_.cyberAccessProgram ??
+                    result.requestedCyberAccessProgram,
                   safetyIdentifier: arguments_.safetyIdentifier,
                   signal: preparationAbortController.signal,
                 });
@@ -11569,7 +11567,8 @@ async function executeScan(
           requestMetadata: patchRequestMetadata,
           otel: patchOtel,
           daybreakFeatures: patchDaybreakFeatures,
-          cyberAccessProgram: followUpCyberAccessProgram,
+          cyberAccessProgram:
+            arguments_.cyberAccessProgram ?? result.requestedCyberAccessProgram,
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,

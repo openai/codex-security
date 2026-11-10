@@ -112,9 +112,6 @@ try {
           tools: requests.at(-1)?.tools ?? [],
         }),
         program: requests.at(-1)?.access_programs?.cyber,
-        requestedProgram: workerArgs.includes("--cyber-access-program")
-          ? workerArgs[workerArgs.indexOf("--cyber-access-program") + 1]
-          : null,
         daybreak: config.daybreak ?? null,
         telemetry: {
           analyticsEnabled: config.analytics?.enabled ?? null,

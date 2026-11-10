@@ -944,11 +944,7 @@ export class CodexSecurity {
           metadata ??= {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
-            requestedCyberAccessProgram: isRecord(recipe)
-              ? ScanSettingsSchema.shape.cyberAccessProgram.parse(
-                  recipe["requestedCyberAccessProgram"],
-                )
-              : undefined,
+            requestedCyberAccessProgram: savedCyberAccessProgram(recipe),
           };
         else local.retryRecipe = isRecord(recipe) ? recipe : {};
       }
@@ -2469,51 +2465,16 @@ export class CodexSecurity {
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
         typeof sqliteHome === "string" ? { CODEX_SQLITE_HOME: sqliteHome } : {};
-      const { model } = scanModelConfiguration(effectiveConfig);
-      const requestMetadata = codexSecurityRequestContext(effectiveConfig, {
-        ...this.#operationTelemetry?.context,
-        surface: this.#surface,
-        command: "scan",
-        pluginVersion: runtime.plugin.version,
-        mode,
-      }).metadata;
-      if (
-        options.resumeScanId === undefined &&
-        cyberAccessProgram === undefined &&
-        this.#dependencies.hostedScan === undefined &&
-        this.#dependencies.resolveScanCyberAccessProgram !== undefined &&
-        (modelProvider === undefined || modelProvider === "openai")
-      ) {
-        // An empty sibling inherits the replacement output's project layers.
-        const archiveWorkspace =
-          options.archiveExisting && (await readdir(scanDir)).length > 0
-            ? await prepareOutputDir(undefined, "catalog", dirname(scanDir))
-            : undefined;
-        try {
-          cyberAccessProgram =
-            await this.#dependencies.resolveScanCyberAccessProgram({
-              command: this.#codexCommand(),
-              cwd: archiveWorkspace ?? scanDir,
-              nativeProfile: runtime.providerProfile !== undefined,
-              environment: definedEnvironment({
-                ...environmentWithGit(workerProviderEnvironment, git),
-                CODEX_HOME: runtimeHome,
-              }),
-              config: {
-                ...workerRuntimeConfig,
-                responses_api_metadata: requestMetadata,
-              },
-              model,
-              signal,
-            });
-        } finally {
-          if (archiveWorkspace !== undefined)
-            await cleanupSdkDirectory(archiveWorkspace);
-        }
-      }
+      workerRuntimeConfig["responses_api_metadata"] =
+        codexSecurityRequestContext(effectiveConfig, {
+          ...this.#operationTelemetry?.context,
+          surface: this.#surface,
+          command: "scan",
+          pluginVersion: runtime.plugin.version,
+          mode,
+        }).metadata;
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
-        responses_api_metadata: requestMetadata,
         ...(workerEnvironment === undefined
           ? {}
           : { environment: workerEnvironment }),
@@ -2629,6 +2590,7 @@ export class CodexSecurity {
         mode,
         pluginVersion: runtime.plugin.version,
       };
+      const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model, pricingContext);
       if (mode === "deep" && options.maxCostUsd !== undefined) {
         budgetRecovery = {
@@ -2848,10 +2810,6 @@ export class CodexSecurity {
         knowledgeBasePaths: knowledgeBase?.sources,
         deepScan: deepScanConfiguration?.settings,
       });
-      if (cyberAccessProgram !== undefined) {
-        // A continuation uses the original program. A new rerun resolves the original intent.
-        recipe["requestedCyberAccessProgram"] = cyberAccessProgram;
-      }
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
           name: savedProviderProfile.name,
@@ -2892,23 +2850,52 @@ export class CodexSecurity {
               options.resumeScanId,
             ])
           : undefined;
-      const resumeRecipe = resumeRegistration?.["recipe"];
-      if (cyberAccessProgram === undefined && isRecord(resumeRecipe)) {
-        cyberAccessProgram = ScanSettingsSchema.shape.cyberAccessProgram.parse(
-          resumeRecipe["cyberAccessProgram"] ??
-            resumeRecipe["requestedCyberAccessProgram"],
+      if (resumeRegistration !== undefined) {
+        cyberAccessProgram ??= savedCyberAccessProgram(
+          resumeRegistration["recipe"],
         );
+      } else if (
+        cyberAccessProgram === undefined &&
+        this.#dependencies.resolveScanCyberAccessProgram !== undefined &&
+        (modelProvider === undefined || modelProvider === "openai")
+      ) {
+        // An empty sibling inherits the replacement output's project layers.
+        const archiveWorkspace =
+          options.archiveExisting && (await readdir(scanDir)).length > 0
+            ? await prepareOutputDir(undefined, "catalog", dirname(scanDir))
+            : undefined;
+        try {
+          cyberAccessProgram =
+            await this.#dependencies.resolveScanCyberAccessProgram({
+              command: this.#codexCommand(),
+              cwd: archiveWorkspace ?? scanDir,
+              nativeProfile: runtime.providerProfile !== undefined,
+              environment: definedEnvironment({
+                ...environmentWithGit(workerProviderEnvironment, git),
+                CODEX_HOME: runtimeHome,
+              }),
+              config: workerRuntimeConfig,
+              model,
+              signal,
+            });
+        } finally {
+          if (archiveWorkspace !== undefined)
+            await cleanupSdkDirectory(archiveWorkspace);
+        }
       }
       if (
-        runtime.configPath !== undefined &&
         cyberAccessProgram !== undefined &&
         cyberAccessProgram !== options.cyberAccessProgram
       ) {
-        await writeCodexConfig(runtime.configPath, {
-          ...preflightConfig,
-          codex_security: { cyber_access_program: cyberAccessProgram },
-        });
+        // A continuation restores the selection. A new rerun uses the caller's original choice.
+        recipe["requestedCyberAccessProgram"] = cyberAccessProgram;
+        if (runtime.configPath !== undefined)
+          await writeCodexConfig(runtime.configPath, {
+            ...preflightConfig,
+            codex_security: { cyber_access_program: cyberAccessProgram },
+          });
       }
+      checkOpen();
       const registration =
         resumeRegistration !== undefined
           ? resumeRegistration
@@ -3993,10 +3980,7 @@ export class CodexSecurity {
           )(`Could not run post-scan instructions: ${errorMessage(error)}`);
         }
       }
-      const inferenceRuntimeConfig: JsonObject = {
-        ...structuredClone(workerRuntimeConfig),
-        responses_api_metadata: workerSnapshot["responses_api_metadata"]!,
-      };
+      const inferenceRuntimeConfig = structuredClone(workerRuntimeConfig);
       const inferenceFeatures = inferenceRuntimeConfig["features"];
       if (isRecord(inferenceFeatures)) delete inferenceFeatures["plugins"];
       const inferenceOptions = {
@@ -6454,6 +6438,13 @@ async function targetInstruction(
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }
   return `Scan target: staged and unstaged working-tree changes against ${target.base}.`;
+}
+
+function savedCyberAccessProgram(recipe: unknown) {
+  if (isRecord(recipe))
+    return ScanSettingsSchema.shape.cyberAccessProgram.parse(
+      recipe["cyberAccessProgram"] ?? recipe["requestedCyberAccessProgram"],
+    );
 }
 
 function scanRecipe({

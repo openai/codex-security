@@ -2045,159 +2045,6 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each([
-    ["api-key", "daybreak_blue", false],
-    ["chatgpt", "standard", false],
-    ["api-key", "daybreak_blue", true],
-  ] as const)(
-    "selects the scan program with %s credentials (expected %s, replacing output %p)",
-    async (auth, program, archiveExisting) => {
-      const { root, repository, codexHome, scanDir } = await scanDirectories();
-      if (archiveExisting) {
-        await mkdir(join(scanDir, ".codex"));
-        await writeFile(
-          join(scanDir, ".codex", "config.toml"),
-          "daybreak = false\n",
-        );
-      }
-      const repositoryBin = join(repository, "node_modules", ".bin");
-      const trustedBin = join(root, "bin");
-      await mkdir(repositoryBin, { recursive: true });
-      await mkdir(trustedBin);
-      const environment = {
-        OPENAI_API_KEY: "synthetic-project-key",
-        CODEX_SQLITE_HOME: join(root, "stale-sqlite"),
-        PATH: [repositoryBin, trustedBin].join(delimiter),
-      };
-      const sqliteSetting =
-        auth === "api-key" ? "scan-db" : join(root, "selected-sqlite");
-      const scanDb = resolve(scanDir, sqliteSetting);
-      let probeDir: string | undefined;
-      let catalogMetadata: unknown;
-      const registered = mock();
-      const turn = mock(rejecting("synthetic scan turn"));
-      await using client = new TestClient(
-        {
-          codexOverrides: {
-            model: "synthetic-model",
-            model_catalog_json: "catalog.json",
-            responses_api_metadata: { "test.tag": "scan-attribution" },
-            sqlite_home: sqliteSetting,
-          },
-        },
-        {
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          environment,
-          createOperationTelemetry: (options) =>
-            new OperationTelemetry({
-              ...options,
-              directory: join(root, "journal"),
-            }),
-          prepareRuntime: async () => ({
-            ...preparedRuntime(codexHome),
-            environment,
-          }),
-          resolveScanCyberAccessProgram: async (query) => {
-            expect(query.model).toBe("synthetic-model");
-            catalogMetadata = query.config["responses_api_metadata"];
-            expect(catalogMetadata).toMatchObject({
-              "test.tag": "scan-attribution",
-              codex_security_command: "scan",
-              codex_security_surface: "sdk",
-              codex_security_operation_id: expect.any(String),
-              codex_security_attempt_id: expect.any(String),
-            });
-            expect(query.config["model_catalog_json"]).toBe(
-              join(scanDir, "catalog.json"),
-            );
-            probeDir = query.cwd;
-            if (archiveExisting) {
-              expect(dirname(probeDir)).toBe(dirname(scanDir));
-              expect(probeDir).not.toBe(scanDir);
-              expect(await readdir(probeDir)).toEqual([]);
-            } else expect(probeDir).toBe(scanDir);
-            expect(query.environment["PATH"]).toBe(await realpath(trustedBin));
-            expect(query.environment["CODEX_HOME"]).toBe(
-              await realpath(codexHome),
-            );
-            expect(query.environment["OPENAI_API_KEY"]).toBeUndefined();
-            expect(query.environment["CODEX_API_KEY"]).toBe(
-              auth === "api-key" ? environment.OPENAI_API_KEY : undefined,
-            );
-            return program;
-          },
-          runWorkbench: async (options, args, input) => {
-            if (args[0] === "register-cli-scan") {
-              expect(options.environment?.["CODEX_SQLITE_HOME"]).toBe(scanDb);
-              if (archiveExisting) expect(existsSync(probeDir!)).toBe(false);
-              const recipe = JSON.parse(input!).recipe;
-              expect(recipe.cyberAccessProgram).toBeUndefined();
-              expect(recipe.requestedCyberAccessProgram).toBe(program);
-            }
-            return mockWorkbench(args, input);
-          },
-          createCodex: (options) => {
-            const metadataOverride = options.configOverrides!.find((value) =>
-              value.startsWith("responses_api_metadata="),
-            );
-            expect(catalogMetadata).toEqual(
-              parseToml(metadataOverride!)["responses_api_metadata"],
-            );
-            expect(options.env?.["CODEX_SQLITE_HOME"]).toBe(scanDb);
-            expect(options.env?.["PATH"]?.split(delimiter)).toContain(
-              trustedBin,
-            );
-            expect(options.env?.["PATH"]?.split(delimiter)).not.toContain(
-              repositoryBin,
-            );
-            return codexFactory(turn)();
-          },
-        },
-      );
-      await expect(
-        client.run(repository, {
-          auth,
-          archiveExisting,
-          outputDir: scanDir,
-          onScanRegistered: registered,
-        }),
-      ).rejects.toThrow("synthetic scan turn");
-      expect(turn).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ cyberAccessProgram: program }),
-      );
-      expect(registered).toHaveBeenCalledWith(
-        expect.objectContaining({ cyberAccessProgram: program }),
-      );
-    },
-  );
-
-  test("keeps existing output and removes the temporary catalog workspace when selection fails", async () => {
-    const { repository, codexHome, scanDir } = await scanDirectories();
-    const previous = join(scanDir, "previous.txt");
-    await writeFile(previous, "previous scan");
-    let probed: string | undefined;
-    const registration = mock();
-    await using client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      resolveScanCyberAccessProgram: async ({ cwd }) => {
-        probed = cwd;
-        throw new Error("Synthetic Red-only model");
-      },
-    });
-    await expect(
-      client.run(repository, {
-        outputDir: scanDir,
-        archiveExisting: true,
-        onScanRegistered: registration,
-      }),
-    ).rejects.toThrow("Synthetic Red-only model");
-    expect(registration).not.toHaveBeenCalled();
-    expect(probed).toBeDefined();
-    expect(existsSync(probed!)).toBe(false);
-    expect(await readFile(previous, "utf8")).toBe("previous scan");
-  });
-
   test("retains the registered scan ID when continuation storage becomes unavailable", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const document = join(root, "architecture.md");
@@ -2348,11 +2195,18 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each(["revision", "registration", "cancellation", "mock"] as const)(
+  test.each([
+    "revision",
+    "catalog",
+    "registration",
+    "cancellation",
+    "mock",
+  ] as const)(
     "keeps existing output when %s prevents scan registration",
     async (failurePoint) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
+      let catalogDirectory: string | undefined;
       const cancellation = new AbortController();
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
@@ -2364,6 +2218,13 @@ describe("CodexSecurity orchestration", () => {
               throw new Error("fixture revision rejected");
             if (failurePoint === "cancellation") cancellation.abort();
             return null;
+          },
+          resolveScanCyberAccessProgram: async ({ cwd }) => {
+            catalogDirectory = cwd;
+            expect(dirname(cwd)).toBe(dirname(scanDir));
+            expect(await readdir(cwd)).toEqual([]);
+            if (failurePoint === "catalog") throw new Error("Red-only model");
+            return "daybreak_blue";
           },
           runWorkbench: async () => {
             throw new Error("fixture registration rejected");
@@ -2379,7 +2240,10 @@ describe("CodexSecurity orchestration", () => {
             signal: cancellation.signal,
             mock: failurePoint === "mock",
           }),
-        ).rejects.toThrow();
+        ).rejects.toThrow(
+          failurePoint === "catalog" ? "Red-only model" : undefined,
+        );
+        if (catalogDirectory) expect(existsSync(catalogDirectory)).toBe(false);
         expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
           "previous scan\n",
         );
@@ -2411,12 +2275,18 @@ describe("CodexSecurity orchestration", () => {
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
+          resolveScanCyberAccessProgram: async () => "daybreak_blue",
           runWorkbench: async (
             _options: Parameters<typeof runWorkbench>[0],
             args: readonly string[],
             input?: string,
           ): Promise<JsonObject> => {
-            if (args[0] === "register-cli-scan") registration = args;
+            if (args[0] === "register-cli-scan") {
+              registration = args;
+              const recipe = JSON.parse(input!).recipe;
+              expect(recipe.cyberAccessProgram).toBeUndefined();
+              expect(recipe.requestedCyberAccessProgram).toBe("daybreak_blue");
+            }
             const result = await runWorkbench(
               {
                 ..._options,
@@ -2432,7 +2302,12 @@ describe("CodexSecurity orchestration", () => {
             }
             return result;
           },
-          createCodex: codexFactory(scanDidNotStart),
+          createCodex: codexFactory(
+            async (_prompt: string, turn: { cyberAccessProgram?: string }) => {
+              expect(turn.cyberAccessProgram).toBe("daybreak_blue");
+              return scanDidNotStart();
+            },
+          ),
         },
       );
 
@@ -15148,73 +15023,63 @@ if __name__ == "__main__":
   );
 
   test.each([
-    ["requestedCyberAccessProgram", "daybreak_blue"],
-    ["requestedCyberAccessProgram", "standard"],
-    ["cyberAccessProgram", "daybreak_red"],
-    [undefined, undefined],
+    [{ requestedCyberAccessProgram: "daybreak_blue" }, "daybreak_blue"],
+    [{ cyberAccessProgram: "daybreak_red" }, "daybreak_red"],
+    [{}, undefined],
   ] as const)(
-    "preserves saved %p=%p across repeated Deep Scan resumes",
-    async (savedKey, savedProgram) => {
+    "restores the saved Cyber access program %p",
+    async (saved, expected) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const scanId = "scan_example_001";
       const threadId = "thread-1";
-      const configPath = join(codexHome, "worker-config.toml");
+      const configPath = join(codexHome, "worker.toml");
       await writeUsageSession(codexHome, threadId, {}, { cwd: scanDir });
-      const discover = mock<() => Promise<"daybreak_blue" | "standard">>();
-      const runStreamed = mock(rejecting("resumed turn reached"));
+      const recipe = {
+        repository,
+        target: { kind: "repository", paths: [] },
+        ...saved,
+      };
+      const runStreamed = mock(rejecting("resumed turn"));
       await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
           configPath,
         }),
-        resolveScanCyberAccessProgram: discover,
+        resolveScanCyberAccessProgram: rejecting("unexpected rediscovery"),
         readDeepScanParentConfig: async () => undefined,
-        createCodex: () => ({
-          startThread: throwing("Expected the original scan thread"),
-          resumeThread: () => ({ id: threadId, runStreamed }),
-        }),
         runWorkbench: async (_options, args, input): Promise<JsonObject> =>
           args[0] === "get-cli-scan-resume"
             ? {
-                scanId,
-                scanDir,
+                ...mockScanRegistration(
+                  ["--registration-json-stdin", "--scan-dir", scanDir],
+                  JSON.stringify({ recipe }),
+                ),
+                recipe,
                 threadId,
-                targetId: "target_sha256_example",
-                targetRevision: "deadbeef",
-                contract: { target: { allowedKinds: ["git_revision"] } },
-                recipe: {
-                  repository,
-                  target: { kind: "repository", paths: [] },
-                  ...(savedKey === undefined
-                    ? {}
-                    : { [savedKey]: savedProgram }),
-                },
               }
             : mockWorkbench(args, input),
+        createCodex: () => ({
+          startThread: throwing("expected resume"),
+          resumeThread: () => ({ id: threadId, runStreamed }),
+        }),
       });
-      for (const available of ["daybreak_blue", "standard"] as const) {
-        discover.mockResolvedValue(available);
-        await expect(
-          client.run(repository, {
-            mode: "deep",
-            resumeScanId: scanId,
-            outputDir: scanDir,
-          }),
-        ).rejects.toThrow("resumed turn reached");
-        expect(runStreamed).toHaveBeenLastCalledWith(
-          expect.any(String),
-          expect.objectContaining({ cyberAccessProgram: savedProgram }),
-        );
-        expect(
-          parseToml(await readFile(configPath, "utf8"))["codex_security"],
-        ).toEqual(
-          savedProgram === undefined
-            ? undefined
-            : { cyber_access_program: savedProgram },
-        );
-      }
-      expect(discover).not.toHaveBeenCalled();
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          resumeScanId: scanId,
+          outputDir: scanDir,
+        }),
+      ).rejects.toThrow("resumed turn");
+      expect(runStreamed).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ cyberAccessProgram: expected }),
+      );
+      expect(
+        parseToml(await readFile(configPath, "utf8"))["codex_security"],
+      ).toEqual(
+        expected === undefined ? undefined : { cyber_access_program: expected },
+      );
     },
   );
 

@@ -85,11 +85,8 @@ async function patchSettings(
     homeConfig?: string;
     standalone?: boolean;
     programs?: string[];
-    cachedScanProgram?: ScanResult["requestedCyberAccessProgram"];
-    scan?: Pick<
-      NonNullable<Parameters<typeof dependencies>[0]>,
-      "onTurn" | "onValidate"
-    >;
+    scanProgram?: ScanResult["requestedCyberAccessProgram"];
+    onValidate?: NonNullable<Parameters<typeof dependencies>[0]>["onValidate"];
   } = {},
 ): Promise<ChildReceipt> {
   const root = await temporaryDirectory("inline-patch-settings-");
@@ -103,7 +100,7 @@ async function patchSettings(
     const result = new ScanResult({
       ...fakeResult(["high"]),
       scanDir: root,
-      requestedCyberAccessProgram: options.cachedScanProgram,
+      requestedCyberAccessProgram: options.scanProgram,
     });
     Object.assign(result.findings.findings[0]!, {
       occurrenceId: "occ_1",
@@ -152,7 +149,7 @@ async function patchSettings(
         "--json",
       ],
       dependencies({
-        ...options.scan,
+        onValidate: options.onValidate,
         currentDirectory: repository,
         environment,
         result,
@@ -428,36 +425,23 @@ describe("inline patch service tier", () => {
 });
 
 describe("patch Daybreak configuration", () => {
-  test.each([false, true])(
-    "validation and patching inherit automatically selected Blue (cached scan: %p)",
-    async (cached) => {
-      const validationPrograms: Array<string | undefined> = [];
-      const child = await patchSettings(["--validate"], {
-        cachedScanProgram: cached ? "daybreak_blue" : undefined,
-        scan: {
-          onTurn: (_, scan) => {
-            if (cached) return;
-            scan.onScanRegistered?.({
-              scanId: "scan",
-              scanDir: "/synthetic/scan",
-              cyberAccessProgram: "daybreak_blue",
-            });
-          },
-          onValidate: async (validation) => {
-            validationPrograms.push(validation.cyberAccessProgram);
-            return {
-              disposition: "deferred",
-              report: "Additional evidence needed.",
-              threadId: "validation-thread",
-              outputDir: "evidence",
-            };
-          },
-        },
-      });
-      expect(validationPrograms).toEqual(["daybreak_blue"]);
-      expect(child.cyberAccessProgram).toBe("daybreakBlue");
-    },
-  );
+  test("validation and patching reuse the scan’s selected program", async () => {
+    const validationPrograms: Array<string | undefined> = [];
+    const child = await patchSettings(["--validate"], {
+      scanProgram: "daybreak_blue",
+      onValidate: async (validation) => {
+        validationPrograms.push(validation.cyberAccessProgram);
+        return {
+          disposition: "deferred",
+          report: "Additional evidence needed.",
+          threadId: "validation-thread",
+          outputDir: "evidence",
+        };
+      },
+    });
+    expect(validationPrograms).toEqual(["daybreak_blue"]);
+    expect(child.cyberAccessProgram).toBe("daybreakBlue");
+  });
 
   test.each([true, false, undefined])(
     "preserves standalone native configuration (override: %p)",

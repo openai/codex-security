@@ -766,7 +766,11 @@ async function startReadOnlyCodexThread(
       };
     }
     let cyberAccessProgram = options.cyberAccessProgram;
-    if (componentRepository !== undefined && model !== undefined) {
+    if (
+      cyberAccessProgram === undefined &&
+      componentRepository !== undefined &&
+      model !== undefined
+    ) {
       // The helper may use a different credential home than the caller.
       // Only send configuration that this Codex process actually receives.
       const nativeEnvironment = codexOptions.env ?? environment;
@@ -782,7 +786,6 @@ async function startReadOnlyCodexThread(
           ...(isRecord(providers) ? { model_providers: providers } : {}),
         },
         model,
-        program: cyberAccessProgram,
         nativeProfile: profile !== undefined,
         signal: options.signal ?? new AbortController().signal,
       });

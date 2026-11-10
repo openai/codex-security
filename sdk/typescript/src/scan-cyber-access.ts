@@ -8,6 +8,7 @@ import {
   withoutOpenAiApiKeys,
 } from "./auth.js";
 import {
+  daybreakAccountType,
   daybreakFeatures,
   modelCyberAccessPrograms,
   type AppServerRequest,
@@ -28,12 +29,13 @@ import {
   nativeProfileClient,
   providerPreflightCommand,
 } from "./provider-profile.js";
-import { isRecord } from "./record.js";
+import { asRecord, isRecord } from "./record.js";
 import {
   expandHome,
   prepareOutputDir,
   runCodexCommand,
   type CodexCommand,
+  type ProcessEnvironment,
 } from "./runtime.js";
 
 interface ScanCyberAccessOptions {
@@ -43,116 +45,117 @@ interface ScanCyberAccessOptions {
   config: JsonObject;
   model: string;
   nativeProfile?: boolean;
-  program?: CyberAccessProgram;
   signal: AbortSignal;
 }
 
+const networkFeatures = [
+  "respect_system_proxy",
+  "system_proxy_fallback",
+  "psp",
+];
 const catalogFeatures = [
   "cli_daybreak",
   "api_key_model_discovery",
   "api_key_cyber_access_programs",
-  "psp",
-  "respect_system_proxy",
-  "system_proxy_fallback",
   "secret_auth_storage",
+  ...networkFeatures,
 ];
-const catalogSettings = new Set([
+const endpoints = ["chatgpt_base_url", "openai_base_url"];
+const catalogSettings = [
   ...CODEX_AUTH_CONFIG_KEYS,
+  ...endpoints,
   "auth_keyring_backend",
   "model",
   "daybreak",
   "model_catalog_json",
   "project_root_markers",
-  "chatgpt_base_url",
-  "openai_base_url",
-]);
+  "features",
+  ...catalogFeatures.map((key) => `features.${key}`),
+];
 
-// Preserve the SDK's ordering of a nested table relative to literal dotted keys.
+function pickSettings(source: JsonObject, keys: string[]): JsonObject {
+  return Object.fromEntries(
+    Object.entries(source).filter(
+      ([key, value]) => value != null && keys.includes(key),
+    ),
+  );
+}
+
+// Keep the original order of literal dotted flags and tables. A native profile
+// replaces the entire feature table, whereas the SDK emits individual leaves.
 function catalogConfig(source: JsonObject, nativeProfile = false): JsonObject {
-  const result: JsonObject = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (value == null) continue;
-    if (key === "features" && isRecord(value)) {
-      const entries = Object.entries(value);
-      const selected = entries.filter(
-        ([feature, enabled]) =>
-          enabled != null && catalogFeatures.includes(feature),
-      );
-      // A native profile sends the entire table as one CLI override.
-      if (nativeProfile || selected.length || !entries.length)
-        result[key] = Object.fromEntries(selected) as JsonObject;
-    } else if (
-      catalogSettings.has(key) ||
-      (key.startsWith("features.") &&
-        catalogFeatures.includes(key.slice("features.".length)))
-    ) {
-      result[key] = value;
-    }
+  const config = pickSettings(source, catalogSettings);
+  const features = config["features"];
+  if (isRecord(features)) {
+    const selected = pickSettings(features, catalogFeatures);
+    if (
+      nativeProfile ||
+      Object.keys(selected).length ||
+      !Object.keys(features).length
+    )
+      config["features"] = selected;
+    else delete config["features"];
   }
-  return result;
+  return config;
 }
 
 function openAiProvider(providers: unknown) {
-  return isRecord(providers) && isRecord(providers["openai"])
-    ? providers["openai"]
-    : undefined;
+  return asRecord(asRecord(providers)?.["openai"]);
 }
 
-function privateCatalogUrl(config: JsonObject, nativeProfile = false) {
-  // The full provider table belongs to the private profile. Literal dotted
-  // keys are CLI overrides and retain their order above that profile.
-  let url = openAiProvider(config["model_providers"])?.["model_catalog_url"];
-  let pinned = false;
-  for (const [key, value] of Object.entries(config)) {
-    if (
-      key === "model_providers.openai.model_catalog_url" &&
-      typeof value === "string"
-    ) {
-      url = value;
-      pinned = true;
-    } else if (key === "model_providers.openai" && isRecord(value)) {
-      const next = value["model_catalog_url"];
-      // Stock SDK nonempty objects set each leaf independently. A native
-      // profile or explicit empty table replaces the entire provider.
-      if (
-        typeof next === "string" ||
-        nativeProfile ||
-        !Object.keys(value).length
-      ) {
-        url = next;
-        pinned = true;
-      }
-    }
-  }
-  return { url: typeof url === "string" ? url : undefined, pinned };
+// File settings are below the SDK's literal dotted flags. TOML normalization
+// places scalars before tables; a whole-table flag can also clear an inherited URL.
+function catalogRoute(
+  config: JsonObject,
+  nativeProfile = false,
+): { url?: string } | undefined {
+  const table = asRecord(config["model_providers.openai"]);
+  const override = table?.["model_catalog_url"];
+  if (typeof override === "string") return { url: override };
+  if (table && (nativeProfile || !Object.keys(table).length)) return {};
+  const leaf = config["model_providers.openai.model_catalog_url"];
+  const url =
+    typeof leaf === "string"
+      ? leaf
+      : openAiProvider(config["model_providers"])?.["model_catalog_url"];
+  return typeof url === "string" ? { url } : undefined;
 }
 
-function hasManagedCatalogSettings(layer: unknown): boolean {
-  if (!isRecord(layer) || !isRecord(layer["name"])) return false;
-  const source = layer["name"]["type"];
+const managedLayers = new Set([
+  "enterpriseManaged",
+  "legacyManagedConfigTomlFromMdm",
+  "legacyManagedConfigTomlFromFile",
+]);
+
+/** These workspace routing controls cannot be reproduced by a separate API-key identity. */
+function hasManagedRoute(policy: JsonObject, layers: unknown[]) {
+  const required = asRecord(policy["featureRequirements"]);
+  const network = asRecord(asRecord(policy["application"])?.["network"]);
   if (
-    source !== "enterpriseManaged" &&
-    source !== "legacyManagedConfigTomlFromMdm" &&
-    source !== "legacyManagedConfigTomlFromFile"
+    policy["chatgptBaseUrl"] != null ||
+    policy["enforceResidency"] != null ||
+    network?.["enabled"] === true ||
+    networkFeatures.some((name) => required?.[name] != null)
   )
-    return false;
-  const config = layer["config"];
-  if (!isRecord(config)) return false;
-  const features = config["features"];
-  return (
-    [
-      "chatgpt_base_url",
-      "openai_base_url",
-      "model_catalog_json",
-      "cli_auth_credentials_store",
-      "application",
-      "network",
-    ].some((key) => config[key] != null) ||
-    (isRecord(features) &&
-      (features["respect_system_proxy"] != null ||
-        features["system_proxy_fallback"] != null ||
-        features["psp"] != null))
-  );
+    return true;
+  return layers.some((layer) => {
+    const entry = asRecord(layer);
+    if (!managedLayers.has(String(asRecord(entry?.["name"])?.["type"])))
+      return false;
+    const settings = asRecord(entry?.["config"]);
+    const features = asRecord(settings?.["features"]);
+    return (
+      [
+        "chatgpt_base_url",
+        "openai_base_url",
+        "model_catalog_json",
+        "cli_auth_credentials_store",
+        "application",
+        "network",
+      ].some((key) => settings?.[key] != null) ||
+      networkFeatures.some((key) => features?.[key] != null)
+    );
+  });
 }
 
 function selectedProgram(model: string, programs: unknown): CyberAccessProgram {
@@ -174,41 +177,17 @@ function selectedProgram(model: string, programs: unknown): CyberAccessProgram {
 
 /** The policy probe masks remote discovery with a bundled catalog. Recover a
  * workspace's actual catalog file from the first active layer below that flag. */
-function configuredCatalogFile(layers: unknown) {
-  if (!Array.isArray(layers)) return undefined;
-  for (const layer of layers) {
+function configuredCatalogFile(layers: unknown[]) {
+  for (const value of layers) {
+    const layer = asRecord(value);
+    const path = asRecord(layer?.["config"])?.["model_catalog_json"];
     if (
-      isRecord(layer) &&
-      !layer["disabledReason"] &&
-      isRecord(layer["name"]) &&
-      layer["name"]["type"] !== "sessionFlags" &&
-      isRecord(layer["config"]) &&
-      typeof layer["config"]["model_catalog_json"] === "string"
+      !layer?.["disabledReason"] &&
+      asRecord(layer?.["name"])?.["type"] !== "sessionFlags" &&
+      typeof path === "string"
     )
-      return layer["config"]["model_catalog_json"];
+      return path;
   }
-  return undefined;
-}
-
-async function nativeModels(
-  command: CodexCommand,
-  cwd: string,
-  environment: Record<string, string>,
-  args: string[],
-  signal: AbortSignal,
-) {
-  const result = await runCodexCommand(
-    command,
-    args,
-    environment,
-    undefined,
-    signal,
-    { cwd },
-  );
-  signal.throwIfAborted();
-  if (!result.success)
-    throw new ConfigurationError(result.stderr || result.stdout);
-  return result.stdout;
 }
 
 /** Discover the selected model's programs using the scan's identity before its first turn. */
@@ -219,10 +198,8 @@ export async function resolveScanCyberAccessProgram({
   config,
   model,
   nativeProfile,
-  program,
   signal,
 }: ScanCyberAccessOptions): Promise<CyberAccessProgram | undefined> {
-  if (program !== undefined) return program;
   if (command.args?.length || !isBundledExecutable(command.command))
     return undefined;
   const resolved = resolveCodexProfile(config);
@@ -258,13 +235,9 @@ export async function resolveScanCyberAccessProgram({
     delete policyConfig["chatgpt_base_url"];
   }
   const policyOverrides = serialize(policyConfig);
-  const providers = isRecord(resolved["model_providers"])
-    ? { ...resolved["model_providers"] }
-    : {};
-  delete providers["openai"]; // Its private catalog URL must stay out of argv.
-  const { url, pinned } = privateCatalogUrl(resolved, nativeProfile);
+  const route = catalogRoute(resolved, nativeProfile);
   const maskCatalog =
-    Boolean(apiKey || url || pinned) && !projected["model_catalog_json"];
+    Boolean(apiKey || route) && !projected["model_catalog_json"];
   const scratch = await prepareOutputDir(
     undefined,
     "catalog",
@@ -276,31 +249,44 @@ export async function resolveScanCyberAccessProgram({
       if (name.toUpperCase() === "CODEX_SQLITE_HOME") delete env[name];
     }
     env["CODEX_SQLITE_HOME"] = sqliteHome;
-    const consent = Object.fromEntries(
-      Object.entries(resolved).filter(
-        ([key, value]) =>
-          value != null && (key === "analytics" || key === "analytics.enabled"),
+    // The policy preflight receives provider names only. Its saved login must never see a project key's route.
+    const providers = { ...asRecord(resolved["model_providers"]) };
+    delete providers["openai"];
+    const policyCommand = await providerPreflightCommand(command, {
+      ...pickSettings(resolved, ["model_provider", "responses_api_metadata"]),
+      model_providers: providers as JsonObject,
+    });
+    policyOverrides.push(
+      ...serialize(pickSettings(resolved, ["analytics", "analytics.enabled"])),
+      `sqlite_home=${inlineToml(sqliteHome)}`,
+    );
+    // The project key uses a private home with no ambient login.
+    const isolated = Object.fromEntries(
+      Object.entries(env).filter(
+        ([name]) =>
+          !["CODEX_ACCESS_TOKEN", "CODEX_HOME"].includes(name.toUpperCase()),
       ),
     );
-    const catalogCommand = await providerPreflightCommand(
-      {
-        ...command,
-        args: [
-          "-c",
-          `sqlite_home=${inlineToml(sqliteHome)}`,
-          ...serialize(consent).flatMap((flag) => ["-c", flag]),
-        ],
-      },
-      resolved["responses_api_metadata"] == null
-        ? {}
-        : { responses_api_metadata: resolved["responses_api_metadata"] },
-    );
-    const policyCommand = await providerPreflightCommand(catalogCommand, {
-      ...(resolved["model_provider"] != null && {
-        model_provider: resolved["model_provider"],
-      }),
-      model_providers: providers,
-    });
+    isolated["CODEX_HOME"] = scratch;
+    const debugModels = async (
+      identity: ProcessEnvironment,
+      bundled = false,
+    ) => {
+      const args = bundled
+        ? ["-c", "analytics.enabled=false", "debug", "models", "--bundled"]
+        : ["debug", "models"];
+      const result = await runCodexCommand(
+        command,
+        args,
+        identity,
+        undefined,
+        signal,
+        { cwd: scratch },
+      );
+      if (!result.success)
+        throw new ConfigurationError(result.stderr || result.stdout);
+      return result.stdout;
+    };
     const native = await nativePermissionPreflight();
     const probe = <T>(
       overrides: string[],
@@ -324,29 +310,26 @@ export async function resolveScanCyberAccessProgram({
     if (maskCatalog) {
       // Ask the saved workspace for policy without loading a catalog under the wrong identity or route.
       const path = join(scratch, "bootstrap-models.json");
-      const bundled = await nativeModels(
-        command,
-        scratch,
-        {
-          HOME: scratch,
-          USERPROFILE: scratch,
-          CODEX_HOME: scratch,
-          ...(environmentEntry(env, "SystemRoot") && {
-            SystemRoot: environmentEntry(env, "SystemRoot")!,
-          }),
-        },
-        ["-c", "analytics.enabled=false", "debug", "models", "--bundled"],
-        signal,
-      );
-      await writeFile(path, bundled, { mode: 0o600 });
+      const bootstrapEnv = {
+        HOME: scratch,
+        USERPROFILE: scratch,
+        CODEX_HOME: scratch,
+        SystemRoot: environmentEntry(env, "SystemRoot"),
+      };
+      await writeFile(path, await debugModels(bootstrapEnv, true), {
+        mode: 0o600,
+      });
       bootstrap.push(`model_catalog_json=${inlineToml(path)}`);
     }
 
     return await probe(bootstrap, async (request) => {
-      const { config: settings, layers } = await request("config/read", {
-        cwd,
-        includeLayers: Boolean(apiKey || maskCatalog),
-      });
+      const { config: settings, layers: nativeLayers } = await request(
+        "config/read",
+        {
+          cwd,
+          includeLayers: Boolean(apiKey || maskCatalog),
+        },
+      );
       if (
         !isRecord(settings) ||
         settings["daybreak"] != null ||
@@ -356,12 +339,9 @@ export async function resolveScanCyberAccessProgram({
       const { requirements } = await request("configRequirements/read", {});
       const policy = isRecord(requirements) ? requirements : {};
       if ((policy["modelProvider"] ?? "openai") !== "openai") return undefined;
-      const requiredFeatures = isRecord(policy["featureRequirements"])
-        ? policy["featureRequirements"]
-        : {};
-      const scopedFeatures = isRecord(settings["features"])
-        ? settings["features"]
-        : {};
+      const layers: unknown[] = Array.isArray(nativeLayers) ? nativeLayers : [];
+      const requiredFeatures = asRecord(policy["featureRequirements"]) ?? {};
+      const scopedFeatures = asRecord(settings["features"]) ?? {};
       if (
         (requiredFeatures["cli_daybreak"] ?? scopedFeatures["cli_daybreak"]) ===
         false
@@ -371,13 +351,9 @@ export async function resolveScanCyberAccessProgram({
       const enabled = (name: string) =>
         requiredFeatures[name] ?? scopedFeatures[name] ?? flags.get(name);
       if (enabled("cli_daybreak") !== true) return undefined;
-      let accountType: unknown = "apiKey";
-      if (!apiKey) {
-        const { account } = await request("account/read", {
-          refreshToken: false,
-        });
-        accountType = isRecord(account) ? account["type"] : undefined;
-      }
+      const accountType = apiKey
+        ? "apiKey"
+        : await daybreakAccountType(request);
       if (accountType === "apiKey") {
         if (
           enabled("api_key_cyber_access_programs") !== true ||
@@ -410,69 +386,38 @@ export async function resolveScanCyberAccessProgram({
       const requiredProvider = openAiProvider(policy["modelProviders"]);
       const nativeUrl = (requiredProvider ??
         openAiProvider(settings["model_providers"]))?.["model_catalog_url"];
-      const catalogUrl = requiredProvider
-        ? nativeUrl
-        : pinned
-          ? url
-          : (url ?? nativeUrl);
+      const catalogUrl = requiredProvider || !route ? nativeUrl : route.url;
       if (!apiKey)
         return nativeUrl === catalogUrl
           ? probe(policyOverrides, select)
           : "standard";
 
       // The isolated key cannot reload a saved workspace's managed network controls.
-      const application = policy["application"];
       if (
         enabled("api_key_model_discovery") === false ||
-        policy["chatgptBaseUrl"] != null ||
-        policy["enforceResidency"] != null ||
-        ["respect_system_proxy", "system_proxy_fallback", "psp"].some(
-          (name) => requiredFeatures[name] != null,
-        ) ||
-        (isRecord(application) &&
-          isRecord(application["network"]) &&
-          application["network"]["enabled"] === true) ||
-        (Array.isArray(layers) && layers.some(hasManagedCatalogSettings))
+        hasManagedRoute(policy, layers)
       )
         return "standard";
 
-      // Native debug models uses CODEX_API_KEY. Its credential home contains only this call's private configuration.
-      const keyConfig = catalogConfig(settings);
-      keyConfig["model_provider"] = "openai";
+      // Replay the effective native policy exactly once, in a private home without the saved login
+      // or a second set of project layers. Keep the scan key in the environment and its route in the file.
+      const keyConfig: JsonObject = {
+        ...catalogConfig(settings),
+        ...pickSettings(settings, ["analytics", "responses_api_metadata"]),
+        ...pickSettings(projected, endpoints),
+        features: {
+          ...pickSettings(scopedFeatures as JsonObject, catalogFeatures),
+          ...pickSettings(requiredFeatures as JsonObject, catalogFeatures),
+        },
+        model_provider: "openai",
+        ...(typeof catalogUrl === "string" && {
+          model_providers: { openai: { model_catalog_url: catalogUrl } },
+        }),
+        project_root_markers: [],
+      };
       delete keyConfig["model_catalog_json"];
-      for (const key of ["analytics", "responses_api_metadata"]) {
-        const value = settings[key] ?? resolved[key];
-        if (value != null) keyConfig[key] = value;
-      }
-      for (const key of ["openai_base_url", "chatgpt_base_url"]) {
-        if (projected[key] != null) keyConfig[key] = projected[key]!;
-      }
-      if (typeof catalogUrl === "string")
-        keyConfig["model_providers"] = {
-          openai: { model_catalog_url: catalogUrl },
-        };
       await writeCodexConfig(join(scratch, "config.toml"), keyConfig);
-      const keyEnv = Object.fromEntries(
-        Object.entries(env).filter(
-          ([name]) =>
-            !["CODEX_ACCESS_TOKEN", "CODEX_HOME"].includes(name.toUpperCase()),
-        ),
-      );
-      const overrides = policyOverrides.filter(
-        (flag) => flag.startsWith("features.") || flag.startsWith("features="),
-      );
-      overrides.push('model_provider="openai"');
-      for (const name of catalogFeatures) {
-        if (typeof requiredFeatures[name] === "boolean")
-          overrides.push(`features.${name}=${requiredFeatures[name]}`);
-      }
-      const raw = await nativeModels(
-        catalogCommand,
-        cwd,
-        { ...keyEnv, CODEX_HOME: scratch, CODEX_API_KEY: apiKey },
-        [...overrides.flatMap((flag) => ["-c", flag]), "debug", "models"],
-        signal,
-      );
+      const raw = await debugModels({ ...isolated, CODEX_API_KEY: apiKey });
       const catalog = JSON.parse(raw).models;
       const row = Array.isArray(catalog)
         ? catalog.find(

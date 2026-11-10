@@ -1,5 +1,5 @@
 import type { JsonObject } from "./config.js";
-import { isRecord } from "./record.js";
+import { asRecord, isRecord } from "./record.js";
 
 type CyberAccessProgram = "standard" | "daybreakBlue" | "daybreakRed";
 
@@ -8,37 +8,45 @@ export type AppServerRequest = (
   params: JsonObject,
 ) => Promise<JsonObject>;
 
+async function* listPages(
+  request: AppServerRequest,
+  method: string,
+  params: JsonObject,
+) {
+  let cursor: string | undefined;
+  do {
+    const { data, nextCursor } = await request(
+      method,
+      cursor === undefined ? params : { ...params, cursor },
+    );
+    if (Array.isArray(data))
+      yield data.filter((row): row is JsonObject => isRecord(row));
+    cursor = typeof nextCursor === "string" ? nextCursor : undefined;
+  } while (cursor !== undefined);
+}
+
 export async function daybreakFeatures(
   request: AppServerRequest,
   threadId?: string,
 ) {
   const features = new Map<string, unknown>();
-  let featureCursor: string | undefined;
-  do {
-    const result = await request("experimentalFeature/list", {
-      ...(threadId === undefined ? {} : { threadId }),
-      ...(featureCursor === undefined ? {} : { cursor: featureCursor }),
-    });
-    const flags = result["data"];
-    if (Array.isArray(flags)) {
-      for (const flag of flags) {
-        if (isRecord(flag) && typeof flag["name"] === "string")
-          features.set(flag["name"], flag["enabled"]);
-      }
+  const pages = listPages(
+    request,
+    "experimentalFeature/list",
+    threadId === undefined ? {} : { threadId },
+  );
+  for await (const flags of pages) {
+    for (const { name, enabled } of flags) {
+      if (typeof name === "string") features.set(name, enabled);
     }
     if (threadId !== undefined && features.get("cli_daybreak") === false) break;
     if (
       features.has("cli_daybreak") &&
       features.has("api_key_cyber_access_programs") &&
       (threadId !== undefined || features.has("api_key_model_discovery"))
-    ) {
+    )
       break;
-    }
-    featureCursor =
-      typeof result["nextCursor"] === "string"
-        ? result["nextCursor"]
-        : undefined;
-  } while (featureCursor !== undefined);
+  }
   return features;
 }
 
@@ -46,27 +54,20 @@ export async function modelCyberAccessPrograms(
   model: string,
   request: AppServerRequest,
 ) {
-  let cursor: string | undefined;
-  do {
-    const result = await request("model/list", {
-      includeHidden: true,
-      ...(cursor === undefined ? {} : { cursor }),
-    });
-    const models = result["data"];
-    const selected = Array.isArray(models)
-      ? models.find((entry) => isRecord(entry) && entry["model"] === model)
-      : undefined;
-    if (isRecord(selected)) {
-      const access = selected["availableAccessPrograms"];
-      const programs = isRecord(access) ? access["cyber"] : undefined;
-      return Array.isArray(programs) ? programs : undefined;
-    }
-    cursor =
-      typeof result["nextCursor"] === "string"
-        ? result["nextCursor"]
-        : undefined;
-  } while (cursor !== undefined);
+  for await (const models of listPages(request, "model/list", {
+    includeHidden: true,
+  })) {
+    const selected = models.find((entry) => entry["model"] === model);
+    if (selected === undefined) continue;
+    const programs = asRecord(selected["availableAccessPrograms"])?.["cyber"];
+    return Array.isArray(programs) ? programs : undefined;
+  }
   return undefined;
+}
+
+export async function daybreakAccountType(request: AppServerRequest) {
+  const { account } = await request("account/read", { refreshToken: false });
+  return asRecord(account)?.["type"];
 }
 
 // App-server clients resolve Daybreak from the catalog before starting a turn,
@@ -89,12 +90,8 @@ export async function appServerCyberAccessProgram(
     return undefined;
   }
 
-  const accountType = async (): Promise<unknown> => {
-    const result = await request("account/read", { refreshToken: false });
-    return isRecord(result["account"]) ? result["account"]["type"] : undefined;
-  };
   if (enabled) {
-    const account = await accountType();
+    const account = await daybreakAccountType(request);
     if (account !== "chatgpt" && account !== "apiKey") {
       throw new Error(
         "Daybreak requires a signed-in ChatGPT account or an OpenAI API key",
@@ -115,7 +112,7 @@ export async function appServerCyberAccessProgram(
     );
   }
   if (!programs.includes("standard")) return undefined;
-  const account = await accountType().catch(() => undefined);
+  const account = await daybreakAccountType(request).catch(() => undefined);
   return account === "chatgpt" ||
     (account === "apiKey" &&
       features.get("api_key_cyber_access_programs") === true)
