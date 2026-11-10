@@ -225,6 +225,9 @@ describe("CodexSecurity finding validation", () => {
           permissions: {
             codex_security_validation: {
               filesystem: {
+                ...(process.platform === "win32"
+                  ? { [options.repositoryPath]: { ".": "read" } }
+                  : {}),
                 ":root": "read",
                 ":workspace_roots": "read",
                 ...credentialDenies,

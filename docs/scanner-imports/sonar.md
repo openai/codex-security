@@ -7,8 +7,7 @@ Replay it without signing in to Sonar. If you already have issue-search JSON,
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the matching
-checkout, run `sonar auth login` with browse access to the project's Sonar
+From the matching checkout, run `sonar auth login` with browse access to the project's Sonar
 organization. [Sonar CLI authentication](https://docs.sonarsource.com/sonarqube-cli/quickstart-guide#step-2-authenticate)
 
 **Preview live issues.** Copy the project and issue keys from Sonar's Issues
@@ -80,9 +79,12 @@ comparable remote must match if the checkout has any. Preview again if a
 fetch URL changes.
 
 Each issue key identifies one record within its source and repository.
-Reimport updates its evidence, including file ranges and available data flows.
-In a monorepo, repository-relative locations require a verified Sonar project
-base directory.
+The title is the rule name when available, otherwise the rule key. The
+description is the issue message. Severity comes from the security impact,
+or the native severity for a legacy vulnerability. The capture supplies a
+link to that issue on the selected branch or pull request. The primary file
+range requires a verified project base directory. Other flow locations and
+their messages remain in the original issue under `evidence.source_data.issue.flows`.
 
 ## Use a native JSON export
 

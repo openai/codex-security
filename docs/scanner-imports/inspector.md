@@ -6,8 +6,7 @@ findings are excluded.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report) and open the matching
-checkout. Verify the repository's Git URL in your SCM integration. If
+Open the matching checkout. Verify the repository's Git URL in your SCM integration. If
 the report identifies the repository only by an Inspector project ARN, verify
 that full ARN against the same URL in the SCM integration before importing.
 
@@ -72,11 +71,12 @@ requested ARN appears once, with no other ARNs or exclusions. If the selected
 rows lack repository evidence, export those ARNs again with the missing fields.
 To save the selected findings in your local workbench, remove `--dry-run` and confirm.
 
-### Publish to your Cloud inbox
+<a id="publish-to-your-cloud-inbox"></a>
 
-Sign in to a workspace with the GitHub repository connected and private
-Inspector imports enabled. Preview the same file and source key, using your
-connected repository URL. If the local preview required a project ARN, add
+### Publish to Cloud
+
+Preview the same file and source key using the connected repository URL.
+If the local preview required a project ARN, add
 `--inspector-project-arn` with the same verified ARN to the command below.
 
 ```sh
@@ -87,10 +87,10 @@ codex-security publish findings "$report" --to cloud --repository "$repo" \
   --dry-run --format json
 ```
 
-Confirm the account, repository, expected finding ARNs and `privateImport`
-in the preview. Remove `--dry-run`, rerun and confirm to upload. Check the
-receipt, then open a finding in your inbox and compare its source ID with the
-AWS ARN. Retry with the same report, source key, Git URL, and any project ARN.
+Check the account, repository and finding ARNs. The preview identifies the inbox
+(`privateImport`) or repository environments (`requests`) that will receive them.
+Remove `--dry-run` and confirm. Match the resulting source IDs to the Inspector ARNs.
+Retry with the same report, source key, Git URL, and any project ARN.
 A private import with changed evidence for the same ARN can return
 `source_order_unknown`. [Verify the import](README.md#verify-the-import)
 
@@ -104,7 +104,9 @@ evidence. New closed or suppressed findings start as `not_assessed`.
 Code findings expose detector information, CWEs, and the reported source line
 range. When those fields exceed Cloud limits, you can read them in
 `evidence.source_data.finding`. Package findings use the primary vulnerability ID as their advisory
-and keep dependency versions. Related vulnerability IDs remain available in
+and keep dependency versions. Their evidence URL opens the advisory supplied by
+Inspector when available. The finding ARN identifies the occurrence in AWS.
+Related vulnerability IDs remain available in
 `evidence.source_data.finding.packageVulnerabilityDetails.relatedVulnerabilities`.
 [AWS code findings](https://docs.aws.amazon.com/inspector/v2/APIReference/API_CodeVulnerabilityDetails.html) · [AWS package findings](https://docs.aws.amazon.com/inspector/v2/APIReference/API_PackageVulnerabilityDetails.html)
 

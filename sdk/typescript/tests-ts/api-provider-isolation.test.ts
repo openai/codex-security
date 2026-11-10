@@ -63,9 +63,12 @@ async function nativeRequest(
   // Keep the child deadline inside the CI runner's per-test budget.
   const probeTimeoutMs = nativeTestTimeoutMs / 2;
   let timedOut = false;
+  let reply;
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill();
+    // A descendant may retain stdout, so EOF cannot be the signal to stop reading.
+    lines.close();
+    child.kill("SIGKILL");
   }, probeTimeoutMs);
   const send = (message: unknown) =>
     child.stdin.write(JSON.stringify(message) + "\n");
@@ -85,18 +88,33 @@ async function nativeRequest(
         send({ method: "initialized", params: {} });
         send({ id: 2, method, params });
       }
-      if (response.id === 2) return response.result;
+      if (response.id === 2) {
+        reply = response;
+        break;
+      }
     }
-    const reason = timedOut
-      ? `timed out after ${probeTimeoutMs}ms`
-      : "closed before replying";
-    throw new Error(`Native ${method} probe ${reason}: ${stderr}`);
   } finally {
-    clearTimeout(timer);
     lines.close();
-    child.kill();
-    await closed;
+    // EOF lets the app-server shut down its workers before fixture cleanup.
+    child.stdin.end();
+    // Bun on Windows can keep these pipes open after the app-server process exits.
+    child.stdout.destroy();
+    child.stderr.destroy();
+    try {
+      await closed;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  if (timedOut) {
+    const phase = reply ? "shutdown" : "response";
+    throw new Error(
+      `Native ${method} probe timed out after ${probeTimeoutMs}ms waiting for ${phase}: ${stderr}`,
+    );
+  }
+  if (!reply)
+    throw new Error(`Native ${method} probe closed before replying: ${stderr}`);
+  return reply.result;
 }
 
 async function readProviderProfile(home: string, name: string) {
@@ -1272,7 +1290,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       inputSchema: { type: "object", properties: {} } }] };
   }
   console.log(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+  // Tool enumeration is the last request this fixture serves.
+  if (request.method === "tools/list") break;
 }
+process.stdin.destroy();
 `,
   );
   const manifestPath = join(plugin, ".mcp.json");

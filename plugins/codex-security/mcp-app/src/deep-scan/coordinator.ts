@@ -55,6 +55,8 @@ import type {
 const RETRY_DELAYS_MS = [60_000, 180_000, 540_000] as const;
 const COORDINATOR_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_HOURS = 96;
+const NO_REVIEW_BEFORE_DEADLINE =
+  "The configured discovery time limit elapsed before any source review completed.";
 
 interface LoopResult {
   reason: DeepScanTerminalReason;
@@ -372,15 +374,11 @@ export class DeepScanCoordinator {
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
+            scope: { limitations: [NO_REVIEW_BEFORE_DEADLINE] },
             reviewState: {
               surfaces: [],
               explicitExclusions: [],
-              deferred: [
-                {
-                  reason:
-                    "The configured discovery time limit elapsed before any source review completed.",
-                },
-              ],
+              deferred: [{ reason: NO_REVIEW_BEFORE_DEADLINE }],
             },
           });
       if (draft.scanId !== this.state.scanId) {
@@ -1175,8 +1173,8 @@ function cloneState(state: DeepScanRunState): DeepScanRunState {
 }
 
 function isFreshRun(state: DeepScanRunState): boolean {
+  // A coordinator can persist the discovery phase before dispatching its first worker.
   return (
-    !state.discoveryStarted &&
     state.dispatchedCount === 0 &&
     !state.persistedWorkers?.some((worker) => worker.kind !== "setup") &&
     (state.persistedDedupInputs?.length ?? 0) === 0

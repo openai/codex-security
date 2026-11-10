@@ -14,9 +14,8 @@ Both routes support local and Cloud imports.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the checkout root,
-set the destination and choose a key for the repository, branch, original scan
-target and format. Replace `root` with your target if you scanned a
+From the checkout root, set the destination and choose a source key for the
+repository, branch, original scan target and format. Replace `root` with your target if you scanned a
 subdirectory such as `services/api`.
 
 ```sh
@@ -91,8 +90,9 @@ violations.
 [Install the plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex) · [Studio export scope](https://github.com/snyk/studio-recipes/blob/3752dd05a462184dcce44af3c247f287b41e35de/plugins/codex/skills/snyk-findings-export/SKILL.md#L15-L20) · [Evo MCP tools](https://docs.snyk.io/agent-security/evo-by-snyk/platform-surfaces/evo-mcp-server#policies-and-issues)
 
 The bundle keeps collection context, ignored status and each selected MCP
-record. The mapper can shorten descriptions and omit alternate dependency
-paths. Paths are relative to the scan target. The reader records a commit
+record. Use `evidence.advisory_ids` for the Snyk advisory and its CVE aliases.
+The export can shorten descriptions and omit alternate dependency paths.
+Paths are relative to the scan target. The reader records a commit
 only for a clean workspace with a known revision.
 [SCA mapper](https://github.com/snyk/studio-mcp/blob/main/internal/oss/map.go)
 
@@ -108,7 +108,7 @@ manifest locations are unsupported.
 
 ## Existing issues from Snyk
 
-[Enable external imports](README.md#preview-a-report) and set
+Set
 `SNYK_TOKEN` to a read-authorized token for the selected region. See the
 [Snyk API access requirements](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api)
 and [Issues API permissions](https://docs.snyk.io/developer-tools/snyk-api/reference/issues).
@@ -223,6 +223,8 @@ plugin scan's `issueCount`, can update a stored snapshot of the same
 occurrence. [Imported evidence and identity](schema-guide.md)
 
 Known source Git URLs must match a comparable local remote when available,
-or the selected Cloud repository. For Snyk Code, use the
+or the selected Cloud repository. Plugin and SARIF reports can identify a
+connected GitHub repository by its HTTPS or standard Git SSH clone URL.
+For Snyk Code, use the
 [monitored project collector](#existing-issues-from-snyk). Container, IaC and
 SBOM results fall outside these import routes.

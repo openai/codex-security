@@ -2,6 +2,7 @@ import { expect, mock, test } from "bun:test";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { collectSelectedSemgrepGuardianFindings } from "../src/semgrep-guardian-findings.js";
+import { stableId } from "../src/scanner-import.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
 import { collectSemgrepPlatformFindings } from "../src/semgrep-platform-collector.js";
 import { isolatedGitReportFixture } from "./external-findings-local-helpers.js";
@@ -36,7 +37,6 @@ const row = {
   filePath: "src/main.ts",
   line: 3,
 };
-const environment = { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" };
 const capture = {
   format: "semgrep-guardian-selection/v1",
   ...selection,
@@ -49,7 +49,6 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   }));
   const selected = await collectSelectedSemgrepGuardianFindings(selection, {
     callTool,
-    environment,
   });
   expect(callTool.mock.calls).toEqual([[selection.request]]);
   expect(selected).toEqual(capture);
@@ -79,7 +78,7 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   const web = await collectSemgrepPlatformFindings(
     { deployment, project, ref },
     {
-      environment: { ...environment, SEMGREP_APP_TOKEN: "synthetic" },
+      environment: { SEMGREP_APP_TOKEN: "synthetic" },
       fetch: async (url) =>
         Response.json(
           url.pathname.endsWith("/findings")
@@ -159,23 +158,7 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
     },
   };
   const normalized = normalizeSemgrepFindings(sca, {}, "local");
-  expect(() => normalizeSemgrepFindings(sca)).toThrow(/local workbench/);
-  await expect(
-    prepareNormalizedExternalPublication(
-      {
-        ...normalized,
-        report: {},
-        findings: [{ ...normalized.findings[0]!, source_finding_id: "custom" }],
-      },
-      { repository: project, provider: "semgrep", sourceKey: "example/topic" },
-      {
-        environment,
-        credentials: async () => {
-          throw new Error("Unexpected credential lookup");
-        },
-      },
-    ),
-  ).rejects.toThrow(/local import/);
+  expect(normalizeSemgrepFindings(sca).findings).toEqual(normalized.findings);
   expect(normalized.findings[0]!.evidence).toMatchObject({
     locations: [],
     source_data: { finding: sca.structuredContent.findings[0] },
@@ -242,6 +225,12 @@ test("normalized Guardian imports verify the original finding against the select
   );
   const normalized = normalizeSemgrepFindings(capture, {}, "local");
   const original = normalized.findings[0]!;
+  await expect(
+    fixture.prepareNormalized({
+      ...normalized,
+      findings: [{ ...original, source_finding_id: "another-source-id" }],
+    }),
+  ).rejects.toThrow(/original Guardian finding/);
   for (const changed of [
     { ...row, repository: { name: "other/service" } },
     { ...row, ref: "refs/heads/other" },
@@ -264,6 +253,43 @@ test("normalized Guardian imports verify the original finding against the select
         ],
       }),
     ).rejects.toThrow(/does not match the selected/);
+  }
+});
+
+test("normalized Guardian rows require a real selection scope even with a matching hash", async () => {
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const normalized = normalizeSemgrepFindings(capture, {}, "local");
+  for (const [override, nativeId, error] of [
+    [{ tool: "list_findings" }, id, /Guardian SAST or Supply Chain/],
+    [{ deployment: null }, id, /Guardian deployment/],
+    [{ repository: "" }, id, /Guardian repository/],
+    [{ ref: "main" }, id, /fully qualified Semgrep ref/],
+    [{}, 12, /Guardian finding ID/],
+    [{}, "  ", /Guardian finding ID/],
+  ] as const) {
+    const input = structuredClone(normalized);
+    const finding = input.findings[0]!;
+    const data = finding.evidence.source_data!;
+    Object.assign(data, override);
+    // Each malformed row agrees with its stored scope and ID. A matching hash alone is insufficient.
+    data["finding"] = {
+      id: nativeId,
+      repository: { name: data["repository"] },
+      ref: data["ref"],
+    };
+    finding.evidence.branch = String(data["ref"]);
+    finding.source_finding_id = stableId("semgrep-guardian", [
+      data["deployment"],
+      data["repository"],
+      data["tool"],
+      data["ref"],
+      nativeId,
+    ]);
+    await expect(fixture.prepareNormalized(input)).rejects.toThrow(error);
   }
 });
 
@@ -293,7 +319,7 @@ test("normalized Guardian repository claims use the checkout's HTTP port identit
   );
 });
 
-test("SDK exports containing Guardian findings fail before Cloud credential lookup", async () => {
+test("SDK exports containing Guardian findings require their original provider", async () => {
   const guardian = normalizeSemgrepFindings(capture, {}, "local");
   const normalized = {
     read: 1,
@@ -322,17 +348,17 @@ test("SDK exports containing Guardian findings fail before Cloud credential look
         input,
         {
           repository: project,
-          provider: "semgrep",
+          provider: "wiz",
           sourceKey: "example/topic",
         },
-        { environment, credentials },
+        { credentials },
       ),
-    ).rejects.toThrow(/local import/);
+    ).rejects.toThrow(/semgrep provider/);
   }
   expect(credentials).not.toHaveBeenCalled();
 });
 
-test("empty selections and disabled imports do not call Guardian; tool errors retain their message", async () => {
+test("Guardian validates the selection before calling the tool and preserves tool errors", async () => {
   const callTool = mock(async () => ({
     isError: true,
     content: [{ type: "text", text: "Guardian login expired" }],
@@ -340,20 +366,13 @@ test("empty selections and disabled imports do not call Guardian; tool errors re
   await expect(
     collectSelectedSemgrepGuardianFindings(
       { ...selection, findingIds: [] },
-      { callTool, environment },
+      { callTool },
     ),
   ).rejects.toThrow(/at least one/);
-  await expect(
-    collectSelectedSemgrepGuardianFindings(selection, {
-      callTool,
-      environment: {},
-    }),
-  ).rejects.toThrow(/disabled/);
   expect(callTool).not.toHaveBeenCalled();
   await expect(
     collectSelectedSemgrepGuardianFindings(selection, {
       callTool,
-      environment,
     }),
   ).rejects.toThrow("Guardian login expired");
 });
@@ -364,7 +383,6 @@ test("Guardian binds the collection, saved selection and normalized replay to th
     { ...selection, sourceRepositoryUrl: url },
     {
       callTool: async () => ({ structuredContent: { findings: [row] } }),
-      environment,
     },
   );
   const other = url + ".git";

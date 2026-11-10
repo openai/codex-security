@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { isRecord, safeSourcePath, assertSafeSarif } from './sarif.js';
+import { isRecord, safeSourcePath, assertSafeSarif } from './sarif.ts';
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'informational';
 export type ScanStatus = 'completed' | 'failed' | 'skipped';
@@ -35,6 +35,7 @@ export interface ScanResults {
   policyStatus: PolicyStatus;
   reportStatus: ReportStatus;
   findings: Finding[];
+  scopeLimitations?: string[];
   counts?: Record<Severity, number>;
   usage?: { input_tokens: number; cached_input_tokens: number; output_tokens: number };
   estimatedCost?: number;
@@ -143,6 +144,8 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
     result.errors.push((error as Error).message);
     return result;
   }
+  const limitations = value.manifest.scan.scope?.limitations;
+  if (Array.isArray(limitations)) result.scopeLimitations = limitations.filter((item: unknown) => typeof item === 'string');
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
   const usage = value.turn?.usage;

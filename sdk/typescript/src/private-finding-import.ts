@@ -15,6 +15,19 @@ const privateFormat = z.enum([
   "wiz.vulnerability_json.v1",
 ]);
 export type PrivateImportFormat = z.infer<typeof privateFormat>;
+const jobVersion = z.union([z.literal(2), z.literal(3)]);
+export type PrivateJobVersion = z.infer<typeof jobVersion>;
+export const privateJobVersions: Partial<
+  Record<ImportSource["provider"], PrivateJobVersion>
+> = {
+  inspector: 2,
+  continuum: 2,
+  blackduck: 3,
+  checkmarx: 3,
+  sonar: 3,
+  trivy: 3,
+  veracode: 3,
+};
 const fileId = z.string().regex(/^aifile_[0-9a-f]{32}$/u);
 const contextSchema = z.object({
   object: z.literal("security.finding_import_context"),
@@ -173,6 +186,7 @@ export async function selectPrivateReport(
   path: string | undefined,
   context: PrivateImportContext,
   saved: string | undefined,
+  requiresStructuredReport = false,
 ): Promise<ReturnType<typeof privateReport>> {
   const checkpoint =
     saved === undefined ? undefined : checkpointSchema.parse(JSON.parse(saved));
@@ -180,6 +194,13 @@ export async function selectPrivateReport(
     checkpoint?.contextVersion === context.context_version
       ? checkpoint.format
       : undefined;
+  if (requiresStructuredReport && !originalFormat) {
+    if (!context.formats.includes(structuredFormat))
+      throw new CodexSecurityError(
+        `This Cloud service must support ${structuredFormat} to publish the reviewed Endor fields.`,
+      );
+    return privateReport(selection.findings, context.limits);
+  }
   const format =
     provider === "endor"
       ? "endor.findings_json.v1"
@@ -274,12 +295,14 @@ const checkpointSchema = z.object({
   accountId: z.string(),
   contextVersion: z.string(),
   sha256: z.string(),
-  source: z.object({ provider: z.string(), source_key: z.string() }),
+  source: jobSchema.shape.source,
   repository: z.object({ id: z.string(), repo_connector_id: z.string() }),
   uploadRequestId: z.uuid(),
   jobRequestId: z.uuid(),
   // Earlier checkpoints used the unversioned job route.
-  jobApiVersion: z.literal(2).optional(),
+  jobApiVersion: jobVersion.optional(),
+  approvedRepositoryUrl: z.string().optional(),
+  approvedRepositoryPlatform: z.literal("other").optional(),
   fileId: fileId.optional(),
   jobId: jobSchema.shape.id.optional(),
   receipt: jobSchema
@@ -287,6 +310,24 @@ const checkpointSchema = z.object({
     .optional(),
   previousReceipt: jobSchema.refine(unsuccessfulJob).optional(),
 });
+
+function matchesJobScope(
+  job: PrivateImportJob,
+  scope: Pick<
+    z.infer<typeof checkpointSchema>,
+    "format" | "source" | "repository"
+  >,
+) {
+  const [target] = job.default_targets;
+  return (
+    job.input.format === scope.format &&
+    job.source.provider === scope.source.provider &&
+    job.source.source_key === scope.source.source_key &&
+    job.default_targets.length === 1 &&
+    target?.repo_id === scope.repository.id &&
+    target.repo_connector_id === scope.repository.repo_connector_id
+  );
+}
 
 export function unsuccessfulJob(job: PrivateImportJob | undefined) {
   return job?.status === "failed" || job?.status === "cancelled";
@@ -297,7 +338,7 @@ export function parsePrivateCheckpoint(serialized: string) {
 }
 
 export function readPrivateCheckpoint(
-  serialized: string,
+  serialized: string | undefined,
   expected: {
     format: PrivateImportFormat;
     apiBaseUrl: string;
@@ -308,46 +349,26 @@ export function readPrivateCheckpoint(
     repository: { id: string; repo_connector_id: string };
   },
 ) {
+  if (serialized === undefined) return;
   const checkpoint = parsePrivateCheckpoint(serialized);
-  const {
-    uploadRequestId,
-    jobRequestId,
-    jobApiVersion,
-    fileId,
-    jobId,
-    receipt,
-    previousReceipt,
-    contextVersion,
-    format,
-    sha256,
-    ...scope
-  } = checkpoint;
-  const {
-    contextVersion: currentContext,
-    format: selectedFormat,
-    sha256: selectedDigest,
-    ...selectedScope
-  } = expected;
-  const sameContext = contextVersion === currentContext;
+  const { fileId, jobId, receipt, previousReceipt } = checkpoint;
+  const { apiBaseUrl, accountId, source, repository } = checkpoint;
+  const { contextVersion, format, sha256, ...scope } = expected;
+  const sameContext = checkpoint.contextVersion === contextVersion;
   if (
-    canonicalJson(scope) !== canonicalJson(selectedScope) ||
-    (sameContext && (format !== selectedFormat || sha256 !== selectedDigest)) ||
+    canonicalJson({ apiBaseUrl, accountId, source, repository }) !==
+      canonicalJson(scope) ||
+    (sameContext &&
+      (checkpoint.format !== format || checkpoint.sha256 !== sha256)) ||
     (jobId && !fileId) ||
     [receipt, previousReceipt].some(
-      (job) =>
-        job &&
-        (job.input.format !== format ||
-          canonicalJson(job.source) !== canonicalJson(scope.source) ||
-          job.default_targets.length !== 1 ||
-          job.default_targets[0]?.repo_id !== scope.repository.id ||
-          job.default_targets[0]?.repo_connector_id !==
-            scope.repository.repo_connector_id),
+      (job) => job && !matchesJobScope(job, checkpoint),
     ) ||
     (receipt &&
       (receipt.id !== jobId ||
-        receipt.request_id !== jobRequestId ||
+        receipt.request_id !== checkpoint.jobRequestId ||
         receipt.input.file_id !== fileId)) ||
-    uploadRequestId === jobRequestId
+    checkpoint.uploadRequestId === checkpoint.jobRequestId
   )
     throw new CodexSecurityError(
       "Saved private import does not match this account, repository or report.",
@@ -462,14 +483,12 @@ export function privateImportClient(
         source: ImportSource;
         repository: { id: string; repo_connector_id: string };
         jobId?: string;
-        jobApiVersion?: 2;
+        jobApiVersion?: PrivateJobVersion;
       },
       accepted: (id: string) => Promise<void>,
     ) {
-      const jobs =
-        input.jobApiVersion === 2
-          ? "/v2/finding-imports/jobs"
-          : "/finding-imports/jobs";
+      const prefix = input.jobApiVersion ? `/v${input.jobApiVersion}` : "";
+      const jobs = prefix + "/finding-imports/jobs";
       let id = input.jobId;
       let response = id
         ? await request(`${jobs}/${id}`)
@@ -499,23 +518,12 @@ export function privateImportClient(
           (id !== undefined && job.id !== id) ||
           job.request_id !== input.requestId ||
           job.input.file_id !== input.fileId ||
-          job.input.format !== input.format ||
-          job.source.provider !== input.source.provider ||
-          job.source.source_key !== input.source.source_key ||
-          job.default_targets.length !== 1 ||
-          job.default_targets[0]?.repo_id !== input.repository.id ||
-          job.default_targets[0]?.repo_connector_id !==
-            input.repository.repo_connector_id
+          !matchesJobScope(job, input)
         )
           throw new CodexSecurityError(
             "Cloud returned a job for a different private import.",
           );
-        if (
-          job.status === "completed" ||
-          job.status === "failed" ||
-          job.status === "cancelled"
-        )
-          return job;
+        if (job.status === "completed" || unsuccessfulJob(job)) return job;
         if (!id) {
           id = job.id;
           await accepted(id);
