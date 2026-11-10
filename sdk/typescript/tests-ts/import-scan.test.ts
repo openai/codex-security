@@ -24,10 +24,13 @@ import { ScanResult } from "../src/result.js";
 import { runWorkbench } from "../src/runtime.js";
 import { VERSION } from "../src/version.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { useTestPython } from "./support/python.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 import { TestClient } from "./support/api-client.js";
+
+const pythonExecutable = useTestPython();
 
 const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -86,7 +89,7 @@ async function fixture(format: "csv" | "json" = "csv") {
     join(await realpath(tmpdir()), "import-scan-test-"),
   );
   roots.track(root);
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
   const stateDirectory = join(root, "state");
   const environment = {
