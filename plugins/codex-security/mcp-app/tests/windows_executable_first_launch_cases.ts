@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { createReadStream, promises as fs } from "node:fs";
 import {
   copyFile,
-  chmod,
   mkdir,
   rename,
   rm,
@@ -177,28 +176,28 @@ export function registerWorkerExecutableFirstLaunchTests(): void {
         const bind = () =>
           bindCodexExecutable({ CODEX_CLI_PATH: executable }, root);
         const bound = phase === "verification" ? await bind() : undefined;
-        if (bound) {
-          // A metadata-only change selects the Windows content-check path.
-          await chmod(executable, 0o444);
-          assert.notEqual(
-            (await stat(executable, { bigint: true })).ctimeNs,
-            bound.identity.ctimeNs,
-          );
-        }
         const originalStat = fs.stat;
         let observations = 0;
         let revised = false;
+        let changeTime = bound?.identity.ctimeNs;
         t.mock.method(
           fs,
           "stat",
           async (...args: Parameters<typeof fs.stat>) => {
-            if (args[0] === executable && ++observations === 2) {
-              await chmod(executable, 0o644);
+            if (args[0] !== executable) return originalStat(...args);
+            observations++;
+            if (observations === 2) {
               await writeFile(executable, "fixture revision B\n");
               await utimes(executable, fixedTime, fixedTime);
               revised = true;
             }
-            return originalStat(...args);
+            const identity = await originalStat(args[0], { bigint: true });
+            // chmod does not advance change time on every Windows filesystem.
+            // Inject only that observation while reading and revising real bytes.
+            changeTime ??= identity.ctimeNs;
+            return Object.assign(identity, {
+              ctimeNs: changeTime + BigInt(observations),
+            });
           },
         );
         await assert.rejects(
@@ -208,6 +207,11 @@ export function registerWorkerExecutableFirstLaunchTests(): void {
           },
         );
         assert.equal(revised, true);
+        assert.equal(observations, phase === "verification" ? 3 : 2);
+        assert.equal(
+          await fs.readFile(executable, "utf8"),
+          "fixture revision B\n",
+        );
       },
     );
   }
@@ -229,19 +233,22 @@ export function registerWorkerExecutableFirstLaunchTests(): void {
         root,
       );
       const beforeDigest = await digest(executable);
-      await chmod(executable, 0o444);
       const originalStat = fs.stat;
       let observations = 0;
       let changedMetadata = false;
       t.mock.method(fs, "stat", async (...args: Parameters<typeof fs.stat>) => {
-        if (args[0] === executable && ++observations === 2) {
-          await chmod(executable, 0o644);
-          changedMetadata = true;
-        }
-        return originalStat(...args);
+        if (args[0] !== executable) return originalStat(...args);
+        observations++;
+        if (observations === 2) changedMetadata = true;
+        const identity = await originalStat(args[0], { bigint: true });
+        // Report one metadata transition during the real content read, then stability.
+        return Object.assign(identity, {
+          ctimeNs: bound.identity.ctimeNs + BigInt(Math.min(observations, 2)),
+        });
       });
       await verifyBoundCodexExecutable(bound);
       assert.equal(changedMetadata, true);
+      assert.equal(observations, 3);
       assert.equal(await digest(executable), beforeDigest);
     },
   );

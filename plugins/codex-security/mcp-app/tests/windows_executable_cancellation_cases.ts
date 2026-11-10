@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs, { promises } from "node:fs";
-import { chmod, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import test from "node:test";
@@ -103,7 +103,6 @@ export function registerWorkerExecutableCancellationTests(): void {
         { CODEX_CLI_PATH: executable },
         root,
       );
-      await chmod(executable, 0o444);
       const controller = new AbortController();
       const reason = new Error("synthetic cancellation during metadata churn");
       const originalStat = promises.stat;
@@ -112,12 +111,15 @@ export function registerWorkerExecutableCancellationTests(): void {
         promises,
         "stat",
         async (...args: Parameters<typeof promises.stat>) => {
-          if (args[0] === executable) {
-            observations++;
-            await chmod(executable, observations % 2 === 0 ? 0o444 : 0o644);
-            if (observations === 3) controller.abort(reason);
-          }
-          return originalStat(...args);
+          if (args[0] !== executable) return originalStat(...args);
+          observations++;
+          if (observations === 3) controller.abort(reason);
+          const identity = await originalStat(args[0], { bigint: true });
+          // Keep the real file and content stream while deterministically advancing
+          // the metadata observation, independent of filesystem chmod timestamps.
+          return Object.assign(identity, {
+            ctimeNs: bound.identity.ctimeNs + BigInt(observations),
+          });
         },
       );
       await assert.rejects(
@@ -125,7 +127,6 @@ export function registerWorkerExecutableCancellationTests(): void {
         (error) => error === reason,
       );
       assert.equal(observations, 3);
-      await chmod(executable, 0o644);
     },
   );
 }
