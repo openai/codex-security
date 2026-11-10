@@ -907,6 +907,25 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
+  test("installs a local marketplace when the Codex home contains a literal hash", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "codex #team");
+    const source = await bundledPluginRoot();
+    const installed = await bootstrapPlugin(home, source, {
+      environment: {
+        HOME: root,
+        USERPROFILE: root,
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+      },
+    });
+
+    const manifest = join(".codex-plugin", "plugin.json");
+    expect(
+      await readFile(join(installed.installedRoot, manifest), "utf8"),
+    ).toBe(await readFile(join(source, manifest), "utf8"));
+  });
+
   test("keeps local marketplace failures separate from installer failures", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
@@ -5834,6 +5853,19 @@ describe("runtime directories and plugin Python boundary", () => {
 
       expectNoEveryoneGrant(credential);
       expect(await readFile(credential, "utf8")).toContain("synthetic-nested");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing whitespace in an explicit POSIX state directory",
+    async () => {
+      const root = await temporaryDirectory();
+      for (const suffix of [" ", "\u00a0"]) {
+        const state = join(root, `explicit-state${suffix}`);
+        expect(
+          codexSecurityStateDirectory({ CODEX_SECURITY_STATE_DIR: state }),
+        ).toBe(state);
+      }
     },
   );
 

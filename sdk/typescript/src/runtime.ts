@@ -244,7 +244,11 @@ function environmentValue(
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
-  const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
+  const configured = environmentValue(
+    environment,
+    "CODEX_SECURITY_STATE_DIR",
+    process.platform !== "win32",
+  );
   const path =
     configured !== undefined
       ? resolve(expandHome(configured, environment))
@@ -2042,11 +2046,13 @@ export async function runWorkbench(
             )
           : input,
       signal,
-      registrationHandshake,
-      // Frame Python arguments on stdin to preserve NUL and long diagnostics.
-      native
-        ? undefined
-        : `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`,
+      {
+        registrationHandshake,
+        // Frame Python arguments on stdin to preserve NUL and long diagnostics.
+        stdinPrefix: native
+          ? undefined
+          : `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`,
+      },
     );
     if (!result.success) {
       throw new Error(
@@ -3822,8 +3828,15 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
-  registrationHandshake = false,
-  stdinPrefix?: string,
+  {
+    registrationHandshake = false,
+    stdinPrefix,
+    cwd,
+  }: {
+    registrationHandshake?: boolean;
+    stdinPrefix?: string;
+    cwd?: string;
+  } = {},
 ): Promise<CodexCommandResult> {
   const cancellation = registrationHandshake
     ? new AbortController()
@@ -3834,6 +3847,7 @@ export async function runCodexCommand(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {
+      cwd,
       env: environment,
       stdio: registrationHandshake
         ? ["pipe", "pipe", "pipe", "pipe"]
@@ -3967,13 +3981,21 @@ async function runPluginCommand(
   signal?: AbortSignal,
 ): Promise<string> {
   try {
-    const { success, exitCode, stdout, stderr } = await runCodexCommand(
-      command,
-      args,
-      environment,
-      undefined,
-      signal,
-    );
+    const run = (argv: readonly string[], cwd?: string) =>
+      runCodexCommand(command, argv, environment, undefined, signal, { cwd });
+    let result = await run(args);
+    const source = args[1] === "marketplace" ? args[3] : undefined;
+    if (
+      result.exitCode === 1 &&
+      source?.includes("#") &&
+      result.stderr
+        .split(/\r?\n/u)
+        .includes("Error: --ref is only supported for git marketplace sources")
+    ) {
+      // Native Codex parsed a literal hash in the local path as a Git ref.
+      result = await run(["plugin", "marketplace", "add", "."], source);
+    }
+    const { success, exitCode, stdout, stderr } = result;
     if (!success) {
       const detail =
         stderr.trim() ||
