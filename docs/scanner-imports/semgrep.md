@@ -81,8 +81,8 @@ repository references in the third argument's `sourceRepositories`. Use
 
 Use Semgrep’s hosted AppSec Platform MCP (beta) at `semgrep.dev` to import
 existing rule-based Code (SAST) findings. You can save the same capture to a
-local workbench or Codex Security Cloud. Cloud uses your private findings
-inbox when available and otherwise publishes to the connected repository.
+local workbench. Workspaces with Semgrep import enabled in Codex Security
+Cloud can also publish to a private findings inbox or a connected repository.
 
 ### Connect and capture
 
@@ -146,9 +146,10 @@ node semgrep-hosted-mcp.mjs capture.json /path/to/checkout --save
 ./node_modules/.bin/codex-security findings imported /path/to/checkout --format json
 ```
 
-**Codex Security Cloud.** The SDK needs a file-backed ChatGPT sign-in. If
-you need one, run these commands from the private example directory and
-choose the intended account. Keep the same state directory for previews,
+**Codex Security Cloud.** Your Cloud workspace must support the Semgrep
+provider separately from your Semgrep MCP access. The SDK also needs a
+file-backed ChatGPT sign-in. If you need one, run these commands from the
+private example directory and choose the intended account. Keep the same state directory for previews,
 saves and retries.
 
 ```sh
@@ -163,6 +164,14 @@ account, repository, selected findings and exclusions before confirming.
 
 ```sh
 node semgrep-hosted-mcp.mjs capture.json cloud https://github.com/example/project
+```
+
+If the repository resolves but the preview reports HTTP 400 for the Semgrep
+source, check that Cloud import is enabled for Semgrep in that workspace.
+You can use the same capture locally while waiting for access. After a
+successful Cloud preview, save and review the receipt.
+
+```sh
 node semgrep-hosted-mcp.mjs capture.json cloud https://github.com/example/project --save
 ```
 
