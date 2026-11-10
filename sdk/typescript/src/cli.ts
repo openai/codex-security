@@ -103,7 +103,8 @@ import {
 } from "./api.js";
 import {
   accountStatus,
-  CODEX_AUTH_CONFIG_KEYS,
+  nativeLogoutArgs,
+  prepareLoginConfig,
   NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
   environmentEntry,
@@ -186,6 +187,7 @@ import {
   type BulkScanPrompt,
 } from "./bulk-scan-discovery.js";
 import {
+  CODEX_AUTH_CONFIG_KEYS,
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
@@ -297,6 +299,7 @@ import {
   resolvePluginPath,
   acquireCodexSecurityCredentialHomeLock,
   withCredentialHomeLock,
+  writeCredentialHomeConfig,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialAllowsAmbientImport,
@@ -1698,26 +1701,6 @@ export async function runCodexSkillCommand(
   }
 }
 
-/**
- * Sign in with the storage and login restrictions the user's Codex config
- * sets, as scans do. Unset settings keep where existing credentials are stored.
- */
-async function applyAmbientAuthConfig(
-  credentialHome: string,
-  environment: NodeJS.ProcessEnv,
-): Promise<void> {
-  const ambient = await readCodexAuthConfig(scanCodexHome(environment));
-  if (Object.keys(ambient).length === 0) return;
-  const config = await readCodexHomeConfig({
-    ...environment,
-    CODEX_HOME: credentialHome,
-  });
-  await writeCodexConfig(join(credentialHome, "config.toml"), {
-    ...config,
-    ...ambient,
-  });
-}
-
 async function runCodexSkillProcess(
   args: readonly string[],
   output: SkillCommandOutput | undefined,
@@ -1801,10 +1784,7 @@ async function runCodexSkillProcess(
           credentialConfig["model_providers"] = {
             [provider]: providerConfiguration,
           };
-        await writeCodexConfig(
-          join(codexHome, "config.toml"),
-          credentialConfig,
-        );
+        await writeCredentialHomeConfig(codexHome, credentialConfig);
         credentialsAvailable = await initialCredentialsAvailable(
           selected,
           configuredCodexHome(selected),
@@ -7189,37 +7169,38 @@ export async function main(
           dependencies.environment,
         );
         const authentication = scanAuthentication(dependencies.environment);
-        await withCredentialHomeLock(credentialHome, async () => {
-          await applyAmbientAuthConfig(
-            credentialHome,
-            dependencies.environment,
-          );
-          if (args.action === "status" && authentication.method !== "api_key") {
+        exitCode = await withCredentialHomeLock(credentialHome, async () => {
+          if (args.action === undefined) {
+            await prepareLoginConfig(
+              credentialHome,
+              await readCodexAuthConfig(
+                scanCodexHome(dependencies.environment),
+                true,
+              ),
+            );
+          } else if (authentication.method !== "api_key") {
             await initialCredentialsAvailable(
               dependencies.environment,
               scanCodexHome(dependencies.environment),
               credentialHome,
             );
           }
+          const status = await dependencies.runCodex(
+            [
+              "login",
+              ...(args.action === undefined ? [] : [args.action]),
+              ...(options.deviceAuth ? ["--device-auth"] : []),
+              ...(options.withApiKey ? ["--with-api-key"] : []),
+              ...(options.withAccessToken ? ["--with-access-token"] : []),
+            ],
+            undefined,
+            { ...dependencies.environment, CODEX_HOME: credentialHome },
+          );
+          if (args.action === undefined && status === 0) {
+            await setCodexSecurityCredentialLogout(credentialHome, false);
+          }
+          return status;
         });
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await dependencies.runCodex(
-          [
-            "login",
-            ...(args.action === undefined ? [] : [args.action]),
-            ...(options.deviceAuth ? ["--device-auth"] : []),
-            ...(options.withApiKey ? ["--with-api-key"] : []),
-            ...(options.withAccessToken ? ["--with-access-token"] : []),
-          ],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (args.action === undefined && exitCode === 0) {
-          await setCodexSecurityCredentialLogout(credentialHome, false);
-        }
         if (args.action === "status") {
           if (
             authentication.method === "api_key" &&
@@ -7267,16 +7248,20 @@ export async function main(
         const credentialHome = await prepareCodexSecurityCredentialHome(
           dependencies.environment,
         );
-        const runLogout = () =>
-          dependencies.runCodex(["logout"], undefined, {
-            ...dependencies.environment,
-            CODEX_HOME: credentialHome,
-          });
+        const environment = {
+          ...dependencies.environment,
+          CODEX_HOME: credentialHome,
+        };
         exitCode = await withCredentialHomeLock(credentialHome, () =>
           logoutCredentialHome(
             credentialHome,
             scanCodexHome(dependencies.environment),
-            runLogout,
+            (store) =>
+              dependencies.runCodex(
+                nativeLogoutArgs(store),
+                undefined,
+                environment,
+              ),
           ),
         );
       },

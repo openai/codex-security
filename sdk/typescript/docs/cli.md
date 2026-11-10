@@ -1569,7 +1569,8 @@ Cloud requires a file-backed ChatGPT login. Codex Security signs in with the
 (`~/.codex/config.toml`, or `$CODEX_HOME/config.toml`). Without it, the login
 can be saved in the system keyring. To publish, set
 `cli_auth_credentials_store = "file"` there, then run `codex-security login`
-with the ChatGPT account you want to use.
+with the ChatGPT account you want to use. `codex-security login status`
+checks the current sign-in without changing credential storage.
 
 ### Review the Cloud destination
 
@@ -1719,8 +1720,9 @@ Uploads require ChatGPT credentials saved to a file. Set
 `cli_auth_credentials_store = "file"` in Codex `config.toml`, then run
 `codex-security login` again. Login, scans and other commands use that setting
 for the Codex Security sign-in.
-Cloud publication rejects automatic/keyring storage even when `auth.json` exists,
-because that file may be stale or belong to another account.
+A dedicated login using automatic storage can publish if Codex Security
+recorded the native file fallback. An unverified file can belong to another
+account, so Cloud publication requires an explicit file store for an ambient login.
 
 Use a positional scan directory or repeated `--scan-dir PATH` for artifacts
 outside history. Each must contain one completed sealed scan, not a bulk-run

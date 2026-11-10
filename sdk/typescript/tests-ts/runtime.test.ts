@@ -74,6 +74,8 @@ import {
   acquireCodexSecurityCredentialHomeLock,
   bundledPluginCandidates,
   canonicalizeModelSafePath,
+  beginCredentialLogin,
+  credentialHomeUsesFileStorage,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
@@ -101,6 +103,8 @@ import {
   requireTrustedOutputAncestor,
   runWorkbench,
   workbenchEnvironment,
+  writeCredentialHomeConfig,
+  logoutCredentialHome,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
   windowsCredentialAncestorAclScript,
@@ -3799,6 +3803,122 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  test.each(["upgraded", "new"] as const)(
+    "logout retries a previous keyring login after revoking a newer file credential (%s)",
+    async (origin) => {
+      const { home, root } = await credentialHome(true);
+      const file = join(home, "auth.json");
+      if (origin === "upgraded") {
+        await writeFile(
+          join(home, "config.toml"),
+          'cli_auth_credentials_store = "auto"\n',
+        );
+      } else {
+        await writeCredentialHomeConfig(home, {
+          cli_auth_credentials_store: "auto",
+        });
+        // Successful auto sign-in with no fallback file used the keyring.
+        await setCodexSecurityCredentialLogout(home, false);
+      }
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "file",
+      });
+      await writeFile(file, "synthetic credential", { mode: 0o600 });
+      await setCodexSecurityCredentialLogout(home, false);
+      let keyringAvailable = false;
+      const revoke = mock(async (store?: string) => {
+        if (store === "keyring") return keyringAvailable ? 0 : 17;
+        await rm(file, { force: true });
+        return 0;
+      });
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(17);
+      expect(revoke.mock.calls).toEqual([[undefined], ["keyring"]]);
+      expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(
+        false,
+      );
+      keyringAvailable = true;
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([["keyring"]]);
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([[undefined]]);
+    },
+  );
+  test("a confirmed file-only home can log out after the configured backend changes", async () => {
+    const { home, root } = await credentialHome(true);
+    const path = join(home, "auth.json");
+    await writeFile(path, "synthetic key", { mode: 0o600 });
+    await writeCredentialHomeConfig(home, {
+      cli_auth_credentials_store: "auto",
+    });
+    await beginCredentialLogin(home);
+    expect(await credentialHomeUsesFileStorage(home)).toBe(false);
+    // Native auto fell back to the file because no keyring was available.
+    await setCodexSecurityCredentialLogout(home, false);
+    expect(await credentialHomeUsesFileStorage(home)).toBe(true);
+    await writeCredentialHomeConfig(home, {
+      cli_auth_credentials_store: "keyring",
+    });
+    const revoke = mock(async (_store?: string) => {
+      await rm(path);
+      return 0;
+    });
+    expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+    expect(revoke.mock.calls).toEqual([["file"]]);
+  });
+
+  test.each(["auto", "file"])(
+    "logout finds a credential native auto refreshed into the keyring (current store: %s)",
+    async (store) => {
+      const { home, root } = await credentialHome(true);
+      const path = join(home, "auth.json");
+      await writeFile(path, "synthetic credential", { mode: 0o600 });
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "auto",
+      });
+      // Auto refresh saves to the keyring and unlinks the former file.
+      await rm(path);
+      if (store === "file")
+        await writeCredentialHomeConfig(home, {
+          cli_auth_credentials_store: "file",
+        });
+      const revoke = mock(async (_store?: string) => 0);
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([
+        [store === "auto" ? undefined : "keyring"],
+      ]);
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([
+        [store === "auto" ? "file" : undefined],
+      ]);
+    },
+  );
+
+  test.each(["auto", "keyring"])(
+    "logout clears an interrupted first %s login even after a later file login",
+    async (store) => {
+      const { home, root } = await credentialHome(true);
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: store,
+      });
+      await beginCredentialLogin(home);
+      // Native persisted the grant but the wrapper never got its success callback.
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "file",
+      });
+      const file = join(home, "auth.json");
+      await writeFile(file, "second synthetic login", { mode: 0o600 });
+      await setCodexSecurityCredentialLogout(home, false);
+      const revoke = mock(async (backend?: string) => {
+        if (backend === undefined) await rm(file);
+        return 0;
+      });
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([[undefined], ["keyring"]]);
+    },
+  );
   test("prevents ambient credential imports after an explicit logout", async () => {
     const { home } = await credentialHome(true);
 

@@ -4,16 +4,18 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
-import type { JsonObject } from "./config.js";
+import { CODEX_AUTH_CONFIG_KEYS, type JsonObject } from "./config.js";
 import {
   CodexSecurityError,
   PluginBootstrapError,
   errorMessage,
 } from "./errors.js";
 import {
+  beginCredentialLogin,
   executablePathForSpawn,
   expandHome,
   runCodexCommand,
+  writeCredentialHomeConfig,
   type CodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
@@ -68,6 +70,7 @@ export async function readCodexHomeConfig(
         encoding: "utf8",
         signal,
       }),
+      { integersAsBigInt: "asNeeded" },
     ) as JsonObject;
   } catch (error) {
     signal?.throwIfAborted();
@@ -111,6 +114,7 @@ export class CodexLoginHandle {
     args: readonly string[],
     environment: ProcessEnvironment,
     onSuccess: () => void | Promise<void>,
+    onFinish?: () => Promise<void>,
   ) {
     void this.#urlReady.promise.catch(() => undefined);
     void this.#deviceReady.promise.catch(() => undefined);
@@ -132,7 +136,7 @@ export class CodexLoginHandle {
     this.#child.stderr.on("data", (chunk: string) => {
       this.#recordOutput("stderr", chunk);
     });
-    this.#completion = new Promise((resolve, reject) => {
+    this.#completion = new Promise<LoginResult>((resolve, reject) => {
       this.#child.once("close", (exitCode) => {
         clearTimeout(this.#forcedTermination);
         if (!this.#canceled) {
@@ -162,7 +166,7 @@ export class CodexLoginHandle {
         });
         reject(error);
       });
-    });
+    }).finally(onFinish);
   }
 
   public get loginId(): null {
@@ -297,14 +301,21 @@ export async function accountStatus(
   };
 }
 
+export function nativeLogoutArgs(store?: string): string[] {
+  return store === undefined
+    ? ["logout"]
+    : ["-c", `cli_auth_credentials_store=${JSON.stringify(store)}`, "logout"];
+}
+
 export async function logout(
   command: CodexCommand,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
+  store?: string,
 ): Promise<void> {
   const result = await runCodexCommand(
     command,
-    ["logout"],
+    nativeLogoutArgs(store),
     environment,
     undefined,
     signal,
@@ -316,7 +327,25 @@ export async function logout(
   }
 }
 
-export { CODEX_AUTH_CONFIG_KEYS } from "./config.js";
+/** Prepare native login under the credential-home lock, preserving unrelated settings. */
+export async function prepareLoginConfig(
+  credentialHome: string,
+  requested: JsonObject,
+): Promise<void> {
+  const config = await readCodexHomeConfig({ CODEX_HOME: credentialHome });
+  let changed = false;
+  for (const key of CODEX_AUTH_CONFIG_KEYS) {
+    const value = requested[key];
+    // Keep existing users in their native store until they select another.
+    if (key === "cli_auth_credentials_store" && value === undefined) continue;
+    if (config[key] === value) continue;
+    if (value === undefined) delete config[key];
+    else config[key] = value;
+    changed = true;
+  }
+  if (changed) await writeCredentialHomeConfig(credentialHome, config);
+  await beginCredentialLogin(credentialHome);
+}
 
 /** @internal Shared login recovery guidance for model commands. */
 export const NO_CREDENTIALS_MESSAGE =

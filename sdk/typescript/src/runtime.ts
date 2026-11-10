@@ -35,7 +35,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   readdir,
   realpath,
@@ -79,7 +78,11 @@ import {
   errorMessage,
   abortReason,
 } from "./errors.js";
-import type { JsonObject } from "./config.js";
+import {
+  writeCodexConfig,
+  writePrivateConfig,
+  type JsonObject,
+} from "./config.js";
 import { isRecord } from "./record.js";
 import {
   isWithin,
@@ -127,6 +130,7 @@ const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOCK_DATABASE = ".codex-security-scan.sqlite3";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
+const KEYRING_LOGIN = ".codex-security-keyring-login";
 const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
@@ -1587,25 +1591,146 @@ async function hasSeparateAmbientLink(
   }
 }
 
+/** Native Codex defaults to file storage when the managed home has no setting. */
+async function credentialStore(home: string): Promise<unknown> {
+  const contents = await readFile(join(home, "config.toml"), "utf8").catch(
+    nullIfMissingFileError,
+  );
+  return contents === null
+    ? "file"
+    : (parse(contents, { integersAsBigInt: "asNeeded" })[
+        "cli_auth_credentials_store"
+      ] ?? "file");
+}
+
+async function hasCredentialFile(home: string): Promise<boolean> {
+  const file = await lstat(join(home, "auth.json")).catch(
+    nullIfMissingFileError,
+  );
+  return file?.isFile() === true;
+}
+
+function savedKeyringHistory(home: string) {
+  return readFile(join(home, KEYRING_LOGIN), "utf8").catch(
+    nullIfMissingFileError,
+  );
+}
+
+function canUseKeyring(store: unknown): boolean {
+  return store === "auto" || store === "keyring";
+}
+
+function keyringHistory(
+  saved: string | null,
+  store: unknown,
+  hasFile: boolean,
+) {
+  if (saved === "keyring" || saved === "pending") return "keyring";
+  // On upgrade, a prior keyring login may exist. Auto can also move a file
+  // credential into the keyring on refresh, removing auth.json.
+  if (
+    (saved === null && canUseKeyring(store)) ||
+    (saved === "file" && store === "auto" && !hasFile)
+  )
+    return "keyring";
+  return hasFile ? "file" : "none";
+}
+
+async function rememberStoredFile(home: string) {
+  if ((await savedKeyringHistory(home)) === "none") {
+    await writePrivateConfig(join(home, KEYRING_LOGIN), "file");
+  }
+}
+
+/** Arm logout before a native login can persist a keyring grant and be interrupted. */
+export async function beginCredentialLogin(home: string): Promise<void> {
+  const store = await credentialStore(home);
+  if (!canUseKeyring(store)) return;
+  const marker = join(home, KEYRING_LOGIN);
+  const saved = await savedKeyringHistory(home);
+  const present = await hasCredentialFile(home);
+  const previous = keyringHistory(saved, store, present);
+  // Only this login's successful file fallback can discharge a new pending marker.
+  const next = previous === "keyring" ? "keyring" : "pending";
+  if (next !== saved) await writePrivateConfig(marker, next);
+}
+
+/** Is the managed file the active login, or a known-empty file destination for an ambient import? */
+export async function credentialHomeUsesFileStorage(
+  home: string,
+  options: { allowAmbientImport?: boolean } = {},
+): Promise<boolean> {
+  const store = await credentialStore(home);
+  if (store !== "auto") return store === "file";
+  const saved = await savedKeyringHistory(home);
+  const hasFile = await hasCredentialFile(home);
+  return hasFile
+    ? saved === "file"
+    : options.allowAmbientImport === true && saved === "none";
+}
+
+/** Preserve credential provenance before a scan or sign-in replaces the shared config. */
+export async function writeCredentialHomeConfig(
+  home: string,
+  config: JsonObject,
+): Promise<void> {
+  const old = await credentialStore(home);
+  if (
+    canUseKeyring(old) ||
+    canUseKeyring(config["cli_auth_credentials_store"])
+  ) {
+    const marker = join(home, KEYRING_LOGIN);
+    const saved = await savedKeyringHistory(home);
+    const hasFile = await hasCredentialFile(home);
+    const observed = keyringHistory(saved, old, hasFile);
+    if (observed !== saved) await writePrivateConfig(marker, observed);
+  }
+  await writeCodexConfig(join(home, "config.toml"), config);
+}
+
 /** Run under the credential-home lock so status cannot reimport the sign-in during logout. */
 export async function logoutCredentialHome<T extends number | void>(
   home: string,
   ambientHome: string,
-  nativeLogout: () => Promise<T>,
+  nativeLogout: (store?: string) => Promise<T>,
   onLoggedOut?: () => void,
 ): Promise<T> {
   const localPath = join(home, "auth.json");
   const shared = await hasSeparateAmbientLink(localPath, ambientHome);
+  let recorded = false;
   const recordLogout = async () => {
+    if (recorded) return;
     await setCodexSecurityCredentialLogout(home, true);
     if (shared) await rm(localPath);
     onLoggedOut?.();
+    recorded = true;
   };
 
   // Detach before native logout can revoke a shared token, even if native cleanup fails.
   if (shared) await recordLogout();
-  const status = await nativeLogout();
-  if (!shared && (status === undefined || status === 0)) await recordLogout();
+  const marker = join(home, KEYRING_LOGIN);
+  const previous = await savedKeyringHistory(home);
+  const active = await credentialStore(home);
+  const hasFile = await hasCredentialFile(home);
+  const keyring =
+    keyringHistory(previous, active, hasFile || shared) === "keyring";
+  if (keyring && hasFile) {
+    // Native keyring logout also unlinks the file, but only revokes the token it loads.
+    const status = await nativeLogout(active === "file" ? undefined : "file");
+    if (status !== undefined && status !== 0) return status;
+    // A retry must not re-import ambient credentials after the file was revoked.
+    await recordLogout();
+  }
+  let override: string | undefined;
+  if (keyring && !canUseKeyring(active)) override = "keyring";
+  else if (!keyring && active !== "file" && (hasFile || canUseKeyring(active)))
+    override = "file";
+  const status = await nativeLogout(override);
+  if (status === undefined || status === 0) {
+    await recordLogout();
+    if (canUseKeyring(active)) await writePrivateConfig(marker, "none");
+    else await rm(marker, { force: true });
+  }
   return status;
 }
 
@@ -1616,27 +1741,25 @@ export async function setCodexSecurityCredentialLogout(
   await requireSecureCredentialHome(codexHome);
   const marker = join(codexHome, CREDENTIAL_LOGOUT_MARKER);
   if (!loggedOut) {
+    // Native auto removes auth.json on keyring success and leaves it on file fallback.
+    const store = await credentialStore(codexHome);
+    const history = join(codexHome, KEYRING_LOGIN);
+    if (
+      store === "keyring" ||
+      (store === "auto" && !(await hasCredentialFile(codexHome)))
+    ) {
+      await writePrivateConfig(history, "keyring");
+    } else if (
+      store === "auto" &&
+      (await savedKeyringHistory(codexHome)) === "pending"
+    ) {
+      await writePrivateConfig(history, "file");
+    }
     await rm(marker, { force: true });
     return;
   }
 
-  const temporary = join(
-    codexHome,
-    `.codex-security-logout-${randomUUID()}.tmp`,
-  );
-  try {
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.chmod(0o600);
-      await handle.writeFile("logged out\n", "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, marker);
-  } finally {
-    await rm(temporary, { force: true });
-  }
+  await writePrivateConfig(marker, "logged out\n");
 }
 
 export async function codexSecurityCredentialAllowsAmbientImport(
@@ -2626,6 +2749,7 @@ export async function importAmbientAuth(
       throw error;
     }
     await chmod(destination, 0o600);
+    await rememberStoredFile(isolatedHome);
     return true;
   } catch (error) {
     throw new PluginBootstrapError(

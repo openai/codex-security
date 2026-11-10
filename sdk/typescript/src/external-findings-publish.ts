@@ -1617,7 +1617,8 @@ async function preparePublicationInput(
   // Validate the configured return destination before authentication or uploads.
   cloudFindingsUrl(environment, options.repository);
   const credentials = await (
-    dependencies.credentials ?? (() => readCloudCredentials(environment))
+    dependencies.credentials ??
+    (() => readCloudCredentials(environment, dependencies.signal))
   )();
   let canStartJob = false;
   let repositorySeverities: string[] | undefined;
