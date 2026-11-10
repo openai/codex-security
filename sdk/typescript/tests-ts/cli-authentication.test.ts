@@ -2,7 +2,8 @@ import { readJsonLines } from "./support/json.js";
 import { runProviderSkill } from "./support/cli-provider-authentication.js";
 import { TestClient } from "./support/api-client.js";
 import { resolving } from "./support/promises.js";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { existsSync } from "node:fs";
 import {
   chmod,
@@ -122,38 +123,73 @@ describe("CLI authentication", () => {
     }
   });
 
-  test("points native sign-in hints at this CLI without buffering other output", async () => {
-    const source = [
-      "const write = (text) => new Promise((done) => process.stderr.write(text, done));",
-      "(async () => {",
-      '  await write("Open the URL.\\nOn a remote machine? Use `codex lo");',
-      "  await new Promise((done) => setTimeout(done, 20));",
-      '  await write("gin --device-auth` instead.\\nRun `codex logout` or `codex login`");',
-      "  process.exit(3);",
-      "})();",
-    ].join("\n");
+  test.each([
+    [{}, "codex-security"],
+    [{ npm_command: "exec" }, "npx @openai/codex-security"],
+  ] as const)("points native sign-in hints at %p", async (environment, cli) => {
+    const chunks = [
+      "Open the URL. On a remote machine? Use `codex lo",
+      "gin --device-auth` instead.\nRun `codex logout` or `codex login`.\n",
+      "Try `printenv OPENAI_API_KEY | co",
+      "dex login --with-api-key` or `printenv CODEX_ACCESS_TOKEN | codex log",
+      "in --with-access-token`.\nUnquoted codex login, `codex login",
+      "-helper`, and partial `codex lo",
+    ];
+    const source = `for (const chunk of ${JSON.stringify(chunks)}) {
+      await new Promise(done => process.stderr.write(chunk, done));
+      await new Promise(done => setTimeout(done, 10));
+    }
+    process.exitCode = 3;`;
     const write = process.stderr.write;
     let stderr = "";
-    process.stderr.write = ((chunk: string | Uint8Array) => {
+    process.stderr.write = ((chunk: string | Uint8Array, done?: () => void) => {
       stderr += chunk.toString();
+      done?.();
       return true;
     }) as typeof process.stderr.write;
-    let status: number;
     try {
-      status = await runCodexSkillCommand(
-        ["-e", source],
-        undefined,
-        { command: process.execPath },
-        { PATH: process.env["PATH"] },
-      );
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          undefined,
+          { command: process.execPath },
+          { PATH: process.env["PATH"], ...environment },
+        ),
+      ).toBe(3);
     } finally {
       process.stderr.write = write;
     }
-    expect(status).toBe(3);
     expect(stderr).toBe(
-      "Open the URL.\nOn a remote machine? Use `codex-security login --device-auth` instead.\n" +
-        "Run `codex logout` or `codex-security login`",
+      `Open the URL. On a remote machine? Use \`${cli} login --device-auth\` instead.\n` +
+        `Run \`codex logout\` or \`${cli} login\`.\n` +
+        `Try \`printenv OPENAI_API_KEY | ${cli} login --with-api-key\` or \`printenv CODEX_ACCESS_TOKEN | ${cli} login --with-access-token\`.\n` +
+        "Unquoted codex login, `codex login-helper`, and partial `codex lo",
     );
+  });
+
+  test("reaps the native login and reports failure when the stderr reader closes", async () => {
+    const pidFile = join(stateDirectory, "native.pid");
+    const completed = join(stateDirectory, "login-completed");
+    const native = `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      process.stderr.write("Open the sign-in URL.\\n");
+      setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(completed)}, "done"), 8000);`;
+    const wrapper = `import { runCodexSkillCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+      const status = await runCodexSkillCommand(["-e", ${JSON.stringify(native)}], undefined, { command: process.execPath }).catch(() => 1);
+      process.exitCode = status === 0 ? 1 : 0;`;
+    const child = spawn(process.execPath, ["-e", wrapper], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    const closed = once(child, "close");
+    child.stderr.destroy();
+    const [exitCode] = await closed;
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(pid).toBeGreaterThan(1);
+    // If the wrapper leaked its child, this assertion also cleans it up.
+    expect(() => process.kill(pid, "SIGKILL")).toThrow(
+      expect.objectContaining({ code: "ESRCH" }),
+    );
+    expect(existsSync(completed)).toBe(false);
+    expect(exitCode).toBe(0);
   });
 
   test("uses the same stable credential home for login, status, and logout", async () => {

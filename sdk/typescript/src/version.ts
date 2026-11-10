@@ -29,6 +29,18 @@ export function updateNoticeEnabled(environment: NodeJS.ProcessEnv): boolean {
   );
 }
 
+/** @internal Whether the current CLI invocation runs through npm exec or npx. */
+export function invokedWithNpx(
+  environment: NodeJS.ProcessEnv,
+  path = new URL(import.meta.url).pathname,
+): boolean {
+  return (
+    environment["npm_command"] === "exec" ||
+    environment["npm_lifecycle_event"] === "npx" ||
+    path.includes("/_npx/")
+  );
+}
+
 export function updateCommand(
   environment: NodeJS.ProcessEnv = process.env,
   entrypoint: string = fileURLToPath(import.meta.url),
@@ -39,11 +51,7 @@ export function updateCommand(
   const path = entrypoint.replaceAll("\\", "/").toLowerCase();
   const agent = (environment["npm_config_user_agent"] ?? "").toLowerCase();
 
-  if (
-    environment["npm_command"] === "exec" ||
-    environment["npm_lifecycle_event"] === "npx" ||
-    path.includes("/_npx/")
-  ) {
+  if (invokedWithNpx(environment, path)) {
     return `npx ${PACKAGE_NAME}@latest`;
   }
   if (path.includes("/.install/node_modules/")) {

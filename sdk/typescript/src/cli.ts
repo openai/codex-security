@@ -397,6 +397,7 @@ import {
   CODEX_EXECUTABLE_VERSION,
   CODEX_SDK_VERSION,
   formatUpdateNotice,
+  invokedWithNpx,
   updateNoticeEnabled,
   type UpdateNotice,
   VERSION,
@@ -1696,34 +1697,6 @@ export async function runCodexSkillCommand(
   }
 }
 
-const NATIVE_LOGIN_COMMAND = "`codex login";
-
-/**
- * Native sign-in hints name Codex's own CLI, which signs in to a different home.
- * Point them at this command while streaming everything else unchanged.
- */
-function nativeSignInHintRewriter() {
-  let pending = "";
-  const rewrite = (text: string) =>
-    text.replaceAll(NATIVE_LOGIN_COMMAND, "`codex-security login");
-  return {
-    write(chunk: string): string {
-      const text = pending + chunk;
-      // Hold back only a suffix that could start the native command.
-      let held = Math.min(text.length, NATIVE_LOGIN_COMMAND.length - 1);
-      while (held > 0 && !NATIVE_LOGIN_COMMAND.startsWith(text.slice(-held)))
-        held -= 1;
-      pending = text.slice(text.length - held);
-      return rewrite(text.slice(0, text.length - held));
-    },
-    end(): string {
-      const rest = pending;
-      pending = "";
-      return rest;
-    },
-  };
-}
-
 async function runCodexSkillProcess(
   args: readonly string[],
   output: SkillCommandOutput | undefined,
@@ -1984,40 +1957,33 @@ async function runCodexSkillProcess(
     process.on("SIGTERM", onTerminate);
     try {
       let diagnostic = "";
-      const signInHints =
-        output === undefined ? nativeSignInHintRewriter() : undefined;
-      invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
-        if (signInHints) process.stderr.write(signInHints.write(chunk));
-        else diagnostic += chunk;
-      });
-      // Sign-in commands forward native stderr; finish it before returning.
-      const forwarded = new Promise<void>((resolve) => {
-        if (!signInHints || invocation.stderr === null) return resolve();
-        invocation.stderr.once("close", () => {
-          process.stderr.write(signInHints.end());
-          resolve();
+      let forwarded: Promise<void> | undefined;
+      if (output === undefined && invocation.stderr) {
+        forwarded = forwardSignInHints(invocation.stderr, processEnvironment);
+      } else {
+        invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+          diagnostic += chunk;
         });
-      });
-      const captured =
+      }
+      const captured = Promise.race([
         output === undefined || invocation.stdout === null
-          ? forwarded.then(() => undefined)
-          : Promise.race([
-              readSkillCommandOutput(
-                invocation.stdout,
-                output.appServer === undefined
-                  ? undefined
-                  : {
-                      ...output.appServer,
-                      apiKey,
-                      modelProvider,
-                      onThreadStarted: releaseCredentialHome,
-                      input: invocation.stdin!,
-                    },
-              ),
-              new Promise<undefined>((resolve) => {
-                forceCaptureCompletion = () => resolve(undefined);
-              }),
-            ]);
+          ? forwarded?.then(() => undefined)
+          : readSkillCommandOutput(
+              invocation.stdout,
+              output.appServer === undefined
+                ? undefined
+                : {
+                    ...output.appServer,
+                    apiKey,
+                    modelProvider,
+                    onThreadStarted: releaseCredentialHome,
+                    input: invocation.stdin!,
+                  },
+            ),
+        new Promise<undefined>((resolve) => {
+          forceCaptureCompletion = () => resolve(undefined);
+        }),
+      ]);
       invocationStatus = new Promise<number>((resolve, reject) => {
         const complete = (
           code: number | null,
@@ -2088,6 +2054,12 @@ async function runCodexSkillProcess(
       invocation.stderr?.destroy();
       requestTermination("SIGTERM");
       await invocationStatus?.catch(() => undefined);
+      // The sign-in diagnostic stream is closed; a second diagnostic cannot be delivered.
+      if (
+        output === undefined &&
+        (error as NodeJS.ErrnoException)?.code === "EPIPE"
+      )
+        return 1;
       throw error;
     } finally {
       if (forcedTermination !== undefined) clearTimeout(forcedTermination);
@@ -2100,6 +2072,37 @@ async function runCodexSkillProcess(
   } finally {
     await releaseCredentialHome?.();
   }
+}
+
+/** Forward native prompts immediately, including commands split across stderr writes. */
+async function forwardSignInHints(
+  stderr: Readable,
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  const cli = invokedWithNpx(environment)
+    ? "npx @openai/codex-security"
+    : "codex-security";
+  const hints = ["`codex login", "| codex login"];
+  const rewrite = (text: string) =>
+    text.replace(/(`|\| )codex login(?=[\s`]|$)/gu, `$1${cli} login`);
+  let pending = "";
+  for await (const chunk of stderr.setEncoding(
+    "utf8",
+  ) as AsyncIterable<string>) {
+    let text = pending + chunk;
+    pending = "";
+    // Hold only a partial command at the end of this chunk.
+    const start = Math.max(text.lastIndexOf("`"), text.lastIndexOf("|"));
+    if (start >= 0) {
+      const tail = text.slice(start);
+      if (hints.some((hint) => hint.startsWith(tail))) {
+        pending = tail;
+        text = text.slice(0, start);
+      }
+    }
+    if (text) await writeCliOutput(process.stderr, rewrite(text));
+  }
+  if (pending) await writeCliOutput(process.stderr, rewrite(pending));
 }
 
 /**
