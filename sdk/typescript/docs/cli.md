@@ -1495,6 +1495,8 @@ After reviewing the findings and exclusions, rerun the command without
 
 For Tenable One Code Repository findings, use `--provider tenable --to local` and set `--source-repository-url` to the checkout’s verified HTTPS remote. [Tenable export and import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md)
 
+For CrowdStrike FCS CLI 4.x IaC reports, use `--provider crowdstrike --to local` and set `--source-repository-url` to the checkout’s verified HTTPS remote. Run the FCS scan from the checkout root. [CrowdStrike import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/crowdstrike.md)
+
 Local readback uses `findings imported [PATH]`. The path defaults to the current
 directory. Each imported record starts as `not_assessed`. Unknown revisions and
 locations stay unknown. Repository-scoped sources are checked against comparable

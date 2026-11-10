@@ -46,12 +46,17 @@ import type {
 import {
   localFindingRepositories,
   semgrepSarifRepositories,
+  LOCAL_ONLY_PROVIDERS,
   type LocalFindingProvider,
 } from "./external-findings-read.js";
 import {
   tenableReportFormat,
   tenableSourceRepository,
 } from "./tenable-findings.js";
+import {
+  crowdstrikeReportFormat,
+  crowdstrikeSourceRepository,
+} from "./crowdstrike-findings.js";
 import {
   guardianFindingRepository,
   guardianSelectionFormat,
@@ -740,7 +745,11 @@ export function distinctSourceRepositories(
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
   options: NormalizedLocalImportOptions &
-    ({ provider: "tenable" } | { provider: Provider }),
+    (
+      | { provider: "tenable" }
+      | { provider: "crowdstrike" }
+      | { provider: Provider }
+    ),
   dependencies: LocalExternalImportDependencies,
   readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),
@@ -751,16 +760,20 @@ export async function prepareLocalImport(
   requireIdentity(options.sourceKey, "Source key");
   const parsedSources = distinctSourceRepositories(parsedInput);
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
-  if (
-    options.provider !== "tenable" &&
-    (current.report?.["format"] === tenableReportFormat ||
-      current.findings.some(
-        (row) => row.evidence?.source_data?.["format"] === tenableReportFormat,
-      ))
-  )
-    throw new CodexSecurityError(
-      "Retained Tenable evidence requires the tenable provider.",
-    );
+  for (const [provider, format] of [
+    ["tenable", tenableReportFormat],
+    ["crowdstrike", crowdstrikeReportFormat],
+  ] as const)
+    if (
+      options.provider !== provider &&
+      (current.report?.["format"] === format ||
+        current.findings.some(
+          (row) => row.evidence?.source_data?.["format"] === format,
+        ))
+    )
+      throw new CodexSecurityError(
+        `Retained ${LOCAL_ONLY_PROVIDERS[provider]} evidence requires the ${provider} provider.`,
+      );
   checkTrivyReportProvider(options.provider, current.report);
   // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
   if (!("snykRestContext" in current) && "snykRestContext" in input)
@@ -803,12 +816,24 @@ export async function prepareLocalImport(
     dependabotSource = native;
   }
   const context = await localContext(options.repository, dependencies);
-  if (options.provider === "tenable") {
-    const source = tenableSourceRepository(
-      current,
-      options.sourceRepositoryUrl,
-      [...readerSources, ...parsedSources],
-    );
+  if (options.provider === "tenable" || options.provider === "crowdstrike") {
+    const url = (
+      options.provider === "tenable"
+        ? tenableSourceRepository
+        : crowdstrikeSourceRepository
+    )(current, options.sourceRepositoryUrl, [
+      ...readerSources,
+      ...parsedSources,
+    ]);
+    const { hostname } = new URL(url);
+    const source = {
+      url,
+      platform: isGitHubCloudHost(hostname)
+        ? "github"
+        : hostname === "gitlab.com"
+          ? "gitlab"
+          : undefined,
+    };
     const remotes = await readHostedGitRemotes(
       context.repository,
       [
@@ -823,7 +848,7 @@ export async function prepareLocalImport(
     );
     if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
       throw new CodexSecurityError(
-        "Tenable's source repository must match a configured Git fetch remote of the selected checkout.",
+        `${LOCAL_ONLY_PROVIDERS[options.provider]}'s source repository must match a configured Git fetch remote of the selected checkout.`,
       );
     return preparedLocalStorage(current, options, context, dependencies, true);
   }

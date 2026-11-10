@@ -352,6 +352,7 @@ export {
   type LocalExternalImportOptions,
 } from "./external-findings-import.js";
 export { readTenableFindings } from "./tenable-findings.js";
+export { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
 export {
   normalizeOpenGrepFindings,
   readOpenGrepFindings,
