@@ -2006,7 +2006,9 @@ export async function validateOutputDir(
       const writableLeaf =
         !archiveExisting ||
         (process.platform === "win32" && (await readdir(path)).length === 0);
-      const canonical = await checkedOutputPath(path, writableLeaf);
+      const canonical = await checkedOutputPath(path, writableLeaf).catch(
+        rethrowOutputPathValidationError,
+      );
       requireModelSafeOutputDir(canonical);
       return canonical;
     }
@@ -2020,7 +2022,9 @@ export async function validateOutputDir(
             relative(parent, path),
           );
           requireModelSafeOutputDir(canonical);
-          await requireSecureOutputAncestry(canonical);
+          await requireSecureOutputAncestry(canonical).catch(
+            rethrowOutputPathValidationError,
+          );
           return canonical;
         }
         break;
@@ -2041,6 +2045,25 @@ export async function validateOutputDir(
       { cause: error },
     );
   }
+}
+
+function rethrowOutputPathValidationError(error: unknown): never {
+  if (
+    process.platform !== "win32" ||
+    nodeErrorCode(error) !== "ERR_DLOPEN_FAILED"
+  )
+    throw error;
+  const blocked =
+    error instanceof Error &&
+    /^(?:LoadLibrary failed: )?An Application Control policy has blocked this file\.(?:\s|$)/u.test(
+      error.message,
+    );
+  throw new OutputDirectoryError(
+    blocked
+      ? "Windows Application Control blocked the bundled Codex Security filesystem module (windows.node). Check the CodeIntegrity Operational log in Event Viewer."
+      : "Could not load the bundled Codex Security filesystem module (windows.node) on Windows.",
+    { cause: error },
+  );
 }
 
 export async function prepareScanArtifactRestorer(
