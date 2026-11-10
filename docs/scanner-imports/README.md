@@ -32,8 +32,10 @@ Each reader supports local and Cloud publication. Cloud acceptance depends on th
 
 [Install the CLI](../../README.md#quick-start) and open the repository the
 findings apply to. Keep reports and preview output in a private directory
-outside that checkout. For commands that use `mktemp`, set `TMPDIR` there
-if needed. In CI, redirect stdout and stderr to private files.
+outside that checkout. To choose where `mktemp -d` creates the directory,
+set `TMPDIR` to an existing directory outside the checkout and pass it in the
+template, as in `mktemp -d "${TMPDIR:-/tmp}/report.XXXXXX"`. This works on
+both macOS and Linux. In CI, redirect stdout and stderr to private files.
 
 **In the terminal**, follow your scanner's guide. Run examples that use
 `--repository .` from the checkout root. For a saved report, `publish findings`
@@ -87,7 +89,7 @@ For a Cloud import, check the receipt for the destination shown in the preview.
 | Private inbox (`privateImport`)                   | Check that `privateJob.status` is `completed` and its counts account for the selected findings, with zero errors or unprocessed rows. Review exclusions. |
 | Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                                                    |
 
-To inspect published findings in Codex, [connect the Cloud app](../../sdk/typescript/README.md#read-existing-cloud-findings)
+To inspect published findings in Codex, [connect the Cloud app](../../sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
 and ask for imported findings in the destination repository. If the scanner has no
 filter in the findings view, use the source and finding IDs from your receipt to
 identify the record. For a private import, ask for your private import history.
@@ -112,7 +114,7 @@ For a dependency alert, [check the installed version and trace the dependency](g
 
 With the SDK, look up a local record by its `id` with
 `listLocalExternalFindings({ repository, id })`. Pass `record.evidence` and the
-matching checkout to [`security.validate()`](../../sdk/typescript/README.md#validate-an-existing-finding).
+matching checkout to [`security.validate()`](../../sdk/typescript/docs/sdk.md#validate-an-existing-finding).
 Your configured model provider returns a separate assessment.
 
 See [Imported finding identity and evidence](schema-guide.md) for what each

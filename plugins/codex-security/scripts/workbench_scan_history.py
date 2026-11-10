@@ -29,7 +29,12 @@ from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LO
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
-from workbench_target import git_output, require_scan_target_identity
+from workbench_target import (
+    git_output,
+    require_remediation_target,
+    require_scan_target_identity,
+    verified_windows_checkout,
+)
 from workbench_validation import timestamp_key
 
 
@@ -68,6 +73,19 @@ def preserve_sealed_completion(
     return binding
 
 
+def _windows_resume_checkout(scan: sqlite3.Row) -> Path:
+    replaced = "Cannot resume: the original checkout is missing or was replaced."
+    try:
+        repository = require_remediation_target(scan["target_path"])
+    except SystemExit as exc:
+        raise SystemExit(replaced) from exc
+    with verified_windows_checkout(scan, repository, replaced_message=replaced):
+        snapshot = (scan["target_revision"], scan["target_snapshot_digest"])
+        if scan_target_identity(repository, None)[:2] != snapshot:
+            raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
+    return repository
+
+
 def cli_scan_resume(
     wb: Any,
     connection: sqlite3.Connection,
@@ -97,21 +115,47 @@ def cli_scan_resume(
         run["status"] not in {"running", "succeeded"} or run["cancel_requested"]
     ):
         raise SystemExit("This Deep Scan has stopped and cannot resume.")
-    try:
-        repository = require_scan_target_identity(scan)
-    except SystemExit as exc:
-        raise SystemExit(
-            "Cannot resume: the original checkout is missing or was replaced."
-        ) from exc
-    if scan_target_identity(repository, None) != (
-        scan["target_revision"],
-        scan["target_snapshot_digest"],
-        scan["target_device"],
-        scan["target_inode"],
-    ):
-        raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
+    if os.name == "nt":
+        try:
+            repository = _windows_resume_checkout(scan)
+        except OSError as exc:
+            raise SystemExit(f"Cannot verify the original Windows checkout: {exc}") from exc
+    else:
+        try:
+            repository = require_scan_target_identity(scan)
+        except SystemExit as exc:
+            raise SystemExit(
+                "Cannot resume: the original checkout is missing or was replaced."
+            ) from exc
+        if scan_target_identity(repository, None) != (
+            scan["target_revision"],
+            scan["target_snapshot_digest"],
+            scan["target_device"],
+            scan["target_inode"],
+        ):
+            raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
     recipe = wb.parse_scan_recipe(scan["recipe_json"], repository)
     scan_dir = wb.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    if os.name == "nt":
+        from windows_scan_local_files import DEEP_RESUME_DIRECTORY, deep_resume_output_identity
+
+        identity = scan["windows_resume_output_identity"]
+        if identity is not None:
+            try:
+                current = deep_resume_output_identity(scan_dir)
+            except OSError as exc:
+                raise SystemExit(
+                    f"Cannot verify the registered Windows resume output: {exc}"
+                ) from exc
+            if current != json.loads(identity):
+                raise SystemExit(
+                    "Cannot resume: the original Windows output directory was replaced."
+                )
+        elif not any(entry != scan_dir / DEEP_RESUME_DIRECTORY for entry in scan_dir.iterdir()):
+            raise SystemExit(
+                "Cannot resume this empty Windows output because its original directory identity "
+                f"was not saved. Start a new scan with 'codex-security scans rerun {scan['id']}'."
+            )
     result = {
         "contract": wb.scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),
@@ -311,6 +355,7 @@ def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.
 def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "completedAt": row["completed_at"],
+        "logCompletedAt": row["log_completed_at"],
         "continuationThreadId": row["continuation_thread_id"],
         **stored_scan_cost_fields(row["cost_json"]),
         "findingCount": row["finding_count"],

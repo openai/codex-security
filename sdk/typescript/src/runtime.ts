@@ -1,5 +1,11 @@
 import { executablePathForSpawn } from "./executable-path.js";
+import { retryWindowsRename } from "./retry-windows-rename.js";
 export { executablePathForSpawn } from "./executable-path.js";
+import {
+  PLUGIN_PYTHON_PROBE,
+  PLUGIN_PYTHON_PROBE_TIMEOUT_MS,
+  PLUGIN_PYTHON_READY,
+} from "./plugin-python-probe.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
@@ -10,6 +16,7 @@ import {
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { shortArchivePrefix } from "./scan-archive-path.js";
 import {
   chmodSync,
   close as closeCallback,
@@ -29,7 +36,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   readdir,
   realpath,
@@ -55,6 +61,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import type { Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
@@ -73,7 +80,11 @@ import {
   errorMessage,
   abortReason,
 } from "./errors.js";
-import type { JsonObject } from "./config.js";
+import {
+  writeCodexConfig,
+  writePrivateConfig,
+  type JsonObject,
+} from "./config.js";
 import { isRecord } from "./record.js";
 import {
   isWithin,
@@ -121,6 +132,7 @@ const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOCK_DATABASE = ".codex-security-scan.sqlite3";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
+const KEYRING_LOGIN = ".codex-security-keyring-login";
 const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
@@ -1581,25 +1593,146 @@ async function hasSeparateAmbientLink(
   }
 }
 
+/** Native Codex defaults to file storage when the managed home has no setting. */
+async function credentialStore(home: string): Promise<unknown> {
+  const contents = await readFile(join(home, "config.toml"), "utf8").catch(
+    nullIfMissingFileError,
+  );
+  return contents === null
+    ? "file"
+    : (parse(contents, { integersAsBigInt: "asNeeded" })[
+        "cli_auth_credentials_store"
+      ] ?? "file");
+}
+
+async function hasCredentialFile(home: string): Promise<boolean> {
+  const file = await lstat(join(home, "auth.json")).catch(
+    nullIfMissingFileError,
+  );
+  return file?.isFile() === true;
+}
+
+function savedKeyringHistory(home: string) {
+  return readFile(join(home, KEYRING_LOGIN), "utf8").catch(
+    nullIfMissingFileError,
+  );
+}
+
+function canUseKeyring(store: unknown): boolean {
+  return store === "auto" || store === "keyring";
+}
+
+function keyringHistory(
+  saved: string | null,
+  store: unknown,
+  hasFile: boolean,
+) {
+  if (saved === "keyring" || saved === "pending") return "keyring";
+  // On upgrade, a prior keyring login may exist. Auto can also move a file
+  // credential into the keyring on refresh, removing auth.json.
+  if (
+    (saved === null && canUseKeyring(store)) ||
+    (saved === "file" && store === "auto" && !hasFile)
+  )
+    return "keyring";
+  return hasFile ? "file" : "none";
+}
+
+async function rememberStoredFile(home: string) {
+  if ((await savedKeyringHistory(home)) === "none") {
+    await writePrivateConfig(join(home, KEYRING_LOGIN), "file");
+  }
+}
+
+/** Arm logout before a native login can persist a keyring grant and be interrupted. */
+export async function beginCredentialLogin(home: string): Promise<void> {
+  const store = await credentialStore(home);
+  if (!canUseKeyring(store)) return;
+  const marker = join(home, KEYRING_LOGIN);
+  const saved = await savedKeyringHistory(home);
+  const present = await hasCredentialFile(home);
+  const previous = keyringHistory(saved, store, present);
+  // Only this login's successful file fallback can discharge a new pending marker.
+  const next = previous === "keyring" ? "keyring" : "pending";
+  if (next !== saved) await writePrivateConfig(marker, next);
+}
+
+/** Is the managed file the active login, or a known-empty file destination for an ambient import? */
+export async function credentialHomeUsesFileStorage(
+  home: string,
+  options: { allowAmbientImport?: boolean } = {},
+): Promise<boolean> {
+  const store = await credentialStore(home);
+  if (store !== "auto") return store === "file";
+  const saved = await savedKeyringHistory(home);
+  const hasFile = await hasCredentialFile(home);
+  return hasFile
+    ? saved === "file"
+    : options.allowAmbientImport === true && saved === "none";
+}
+
+/** Preserve credential provenance before a scan or sign-in replaces the shared config. */
+export async function writeCredentialHomeConfig(
+  home: string,
+  config: JsonObject,
+): Promise<void> {
+  const old = await credentialStore(home);
+  if (
+    canUseKeyring(old) ||
+    canUseKeyring(config["cli_auth_credentials_store"])
+  ) {
+    const marker = join(home, KEYRING_LOGIN);
+    const saved = await savedKeyringHistory(home);
+    const hasFile = await hasCredentialFile(home);
+    const observed = keyringHistory(saved, old, hasFile);
+    if (observed !== saved) await writePrivateConfig(marker, observed);
+  }
+  await writeCodexConfig(join(home, "config.toml"), config);
+}
+
 /** Run under the credential-home lock so status cannot reimport the sign-in during logout. */
 export async function logoutCredentialHome<T extends number | void>(
   home: string,
   ambientHome: string,
-  nativeLogout: () => Promise<T>,
+  nativeLogout: (store?: string) => Promise<T>,
   onLoggedOut?: () => void,
 ): Promise<T> {
   const localPath = join(home, "auth.json");
   const shared = await hasSeparateAmbientLink(localPath, ambientHome);
+  let recorded = false;
   const recordLogout = async () => {
+    if (recorded) return;
     await setCodexSecurityCredentialLogout(home, true);
     if (shared) await rm(localPath);
     onLoggedOut?.();
+    recorded = true;
   };
 
   // Detach before native logout can revoke a shared token, even if native cleanup fails.
   if (shared) await recordLogout();
-  const status = await nativeLogout();
-  if (!shared && (status === undefined || status === 0)) await recordLogout();
+  const marker = join(home, KEYRING_LOGIN);
+  const previous = await savedKeyringHistory(home);
+  const active = await credentialStore(home);
+  const hasFile = await hasCredentialFile(home);
+  const keyring =
+    keyringHistory(previous, active, hasFile || shared) === "keyring";
+  if (keyring && hasFile) {
+    // Native keyring logout also unlinks the file, but only revokes the token it loads.
+    const status = await nativeLogout(active === "file" ? undefined : "file");
+    if (status !== undefined && status !== 0) return status;
+    // A retry must not re-import ambient credentials after the file was revoked.
+    await recordLogout();
+  }
+  let override: string | undefined;
+  if (keyring && !canUseKeyring(active)) override = "keyring";
+  else if (!keyring && active !== "file" && (hasFile || canUseKeyring(active)))
+    override = "file";
+  const status = await nativeLogout(override);
+  if (status === undefined || status === 0) {
+    await recordLogout();
+    if (canUseKeyring(active)) await writePrivateConfig(marker, "none");
+    else await rm(marker, { force: true });
+  }
   return status;
 }
 
@@ -1610,27 +1743,25 @@ export async function setCodexSecurityCredentialLogout(
   await requireSecureCredentialHome(codexHome);
   const marker = join(codexHome, CREDENTIAL_LOGOUT_MARKER);
   if (!loggedOut) {
+    // Native auto removes auth.json on keyring success and leaves it on file fallback.
+    const store = await credentialStore(codexHome);
+    const history = join(codexHome, KEYRING_LOGIN);
+    if (
+      store === "keyring" ||
+      (store === "auto" && !(await hasCredentialFile(codexHome)))
+    ) {
+      await writePrivateConfig(history, "keyring");
+    } else if (
+      store === "auto" &&
+      (await savedKeyringHistory(codexHome)) === "pending"
+    ) {
+      await writePrivateConfig(history, "file");
+    }
     await rm(marker, { force: true });
     return;
   }
 
-  const temporary = join(
-    codexHome,
-    `.codex-security-logout-${randomUUID()}.tmp`,
-  );
-  try {
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.chmod(0o600);
-      await handle.writeFile("logged out\n", "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, marker);
-  } finally {
-    await rm(temporary, { force: true });
-  }
+  await writePrivateConfig(marker, "logged out\n");
 }
 
 export async function codexSecurityCredentialAllowsAmbientImport(
@@ -1744,7 +1875,8 @@ export function requireOutputOutsideRepository(
 ): void {
   if (
     isWithin(repository, outputDirectory) ||
-    (pathKind === "output" && isWithin(outputDirectory, repository))
+    ((pathKind === "output" || pathKind === "state") &&
+      isWithin(outputDirectory, repository))
   ) {
     throw new OutputInsideProtectedRootError(
       outputDirectory,
@@ -1793,20 +1925,21 @@ sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 `;
 
-const ARCHIVE_READY = "codex-security-archive-ready\n";
-const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
-import io, json, runpy, sys
-control = sys.stdin
-payload = json.loads(control.readline())
-sys.stdin = io.TextIOWrapper(io.BytesIO(payload.encode("utf-8")), encoding="utf-8")
+const WORKBENCH_REGISTRATION_PROGRAM = String.raw`
+import os, runpy, sys
 sys.argv = sys.argv[1:]
-workbench = runpy.run_path(sys.argv[0])
-def before_archive():
-    sys.stdout.buffer.write(b"codex-security-archive-ready\n")
-    sys.stdout.buffer.flush()
-    if control.readline() != "\n":
-        raise SystemExit("Scan registration canceled before archival.")
-workbench["main"](before_archive=before_archive)
+def before_output_change():
+    with os.fdopen(3, "r+b", buffering=0) as control:
+        control.write(b"?")
+        if control.read(1) != b"!":
+            raise SystemExit("Scan registration canceled before changing the output.")
+sys._codex_security_before_output_change = before_output_change
+if "--archive-existing" in sys.argv[1:] and "--archived-scan-dir" not in sys.argv[1:]:
+    # Released workbenches accept this callback before moving an existing output.
+    runpy.run_path(sys.argv[0])["main"](before_archive=before_output_change)
+else:
+    # A selected plugin keeps its script entrypoint, argv, stdin and stdout.
+    runpy.run_path(sys.argv[0], run_name="__main__")
 `;
 
 export async function runWorkbench(
@@ -1823,7 +1956,7 @@ export async function runWorkbench(
   const run = async (
     arguments_: readonly string[],
     input?: string,
-    archiveHandshake = false,
+    registrationHandshake = false,
   ): Promise<string> => {
     const native =
       nativeLocalDedupe ||
@@ -1878,8 +2011,8 @@ export async function runWorkbench(
             "-B",
             "-c",
             WORKBENCH_ARGUMENTS_PROGRAM +
-              (archiveHandshake
-                ? ARCHIVE_REGISTRATION_PROGRAM
+              (registrationHandshake
+                ? WORKBENCH_REGISTRATION_PROGRAM
                 : WORKBENCH_SCRIPT_PROGRAM),
             script,
           ],
@@ -1909,7 +2042,7 @@ export async function runWorkbench(
             )
           : input,
       signal,
-      archiveHandshake,
+      registrationHandshake,
       // Frame Python arguments on stdin to preserve NUL and long diagnostics.
       native
         ? undefined
@@ -1926,12 +2059,13 @@ export async function runWorkbench(
   };
   let stdout: string;
   try {
-    const archiveHandshake =
+    const registrationHandshake =
       signal !== undefined &&
       args[0] === "register-cli-scan" &&
-      args.includes("--archive-existing") &&
-      !args.includes("--archived-scan-dir");
-    stdout = await run(args, input, archiveHandshake);
+      (process.platform === "win32" ||
+        (args.includes("--archive-existing") &&
+          !args.includes("--archived-scan-dir")));
+    stdout = await run(args, input, registrationHandshake);
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
@@ -1999,7 +2133,9 @@ export async function validateOutputDir(
       const writableLeaf =
         !archiveExisting ||
         (process.platform === "win32" && (await readdir(path)).length === 0);
-      const canonical = await checkedOutputPath(path, writableLeaf);
+      const canonical = await checkedOutputPath(path, writableLeaf).catch(
+        rethrowOutputPathValidationError,
+      );
       requireModelSafeOutputDir(canonical);
       return canonical;
     }
@@ -2013,7 +2149,9 @@ export async function validateOutputDir(
             relative(parent, path),
           );
           requireModelSafeOutputDir(canonical);
-          await requireSecureOutputAncestry(canonical);
+          await requireSecureOutputAncestry(canonical).catch(
+            rethrowOutputPathValidationError,
+          );
           return canonical;
         }
         break;
@@ -2034,6 +2172,25 @@ export async function validateOutputDir(
       { cause: error },
     );
   }
+}
+
+function rethrowOutputPathValidationError(error: unknown): never {
+  if (
+    process.platform !== "win32" ||
+    nodeErrorCode(error) !== "ERR_DLOPEN_FAILED"
+  )
+    throw error;
+  const blocked =
+    error instanceof Error &&
+    /^(?:LoadLibrary failed: )?An Application Control policy has blocked this file\.(?:\s|$)/u.test(
+      error.message,
+    );
+  throw new OutputDirectoryError(
+    blocked
+      ? "Windows Application Control blocked the bundled Codex Security filesystem module (windows.node). Check the CodeIntegrity Operational log in Event Viewer."
+      : "Could not load the bundled Codex Security filesystem module (windows.node) on Windows.",
+    { cause: error },
+  );
 }
 
 export async function prepareScanArtifactRestorer(
@@ -2140,14 +2297,33 @@ export async function planOutputArchive(
   if (outputDirectory === null) return null;
   const entries = await readdir(outputDirectory).catch(nullIfMissingFileError);
   if (entries === null || entries.length === 0) return null;
-  return `${outputDirectory}${outputArchiveSuffix()}`;
+  const id = randomUUID().slice(0, 8);
+  const archive = `${outputDirectory}${outputArchiveSuffix(id)}`;
+  if (process.platform === "win32" || !(await archiveNameTooLong(archive)))
+    return archive;
+  // The workbench reserves a sibling with an eight-character random suffix.
+  const sibling = `${outputDirectory}.previous-${id}`;
+  if (!(await archiveNameTooLong(sibling))) return sibling;
+  return join(
+    dirname(outputDirectory),
+    shortArchivePrefix(basename(outputDirectory)) + id,
+  );
 }
 
-function outputArchiveSuffix(): string {
+async function archiveNameTooLong(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    return nodeErrorCode(error) === "ENAMETOOLONG";
+  }
+}
+
+function outputArchiveSuffix(id = randomUUID().slice(0, 8)): string {
   return `.previous-${new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
-    .replace(/\.\d{3}Z$/, "")}-${randomUUID().slice(0, 8)}`;
+    .replace(/\.\d{3}Z$/, "")}-${id}`;
 }
 
 export function requireModelSafeOutputDir(path: string): void {
@@ -2259,7 +2435,13 @@ async function prepareOutputDirectory(
       );
       await createWindowsOutputDirectory(created, false);
     } else {
-      created = await mkdtemp(join(canonicalRoot, `${prefix}-`));
+      try {
+        created = await mkdtemp(join(canonicalRoot, `${prefix}-`));
+      } catch (error) {
+        if (nodeErrorCode(error) !== "ENAMETOOLONG") throw error;
+        // The repository name itself can fill a filesystem component.
+        created = await mkdtemp(join(canonicalRoot, "codex-security-"));
+      }
     }
     try {
       if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
@@ -2619,6 +2801,7 @@ export async function importAmbientAuth(
       throw error;
     }
     await chmod(destination, 0o600);
+    await rememberStoredFile(isolatedHome);
     return true;
   } catch (error) {
     throw new PluginBootstrapError(
@@ -2642,6 +2825,7 @@ export async function extractPluginZip(
   const staging = await realpath(
     await mkdtemp(join(dirname(destination), ".codex-security-plugin-")),
   );
+  let publishingOnWindows = false;
   try {
     throwIfSignalAborted(signal);
     let expandedSize = 0;
@@ -2718,11 +2902,36 @@ export async function extractPluginZip(
     const pluginRoot = await discoverPluginRoot(staging);
     throwIfSignalAborted(signal);
     const relativeRoot = relative(staging, pluginRoot);
-    await rename(staging, destination);
+    if (process.platform === "win32") {
+      publishingOnWindows = true;
+      await retryWindowsRename(
+        async () => {
+          throwIfSignalAborted(signal);
+          if (await lstat(destination).catch(nullIfMissingFileError))
+            throw new Error(`Destination already exists: ${destination}`);
+          await rename(staging, destination);
+        },
+        undefined,
+        signal,
+      );
+      publishingOnWindows = false;
+    } else {
+      await rename(staging, destination);
+    }
     return await validatePluginRoot(join(destination, relativeRoot));
   } catch (error) {
-    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    let cleanupDiagnostic = "";
+    await rm(staging, { recursive: true, force: true }).catch(
+      (cleanupError) => {
+        cleanupDiagnostic = `\nCould not remove staging directory ${staging}: ${errorMessage(cleanupError)}`;
+      },
+    );
     throwIfSignalAborted(signal);
+    if (publishingOnWindows)
+      throw new PluginBootstrapError(
+        `Could not publish extracted plugin ZIP: ${errorMessage(error)}${cleanupDiagnostic}`,
+        { cause: error },
+      );
     if (error instanceof PluginBootstrapError) throw error;
     throw new PluginBootstrapError(`Invalid plugin ZIP: ${archivePath}`, {
       cause: error,
@@ -2991,7 +3200,7 @@ export function resolveCodexCommand(
   const expanded =
     configured === undefined
       ? undefined
-      : expandExecutableHome(configured, environment);
+      : expandHomeForLookup(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
@@ -3085,15 +3294,21 @@ export async function bootstrapPlugin(
           () => null,
         );
   const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
-  const stagedMatches =
-    staged?.version === version &&
-    (await pluginContentsMatch(
+  const matchesSelected = (
+    destination: string,
+    allowExtraFiles = false,
+    generatedDirectory?: string,
+  ) =>
+    pluginContentsMatch(
       root,
-      stagedRoot,
+      destination,
       options.signal,
-      false,
+      allowExtraFiles,
       projection,
-    ));
+      generatedDirectory,
+    );
+  const stagedMatches =
+    staged?.version === version && (await matchesSelected(stagedRoot));
 
   if (!stagedMatches) {
     if (existing !== null) {
@@ -3172,13 +3387,7 @@ export async function bootstrapPlugin(
     isRecord(previous) &&
     typeof previous["installedPath"] === "string" &&
     previous["version"] === version &&
-    (await pluginContentsMatch(
-      root,
-      previous["installedPath"],
-      options.signal,
-      true,
-      projection,
-    ))
+    (await matchesSelected(previous["installedPath"], true))
   ) {
     return {
       pluginRoot: root,
@@ -3190,12 +3399,46 @@ export async function bootstrapPlugin(
     };
   }
 
-  const output = await run(
-    command,
-    ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
-    environment,
-    options.signal,
-  );
+  const addPlugin = () =>
+    run(
+      command,
+      ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
+      environment,
+      options.signal,
+    );
+  let output: string;
+  let retried = false;
+  try {
+    output = await addPlugin();
+  } catch (first) {
+    if (!isRolledBackPluginActivation(first)) throw first;
+    throwIfSignalAborted(options.signal);
+    let bundled: string;
+    try {
+      bundled = resolveBundledCodexExecutable();
+    } catch {
+      throw first;
+    }
+    if (!(await sameFile(command.command, bundled))) throw first;
+    // The bundled CLI restored the old cache. A short-lived Windows reader
+    // of the new tree can release it before a fresh installation attempt.
+    try {
+      await delay(100, undefined, { signal: options.signal });
+      throwIfSignalAborted(options.signal);
+      if (!(await matchesSelected(stagedRoot))) {
+        throw new LocalPluginBootstrapError(
+          "The selected plugin or its marketplace changed before the native installation could be retried.",
+          { cause: first },
+        );
+      }
+      throwIfSignalAborted(options.signal);
+      output = await addPlugin();
+      retried = true;
+    } catch (second) {
+      throwIfSignalAborted(options.signal);
+      throw isRolledBackPluginActivation(second) ? first : second;
+    }
+  }
 
   let installed: unknown;
   try {
@@ -3215,6 +3458,24 @@ export async function bootstrapPlugin(
     throw new PluginBootstrapError(
       "Codex plugin install did not return the selected plugin path and version.",
     );
+  }
+
+  if (retried) {
+    const installedRoot = installed["installedPath"];
+    // The pinned local installer converts plugin commands into skills here.
+    const migratedCommands = join(
+      installedRoot,
+      ".codex-plugin",
+      "migrated-command-skills",
+    );
+    if (
+      !(await matchesSelected(stagedRoot)) ||
+      !(await matchesSelected(installedRoot, false, migratedCommands))
+    ) {
+      throw new PluginBootstrapError(
+        "The retried Codex plugin install did not install the selected plugin contents.",
+      );
+    }
   }
 
   await writeFile(
@@ -3242,6 +3503,7 @@ async function pluginContentsMatch(
   signal?: AbortSignal,
   allowExtraFiles = false,
   projection?: PluginRuntimeProjection,
+  generatedDirectory?: string,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 
@@ -3281,7 +3543,33 @@ async function pluginContentsMatch(
     return false;
   }
 
-  const entries = await readdir(source);
+  let entries = await readdir(source);
+  let nativeOutputs = 0;
+  if (generatedDirectory) {
+    const parent = dirname(generatedDirectory);
+    if (
+      parent === destination ||
+      (relative(parent, destination) === "" &&
+        (await sameFile(parent, destination)))
+    ) {
+      // The installer removes old command output before regenerating it. Resolve
+      // its source spelling on volumes that preserve case but ignore it on lookup.
+      const path = join(source, basename(generatedDirectory));
+      const original = await lstat(path).catch(nullIfMissingFileError);
+      if (original?.isSymbolicLink()) return false;
+      if (original) {
+        const name = basename(await realpath(path));
+        entries = entries.filter((entry) => entry !== name);
+      }
+      const installed = await lstat(generatedDirectory).catch(
+        nullIfMissingFileError,
+      );
+      if (installed) {
+        if (!installed.isDirectory()) return false;
+        nativeOutputs = 1;
+      }
+    }
+  }
   const projectedDirectory =
     projection === undefined
       ? undefined
@@ -3292,10 +3580,10 @@ async function pluginContentsMatch(
   );
   if (
     !allowExtraFiles &&
-    entries.length + generated.length !== (await readdir(destination)).length
-  ) {
+    entries.length + generated.length + nativeOutputs !==
+      (await readdir(destination)).length
+  )
     return false;
-  }
   for (const [path, file] of generated) {
     const generatedPath = join(destination, basename(path));
     const metadata = await lstat(generatedPath).catch(nullIfMissingFileError);
@@ -3317,6 +3605,7 @@ async function pluginContentsMatch(
         signal,
         allowExtraFiles,
         projection,
+        generatedDirectory,
       ))
     ) {
       return false;
@@ -3399,13 +3688,23 @@ export async function resolvePluginPython(
     );
   }
 
-  const home = options.homeDirectory ?? homedir();
-  const cacheDirectory =
-    environmentValue(environment, "XDG_CACHE_HOME", true) ||
-    join(home, ".cache");
-  const managedRoots = options.managedRuntimeRoots ?? [
-    join(cacheDirectory, "codex-runtimes", "codex-primary-runtime"),
-  ];
+  let managedRoots = options.managedRuntimeRoots;
+  if (managedRoots === undefined) {
+    try {
+      const cache =
+        environmentValue(environment, "XDG_CACHE_HOME", true) ||
+        join(options.homeDirectory ?? homedir(), ".cache");
+      managedRoots = [join(cache, "codex-runtimes", "codex-primary-runtime")];
+    } catch (error) {
+      // A numeric Linux UID can lack a home for the optional managed cache.
+      if (
+        process.platform !== "linux" ||
+        (error as { info?: NodeJS.ErrnoException }).info?.code !== "ENOENT"
+      )
+        throw error;
+      managedRoots = [];
+    }
+  }
   const relativeCandidates =
     process.platform === "win32"
       ? [
@@ -3523,19 +3822,22 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
-  archiveHandshake = false,
+  registrationHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
-  const cancellation = archiveHandshake ? new AbortController() : undefined;
+  const cancellation = registrationHandshake
+    ? new AbortController()
+    : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
-  let awaitingArchive = archiveHandshake;
   const child = spawn(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {
       env: environment,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: registrationHandshake
+        ? ["pipe", "pipe", "pipe", "pipe"]
+        : ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
     },
@@ -3543,19 +3845,20 @@ export async function runCodexCommand(
   let stdout = "";
   let stderr = "";
   let processError: Error | undefined;
+  const control = child.stdio[3] as Duplex | undefined;
+  control?.once("data", () => {
+    // The helper cannot change the output until the host allows the transaction.
+    signal?.removeEventListener("abort", abort);
+    if (signal?.aborted) abort();
+    else control.end("!");
+  });
+  control?.on("error", (error: NodeJS.ErrnoException) => {
+    if (!isDisconnectedChildStdin(error)) processError = error;
+  });
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     stdout += chunk;
-    if (awaitingArchive && stdout.startsWith(ARCHIVE_READY)) {
-      awaitingArchive = false;
-      stdout = stdout.slice(ARCHIVE_READY.length);
-      signal?.removeEventListener("abort", abort);
-      // The helper cannot rename until this acknowledgement. Detach and check
-      // cancellation before allowing the filesystem/database transaction.
-      if (signal?.aborted) abort();
-      else child.stdin.end("\n");
-    }
   });
   child.stderr.on("data", (chunk: string) => {
     stderr += chunk;
@@ -3584,21 +3887,22 @@ export async function runCodexCommand(
     child.stdin.destroy();
     child.stdout.destroy();
     child.stderr.destroy();
+    control?.destroy();
   };
   commandSignal?.addEventListener("abort", settleCanceledChild, { once: true });
   child.once("exit", settleCanceledChild);
   if (commandSignal?.aborted) settleCanceledChild();
-  if (archiveHandshake) {
+  if (registrationHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
   }
   try {
     if (stdinPrefix !== undefined) child.stdin.write(stdinPrefix);
-    if (archiveHandshake) child.stdin.write(`${JSON.stringify(input ?? "")}\n`);
-    else child.stdin.end(input);
+    child.stdin.end(input);
     return await completion;
   } finally {
-    if (archiveHandshake) signal?.removeEventListener("abort", abort);
+    if (registrationHandshake) signal?.removeEventListener("abort", abort);
+    control?.destroy();
     clearTimeout(forceTermination);
     commandSignal?.removeEventListener("abort", settleCanceledChild);
     child.removeListener("exit", settleCanceledChild);
@@ -3647,6 +3951,15 @@ export async function probeCodexSandbox(
   );
 }
 
+class RolledBackPluginActivationError extends Error {}
+
+function isRolledBackPluginActivation(error: unknown): boolean {
+  return (
+    error instanceof PluginBootstrapError &&
+    error.cause instanceof RolledBackPluginActivationError
+  );
+}
+
 async function runPluginCommand(
   command: CodexCommand,
   args: readonly string[],
@@ -3662,11 +3975,24 @@ async function runPluginCommand(
       signal,
     );
     if (!success) {
-      throw new Error(
+      const detail =
         stderr.trim() ||
-          stdout.trim() ||
-          `Codex exited with status ${exitCode}.`,
-      );
+        stdout.trim() ||
+        `Codex exited with status ${exitCode}.`;
+      // This native headline is emitted only after the previous entry was
+      // restored. The Windows message itself may be localized.
+      if (
+        process.platform === "win32" &&
+        args[0] === "plugin" &&
+        args[1] === "add" &&
+        exitCode === 1 &&
+        /^Error: failed to activate updated plugin cache entry: [^\r\n]+ \(os error 5\)(?:\r?\n|$)/u.test(
+          stderr,
+        ) &&
+        !stderr.includes("failed to restore previous cache entry")
+      )
+        throw new RolledBackPluginActivationError(detail);
+      throw new Error(detail);
     }
     return stdout;
   } catch (error) {
@@ -3697,7 +4023,7 @@ async function validatePluginRoot(root: string): Promise<string> {
   return await realpath(root);
 }
 
-async function copyPluginTree(
+export async function copyPluginTree(
   source: string,
   destination: string,
   signal?: AbortSignal,
@@ -3802,7 +4128,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandExecutableHome(candidate, environment)
+      ? expandHomeForLookup(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3811,23 +4137,16 @@ async function usablePython(
   try {
     const { stdout } = await execFile(
       command.executable,
-      [
-        "-I",
-        "-c",
-        "import importlib.util,sys\nif sys.version_info < (3, 10): raise SystemExit(1)\nif sys.version_info < (3, 11) and importlib.util.find_spec('tomli') is None: raise SystemExit(1)\nprint('codex-security-python-ok')",
-      ],
+      ["-I", "-c", PLUGIN_PYTHON_PROBE],
       {
         env: command.environment,
         encoding: "utf8",
-        // Cold Python startup can exceed five seconds on busy Windows hosts.
-        timeout: 30_000,
+        timeout: PLUGIN_PYTHON_PROBE_TIMEOUT_MS,
         windowsHide: true,
         signal,
       },
     );
-    return stdout.trim() === "codex-security-python-ok"
-      ? command.executable
-      : null;
+    return stdout.trim() === PLUGIN_PYTHON_READY ? command.executable : null;
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;
@@ -3857,9 +4176,9 @@ export function sameFile(left: string, right: string): Promise<boolean> {
   );
 }
 
-function expandExecutableHome(
+export function expandHomeForLookup(
   value: string,
-  environment: ProcessEnvironment,
+  environment: ProcessEnvironment = process.env,
 ): string {
   const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
   // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
@@ -3872,16 +4191,16 @@ export function expandHome(
   value: string,
   environment: ProcessEnvironment = process.env,
 ): string {
-  const home =
+  const home = () =>
     (process.platform === "win32"
       ? (environmentValue(environment, "USERPROFILE") ??
         environmentValue(environment, "HOME"))
       : (environmentValue(environment, "HOME") ??
         environmentValue(environment, "USERPROFILE"))) ?? homedir();
-  if (value === "~") return home;
-  if (value.startsWith("~/")) return join(home, value.slice(2));
+  if (value === "~") return home();
+  if (value.startsWith("~/")) return join(home(), value.slice(2));
   if (value.startsWith("~\\")) {
-    return join(home, ...value.slice(2).split("\\"));
+    return join(home(), ...value.slice(2).split("\\"));
   }
   return value;
 }

@@ -122,7 +122,10 @@ import {
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
 import { checkmarxSelection } from "./checkmarx-repository.js";
-import { continuumReportRepositories } from "./continuum-findings.js";
+import {
+  continuumReportRepositories,
+  previousContinuumCweProjection,
+} from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
@@ -742,8 +745,9 @@ export async function prepareExternalPublication(
         : await normalizeSnykFile(report, "cloud", references);
       const selection = normalizedPublicationInput(findings, provider);
       if (semgrep && hasPreviousCloudProjection(findings))
-        selection.readPreviousFindings = () =>
-          normalizePreviousSemgrepFindings(report, semgrepOptions);
+        selection.previousReaders = [
+          () => normalizePreviousSemgrepFindings(report, semgrepOptions),
+        ];
       return selection;
     };
     const hosted =
@@ -795,7 +799,8 @@ export async function prepareExternalPublication(
     input =
       parsed.publication ??
       normalizedPublicationInput(parsed.findings, provider);
-    input.readPreviousFindings = parsed.previousFindings;
+    if (parsed.previousFindings)
+      (input.previousReaders ??= []).push(parsed.previousFindings);
     if (provider === "endor") {
       fileRepositories = () => parsed.sourceRepositories ?? [];
       input.requiresStructuredReport = requiresStructuredEndorReport(
@@ -1035,7 +1040,7 @@ function hostedRepositoryMatcher(
 interface PublicationSelection extends ExternalPublicationInput {
   requiresStructuredReport?: boolean;
   sourcePositions?: ReadonlyMap<string, readonly number[]>;
-  readPreviousFindings?: () => ExternalFindings;
+  previousReaders?: (() => ExternalFindings)[];
   original?: {
     parsed: ExternalFindings;
     identity: unknown;
@@ -1355,6 +1360,10 @@ function normalizedPublicationInput(
     legacy: current,
     currentIdentity: identity,
     legacyIdentity: identity,
+    previousReaders:
+      provider === "continuum"
+        ? [() => previousContinuumCweProjection(current)]
+        : undefined,
     sourcePositions: getOpenGrepSourcePositions(ownData(input, "findings")),
     original,
     freshError,
@@ -1569,13 +1578,12 @@ async function preparePublicationInput(
   function pendingFile(key: string) {
     return join(state, `${key}.pending.json`);
   }
-  let previousFindings: ExternalFindings | undefined;
+  let previousFindings: ExternalFindings[] | undefined;
   async function previousFindingsIfSaved(
     input: PublicationSelection,
     currentKey?: string,
   ) {
-    if (!input.readPreviousFindings || previousFindings)
-      return previousFindings;
+    if (!input.previousReaders || previousFindings) return previousFindings;
     // An empty state directory (or just this current receipt) needs only the
     // current reader for its preview.
     const entries = (await readdir(state).catch(nullIfMissingFile)) ?? [];
@@ -1586,7 +1594,7 @@ async function preparePublicationInput(
           name.split(".", 1)[0] !== currentKey,
       )
     )
-      previousFindings = input.readPreviousFindings();
+      previousFindings = input.previousReaders.map((read) => read());
     return previousFindings;
   }
   async function checkSelection(input: PublicationSelection) {
@@ -1605,7 +1613,9 @@ async function preparePublicationInput(
       !input.uncertainFindingIds?.length &&
       !input.unprovenOccurrenceCount &&
       !input.unprovenIdPrefixes?.length &&
-      !(await previousFindingsIfSaved(input))?.findings.length
+      !(await previousFindingsIfSaved(input))?.some(
+        (report) => report.findings.length,
+      )
     )
       throw new NoPublishableFindingsError(parsed);
   }
@@ -1616,7 +1626,8 @@ async function preparePublicationInput(
   // Validate the configured return destination before authentication or uploads.
   cloudFindingsUrl(environment, options.repository);
   const credentials = await (
-    dependencies.credentials ?? (() => readCloudCredentials(environment))
+    dependencies.credentials ??
+    (() => readCloudCredentials(environment, dependencies.signal))
   )();
   let canStartJob = false;
   let repositorySeverities: string[] | undefined;
@@ -1659,10 +1670,16 @@ async function preparePublicationInput(
         error?: { message?: string };
       } | null;
       const retryAfter = response.headers.get("Retry-After");
-      throw new CloudImportError(
-        response.status,
-        `Cloud import failed (HTTP ${response.status}). ${payload?.error?.message ?? response.statusText}${retryAfter ? ` Retry-After: ${retryAfter}.` : ""}`,
-      );
+      const detail = payload?.error?.message ?? response.statusText;
+      let message = `Cloud import failed (HTTP ${response.status}).`;
+      if (detail) message += ` ${detail}`;
+      if (repositoryCatalog && response.status === 404) {
+        if (!/[.!?]$/u.test(message)) message += ".";
+        message +=
+          " Cloud import is not available for this account or deployment.";
+      }
+      if (retryAfter) message += ` Retry-After: ${retryAfter}.`;
+      throw new CloudImportError(response.status, message);
     }
     if (repositoryCatalog) {
       const advertised = (header: string) =>
@@ -1787,22 +1804,22 @@ async function preparePublicationInput(
     dependencies.signal,
   );
   let previewContext: PrivateImportContext | undefined;
-  const currentReaderKey = resolved.readPreviousFindings
+  const currentReaderKey = resolved.previousReaders
     ? scopeKey(resolved.currentIdentity)
     : undefined;
-  let alternateKey: string | undefined;
+  const alternateReaders = new Map<string, ExternalFindings>();
   let resumingPreviousReader = false;
-  function previousCandidateKey(previous: ExternalFindings | undefined) {
-    if (!previous?.findings.length) return;
-    // The file reader already validated plain JSON evidence for Cloud. Only a
-    // matching checkpoint needs the full normalized publication snapshot.
-    const previousKey = scopeKey(
-      publicationIdentity(previous, options.provider),
-    );
-    return previousKey !== currentReaderKey ? previousKey : undefined;
+  function addPreviousReaders(readers: ExternalFindings[] | undefined) {
+    // A source can produce identical evidence under multiple reader versions.
+    for (const reader of readers ?? []) {
+      if (reader === resolved.current || !reader.findings.length) continue;
+      const key = scopeKey(publicationIdentity(reader, options.provider));
+      if (key !== currentReaderKey) alternateReaders.set(key, reader);
+    }
   }
   async function alternateCheckpoint(
     key: string,
+    reader: ExternalFindings,
     context: () => Promise<PrivateImportContext>,
   ): Promise<{ pending: string | undefined } | undefined> {
     const pending = await readOptionalFile(pendingFile(key));
@@ -1815,13 +1832,9 @@ async function preparePublicationInput(
     // A completed import cannot acknowledge findings newly admitted by the
     // current reader. Pending uploads and jobs always retain their original bytes.
     if (
-      !resumingPreviousReader &&
-      previousFindings &&
+      key !== currentReaderKey &&
       checkpoint.receipt?.status === "completed" &&
-      !sameFindingSelection(
-        previousFindings.findings,
-        resolved.current.findings,
-      )
+      !sameFindingSelection(reader.findings, resolved.current.findings)
     )
       return;
     if (checkpoint.contextVersion === (await context()).context_version)
@@ -1830,30 +1843,31 @@ async function preparePublicationInput(
   async function assertNoAlternateCheckpoint(
     context = () => privateClient.context(),
   ) {
-    if (alternateKey && (await alternateCheckpoint(alternateKey, context)))
-      throw new CodexSecurityError(
-        resumingPreviousReader
-          ? "Both reader versions have saved publications for this report. Resume either one using its original normalized findings."
-          : "Another publication prepared this input. Run the command again to review and resume the saved request.",
-      );
+    for (const [key, reader] of alternateReaders) {
+      if (await alternateCheckpoint(key, reader, context))
+        throw new CodexSecurityError(
+          resumingPreviousReader
+            ? "Multiple reader versions have saved publications for this report. Resume one using its original normalized findings."
+            : "Another publication prepared this input. Run the command again to review and resume the saved request.",
+        );
+    }
   }
-  if (currentReaderKey)
-    alternateKey = previousCandidateKey(
+  if (currentReaderKey) {
+    addPreviousReaders(
       await previousFindingsIfSaved(resolved, currentReaderKey),
     );
-  if (alternateKey && previousFindings) {
     const context = async () =>
       (previewContext ??= await privateClient.context());
-    const checkpoint = await alternateCheckpoint(alternateKey, context);
-    capturedPending = checkpoint?.pending;
-    if (checkpoint) {
-      projection = normalizedPublicationInput(
-        previousFindings,
-        options.provider,
-      );
+    for (const [key, reader] of alternateReaders) {
+      const checkpoint = await alternateCheckpoint(key, reader, context);
+      if (!checkpoint) continue;
+      capturedPending = checkpoint.pending;
+      projection = normalizedPublicationInput(reader, options.provider);
       resumingPreviousReader = true;
-      alternateKey = currentReaderKey;
+      alternateReaders.delete(key);
+      alternateReaders.set(currentReaderKey, resolved.current);
       await assertNoAlternateCheckpoint(context);
+      break;
     }
   }
   const input = projection;
@@ -2849,15 +2863,14 @@ async function preparePublicationInput(
       await rm(lookupPath, { force: true }).catch(() => undefined);
   }
 
-  const lockKeys = [key, fileKey, stagingKey];
-  if (alternateKey) lockKeys.push(alternateKey);
+  const lockKeys = [key, fileKey, stagingKey, ...alternateReaders.keys()];
   async function underPublishLocks<T>(operation: () => Promise<T>) {
     // An older publisher may already hold its lock before its checkpoint exists.
     // Derive that key for actual writes, even after a checkpoint-free preview.
-    if (resolved.readPreviousFindings && !previousFindings) {
-      previousFindings = resolved.readPreviousFindings();
-      alternateKey = previousCandidateKey(previousFindings);
-      if (alternateKey) lockKeys.push(alternateKey);
+    if (resolved.previousReaders && !previousFindings) {
+      previousFindings = resolved.previousReaders.map((read) => read());
+      addPreviousReaders(previousFindings);
+      lockKeys.push(...alternateReaders.keys());
     }
     return underLocks(lockKeys, operation);
   }

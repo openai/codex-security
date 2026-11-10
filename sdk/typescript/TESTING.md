@@ -59,6 +59,8 @@ pnpm run test:package
 
 Replace `X.Y.Z` with the version in the filename printed by `pnpm pack`.
 Packing regenerates SDK defaults and project schemas before building the MCP runtime.
+On Alpine Linux, install GNU tar with `apk add tar` before running `check:package`.
+The BusyBox tar applet lacks the archive options used by the release checker.
 
 The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
 the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during

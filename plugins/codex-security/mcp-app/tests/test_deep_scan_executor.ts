@@ -1457,7 +1457,7 @@ async function testWorkerRuntimeSettings() {
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
     "CODEX_CLI_PATH",
-    "CODEX_MCP_NODE_PATH",
+    "CODEX_BROWSER_USE_NODE_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_CONFIG_PATH",
@@ -1498,6 +1498,8 @@ async function testWorkerRuntimeSettings() {
         { account: null, requiresOpenaiAuth: false },
         process.platform === "win32" && configuration === "",
       );
+      const browserNode = path.join(fixture.root, "browser node");
+      process.env.CODEX_BROWSER_USE_NODE_PATH = browserNode;
       const python = path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
         fixture.root,
@@ -1505,6 +1507,9 @@ async function testWorkerRuntimeSettings() {
         "bin",
         "python",
       );
+      const systemPython = process.platform === "win32" ? "python" : "python3";
+      const workerPython = (index: number) =>
+        index === 0 ? systemPython : `${helperPython}-${index} `;
       process.env.PYTHON = python;
       const gitEnvironment = workerGitEnvironment(fixture.root);
       await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
@@ -1646,7 +1651,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             `scan-${index}`,
           );
           const receiptRoot = path.parse(workerUsageDirectory).root;
+          const pluginReadRoot =
+            index === 0
+              ? path.join(fixture.root, `plugin-${index}`)
+              : undefined;
           const parentSandbox = {
+            pluginReadRoot,
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
               ...(nestedReceipts ? [] : [workerUsageDirectory]),
@@ -1715,6 +1725,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...deniedWorkerPermissionProfile,
               filesystem: {
                 ...deniedWorkerPermissionProfile.filesystem,
+                ...(pluginReadRoot === undefined
+                  ? {}
+                  : { [pluginReadRoot]: { ".": "read" } }),
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
                 ...(!nestedReceipts || process.platform !== "linux"
@@ -1741,6 +1754,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ? undefined
                 : {
                     ...workerScanEnvironment(fixture.root, index),
+                    CODEX_BROWSER_USE_NODE_PATH: path.join(
+                      fixture.root,
+                      `scan browser node ${index}`,
+                    ),
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                     [headerKey]: ` synthetic-canonical-header-${index}\t`,
@@ -2060,7 +2077,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ? ["api", `background jobs ${index}`]
                   : undefined,
               filePaths: index % 2 === 0 ? [`background jobs ${index}`] : [],
-              pythonCommand: `${helperPython}-${index} `,
+              pythonCommand: workerPython(index),
             },
           }),
       );
@@ -2157,7 +2174,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
-            path.join(fixture.root, "ambient-plugin"),
+            workerConfigurations[index].parentSandbox.pluginReadRoot ??
+              path.join(fixture.root, "ambient-plugin"),
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
@@ -2269,6 +2287,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               nodePaths[index],
           );
           assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
+          assert.equal(
+            invocation.runtimeEnvironment.CODEX_BROWSER_USE_NODE_PATH,
+            selectedProvider.environment?.CODEX_BROWSER_USE_NODE_PATH ??
+              browserNode,
+          );
           assert.equal(invocation.providerHeader, providerHeaders[index]);
 
           assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
@@ -2479,7 +2502,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             "mcp_servers.cs_artifacts.command": process.execPath,
             "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
               undefined,
-            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
+              workerPython(index),
             "mcp_servers.cs_artifacts.args.0": path.join(
               fixture.root,
               `plugin-${index}`,

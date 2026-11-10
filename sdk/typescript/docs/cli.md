@@ -538,7 +538,9 @@ through inheritance. Other users must not have permission to set reparse data
 on the destination directory itself.
 `--archive-existing` moves earlier output to a sibling directory with a unique
 suffix, such as `results.previous-ab12cd34` for an output directory named
-`results`. Use `--dry-run` to preview the move.
+`results`. If adding the suffix exceeds the filesystem's filename limit on POSIX,
+the archive uses a short sibling name starting with `.previous-` and a hash of the
+original filename. Use `--dry-run` to preview the move.
 
 Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
 optional export fails, the scan can still complete. Use the
@@ -925,7 +927,7 @@ completed scans that added no findings. `--max-discovery-runs` caps the total
 number started, including failures. `--max-time` stops discovery and returns
 the findings from completed scans.
 
-For TypeScript, see the [SDK Deep Scan example](../README.md#configure-deep-scans).
+For TypeScript, see the [SDK Deep Scan example](sdk.md#configure-deep-scans).
 
 Use project-file `scan.deep` settings or legacy
 `$CODEX_HOME/codex-security/config.toml` defaults. Counts must be positive except
@@ -1078,7 +1080,7 @@ client during the scan, or receiving a canceled hosted execution records
 Applications can choose how to collect and export these observations.
 
 For filesystem and approval behavior, see the
-[local security model](../README.md#local-security-model).
+[local security model](sdk.md#local-security-model).
 
 ### Environment variables
 
@@ -1125,6 +1127,12 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
+If a scan reports that its state directory overlaps a protected root, choose a
+private directory in a separate tree, such as a sibling of the protected root.
+Set `CODEX_SECURITY_STATE_DIR` for local scans or `stateDirectory` on a hosted
+scan request. SDK callers handling `OutputInsideProtectedRootError.pathKind`
+can match `"state"` for this case.
+
 If credential-home preparation fails, the error includes the underlying
 filesystem diagnostic. For permission or read-only filesystem errors, check
 the reported path or set `CODEX_SECURITY_STATE_DIR` to a private, writable
@@ -1133,6 +1141,11 @@ and does not migrate existing credentials or reports.
 
 Sandbox startup errors include the native diagnostic followed by a command to
 reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
+
+If Windows Application Control blocks `windows.node` while validating a scan
+output directory, look for the module's block event in Event Viewer under
+Applications and Services Logs → Microsoft → Windows → CodeIntegrity → Operational.
+[Microsoft's App Control event reference](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/operations/event-id-explanations)
 
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
@@ -1213,8 +1226,9 @@ work is needed, the scan is preserved and you can run `scans match --all`.
 
 A scan with a cost limit requires complete token usage for its recorded scan,
 worker, and custom validation sessions before the SDK returns a completed result.
-Verifying compressed `.jsonl.zst` sessions requires Python 3.14 or later, or
-`backports.zstd` installed in the selected Python environment.
+The workbench reads compressed `.jsonl.zst` sessions with `compression.zstd`
+(Python 3.14+) or `backports.zstd` when available. Otherwise it uses the
+Node.js decoder bundled with the plugin.
 Missing or unreadable usage fails budget verification. Without a limit, usage
 reporting remains best effort.
 
@@ -1339,6 +1353,12 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
+If an ordinary attempt finds its checkout path already occupied, it stops before
+fetching. Use `--recover` to scan in a fresh checkout, or inspect and move the
+existing checkout before an ordinary retry.
+If checkout cleanup previously failed, the next invocation removes it only when
+its marker still identifies the same directory and scan attempt. Older or
+replacement checkouts without a matching marker are preserved.
 Completed results are skipped only when their saved contract and seal are valid
 and the manifest records a completed scan. Damaged or unsuccessful results get a
 new attempt, including with `--recover`, while the old artifacts remain available.
@@ -1552,9 +1572,13 @@ Enterprise repository URL or its Cloud ID. Either works for retries. If
 several connectors share the URL, use the ID. You can import before the
 repository's first native scan.
 
-Cloud requires a file-backed ChatGPT login. To use your regular Codex login,
-set `cli_auth_credentials_store = "file"` in Codex `config.toml`, then sign in
-again with the ChatGPT account you want to use.
+Cloud requires a file-backed ChatGPT login. Codex Security signs in with the
+`cli_auth_credentials_store` set in your Codex `config.toml`
+(`~/.codex/config.toml`, or `$CODEX_HOME/config.toml`). Without it, the login
+can be saved in the system keyring. To publish, set
+`cli_auth_credentials_store = "file"` there, then run `codex-security login`
+with the ChatGPT account you want to use. `codex-security login status`
+checks the current sign-in without changing credential storage.
 
 ### Review the Cloud destination
 
@@ -1701,9 +1725,12 @@ prefix of at least eight characters, or `latest` for the current repository.
 Local sealed artifacts are required. Dry runs need no login or network access.
 
 Uploads require ChatGPT credentials saved to a file. Set
-`cli_auth_credentials_store = "file"` in Codex `config.toml`, then sign in again.
-Cloud publication rejects automatic/keyring storage even when `auth.json` exists,
-because that file may be stale or belong to another account.
+`cli_auth_credentials_store = "file"` in Codex `config.toml`, then run
+`codex-security login` again. Login, scans and other commands use that setting
+for the Codex Security sign-in.
+A dedicated login using automatic storage can publish if Codex Security
+recorded the native file fallback. An unverified file can belong to another
+account, so Cloud publication requires an explicit file store for an ambient login.
 
 Use a positional scan directory or repeated `--scan-dir PATH` for artifacts
 outside history. Each must contain one completed sealed scan, not a bulk-run
@@ -2094,6 +2121,12 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
+Saved scan logs retain the finishing turn, including its final response, and
+exclude later turns once the scan records a completion boundary. Older scans
+retain the full history of their attributed sessions and keep their existing
+worker-selection boundaries. This also applies to logs attached with
+`feedback --include-logs`.
+
 Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
 work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder
@@ -2109,6 +2142,18 @@ codex-security scans resume SCAN_ID
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
+
+On Windows, keep the protected `.codex-security-resume` directory in the scan
+output. It lets the workbench verify the original output even before the first
+checkpoint. If an older scan stopped with an empty output, start a new scan with
+`codex-security scans rerun SCAN_ID`.
+
+New Windows Deep Scans also record the checkout's native volume and file ID
+when the filesystem supplies them. Validation and remediation verify the same
+checkout identity. An older scan can resume across Python
+versions when its saved checkout identity can be verified. If the workbench
+cannot verify it, resume with the Python runtime that started the scan or use
+`codex-security scans rerun SCAN_ID` to start a new scan.
 
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
 settings/instructions. Knowledge-bearing scans save their extracted documents in

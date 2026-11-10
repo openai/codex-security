@@ -36,9 +36,24 @@ export async function resolvePythonCommand(
 
   const platform = options.platform ?? process.platform;
   const pathImplementation = platform === "win32" ? path.win32 : path.posix;
-  const cacheDirectory =
-    (options.cacheDirectory ?? process.env.XDG_CACHE_HOME) ||
-    pathImplementation.join(options.homeDirectory ?? homedir(), ".cache");
+  const systemPython = platform === "win32" ? "python" : "python3";
+  let cacheDirectory = options.cacheDirectory ?? process.env.XDG_CACHE_HOME;
+  if (!cacheDirectory) {
+    try {
+      cacheDirectory = pathImplementation.join(
+        options.homeDirectory ?? homedir(),
+        ".cache",
+      );
+    } catch (error) {
+      // A numeric Linux UID can have no home directory for the managed cache.
+      if (
+        platform === "linux" &&
+        (error as { info?: NodeJS.ErrnoException }).info?.code === "ENOENT"
+      )
+        return systemPython;
+      throw error;
+    }
+  }
   const bundledPythonRoot = pathImplementation.join(
     cacheDirectory,
     "codex-runtimes",
@@ -65,7 +80,7 @@ export async function resolvePythonCommand(
       return candidate;
     }
   }
-  return platform === "win32" ? "python" : "python3";
+  return systemPython;
 }
 
 /**

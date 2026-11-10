@@ -20,7 +20,7 @@ security context:
 
 The [task map](#choose-a-task) below also gives explicit skill names. Local scans
 do not require the optional Cloud connection. To read existing Cloud findings,
-follow the separate [Cloud setup](../sdk/typescript/README.md#read-existing-cloud-findings).
+follow the separate [Cloud setup](../sdk/typescript/docs/sdk.md#read-existing-cloud-findings).
 
 The terminal package includes the plugin used by its own scans. You can follow
 [the CLI quick start](../README.md#quick-start) without setting up an interactive
@@ -91,7 +91,7 @@ For automation, scan exit codes distinguish these outcomes:
 
 Coverage gaps and investigation notes do not by themselves fail a completed
 scan. See [scan output](../sdk/typescript/docs/cli.md#scan-options-and-output)
-and [SDK results](../sdk/typescript/README.md#read-results) for the saved fields
+and [SDK results](../sdk/typescript/docs/sdk.md#read-results) for the saved fields
 and failure output.
 
 ### Check a revision-range scan for missing files
