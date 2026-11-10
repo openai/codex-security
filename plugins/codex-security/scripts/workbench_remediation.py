@@ -9,7 +9,6 @@ import io
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 from collections.abc import Callable
 from contextlib import ExitStack, suppress
@@ -48,14 +47,36 @@ SCAN_STATUS_ERROR = "Remediation is available only for successfully completed sc
 
 
 def reverse_reviewed_patch(
-    reverse: Callable[..., subprocess.CompletedProcess[bytes]],
+    target: Path,
     checkout: Path,
     metadata: Path | None,
     pinned_metadata: Path | None,
     patch_digest: str,
     pins: ExitStack,
-) -> Path | None:
-    """Reverse the reviewed bytes, returning the selected short Git reference if Windows needed it."""
+    patch: Path,
+    pathspec: str | None,
+) -> tuple[Path | None, Path | None]:
+    """Reverse reviewed bytes and select the Git references for subsequent content snapshots."""
+
+    arguments = ["--reverse", "--whitespace=nowarn"]
+    if pathspec is None:
+        arguments.append("--no-index")
+    elif pathspec != ".":
+        arguments.append(f"--directory={pathspec}")
+    arguments.append(str(patch))
+
+    def reverse(*, git_dir: Path | None, check: bool = False):
+        return git_command(
+            checkout,
+            "apply",
+            *(["--check"] if check else []),
+            *arguments,
+            text=False,
+            git_dir=git_dir,
+            work_tree=checkout if git_dir else None,
+            environment_overrides={"LC_ALL": "C", "LANGUAGE": "C"} if check else None,
+        )
+
     applied = reverse(git_dir=metadata)
     short = None
     diagnostic = b"fatal: '$GIT_DIR' too big"
@@ -83,7 +104,12 @@ def reverse_reviewed_patch(
         raise SystemExit(
             "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
         )
-    return short
+    replay_root = None
+    if pathspec is None and short is not None:
+        selected_root = git_output(target, "rev-parse", "--show-toplevel")
+        if selected_root and Path(selected_root).samefile(target):
+            replay_root = short
+    return short, replay_root
 
 
 def prepare_replay_gitfile(

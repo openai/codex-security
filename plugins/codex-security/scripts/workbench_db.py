@@ -2391,38 +2391,16 @@ def require_reviewed_patch_applied(
             junctions = copy_directory_excluding(target, checkout, excluded)
         else:
             _, junctions = copy_git_worktree_files(target, checkout_root, excluded)
-        arguments = ["--reverse", "--whitespace=nowarn"]
-        if unversioned:
-            arguments.append("--no-index")
-        elif pathspec != ".":
-            arguments.append(f"--directory={pathspec}")
-        arguments.append(str(reviewed_patch))
-
-        def reverse_patch(*, git_dir: Path | None, check: bool = False):
-            return git_command(
-                checkout_root,
-                "apply",
-                *(["--check"] if check else []),
-                *arguments,
-                text=False,
-                git_dir=git_dir,
-                work_tree=checkout_root if git_dir else None,
-                environment_overrides={"LC_ALL": "C", "LANGUAGE": "C"} if check else None,
-            )
-
-        short = remediation_state.reverse_reviewed_patch(
-            reverse_patch,
+        short, replay_root = remediation_state.reverse_reviewed_patch(
+            target,
             checkout_root,
             metadata,
             pinned_metadata,
             remediation["patch_digest"],
             pins,
+            reviewed_patch,
+            None if unversioned else pathspec,
         )
-        replay_root = None
-        if unversioned and short is not None:
-            selected_root = git_output(target, "rev-parse", "--show-toplevel")
-            if selected_root and Path(selected_root).samefile(target):
-                replay_root = short
         restore_directory_junctions(
             target if unversioned else repository,
             checkout if unversioned else checkout_root,
@@ -2446,7 +2424,10 @@ def require_reviewed_patch_applied(
                 "-c",
                 "core.autocrlf=input",
                 "apply",
-                *arguments,
+                "--reverse",
+                "--whitespace=nowarn",
+                "--no-index",
+                str(reviewed_patch),
                 text=True,
                 git_dir=short,
                 work_tree=checkout if short else None,

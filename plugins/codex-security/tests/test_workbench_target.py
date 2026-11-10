@@ -318,7 +318,9 @@ def test_replay_gitfile_remains_bound_until_the_private_replay_is_removed(tmp_pa
 @pytest.mark.parametrize(
     "change", ["foreign-pointer", "changed-patch", "replaced-parent", "writable-scratch"]
 )
-def test_short_git_reference_refuses_changed_replay_inputs(tmp_path: Path, change: str) -> None:
+def test_short_git_reference_refuses_changed_replay_inputs(
+    tmp_path: Path, change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from contextlib import ExitStack
 
     import windows_scan_local_files as windows
@@ -344,19 +346,20 @@ def test_short_git_reference_refuses_changed_replay_inputs(tmp_path: Path, chang
     else:
         subprocess.run(["icacls.exe", str(scratch), "/grant", "*S-1-1-0:(WD)"], check=True)
     failed = subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
+    monkeypatch.setattr(workbench_remediation, "git_command", lambda *args, **kwargs: failed)
     with ExitStack() as pins:
         selected = windows.pin_replay_metadata(pins, metadata, scratch)
         if change == "writable-scratch":
             assert selected is None
             with pytest.raises(SystemExit, match="Could not bind"):
                 workbench_remediation.reverse_reviewed_patch(
-                    lambda **_: failed, worktree, metadata, selected, expected, pins
+                    tmp_path, worktree, metadata, selected, expected, pins, patch, "."
                 )
             assert not marker.exists()
             return
         with pytest.raises(SystemExit, match="Could not verify|Patch digest does not match"):
             workbench_remediation.reverse_reviewed_patch(
-                lambda **_: failed, worktree, metadata, selected, expected, pins
+                tmp_path, worktree, metadata, selected, expected, pins, patch, "."
             )
     if change == "foreign-pointer":
         assert marker.read_bytes() == b"gitdir: foreign\n"
@@ -500,6 +503,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
     populated: bool,
 ) -> None:
     import workbench_db
+    import workbench_remediation
 
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
@@ -517,7 +521,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
     junction = nested / "linked"
     junction_factory(junction, outside)
     relative_junction = junction.relative_to(repository)
-    original_command = workbench_db.git_command
+    original_command = workbench_remediation.git_command
     original_restore = workbench_db.restore_directory_junctions
     reversed_roots: list[Path] = []
     restored: list[Path] = []
@@ -541,7 +545,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
         original_restore(source, destination, junctions)
         restored.append(destination)
 
-    monkeypatch.setattr(workbench_db, "git_command", command)
+    monkeypatch.setattr(workbench_remediation, "git_command", command)
     monkeypatch.setattr(workbench_db, "restore_directory_junctions", restore)
     assert_reviewed_change(
         target,
