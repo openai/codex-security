@@ -11,6 +11,12 @@ use std::{
     path::PathBuf,
 };
 
+// These descriptors anchor named lookups and metadata checks without listing the directory.
+#[cfg(target_os = "linux")]
+const DIRECTORY_ACCESS: i32 = libc::O_PATH;
+#[cfg(not(target_os = "linux"))]
+const DIRECTORY_ACCESS: i32 = libc::O_RDONLY;
+
 pub(crate) struct ScanReadRootBackend {
     path: PathBuf,
     directory: Option<File>,
@@ -93,7 +99,7 @@ impl ScanReadRootBackend {
         let directory = open_at(
             libc::AT_FDCWD,
             path.as_os_str(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            DIRECTORY_ACCESS | libc::O_DIRECTORY | libc::O_NOFOLLOW,
         )
         .map_err(|error| failure("Cannot open scan directory", error))?;
         let opened = directory
@@ -139,7 +145,7 @@ impl ScanReadRootBackend {
             let directory = match open_at(
                 parent,
                 OsStr::new(part),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                DIRECTORY_ACCESS | libc::O_DIRECTORY | libc::O_NOFOLLOW,
             ) {
                 Ok(directory) => directory,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
