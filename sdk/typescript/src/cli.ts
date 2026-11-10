@@ -10384,17 +10384,7 @@ function projectPreviewCommand(directory: string, path?: string): string {
   // Keep terminal controls out of suggested commands and quote shell syntax.
   if (escapeTerminalText(file) !== file)
     return "codex-security scan . -c FILE --dry-run (replace FILE with the selected path)";
-  if (!/^[a-zA-Z0-9._/:-]+$/u.test(file)) {
-    const quoted =
-      process.platform === "win32"
-        ? file.replaceAll(
-            /['\u2018\u2019\u201a\u201b]/gu,
-            (quote) => quote + quote,
-          )
-        : file.replaceAll("'", "'\"'\"'");
-    file = `'${quoted}'`;
-  }
-  return `codex-security scan . -c ${file} --dry-run`;
+  return `codex-security scan . -c ${quoteCliPath(file)} --dry-run`;
 }
 
 function diagnosticValue(value: unknown): string {
