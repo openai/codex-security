@@ -71,6 +71,7 @@ _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
@@ -468,9 +469,11 @@ def _verify_handle_path(handle: int, expected_path: Path, *, opened_name: bool =
         raise _invalid_path(expected_path, "opened file resolved outside its verified scan path")
 
 
-def _verify_directory(handle: int, expected_path: Path) -> None:
+def _verify_directory(handle: int, expected_path: Path, checkout: bool = False) -> None:
     info = _attributes(handle)
-    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT and (
+        not checkout or not info.ReparseTag or info.ReparseTag & _REPARSE_TAG_NAME_SURROGATE
+    ):
         raise _invalid_path(expected_path, "scan-local directories must not be reparse points")
     if not info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY:
         raise _invalid_path(expected_path, "expected a scan-local directory")
@@ -506,6 +509,7 @@ def _open_directory(
     missing_ok: bool = False,
     missing_is_path_error: bool = True,
     movable: bool = False,
+    checkout: bool = False,
 ) -> _OwnedHandle | None:
     try:
         handle = _create_file(
@@ -526,7 +530,7 @@ def _open_directory(
     if handle is not None:
         try:
             assert handle.value is not None
-            _verify_directory(handle.value, path)
+            _verify_directory(handle.value, path, checkout)
         except BaseException:
             handle.close()
             raise
@@ -731,24 +735,44 @@ def deep_resume_output_identity(scan_dir: Path) -> list[int]:
         return _pinned_resume_identity(parent, child, retained, grants)
 
 
-def _resume_directory_id(handle: int, path: Path) -> tuple[int, int]:
+def _full_directory_id(handle: int, path: Path) -> tuple[int, int] | None:
     info = _FileIdInfo()
-    if _GetFileInformationByHandleEx(
+    if not _GetFileInformationByHandleEx(
         handle, _FILE_ID_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
     ):
-        volume, file_id = info.VolumeSerialNumber, int.from_bytes(info.FileId, "little")
-    elif ctypes.get_last_error() in {50, 87}:  # ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER.
-        # Some filesystems expose only the legacy 64-bit file index.
-        legacy = _ByHandleFileInformation()
-        if not _GetFileInformationByHandle(handle, ctypes.byref(legacy)):
-            _raise_last_error("GetFileInformationByHandle", path)
-        volume = legacy.dwVolumeSerialNumber
-        file_id = (legacy.nFileIndexHigh << 32) | legacy.nFileIndexLow
-    else:
+        if ctypes.get_last_error() in {50, 87}:  # ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER.
+            return None
         _raise_last_error("GetFileInformationByHandleEx(FileIdInfo)", path)
+    file_id = int.from_bytes(info.FileId, "little")
     if not file_id:
         raise _invalid_path(path, "The resume directory has no stable file identity.")
-    return volume, file_id
+    return info.VolumeSerialNumber, file_id
+
+
+def _resume_directory_id(handle: int, path: Path) -> tuple[int, int]:
+    if (identity := _full_directory_id(handle, path)) is not None:
+        return identity
+    # Some filesystems expose only the legacy 64-bit file index.
+    legacy = _ByHandleFileInformation()
+    if not _GetFileInformationByHandle(handle, ctypes.byref(legacy)):
+        _raise_last_error("GetFileInformationByHandle", path)
+    file_id = (legacy.nFileIndexHigh << 32) | legacy.nFileIndexLow
+    if not file_id:
+        raise _invalid_path(path, "The resume directory has no stable file identity.")
+    return legacy.dwVolumeSerialNumber, file_id
+
+
+@contextlib.contextmanager
+def pinned_resume_checkout(target: Path) -> Iterator[tuple[int, int] | None]:
+    """Keep the canonical checkout fixed while reading its full native identity and snapshot."""
+    with contextlib.ExitStack() as pins:
+        for directory in (*reversed(target.parents), target):
+            # A source provider directory may carry a reparse tag without redirecting its name.
+            handle = _open_directory(directory, checkout=True)
+            assert handle is not None
+            pins.enter_context(handle)
+        assert handle.value is not None
+        yield _full_directory_id(handle.value, target)
 
 
 def _pinned_resume_identity(parent: int, child: int, retained: Path, grants: int) -> list[int]:

@@ -31,6 +31,8 @@
 - allow more time for npm package availability ([#2532](https://github.com/openai/codex-security/pull/2532))
 - use the singular for one review round in Deep Scan stop reasons ([#2443](https://github.com/openai/codex-security/pull/2443))
 - skip DOCX content control placeholder text ([#2490](https://github.com/openai/codex-security/pull/2490))
+- publish new patch files on musl without hard links ([#2530](https://github.com/openai/codex-security/pull/2530))
+- preserve Windows checkout identity across Python versions ([#2541](https://github.com/openai/codex-security/pull/2541))
 
 </details>
 
