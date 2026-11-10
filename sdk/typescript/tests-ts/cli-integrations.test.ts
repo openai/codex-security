@@ -14,6 +14,7 @@ async function isolatedCli(root: string, environment: NodeJS.ProcessEnv = {}) {
     USERPROFILE: home,
     XDG_CACHE_HOME: join(root, "cache"),
     XDG_CONFIG_HOME: join(root, "config"),
+    XDG_DATA_HOME: join(root, "data"),
     CODEX_HOME: join(root, "codex"),
     CI: "1",
     ...environment,
