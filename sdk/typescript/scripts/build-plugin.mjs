@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { basename, toNamespacedPath } from "node:path/win32";
 import { isDeepStrictEqual } from "node:util";
 import {
   chmod,
@@ -86,8 +87,15 @@ export async function buildBundledPlugin({
     }),
   );
 
-  await mkdir(dirname(destination), { recursive: true });
-  const staging = await mkdtemp(join(dirname(destination), ".plugin-build-"));
+  const parent = dirname(destination);
+  await mkdir(parent, { recursive: true });
+  const prefix = join(parent, ".plugin-build-");
+  // Windows mkdtemp needs the extended-length prefix. Keep the caller's path
+  // spelling for the compiler, publication, and cleanup.
+  const staging =
+    process.platform === "win32"
+      ? join(parent, basename(await mkdtemp(toNamespacedPath(prefix))))
+      : await mkdtemp(prefix);
   const staged = join(staging, "bundle");
   const previous = join(staging, "previous");
   let preservePrevious = false;

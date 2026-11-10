@@ -32,6 +32,7 @@ import {
   readOperationTelemetry,
 } from "../src/operation-telemetry.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { useTestPython } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
@@ -40,6 +41,10 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
+const pythonOnPath =
+  process.platform === "win32"
+    ? useTestPython(false)
+    : () => Bun.which("python3") ?? Bun.which("python");
 afterEach(cleanup);
 
 async function interruptedScan(
@@ -134,7 +139,7 @@ async function interruptedScan(
       }) + "\n",
     );
   }
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonOnPath();
   if (python === null) throw new Error("Python is required for this test.");
   const environment = {
     PATH: process.env["PATH"],
@@ -1301,7 +1306,7 @@ test.each(["chatgpt", "api-key"] as const)(
     const promptFile = join(root, "post-scan.md");
     const postScanPrompt = "Keep these original post-scan instructions.\n";
     await writeFile(promptFile, postScanPrompt);
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     if (python === null) throw new Error("Python is required for this test.");
     const environment = {
       PATH: process.env["PATH"],
