@@ -1,6 +1,7 @@
 import { nodeCommand, gitText } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import {
+  chmod,
   cp,
   mkdir,
   readFile,
@@ -397,6 +398,35 @@ describe("security policy generation", () => {
     expect(inventory.policyPaths).toEqual(["objects/SECURITY.md"]);
     expect(inventory.gitMetadataPaths).toEqual([]);
   });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "inventories policies when an unrelated leaf directory only permits listing",
+    async () => {
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const leaf = join(f.repository, "data");
+      await mkdir(leaf);
+      await writeFile(join(leaf, "sample.txt"), "fixture\n");
+      await writeFile(join(f.repository, "SECURITY.md"), POLICY);
+      const target = await resolveSecurityPolicyTarget(f.repository);
+      try {
+        await chmod(leaf, 0o400);
+        expect(
+          (await inspectSecurityPolicySources(target)).policyPaths,
+        ).toEqual(["SECURITY.md"]);
+        await chmod(leaf, 0o700);
+        await writeFile(join(leaf, "SECURITY.md"), POLICY);
+        await chmod(leaf, 0o400);
+        await expect(
+          inspectSecurityPolicySources(target),
+        ).rejects.toMatchObject({
+          code: "EACCES",
+        });
+      } finally {
+        await chmod(leaf, 0o700);
+      }
+    },
+  );
 
   test("leaves Git-ignored dependencies out of the policy inventory", async () => {
     const f = await fixture();
