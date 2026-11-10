@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -514,7 +516,11 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
           const executable = Bun.which("rg", { PATH: env[pathKey] });
           expect(executable).not.toBeNull();
           const quoted = lookup !== "extension precedence";
-          const tools = join(f.root, quoted ? "tools;version" : "tools");
+          const quotedName =
+            lookup === "double-quoted semicolon"
+              ? "worker's tools;version"
+              : "tools;version";
+          const tools = join(f.root, quoted ? quotedName : "tools");
           mkdirSync(tools);
           // Ordinary Node lookup prefers COM; the existing raw bridge prefers EXE.
           const extension = !quoted && !bridge ? "com" : "exe";
@@ -525,7 +531,12 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
               join(tools, `rg.${extension === "com" ? "exe" : "com"}`),
             );
           const quote = lookup === "single-quoted semicolon" ? "'" : '"';
-          env[pathKey] = quoted ? `${quote}${tools}${quote}` : tools;
+          // A single-quoted absolute path can contain a quote from the host profile.
+          const entry =
+            lookup === "single-quoted semicolon"
+              ? relative(f.repo, tools)
+              : tools;
+          env[pathKey] = quoted ? `${quote}${entry}${quote}` : entry;
           if (bridge) {
             env["HOME"] = `${f.root}${sep}home-\ud800`;
             expect(env["HOME"].isWellFormed()).toBe(false);
@@ -670,6 +681,97 @@ for (const scope of [".", "src", "./src", "src/résumé.py"]) {
     );
   });
 }
+
+test("make-repo-scope-input reports the count for its registered inventory", () => {
+  const f = fixture();
+  f.write("source");
+  const args = f.scopeArgs("source");
+  const scanDir = join(f.root, "scan");
+  mkdirSync(scanDir);
+  const output = join(scanDir, "scoped-source-input.jsonl");
+  const receipt = join(scanDir, "scoped-source-input.receipt.json");
+  const otherScopes = join(f.root, "alternate.json");
+  copyFileSync(args[1]!, otherScopes);
+  const scanId = randomUUID();
+  const env = {
+    ...f.toolEnvironment,
+    CODEX_SECURITY_SCAN_DIR: scanDir,
+    CODEX_SECURITY_SCAN_ID: scanId,
+    CODEX_SECURITY_REPOSITORY: f.repo + sep + ".",
+    CODEX_SECURITY_TARGET_PATHS_FILE: args[1]!,
+  };
+  const run = (overrides: NodeJS.ProcessEnv = {}, out = output) => {
+    const result = f.run("make-repo-scope-input", [...args, "--out", out], {
+      ...env,
+      ...overrides,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trimEnd()).toBe(`Wrote 1 scoped paths to ${out}`);
+  };
+  for (const mismatch of [
+    { CODEX_SECURITY_SCAN_ID: "" },
+    { CODEX_SECURITY_REPOSITORY: f.root },
+    { CODEX_SECURITY_TARGET_PATHS_FILE: otherScopes },
+    { CODEX_SECURITY_SCAN_DIR: f.root },
+  ]) {
+    run(mismatch);
+    expect(existsSync(receipt)).toBe(false);
+  }
+  run({}, f.out);
+  expect(existsSync(receipt)).toBe(false);
+
+  const existing = statSync(output, { bigint: true });
+  run();
+  const inventory = readFileSync(output);
+  const written = statSync(output, { bigint: true });
+  expect(written.ino).toBe(existing.ino);
+  expect(written.mode).toBe(existing.mode);
+  if (process.platform !== "win32") {
+    expect(statSync(receipt).mode & 0o777).toBe(0o600);
+  }
+  expect(JSON.parse(readFileSync(receipt, "utf8"))).toEqual({
+    scanId,
+    repository: f.repo,
+    count: 1,
+  });
+  rmSync(receipt);
+  mkdirSync(receipt);
+  run();
+  expect(readFileSync(output)).toEqual(inventory);
+});
+
+test.skipIf(process.getuid?.() === 0)(
+  "registered scope inventory preserves read-only output and reports the write failure",
+  () => {
+    const f = fixture();
+    f.write("source");
+    const args = f.scopeArgs("source");
+    const output = join(f.root, "scoped-source-input.jsonl");
+    writeFileSync(output, "existing inventory");
+    chmodSync(output, 0o444);
+    try {
+      const result = f.run(
+        "make-repo-scope-input",
+        [...args, "--out", output],
+        {
+          ...f.toolEnvironment,
+          CODEX_SECURITY_SCAN_DIR: f.root,
+          CODEX_SECURITY_SCAN_ID: randomUUID(),
+          CODEX_SECURITY_REPOSITORY: f.repo,
+          CODEX_SECURITY_TARGET_PATHS_FILE: args[1]!,
+        },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(readFileSync(output, "utf8")).toBe("existing inventory");
+      expect(existsSync(join(f.root, "scoped-source-input.receipt.json"))).toBe(
+        false,
+      );
+    } finally {
+      chmodSync(output, 0o600);
+    }
+  },
+);
 
 test("make-repo-scope-input retains explicit and ignored tracked files without widening directory scope", () => {
   const f = fixture();

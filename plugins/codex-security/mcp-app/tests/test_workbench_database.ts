@@ -93,7 +93,11 @@ test("retains SQLite open errors and recovery guidance", async () => {
     openWorkbenchDatabase(databasePath),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.equal((error as Error & { errcode: number }).errcode, 14);
+      const resultCode = (error as Error & { errcode: number }).errcode;
+      assert.equal(resultCode & 0xff, 14);
+      assert.throws(() => new DatabaseSync(databasePath).close(), {
+        errcode: resultCode,
+      });
       assert.equal(
         (error as Error & { code: string }).code,
         "ERR_SQLITE_ERROR",
@@ -170,6 +174,47 @@ test("every released schema upgrades to the same current schema and remains idem
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   }
 });
+
+test("log completion migration leaves legacy terminal boundaries unknown", (t) => {
+  const database = memory(t, 49);
+  insertScan(database);
+  database.exec(
+    "UPDATE scans SET status = 'complete', completed_at = 'artifact-time', updated_at = 'later-edit'",
+  );
+
+  applyMigrations(database);
+
+  assert.deepEqual(
+    {
+      ...database
+        .prepare("SELECT completed_at, updated_at, log_completed_at FROM scans")
+        .get(),
+    },
+    {
+      completed_at: "artifact-time",
+      updated_at: "later-edit",
+      log_completed_at: null,
+    },
+  );
+});
+
+for (const version of [48, 50, 63]) {
+  test(`preserves terminal logs from preview migration ${version}`, (t) => {
+    const database = memory(t, version - 1);
+    const boundary = migrations.find((item) => item.version === 64)!;
+    applyMigrations(database, [{ ...boundary, version }]);
+    insertScan(database);
+    database.exec("UPDATE scans SET log_completed_at = 'saved-boundary'");
+    applyMigrations(database);
+    applyMigrations(database);
+    assertMigrationNames(database, version, 63, 64);
+    assert.equal(
+      database.prepare("SELECT log_completed_at FROM scans").get()
+        ?.log_completed_at,
+      "saved-boundary",
+    );
+  });
+}
 
 for (const previewVersion of [58, 59]) {
   test(`preserves the saved rubric from preview migration ${previewVersion}`, (t) => {
@@ -1048,27 +1093,28 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
       `"findings":${index},"opaqueId":9007199254740993`,
     ),
   );
+  const insertWorkflow = database.prepare(
+    "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
+  );
+  const insertReview = database.prepare(
+    "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
+  );
+  // run() returns the inserted row ID even when the fixture ignores the result.
+  insertWorkflow.setReadBigInts(true);
+  insertReview.setReadBigInts(true);
   for (const [index, id] of workflowIds.entries()) {
-    database
-      .prepare(
-        "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
-      )
-      .run(9007199254740993n + BigInt(index), id, states[index]);
+    insertWorkflow.run(9007199254740993n + BigInt(index), id, states[index]);
     for (const [keyIndex, key] of reviewKeys.entries()) {
-      database
-        .prepare(
-          "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
-        )
-        .run(
-          9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
-          id,
-          key,
-          JSON.stringify({
-            ...binding,
-            promptDigest: `prompt-${index}-${keyIndex}`,
-          }),
-          JSON.stringify({ retained: `${index}-${keyIndex}` }),
-        );
+      insertReview.run(
+        9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
+        id,
+        key,
+        JSON.stringify({
+          ...binding,
+          promptDigest: `prompt-${index}-${keyIndex}`,
+        }),
+        JSON.stringify({ retained: `${index}-${keyIndex}` }),
+      );
     }
   }
   const before = schema(database);

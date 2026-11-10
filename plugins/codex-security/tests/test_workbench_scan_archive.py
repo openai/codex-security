@@ -160,6 +160,46 @@ def test_archive_requires_previous_directory_when_artifacts_exist(tmp_path: Path
     assert "archived scan directory is required" in str(rejected["stderr"])
 
 
+@pytest.mark.skipif(os.name != "posix", reason="uses the filesystem's POSIX component limit")
+def test_archive_keeps_output_with_a_full_length_filename(tmp_path: Path) -> None:
+    limit = os.pathconf(tmp_path, "PC_NAME_MAX")
+    if limit < 0:
+        pytest.skip("This filesystem does not report a component limit")
+    name = "a" * (limit - 1) + "b"
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    scan_dir = tmp_path / name
+    repository.mkdir()
+    scan_dir.mkdir(mode=0o700)
+    previous = register_scan(state_dir, repository, scan_dir)
+    fail_scan(state_dir, str(previous["scanId"]), "Interrupted fixture scan.")
+    (scan_dir / "report.md").write_text("original report\n")
+
+    current = register_scan(state_dir, repository, scan_dir, "--archive-existing")
+    archived = Path(str(current["archivedScanDir"]))
+    assert archived.parent == tmp_path
+    assert (archived / "report.md").read_text() == "original report\n"
+    assert not (scan_dir / "report.md").exists()
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT scan_dir FROM scans WHERE id = ?", (previous["scanId"],)
+        ).fetchone() == (str(archived),)
+
+    other = tmp_path / (name[:-1] + "c")
+    other.mkdir(mode=0o700)
+    rejected = register_scan(
+        state_dir,
+        repository,
+        other,
+        "--archive-existing",
+        "--archived-scan-dir",
+        str(archived),
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert "previous sibling" in str(rejected["stderr"])
+
+
 def test_archive_does_not_replace_a_running_scan(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"

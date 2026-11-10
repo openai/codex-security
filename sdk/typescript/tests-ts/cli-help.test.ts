@@ -154,7 +154,8 @@ describe("CLI help", () => {
     const example = option(text, "--codex").match(/--codex ('[^']+')/u)?.[1];
     expect(example).toBeDefined();
     // Bun's shell parses the displayed quoting on Unix and Windows.
-    const value = await $`printf '%s' ${{ raw: example! }}`.text();
+    const value =
+      await $`${process.execPath} -e "process.stdout.write(process.argv[1])" ${{ raw: example! }}`.text();
     expect(parseCodexOverrides([value])).toMatchObject({
       model_reasoning_effort: "high",
     });

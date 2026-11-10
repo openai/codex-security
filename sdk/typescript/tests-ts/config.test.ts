@@ -176,6 +176,70 @@ function macOsSandboxUnavailable(): boolean {
   );
 }
 
+function shouldScheduleNativeSandboxTests(
+  platform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv,
+): boolean {
+  if (platform !== "win32") return true;
+  const setting =
+    environment["CODEX_SECURITY_TEST_WINDOWS_SANDBOX"]?.toLowerCase();
+  if (setting === "1" || setting === "true") return true;
+  if (setting === "0" || setting === "false") return false;
+  return (
+    environment["GITHUB_ACTIONS"] === "true" &&
+    environment["RUNNER_ENVIRONMENT"] === "github-hosted"
+  );
+}
+
+const skipNativeSandboxTests =
+  !shouldScheduleNativeSandboxTests(process.platform, process.env) ||
+  macOsSandboxUnavailable();
+
+describe("native sandbox test scheduling", () => {
+  const local = { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false" };
+  const hosted = {
+    ...local,
+    GITHUB_ACTIONS: "true",
+    RUNNER_ENVIRONMENT: "github-hosted",
+  };
+  const setting = "CODEX_SECURITY_TEST_WINDOWS_SANDBOX";
+  const onWindows = (env: NodeJS.ProcessEnv) =>
+    shouldScheduleNativeSandboxTests("win32", env);
+
+  test("defaults Windows coverage to GitHub-hosted Actions runners", () => {
+    expect(onWindows(local)).toBe(false);
+    expect(onWindows(hosted)).toBe(true);
+    expect(onWindows({ ...hosted, [setting]: "" })).toBe(true);
+    expect(onWindows({ RUNNER_ENVIRONMENT: "github-hosted" })).toBe(false);
+    expect(onWindows({ ...hosted, RUNNER_ENVIRONMENT: "self-hosted" })).toBe(
+      false,
+    );
+  });
+
+  test.each(["1", "true", "True"])(
+    "opts into local Windows coverage with %s",
+    (value) => {
+      expect(onWindows({ ...local, [setting]: value })).toBe(true);
+    },
+  );
+
+  test.each(["0", "false"])(
+    "opts out of hosted Windows coverage with %s",
+    (value) => {
+      expect(onWindows({ ...hosted, [setting]: value })).toBe(false);
+    },
+  );
+
+  test.each(["darwin", "linux"] as const)(
+    "ignores the Windows setting on %s",
+    (platform) => {
+      expect(
+        shouldScheduleNativeSandboxTests(platform, { [setting]: "false" }),
+      ).toBe(true);
+    },
+  );
+});
+
 async function sandboxFailureDetails(codexHome: string, details: string) {
   if (process.platform !== "win32") return details;
   const directory = join(codexHome, ".sandbox");
@@ -271,6 +335,36 @@ describe("Codex configuration", () => {
     expect((await mergedCodexConfig({}))["cli_auth_credentials_store"]).toBe(
       "auto",
     );
+  });
+
+  test("uses the sign-in settings from the user's Codex config below explicit overrides", async () => {
+    const home = await temporaryDirectory();
+    expect(
+      (await mergedCodexConfig({}, home))["cli_auth_credentials_store"],
+    ).toBe("auto");
+    await writeFile(
+      join(home, "config.toml"),
+      [
+        'cli_auth_credentials_store = "file"',
+        'forced_login_method = "chatgpt"',
+        'model = "ambient-model"',
+      ].join("\n"),
+    );
+
+    const config = await mergedCodexConfig({}, home);
+    expect(config).toMatchObject({
+      cli_auth_credentials_store: "file",
+      forced_login_method: "chatgpt",
+    });
+    expect(config["model"]).toBe(DEFAULT_CODEX_CONFIG["model"]);
+    expect(
+      (
+        await mergedCodexConfig(
+          { codexOverrides: { cli_auth_credentials_store: "keyring" } },
+          home,
+        )
+      )["cli_auth_credentials_store"],
+    ).toBe("keyring");
   });
 
   test("resolves selected profile model and effort before root settings", async () => {
@@ -1015,7 +1109,7 @@ describe("Codex configuration", () => {
     expect(result.stdout.length).toBeGreaterThan(0);
   });
 
-  test.skipIf(macOsSandboxUnavailable())(
+  test.skipIf(skipNativeSandboxTests)(
     "allows scan helpers to write workspace files without writable credential ancestry",
     async () => {
       const { root, codexHome, stateDirectory, workspace, environment } =
@@ -1109,7 +1203,7 @@ describe("Codex configuration", () => {
     },
   );
 
-  test.skipIf(macOsSandboxUnavailable())(
+  test.skipIf(skipNativeSandboxTests)(
     "reads policy source without exposing credentials or changing host files",
     async () => {
       const { root, codexHome, workspace, stateDirectory, environment } =

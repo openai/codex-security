@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -79,7 +80,7 @@ async function finalizeParentFindings({
     document.scanId = context.scanId;
     await writeJson(filePath, document);
   }
-  await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+  await execFileAsync(fixturePython, [
     fileURLToPath(
       new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
     ),
@@ -201,11 +202,9 @@ for (const [layout, status] of [
         saved.findings[1].identity.instance = "saved-distinct-location";
         await writeFile(file, JSON.stringify(saved));
       }
-      const { stdout } = await execFileAsync(
-        process.env.PYTHON?.trim() || "python3",
-        [
-          "-c",
-          `import sys,json
+      const { stdout } = await execFileAsync(fixturePython, [
+        "-c",
+        `import sys,json
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -223,12 +222,11 @@ prepared=_prepare_scan_finalization(root,completion_binding=binding,recover_unse
 warnings.extend(prepared.warnings)
 published=_write_prepared_scan_finalization(prepared)
 print(json.dumps({'count':len(published[1]['findings']),'status':published[0]['scan']['status'],'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
-          fileURLToPath(new URL("../../scripts", import.meta.url)),
-          f.root,
-          f.context.scanId!,
-          status,
-        ],
-      );
+        fileURLToPath(new URL("../../scripts", import.meta.url)),
+        f.root,
+        f.context.scanId!,
+        status,
+      ]);
       assert.deepEqual(JSON.parse(stdout), {
         count,
         status,
@@ -533,8 +531,13 @@ for (const observation of ["checkpoint head", "worker result"]) {
     let replaced = false;
     const replaceOnce = async (destination: string) => {
       if (replaced) return;
-      replaced = true;
+      // Windows can move the open result aside, but cannot overwrite its name.
+      // Keep its original handle open while the pathname acquires the new mtime.
+      if (process.platform === "win32" && destination === resultPath) {
+        await rename(resultPath, path.join(f.root, "previous-result.json"));
+      }
       await rename(replacementPath, destination);
+      replaced = true;
     };
     const originalLstat = fsPromises.lstat;
     const originalReadFile = fsPromises.readFile;
@@ -630,11 +633,9 @@ for (const headTime of [1, 2, 3]) {
     ]) {
       originals.set(filename, await readFile(filename));
     }
-    const { stdout } = await execFileAsync(
-      process.env.PYTHON?.trim() || "python3",
-      [
-        "-c",
-        `import json,sys
+    const { stdout } = await execFileAsync(fixturePython, [
+      "-c",
+      `import json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -644,12 +645,11 @@ binding={"status":"interrupted","allowedTargetKinds":["git_revision"],"target":{
 first=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted")
 replay=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted",frozen_source_digests=first[0]["scan"]["preservedSources"])
 print(json.dumps([first[2],replay[2]]))`,
-        path.join(import.meta.dirname, "../../scripts"),
-        path.dirname(f.root),
-        f.root,
-        f.context.scanId!,
-      ],
-    );
+      path.join(import.meta.dirname, "../../scripts"),
+      path.dirname(f.root),
+      f.root,
+      f.context.scanId!,
+    ]);
     const [reviewState, replay] = JSON.parse(stdout);
     assert.deepEqual(replay, reviewState);
     for (const [field, rows] of Object.entries(added)) {
@@ -1102,6 +1102,14 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         );
         assert.deepEqual(await snapshot(), beforeClosure);
       }
+
+      const submitted = f.draft({ deferred: [tasks[0]] }, true);
+      const receipt = draftApi.scanDraftToolResponse(
+        await f.write(submitted),
+        submitted,
+      );
+      assert.equal(receipt.deferredCount, 2);
+      assert.deepEqual(receipt.retainedDeferred, [tasks[1]]);
     });
   }
 
@@ -1649,6 +1657,31 @@ for (const layout of ["standard", "diff"] as const) {
 }
 
 for (const layout of ["standard", "diff", "worker"] as const) {
+  test(`${layout}: an empty checkpoint returns only retained follow-up surfaces`, async (t) => {
+    const f = await fixture(t, layout);
+    const followUp = {
+      label: "Upload handler",
+      disposition: "needs_follow_up",
+      notes: "Check the second caller.",
+      receiptRefs: ["artifacts/upload.md"],
+    };
+    const initial = draftApi.scanDraftInputSchema.parse(
+      f.draft({
+        surfaces: [followUp, { label: "API", disposition: "no_issue_found" }],
+      }),
+    );
+    const saved = await f.write(initial);
+    const initialReceipt = draftApi.scanDraftToolResponse(saved, initial);
+    assert.equal(initialReceipt.retainedSurfaces, undefined);
+    const id = initialReceipt.assignedSurfaces[0].id;
+
+    const empty = f.draft();
+    const receipt = draftApi.scanDraftToolResponse(await f.write(empty), empty);
+    assert.equal(receipt.surfaceCount, 2);
+    assert.equal(receipt.deferredCount, 0);
+    assert.deepEqual(receipt.retainedSurfaces, [{ ...followUp, id }]);
+  });
+
   for (const interrupted of [false, true]) {
     test(`${layout}: returned surface IDs support closeout after first-write interruption=${interrupted}`, async (t) => {
       const f = await fixture(t, layout);
