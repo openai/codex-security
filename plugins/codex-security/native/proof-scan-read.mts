@@ -8,6 +8,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -112,7 +113,7 @@ export function scanReadProof(): Record<string, boolean> {
       assert.deepEqual(chunks(held), payload);
       assert.throws(() => root.openFile("artifacts/receipt.json"));
       held.close();
-      rmSync(artifacts);
+      unlinkSync(artifacts);
       renameSync(moved, artifacts);
     }
     assert.throws(() => held.read(1), /closed/i);
