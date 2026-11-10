@@ -93,7 +93,11 @@ test("retains SQLite open errors and recovery guidance", async () => {
     openWorkbenchDatabase(databasePath),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.equal((error as Error & { errcode: number }).errcode, 14);
+      const resultCode = (error as Error & { errcode: number }).errcode;
+      assert.equal(resultCode & 0xff, 14);
+      assert.throws(() => new DatabaseSync(databasePath).close(), {
+        errcode: resultCode,
+      });
       assert.equal(
         (error as Error & { code: string }).code,
         "ERR_SQLITE_ERROR",
@@ -170,6 +174,47 @@ test("every released schema upgrades to the same current schema and remains idem
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   }
 });
+
+test("log completion migration leaves legacy terminal boundaries unknown", (t) => {
+  const database = memory(t, 49);
+  insertScan(database);
+  database.exec(
+    "UPDATE scans SET status = 'complete', completed_at = 'artifact-time', updated_at = 'later-edit'",
+  );
+
+  applyMigrations(database);
+
+  assert.deepEqual(
+    {
+      ...database
+        .prepare("SELECT completed_at, updated_at, log_completed_at FROM scans")
+        .get(),
+    },
+    {
+      completed_at: "artifact-time",
+      updated_at: "later-edit",
+      log_completed_at: null,
+    },
+  );
+});
+
+for (const version of [48, 50, 63]) {
+  test(`preserves terminal logs from preview migration ${version}`, (t) => {
+    const database = memory(t, version - 1);
+    const boundary = migrations.find((item) => item.version === 64)!;
+    applyMigrations(database, [{ ...boundary, version }]);
+    insertScan(database);
+    database.exec("UPDATE scans SET log_completed_at = 'saved-boundary'");
+    applyMigrations(database);
+    applyMigrations(database);
+    assertMigrationNames(database, version, 63, 64);
+    assert.equal(
+      database.prepare("SELECT log_completed_at FROM scans").get()
+        ?.log_completed_at,
+      "saved-boundary",
+    );
+  });
+}
 
 for (const previewVersion of [58, 59]) {
   test(`preserves the saved rubric from preview migration ${previewVersion}`, (t) => {
@@ -381,23 +426,50 @@ function insertRunningWorker(database: DatabaseSync) {
   `);
 }
 
+function legacyRetry(t: TestContext, attempt: number, thread: string | null) {
+  const database = memory(t, 62);
+  insertRunningWorker(database);
+  database
+    .prepare(
+      "UPDATE deep_scan_workers SET attempt = ?, started_at = 'started', sdk_thread_id = ?",
+    )
+    .run(attempt, thread);
+  if (thread === null) database.exec("DELETE FROM deep_scan_worker_threads");
+  return database;
+}
+
 test("legacy retries can reuse a recorded thread and still verify usage", (t) => {
   for (const thread of ["first-thread", "retry-thread", null]) {
-    const database = memory(t, 62);
-    insertRunningWorker(database);
-    database
-      .prepare(
-        "UPDATE deep_scan_workers SET attempt = 3, started_at = 'started', sdk_thread_id = ?",
-      )
-      .run(thread);
-    if (thread === null) database.exec("DELETE FROM deep_scan_worker_threads");
+    const database = legacyRetry(t, 3, thread);
     applyMigrations(database);
     assert.equal(
-      database.prepare("SELECT worker_usage_gap FROM deep_scan_runs").get()
-        ?.worker_usage_gap,
+      storedValue(database, "deep_scan_runs", "worker_usage_gap"),
       thread === null ? 1 : 0,
     );
   }
+});
+
+test("the allowance preview keeps its data and receives canonical usage accounting", (t) => {
+  const database = legacyRetry(t, 2, null);
+  database.exec(`
+    ALTER TABLE scans ADD COLUMN investigation_policy TEXT;
+    UPDATE scans SET investigation_policy = 'saved policy';
+    INSERT INTO schema_migrations (version, name, applied_at)
+      VALUES (63, 'retain native investigation time allowances', 'preview');
+  `);
+  applyMigrations(database);
+  assertMigrationNames(database, 63);
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
+  database.exec("UPDATE deep_scan_runs SET worker_usage_gap = 0");
+  database.exec("UPDATE deep_scan_workers SET attempt = 3");
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
+  const history = migrationHistory(database);
+  applyMigrations(database);
+  assert.deepEqual(migrationHistory(database), history);
+  assert.equal(
+    storedValue(database, "scans", "investigation_policy"),
+    "saved policy",
+  );
 });
 
 test("worker thread history survives retry, replay, and worker retirement", (t) => {
@@ -1021,27 +1093,28 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
       `"findings":${index},"opaqueId":9007199254740993`,
     ),
   );
+  const insertWorkflow = database.prepare(
+    "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
+  );
+  const insertReview = database.prepare(
+    "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
+  );
+  // run() returns the inserted row ID even when the fixture ignores the result.
+  insertWorkflow.setReadBigInts(true);
+  insertReview.setReadBigInts(true);
   for (const [index, id] of workflowIds.entries()) {
-    database
-      .prepare(
-        "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
-      )
-      .run(9007199254740993n + BigInt(index), id, states[index]);
+    insertWorkflow.run(9007199254740993n + BigInt(index), id, states[index]);
     for (const [keyIndex, key] of reviewKeys.entries()) {
-      database
-        .prepare(
-          "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
-        )
-        .run(
-          9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
-          id,
-          key,
-          JSON.stringify({
-            ...binding,
-            promptDigest: `prompt-${index}-${keyIndex}`,
-          }),
-          JSON.stringify({ retained: `${index}-${keyIndex}` }),
-        );
+      insertReview.run(
+        9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
+        id,
+        key,
+        JSON.stringify({
+          ...binding,
+          promptDigest: `prompt-${index}-${keyIndex}`,
+        }),
+        JSON.stringify({ retained: `${index}-${keyIndex}` }),
+      );
     }
   }
   const before = schema(database);

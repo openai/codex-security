@@ -14,10 +14,14 @@ test.each(["validate", "patch", "verify-fix"])(
   async (command) => {
     const repository = await temporaryDirectory();
     const original = join(repository, "finding with spaces.json");
-    const finding = JSON.stringify({
-      evidence: "Synthetic evidence. ".repeat(100_000),
-      tail: "Last evidence",
-    });
+    const finding = JSON.stringify(
+      {
+        evidence: "Synthetic evidence. ".repeat(100_000),
+        tail: "Last evidence",
+      },
+      null,
+      2,
+    );
     await writeFile(original, finding);
     let path = "";
     const { runCli, stdout, stderr } = createCliTest(main);
@@ -28,12 +32,9 @@ test.each(["validate", "patch", "verify-fix"])(
             const prompt = output?.appServer?.prompt ?? input!;
             expect(prompt.length).toBeLessThan(1 << 20);
             path = JSON.parse(prompt.match(/^".*finding\.json"$/m)![0]);
-            expect(JSON.parse(await readFile(path, "utf8"))).toEqual([finding]);
             // The file must outlive the asynchronous worker call.
             await Promise.resolve();
-            expect(await readFile(path, "utf8")).toBe(
-              JSON.stringify([finding]),
-            );
+            expect(await readFile(path, "utf8")).toBe(finding);
             output!.stdout.write(
               command === "verify-fix"
                 ? JSON.stringify({

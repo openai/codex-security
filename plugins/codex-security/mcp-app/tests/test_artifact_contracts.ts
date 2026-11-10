@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -113,7 +114,7 @@ const commonJson = await readJson(
 );
 const pythonTextResults = JSON.parse(
   execFileSync(
-    process.env.PYTHON || "python3",
+    fixturePython,
     [
       "-c",
       "import json, re, sys; values, pattern = json.load(sys.stdin.buffer); print(json.dumps([[bool(value.strip()), bool(re.search(pattern, value))] for value in values]))",

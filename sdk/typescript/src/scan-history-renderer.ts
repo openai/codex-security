@@ -319,7 +319,7 @@ export function renderScanHistory(
               Object.keys(SEVERITY_COLORS).indexOf(right.toUpperCase()),
           )
           .map(([severity, count]) => {
-            const label = severity.toUpperCase();
+            const label = clean(severity).toUpperCase();
             return paint(
               `${clean(count)} ${label}`,
               SEVERITY_COLORS[label] ?? 37,
@@ -439,32 +439,18 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const findings = (result["findings"] as JsonObject[]).map((entry) =>
+    const groups = Map.groupBy(result["findings"] as JsonObject[], (entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===
         "The affected path was excluded or outside the later scope."
-        ? { ...entry, status: "not_rescanned" }
-        : entry,
+        ? "not_rescanned"
+        : String(entry["status"]).toLowerCase(),
     );
-    const notRescanned = findings.filter(
-      (entry) => entry["status"] === "not_rescanned",
-    ).length;
-    const summary: JsonObject = {
-      ...(result["summary"] as JsonObject),
-      ...(notRescanned
-        ? {
-            unknown:
-              Number((result["summary"] as JsonObject)["unknown"] ?? 0) -
-              notRescanned,
-            not_rescanned: notRescanned,
-          }
-        : {}),
-    };
     lines.push("");
     let summaryLine = "  ";
     let summaryLength = 2;
     for (const [status, style] of Object.entries(STATUS_STYLES)) {
-      const value = summary[status];
+      const value = groups.get(status)?.length;
       if (!value) continue;
       const label = `${style.icon} ${clean(value)} ${status.replaceAll("_", " ")}`;
       if (summaryLength > 2 && summaryLength + label.length + 4 > width - 2) {
@@ -478,10 +464,8 @@ export function renderScanHistory(
     if (summaryLength > 2) lines.push(summaryLine);
 
     for (const status of Object.keys(STATUS_STYLES)) {
-      const group = findings.filter(
-        (entry) => String(entry["status"]).toLowerCase() === status,
-      );
-      if (group.length === 0) continue;
+      const group = groups.get(status);
+      if (!group) continue;
       group.sort(
         (first, second) =>
           Object.keys(SEVERITY_COLORS).indexOf(findingSeverity(first)) -

@@ -2,7 +2,7 @@ import { CodexSecurityError } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import {
   type ExternalImportTarget,
-  validateExternalEvidence,
+  validateEnrichedExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { canonicalJson, isRecord } from "./record.js";
@@ -11,11 +11,11 @@ import {
   normalizeRecords,
   readScannerJson,
   record,
+  reportableScannerSeverity,
   requiredText,
   stableId,
   text,
 } from "./scanner-import.js";
-import { FailureSeveritySchema } from "./scan-settings.js";
 import {
   declaredScannerRepositoryUrl,
   repositoryScopeValidator,
@@ -294,6 +294,8 @@ const nameVersionForges = new Map([
 
 function packageUrlName(ecosystem: string, parts: string[]) {
   if (parts.some((part) => !part || part.includes("/"))) return;
+  if (ecosystem === "github" && parts.length === 2)
+    return parts.join("/").toLowerCase();
   if (ecosystem === "maven" || ecosystem === "composer")
     return parts.length === 2
       ? parts.join(ecosystem === "maven" ? ":" : "/")
@@ -333,6 +335,7 @@ function originPackage(row: Record<string, unknown>) {
 
 function blackDuckPackages(row: Record<string, unknown>) {
   const origin = originPackage(row);
+  const fallback = origin ? [origin] : [];
   const purl =
     /^pkg:([a-z][a-z0-9.+-]*)\/((?:@[^/@?#]+\/)?[^@?#]+)(?:@([^@?#]+))?(?:[?#].*)?$/iu.exec(
       text(row["packageUrl"]) ?? "",
@@ -346,29 +349,32 @@ function blackDuckPackages(row: Record<string, unknown>) {
       );
       if (name) {
         if (!purl[3] && origin?.ecosystem === ecosystem && origin.name === name)
-          return [origin];
-        return [
-          {
-            name,
-            ecosystem,
-            installed_version: purl[3]
-              ? decodeURIComponent(purl[3])
-              : text(row["componentVersionName"]),
-          },
-        ];
+          return { packages: fallback };
+        const pkg = {
+          name,
+          ecosystem,
+          installed_version: purl[3]
+            ? decodeURIComponent(purl[3])
+            : text(row["componentVersionName"]),
+        };
+        // Earlier versions used the origin fallback for owner/repository PURLs.
+        return ecosystem === "github" && name.includes("/")
+          ? { packages: fallback, enrichment: { packages: [pkg] } }
+          : { packages: [pkg] };
       }
     } catch {
       // A malformed escape does not invalidate the native origin coordinate.
     }
   }
 
-  return origin ? [origin] : [];
+  return { packages: fallback };
 }
 
-export function normalizeBlackDuckFindings(
+function normalizeReport(
   input: unknown,
   sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
+  target: ExternalImportTarget,
+  previous: boolean,
 ): ExternalFindings {
   const repository = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
@@ -411,16 +417,16 @@ export function normalizeBlackDuckFindings(
         row["componentName"],
         "Black Duck component name",
       );
-      const severity = text(vulnerability["severity"])?.toLowerCase();
       const related = text(vulnerability["relatedVulnerability"]);
-      return validateExternalEvidence(
+      const { packages, enrichment } = blackDuckPackages(row);
+      return validateEnrichedExternalEvidence(
         {
           title: `${advisory} in ${name}`,
           description: text(vulnerability["description"]),
-          severity: FailureSeveritySchema.safeParse(severity).data ?? "unknown",
+          severity: reportableScannerSeverity(vulnerability["severity"]),
           advisory_ids:
             related && related !== advisory ? [advisory, related] : [advisory],
-          packages: blackDuckPackages(row),
+          packages,
           source_data: {
             format,
             sourceRepositoryUrl: repository,
@@ -429,6 +435,7 @@ export function normalizeBlackDuckFindings(
           },
         },
         target,
+        previous ? undefined : enrichment,
       );
     },
     (entry) => occurrenceId(entry, projectVersion),
@@ -450,6 +457,34 @@ export function normalizeBlackDuckFindings(
     }
   }
   return result;
+}
+
+export function normalizeBlackDuckFindings(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  return normalizeReport(input, sourceRepositoryUrl, target, false);
+}
+
+/** @internal Earlier readers used the native origin fallback for GitHub package URLs. */
+export function needsPreviousBlackDuckProjection({
+  findings,
+}: ExternalFindings) {
+  return findings.some(({ evidence }) =>
+    evidence.packages?.some(
+      (pkg) => pkg.ecosystem === "github" && pkg.name.includes("/"),
+    ),
+  );
+}
+
+/** @internal Reconstruct the original evidence for an interrupted Cloud request. */
+export function normalizePreviousBlackDuckFindings(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
+  return normalizeReport(input, sourceRepositoryUrl, target, true);
 }
 
 export async function readBlackDuckFindings(

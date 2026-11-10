@@ -4,6 +4,10 @@ import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import stripAnsi from "strip-ansi";
 import stringWidth from "string-width";
+import {
+  TerminalErrorListener,
+  type TerminalStream,
+} from "./terminal-stream.js";
 import { fitCell, fitLine, graphemes } from "./terminal-columns.js";
 import { isRecord } from "./record.js";
 import type { ScanAuthMode, ScanBudget } from "./api.js";
@@ -26,6 +30,7 @@ import {
   formatScanCosts,
   formatScanCostTokens,
   formatTokenUsage,
+  type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
 import { formatDeepScanReviews } from "./scan-progress.js";
@@ -60,11 +65,8 @@ const COMPONENT_STATUS = {
   failed: "Failed",
 } as const;
 
-interface DashboardStream {
+interface DashboardStream extends TerminalStream {
   readonly writableNeedDrain?: boolean;
-  write(chunk: string, callback?: (error?: Error | null) => void): unknown;
-  on?(event: "error", listener: (error: Error) => void): unknown;
-  off?(event: "error", listener: (error: Error) => void): unknown;
   readonly columns?: number;
   readonly rows?: number;
 }
@@ -92,6 +94,7 @@ interface ScanDashboardOptions {
   componentName?: string;
   mode?: ScanMode;
   model?: ScanModelConfiguration;
+  pricingContext?: ScanPricingContext;
   maxCostUsd?: number;
   showCost?: boolean;
   clock: DashboardClock;
@@ -191,8 +194,7 @@ export class ScanDashboard {
   #source: "all" | "main" | number = "all";
   #inputWasRaw = false;
   #noteCount = 0;
-  #observingStreamErrors = false;
-  readonly #onStreamError = (): void => {};
+  readonly #terminalErrors: TerminalErrorListener;
   #keyInput: PassThrough | null = null;
   #ss3Parameters = false;
   #inputKeys: {
@@ -398,6 +400,7 @@ export class ScanDashboard {
 
   public constructor(stream: DashboardStream, options: ScanDashboardOptions) {
     this.#stream = stream;
+    this.#terminalErrors = new TerminalErrorListener(stream);
     this.#options = options;
     this.#startedAt = options.clock.now();
   }
@@ -410,10 +413,7 @@ export class ScanDashboard {
     }
     this.#timer = this.#options.clock.setInterval(() => this.#refresh(), 1_000);
     try {
-      if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
-        this.#stream.on("error", this.#onStreamError);
-        this.#observingStreamErrors = true;
-      }
+      this.#terminalErrors.start();
       this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
       if (input?.isTTY === true) {
         this.#setKeyInput(new PassThrough());
@@ -455,21 +455,7 @@ export class ScanDashboard {
         `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
       );
     } finally {
-      if (this.#observingStreamErrors) {
-        try {
-          this.#stream.write("", () => {
-            queueMicrotask(() => {
-              if (this.#timer === null && this.#observingStreamErrors) {
-                this.#stream.off?.("error", this.#onStreamError);
-                this.#observingStreamErrors = false;
-              }
-            });
-          });
-        } catch {
-          this.#stream.off?.("error", this.#onStreamError);
-          this.#observingStreamErrors = false;
-        }
-      }
+      this.#terminalErrors.stop();
     }
   }
 
@@ -1165,10 +1151,11 @@ export class ScanDashboard {
     if (
       this.#cost === null &&
       this.#options.maxCostUsd === undefined &&
-      estimateScanCost(this.#options.model?.model, {
-        input_tokens: 0,
-        output_tokens: 0,
-      }) === null
+      estimateScanCost(
+        this.#options.model?.model,
+        { input_tokens: 0, output_tokens: 0 },
+        this.#options.pricingContext,
+      ) === null
     ) {
       return [];
     }
@@ -1753,5 +1740,8 @@ function budgetBar(cost: number, limit: number): string {
 }
 
 function terminalText(value: string): string {
-  return stripAnsi(value).replaceAll(/[\u0000-\u001F\u007F]/gu, " ");
+  return stripAnsi(value).replaceAll(
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
+    " ",
+  );
 }

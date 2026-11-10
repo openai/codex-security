@@ -2,10 +2,12 @@ import { readJsonLines } from "./support/json.js";
 import { runProviderSkill } from "./support/cli-provider-authentication.js";
 import { TestClient } from "./support/api-client.js";
 import { resolving } from "./support/promises.js";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { existsSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   realpath,
   readFile,
@@ -18,7 +20,11 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { main, runCodexSkillCommand } from "../src/cli.js";
+import {
+  hasStoredChatGPTSignIn,
+  main,
+  runCodexSkillCommand,
+} from "../src/cli.js";
 import {
   CodexSecurityError,
   type JsonObject,
@@ -38,6 +44,7 @@ import {
   fakeSecurity,
   failingSecurity,
 } from "./cli-fixtures.js";
+import { chatGptTokens } from "./support/chatgpt-credentials.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
@@ -116,6 +123,75 @@ describe("CLI authentication", () => {
     }
   });
 
+  test.each([
+    [{}, "codex-security"],
+    [{ npm_command: "exec" }, "npx @openai/codex-security"],
+  ] as const)("points native sign-in hints at %p", async (environment, cli) => {
+    const chunks = [
+      "Open the URL. On a remote machine? Use `codex lo",
+      "gin --device-auth` instead.\nRun `codex logout` or `codex login`.\n",
+      "Try `printenv OPENAI_API_KEY | co",
+      "dex login --with-api-key` or `printenv CODEX_ACCESS_TOKEN | codex log",
+      "in --with-access-token`.\nUnquoted codex login, `codex login",
+      "-helper`, and partial `codex lo",
+    ];
+    const source = `for (const chunk of ${JSON.stringify(chunks)}) {
+      await new Promise(done => process.stderr.write(chunk, done));
+      await new Promise(done => setTimeout(done, 10));
+    }
+    process.exitCode = 3;`;
+    const write = process.stderr.write;
+    let stderr = "";
+    process.stderr.write = ((chunk: string | Uint8Array, done?: () => void) => {
+      stderr += chunk.toString();
+      done?.();
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          undefined,
+          { command: process.execPath },
+          { PATH: process.env["PATH"], ...environment },
+        ),
+      ).toBe(3);
+    } finally {
+      process.stderr.write = write;
+    }
+    expect(stderr).toBe(
+      `Open the URL. On a remote machine? Use \`${cli} login --device-auth\` instead.\n` +
+        `Run \`codex logout\` or \`${cli} login\`.\n` +
+        `Try \`printenv OPENAI_API_KEY | ${cli} login --with-api-key\` or \`printenv CODEX_ACCESS_TOKEN | ${cli} login --with-access-token\`.\n` +
+        "Unquoted codex login, `codex login-helper`, and partial `codex lo",
+    );
+  });
+
+  test("reaps the native login and reports failure when the stderr reader closes", async () => {
+    const pidFile = join(stateDirectory, "native.pid");
+    const completed = join(stateDirectory, "login-completed");
+    const native = `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      process.stderr.write("Open the sign-in URL.\\n");
+      setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(completed)}, "done"), 8000);`;
+    const wrapper = `import { runCodexSkillCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+      const status = await runCodexSkillCommand(["-e", ${JSON.stringify(native)}], undefined, { command: process.execPath }).catch(() => 1);
+      process.exitCode = status === 0 ? 1 : 0;`;
+    const child = spawn(process.execPath, ["-e", wrapper], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    const closed = once(child, "close");
+    child.stderr.destroy();
+    const [exitCode] = await closed;
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(pid).toBeGreaterThan(1);
+    // If the wrapper leaked its child, this assertion also cleans it up.
+    expect(() => process.kill(pid, "SIGKILL")).toThrow(
+      expect.objectContaining({ code: "ESRCH" }),
+    );
+    expect(existsSync(completed)).toBe(false);
+    expect(exitCode).toBe(0);
+  });
+
   test("uses the same stable credential home for login, status, and logout", async () => {
     const expectedHome = join(stateDirectory, "codex-home");
 
@@ -141,6 +217,106 @@ describe("CLI authentication", () => {
         await codexSecurityCredentialAllowsAmbientImport(expectedHome),
       ).toBe(argv[0] !== "logout");
     }
+  });
+
+  test("login follows native settings while status and logout keep the active store", async () => {
+    const home = await createCredentialHome();
+    const ambient = join(stateDirectory, "ambient");
+    await mkdir(ambient, { mode: 0o700 });
+    const managed = join(home, "config.toml");
+    const source = join(ambient, "config.toml");
+    await writeFile(
+      managed,
+      'cli_auth_credentials_store = "file"\nmodel = "kept"\n',
+    );
+    await writeFile(
+      source,
+      [
+        'cli_auth_credentials_store = "ephemeral"',
+        'forced_login_method = "chatgpt"',
+        "[ghost_snapshot]",
+        "ignore_large_untracked_files = 9223372036854775807",
+      ].join("\n"),
+    );
+    const deps = dependencies();
+    const run = mock<typeof deps.runCodex>(resolving(0));
+    deps.runCodex = run;
+    const { runCli } = createCliTest(main);
+    for (const args of [["login", "status"], ["logout"]]) {
+      expect(await runCli(args, deps)).toBe(0);
+      expect(run.mock.lastCall?.[0]).toEqual(args);
+      expect(parseToml(await readFile(managed, "utf8"))).toEqual({
+        cli_auth_credentials_store: "file",
+        model: "kept",
+      });
+    }
+    expect(await runCli(["login"], deps)).toBe(0);
+    expect(run.mock.lastCall?.[0]).toEqual(["login"]);
+    expect(parseToml(await readFile(managed, "utf8"))).toEqual({
+      cli_auth_credentials_store: "ephemeral",
+      forced_login_method: "chatgpt",
+      model: "kept",
+    });
+    await rm(source);
+    expect(await runCli(["login"], deps)).toBe(0);
+    expect(parseToml(await readFile(managed, "utf8"))).toEqual({
+      cli_auth_credentials_store: "ephemeral",
+      model: "kept",
+    });
+    await writeFile(source, 'forced_login_method = "chatgpt"\ninvalid = [');
+    run.mockClear();
+    expect(await runCli(["login"], deps)).toBe(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  test("logout detaches only a separate ambient hard link before native failure", async () => {
+    const home = await createCredentialHome();
+    const auth = join(home, "auth.json");
+    const ambient = join(stateDirectory, "ambient");
+    await mkdir(ambient);
+    const source = join(ambient, "auth.json");
+    const backing = join(ambient, "backing.json");
+    await writeFile(auth, "session", { mode: 0o600 });
+    await link(auth, backing);
+
+    const logout = async (sourceHome: string, expectDetached: boolean) => {
+      const deps = dependencies({ environment: { CODEX_HOME: sourceHome } });
+      deps.runCodex = async () => {
+        expect(existsSync(auth)).toBe(!expectDetached);
+        return 19;
+      };
+      const { runCli, stderr } = createCliTest(main);
+      const status = await runCli(["logout"], deps);
+      expect(status, stderr.text()).toBe(19);
+      expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(
+        !expectDetached,
+      );
+    };
+
+    // A backup link in another directory does not make an independent sign-in shared.
+    await writeFile(source, "independent", { mode: 0o600 });
+    await logout(ambient, false);
+    expect(await readFile(source, "utf8")).toBe("independent");
+    await rm(source);
+    // ENOTDIR makes the ambient file uninspectable even when tests run as root.
+    await logout(backing, false);
+
+    const alias = join(ambient, "home-alias");
+    await symlink(
+      home,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await logout(alias, false);
+
+    if (process.platform !== "win32") {
+      await symlink(backing, source);
+      await logout(ambient, false);
+      await rm(source);
+    }
+    await link(auth, source);
+    await logout(ambient, true);
+    expect(await readFile(source, "utf8")).toBe("session");
   });
 
   test.skipIf(process.platform === "win32")(
@@ -626,6 +802,50 @@ describe("CLI authentication", () => {
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
+
+  test.each([
+    ["ambient ChatGPT", true],
+    ["dedicated API key", false],
+    ["truncated dedicated credential file", false],
+    ["explicit logout", false],
+    ["invalid logout marker", false],
+  ] as const)(
+    "offers an interactive ChatGPT choice with %s: %p",
+    async (source, offered) => {
+      const ambientHome = join(stateDirectory, "ambient");
+      const dedicatedHome = await createCredentialHome();
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        JSON.stringify({ auth_mode: "chatgpt", tokens: chatGptTokens }),
+        { mode: 0o600 },
+      );
+      if (source === "explicit logout") {
+        await setCodexSecurityCredentialLogout(dedicatedHome, true);
+      } else if (source === "invalid logout marker") {
+        await mkdir(join(dedicatedHome, ".codex-security-logged-out"));
+      } else if (source !== "ambient ChatGPT") {
+        await writeFile(
+          join(dedicatedHome, "auth.json"),
+          source === "dedicated API key"
+            ? '{"OPENAI_API_KEY":"synthetic-stored-key"}'
+            : "{",
+          { mode: 0o600 },
+        );
+      }
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-environment-key" },
+      });
+      deps.hasStoredChatGPTSignIn = (signal) =>
+        hasStoredChatGPTSignIn(deps.environment, signal);
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (_message, options) => options[0]!.value,
+      );
+      const stderr = captureCli(main, "stderr", true);
+      expect(await stderr.run(["scan"], deps), stderr.text()).toBe(0);
+      expect(stderr.text().includes("Both a ChatGPT sign-in")).toBe(offered);
+    },
+  );
 
   test("cancels sign-in discovery and authentication prompts before starting a scan", async () => {
     for (const stage of ["status", "prompt"] as const) {
@@ -2196,24 +2416,31 @@ describe("skill authentication", () => {
         }),
         { mode: 0o600 },
       );
+      const native = join(stateDirectory, "native.cjs");
+      await writeFile(
+        native,
+        [
+          "const args = process.argv.slice(2);",
+          'if (args.at(-2) === "login" && args.at(-1) === "status") console.log("Logged in using ChatGPT");',
+          'else console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({args:[process.execPath, ...args],home:process.env.CODEX_HOME})}}));',
+        ].join("\n"),
+      );
       const run = async () => {
         const stdout = capture();
-        const source =
-          'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({args:process.argv,home:process.env.CODEX_HOME})}}))';
-        expect(
-          await runCodexSkillCommand(
-            ["-e", source, "--"],
-            {
-              command: "validate",
-              auth,
-              directory: skillDirectory,
-              stdout: stdout.stream,
-              stderr: capture().stream,
-            },
-            { command: process.execPath },
-            environment,
-          ),
-        ).toBe(0);
+        const stderr = capture();
+        const exit = await runCodexSkillCommand(
+          [native],
+          {
+            command: "validate",
+            auth,
+            directory: skillDirectory,
+            stdout: stdout.stream,
+            stderr: stderr.stream,
+          },
+          { command: process.execPath, args: [native] },
+          environment,
+        );
+        expect(exit, stderr.text()).toBe(0);
         return JSON.parse(stdout.text());
       };
       const { args, home: runtimeHome } = await run();

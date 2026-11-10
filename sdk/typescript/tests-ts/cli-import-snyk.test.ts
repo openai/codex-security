@@ -24,7 +24,6 @@ const command = [
   "json",
 ];
 const environment = {
-  CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
   SNYK_TOKEN: "synthetic",
 };
 
@@ -61,7 +60,7 @@ test.each(["open-source", "code"] as const)(
   },
 );
 
-test("import snyk requires opt-in and keeps failed collections out of redirected JSON", async () => {
+test("import snyk checks the token before fetching and keeps failed collections out of redirected JSON", async () => {
   const detail = "projet refusé \u202edenied\npermissions:\tread";
   const fetch = mock(async (_url: URL, init: RequestInit) => {
     expect(new Headers(init.headers).get("authorization")).toBe(
@@ -69,28 +68,26 @@ test("import snyk requires opt-in and keeps failed collections out of redirected
     );
     return new Response(detail, { status: 403 });
   });
-  const disabled = createCliTest(main);
+  const missingToken = createCliTest(main);
   expect(
-    await disabled.runCli(command, {
+    await missingToken.runCli(command, {
       ...dependencies({ environment: {} }),
       hostedScannerFetch: fetch,
     }),
   ).toBe(2);
   expect(fetch).not.toHaveBeenCalled();
-  expect(disabled.stdout.text()).toBe("");
-  expect(disabled.stderr.text()).toContain(
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
-  );
+  expect(missingToken.stdout.text()).toBe("");
+  expect(missingToken.stderr.text()).toContain("SNYK_TOKEN");
 
-  const enabled = createCliTest(main);
+  const cli = createCliTest(main);
   expect(
-    await enabled.runCli(command, {
+    await cli.runCli(command, {
       ...dependencies({ environment }),
       hostedScannerFetch: fetch,
     }),
   ).toBe(2);
-  expect(enabled.stdout.text()).toBe("");
-  expect(enabled.stderr.text()).toContain(
+  expect(cli.stdout.text()).toBe("");
+  expect(cli.stderr.text()).toContain(
     "projet refusé \\u202edenied permissions: read",
   );
 
@@ -102,7 +99,7 @@ test("import snyk requires opt-in and keeps failed collections out of redirected
     }),
   ).toBe(2);
   expect(JSON.parse(full.stdout.text()).error.message).toContain(detail);
-  expect(full.stderr.text()).toBe(enabled.stderr.text());
+  expect(full.stderr.text()).toBe(cli.stderr.text());
 });
 
 test("Snyk CLI escapes cursors in human output and retains the native JSON value", async () => {
@@ -139,12 +136,7 @@ test("Snyk CLI escapes cursors in human output and retains the native JSON value
 test("Snyk --schema describes the complete saved report", async () => {
   const cli = createCliTest(main);
   expect(
-    await cli.runCli(
-      ["import", "snyk", "--schema", "--json"],
-      dependencies({
-        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
-      }),
-    ),
+    await cli.runCli(["import", "snyk", "--schema", "--json"], dependencies()),
   ).toBe(0);
   const { output } = JSON.parse(cli.stdout.text());
   expect(output.properties).toMatchObject({

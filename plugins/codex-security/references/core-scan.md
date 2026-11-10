@@ -23,7 +23,7 @@ When the assigned reviews have returned, reconcile their evidence and submit the
 
 Use an existing offline search tool. Prefer native ripgrep, with local `git grep`, `find`, or `grep` as alternatives; do not invoke download-capable wrappers or install tools. Pass a verified search command to workers when they need it.
 
-Resolve inherited policy with `<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out -` (`launch_codex_security_mcp.cmd` on Windows). Reuse the result for the same directory or packet; the closest nested policy takes precedence. Apply it to reportability as well as architecture. If policy includes an example or fixture's application boundaries, assess those boundaries with synthetic impact rather than substituting the enclosing product's disclosure eligibility. Explicit user exclusions still control scope.
+Resolve inherited policy with `<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out -`. On Windows, use the PowerShell command in `security-guidance.md` and pass it to workers that resolve policy. Reuse the result for the same directory or packet; the closest nested policy takes precedence. Apply it to reportability as well as architecture. If policy includes an example or fixture's application boundaries, assess those boundaries with synthetic impact rather than substituting the enclosing product's disclosure eligibility. Explicit user exclusions still control scope.
 
 ## Secrets Exposed In Source
 
