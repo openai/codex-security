@@ -133,6 +133,7 @@ const distModules = [
   "retry-windows-rename",
   "runtime",
   "scan-activity",
+  "scan-archive-path",
   "scan-comparison",
   "scan-dashboard",
   "scan-history-renderer",
