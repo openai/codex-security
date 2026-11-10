@@ -64,6 +64,7 @@ import {
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, Formatter, z } from "incur";
+import { serveIntegration } from "./cli-integrations.js";
 import type { ZodType } from "zod";
 import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
@@ -2311,6 +2312,21 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
   onInterruptedSignIn?: () => void,
 ): Promise<number> {
+  if (
+    argv.includes("--mcp") &&
+    argv.some((arg) =>
+      [
+        "--help",
+        "-h",
+        "--schema",
+        "--version",
+        "--llms",
+        "--llms-full",
+      ].includes(arg),
+    )
+  ) {
+    argv = argv.filter((arg) => arg !== "--mcp");
+  }
   const remediationOperation =
     argv[0] === "patch"
       ? "patch"
@@ -7747,15 +7763,29 @@ export async function main(
 
   let notice: UpdateNotice | undefined;
   try {
-    await cli.serve(frameworkArgv, {
+    const serveOptions: Cli.serve.Options = {
       stdout: frameworkCapture.stream.write,
       exit: (code) => {
         frameworkExit = code;
       },
-    });
+    };
+    if (
+      !(await serveIntegration(
+        frameworkArgv,
+        cli,
+        cliOptions.description!,
+        cliOptions.mcp!.command!,
+        serveOptions,
+      ))
+    ) {
+      await cli.serve(frameworkArgv, serveOptions);
+    }
     if (pendingUpdate !== undefined) {
       notice = await Promise.race([pendingUpdate, undefined]);
     }
+  } catch (error) {
+    errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+    return 2;
   } finally {
     updateController.abort();
   }

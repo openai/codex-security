@@ -2698,6 +2698,19 @@ only read-only `info` because the transport cannot cancel scans. For the plugin'
 scan, triage, patch, and verification workflows, see the
 [agent workflow guide](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md).
 
+Use `skills add --no-global` to write generated guidance to the current project.
+`--depth 0` creates a single skill; the default depth of 1 groups guidance by
+top-level command. `skills list --json` includes each skill's installed status.
+For both installers, `--help`, `--schema`, and `--version` can be inspected
+before writing any configuration.
+
+`mcp add` registers in the user profile by default. `mcp add --no-global`
+selects project-capable clients. For example, use
+`mcp add --no-global --agent cursor` to target Cursor. The built-in Amp
+registration supports only user settings. `mcp doctor` checks the current CLI's
+server startup and tool catalog. To verify a registered launcher, connect from
+the client where it was registered.
+
 For local findings storage, deduplication, and custom endpoints, see the
 [findings guide](findings-service.md).
 
