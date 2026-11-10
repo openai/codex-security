@@ -361,8 +361,23 @@ def assert_new_scan_model_is_independent(state_dir: Path, target: Path, scan_roo
         ).fetchone() == (None, None, "gpt-5.6-sol", "high")
 
 
-def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> None:
-    source = tmp_path / "source.sqlite3"
+@pytest.mark.parametrize(
+    "source_name",
+    [
+        b"source.sqlite3",
+        pytest.param(
+            b"source-\xff?#%.sqlite3",
+            marks=pytest.mark.skipif(
+                sys.platform != "linux", reason="requires Linux filename bytes"
+            ),
+            id="linux-filename-bytes",
+        ),
+    ],
+)
+def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(
+    tmp_path: Path, source_name: bytes
+) -> None:
+    source = tmp_path / os.fsdecode(source_name)
     snapshot = tmp_path / "snapshot.sqlite3"
     with sqlite3.connect(source) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
