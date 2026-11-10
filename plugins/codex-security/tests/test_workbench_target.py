@@ -132,6 +132,26 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     return create
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory component errors")
+def test_recorded_checkout_distinguishes_a_replaced_parent_from_a_missing_path(
+    tmp_path: Path,
+) -> None:
+    from workbench_target import require_remediation_target
+
+    parent = tmp_path / "projects"
+    checkout = parent / "repository"
+    checkout.mkdir(parents=True)
+    assert require_remediation_target(str(checkout)) == checkout
+
+    checkout.rmdir()
+    with pytest.raises(SystemExit, match="no longer accessible"):
+        require_remediation_target(str(checkout))
+    parent.rmdir()
+    parent.write_text("ordinary file")
+    with pytest.raises(SystemExit, match="checkout path was replaced"):
+        require_remediation_target(str(checkout))
+
+
 def write_reviewed_patch(
     tmp_path: Path, source: Path, patch: bytes, revision: str = "unversioned"
 ) -> dict[str, object]:
