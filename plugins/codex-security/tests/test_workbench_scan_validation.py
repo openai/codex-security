@@ -136,12 +136,8 @@ def test_check_committed_diff_target_rechecks_assume_unchanged_files(tmp_path: P
     changed = get_scan(state_dir, scan_id, "--check-target", check=False)
     assert changed["returncode"] != 0
     assert "changed" in changed["stderr"]
-    assert (
-        subprocess.check_output(["git", "ls-files", "-v", "--", source.name], cwd=repository).split(
-            maxsplit=1
-        )[0]
-        == b"h"
-    )
+    tracked = subprocess.check_output(["git", "ls-files", "-v", "--", source.name], cwd=repository)
+    assert tracked.split(maxsplit=1)[0] == b"h"
     source.write_bytes(original)
     assert get_scan(state_dir, scan_id, "--check-target")["scan"]["scanId"] == scan_id
 
