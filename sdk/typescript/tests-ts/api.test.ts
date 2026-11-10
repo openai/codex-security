@@ -15671,9 +15671,11 @@ if __name__ == "__main__":
                 {},
                 { parent: "scan-thread" },
               );
-            await (options.signal.aborted
-              ? undefined
-              : once(options.signal, "abort"));
+            if (!options.signal.aborted) {
+              await once(options.signal, "abort", {
+                signal: AbortSignal.timeout(5_000),
+              });
+            }
             throw new DOMException("aborted", "AbortError");
           }
           return { events: events() };
@@ -15762,7 +15764,6 @@ if __name__ == "__main__":
           postScanPrompt: "Do not spend another model turn.",
           onLifecycle,
           onWarning: (warning) => warnings.push(warning),
-          signal: AbortSignal.timeout(5_000),
         });
         if (completion === "unavailable" || completion === "failed") {
           await expect(result).rejects.toBeInstanceOf(
