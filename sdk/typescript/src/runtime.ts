@@ -34,6 +34,7 @@ import {
   type Stats,
 } from "node:fs";
 import {
+  access,
   chmod,
   cp,
   copyFile,
@@ -1903,6 +1904,57 @@ export function requireOutputOutsideRepositories(
 ): void {
   for (const repository of repositories)
     requireOutputOutsideRepository(repository, outputDirectory, pathKind);
+}
+
+/** Check where the scan will create state and default artifacts without creating them. */
+export async function checkScanStorage(
+  stateDirectory: string,
+  defaultOutputRepository?: string,
+): Promise<void> {
+  try {
+    const state = await canonicalConfigPath(stateDirectory);
+    await requireWritableDirectoryOrParent(state);
+    if (defaultOutputRepository !== undefined) {
+      let root = state;
+      for (const name of ["scans", safePrefix(defaultOutputRepository)]) {
+        root = join(root, name);
+        const metadata = await lstat(root).catch(nullIfMissingFileError);
+        if (metadata !== null && !metadata.isDirectory()) {
+          throw new OutputDirectoryError(
+            `Persistent scan output must use real directories: ${root}`,
+          );
+        }
+      }
+      await requireWritableDirectoryOrParent(root);
+      // New per-scan directories are created beneath this root.
+      await requireSecureOutputAncestry(
+        join(root, `codex-security-${randomUUID()}`),
+      );
+    }
+  } catch (error) {
+    throw new OutputDirectoryError(
+      `Cannot use scan state directory ${stateDirectory}. Check CODEX_SECURITY_STATE_DIR: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+async function requireWritableDirectoryOrParent(path: string): Promise<void> {
+  let current = path;
+  for (;;) {
+    const metadata = await lstat(current).catch(nullIfMissingFileError);
+    if (metadata !== null) {
+      if (!metadata.isDirectory()) {
+        throw new OutputDirectoryError(`Expected a directory: ${current}`);
+      }
+      await access(current, constants.W_OK | constants.X_OK);
+      return;
+    }
+    const parent = dirname(current);
+    if (parent === current)
+      throw new OutputDirectoryError(`Directory does not exist: ${path}`);
+    current = parent;
+  }
 }
 
 export async function preparePersistentOutputRoot(

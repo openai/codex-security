@@ -2,6 +2,7 @@ import { resolving } from "./support/promises.js";
 import { parseJsonLines } from "./support/json.js";
 import { writeFileSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -1195,6 +1196,37 @@ describe("CLI", () => {
     });
   });
 
+  test("rejects malformed boolean options before running the command", async () => {
+    const onRun = mock(() => {});
+    const deps = dependencies({ onRun });
+    for (const args of [
+      ["scan", ".", "--working-tree=1", "--dry-run"],
+      ["scan", ".", "--workingTree=treu", "--dry-run"],
+      ["scan", ".", "--mock", "--dry-run=1"],
+      ["scan", "import", "--csv", "unread.csv", "--dry-run=TRUE"],
+      ["publish", "findings", "unread.sarif", "--yes=maybe"],
+    ]) {
+      const stderr = captureCli(main, "stderr");
+      expect(await stderr.run(args, deps)).toBe(2);
+      expect(stderr.text()).toContain("Invalid boolean value for");
+    }
+    const typo = captureCli(main, "stderr");
+    expect(
+      await typo.run(["scan", ".", "--max-cots", "1", "--dry-run"], deps),
+    ).toBe(2);
+    expect(typo.text()).toContain("--max-cots");
+    expect(onRun).not.toHaveBeenCalled();
+    const out = captureCli(main, "stdout");
+    expect(
+      await out.run(
+        ["scan", ".", "--dry-run=true", "--working-tree=false", "--json"],
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(out.text()).dryRun).toBe(true);
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
     const root = await realpath(
       await temporaryDirectory("codex-security-cli-pre-commit-"),
@@ -1228,6 +1260,10 @@ describe("CLI", () => {
         };
         expect(normalize(result.hook)).toBe(hook);
         expect(result.failOnSeverity).toBe("medium");
+        if (process.platform !== "win32") {
+          expect((await stat(hook)).mode & 0o100).toBe(0o100);
+          if (attempt === 0) await chmod(hook, 0o600);
+        }
       }
       expect(await readFile(hook, "utf8")).toContain(
         "--working-tree --fail-on-severity medium",
