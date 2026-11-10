@@ -6934,6 +6934,48 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  testPosix(
+    "preserves literal executable override names and accepts padding",
+    async () => {
+      const tools = await realpath(await temporaryDirectory());
+      const repository = await temporaryDirectory();
+      const interpreter = pythonWithLauncher();
+      expect(interpreter).not.toBeNull();
+      const ordinary = join(tools, "tool");
+      const literal = ordinary + " ";
+      await symlink(interpreter!, ordinary);
+      await symlink(interpreter!, literal);
+
+      for (const [configured, name, expected] of [
+        [literal, "tool ", literal],
+        [` ${ordinary} `, " tool ", ordinary],
+      ] as const) {
+        expect(
+          resolveCodexCommand({ CODEX_CLI_PATH: configured }).command,
+        ).toBe(expected);
+        for (const python of [configured, name]) {
+          await expect(
+            resolvePluginPython({
+              environment: { PYTHON: python, PATH: tools },
+              protectedRoot: repository,
+            }),
+          ).resolves.toBe(expected);
+        }
+      }
+
+      await rm(literal);
+      expect(resolveCodexCommand({ CODEX_CLI_PATH: literal }).command).toBe(
+        ordinary,
+      );
+      await expect(
+        resolvePluginPython({
+          environment: { PYTHON: literal, PATH: tools },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(ordinary);
+    },
+  );
+
   test("resolves inherited Python names case-insensitively", async () => {
     const discovered = pythonWithLauncher();
     expect(discovered).not.toBeNull();

@@ -7,6 +7,7 @@ import {
   realpath,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -177,6 +178,15 @@ export async function testExecutorExecutablePinning({
       () => new CodexSdkWorkerExecutor({ parentSandbox }),
     );
     try {
+      const configuredPaths = fixtures.map((fixture) => fixture.executablePath);
+      if (process.platform !== "win32") {
+        const alias = path.join(
+          fixtures[0]!.root,
+          "codex with trailing space ",
+        );
+        await symlink(fixtures[0]!.executablePath, alias);
+        configuredPaths[0] = alias;
+      }
       for (const fixture of fixtures) {
         await writeFile(
           path.join(fixture.root, "prompt.md"),
@@ -188,7 +198,7 @@ export async function testExecutorExecutablePinning({
         await Promise.all(
           fixtures.map((fixture, index) => {
             process.env.CODEX_CLI_PATH =
-              fixtures[firstLaunch ? index : 1 - index]!.executablePath;
+              configuredPaths[firstLaunch ? index : 1 - index]!;
             process.env.FAKE_CODEX_MARKER = fixture.markerPath;
             return runTurn(
               executors[index]!,

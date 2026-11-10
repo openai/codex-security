@@ -1,4 +1,8 @@
-import { executablePathForSpawn } from "./executable-path.js";
+import {
+  configuredExecutableValue,
+  executablePathForSpawn,
+  isExecutableFile,
+} from "./executable-path.js";
 import { retryWindowsRename } from "./retry-windows-rename.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -3196,7 +3200,11 @@ async function pluginRuntimeProjection(
 export function resolveCodexCommand(
   environment: ProcessEnvironment = process.env,
 ): CodexCommand {
-  const configured = environmentValue(environment, "CODEX_CLI_PATH");
+  const configured = configuredExecutableValue(
+    environmentValue(environment, "CODEX_CLI_PATH", true),
+    process.platform,
+    (value) => isExecutableFile(expandHomeForLookup(value, environment)),
+  );
   const expanded =
     configured === undefined
       ? undefined
@@ -3677,13 +3685,27 @@ export async function resolvePluginPython(
       options.signal,
     );
   }
-  const inherited = environmentValue(environment, "PYTHON");
+  const inherited = environmentValue(environment, "PYTHON", true);
   if (inherited) {
+    const pathLike = isPythonPathCandidate(inherited);
+    const roots = pathLike ? protectedRoot : discoveryRoots;
+    const trimmed = inherited.trim();
+    // Check the literal spelling with the same PATH and repository protections as the launch.
+    const candidate =
+      process.platform !== "win32" &&
+      inherited !== trimmed &&
+      (await resolveTrustedExecutable(
+        pathLike ? expandHomeForLookup(inherited, environment) : inherited,
+        environment,
+        roots,
+      ))
+        ? inherited
+        : trimmed;
     return await requirePython(
-      inherited,
+      candidate,
       "PYTHON",
       environment,
-      isPythonPathCandidate(inherited) ? protectedRoot : discoveryRoots,
+      roots,
       options.signal,
     );
   }

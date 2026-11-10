@@ -177,8 +177,24 @@ try {
   );
   const resolvedPython =
     process.platform === "win32" ? process.execPath : `${fileCandidate} `;
-  if (process.platform !== "win32")
+  if (process.platform !== "win32") {
     await symlink(process.execPath, resolvedPython);
+    assert.equal(
+      await resolvePythonCommand({ configuredPython: resolvedPython }),
+      resolvedPython,
+    );
+    assert.equal(
+      await resolvePythonCommand({
+        configuredPython: "./python3 ",
+        workingDirectory: executableFixtureRoot,
+      }),
+      "./python3 ",
+    );
+    assert.equal(
+      await resolvePythonCommand({ configuredPython: ` ${fileCandidate} ` }),
+      fileCandidate,
+    );
+  }
   process.env.PYTHON = ` ${fileCandidate} `;
   process.env.CODEX_SECURITY_PYTHON_COMMAND = resolvedPython;
   assert.equal(await resolvePythonCommand(), resolvedPython);

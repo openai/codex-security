@@ -1113,6 +1113,8 @@ Python lookup: `--python` on commands that expose interpreter selection or SDK
 `pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
 works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
+On POSIX, `CODEX_CLI_PATH` and `PYTHON` preserve surrounding whitespace when
+the literal name selects an executable. Otherwise, surrounding whitespace is ignored.
 
 ### Troubleshooting
 

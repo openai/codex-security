@@ -1,4 +1,5 @@
 /* Generated from plugin executable-path.ts. Run `pnpm generate:models`. */
+import { accessSync, constants, statSync } from "node:fs";
 import { win32 } from "node:path";
 
 export function executablePathForSpawn(command: string): string {
@@ -9,4 +10,26 @@ export function executablePathForSpawn(command: string): string {
   return root === "\\" || root === "/"
     ? command
     : win32.toNamespacedPath(command);
+}
+
+export function isExecutableFile(value: string): boolean {
+  try {
+    if (!statSync(value).isFile()) return false;
+    accessSync(value, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function configuredExecutableValue(
+  value: string | undefined,
+  platform: NodeJS.Platform,
+  literalIsExecutable: (value: string) => boolean,
+): string | undefined {
+  const trimmed = value?.trim();
+  // Preserve conventional padding unless the literal POSIX name selects a file.
+  if (!value || !trimmed || value === trimmed || platform === "win32")
+    return trimmed;
+  return literalIsExecutable(value) ? value : trimmed;
 }
