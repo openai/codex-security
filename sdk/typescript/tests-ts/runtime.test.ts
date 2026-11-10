@@ -3373,23 +3373,30 @@ describe("runtime directories and plugin Python boundary", () => {
       let stickyParent = shared;
       await mkdir(stickyParent, { mode: 0o1777 });
       await chmod(stickyParent, 0o1777);
-      if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-        stickyParent = await realpath(tmpdir());
+      try {
         if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-          return;
+          stickyParent = await realpath(tmpdir());
+          if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+            return;
+          }
         }
+        const stateDirectory = join(
+          stickyParent,
+          `codex-security-sticky-${process.pid}-${Date.now()}`,
+        );
+        if (stickyParent !== shared) temporaryDirectories.track(stateDirectory);
+        await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+        const home = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        });
+        await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
+        await expect(
+          requireSecureOutputAncestry(home),
+        ).resolves.toBeUndefined();
+      } finally {
+        // Restore this fixture's parent before recursive cleanup on macOS.
+        await chmod(shared, 0o700);
       }
-      const stateDirectory = join(
-        stickyParent,
-        `codex-security-sticky-${process.pid}-${Date.now()}`,
-      );
-      if (stickyParent !== shared) temporaryDirectories.track(stateDirectory);
-      await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      });
-      await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
-      await expect(requireSecureOutputAncestry(home)).resolves.toBeUndefined();
     },
   );
 
@@ -6508,25 +6515,30 @@ describe("runtime directories and plugin Python boundary", () => {
       const shared = join(root, "shared");
       await mkdir(shared, { mode: 0o1777 });
       await chmod(shared, 0o1777);
-      // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
-      // chmod; fall back to the process temp root when it is already sticky.
-      let stickyParent = shared;
-      if (((await lstat(shared)).mode & 0o1000) === 0) {
-        stickyParent = await realpath(tmpdir());
-        if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-          return;
+      try {
+        // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
+        // chmod; fall back to the process temp root when it is already sticky.
+        let stickyParent = shared;
+        if (((await lstat(shared)).mode & 0o1000) === 0) {
+          stickyParent = await realpath(tmpdir());
+          if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+            return;
+          }
         }
-      }
-      const output = join(
-        stickyParent,
-        `codex-security-sticky-${process.pid}-${Date.now()}`,
-      );
-      if (stickyParent !== shared) temporaryDirectories.track(output);
+        const output = join(
+          stickyParent,
+          `codex-security-sticky-${process.pid}-${Date.now()}`,
+        );
+        if (stickyParent !== shared) temporaryDirectories.track(output);
 
-      await expect(
-        requireSecureOutputAncestry(output),
-      ).resolves.toBeUndefined();
-      expect(await prepareOutputDir(output, "repo")).toBe(output);
+        await expect(
+          requireSecureOutputAncestry(output),
+        ).resolves.toBeUndefined();
+        expect(await prepareOutputDir(output, "repo")).toBe(output);
+      } finally {
+        // Restore this fixture's parent before recursive cleanup on macOS.
+        await chmod(shared, 0o700);
+      }
     },
   );
 
