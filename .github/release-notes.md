@@ -63,6 +63,7 @@
 - compare ignored policy paths by their Git filename bytes ([#2573](https://github.com/openai/codex-security/pull/2573))
 - require thread attachment for legacy scan continuations ([#2428](https://github.com/openai/codex-security/pull/2428))
 - report exit status when the scan helper fails ([#2406](https://github.com/openai/codex-security/pull/2406))
+- import hosted Semgrep findings locally or in Cloud ([#2576](https://github.com/openai/codex-security/pull/2576))
 
 </details>
 
