@@ -151,7 +151,7 @@ and retries.
 
 The runner starts with a nonroot user, dropped capabilities,
 no-new-privileges, and the project's seccomp profile. On hosts that restrict
-nested user namespaces, install the [AppArmor profile](../sdk/typescript/README.md#containerized-bulk-scans)
+nested user namespaces, install the [AppArmor profile](../sdk/typescript/docs/cli.md#containerized-bulk-scans)
 and add `-f compose.apparmor.yaml` after `-f compose.runner.yaml` in the
 Compose commands. Both files configure the `codex-security` service. Source inspection requires a host that supports
 Bubblewrap and permits its user namespaces.

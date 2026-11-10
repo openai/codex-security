@@ -1,6 +1,7 @@
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { sessionLines } from "./session-lines.js";
+import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
+import { parseJson } from "./value.js";
 import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
@@ -11,6 +12,8 @@ import {
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
+import { compareTimestamps } from "./timestamps.js";
+import { shortArchivePrefix } from "./scan-archive-path.js";
 
 interface ScanLogOptions {
   scanId: string;
@@ -21,6 +24,7 @@ interface ScanLogOptions {
   scanDirectory?: string;
   startedAt?: string;
   completedAt?: string | null;
+  logCompletedAt?: string | null;
   allowMissingRoot?: boolean;
 }
 
@@ -31,9 +35,27 @@ export type ScanLogSource = JsonObject & {
   executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
+  logCompletedAt?: string | null;
   lifecycle?: { startedAt: string; finishedAt?: string | null };
   progress?: { status?: string; updatedAt?: string };
 };
+
+export function savedScanLogBoundaries(scan: ScanLogSource) {
+  const status = scan.progress?.status;
+  const terminal =
+    status === "complete" || status === "failed" || status === "canceled";
+  return {
+    // Legacy completion still bounds inferred workers, but cannot identify the
+    // final scan turn when sealed artifacts were completed before a resume.
+    completedAt:
+      status === "running"
+        ? null
+        : terminal
+          ? (scan.lifecycle?.finishedAt ?? scan.progress?.updatedAt ?? "")
+          : "",
+    logCompletedAt: terminal ? (scan.logCompletedAt ?? null) : null,
+  };
+}
 
 export function readSavedScanLogs(
   scan: ScanLogSource,
@@ -55,14 +77,7 @@ export function readSavedScanLogs(
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
     startedAt: scan.lifecycle?.startedAt,
-    completedAt:
-      scan.progress?.status === "running"
-        ? null
-        : scan.progress?.status === "complete" ||
-            scan.progress?.status === "failed" ||
-            scan.progress?.status === "canceled"
-          ? (scan.lifecycle?.finishedAt ?? scan.progress.updatedAt ?? "")
-          : "",
+    ...savedScanLogBoundaries(scan),
   });
 }
 
@@ -70,23 +85,24 @@ type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
 async function* scanSessions(codexHome: string, directory = "sessions") {
   for await (const path of sessionFiles(join(codexHome, directory), true)) {
-    for await (const first of sessionEvents(path)) {
-      if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
-        break;
-      }
-      const metadata = first["payload"];
-      const threadId = metadata["id"];
-      if (typeof threadId !== "string") break;
-      yield {
-        threadId,
-        parentThreadId: sessionParentThreadId(metadata),
-        startedAt: sessionStartedAt(metadata["timestamp"]),
-        workingDirectory:
-          typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
-        path,
-      };
-      break;
-    }
+    const first = await firstSessionEvent(path);
+    if (first?.["type"] !== "session_meta" || !isRecord(first["payload"]))
+      continue;
+    const metadata = first["payload"];
+    const threadId = metadata["id"];
+    if (typeof threadId !== "string") continue;
+    yield {
+      threadId,
+      parentThreadId: sessionParentThreadId(metadata),
+      startedAt: sessionStartedAt(metadata["timestamp"]),
+      timestamp:
+        typeof metadata["timestamp"] === "string"
+          ? metadata["timestamp"]
+          : null,
+      workingDirectory:
+        typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
+      path,
+    };
   }
 }
 
@@ -121,6 +137,11 @@ export async function readScanLogs(options: ScanLogOptions) {
     );
   }
 
+  const startsAfterCompletion = (timestamp: unknown) =>
+    typeof options.logCompletedAt === "string" &&
+    typeof timestamp === "string" &&
+    compareTimestamps(timestamp, options.logCompletedAt) >= 0;
+
   const included = new Set([
     ...(options.threadId ? [options.threadId] : []),
     ...(options.threadIds ?? []),
@@ -144,12 +165,34 @@ export async function readScanLogs(options: ScanLogOptions) {
   if (options.scanDirectory && startedAt !== null) {
     const directories = [options.scanDirectory];
     const name = basename(options.scanDirectory);
+    const parent = dirname(options.scanDirectory);
+    const originals = new Set<string>();
     for (const marker of name.matchAll(/\.previous-/g)) {
-      if (!marker.index) continue;
-      const original = join(
-        dirname(options.scanDirectory),
-        name.slice(0, marker.index),
-      );
+      if (marker.index)
+        originals.add(join(parent, name.slice(0, marker.index)));
+    }
+    if (name.startsWith(".previous-")) {
+      // A short archive has no readable source name. Only already-bound
+      // sessions can supply a sibling whose complete filename matches its hash.
+      const boundCwds = [
+        root?.workingDirectory,
+        ...Array.from(traversed, (id) => logs.get(id)?.[0].workingDirectory),
+      ];
+      for (const cwd of boundCwds) {
+        if (!cwd) continue;
+        const path = relative(parent, cwd);
+        const sibling = path.split(sep, 1)[0];
+        if (
+          sibling &&
+          sibling !== ".." &&
+          !isAbsolute(path) &&
+          name.startsWith(shortArchivePrefix(sibling))
+        ) {
+          originals.add(join(parent, sibling));
+        }
+      }
+    }
+    for (const original of originals) {
       // A Desktop owner can work outside the scan directory. Its registered
       // workers provide the same binding after archiving the output.
       if (
@@ -165,7 +208,7 @@ export async function readScanLogs(options: ScanLogOptions) {
     for (const session of children.get(null) ?? []) {
       if (
         session !== root &&
-        belongsToScan(session, directories, startedAt, options.completedAt)
+        belongsToScan(session, directories, startedAt, options)
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
@@ -174,6 +217,7 @@ export async function readScanLogs(options: ScanLogOptions) {
   }
   for (const parentId of traversed) {
     for (const session of children.get(parentId) ?? []) {
+      if (startsAfterCompletion(session.timestamp)) continue;
       included.add(session.threadId);
       traversed.add(session.threadId);
     }
@@ -189,6 +233,8 @@ export async function readScanLogs(options: ScanLogOptions) {
     sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
+  // Recorded completion can precede the scan turn's final response. Keep that
+  // turn's remaining events, then stop before a post-completion turn starts.
   for (const session of sessions) {
     let replaying = false;
     for await (const event of sessionEvents(session.path)) {
@@ -196,17 +242,15 @@ export async function readScanLogs(options: ScanLogOptions) {
       if (event["type"] === "session_meta" && isRecord(payload)) {
         replaying = payload["id"] !== session.threadId;
       }
+      const taskStarted =
+        event["type"] === "event_msg" &&
+        isRecord(payload) &&
+        payload["type"] === "task_started";
       if (replaying) {
-        if (
-          event["type"] !== "event_msg" ||
-          !isRecord(payload) ||
-          payload["type"] !== "task_started" ||
-          !sessionOwnsTurn(session, payload)
-        ) {
-          continue;
-        }
+        if (!taskStarted || !sessionOwnsTurn(session, payload)) continue;
         replaying = false;
       }
+      if (taskStarted && startsAfterCompletion(event["timestamp"])) break;
       events.push({ threadId: session.threadId, event });
     }
   }
@@ -227,7 +271,7 @@ function belongsToScan(
   session: SessionLog,
   directories: string[],
   startedAt: number,
-  completedAt: string | null | undefined,
+  options: ScanLogOptions,
 ): boolean {
   if (
     session.workingDirectory === null ||
@@ -236,12 +280,12 @@ function belongsToScan(
   ) {
     return false;
   }
-  if (completedAt !== undefined && completedAt !== null) {
-    const completed = Date.parse(completedAt);
-    if (!Number.isFinite(completed) || session.startedAt >= completed) {
-      return false;
-    }
-  }
+  const beforeCompletion =
+    typeof options.logCompletedAt === "string" && session.timestamp !== null
+      ? compareTimestamps(session.timestamp, options.logCompletedAt) < 0
+      : options.completedAt == null ||
+        session.startedAt < Date.parse(options.completedAt);
+  if (!beforeCompletion) return false;
 
   for (const directoryRoot of directories) {
     if (isScanArtifactDirectory(directoryRoot, session.workingDirectory)) {
@@ -267,6 +311,16 @@ async function extendsSessionLog(
   } finally {
     await events.return(undefined);
   }
+}
+
+async function firstSessionEvent(path: string) {
+  const line = await firstNativeSessionLine(path);
+  if (line !== undefined) {
+    const event = parseJson(() => line);
+    if (isRecord(event)) return event;
+  }
+  // Also handles metadata split across frames and malformed prefix lines.
+  for await (const event of sessionEvents(path)) return event;
 }
 
 async function* sessionEvents(

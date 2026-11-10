@@ -76,7 +76,7 @@ def require_diff_target(
     if kind == "working_tree":
         base = resolve_git_commit(target, base_revision or "HEAD", "Working-tree base")
         head = resolve_git_commit(target, head_revision or current_head, "Working-tree HEAD")
-        current_digest = worktree_content_digest(target)
+        current_digest = worktree_content_digest(target, expected_digest=content_digest)
         if base != current_head or head != current_head:
             raise SystemExit(
                 "Repository HEAD changed after these working-tree changes were selected. "
@@ -232,7 +232,7 @@ def inspect_selected_setup(args: argparse.Namespace) -> dict[str, Any]:
     )
     if args.mode == "deep":
         inspected["deepScanConfig"] = resolve_deep_scan_setup(
-            os.cpu_count() or 1, args.deep_scan_project_json
+            project_json=args.deep_scan_project_json
         )
     elif args.deep_scan_project_json is not None:
         raise SystemExit("Project Deep Scan settings require Deep Scan mode.")

@@ -176,10 +176,9 @@ export function normalizeSemgrepFindings(
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
   if (document["format"] === guardianSelectionFormat) {
-    if (target !== "local")
-      throw new Error("Import Guardian selections into the local workbench.");
     return normalizeGuardianSelection(
       document,
+      target,
       options.sourceRepositoryUrl,
       options.sourceRepositories,
     );
