@@ -30,6 +30,7 @@
 - find system Python for Linux accounts without a home ([#2509](https://github.com/openai/codex-security/pull/2509))
 - allow more time for npm package availability ([#2532](https://github.com/openai/codex-security/pull/2532))
 - use the singular for one review round in Deep Scan stop reasons ([#2443](https://github.com/openai/codex-security/pull/2443))
+- skip DOCX content control placeholder text ([#2490](https://github.com/openai/codex-security/pull/2490))
 
 </details>
 
