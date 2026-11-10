@@ -669,7 +669,8 @@ def require_working_tree_unchanged(target: Path, diff_target: dict[str, str] | N
         and diff_target["kind"] == "working_tree"
         and (
             git_revision(target) != diff_target["headRevision"]
-            or worktree_content_digest(target) != diff_target["contentDigest"]
+            or worktree_content_digest(target, expected_digest=diff_target["contentDigest"])
+            != diff_target["contentDigest"]
         )
     ):
         raise SystemExit("The selected scan target changed while the scan was starting. Try again.")
@@ -2362,7 +2363,9 @@ def require_reviewed_patch_applied(
 ) -> str | None:
     target = require_scan_target_identity(scan)
     _, content_digest = remediation_checkout_snapshot(
-        scan, expected_revision=remediation["base_revision"]
+        scan,
+        expected_revision=remediation["base_revision"],
+        expected_digest=remediation["base_content_digest"],
     )
     if content_digest == remediation["base_content_digest"]:
         raise SystemExit(
@@ -2421,6 +2424,7 @@ def require_reviewed_patch_applied(
                 pathspec or ".",
                 git_dir=short or metadata,
                 work_tree=checkout_root,
+                expected_digest=remediation["base_content_digest"],
             )
         )
         if reverted_digest != remediation["base_content_digest"] and unversioned:
@@ -2454,15 +2458,15 @@ def require_remediation_checkout_unchanged(
     require_applied_content: bool = False,
     require_base_content: bool = False,
 ) -> None:
-    _, content_digest = remediation_checkout_snapshot(
-        scan, expected_revision=remediation["base_revision"]
-    )
     expected_digest = (
         remediation["applied_content_digest"]
         if require_applied_content
         else remediation["base_content_digest"]
         if require_base_content
         else None
+    )
+    _, content_digest = remediation_checkout_snapshot(
+        scan, expected_revision=remediation["base_revision"], expected_digest=expected_digest
     )
     if expected_digest is not None and content_digest != expected_digest:
         raise SystemExit(

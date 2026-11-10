@@ -592,6 +592,7 @@ def _update_digest_field_from_git(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    environment_overrides: dict[str, str] | None = None,
 ) -> None:
     with tempfile.TemporaryFile() as output:
         completed = git_command(
@@ -601,6 +602,7 @@ def _update_digest_field_from_git(
             git_dir=git_dir,
             work_tree=work_tree,
             stdout_file=output,
+            environment_overrides=environment_overrides,
         )
         if completed.returncode != 0:
             detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
@@ -618,17 +620,20 @@ def _update_digest_field_from_git(
             digest.update(chunk)
 
 
-def worktree_content_digest(target: Path) -> str:
+def worktree_content_digest(target: Path, *, expected_digest: str | None = None) -> str:
     """Return the worktree digest for the selected path after checking the state of its submodules."""
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
-    return worktree_content_digest_for_context(repository, pathspec)
+    return worktree_content_digest_for_context(
+        repository, pathspec, expected_digest=expected_digest
+    )
 
 
 def remediation_checkout_snapshot(
     scan: sqlite3.Row,
     *,
     expected_revision: str | None = None,
+    expected_digest: str | None = None,
     head_changed_message: str = (
         "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
     ),
@@ -640,7 +645,7 @@ def remediation_checkout_snapshot(
         if revision != required_revision:
             raise SystemExit(head_changed_message)
         content_digest = (
-            worktree_content_digest(target)
+            worktree_content_digest(target, expected_digest=expected_digest)
             if revision != "unversioned"
             else directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
         )
@@ -661,12 +666,16 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
                 raise SystemExit(head_changed_message)
             require_clean_submodule_worktrees(target)
         return
-    _, current_digest = remediation_checkout_snapshot(
-        scan, head_changed_message=head_changed_message
-    )
     if scan["diff_target_kind"] == "working_tree":
         expected_digest = scan["diff_content_digest"]
     elif scan["diff_target_kind"] in {"commit", "range"}:
+        expected_digest = clean_worktree_content_digest()
+    else:
+        expected_digest = scan["target_snapshot_digest"]
+    _, current_digest = remediation_checkout_snapshot(
+        scan, expected_digest=expected_digest, head_changed_message=head_changed_message
+    )
+    if scan["diff_target_kind"] in {"commit", "range"}:
         target = Path(scan["target_path"])
         tracked = git_bytes(target, "ls-files", "-v", "-z")
         if tracked is None:
@@ -679,9 +688,6 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
             )
         if any(entry.startswith(b"h ") for entry in entries):
             verify_assumed_unchanged_files(target)
-        expected_digest = clean_worktree_content_digest()
-    else:
-        expected_digest = scan["target_snapshot_digest"]
     if current_digest != expected_digest:
         raise SystemExit(
             "Scan target contents changed since the scan. "
@@ -728,6 +734,28 @@ def worktree_content_digest_for_context(
     *,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    expected_digest: str | None = None,
+) -> str:
+    def calculate(stable_display: bool) -> str:
+        return _git_content_digest(repository, pathspec, git_dir, work_tree, stable_display)
+
+    current = calculate(True)
+    # Older sealed snapshots may have included the user's Git display settings.
+    if (
+        expected_digest is not None
+        and current != expected_digest
+        and calculate(False) == expected_digest
+    ):
+        return expected_digest
+    return current
+
+
+def _git_content_digest(
+    repository: Path,
+    pathspec: str,
+    git_dir: Path | None,
+    work_tree: Path | None,
+    stable_display: bool,
 ) -> str:
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
@@ -736,12 +764,26 @@ def worktree_content_digest_for_context(
         ":(top,glob,exclude)**/.svn",
         ":(top,glob,exclude)**/.svn/**",
     ]
+    config = ("-c", "core.quotePath=true") if stable_display else ()
+    display = (
+        (
+            "--no-color",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--unified=3",
+            "--diff-algorithm=myers",
+        )
+        if stable_display
+        else ()
+    )
     _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
+        *config,
         "--no-literal-pathspecs",
         "diff",
+        *display,
         "--binary",
         "--full-index",
         "--no-ext-diff",
@@ -752,6 +794,8 @@ def worktree_content_digest_for_context(
         *source_pathspecs,
         git_dir=git_dir,
         work_tree=work_tree,
+        # GIT_DIFF_OPTS overrides even an explicit --unified option.
+        environment_overrides={"GIT_DIFF_OPTS": ""} if stable_display else None,
     )
     untracked = git_bytes(
         repository,
@@ -1570,7 +1614,7 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
             expected_digest = (
                 scan["diff_content_digest"] if working_tree else scan["target_snapshot_digest"]
             )
-            if worktree_content_digest(target) != expected_digest:
+            if worktree_content_digest(target, expected_digest=expected_digest) != expected_digest:
                 return (
                     "Working-tree contents changed while the scan was running; "
                     "results were saved for the original snapshot."
