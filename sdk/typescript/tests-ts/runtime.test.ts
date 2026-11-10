@@ -6963,6 +6963,27 @@ describe("runtime directories and plugin Python boundary", () => {
         }
       }
 
+      const paddedAbsolute = ` ${ordinary} `;
+      const shadow = join(repository, paddedAbsolute);
+      await mkdir(dirname(shadow), { recursive: true });
+      await writeFile(shadow, "#!/bin/sh\nexit 93\n", { mode: 0o700 });
+      const runtime = new URL("../src/runtime.ts", import.meta.url).href;
+      const child = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `import { resolveCodexCommand } from ${JSON.stringify(runtime)};
+         import { spawnSync } from "node:child_process";
+         const { command } = resolveCodexCommand();
+         process.exit(spawnSync(command, ["-I", "-c", "pass"]).status ?? 1);`,
+        ],
+        {
+          cwd: repository,
+          env: { ...process.env, CODEX_CLI_PATH: paddedAbsolute },
+        },
+      );
+      expect(child.status).toBe(0);
+
       await rm(literal);
       expect(resolveCodexCommand({ CODEX_CLI_PATH: literal }).command).toBe(
         ordinary,

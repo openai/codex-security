@@ -21,14 +21,26 @@ export function isExecutableFile(value: string): boolean {
   }
 }
 
+export function hasTrailingExecutableWhitespace(
+  value: string,
+  platform: NodeJS.Platform,
+): boolean {
+  // Leading padding can turn an absolute or home-relative override into a path in the current directory.
+  return (
+    platform !== "win32" &&
+    value.trimStart() === value &&
+    value.trimEnd() !== value
+  );
+}
+
 export function configuredExecutableValue(
   value: string | undefined,
   platform: NodeJS.Platform,
   literalIsExecutable: (value: string) => boolean,
 ): string | undefined {
-  const trimmed = value?.trim();
-  // Preserve conventional padding unless the literal POSIX name selects a file.
-  if (!value || !trimmed || value === trimmed || platform === "win32")
-    return trimmed;
-  return literalIsExecutable(value) ? value : trimmed;
+  return value &&
+    hasTrailingExecutableWhitespace(value, platform) &&
+    literalIsExecutable(value)
+    ? value
+    : value?.trim();
 }

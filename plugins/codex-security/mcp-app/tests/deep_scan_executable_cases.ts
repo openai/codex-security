@@ -186,6 +186,21 @@ export async function testExecutorExecutablePinning({
         );
         await symlink(fixtures[0]!.executablePath, alias);
         configuredPaths[0] = alias;
+        const other = fixtures[1]!.executablePath;
+        const bare = path.basename(other) + " ";
+        await symlink(
+          fixtures[0]!.executablePath,
+          path.join(fixtures[0]!.root, bare),
+        );
+        assert.equal(
+          resolveCodexPath(
+            { PATH: path.dirname(other), CODEX_CLI_PATH: bare },
+            process.platform,
+            process.arch,
+            fixtures[0]!.root,
+          ),
+          other,
+        );
       }
       for (const fixture of fixtures) {
         await writeFile(

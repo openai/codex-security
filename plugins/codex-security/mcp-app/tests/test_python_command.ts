@@ -190,8 +190,15 @@ try {
       }),
       "./python3 ",
     );
+    const paddedAbsolute = ` ${fileCandidate} `;
+    const shadow = path.join(executableFixtureRoot, paddedAbsolute);
+    await mkdir(path.dirname(shadow), { recursive: true });
+    await symlink(process.execPath, shadow);
     assert.equal(
-      await resolvePythonCommand({ configuredPython: ` ${fileCandidate} ` }),
+      await resolvePythonCommand({
+        configuredPython: paddedAbsolute,
+        workingDirectory: executableFixtureRoot,
+      }),
       fileCandidate,
     );
   }
