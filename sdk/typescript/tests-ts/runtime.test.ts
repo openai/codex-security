@@ -6646,6 +6646,23 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "creates private scan directories for a maximum-length repository name",
+    async () => {
+      const root = await realpath(await temporaryDirectory());
+      const repositoryName = "r".repeat(255);
+      const outputs = await Promise.all([
+        prepareOutputDir(undefined, repositoryName, root),
+        prepareOutputDir(undefined, repositoryName, root),
+      ]);
+      expect(new Set(outputs).size).toBe(2);
+      for (const output of outputs) {
+        expect(dirname(output)).toBe(root);
+        expect((await stat(output)).mode & 0o777).toBe(0o700);
+      }
+    },
+  );
+
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
