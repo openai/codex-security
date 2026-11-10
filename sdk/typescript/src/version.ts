@@ -94,7 +94,7 @@ function resolveUpdate(
     "peerDependencies",
   ].filter((key) => Object.hasOwn(manifest?.[key] ?? {}, PACKAGE_NAME));
   const global =
-    (installRoot.endsWith("/lib/") && !fields.length) ||
+    (installRoot.endsWith("/lib/") && manifest === undefined) ||
     installRoot.endsWith("/appdata/roaming/npm/") ||
     (nodeModulesDirectory !== undefined &&
       path.startsWith(`${nodeModulesDirectory}/`)) ||

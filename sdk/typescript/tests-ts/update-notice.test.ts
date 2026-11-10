@@ -248,6 +248,12 @@ describe("CLI update notice", () => {
       expect(cwd).toBe(owner);
       expect(realpathSync(selectedPrefix!)).toBe(prefix);
       expect(args).toEqual(["install", "-g", "@openai/codex-security@latest"]);
+      if (!windows) {
+        writeFileSync(join(owner, "package.json"), "{}");
+        await expect(
+          installUpdate(env, join(owner, "node_modules", "pkg", "version.js")),
+        ).rejects.toThrow("from the project that declares");
+      }
       writeFileSync(join(project, "package.json"), "{}");
       await expect(installUpdate(env, entrypoint)).rejects.toThrow(
         "from the project that declares",
