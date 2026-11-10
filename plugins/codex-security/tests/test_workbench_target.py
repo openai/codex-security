@@ -230,9 +230,10 @@ def test_reviewed_patch_uses_long_source_metadata_in_its_private_replay(
         )
         monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
         (source / "conditional.fixture").write_bytes(b"excluded by the selected Git directory\n")
-        assert subprocess.check_output(
+        ignored = subprocess.check_output(
             ["git", "-C", source, "check-ignore", "conditional.fixture"]
-        ).strip()
+        )
+        assert ignored.strip()
     patch = b"diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
     scan = write_reviewed_patch(tmp_path, source, patch, revision)
     _, digest = workbench_db.remediation_checkout_snapshot(scan)
@@ -706,9 +707,43 @@ def test_reviewed_patch_restores_junction_git_context(
 
 
 @pytest.mark.cross_platform
-def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "short_reference",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=[
+                pytest.mark.native_windows,
+                pytest.mark.skipif(os.name != "nt", reason="requires Windows replay binding"),
+            ],
+        ),
+    ],
+    ids=["ordinary", "short-reference"],
+)
+def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(
+    tmp_path: Path, short_reference: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_remediation
+
     repository = tmp_path / "repository"
     initialize_unborn_git_repository(repository)
+    references = []
+    reverse = workbench_remediation.reverse_reviewed_patch
+    git = workbench_remediation.git_command
+
+    def record_references(*args, **kwargs):
+        selected = reverse(*args, **kwargs)
+        references.append(selected)
+        return selected
+
+    def require_short_reference(target, *args, **kwargs):
+        if short_reference and kwargs.get("git_dir") == repository / ".git":
+            return subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
+        return git(target, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_remediation, "reverse_reviewed_patch", record_references)
+    monkeypatch.setattr(workbench_remediation, "git_command", require_short_reference)
     attributes = tmp_path / "attributes"
     attributes.write_text("*.txt text eol=crlf\n")
     subprocess.run(
@@ -720,6 +755,8 @@ def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(tmp_path: Path) -> None
     assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n", newline="\n")
 
     assert (source / "app.txt").read_bytes() == b"after\n"
+    if short_reference:
+        assert references[0][0] is not None
 
 
 def assert_reviewed_change(

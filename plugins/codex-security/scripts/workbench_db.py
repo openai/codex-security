@@ -2429,8 +2429,6 @@ def require_reviewed_patch_applied(
                 "--no-index",
                 str(reviewed_patch),
                 text=True,
-                git_dir=short,
-                work_tree=checkout if short else None,
             )
             if applied_without_conversion.returncode == 0:
                 restore_directory_junctions(target, checkout, junctions)
