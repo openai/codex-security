@@ -7148,7 +7148,18 @@ export async function main(
             .default(false)
             .describe("Read an access token from stdin."),
         }),
-        examples: [{ options: {}, description: "Sign in with ChatGPT." }],
+        examples: [
+          { options: {}, description: "Sign in using the browser." },
+          {
+            options: { deviceAuth: true },
+            description: "Sign in from a headless machine with device auth.",
+          },
+          {
+            options: { withApiKey: true },
+            description:
+              "Pipe an API key on stdin from your credential source.",
+          },
+        ],
         async run({ options }) {
           const credentialHome = await prepareCodexSecurityCredentialHome(
             dependencies.environment,
@@ -7275,7 +7286,8 @@ export async function main(
       }),
     )
     .command("logout", {
-      description: "Remove the stored sign-in.",
+      description: "Remove the stored Codex Security sign-in.",
+      hint: "Check the effective account with codex-security login status. Scans can still use an API key configured in your environment.",
       destructive: true,
       async run() {
         const credentialHome = await prepareCodexSecurityCredentialHome(
