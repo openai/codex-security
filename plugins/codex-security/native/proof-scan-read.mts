@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -65,6 +67,20 @@ export function scanReadProof(): Record<string, boolean> {
       renameSync(scan, moved);
       renameSync(moved, scan);
     }
+    if (process.platform === "linux") {
+      chmodSync(artifacts, 0o100);
+      chmodSync(scan, 0o100);
+      try {
+        const searchable = openRoot(scan);
+        assert.deepEqual(
+          chunks(openFile(searchable, "artifacts/receipt.json")),
+          payload,
+        );
+      } finally {
+        chmodSync(scan, 0o700);
+        chmodSync(artifacts, 0o700);
+      }
+    }
     const root = openRoot(scan);
     assert.deepEqual(chunks(openFile(root, "artifacts/receipt.json")), payload);
     assert.equal(root.openFile("missing.json"), null);
@@ -97,7 +113,7 @@ export function scanReadProof(): Record<string, boolean> {
       assert.deepEqual(chunks(held), payload);
       assert.throws(() => root.openFile("artifacts/receipt.json"));
       held.close();
-      rmSync(artifacts);
+      unlinkSync(artifacts);
       renameSync(moved, artifacts);
     }
     assert.throws(() => held.read(1), /closed/i);

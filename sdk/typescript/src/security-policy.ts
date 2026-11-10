@@ -432,13 +432,14 @@ async function securityPolicyPaths(
   const gitDirectories = new Set<string>();
   const policies: string[] = [];
   const reportingPaths = new Set<string>();
-  const ignored = new Set<string>();
+  const ignoredPathBytes = new Set<string>();
   const isGitData = (path: string): boolean =>
     [...gitDirectories].some(
       (directory) => !relativePathIsOutside(relative(directory, path)),
     );
   const isIgnored = (path: string): boolean =>
-    ignored.has(path) || (dirname(path) !== path && isIgnored(dirname(path)));
+    ignoredPathBytes.has(Buffer.from(path).toString("latin1")) ||
+    (dirname(path) !== path && isIgnored(dirname(path)));
   const addRoot = async (repository: string) => {
     if (knownRoots.has(repository)) return;
     knownRoots.add(repository);
@@ -461,9 +462,17 @@ async function securityPolicyPaths(
           "-z",
         ],
         signal,
+        undefined,
+        undefined,
+        "buffer",
       );
-      for (const path of ignoredPaths.split("\0").filter(Boolean))
-        ignored.add(resolve(gitRoot, path));
+      // Match Git's filename bytes without aliasing invalid UTF-8 to U+FFFD.
+      const rootBytes = Buffer.from(gitRoot).toString("latin1");
+      for (const path of ignoredPaths
+        .toString("latin1")
+        .split("\0")
+        .filter(Boolean))
+        ignoredPathBytes.add(resolve(rootBytes, path));
     }
     for (const name of [".github", "docs"]) {
       let directory = join(repository, name);
@@ -482,7 +491,25 @@ async function securityPolicyPaths(
     const directory = directories.pop()!;
     if (isGitData(directory)) continue;
     const entries = await readdir(directory, { withFileTypes: true });
-    if (await isGitMetadataDirectory(directory, signal)) {
+    let gitMetadata: boolean;
+    try {
+      gitMetadata = await isGitMetadataDirectory(directory, signal);
+    } catch (error) {
+      // POSIX can permit listing a directory but deny lookups of its children.
+      // A leaf containing only unrelated regular files needs no further lookups.
+      if (
+        process.platform !== "win32" &&
+        (error as NodeJS.ErrnoException).code === "EACCES" &&
+        entries.every(
+          (entry) =>
+            entry.isFile() &&
+            !/^(?:\.git|HEAD|SECURITY\.md)$/iu.test(entry.name),
+        )
+      )
+        continue;
+      throw error;
+    }
+    if (gitMetadata) {
       gitDirectories.add(directory);
       const common = await readFile(join(directory, "commondir"), "utf8").catch(
         nullIfMissingFile,
