@@ -929,6 +929,37 @@ describe("npm package tar listings", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "explains the missing tar option on Alpine",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "codex-package-tar-option-"));
+      try {
+        const tools = join(root, "tools");
+        mkdirSync(tools);
+        writeFileSync(
+          join(tools, "tar"),
+          "#!/bin/sh\necho 'tar: unrecognized option: ignore-zeros' >&2\necho 'BusyBox multi-call binary.' >&2\nexit 1\n",
+          { mode: 0o755 },
+        );
+        const path = join(root, "package.tgz");
+        writeFileSync(path, gzipSync(packageTar(), { level: 0 }));
+        const contract = join(root, "contract.json");
+        writeFileSync(contract, JSON.stringify(pluginContract));
+        const checked = await checkPackage(root, path, contract, {
+          ...process.env,
+          PATH: tools + delimiter + process.env["PATH"],
+        });
+        expect(checked.status).toBe(1);
+        expect(checked.stderr).toContain("apk add tar");
+        expect(checked.stderr).toContain(
+          "tar: unrecognized option: ignore-zeros",
+        );
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
+
   test("streams each archive without resolving tar from its directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-tar-test-"));
     try {
