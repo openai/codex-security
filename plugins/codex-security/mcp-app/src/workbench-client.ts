@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { JsonObject } from "./types.js";
-import { isRecord as isJsonObject } from "./record.js";
+import { isRecord } from "./record.js";
 import {
   missingPythonHelperMessage,
   resolvePythonCommand,
@@ -39,34 +39,36 @@ export async function runWorkbench(
   input?: string | Buffer,
   options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
-  let pythonCommand: string | undefined;
+  const pythonCommand = await resolvePythonCommand({
+    workingDirectory: PLUGIN_ROOT,
+  });
   try {
-    pythonCommand = await resolvePythonCommand({
-      workingDirectory: PLUGIN_ROOT,
-    });
     return await executeWorkbench(pythonCommand, args, input, options);
   } catch (error) {
-    const launchError = pythonCommand
-      ? missingPythonHelperMessage(error, pythonCommand)
-      : undefined;
-    if (launchError) {
-      throw new Error(launchError, { cause: error });
-    }
-    if (isExecError(error) && error.stderr.trim()) {
-      throw new Error(error.stderr.trim(), { cause: error });
-    }
+    const message =
+      missingPythonHelperMessage(error, pythonCommand) ??
+      workbenchExitMessage(error, args[0]);
+    if (message) throw new Error(message, { cause: error });
     throw error;
   }
 }
 
+function workbenchExitMessage(error: unknown, command: string) {
+  if (!isRecord(error) || typeof error.stderr !== "string") return;
+  const stderr = error.stderr.trim();
+  if (stderr) return stderr;
+
+  const operation = `Codex Security workbench ${command}`;
+  if (typeof error.signal === "string")
+    return `${operation} was terminated by signal ${error.signal}.`;
+  if (typeof error.code === "number")
+    return `${operation} exited with code ${error.code}.`;
+}
+
 function workbenchTimeout(args: string[]): number {
-  if (
-    args[0] === "mark-handoff-delivered" &&
-    args.includes("--return-context")
-  ) {
-    return 300_000;
-  }
-  return [
+  const contextHandoff =
+    args[0] === "mark-handoff-delivered" && args.includes("--return-context");
+  const longRunningCommand = [
     "begin-deep-scan",
     "cancel-scan",
     "fail-scan",
@@ -91,9 +93,8 @@ function workbenchTimeout(args: string[]): number {
     "start-prompt-only-scan",
     "start-scan",
     "upsert-deep-scan-worker",
-  ].includes(args[0] ?? "")
-    ? 300_000
-    : 30_000;
+  ].includes(args[0] ?? "");
+  return contextHandoff || longRunningCommand ? 300_000 : 30_000;
 }
 
 async function executeWorkbench(
@@ -149,7 +150,7 @@ async function executeWorkbench(
     throw error;
   });
   const result = JSON.parse(stdout) as unknown;
-  if (!isJsonObject(result)) {
+  if (!isRecord(result)) {
     throw new Error("Codex Security workbench helper returned invalid JSON.");
   }
   return result;
@@ -157,13 +158,4 @@ async function executeWorkbench(
 
 function workbenchScriptPath(): string {
   return join(PLUGIN_ROOT, "scripts", "workbench_db.py");
-}
-
-function isExecError(error: unknown): error is { stderr: string } {
-  return Boolean(
-    error &&
-    typeof error === "object" &&
-    "stderr" in error &&
-    typeof error.stderr === "string",
-  );
 }
