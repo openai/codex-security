@@ -17,10 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench.storage import worker_usage_directory
+from snapshot_sqlite import readonly_sqlite_uri
+from workbench.storage import archive_source_directory, worker_usage_directory
 
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
@@ -607,9 +607,9 @@ def _scan_worker_directories(
 
 
 def _codex_state_database() -> Path | None:
-    configured_database = os.environ.get("CODEX_STATE_DB", "").strip()
-    if configured_database:
-        path = Path(configured_database).expanduser()
+    configured_database = os.environ.get("CODEX_STATE_DB", "")
+    if configured_database.strip():
+        path = Path(os.path.expanduser(configured_database))
         return path.resolve() if path.is_file() and os.access(path, os.R_OK) else None
 
     configured_home = os.environ.get("CODEX_HOME", "")
@@ -654,7 +654,7 @@ def _discover_rollout_sessions(
     completed_at: datetime | None,
 ) -> tuple[list[RolloutSession], set[str]]:
     database = sqlite3.connect(
-        f"file:{quote(str(state_database), safe='')}?mode=ro",
+        readonly_sqlite_uri(state_database),
         uri=True,
         timeout=STATE_DATABASE_TIMEOUT_SECONDS,
     )
@@ -708,10 +708,12 @@ def _discover_rollout_sessions(
                 for path in worker_directories
                 if Path(path).is_relative_to(scan_directory)
             }
-            for marker in re.finditer(r"\.previous-", scan_directory.name):
-                if marker.start() == 0:
-                    continue
-                original = scan_directory.with_name(scan_directory.name[: marker.start()])
+            originals = {
+                original
+                for path in bound_directories | {Path(path) for path in worker_directories}
+                if (original := archive_source_directory(scan_directory, path)) is not None
+            }
+            for original in originals:
                 candidates = {original / relative: path for relative, path in relatives.items()}
                 # Older archives kept absolute discovery paths in their original directory.
                 if (

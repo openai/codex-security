@@ -1877,6 +1877,7 @@ describe("CLI", () => {
           '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
           '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
           '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"info","arguments":{}}}',
+          '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"scans_list","arguments":{}}}',
           "",
         ].join("\n"),
         timeout: 30_000,
@@ -1903,6 +1904,12 @@ describe("CLI", () => {
         },
       },
     });
+    expect(responses.find((response) => response.id === 4).error).toMatchObject(
+      {
+        code: -32602,
+        message: "Tool scans_list not found",
+      },
+    );
     const metadata = responses.find((response) => response.id === 3).result;
     expect(metadata.structuredContent).toMatchObject({
       sdkVersion: VERSION,
@@ -5095,6 +5102,25 @@ describe("CLI", () => {
     }
   });
 
+  test("reports an unreadable mock scan artifact as a local failure", async () => {
+    const message =
+      "Could not save the mock scan: scan-manifest.json: [Errno 13] Permission denied";
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.createSecurity = () => failingSecurity(message);
+
+    expect(
+      await runCli(["scan", ".", "--mock", "--json", "--verbose"], deps),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message,
+    });
+    expect(stderr.text()).toContain(message);
+    expect(stderr.text()).toContain('scan.failed classification="local"');
+  });
+
   test("keeps model authorization advice for genuine transport failures", async () => {
     // The bypass must not swallow real 401/403 handling, and the advice must
     // still replace upstream text that can name the organization or project.
@@ -6217,6 +6243,28 @@ describe("CLI", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("explains how to fix an overlapping state directory", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const failing = scanDependencies(async () => {
+      throw new OutputInsideProtectedRootError(
+        "/state",
+        "/state/repo",
+        "state",
+      );
+    });
+
+    expect(await runCli(["scan", ".", "--json"], failing)).toBe(2);
+    const { message } = JSON.parse(stdout.text());
+    expect(message).toContain(
+      "Codex Security state directory must be outside the protected scan root and cannot contain it.",
+    );
+    expect(message).toContain("Resolved path:  /state");
+    expect(message).toContain("Protected root: /state/repo");
+    expect(message).toContain("Set CODEX_SECURITY_STATE_DIR");
+    expect(message).not.toContain("--output-dir");
+    expect(stderr.text()).toContain(message);
   });
 
   test("identifies the output directory for a late protected-root failure", async () => {

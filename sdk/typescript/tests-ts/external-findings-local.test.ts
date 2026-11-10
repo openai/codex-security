@@ -1655,9 +1655,16 @@ describe("local normalized scanner findings", () => {
     "a line break in the primary Git URL cannot establish a repository match: %j",
     async (suffix) => {
       const url = "https://github.com/example/project";
-      const { repository, environment } = await fixture({
-        remote: url + suffix,
-      });
+      const { repository, environment, git } = await fixture();
+      // A quoted value preserves a trailing carriage return on older Git.
+      const quotedSuffix = suffix.replaceAll("\n", "\\n");
+      await appendFile(
+        join(repository, ".git", "config"),
+        `\n[remote "origin"]\n\turl = "${url}${quotedSuffix}"\n`,
+      );
+      expect(git("config", "--null", "--get", "remote.origin.url")).toBe(
+        `${url}${suffix}\0`,
+      );
       await expect(
         prepareNormalizedLocalImport(
           input(),

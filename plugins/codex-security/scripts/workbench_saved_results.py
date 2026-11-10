@@ -159,7 +159,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
 
         if manifest_path is None:
             if frozen_sources is not None:
-                return bool(_retained_source_state(json.loads(frozen_sources))[0])
+                return bool(_retained_source_state(frozen_sources)["sources"])
             return has_saved_source()
         if scan["seal_manifest_digest"] is None:
             try:
@@ -233,24 +233,24 @@ def _recovery_source_digests(
     db: Any, connection: Any, scan: Any
 ) -> tuple[dict[str, str], bool, dict[str, str | None]]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    frozen_sources: dict[str, str] | None = None
-    include_parent = True
-    raw_frozen_sources = scan["retained_source_digests_json"]
-    if raw_frozen_sources is not None:
-        retained = json.loads(raw_frozen_sources)
-        frozen_sources, model_source = _retained_source_state(retained)
-        if isinstance(retained.get("sources"), dict) and retained.get("sourceTimes") is not None:
-            _restore_frozen_model_capture(
-                scan_dir, scan["id"], frozen_sources, retained["sourceTimes"], model_source
-            )
-            _freeze_source_times(
-                scan_dir,
-                scan["id"],
-                frozen_sources,
-                retained["sourceTimes"],
-                retained.get("parentContext"),
-            )
-        include_parent = False
+    retained = _retained_source_state(scan["retained_source_digests_json"])
+    frozen_sources = retained.get("sources")
+    include_parent = frozen_sources is None
+    if retained.get("sourceTimes") is not None:
+        _restore_frozen_model_capture(
+            scan_dir,
+            scan["id"],
+            frozen_sources,
+            retained["sourceTimes"],
+            retained.get("threatModelSource"),
+        )
+        _freeze_source_times(
+            scan_dir,
+            scan["id"],
+            frozen_sources,
+            retained["sourceTimes"],
+            retained.get("parentContext"),
+        )
     checkpoint_heads, pending_recovery = _retained_checkpoint_state(scan)
     if pending_recovery:
         return frozen_sources, False, checkpoint_heads
@@ -574,19 +574,13 @@ def preserve_scan_results_locked(
     scan = db.require_scan(connection, scan_id)
     if scan["status"] != "failed":
         return False
-    frozen_source_digests: dict[str, str] | None = None
     checkpoint_heads, pending_recovery = _retained_checkpoint_state(scan)
-    model_source: list[str] = []
-    saved_model_source: str | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
-    frozen_source_times = None
-    if raw_frozen_sources is not None:
-        retained = json.loads(raw_frozen_sources)
-        frozen_source_digests, saved_model_source = _retained_source_state(retained)
-        if isinstance(retained.get("sources"), dict):
-            frozen_source_times = retained.get("sourceTimes")
-        if saved_model_source is not None:
-            model_source.append(saved_model_source)
+    retained = _retained_source_state(raw_frozen_sources)
+    frozen_source_digests = retained.get("sources")
+    saved_model_source = retained.get("threatModelSource")
+    model_source = [saved_model_source] if saved_model_source is not None else []
+    frozen_source_times = retained.get("sourceTimes")
     canonical_sources = frozen_source_digests
     if recovery_source_digests is not None:
         frozen_source_digests = recovery_source_digests
@@ -980,6 +974,9 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
+        db.handoff.require_tokenless_scan_owner(
+            connection, scan, getattr(args, "model_thread_id", None)
+        )
         db.handoff.require_current_continuation(
             scan,
             args.claim_token,
@@ -1017,6 +1014,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
+        db.handoff.require_tokenless_scan_owner(
+            connection, scan, getattr(args, "model_thread_id", None)
+        )
         db.handoff.require_current_continuation(
             scan, args.claim_token, error_message="Scan draft is owned by another continuation."
         )
@@ -1238,6 +1238,34 @@ def _scan_draft_contents_digest(documents: dict[str, bytes | None]) -> str:
     return digest.hexdigest()
 
 
+def mark_running_scan_failed(
+    connection: sqlite3.Connection, scan_id: str, message: str | None, timestamp: str
+) -> bool:
+    updated = connection.execute(
+        """
+        UPDATE scans SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
+            log_completed_at = ?
+        WHERE id = ? AND status = 'running'
+        """,
+        (message, timestamp, timestamp, timestamp, scan_id),
+    )
+    return updated.rowcount == 1
+
+
+def touch_scan_progress(
+    connection: sqlite3.Connection,
+    scan_id: str,
+    timestamp: str,
+    scope_file_count: int | None = None,
+) -> bool:
+    updated = connection.execute(
+        "UPDATE scan_progress SET updated_at = ?, scope_file_count = COALESCE(?, scope_file_count) "
+        "WHERE scan_id = ?",
+        (timestamp, scope_file_count, scan_id),
+    )
+    return updated.rowcount == 1
+
+
 def fail_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     with db.scan_completion_lock(db.require_uuid(args.scan_id, "scan-id")):
         return fail_scan_locked(db, connection, args)
@@ -1246,14 +1274,25 @@ def fail_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     cost_json = db.parse_scan_cost(args.cost_json)
+    observed = db.require_scan(connection, scan_id)
+    scope_file_count = None
+    if observed["status"] == "running" and observed["mode"] == "standard":
+        db.handoff.require_tokenless_scan_owner(
+            connection, observed, getattr(args, "model_thread_id", None)
+        )
+        db.handoff.require_current_continuation(
+            observed,
+            args.claim_token,
+            error_message="Scan failure is owned by another continuation.",
+        )
+        scope_file_count = db.progress.reported_scope_file_count(db, observed)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
-        if scan["status"] == "failed":
-            connection.commit()
-            record_stopped_scan_usage(db, connection, scan_id, cost_json)
-            return db.scan_context(connection, scan["id"])
+        db.handoff.require_tokenless_scan_owner(
+            connection, scan, getattr(args, "model_thread_id", None)
+        )
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
         db.handoff.require_current_continuation(
@@ -1261,23 +1300,20 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
         )
+        if scan["status"] == "failed":
+            connection.commit()
+            record_stopped_scan_usage(db, connection, scan_id, cost_json)
+            return db.scan_context(connection, scan["id"])
         message = db.optional_text(args.message)
-        updated = connection.execute(
-            """
-            UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
-            WHERE id = ? AND status = 'running'
-            """,
-            (message, timestamp, timestamp, scan["id"]),
-        )
-        if updated.rowcount != 1:
+        if not mark_running_scan_failed(connection, scan_id, message, timestamp):
             raise SystemExit("Only a running scan can be marked failed.")
         db.deep_scan.fail_from_parent_scan(connection, scan["id"], message, timestamp)
-        progress_updated = connection.execute(
-            "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
-            (timestamp, scan["id"]),
-        )
-        if progress_updated.rowcount != 1:
+        if not touch_scan_progress(
+            connection,
+            scan_id,
+            timestamp,
+            scope_file_count if scan["scan_dir"] == observed["scan_dir"] else None,
+        ):
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
@@ -1289,23 +1325,38 @@ def cancel_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         return cancel_scan_locked(db, connection, args)
 
 
+def require_cancel_owner(
+    db: Any, connection: Any, scan: sqlite3.Row, thread_id: str | None
+) -> None:
+    workspace = db.require_workspace(connection, scan["workspace_id"])
+    owning_thread_id = scan["continuation_thread_id"] or workspace["thread_id"]
+    if thread_id is not None and owning_thread_id != thread_id:
+        raise SystemExit("A scan can only be canceled from its owning Codex thread.")
+
+
 def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     thread_id = db.optional_text(args.thread_id, maximum=512)
+    observed = db.require_scan(connection, scan_id)
+    scope_file_count = None
+    if observed["status"] == "running" and observed["mode"] == "standard":
+        require_cancel_owner(db, connection, observed, thread_id)
+        scope_file_count = db.progress.reported_scope_file_count(db, observed)
     cost_json = db.parse_scan_cost(getattr(args, "cost_json", None))
+    # The app displays the active scan. A conversation may only receive the scan it canceled.
+    result_scan_id = scan_id if thread_id is not None else None
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
-        workspace = db.require_workspace(connection, scan["workspace_id"])
-        owning_thread_id = scan["continuation_thread_id"] or workspace["thread_id"]
-        if thread_id is not None and owning_thread_id != thread_id:
-            raise SystemExit("A scan can only be canceled from its owning Codex thread.")
+        require_cancel_owner(db, connection, scan, thread_id)
         if scan["canceled_at"] is not None:
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return {
-                **db.workspace_state(connection, scan["workspace_id"]),
+                **db.workspace_state(
+                    connection, scan["workspace_id"], result_scan_id=result_scan_id
+                ),
                 "canceledScanId": scan["id"],
             }
         if scan["status"] != "running":
@@ -1313,23 +1364,27 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?, log_completed_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, timestamp, scan["id"]),
+            (timestamp, timestamp, timestamp, timestamp, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be canceled.")
         db.deep_scan.cancel_from_parent_scan(connection, scan["id"], timestamp)
-        progress_updated = connection.execute(
-            "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
-            (timestamp, scan["id"]),
-        )
-        if progress_updated.rowcount != 1:
+        if not touch_scan_progress(
+            connection,
+            scan_id,
+            timestamp,
+            scope_file_count if scan["scan_dir"] == observed["scan_dir"] else None,
+        ):
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
-    return {**db.workspace_state(connection, scan["workspace_id"]), "canceledScanId": scan["id"]}
+    return {
+        **db.workspace_state(connection, scan["workspace_id"], result_scan_id=result_scan_id),
+        "canceledScanId": scan["id"],
+    }
 
 
 def record_stopped_scan_usage(
@@ -1504,11 +1559,15 @@ def budget_exhausted_draft(
                 "surfaceIds": [surface_id],
             }
         )
+    deferred_reason = "Validation was deferred because the scan reached its cost limit."
+    limitations = manifest["scan"].setdefault("scope", {}).setdefault("limitations", [])
+    if deferred_reason not in limitations:
+        limitations.append(deferred_reason)
     if not any(
         isinstance(item, dict)
         and isinstance(reason := item.get("reason"), str)
         and (
-            reason == "Validation was deferred because the scan reached its cost limit."
+            reason == deferred_reason
             or reason.startswith(
                 "Validation was deferred because the scan reached its cost limit: "
             )
@@ -1518,7 +1577,7 @@ def budget_exhausted_draft(
         coverage["deferred"].append(
             {
                 "id": "scan-cost-limit",
-                "reason": "Validation was deferred because the scan reached its cost limit.",
+                "reason": deferred_reason,
             }
         )
     coverage.pop("completeness", None)

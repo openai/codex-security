@@ -116,7 +116,10 @@ import {
   normalizeInspectorFindings,
   normalizePreviousInspectorFindings,
 } from "../src/inspector-findings.js";
-import { normalizePreviousContinuumFindings } from "../src/continuum-findings.js";
+import {
+  normalizePreviousContinuumFindings,
+  readContinuumFindings,
+} from "../src/continuum-findings.js";
 import {
   trivyReport,
   trivyReportWithManyLocations,
@@ -1264,7 +1267,7 @@ test("a projected Snyk issue resumes its approved private repository after a ren
 
 async function privateUploadFixture(
   raw: unknown,
-  provider: "endor" | "snyk" | "wiz",
+  provider: "endor" | "semgrep" | "snyk" | "wiz",
   repositoryUrl?: string,
 ) {
   const f = await fixture(raw, repositoryUrl);
@@ -1752,7 +1755,100 @@ test("an undefined optional Snyk context permits generic SDK evidence", async ()
   ).rejects.toThrow("Expected a versioned Snyk REST report context");
 });
 
-test("a saved selection with Guardian evidence cannot resume a Cloud upload", async () => {
+test.each(["sast", "sca"])(
+  "Guardian %s files publish and replay only at their selected repository",
+  async (product) => {
+    const url = "https://github.com/example/project";
+    const repository = "example/project";
+    const ref = "refs/heads/topic";
+    const id = "09007199254740993";
+    const report = {
+      format: "semgrep-guardian-selection/v1",
+      sourceRepositoryUrl: url,
+      request: {
+        name:
+          product === "sast"
+            ? "get_semgrep_sast_findings"
+            : "get_semgrep_supply_chain_findings",
+        arguments: {
+          deployment_name: "example",
+          repository_name: repository,
+          ref,
+        },
+      },
+      findingIds: [id],
+      structuredContent: {
+        findings: [
+          {
+            id,
+            ref,
+            repository: { name: repository },
+            issueType: product,
+            severity: "HIGH",
+            rulePath: "example.rule",
+            message: "Example finding",
+            filePath: "src/app.ts",
+            line: 3,
+          },
+        ],
+      },
+    };
+    const f = await fixture(report, url);
+    const binding = { ...options, provider: "semgrep" as const };
+    const local = normalizeSemgrepFindings(report, {}, "local");
+    const prepare = () => prepareExternalPublication(f.file, binding, f.deps);
+    const prepared = await prepare();
+    expect(prepared.preview.findings).toEqual(local.findings);
+    await f.loseResponse(prepared);
+    expect((await (await prepare()).publish()).verified).toBe(1);
+    const unscored = structuredClone(report);
+    unscored.structuredContent.findings[0]!.severity = "UNSPECIFIED";
+    const inbox = await privateUploadFixture(unscored, "semgrep", url);
+    const headers = inbox.f.state.catalogHeaders;
+    headers["Codex-Security-Repository-Import-Severities"] = "high";
+    delete headers["Codex-Security-Private-Import-Providers"];
+    await expect(inbox.prepareFile()).rejects.toMatchObject({
+      selection: { findings: [], excluded: [{ position: 1 }] },
+    });
+    headers["Codex-Security-Private-Import-Providers"] = "semgrep";
+    const privatePreview = (await inbox.prepareFile()).preview;
+    expect(privatePreview.privateImport?.format).toBe("security.findings.v1");
+    expect(privatePreview.findings[0]!.evidence.severity).toBe("unknown");
+    const elsewhere = await fixture(report, "https://github.com/other/project");
+    await expect(
+      prepareExternalPublication(elsewhere.file, binding, elsewhere.deps),
+    ).rejects.toThrow(/repository/iu);
+    await expect(
+      prepareNormalizedExternalPublication(
+        { ...local, report: undefined },
+        binding,
+        elsewhere.deps,
+      ),
+    ).rejects.toThrow(/repository/iu);
+    expect(elsewhere.posts).toHaveLength(0);
+    const missingSource = structuredClone(local);
+    delete missingSource.findings[0]!.evidence.source_data![
+      "sourceRepositoryUrl"
+    ];
+    await expect(
+      prepareNormalizedExternalPublication(missingSource, binding, f.deps),
+    ).rejects.toThrow(/Guardian --source-repository-url/u);
+    const wrongRef = structuredClone(local);
+    wrongRef.findings[0]!.evidence.branch = "refs/heads/other";
+    await expect(
+      prepareNormalizedExternalPublication(wrongRef, binding, f.deps),
+    ).rejects.toThrow(/selected ref/u);
+    const changed = {
+      ...local,
+      findings: [{ ...local.findings[0]!, source_finding_id: "another-id" }],
+    };
+    await expect(
+      prepareNormalizedExternalPublication(changed, binding, f.deps),
+    ).rejects.toThrow(/original Guardian finding/);
+  },
+);
+
+test("a saved selection with Guardian evidence cannot resume under another provider", async () => {
   const f = await fixture([normalized()]);
   const prepare = () => prepareExternalPublication(f.file, options, f.deps);
   const path = await f.loseResponse(await prepare());
@@ -1766,9 +1862,7 @@ test("a saved selection with Guardian evidence cannot resume a Cloud upload", as
   );
   const bytes = JSON.stringify(saved);
   await writeFile(path, bytes);
-  await expect(prepare()).rejects.toThrow(
-    /Guardian findings require a local import/,
-  );
+  await expect(prepare()).rejects.toThrow(/semgrep provider/);
   expect(f.posts).toHaveLength(1);
   expect(await readFile(path, "utf8")).toBe(bytes);
 });
@@ -4484,6 +4578,37 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
   expect(f.posts[1]).toBe(f.posts[0]!);
 });
 
+test("explains a Cloud account or deployment without the import catalog", async () => {
+  const f = await fixture(continuumDetail(), continuumRepository);
+  const missing = (status: number) => ({
+    ...f.deps,
+    fetch: async () =>
+      Response.json({ error: { message: "Not found" } }, { status }),
+  });
+  const selected = {
+    ...options,
+    provider: "continuum" as const,
+    sourceKey: "continuum/example/project",
+    sourceRepositoryUrl: continuumRepository,
+  };
+  await expect(
+    prepareExternalPublication(f.file, selected, missing(404)),
+  ).rejects.toThrow(
+    "Cloud import failed (HTTP 404). Not found. Cloud import is not available for this account or deployment.",
+  );
+  await expect(
+    prepareExternalPublication(f.file, selected, {
+      ...f.deps,
+      fetch: async () => new Response(null, { status: 404 }),
+    }),
+  ).rejects.toThrow(
+    "Cloud import failed (HTTP 404). Cloud import is not available for this account or deployment.",
+  );
+  await expect(
+    prepareExternalPublication(f.file, selected, missing(500)),
+  ).rejects.toThrow(/^Cloud import failed \(HTTP 500\)\. Not found$/u);
+});
+
 test("Continuum Cloud publication checks repository and provider and replays an interrupted request", async () => {
   const detail = continuumDetail();
   const f = await fixture(detail, continuumRepository);
@@ -4529,6 +4654,70 @@ test("Continuum Cloud publication checks repository and provider and replays an 
   expect((await retry.publish()).verified).toBe(1);
   expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
 });
+
+test.each(["single detail", "selected array"])(
+  "a Continuum %s reuses its interrupted 0.9.x request after CWE enrichment",
+  async (shape) => {
+    const { cweIds: _, ...detail } = continuumDetail();
+    const native = {
+      ...detail,
+      source: "CONTINUUM",
+      type: "CONTINUUM_CODE_VULN",
+      vulnerabilities: [],
+      subCategory: "CWE-89: SQL Injection",
+    };
+    const f = await fixture(
+      shape === "single detail" ? native : [native],
+      continuumRepository,
+    );
+    const settings = {
+      ...options,
+      provider: "continuum" as const,
+      sourceRepositoryUrl: continuumRepository,
+    };
+    // 0.9.x retained the status timestamp but did not infer a structured CWE.
+    const released = normalizePreviousContinuumFindings(
+      native,
+      continuumRepository,
+    );
+    released.findings[0]!.evidence.source_updated_at =
+      Date.parse(native.statusUpdatedAt) / 1000;
+    expect(hash("sha256", canonicalJson(released.findings))).toBe(
+      "2d1bca6f9e46758b8b7d9d679e5e7912a9dd8f99ca4c3cb6889b40eaa4b2506e",
+    );
+    const original = await prepareNormalizedExternalPublication(
+      released,
+      settings,
+      f.deps,
+    );
+    const pending = await f.loseResponse(original);
+
+    const prepare = () => prepareExternalPublication(f.file, settings, f.deps);
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(original.preview.requests);
+    expect(await f.loseResponse(retry)).toBe(pending);
+
+    const sdk = await readContinuumFindings(f.file, continuumRepository);
+    const prepareSdk = (input: ExternalFindings) =>
+      prepareNormalizedExternalPublication(input, settings, f.deps);
+    const edited = structuredClone(sdk);
+    edited.findings[0]!.evidence.details!.weakness_ids = ["CWE-20"];
+    expect((await prepareSdk(edited)).preview.resumed).toBe(false);
+
+    const sdkRetry = await prepareSdk(sdk);
+    expect(sdkRetry.preview.requests).toEqual(original.preview.requests);
+    expect(await f.loseResponse(sdkRetry)).toBe(pending);
+    const restored = await prepareSdk(JSON.parse(JSON.stringify(sdk)));
+    expect(restored.preview.resumed).toBe(true);
+    expect((await restored.publish()).verified).toBe(1);
+    expect(f.posts).toEqual(Array(4).fill(f.posts[0]));
+    expect(await Bun.file(pending).exists()).toBe(false);
+    expect(
+      (await prepare()).preview.findings[0]!.evidence.details?.weakness_ids,
+    ).toEqual(["CWE-89"]);
+  },
+);
 
 test("Inspector publication checks its source and reuses the finding ARN", async () => {
   const { f, input, prepare } = await inspectorPublicationFixture();

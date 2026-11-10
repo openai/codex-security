@@ -509,7 +509,8 @@ be clean and at the commit recorded by the parent.
 Committed-diff scans require a clean, full checkout at the requested head
 revision, including when using `--validate`. A different checkout revision or
 local changes are rejected before scanning; check out the requested head and
-commit or stash local changes before retrying.
+commit or stash local changes before retrying. The check also verifies tracked
+files marked `assume-unchanged` and preserves their Git index flags.
 
 `--owner-suggestions` writes optional `owner-suggestions.json` after a completed
 committed Git scan, using the same checkout, model, and reasoning effort. Owner
@@ -528,11 +529,19 @@ with every repository.
 
 Use `--output-dir DIR` to choose where a scan saves its results. The directory
 must be empty and outside the scanned directory and enclosing Git worktree.
-Existing directories keep their permissions; newly created directories are
-private to you by default.
+Existing directories keep their permissions. Newly created directories are
+private to you by default. On Windows, the directory and its parents must be
+owned by your account, Administrators, SYSTEM, or TrustedInstaller. Choose a
+path where another user cannot replace the output directory or one of its
+parents. A parent can allow other users to read it or create sibling directories.
+For an empty write destination, grant content-writing permissions to children
+through inheritance. Other users must not have permission to set reparse data
+on the destination directory itself.
 `--archive-existing` moves earlier output to a sibling directory with a unique
 suffix, such as `results.previous-ab12cd34` for an output directory named
-`results`. Use `--dry-run` to preview the move.
+`results`. If adding the suffix exceeds the filesystem's filename limit on POSIX,
+the archive uses a short sibling name starting with `.previous-` and a hash of the
+original filename. Use `--dry-run` to preview the move.
 
 Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
 optional export fails, the scan can still complete. Use the
@@ -761,7 +770,8 @@ runs, four with new identities, and two duplicate pairs for testing deduplicatio
 Paths and snippets are fictional; repository files remain unchanged.
 
 Use a separate `CODEX_SECURITY_STATE_DIR` for disposable data. Output, exports,
-archiving, and severity thresholds work normally. Reruns preserve mock mode.
+archiving, and severity thresholds work normally. Use `scans show` to inspect a
+mock scan. Mock scans have no Codex session logs. Reruns preserve mock mode.
 Separate matching or deduplication commands still make their usual model calls.
 
 Mock mode supports Standard repository, path, and diff scans. It cannot combine
@@ -918,7 +928,7 @@ completed scans that added no findings. `--max-discovery-runs` caps the total
 number started, including failures. `--max-time` stops discovery and returns
 the findings from completed scans.
 
-For TypeScript, see the [SDK Deep Scan example](../README.md#configure-deep-scans).
+For TypeScript, see the [SDK Deep Scan example](sdk.md#configure-deep-scans).
 
 Use project-file `scan.deep` settings or legacy
 `$CODEX_HOME/codex-security/config.toml` defaults. Counts must be positive except
@@ -926,6 +936,8 @@ that `subagents` can be zero. Discovery time accepts positive fractional minutes
 its default and maximum are 5760 minutes (96 hours). Unlike Standard's
 advisory allowance, the Deep discovery limit is enforced. Resuming a
 Deep scan keeps its original deadline; rerunning starts a new scan.
+If the deadline expires before any source review completes, the saved report
+and scan manifest record that limitation.
 `--max-time-hours`, SDK `maxTimeHours`, project `scan.deep.max_time_hours`, and
 legacy TOML `deep_scan.max_time_hours` remain deprecated Deep-only aliases in
 hours. Explicit settings override lower-priority configuration across units.
@@ -1069,7 +1081,7 @@ client during the scan, or receiving a canceled hosted execution records
 Applications can choose how to collect and export these observations.
 
 For filesystem and approval behavior, see the
-[local security model](../README.md#local-security-model).
+[local security model](sdk.md#local-security-model).
 
 ### Environment variables
 
@@ -1102,6 +1114,10 @@ Python lookup: `--python` on commands that expose interpreter selection or SDK
 `pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
 works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
+On POSIX, `CODEX_CLI_PATH` and `PYTHON` preserve trailing whitespace in an
+explicit path that selects an executable. Use an absolute path or a `./`
+prefix for filenames beginning or ending in whitespace. Bare command names
+are trimmed before lookup.
 
 ### Troubleshooting
 
@@ -1116,6 +1132,12 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
+If a scan reports that its state directory overlaps a protected root, choose a
+private directory in a separate tree, such as a sibling of the protected root.
+Set `CODEX_SECURITY_STATE_DIR` for local scans or `stateDirectory` on a hosted
+scan request. SDK callers handling `OutputInsideProtectedRootError.pathKind`
+can match `"state"` for this case.
+
 If credential-home preparation fails, the error includes the underlying
 filesystem diagnostic. For permission or read-only filesystem errors, check
 the reported path or set `CODEX_SECURITY_STATE_DIR` to a private, writable
@@ -1124,6 +1146,11 @@ and does not migrate existing credentials or reports.
 
 Sandbox startup errors include the native diagnostic followed by a command to
 reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
+
+If Windows Application Control blocks `windows.node` while validating a scan
+output directory, look for the module's block event in Event Viewer under
+Applications and Services Logs → Microsoft → Windows → CodeIntegrity → Operational.
+[Microsoft's App Control event reference](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/operations/event-id-explanations)
 
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
@@ -1204,15 +1231,17 @@ work is needed, the scan is preserved and you can run `scans match --all`.
 
 A scan with a cost limit requires complete token usage for its recorded scan,
 worker, and custom validation sessions before the SDK returns a completed result.
-Verifying compressed `.jsonl.zst` sessions requires Python 3.14 or later, or
-`backports.zstd` installed in the selected Python environment.
+The workbench reads compressed `.jsonl.zst` sessions with `compression.zstd`
+(Python 3.14+) or `backports.zstd` when available. Otherwise it uses the
+Node.js decoder bundled with the plugin.
 Missing or unreadable usage fails budget verification. Without a limit, usage
 reporting remains best effort.
 
 When Deep discovery has finished at a cost stop and usage is verified, the scan returns a sealed
-report and lists unvalidated candidates as follow-up work. Reaching a configured
-limit with a valid finalized report returns `0` by default, or `1` if findings
-meet a configured failure threshold.
+report and retains unvalidated candidates as follow-up work. The saved report and
+the manifest's `scan.scope.limitations` record that validation was deferred.
+Reaching a configured limit with a valid finalized report returns `0` by default,
+or `1` if findings meet a configured failure threshold.
 
 When a worker turn fails with a known cybersecurity policy refusal or an
 exhausted usage limit, Deep Scan stops retries and replacements, cancels active
@@ -1329,6 +1358,12 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
+If an ordinary attempt finds its checkout path already occupied, it stops before
+fetching. Use `--recover` to scan in a fresh checkout, or inspect and move the
+existing checkout before an ordinary retry.
+If checkout cleanup previously failed, the next invocation removes it only when
+its marker still identifies the same directory and scan attempt. Older or
+replacement checkouts without a matching marker are preserved.
 Completed results are skipped only when their saved contract and seal are valid
 and the manifest records a completed scan. Damaged or unsuccessful results get a
 new attempt, including with `--recover`, while the old artifacts remain available.
@@ -1471,13 +1506,18 @@ directory. Each imported record starts as `not_assessed`. Unknown revisions and
 locations stay unknown. Repository-scoped sources are checked against comparable
 configured Git remotes as described in the provider guide. Reimporting the same
 source key and finding ID reports created, updated, or unchanged records.
-Records omitted from the new selection stay stored. An import with exclusions
-exits with status 1. Local imports can retain evidence that exceeds Cloud's per-finding limits.
+Records omitted from the new selection stay stored. Local imports can retain
+evidence that exceeds Cloud's per-finding limits.
+
+If a report contains both ready and excluded records, the local dry run exits
+with status 0. After confirmation, the import stores the ready records and
+exits with status 1. If all records are excluded, both commands exit with
+status 2. A clean empty report exits with status 0 in either mode and stores
+no findings.
 
 Preview the same file and source key again for the intended destination before
-publishing. Semgrep Guardian captures support local import only. Both Web API
-formats, a selected SAST capture and a full project collection, support local
-and Cloud import. Choose the [Semgrep import method](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) that matches your source.
+publishing. Semgrep Guardian selections, Web API SAST selections and full
+project collections support both destinations. Choose the [Semgrep import method](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) that matches your source.
 
 ## Import Trivy dependency findings
 
@@ -1543,9 +1583,13 @@ Enterprise repository URL or its Cloud ID. Either works for retries. If
 several connectors share the URL, use the ID. You can import before the
 repository's first native scan.
 
-Cloud requires a file-backed ChatGPT login. To use your regular Codex login,
-set `cli_auth_credentials_store = "file"` in Codex `config.toml`, then sign in
-again with the ChatGPT account you want to use.
+Cloud requires a file-backed ChatGPT login. Codex Security signs in with the
+`cli_auth_credentials_store` set in your Codex `config.toml`
+(`~/.codex/config.toml`, or `$CODEX_HOME/config.toml`). Without it, the login
+can be saved in the system keyring. To publish, set
+`cli_auth_credentials_store = "file"` there, then run `codex-security login`
+with the ChatGPT account you want to use. `codex-security login status`
+checks the current sign-in without changing credential storage.
 
 ### Review the Cloud destination
 
@@ -1692,9 +1736,12 @@ prefix of at least eight characters, or `latest` for the current repository.
 Local sealed artifacts are required. Dry runs need no login or network access.
 
 Uploads require ChatGPT credentials saved to a file. Set
-`cli_auth_credentials_store = "file"` in Codex `config.toml`, then sign in again.
-Cloud publication rejects automatic/keyring storage even when `auth.json` exists,
-because that file may be stale or belong to another account.
+`cli_auth_credentials_store = "file"` in Codex `config.toml`, then run
+`codex-security login` again. Login, scans and other commands use that setting
+for the Codex Security sign-in.
+A dedicated login using automatic storage can publish if Codex Security
+recorded the native file fallback. An unverified file can belong to another
+account, so Cloud publication requires an explicit file store for an ambient login.
 
 Use a positional scan directory or repeated `--scan-dir PATH` for artifacts
 outside history. Each must contain one completed sealed scan, not a bulk-run
@@ -2085,6 +2132,12 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
+Saved scan logs retain the finishing turn, including its final response, and
+exclude later turns once the scan records a completion boundary. Older scans
+retain the full history of their attributed sessions and keep their existing
+worker-selection boundaries. This also applies to logs attached with
+`feedback --include-logs`.
+
 Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
 work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder
@@ -2100,6 +2153,18 @@ codex-security scans resume SCAN_ID
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
+
+On Windows, keep the protected `.codex-security-resume` directory in the scan
+output. It lets the workbench verify the original output even before the first
+checkpoint. If an older scan stopped with an empty output, start a new scan with
+`codex-security scans rerun SCAN_ID`.
+
+New Windows Deep Scans also record the checkout's native volume and file ID
+when the filesystem supplies them. Validation and remediation verify the same
+checkout identity. An older scan can resume across Python
+versions when its saved checkout identity can be verified. If the workbench
+cannot verify it, resume with the Python runtime that started the scan or use
+`codex-security scans rerun SCAN_ID` to start a new scan.
 
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
 settings/instructions. Knowledge-bearing scans save their extracted documents in
@@ -2570,8 +2635,13 @@ including code, HTML, and math, retain their original text.
 GITLAB_HOST=gitlab.example.com codex-security patch --scan SCAN_ID --create-pr
 ```
 
-Both providers return `pullRequest: { branch, url }`. Supplied-issue patching
-requires a clean tree. If publication fails, run the printed
+Both providers return `pullRequest: { branch, url }`. Saved-finding publication
+includes files changed and verified in the same patch turn. If a selected file
+already had local edits, the CLI keeps the patch in the working tree for review.
+The risk assessment and commit use the same verified tree. If staging changed
+during the run and Git cannot update the index, the CLI reports it and keeps
+the existing staging.
+Supplied-issue patching requires a clean tree. If publication fails, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
 commit and refuses changed branches. Retain the GitLab host setting on resume.
 

@@ -19,6 +19,9 @@ import {
   scanInputIdentity,
 } from "../src/scan-inputs.js";
 import { workbenchCommand } from "./support/workbench-command.js";
+import { useTestPython } from "./support/python.js";
+
+const pythonExecutable = useTestPython(false);
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -37,7 +40,7 @@ test("rerun recognizes unchanged context after the workbench serializes its reci
     undefined,
     await readKnowledgeBaseSnapshot([document]),
   );
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
   const command = workbenchCommand(python!, join(root, "state"));
   const saved = await command(

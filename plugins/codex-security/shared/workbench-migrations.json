@@ -517,5 +517,24 @@
       "UPDATE deep_scan_runs SET worker_usage_gap = 1\nWHERE scan_id IN (\n    SELECT w.scan_id FROM deep_scan_workers AS w\n    WHERE w.kind IN ('discovery', 'dedup') AND w.attempt > 1\n      AND w.started_at IS NOT NULL AND w.sdk_thread_id IS NULL\n      AND NOT EXISTS (SELECT 1 FROM deep_scan_worker_threads AS t\n                      WHERE t.scan_id = w.scan_id AND t.worker_id = w.id)\n);",
       "CREATE TRIGGER retain_unverified_deep_scan_worker_attempt\nAFTER UPDATE OF attempt ON deep_scan_workers\nWHEN NEW.attempt > OLD.attempt AND OLD.started_at IS NOT NULL\n     AND OLD.sdk_thread_id IS NULL AND OLD.kind IN ('discovery', 'dedup')\nBEGIN\n    UPDATE deep_scan_runs SET worker_usage_gap = 1 WHERE scan_id = OLD.scan_id;\nEND;"
     ]
+  },
+  {
+    "version": 64,
+    "name": "persist scan log completion boundaries",
+    "statements": ["ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"]
+  },
+  {
+    "version": 65,
+    "name": "bind Windows Deep Scan resume output directories",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_output_identity TEXT;"
+    ]
+  },
+  {
+    "version": 66,
+    "name": "bind Windows Deep Scan resume checkouts",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_target_identity TEXT;"
+    ]
   }
 ]
