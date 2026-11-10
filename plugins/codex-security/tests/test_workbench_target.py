@@ -135,12 +135,14 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
 def write_reviewed_patch(
     tmp_path: Path, source: Path, patch: bytes, revision: str = "unversioned"
 ) -> dict[str, object]:
+    from filesystem_identity import serialize_filesystem_identity
+
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
     (scan_dir / "reviewed.patch").write_bytes(patch)
     return {
         "target_path": str(source),
-        "target_inode": source.stat().st_ino,
+        "target_inode": serialize_filesystem_identity(source.stat().st_ino),
         "target_revision": revision,
         "scan_dir": str(scan_dir),
     }
@@ -152,6 +154,214 @@ def reviewed_remediation(patch: bytes, revision: str, digest: str) -> dict[str, 
         "base_content_digest": digest,
         "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
     }
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("layout", ["separate", "linked", "unborn", "unborn-root"])
+def test_reviewed_patch_uses_long_source_metadata_in_its_private_replay(
+    tmp_path: Path, layout: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_db
+
+    # The metadata argument is long in UTF-8 even on hosts with short temporary paths.
+    padding = max(1, (230 - len((tmp_path / "metadata-").as_posix().encode("utf-8")) + 2) // 3)
+    metadata = tmp_path / ("metadata-" + "界" * padding)
+    source = tmp_path / "source"
+    if layout == "unborn-root":
+        source, metadata = metadata, metadata / ".git"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+    else:
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(metadata), str(source)], check=True
+        )
+    subprocess.run(["git", "-C", str(source), "config", "core.autocrlf", "false"], check=True)
+    (source / "file.txt").write_bytes(b"before\n")
+    revision = "unversioned"
+    if layout in {"separate", "linked"}:
+        subprocess.run(["git", "-C", str(source), "add", "file.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=f@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        if layout == "linked":
+            linked = tmp_path / "linked"
+            subprocess.run(
+                ["git", "-C", str(source), "worktree", "add", "--detach", str(linked)], check=True
+            )
+            source = linked
+        revision = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+        ).strip()
+    marker = source / ".git/HEAD" if layout == "unborn-root" else source / ".git"
+    original_marker = marker.read_bytes()
+    (metadata / "info/exclude").write_bytes(b"ignored.fixture\n")
+    (source / "ignored.fixture").write_bytes(b"outside the recorded content\n")
+    if os.name == "nt" and revision == "unversioned":
+        # The private copy keeps the original gitdir-conditional visibility when using the retry.
+        global_config, included, excludes = (
+            tmp_path / name for name in ("global", "include", "excludes")
+        )
+        excludes.write_bytes(b"conditional.fixture\n")
+        subprocess.run(
+            ["git", "config", "--file", included, "core.excludesFile", excludes.as_posix()],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--file",
+                global_config,
+                f"includeIf.gitdir:{metadata.as_posix()}.path",
+                included.as_posix(),
+            ],
+            check=True,
+        )
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        (source / "conditional.fixture").write_bytes(b"excluded by the selected Git directory\n")
+        assert subprocess.check_output(
+            ["git", "-C", source, "check-ignore", "conditional.fixture"]
+        ).strip()
+    patch = b"diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    scan = write_reviewed_patch(tmp_path, source, patch, revision)
+    _, digest = workbench_db.remediation_checkout_snapshot(scan)
+    remediation = reviewed_remediation(patch, revision, digest)
+    selected_file = source / "file.txt"
+    selected_file.write_bytes(b"after\n")
+    _, applied_digest = workbench_db.remediation_checkout_snapshot(scan)
+    verify = workbench_db.require_reviewed_patch_applied
+    assert verify(scan, remediation, "reviewed.patch") == applied_digest
+    assert selected_file.read_bytes() == b"after\n"
+    selected_file.write_bytes(b"other\n")
+    with pytest.raises(SystemExit, match="does not contain the reviewed remediation patch"):
+        verify(scan, remediation, "reviewed.patch")
+    assert selected_file.read_bytes() == b"other\n"
+    selected_file.write_bytes(b"after\n")
+    (source / "unrelated.txt").write_bytes(b"keep me\n")
+    with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+        verify(scan, remediation, "reviewed.patch")
+    assert (source / "unrelated.txt").read_bytes() == b"keep me\n"
+    (source / "unrelated.txt").unlink()
+    malformed = b"not a patch\n"
+    (tmp_path / "scan/reviewed.patch").write_bytes(malformed)
+    with pytest.raises(SystemExit, match="does not contain the reviewed remediation patch"):
+        verify(scan, reviewed_remediation(malformed, revision, digest), "reviewed.patch")
+    assert marker.read_bytes() == original_marker
+    assert selected_file.read_bytes() == b"after\n"
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory and file sharing")
+def test_replay_gitfile_remains_bound_until_the_private_replay_is_removed(tmp_path: Path) -> None:
+    import tempfile
+    from contextlib import ExitStack
+
+    import windows_scan_local_files as windows
+    import workbench_target
+
+    source = tmp_path / "source"
+    foreign = tmp_path / "foreign"
+    initialize_git_repository(source)
+    initialize_git_repository(foreign)
+    metadata = source / ".git"
+    stages = tmp_path / "replays"
+    stages.mkdir()
+
+    def interrupt_replay():
+        with tempfile.TemporaryDirectory(dir=stages) as temporary, ExitStack() as pins:
+            scratch = Path(temporary)
+            checkout = scratch / "checkout"
+            checkout.mkdir()
+            (checkout / ".git").write_bytes(f"gitdir: {(foreign / '.git').as_posix()}\n".encode())
+            assert windows.pin_replay_metadata(pins, metadata, scratch) == metadata
+            with pytest.raises(PermissionError):
+                scratch.rename(stages / "elsewhere")
+            short = pins.enter_context(windows.pinned_replay_gitfile(checkout, metadata))
+            assert (
+                Path(
+                    workbench_target.git_output(
+                        checkout,
+                        "rev-parse",
+                        "--absolute-git-dir",
+                        git_dir=short,
+                        work_tree=checkout,
+                    )
+                )
+                == metadata
+            )
+            with pytest.raises(PermissionError):
+                (checkout / short).write_bytes(b"other")
+            for path in (metadata, checkout, scratch, checkout / short):
+                with pytest.raises(PermissionError):
+                    path.rename(path.with_name("replaced"))
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupt_replay()
+    assert not list(stages.iterdir())
+    assert metadata.is_dir() and (foreign / ".git").is_dir()
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows regular-file and junction checks")
+@pytest.mark.parametrize(
+    "change", ["foreign-pointer", "changed-patch", "replaced-parent", "writable-scratch"]
+)
+def test_short_git_reference_refuses_changed_replay_inputs(tmp_path: Path, change: str) -> None:
+    from contextlib import ExitStack
+
+    import windows_scan_local_files as windows
+    import workbench_remediation
+
+    metadata, scratch = tmp_path / "metadata", tmp_path / "scratch"
+    metadata.mkdir()
+    scratch.mkdir()
+    worktree = scratch / "checkout"
+    worktree.mkdir()
+    patch = scratch / "reviewed.patch"
+    patch.write_bytes(b"expected")
+    expected = "sha256:" + hashlib.sha256(patch.read_bytes()).hexdigest()
+    marker = scratch / "reviewed.git"
+    if change == "foreign-pointer":
+        marker.write_bytes(b"gitdir: foreign\n")
+    elif change == "changed-patch":
+        patch.write_bytes(b"changed")
+    elif change == "replaced-parent":
+        alias = tmp_path / "alias"
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(scratch)], check=True)
+        worktree = alias / "checkout"
+    else:
+        subprocess.run(["icacls.exe", str(scratch), "/grant", "*S-1-1-0:(WD)"], check=True)
+    failed = subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
+    with ExitStack() as pins:
+        selected = windows.pin_replay_metadata(pins, metadata, scratch)
+        if change == "writable-scratch":
+            assert selected is None
+            with pytest.raises(SystemExit, match="Could not bind"):
+                workbench_remediation.reverse_reviewed_patch(
+                    lambda **_: failed, worktree, metadata, selected, expected, pins
+                )
+            assert not marker.exists()
+            return
+        with pytest.raises(SystemExit, match="Could not verify|Patch digest does not match"):
+            workbench_remediation.reverse_reviewed_patch(
+                lambda **_: failed, worktree, metadata, selected, expected, pins
+            )
+    if change == "foreign-pointer":
+        assert marker.read_bytes() == b"gitdir: foreign\n"
+    if change == "replaced-parent":
+        assert not marker.exists()
 
 
 @pytest.mark.parametrize(

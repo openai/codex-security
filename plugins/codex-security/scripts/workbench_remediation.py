@@ -9,6 +9,7 @@ import io
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Callable
 from contextlib import ExitStack, suppress
@@ -44,6 +45,65 @@ COMMANDS = {
     "set-finding-remediation",
 }
 SCAN_STATUS_ERROR = "Remediation is available only for successfully completed scans."
+
+
+def reverse_reviewed_patch(
+    reverse: Callable[..., subprocess.CompletedProcess[bytes]],
+    checkout: Path,
+    metadata: Path | None,
+    pinned_metadata: Path | None,
+    patch_digest: str,
+    pins: ExitStack,
+) -> Path | None:
+    """Reverse the reviewed bytes, returning the selected short Git reference if Windows needed it."""
+    applied = reverse(git_dir=metadata)
+    short = None
+    diagnostic = b"fatal: '$GIT_DIR' too big"
+    if (
+        os.name == "nt"
+        and metadata is not None
+        and applied.returncode == 128
+        and not applied.stdout
+        and b"GIT_DIR" in applied.stderr
+    ):
+        # Confirm translated messages without applying the reverse patch twice.
+        failure = (
+            applied
+            if diagnostic in applied.stderr.splitlines()
+            else reverse(git_dir=metadata, check=True)
+        )
+        if (
+            failure.returncode == 128
+            and not failure.stdout
+            and diagnostic in failure.stderr.splitlines()
+        ):
+            short = prepare_replay_gitfile(checkout, pinned_metadata, patch_digest, pins)
+            applied = reverse(git_dir=short)
+    if applied.returncode != 0:
+        raise SystemExit(
+            "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
+        )
+    return short
+
+
+def prepare_replay_gitfile(
+    checkout: Path, pinned_metadata: Path | None, patch_digest: str, pins: ExitStack
+) -> Path:
+    """Retain the verified patch and short metadata reference through the final snapshot."""
+    if pinned_metadata is None:
+        raise SystemExit(
+            "Could not bind the selected Windows Git directory and private patch replay directory."
+        )
+    from windows_scan_local_files import open_read_fd, pinned_replay_gitfile
+
+    try:
+        short = pins.enter_context(pinned_replay_gitfile(checkout, pinned_metadata))
+        fd = open_read_fd(checkout.parent, "reviewed.patch", "reviewed remediation patch")
+        patch = pins.enter_context(os.fdopen(fd, "rb"))
+        matching_patch_metadata(patch, patch_digest)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Could not verify the reviewed patch replay: {exc}") from exc
+    return short
 
 
 def require_available(connection: sqlite3.Connection, args: Any, require_scan: Any) -> None:

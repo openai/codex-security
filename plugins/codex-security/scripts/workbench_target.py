@@ -909,11 +909,16 @@ def _windows_inventory_query(
     return result
 
 
-def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
-    repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None:
-        return None
-    repository, pathspec = git_worktree_context(target)
+def git_directory_snapshot_paths(
+    target: Path, *, replay_git_dir: Path | None = None
+) -> list[Path] | None:
+    if replay_git_dir is None:
+        if git_output(target, "rev-parse", "--show-toplevel") is None:
+            return None
+        repository, pathspec = git_worktree_context(target)
+    else:
+        # The temporary copy of an unborn repository uses the selected Git config and index.
+        repository, pathspec = target, "."
     scope = repository / pathspec
     scope_depth = len(Path(pathspec).parts)
     matching_prefixes: dict[str, bool] = {}
@@ -941,6 +946,8 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         "-z",
         "--",
         inventory_pathspec,
+        git_dir=replay_git_dir,
+        work_tree=repository if replay_git_dir else None,
     )
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
@@ -999,7 +1006,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     if _WINDOWS:
         # Git omits empty untracked directories from its file listing. Inventory
         # junction identities independently of whether their targets contain files.
-        git_directory = git_output(target, "rev-parse", "--absolute-git-dir")
+        git_directory = replay_git_dir or git_output(target, "rev-parse", "--absolute-git-dir")
         if git_directory is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
         directories = _windows_inventory_query(
@@ -1116,6 +1123,7 @@ def directory_content_digest(
     excluded: tuple[Path, ...] = (),
     include_ignored: bool = False,
     include_git_metadata: bool = False,
+    replay_git_dir: Path | None = None,
 ) -> str:
     def raise_walk_error(error: OSError) -> None:
         raise error
@@ -1128,7 +1136,7 @@ def directory_content_digest(
             target, excluded, include_git_metadata=include_git_metadata, onerror=raise_walk_error
         )
         if include_ignored
-        else git_directory_snapshot_paths(target)
+        else git_directory_snapshot_paths(target, replay_git_dir=replay_git_dir)
     )
     if paths is None:
         paths = source_directory_snapshot_paths(target, excluded)
