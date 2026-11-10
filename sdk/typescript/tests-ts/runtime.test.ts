@@ -1024,7 +1024,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1102,12 +1102,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         cwd: mcp.mcpServers["codex-security"].cwd,
         startup_timeout_sec:
           mcp.mcpServers["codex-security"].startup_timeout_sec,
-        env_vars: declaredRoot
-          ? mcp.mcpServers["codex-security"].env_vars
-          : [
-              ...mcp.mcpServers["codex-security"].env_vars,
-              "CODEX_SECURITY_PLUGIN_ROOT",
-            ],
+        env_vars: [
+          ...mcp.mcpServers["codex-security"].env_vars,
+          ...(declaredRoot ? [] : ["CODEX_SECURITY_PLUGIN_ROOT"]),
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         JSON.parse(await readFile(join(selected, ".mcp.json"), "utf8")),
@@ -1133,6 +1132,11 @@ for await (const line of createInterface({ input: process.stdin })) {
               ...environment,
               CODEX_HOME: home,
               CODEX_SQLITE_HOME: sqliteHome,
+              CODEX_SECURITY_REPOSITORY: join(
+                root,
+                pluginRoot === second ? "second source" : "first source",
+              ),
+              SYNTHETIC_UNDECLARED_VALUE: "ambient fixture",
               ...(pluginRoot === undefined
                 ? {}
                 : { CODEX_SECURITY_PLUGIN_ROOT: pluginRoot }),
@@ -1196,6 +1200,10 @@ for await (const line of createInterface({ input: process.stdin })) {
         });
         const details = server.tools.probe._meta.launch;
         expect(details.pluginRoot).toBe(await realpath(pluginRoot));
+        expect(details.repository).toBe(
+          join(root, pluginRoot === second ? "second source" : "first source"),
+        );
+        expect(details.ambient).toBeUndefined();
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(
           process.platform === "win32"
@@ -2269,7 +2277,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         command: "./scripts/launch_codex_security_mcp_sdk",
         args: ["--stdio", "synthetic argument"],
         cwd: ".",
-        env_vars: ["CODEX_HOME", "CODEX_SECURITY_PLUGIN_ROOT"],
+        env_vars: [
+          "CODEX_HOME",
+          "CODEX_SECURITY_PLUGIN_ROOT",
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         (await stat(join(staged, "scripts", "launch_codex_security_mcp")))
