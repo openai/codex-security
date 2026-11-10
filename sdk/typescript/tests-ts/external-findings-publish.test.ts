@@ -1550,6 +1550,38 @@ test("Tenable private imports require structured support and upload only the app
   expect(f.posts).toHaveLength(0);
 });
 
+test("a throttled private upload reports the retry interval and resumes the same request", async () => {
+  const { f, deps, inbox, jobs } = await privateUploadFixture(
+    tenableReport,
+    "tenable",
+    tenableReport.repository_url,
+  );
+  inbox.interruptUpload = false;
+  const uploadIds: string[] = [];
+  const prepare = () =>
+    prepareExternalPublication(f.file, tenableOptions, {
+      ...deps,
+      fetch: async (url, init) => {
+        if (new URL(url).pathname.endsWith("/finding-imports/files")) {
+          uploadIds.push(String((init.body as FormData).get("request_id")));
+          if (uploadIds.length === 1)
+            return Response.json(
+              { error: { code: "rate_limit_exceeded", message: "Slow down." } },
+              { status: 429, headers: { "Retry-After": "17" } },
+            );
+        }
+        return deps.fetch(url, init);
+      },
+    });
+  const first = await prepare();
+  await expect(first.publish()).rejects.toThrow("Slow down. Retry-After: 17.");
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).privateJob?.status).toBe("completed");
+  expect(uploadIds).toEqual([expect.any(String), uploadIds[0]]);
+  expect(jobs).toHaveLength(1);
+});
+
 test("a Snyk private upload resumes after a rename and still checks supplemental SDK repository claims", async () => {
   const { url, capture, report } = privateSnykProject();
   const { f, settings, deps, inbox, uploads, prepareFile } =

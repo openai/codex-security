@@ -417,10 +417,13 @@ export function privateImportClient(
         })
         .safeParse(payload);
       const detail = error.data?.error;
+      const retryAfter = response.headers.get("Retry-After");
+      let message = `Private import failed (HTTP ${response.status}): ${detail?.message ?? detail?.code ?? response.statusText}`;
+      if (retryAfter) message += ` Retry-After: ${retryAfter}.`;
       throw new PrivateImportRequestError(
         response.status,
         detail?.code,
-        `Private import failed (HTTP ${response.status}): ${detail?.message ?? detail?.code ?? response.statusText}`,
+        message,
       );
     }
     return response;
