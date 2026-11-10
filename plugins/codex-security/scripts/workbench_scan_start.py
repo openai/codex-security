@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -19,7 +20,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
-from workbench.storage import create_private_temporary_directory, state_dir
+from workbench.storage import (
+    archive_source_directory,
+    create_private_temporary_directory,
+    short_archive_prefix,
+    state_dir,
+)
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -129,7 +135,7 @@ def archive_scan(
     if archived_scan_dir is not None and (
         not args.archive_existing
         or archived_scan_dir.parent != scan_dir.parent
-        or not archived_scan_dir.name.startswith(f"{scan_dir.name}.previous-")
+        or archive_source_directory(archived_scan_dir, scan_dir) != scan_dir
     ):
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
@@ -179,9 +185,17 @@ def archive_scan(
                 )
             if before_archive is not None:
                 before_archive()
-            archived_scan_dir = Path(
-                tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
-            ).resolve()
+            try:
+                reserved = tempfile.mkdtemp(
+                    prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent
+                )
+            except OSError as error:
+                if os.name != "posix" or error.errno != errno.ENAMETOOLONG:
+                    raise
+                reserved = tempfile.mkdtemp(
+                    prefix=short_archive_prefix(scan_dir.name), dir=scan_dir.parent
+                )
+            archived_scan_dir = Path(reserved).resolve()
             archived_scan_dir.rmdir()
             scan_dir.rename(archived_scan_dir)
             moved = True

@@ -15,7 +15,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   close as closeCallback,
@@ -2147,14 +2147,33 @@ export async function planOutputArchive(
   if (outputDirectory === null) return null;
   const entries = await readdir(outputDirectory).catch(nullIfMissingFileError);
   if (entries === null || entries.length === 0) return null;
-  return `${outputDirectory}${outputArchiveSuffix()}`;
+  const id = randomUUID().slice(0, 8);
+  const archive = `${outputDirectory}${outputArchiveSuffix(id)}`;
+  if (process.platform === "win32" || !(await archiveNameTooLong(archive)))
+    return archive;
+  // The workbench reserves a sibling with an eight-character random suffix.
+  const sibling = `${outputDirectory}.previous-${id}`;
+  if (!(await archiveNameTooLong(sibling))) return sibling;
+  const digest = createHash("sha256")
+    .update(basename(outputDirectory))
+    .digest("hex");
+  return join(dirname(outputDirectory), `.previous-${digest}-${id}`);
 }
 
-function outputArchiveSuffix(): string {
+async function archiveNameTooLong(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    return nodeErrorCode(error) === "ENAMETOOLONG";
+  }
+}
+
+function outputArchiveSuffix(id = randomUUID().slice(0, 8)): string {
   return `.previous-${new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
-    .replace(/\.\d{3}Z$/, "")}-${randomUUID().slice(0, 8)}`;
+    .replace(/\.\d{3}Z$/, "")}-${id}`;
 }
 
 export function requireModelSafeOutputDir(path: string): void {
