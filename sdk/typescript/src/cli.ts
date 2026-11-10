@@ -4864,6 +4864,13 @@ export async function main(
     configuration: z.record(z.string(), z.unknown()),
   });
 
+  const inspecting = argv.some((arg) =>
+    ["-h", "--help", "--version", "--schema", "--llms", "--llms-full"].includes(
+      arg,
+    ),
+  );
+  if (inspecting && argv.includes("--update"))
+    argv = argv.filter((arg) => arg !== "--update");
   const cliOptions: Cli.create.Options = {
     aliases: ["cs"],
     // The SDK owns update notices and uses the same installation resolver for
@@ -7619,15 +7626,9 @@ export async function main(
     }
   }
   const firstImportOption = scanImport ? commandIndex + 2 : argv.length;
-  const inspecting = argv.some((arg) =>
-    ["-h", "--help", "--version", "--schema", "--llms", "--llms-full"].includes(
-      arg,
-    ),
-  );
   const frameworkArgv: string[] = [];
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]!;
-    if (inspecting && argument === "--update") continue;
     const next = argv[index + 1];
     const separator = argument.indexOf("=");
     if (
