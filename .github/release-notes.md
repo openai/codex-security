@@ -34,6 +34,7 @@
 - publish new patch files on musl without hard links ([#2530](https://github.com/openai/codex-security/pull/2530))
 - preserve Windows checkout identity across Python versions ([#2541](https://github.com/openai/codex-security/pull/2541))
 - register local marketplaces in Codex homes containing a hash ([#2547](https://github.com/openai/codex-security/pull/2547))
+- preserve whitespace in POSIX state directory overrides ([#2548](https://github.com/openai/codex-security/pull/2548))
 
 </details>
 
