@@ -3688,14 +3688,23 @@ export async function resolvePluginPython(
     );
   }
 
-  const managedRoots = options.managedRuntimeRoots ?? [
-    join(
-      environmentValue(environment, "XDG_CACHE_HOME", true) ||
-        join(options.homeDirectory ?? homedir(), ".cache"),
-      "codex-runtimes",
-      "codex-primary-runtime",
-    ),
-  ];
+  let managedRoots = options.managedRuntimeRoots;
+  if (managedRoots === undefined) {
+    try {
+      const cache =
+        environmentValue(environment, "XDG_CACHE_HOME", true) ||
+        join(options.homeDirectory ?? homedir(), ".cache");
+      managedRoots = [join(cache, "codex-runtimes", "codex-primary-runtime")];
+    } catch (error) {
+      // A numeric Linux UID can lack a home for the optional managed cache.
+      if (
+        process.platform !== "linux" ||
+        (error as { info?: NodeJS.ErrnoException }).info?.code !== "ENOENT"
+      )
+        throw error;
+      managedRoots = [];
+    }
+  }
   const relativeCandidates =
     process.platform === "win32"
       ? [

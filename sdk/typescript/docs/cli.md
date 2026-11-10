@@ -927,7 +927,7 @@ completed scans that added no findings. `--max-discovery-runs` caps the total
 number started, including failures. `--max-time` stops discovery and returns
 the findings from completed scans.
 
-For TypeScript, see the [SDK Deep Scan example](../README.md#configure-deep-scans).
+For TypeScript, see the [SDK Deep Scan example](sdk.md#configure-deep-scans).
 
 Use project-file `scan.deep` settings or legacy
 `$CODEX_HOME/codex-security/config.toml` defaults. Counts must be positive except
@@ -1080,7 +1080,7 @@ client during the scan, or receiving a canceled hosted execution records
 Applications can choose how to collect and export these observations.
 
 For filesystem and approval behavior, see the
-[local security model](../README.md#local-security-model).
+[local security model](sdk.md#local-security-model).
 
 ### Environment variables
 
