@@ -80,8 +80,11 @@ def _windows_resume_checkout(scan: sqlite3.Row) -> Path:
     except SystemExit as exc:
         raise SystemExit(replaced) from exc
     with verified_windows_checkout(scan, repository, replaced_message=replaced):
-        snapshot = (scan["target_revision"], scan["target_snapshot_digest"])
-        if scan_target_identity(repository, None)[:2] != snapshot:
+        expected = (scan["target_revision"], scan["target_snapshot_digest"])
+        current = scan_target_identity(
+            repository, None, expected_digest=scan["target_snapshot_digest"]
+        )
+        if current[:2] != expected:
             raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
     return repository
 
@@ -127,7 +130,9 @@ def cli_scan_resume(
             raise SystemExit(
                 "Cannot resume: the original checkout is missing or was replaced."
             ) from exc
-        if scan_target_identity(repository, None) != (
+        if scan_target_identity(
+            repository, None, expected_digest=scan["target_snapshot_digest"]
+        ) != (
             scan["target_revision"],
             scan["target_snapshot_digest"],
             scan["target_device"],

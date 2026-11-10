@@ -65,6 +65,7 @@ def scan_target_identity(
     diff_target: dict[str, str] | None,
     *,
     metadata: os.stat_result | None = None,
+    expected_digest: str | None = None,
 ) -> tuple[str, str | None, int | str, int | str]:
     """Return revision, content digest, device ID, and inode for scan registration.
 
@@ -79,7 +80,7 @@ def scan_target_identity(
         snapshot_digest = (
             directory_content_digest(target)
             if revision == "unversioned"
-            else worktree_content_digest(target)
+            else worktree_content_digest(target, expected_digest=expected_digest)
         )
     return (
         revision,
