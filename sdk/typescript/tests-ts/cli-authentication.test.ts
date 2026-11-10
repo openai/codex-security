@@ -133,10 +133,12 @@ describe("CLI authentication", () => {
     await writeFile(
       join(home, "config.toml"),
       `cli_auth_credentials_store = "file"\n[projects.${JSON.stringify(skillDirectory)}]\ntrust_level = "trusted"\n`,
+      { mode: 0o600 },
     );
     await writeFile(
       join(home, "auth.json"),
       JSON.stringify({ OPENAI_API_KEY: "synthetic-key" }),
+      { mode: 0o600 },
     );
 
     const status = spawnSync(
@@ -153,7 +155,7 @@ describe("CLI authentication", () => {
         },
       },
     );
-    expect(status.status).toBe(0);
+    expect(status.status, status.stderr).toBe(0);
     expect(JSON.parse(status.stdout)).toEqual({
       authenticated: true,
       method: "stored_credentials",

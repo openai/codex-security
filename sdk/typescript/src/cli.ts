@@ -7580,32 +7580,31 @@ export async function main(
       }),
       output: z.object({ path: z.string() }).optional(),
       async run({ args, format }) {
-        const directory = dependencies.currentDirectory();
-        const path = resolveCliPath(
-          directory,
-          args.file ?? "codex-security.yaml",
-        );
-        const preview = `${PREVIEW_LABEL}: ${projectPreviewCommand(directory, path)}`;
+        let preview: string | undefined;
         try {
+          const directory = dependencies.currentDirectory();
+          const path = resolveCliPath(
+            directory,
+            args.file ?? "codex-security.yaml",
+          );
+          preview = `${PREVIEW_LABEL}: ${projectPreviewCommand(directory, path)}`;
           await writeFile(path, projectConfigStarter(path, directory), {
             flag: "wx",
             mode: 0o600,
           });
+          if (useDefaultOutput(format)) {
+            if (output.isTTY)
+              renderedOutput = `Created ${escapeTerminalText(path)}\n${preview}\n`;
+            else errorOutput.write(`${preview}\n`);
+          }
+          return { path };
         } catch (error) {
           exitCode = 2;
-          const message =
-            (error as NodeJS.ErrnoException).code === "EEXIST"
-              ? `Configuration already exists at ${escapeTerminalText(path)}. ${preview}`
-              : diagnosticLines(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          if ((error as NodeJS.ErrnoException).code === "EEXIST" && preview)
+            errorOutput.write(`${preview}\n`);
           throw error;
         }
-        if (useDefaultOutput(format)) {
-          if (output.isTTY)
-            renderedOutput = `Created ${escapeTerminalText(path)}\n${preview}\n`;
-          else errorOutput.write(`${preview}\n`);
-        }
-        return { path };
       },
     })
     .command("feedback", {
