@@ -45,6 +45,9 @@
 - stage knowledge in the selected temporary directory ([#2559](https://github.com/openai/codex-security/pull/2559))
 - isolate Git pathspec modes for file inventories ([#2565](https://github.com/openai/codex-security/pull/2565))
 - read sealed artifacts in searchable Linux directories ([#2564](https://github.com/openai/codex-security/pull/2564))
+- pin Git metadata on another Windows fixed drive ([#2539](https://github.com/openai/codex-security/pull/2539))
+- preserve long Git metadata in reviewed patch replay ([#2543](https://github.com/openai/codex-security/pull/2543))
+- reuse verified generated plugin cache content ([#2538](https://github.com/openai/codex-security/pull/2538))
 
 </details>
 
