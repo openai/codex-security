@@ -1614,7 +1614,7 @@ def test_git_diff_display_settings_preserve_selected_working_content(
     lines.write_text("\n".join(original_lines) + "\n", encoding="utf-8")
     if option == "diff.orderFile":
         order_file = tmp_path / "diff order"
-        order_file.write_text(lines.name + "\n", encoding="utf-8")
+        order_file.write_text(lines.name + "\n", encoding="utf-8", newline="\n")
         value = str(order_file)
     selected = workbench_api["require_diff_target"](target, "working_tree", None, None, None)
     if option == "GIT_DIFF_OPTS":
