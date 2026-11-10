@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from test_workbench_scan_history import create_cli_scan
-from workbench_test_support import get_scan, initialize_git_repository
+from workbench_test_support import configure_git_command, get_scan, initialize_git_repository
 
 
 def start_validation_scan(
@@ -132,10 +132,34 @@ def test_check_committed_diff_target_rechecks_assume_unchanged_files(tmp_path: P
     )
     assert get_scan(state_dir, scan_id, "--check-target")["scan"]["scanId"] == scan_id
 
-    source.write_bytes(b"Changed locally.\n")
-    changed = get_scan(state_dir, scan_id, "--check-target", check=False)
+    (repository / ".git" / "info" / "attributes").write_text("README.md filter=fixture\n")
+    clean_filter = tmp_path / "clean_filter.py"
+    clean_filter.write_text(
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "if os.environ.get('GIT_INDEX_FILE'):\n"
+        "    inherited = os.environ.get('GIT_CONFIG_VALUE_0') == 'synthetic-fixture-value'\n"
+        "    Path(__file__).with_suffix('.result').write_text('inherited' if inherited else 'isolated')\n"
+        "sys.stdout.buffer.write(sys.stdin.buffer.read())\n"
+    )
+    configure_git_command(repository, "filter.fixture.clean", clean_filter)
+    # Matching sizes force Git to compare the filtered contents.
+    source.write_bytes(b"x" * len(original))
+    os.utime(source, (1, 1))
+    changed = get_scan(
+        state_dir,
+        scan_id,
+        "--check-target",
+        check=False,
+        environment={
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": "synthetic-fixture-value",
+        },
+    )
     assert changed["returncode"] != 0
     assert "changed" in changed["stderr"]
+    assert clean_filter.with_suffix(".result").read_text() == "isolated"
     tracked = subprocess.check_output(["git", "ls-files", "-v", "--", source.name], cwd=repository)
     assert tracked.split(maxsplit=1)[0] == b"h"
     source.write_bytes(original)

@@ -282,6 +282,7 @@ def git_command(
     work_tree: Path | None = None,
     stdout_file: BinaryIO | None = None,
     environment_overrides: dict[str, str] | None = None,
+    inherit_git_environment: bool = True,
     offline: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     """Run Git against target and return the completed process with its exit status.
@@ -292,7 +293,13 @@ def git_command(
     """
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
-    environment = os.environ.copy()
+    environment = (
+        os.environ.copy()
+        if inherit_git_environment
+        else {
+            name: value for name, value in os.environ.items() if not name.upper().startswith("GIT_")
+        }
+    )
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
@@ -700,6 +707,8 @@ def verify_assumed_unchanged_files(target: Path) -> None:
             "--really-refresh",
             text=False,
             environment_overrides={"GIT_INDEX_FILE": str(index_copy)},
+            # A repository's clean filter can run while Git compares working-tree bytes.
+            inherit_git_environment=False,
             offline=True,
         )
     if result.returncode == 1:
