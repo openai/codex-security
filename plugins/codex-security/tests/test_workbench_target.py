@@ -1580,6 +1580,10 @@ def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> 
         ("diff.mnemonicPrefix", "true"),
         ("diff.context", "0"),
         ("diff.algorithm", "histogram"),
+        ("diff.interHunkContext", "20"),
+        ("diff.suppressBlankEmpty", "true"),
+        ("diff.orderFile", "order"),
+        ("diff.renames", "false"),
         ("core.quotePath", "false"),
         ("GIT_DIFF_OPTS", "--unified=0"),
     ],
@@ -1595,9 +1599,23 @@ def test_git_diff_display_settings_preserve_selected_working_content(
     initialize_git_repository(target)
     path = target / "café.txt"
     path.write_bytes(b"heading\none\nC\nB\nB\nthree\n")
-    subprocess.run(["git", "add", "--", path.name], cwd=target, check=True)
+    lines = target / "z-lines.txt"
+    original_lines = ["start", "", *(f"line {n}" for n in range(20)), "end"]
+    lines.write_text("\n".join(original_lines) + "\n", encoding="utf-8")
+    (target / "previous-name.txt").write_bytes(b"uniquely renamed fixture\n")
+    subprocess.run(
+        ["git", "add", "--", path.name, lines.name, "previous-name.txt"], cwd=target, check=True
+    )
     subprocess.run(["git", "commit", "-qm", "Track fixture"], cwd=target, check=True)
+    subprocess.run(["git", "mv", "previous-name.txt", "renamed.txt"], cwd=target, check=True)
     path.write_bytes(b"heading\none\nB\nC\nC\nthree\n")
+    original_lines[0] = "changed start"
+    original_lines[-1] = "changed end"
+    lines.write_text("\n".join(original_lines) + "\n", encoding="utf-8")
+    if option == "diff.orderFile":
+        order_file = tmp_path / "diff order"
+        order_file.write_text(lines.name + "\n", encoding="utf-8")
+        value = str(order_file)
     selected = workbench_api["require_diff_target"](target, "working_tree", None, None, None)
     if option == "GIT_DIFF_OPTS":
         monkeypatch.setenv(option, value)

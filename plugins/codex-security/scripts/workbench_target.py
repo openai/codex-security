@@ -764,7 +764,11 @@ def _git_content_digest(
         ":(top,glob,exclude)**/.svn",
         ":(top,glob,exclude)**/.svn/**",
     ]
-    config = ("-c", "core.quotePath=true") if stable_display else ()
+    config = (
+        ("-c", "core.quotePath=true", "-c", "diff.suppressBlankEmpty=false")
+        if stable_display
+        else ()
+    )
     display = (
         (
             "--no-color",
@@ -772,6 +776,10 @@ def _git_content_digest(
             "--dst-prefix=b/",
             "--unified=3",
             "--diff-algorithm=myers",
+            "--inter-hunk-context=0",
+            "--find-renames=50%",
+            "-O",
+            os.devnull,
         )
         if stable_display
         else ()
