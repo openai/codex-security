@@ -308,20 +308,24 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
   },
 );
 
-test("scan --validate rejects a repository link before sharing knowledge with validation", async () => {
+test("validation rejects knowledge selected through a checkout link", async () => {
   const input = await fixture({});
+  git(input.repository, "init", "--quiet");
   const link = join(input.repository, "documents");
   await symlink(input.configDirectory, link, "junction");
-  const onTurn = mock<(_target: string, options: ScanOptions) => void>();
-  const stderr = captureCli(main, "stderr");
-  expect(
-    await stderr.run(
-      ["scan", "--validate", "--knowledge-base", join(link, "scan.json")],
-      dependencies({ currentDirectory: input.repository, onTurn }),
-    ),
-  ).not.toBe(0);
-  expect(stderr.text()).toContain("repository symbolic link");
-  expect(onTurn).not.toHaveBeenCalled();
+  for (const command of [
+    ["scan", "--validate"],
+    ["validate", "candidate"],
+  ]) {
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        [...command, "--knowledge-base", join(link, "scan.json")],
+        dependencies({ currentDirectory: input.repository }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("repository directory links");
+  }
 });
 
 test("a missing operator-selected environment file fails without falling back", async () => {

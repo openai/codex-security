@@ -15,11 +15,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
-import {
-  type DocumentRoots,
-  type DocumentRootSource,
-  escapingInputDirectoryLink,
-} from "./prompt-files.js";
+import { checkDocumentPath, type DocumentRootSource } from "./prompt-files.js";
 import { expandHome } from "./runtime.js";
 import {
   documentSourceRoot,
@@ -67,16 +63,11 @@ export async function knowledgeBaseProtectedRoots(
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
-  repositoryOrRoots: string | DocumentRootSource = [],
+  roots: string | DocumentRootSource = [],
 ): Promise<KnowledgeBaseSnapshot> {
   try {
     const sources = new Set<string>();
     const documents = new Set<string>();
-    const roots =
-      typeof repositoryOrRoots === "string"
-        ? [await documentSourceRoot(repositoryOrRoots, signal)]
-        : repositoryOrRoots;
-
     for (const requested of paths) {
       signal?.throwIfAborted();
       if (!requested.trim())
@@ -95,16 +86,10 @@ export async function readKnowledgeBaseSnapshot(
       }
 
       const source = await realpath(path);
-      const escaped = await escapingInputDirectoryLink(
-        path,
-        source,
-        roots,
-        signal,
-      );
-      if (escaped) {
-        throw new Error(
-          `Knowledge base paths cannot traverse a repository symbolic link to an external document: ${escaped}`,
-        );
+      if (path !== source) {
+        if (typeof roots === "string")
+          roots = [await documentSourceRoot(roots, signal)];
+        await checkDocumentPath(path, source, roots, signal);
       }
       const selected = metadata.isDirectory()
         ? (await discover(source, signal)).sort()
@@ -202,18 +187,6 @@ export async function prepareKnowledgeBase(
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
     throw new ConfigurationError(errorMessage(error), { cause: error });
   }
-}
-
-/** @internal Read the same extracted document text used by scans. */
-export async function readKnowledgeBaseDocuments(
-  paths: readonly string[],
-  signal?: AbortSignal,
-  roots?: DocumentRoots,
-): Promise<string[]> {
-  const { documents } = await readKnowledgeBaseSnapshot(paths, signal, roots);
-  return Object.keys(documents)
-    .sort()
-    .map((name) => documents[name]!);
 }
 
 async function discover(

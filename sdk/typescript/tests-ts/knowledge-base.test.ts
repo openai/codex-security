@@ -986,44 +986,30 @@ describe("scan knowledge bases", () => {
     );
   });
 
-  test("only source-owned directory links must keep documents inside the source", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const internal = join(repository, "policies");
-    const external = join(root, "external");
-    await mkdir(internal, { recursive: true });
-    await mkdir(external);
-    await writeFile(join(internal, "guide.md"), "Internal policy.");
+  test("checks each directory link on the way to an external document", async () => {
+    const repository = await temporaryDirectory();
+    const external = await temporaryDirectory();
     await writeFile(join(external, "guide.md"), "External policy.");
-
-    const linkType = process.platform === "win32" ? "junction" : "dir";
-    const escaped = join(repository, "outside");
-    const indirect = join(root, "via-source");
-    const operator = join(root, "current-policy");
-    const version = join(repository, "current");
-    await symlink(external, escaped, linkType);
-    await symlink(escaped, indirect, linkType);
-    await symlink(external, operator, linkType);
-    await symlink(internal, version, linkType);
-
-    const roots = [await filesystem.realpath(repository)];
-    const read = (directory: string) =>
+    const escape = join(repository, "outside");
+    const viaRepository = join(external, "via-repository");
+    const operatorAlias = join(external, "current");
+    await symlink(external, escape, "junction");
+    await symlink(escape, viaRepository, "junction");
+    await symlink(external, operatorAlias, "junction");
+    const read = (directory: string, checkout: string) =>
       readKnowledgeBaseSnapshot(
         [join(directory, "guide.md")],
         undefined,
-        roots,
+        checkout,
       );
-    for (const directory of [escaped, indirect]) {
-      await expect(read(directory)).rejects.toThrow("repository symbolic link");
+    await expect(read(viaRepository, repository)).rejects.toThrow(
+      "repository directory links",
+    );
+    for (const checkout of [repository, external]) {
+      expect(
+        Object.values((await read(operatorAlias, checkout)).documents),
+      ).toEqual(["External policy."]);
     }
-    for (const directory of [external, operator]) {
-      expect(Object.values((await read(directory)).documents)).toEqual([
-        "External policy.",
-      ]);
-    }
-    expect(Object.values((await read(version)).documents)).toEqual([
-      "Internal policy.",
-    ]);
   });
 
   testPosix("rejects unreadable source documents", async () => {

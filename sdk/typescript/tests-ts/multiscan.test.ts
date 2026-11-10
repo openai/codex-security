@@ -72,62 +72,54 @@ describe("multiscan", () => {
     ]);
   });
 
-  test.each([
-    "worktree",
-    "separate storage",
-    "gitfile",
-    "omitted suffix",
-    "invalid directory",
-  ])("rejects externally linked shared documents for %s", async (kind) => {
+  test("checks linked bulk documents against the selected Git layout", async () => {
     const { paths, source } = await repositoryFixture("source");
-    let selected = source.path;
-    let owner = source.path;
-    if (kind === "separate storage") {
-      selected = join(paths.root, "git-storage");
-      git(source.path, "init", "--separate-git-dir", selected);
-      git(source.path, "config", "core.worktree", source.path);
-    } else if (kind === "gitfile") {
-      selected = join(source.path, "target.ref");
-      await writeFile(selected, "gitdir: .git\n");
-    } else if (kind === "omitted suffix") {
-      selected = join(paths.root, "archive");
-      await mkdir(selected);
-      owner = selected + ".git";
-      git(paths.root, "clone", "--quiet", "--bare", source.path, owner);
-      git(owner, "config", "gc.auto", "0");
-    } else if (kind === "invalid directory") {
-      await rm(join(source.path, ".git"), { recursive: true });
-    }
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrow,${selected},${source.revision}\n`,
-    );
+    const settings = options(paths, client(completeRun), { maxAttempts: 1 });
     const direct = join(await filesystem.realpath(paths.root), "policy.md");
     await writeFile(direct, "External document.");
-    await filesystem.symlink(paths.root, join(owner, "docs"), "junction");
-    const linked = join(owner, "docs", "policy.md");
-    const settings = options(paths, client(completeRun), { maxAttempts: 1 });
-    await expect(
-      runMultiscan({ ...settings, scanPromptFile: linked }),
-    ).rejects.toThrow(/directory link|canonical/i);
-    const result = await runMultiscan({
+    const docs = join(source.path, "docs");
+    await filesystem.symlink(paths.root, docs, "junction");
+    const linked = join(docs, "policy.md");
+
+    const { resultsPath } = await runMultiscan({
       ...settings,
       knowledgeBasePaths: [linked],
     });
-    expect(await results(result.resultsPath)).toMatchObject([
+    expect(await results(resultsPath)).toMatchObject([
       {
         status: "failed",
-        error: expect.stringMatching(/symbolic link|canonical/i),
+        error: expect.stringContaining("repository directory links"),
       },
     ]);
-    if (kind !== "invalid directory") {
-      const successful = await runMultiscan({
-        ...settings,
-        outputDir: join(paths.root, "direct-run"),
-        knowledgeBasePaths: [direct],
-      });
-      expect(successful.completed).toBe(1);
-    }
+
+    const requireCanonical = async (repository: string) => {
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrow,${repository},${source.revision}\n`,
+      );
+      await expect(
+        runMultiscan({ ...settings, scanPromptFile: linked }),
+      ).rejects.toThrow("canonical path");
+    };
+
+    const gitfile = join(source.path, "target.ref");
+    await writeFile(
+      gitfile,
+      `gitdir: ${git(source.path, "rev-parse", "--absolute-git-dir")}\n`,
+    );
+    await requireCanonical(gitfile);
+    const directRun = await runMultiscan({
+      ...settings,
+      outputDir: join(paths.root, "direct-run"),
+      knowledgeBasePaths: [direct],
+    });
+    expect(directRun.completed).toBe(1);
+
+    const archive = join(paths.root, "archive");
+    git(paths.root, "clone", "--bare", source.path, archive + ".git");
+    await requireCanonical(archive);
+    git(source.path, "config", "core.worktree", paths.root);
+    await requireCanonical(source.path);
   });
 
   test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(

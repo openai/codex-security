@@ -822,14 +822,10 @@ describe("CodexSecurity orchestration", () => {
       ],
     ];
     const redirected = join(repository, "documents");
-    await symlink(
-      root,
-      redirected,
-      process.platform === "win32" ? "junction" : "dir",
-    );
+    await symlink(root, redirected, "junction");
     invalidDocuments.push([
       join(redirected, "context.json"),
-      "repository symbolic link",
+      "repository directory links",
     ]);
     if (process.platform !== "win32") {
       const linkedDocument = join(root, "linked.md");

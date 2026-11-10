@@ -10,10 +10,7 @@ import {
 import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Finding } from "./models.js";
-import {
-  type DocumentRoots,
-  requireCanonicalDocumentPaths,
-} from "./prompt-files.js";
+import type { DocumentRoots } from "./prompt-files.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import {
@@ -75,24 +72,21 @@ export async function classifyScanSeverityInternal(
     throw new CodexSecurityError("Saved scan does not match expectedScanId.");
   }
   const target = scan["targetPath"];
-  let sourceRoots: DocumentRoots = requireCanonicalDocumentPaths;
   // The workbench enables remediation only for the recorded checkout and revision.
-  if (
+  const sourceRoot =
     scan["remediationAvailable"] === true &&
     typeof target === "string" &&
     (options.rubricPath !== undefined || options.knowledgeBasePaths?.length)
-  ) {
-    const root = await documentSourceRoot(target, options.signal).catch(
-      nullIfMissingPath,
-    );
-    if (root !== null) sourceRoots = [root];
-  }
+      ? await documentSourceRoot(target, options.signal).catch(
+          nullIfMissingPath,
+        )
+      : null;
   return classifyScanDirectorySeverityInternal(
     scan.scanDir,
     { ...options, expectedScanId: scan.scanId },
     surface,
     bootstrap?.protectedRoots,
-    sourceRoots,
+    sourceRoot === null ? null : [sourceRoot],
   );
 }
 
@@ -140,9 +134,7 @@ export async function classifyScanDirectorySeverityInternal(
         findings.map(({ findingId }) => findingId),
         options.reprocess ?? false,
       ),
-      sourceRoots === requireCanonicalDocumentPaths
-        ? sourceRoots
-        : [scanDirectory, ...sourceRoots],
+      sourceRoots && [scanDirectory, ...sourceRoots],
     )),
     scanId: contract.manifest.scan.id,
   };

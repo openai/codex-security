@@ -7,7 +7,7 @@ import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
-import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
+import { readKnowledgeBaseSnapshot } from "./knowledge-base.js";
 import type { DocumentRoots } from "./prompt-files.js";
 import type { Finding } from "./models.js";
 import {
@@ -124,7 +124,7 @@ export async function classifySeverityInternal(
   options: ClassifySeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   checkpoint?: SeverityClassificationCheckpoint,
-  documentRoots?: DocumentRoots,
+  roots?: DocumentRoots,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
   const classificationRuns = reviewRunsOption.parse(options.classificationRuns);
@@ -137,29 +137,16 @@ export async function classifySeverityInternal(
     }
     ids.add(finding.findingId);
   }
-  const readDocuments = async (paths: readonly string[]) => {
-    const contents = await readKnowledgeBaseDocuments(
-      paths,
-      options.signal,
-      documentRoots,
-    );
-    if (contents.every((text) => !text.trim())) {
-      throw new CodexSecurityError(
-        "Classification documents must not be empty.",
-      );
-    }
-    return contents;
-  };
   let rubric: string[];
   let defaultRubric: SeverityRubricSnapshot | undefined;
   if (options.rubricPath === undefined) {
     defaultRubric = await getDefaultSeverityRubric(options);
     rubric = [defaultRubric.markdown];
   } else {
-    rubric = await readDocuments([options.rubricPath]);
+    rubric = await readDocuments([options.rubricPath], options.signal, roots);
   }
   const knowledge = options.knowledgeBasePaths?.length
-    ? await readDocuments(options.knowledgeBasePaths)
+    ? await readDocuments(options.knowledgeBasePaths, options.signal, roots)
     : null;
   const rubricCheckpointSha256 = workflowDigest(rubric);
   const metadata = {
@@ -231,6 +218,21 @@ export async function classifySeverityInternal(
   }
   options.signal?.throwIfAborted();
   return result;
+}
+
+async function readDocuments(
+  paths: readonly string[],
+  signal?: AbortSignal,
+  roots?: DocumentRoots,
+): Promise<string[]> {
+  const { documents } = await readKnowledgeBaseSnapshot(paths, signal, roots);
+  const contents = Object.keys(documents)
+    .sort()
+    .map((name) => documents[name]!);
+  if (contents.every((text) => !text.trim())) {
+    throw new CodexSecurityError("Classification documents must not be empty.");
+  }
+  return contents;
 }
 
 /** @internal Check parsed assessments against the actual finding evidence. */

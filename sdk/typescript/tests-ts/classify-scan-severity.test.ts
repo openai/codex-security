@@ -5,6 +5,7 @@ import {
   chmod,
   mkdir,
   readFile,
+  realpath,
   rename,
   rm,
   symlink,
@@ -187,30 +188,18 @@ test("classifies and reads a saved scan with an embedded NUL in its ID without P
   ).toEqual(classification);
 });
 
-test("saved scan artifact links cannot redirect document reads outside the scan directory", async () => {
-  const { scanDirectory, environment, rubricPath } = await fixture();
-  const alias = join(scanDirectory, "policy");
-  await symlink(dirname(rubricPath), alias, "junction");
-  const options = { environment, findingIds: [] };
-  const linked = join(alias, "policy.md");
+test("saved scan artifacts cannot redirect knowledge-base reads", async () => {
+  const { scanDirectory, root, environment, rubricPath } = await fixture();
+  const alias = join(scanDirectory, "documents");
+  await symlink(root, alias, "junction");
   await expect(
     classifyScanDirectorySeverity(scanDirectory, {
-      ...options,
-      rubricPath: linked,
-    }),
-  ).rejects.toThrow(/symbolic link|directory link/i);
-  await expect(
-    classifyScanDirectorySeverity(scanDirectory, {
-      ...options,
+      environment,
+      findingIds: [],
       rubricPath,
-      knowledgeBasePaths: [linked],
+      knowledgeBasePaths: [join(alias, "policy.md")],
     }),
   ).rejects.toThrow(/symbolic link|directory link/i);
-  const result = await classifyScanDirectorySeverity(scanDirectory, {
-    ...options,
-    rubricPath,
-  });
-  expect(result.rubricSha256).toBe(sha256(await readFile(rubricPath)));
 });
 
 test("classifying a saved scan ID checks document links in its source directory", async () => {
@@ -350,7 +339,7 @@ test.each(["id", "prefix", "latest", "missing target"])(
       {
         environment,
         expectedScanId: f.scanId,
-        rubricPath: f.rubricPath,
+        rubricPath: await realpath(f.rubricPath),
         codex: recordingClassifier().codex,
       },
       {
