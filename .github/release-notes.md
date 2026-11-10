@@ -20,6 +20,7 @@
 - retry rolled-back plugin cache activation ([#2528](https://github.com/openai/codex-security/pull/2528))
 - correct compressed session prerequisites ([#2546](https://github.com/openai/codex-security/pull/2546))
 - save artifacts with long POSIX filenames ([#2533](https://github.com/openai/codex-security/pull/2533))
+- explain the Alpine tar prerequisite in release checks ([#2536](https://github.com/openai/codex-security/pull/2536))
 
 </details>
 
