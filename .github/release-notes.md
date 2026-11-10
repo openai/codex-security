@@ -37,6 +37,7 @@
 - preserve whitespace in POSIX state directory overrides ([#2548](https://github.com/openai/codex-security/pull/2548))
 - record the Wolfi Canvas 1.1.0 source and Skia notice ([#2549](https://github.com/openai/codex-security/pull/2549))
 - preserve trailing whitespace in POSIX scan roots ([#2552](https://github.com/openai/codex-security/pull/2552))
+- honor literal POSIX executable override paths ([#2551](https://github.com/openai/codex-security/pull/2551))
 
 </details>
 

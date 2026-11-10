@@ -41,7 +41,9 @@ export async function runWorkbench(
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
-    pythonCommand = await resolvePythonCommand();
+    pythonCommand = await resolvePythonCommand({
+      workingDirectory: PLUGIN_ROOT,
+    });
     return await executeWorkbench(pythonCommand, args, input, options);
   } catch (error) {
     const launchError = pythonCommand
