@@ -1,7 +1,7 @@
 import type { ThreadOptions } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { createFixture, writeFixture } from "./fixtures.mts";
 import { gradeResult } from "./grade.mts";
 import {
@@ -127,26 +127,49 @@ export async function prepareEval(
   const runtime = join(root, "runtime");
   const fixture = createFixture(externalTokenScanner);
   await writeFixture(repo, fixture);
+  const policyFiles = (
+    await readdir(repo, { recursive: true, withFileTypes: true })
+  )
+    .filter((entry) => entry.isFile() && entry.name === "SECURITY.md")
+    .map((entry) =>
+      relative(repo, join(entry.parentPath, entry.name)).split(sep).join("/"),
+    )
+    .sort();
   await mkdir(join(runtime, "references"), { recursive: true });
   const core = await readFile(corePromptPath, "utf8");
   await writeFile(join(runtime, "references/core-scan.md"), core);
-  for (const path of [
-    "references/threat-model.md",
-    "references/finding-detail-fields.md",
-    "references/default-severity-rubric.md",
-    "references/final-report.md",
-    "schemas",
-    "examples/completed-scan",
+  const referenceSha256: Record<string, string> = {};
+  const referenceDir = dirname(corePromptPath);
+  const siblings = new Set(await readdir(referenceDir));
+  const auditBriefs = [
+    "baseline-auditor.md",
+    "focused-investigator.md",
+    "validate-scan-findings.md",
+  ].filter((name) => core.includes(name));
+  for (const name of [
+    ...auditBriefs,
+    "default-severity-rubric.md",
+    "threat-model.md",
+    "finding-detail-fields.md",
+    "final-report.md",
   ]) {
-    await cp(join(pluginRoot, path), join(runtime, path), { recursive: true });
+    const directory =
+      auditBriefs.includes(name) && siblings.has(name)
+        ? referenceDir
+        : join(pluginRoot, "references");
+    const contents = await readFile(join(directory, name));
+    await writeFile(join(runtime, "references", name), contents);
+    referenceSha256[name] = createHash("sha256").update(contents).digest("hex");
+  }
+  for (const name of ["schemas", "examples/completed-scan"]) {
+    await cp(join(pluginRoot, name), join(runtime, name), { recursive: true });
   }
   const prompt = [
     "Perform a static security review of the repository below.",
     `Repository and authorized scope: ${repo}, all current files.`,
     `Plugin reference directory: ${runtime}. Bare reference filenames are relative to ${join(runtime, "references")}.`,
-    externalTokenScanner
-      ? `Applicable inherited SECURITY.md guidance, resolved by the caller for all files in scope from the repository root: ${fixture.files["SECURITY.md"].trim()}`
-      : "Applicable inherited SECURITY.md guidance: none; the caller checked the authorized scope and its ancestors.",
+    `For this generated read-only fixture, the caller handles policy discovery. It checked the root and every nested directory. Apply inherited policy using this complete list of repository-relative SECURITY.md files: ${JSON.stringify(policyFiles)}. The fixture has no plugin helper.`,
+    ...(externalTokenScanner ? [fixture.files["SECURITY.md"].trim()] : []),
     "User security context: none. Supplied threat model: none. Knowledge base: none.",
     "Subagent allowance: 0. Perform the core workflow sequentially, including its baseline audit and final validation.",
     "This caller has no scan tools. Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",
@@ -162,6 +185,7 @@ export async function prepareEval(
       ? "external-token-scanner"
       : "default",
     promptSha256: createHash("sha256").update(core).digest("hex"),
+    referenceSha256,
   };
 }
 
@@ -349,6 +373,7 @@ export async function runPreparedEval(
       ? "explicit"
       : "Codex default; SDK does not expose resolved model",
     promptSha256: prepared.promptSha256,
+    referenceSha256: prepared.referenceSha256,
     ...gradeResult(semanticResult, prepared.fixture),
     usage,
   };
