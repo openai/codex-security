@@ -2244,26 +2244,6 @@ def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> No
         _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
-def _validate_canonical_schemas_before_projection(
-    manifest: dict[str, Any],
-    findings: dict[str, Any],
-    coverage: dict[str, Any],
-    schema_dir: Path,
-) -> None:
-    provisional_manifest = copy.deepcopy(manifest)
-    provisional_scan = _require_dict(provisional_manifest, "scan", "manifest")
-    provisional_scan["artifacts"] = [
-        {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
-        {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
-    ]
-    if "coverageRef" not in provisional_scan:
-        provisional_scan["mode"] = coverage["mode"]
-        provisional_scan["review"] = review_summary(coverage)
-    validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings, schema_dir / "findings.schema.json")
-    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
-
-
 def _validate_contract_refs(scan: dict[str, Any]) -> None:
     for field, expected in (
         ("coverageRef", "coverage.json"),
@@ -2729,9 +2709,9 @@ def _validate_existing_seal(
             raise ContractError(f"{context}: sealed artifact changed or is missing")
 
 
-def _read_sealed_artifacts(
+def _read_scan_artifacts(
     scan_dir: Path, scan: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     findings, findings_bytes = _read_scan_local_json_bytes(
         scan_dir, scan["findingsRef"], scan["findingsRef"]
     )
@@ -2743,8 +2723,15 @@ def _read_sealed_artifacts(
         contents[scan["coverageRef"]] = coverage_bytes
     else:
         coverage = review_state(scan)
+    return findings, coverage, contents
+
+
+def _read_sealed_artifacts(
+    scan_dir: Path, scan: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+    findings, coverage, contents = _read_scan_artifacts(scan_dir, scan)
     _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
-    return findings, coverage, findings_bytes
+    return findings, coverage, contents[scan["findingsRef"]]
 
 
 def _read_sealed_scan(
@@ -2832,38 +2819,30 @@ def _has_identity_text(value: Any) -> bool:
     )
 
 
+def _candidate_id_values(finding: dict[str, Any]) -> Iterator[Any]:
+    if isinstance(provenance := finding.get("provenance"), dict):
+        yield provenance.get("candidateId")
+    if isinstance(extensions := finding.get("extensions"), dict):
+        for key in ("candidateId", "reportId", "ledgerRowId"):
+            yield extensions.get(key)
+
+
 def finding_candidate_id(finding: dict[str, Any]) -> str | None:
-    provenance = finding.get("provenance")
-    if isinstance(provenance, dict) and _has_identity_text(value := provenance.get("candidateId")):
-        return value
-    extensions = finding.get("extensions")
-    if not isinstance(extensions, dict):
-        return None
     return next(
-        (
-            value
-            for field in ("candidateId", "reportId", "ledgerRowId")
-            if _has_identity_text(value := extensions.get(field))
-        ),
-        None,
+        (value for value in _candidate_id_values(finding) if _has_identity_text(value)), None
     )
 
 
 def _csv_candidate_id(finding: dict[str, Any]) -> str | None:
-    candidate_id = finding_candidate_id(finding)
-    if candidate_id is not None:
-        return candidate_id
     # Preserve literal CSV metadata, such as FEFF, that is not a canonical identity.
-    for metadata, fields in (
-        (finding.get("provenance"), ("candidateId",)),
-        (finding.get("extensions"), ("candidateId", "reportId", "ledgerRowId")),
-    ):
-        if isinstance(metadata, dict):
-            for field in fields:
-                value = metadata.get(field)
-                if isinstance(value, str) and value.strip():
-                    return value
-    return None
+    return finding_candidate_id(finding) or next(
+        (
+            value
+            for value in _candidate_id_values(finding)
+            if isinstance(value, str) and value.strip()
+        ),
+        None,
+    )
 
 
 def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
@@ -3113,19 +3092,14 @@ def _prepare_scan_finalization(
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
     if draft_documents is None:
-        findings, findings_input_bytes = _read_scan_local_json_bytes(
-            scan_dir, scan["findingsRef"], scan["findingsRef"]
-        )
-        if "coverageRef" in scan:
-            coverage, coverage_input_bytes = _read_scan_local_json_bytes(
-                scan_dir, scan["coverageRef"], scan["coverageRef"]
-            )
-        else:
-            coverage = review_state(scan)
-            coverage_input_bytes = _json_bytes(coverage)
+        findings, coverage, contents = _read_scan_artifacts(scan_dir, scan)
     else:
         findings, coverage = copy.deepcopy(draft_documents[1:])
-        findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
+        contents = {scan["findingsRef"]: _json_bytes(findings)}
+        if "coverageRef" in scan:
+            contents[scan["coverageRef"]] = _json_bytes(coverage)
+    if "coverageRef" not in scan:
+        _json_bytes(coverage)
     if not was_sealed:
         # Preserve legacy sealed bundles, but do not publish a completeness claim.
         coverage.pop("completeness", None)
@@ -3149,14 +3123,7 @@ def _prepare_scan_finalization(
         raise ContractError(
             f"coverage.mode: must match selected scan mode {expected_coverage_mode}"
         )
-    _validate_existing_seal(
-        scan_dir,
-        scan,
-        artifact_contents={
-            scan["findingsRef"]: findings_input_bytes,
-            **({scan["coverageRef"]: coverage_input_bytes} if "coverageRef" in scan else {}),
-        },
-    )
+    _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
     _validate_target(_require_dict(scan, "target", "manifest.scan"))
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
@@ -3191,9 +3158,19 @@ def _prepare_scan_finalization(
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
-    _validate_canonical_schemas_before_projection(
-        manifest, findings_for_validation, coverage, schema_dir
-    )
+    provisional_manifest = copy.deepcopy(manifest)
+    provisional_manifest["scan"]["artifacts"] = [
+        {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
+        {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
+    ]
+    inline_review = {}
+    if "coverageRef" not in scan:
+        inline_review = {"mode": coverage["mode"], "review": review_summary(coverage)}
+        provisional_manifest["scan"].update(inline_review)
+    validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
+    del provisional_manifest
+    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
+    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent
@@ -3239,9 +3216,8 @@ def _prepare_scan_finalization(
     else:
         findings_bytes = _contract_json_bytes("findings.json", findings)
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
-        if "coverageRef" not in scan:
-            scan["mode"] = coverage["mode"]
-            scan["review"] = review_summary(coverage)
+        if inline_review:
+            scan.update(inline_review)
             scan.pop("reviewState", None)
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")

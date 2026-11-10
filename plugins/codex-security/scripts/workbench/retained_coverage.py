@@ -745,7 +745,7 @@ def merge_saved_results(
     projected_coverage = saved_parent["reviewState"] if saved_parent else {}
     # Reconcile raw source IDs and timestamps before projecting accepted outputs.
     accepted_sources = {
-        relative
+        (worker_id, relative): draft
         for relative, draft, worker_id in sources
         if (worker := workers_by_id.get(worker_id)) is not None
         and worker["status"] == "succeeded"
@@ -781,13 +781,11 @@ def merge_saved_results(
             retained_surface_rows.add(id(source))
         return retained
 
-    accepted_coverage_sources = {
-        id(draft["reviewState"]) for relative, draft, _ in sources if relative in accepted_sources
-    }
+    accepted_coverage_sources = {id(draft["reviewState"]) for draft in accepted_sources.values()}
+    accepted_by_worker = {}
     accepted_surfaces: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
-    for relative, draft, worker_id in sources:
-        if relative not in accepted_sources:
-            continue
+    for (worker_id, relative), draft in accepted_sources.items():
+        accepted_by_worker.setdefault(worker_id, (relative, draft["reviewState"]))
         for index, surface in enumerate(_coverage_rows(draft["reviewState"], "surfaces"), 1):
             if isinstance(surface, dict) and isinstance(surface.get("id"), str):
                 accepted_surfaces.setdefault((worker_id, surface["id"]), []).append(
@@ -824,7 +822,7 @@ def merge_saved_results(
         if origin is None:
             return item
         worker_id, relative, _, index, source = origin
-        if relative not in accepted_sources:
+        if (worker_id, relative) not in accepted_sources:
             worker = workers_by_id.get(worker_id)
             if worker is None or worker_attempts.get(_worker_source_directory(relative)) != (
                 worker_id,
@@ -833,14 +831,7 @@ def merge_saved_results(
                 return item
             # Reproduced outputs and links from omitted checkpoints use the
             # accepted worker's surface namespace.
-            accepted = next(
-                (
-                    (path, draft["reviewState"])
-                    for path, draft, owner in sources
-                    if owner == worker_id and path in accepted_sources
-                ),
-                None,
-            )
+            accepted = accepted_by_worker.get(worker_id)
             if accepted is not None and source == accepted[1]:
                 relative, source = accepted
             elif relative not in selected_observations or accepted is None:
@@ -1299,9 +1290,7 @@ def merge_saved_results(
                         selected_reported_candidates.get(key, source_order[relative]),
                         source_order[relative],
                     )
-    for relative, draft, worker_id in sources:
-        if relative not in accepted_sources:
-            continue
+    for (worker_id, relative), draft in accepted_sources.items():
         worker = workers_by_id[worker_id]
         reported = {
             finding_candidate_id(finding)
@@ -2932,12 +2921,7 @@ def merge_saved_results(
             worker = workers_by_id.get(worker_id)
             # Only the accepted current output belongs to this worker attempt. An
             # unsuperseded archive can remain evidence after that output is lost.
-            project_coverage = (
-                worker is not None
-                and worker["status"] == "succeeded"
-                and worker["result_manifest_path"] == str(scan_dir / relative)
-                and draft.get("complete") is not False
-            )
+            project_coverage = (worker_id, relative) in accepted_sources
             if coverage_superseded and not selected_candidates and not retain_pending:
                 continue
             if project_coverage:

@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { after, test } from "node:test";
 import { promisify } from "node:util";
+import { fixturePython } from "./support/python.ts";
 import { buildServer, applicationRoot } from "./build-server.ts";
 import { FakeExecutor } from "./deep_scan_coordinator_fixture.ts";
 import {
@@ -20,7 +21,6 @@ import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 
 const execFileAsync = promisify(execFile);
 const pluginRoot = path.resolve(applicationRoot, "..");
-const python = process.env.PYTHON?.trim() || "python3";
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const owner = "selected-evidence-owner";
 const { permissionProfile } = readOnlyParentSandboxState(pluginRoot);
@@ -98,7 +98,7 @@ for (const { route, saturated, lateFailure } of [
         : "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
     );
     const runWorkbench = async (args: string[], input?: string | Buffer) => {
-      const child = execFileAsync(python, [workbenchPath, ...args], {
+      const child = execFileAsync(fixturePython, [workbenchPath, ...args], {
         env,
         cwd: pluginRoot,
       });
@@ -150,7 +150,7 @@ for (const { route, saturated, lateFailure } of [
     if (saturated) {
       // The retired scheduler could select a report while a surplus discovery
       // finished. Seed that historical row after running the current host.
-      await execFileAsync(python, [
+      await execFileAsync(fixturePython, [
         "-c",
         `
 import sqlite3, sys, uuid

@@ -44,8 +44,9 @@ name identify each occurrence. Package URLs and origin coordinates identify
 the package. For a GitHub dependency, a `pkg:github/owner/repo@tag` package URL
 supplies the dependency's owner, repository name and installed tag or commit.
 `--source-repository-url` identifies the repository Black Duck scanned.
-`advisory_ids` keeps `vulnerabilityName` and any distinct
-`relatedVulnerability` verbatim, including Black Duck resource URLs.
+The first entry in `evidence.advisory_ids` is `vulnerabilityName`. A second
+entry identifies the related vulnerability, exactly as Black Duck reported it.
+If that entry is a URL, it points to a Black Duck resource.
 
 Look in the original row for CWE, matched-files links and remediation
 status. The reader leaves fix verification, Git revision and source location
@@ -142,11 +143,12 @@ print(json.dumps({"_meta": {"href": url}, "totalCount": total, "items": items}))
 ```
 
 Run the script in isolated mode so Python loads packages from the trusted
-environment. Point `TMPDIR` to a private directory outside the checkout.
+environment. The example creates a private report directory under `TMPDIR`
+or, if unset, under `/tmp`.
 
 ```sh
 report=
-out=$(mktemp -d) &&
+out=$(mktemp -d "${TMPDIR:-/tmp}/blackduck.XXXXXX") &&
   /path/to/venv/bin/python -I /private/path/export.py > "$out/blackduck.tmp" &&
   mv "$out/blackduck.tmp" "$out/blackduck.json" &&
   report="$out/blackduck.json"
@@ -154,4 +156,4 @@ out=$(mktemp -d) &&
 
 Keep the original rows and collection total. If the BOM changes during
 pagination, export it again after the scan finishes.
-[Black Duck Python client](https://github.com/blackducksoftware/hub-rest-api-python) · [Vulnerable BOM component example](https://github.com/blackducksoftware/hub-client-go/blob/5f78f7257c00fe9cebabf1bf89a6fc36a4d1f095/hubapi/testdata/vulnerableBomComponents.json)
+[Black Duck Python client](https://github.com/blackducksoftware/hub-rest-api-python) · [Example BOM rows from a partial collection](https://github.com/blackducksoftware/hub-client-go/blob/5f78f7257c00fe9cebabf1bf89a6fc36a4d1f095/hubapi/testdata/vulnerableBomComponents.json)

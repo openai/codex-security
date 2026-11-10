@@ -8,6 +8,7 @@ import {
   workbenchCommand,
 } from "./support/workbench-command.js";
 import { runNodePython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 import {
   copyCompletedScanFixture,
   PLUGIN_ROOT,
@@ -19,6 +20,8 @@ import { main } from "../src/cli.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { dependencies, fakeSecurity } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+
+const pythonExecutable = useTestPython();
 
 type FindingsDocument = {
   findings: Array<{
@@ -74,8 +77,7 @@ async function startDraftScan(
   recipeFromStdin = false,
 ) {
   const root = await temporaryDirectory();
-  const python =
-    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
 
   const target = join(
