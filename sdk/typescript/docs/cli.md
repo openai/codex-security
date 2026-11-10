@@ -538,7 +538,9 @@ through inheritance. Other users must not have permission to set reparse data
 on the destination directory itself.
 `--archive-existing` moves earlier output to a sibling directory with a unique
 suffix, such as `results.previous-ab12cd34` for an output directory named
-`results`. Use `--dry-run` to preview the move.
+`results`. If adding the suffix exceeds the filesystem's filename limit on POSIX,
+the archive uses a short sibling name starting with `.previous-` and a hash of the
+original filename. Use `--dry-run` to preview the move.
 
 Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
 optional export fails, the scan can still complete. Use the
@@ -1224,8 +1226,9 @@ work is needed, the scan is preserved and you can run `scans match --all`.
 
 A scan with a cost limit requires complete token usage for its recorded scan,
 worker, and custom validation sessions before the SDK returns a completed result.
-Verifying compressed `.jsonl.zst` sessions requires Python 3.14 or later, or
-`backports.zstd` installed in the selected Python environment.
+The workbench reads compressed `.jsonl.zst` sessions with `compression.zstd`
+(Python 3.14+) or `backports.zstd` when available. Otherwise it uses the
+Node.js decoder bundled with the plugin.
 Missing or unreadable usage fails budget verification. Without a limit, usage
 reporting remains best effort.
 
