@@ -538,7 +538,9 @@ through inheritance. Other users must not have permission to set reparse data
 on the destination directory itself.
 `--archive-existing` moves earlier output to a sibling directory with a unique
 suffix, such as `results.previous-ab12cd34` for an output directory named
-`results`. Use `--dry-run` to preview the move.
+`results`. If adding the suffix exceeds the filesystem's filename limit on POSIX,
+the archive uses a short sibling name starting with `.previous-` and a hash of the
+original filename. Use `--dry-run` to preview the move.
 
 Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
 optional export fails, the scan can still complete. Use the

@@ -6405,6 +6405,31 @@ describe("runtime directories and plugin Python boundary", () => {
     ).not.toThrow();
   });
 
+  testPosix.each([
+    [230, "a".repeat(230)],
+    [250, "é".repeat(125)],
+  ] as const)(
+    "previews and archives a %i-byte output name",
+    async (_bytes, name) => {
+      const root = await temporaryDirectory();
+      const output = join(root, name);
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, "report.md"), "first report");
+      const preview = await planOutputArchive(output);
+      expect(dirname(preview!)).toBe(root);
+      await expect(lstat(preview!)).rejects.toMatchObject({ code: "ENOENT" });
+      const archived: string[] = [];
+      await prepareOutputDir(output, "repo", root, undefined, true, (path) => {
+        archived.push(path);
+      });
+      expect(archived).toHaveLength(1);
+      expect(await readFile(join(archived[0]!, "report.md"), "utf8")).toBe(
+        "first report",
+      );
+      expect(await readdir(output)).toEqual([]);
+    },
+  );
+
   test("prepares an output directory without moving prior results", async () => {
     const root = await temporaryDirectory();
     const output = join(root, "scan");

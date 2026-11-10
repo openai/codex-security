@@ -21,6 +21,7 @@
 - correct compressed session prerequisites ([#2546](https://github.com/openai/codex-security/pull/2546))
 - save artifacts with long POSIX filenames ([#2533](https://github.com/openai/codex-security/pull/2533))
 - explain the Alpine tar prerequisite in release checks ([#2536](https://github.com/openai/codex-security/pull/2536))
+- archive long POSIX output directory names ([#2529](https://github.com/openai/codex-security/pull/2529))
 
 </details>
 
