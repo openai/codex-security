@@ -730,7 +730,7 @@ function fitProgressLine(line: string, width: number): string {
   for (const { index, segment } of graphemes.segment(plain)) {
     used += stringWidth(segment.toWellFormed());
     if (used > width)
-      return width > 0 ? `${plain.slice(0, ellipsisIndex)}â€¦` : "";
+      return width > 0 ? `${plain.slice(0, ellipsisIndex)}…` : "";
     if (used < width) ellipsisIndex = index + segment.length;
   }
   return line;
@@ -830,7 +830,7 @@ function renderExternalPublicationSummary(
     result.privateJob
       ? `Private inbox import ${result.privateJob.status}. Job: ${diagnosticValue(result.privateJob.id)}`
       : `Import ${result.status}.`,
-    `Submission totals â€” Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}`,
+    `Submission totals — Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}`,
     result.privateJob
       ? `Excluded: ${result.excluded.length}  Unprocessed: ${result.privateJob.counts.unprocessed}`
       : `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
@@ -868,7 +868,7 @@ function renderPublicationSummary(
 ): string {
   const created = result.created.length;
   const failed = result.failed.length;
-  const marker = failed === 0 ? "âœ“" : "!";
+  const marker = failed === 0 ? "✓" : "!";
   const title =
     failed === 0
       ? "Linear publication complete"
@@ -953,7 +953,7 @@ class PublicationProgressPresenter {
     if (event.type === "started") {
       if (this.#dashboard !== null) {
         this.#dashboard.setPublicationProgress(0, event.total);
-        this.#dashboard.setStage(`Publishing findings Â· 0/${event.total}`);
+        this.#dashboard.setStage(`Publishing findings · 0/${event.total}`);
       } else {
         this.#write(
           `Publishing ${formatItemCount(event.total, "finding")} to Linear.`,
@@ -1016,7 +1016,7 @@ class PublicationProgressPresenter {
       if (this.#dashboard !== null) {
         this.#dashboard.setPublicationProgress(event.completed, event.total);
         this.#dashboard.setStage(
-          `Publishing findings Â· ${event.completed}/${event.total}`,
+          `Publishing findings · ${event.completed}/${event.total}`,
         );
         this.#dashboard.note(detail);
       } else {
@@ -1088,7 +1088,7 @@ class FindingProgressPresenter {
         color: this.#dependencies.environment["NO_COLOR"] === undefined,
       });
       dashboard.setPublicationProgress(0, this.#total);
-      dashboard.setStage(`Verifying findings Â· 0/${this.#total}`);
+      dashboard.setStage(`Verifying findings · 0/${this.#total}`);
       try {
         dashboard.start();
         this.#dashboard = dashboard;
@@ -1104,7 +1104,7 @@ class FindingProgressPresenter {
   public startPatch(finding: Finding, index: number): void {
     try {
       this.#progress.startTimer(
-        `Patching ${index + 1}/${this.#total} Â· ${safePatchText(finding.title)}`,
+        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title)}`,
       );
     } catch {
       this.stop();
@@ -1187,7 +1187,7 @@ class FindingProgressPresenter {
     if (this.#dashboard === null) return;
     this.#dashboard.setPublicationProgress(results.length, this.#total);
     this.#dashboard.setStage(
-      `Verification complete Â· ${results.length}/${this.#total}`,
+      `Verification complete · ${results.length}/${this.#total}`,
     );
     for (const result of results) {
       this.#dashboard.note(`${result.status.toUpperCase()} ${result.id}`);
@@ -3745,7 +3745,7 @@ export async function main(
                   fitCell(row.age, ageWidth),
                   row.scanId,
                 ].join("  "),
-                short: `${repository} Â· ${row.scanId}`,
+                short: `${repository} · ${row.scanId}`,
                 value: row.value,
               };
             });
@@ -4674,7 +4674,7 @@ export async function main(
         sonarProject: optionValue("--sonar-project")
           .optional()
           .describe(
-            "Sonar project key (defaults to the checkoutâ€™s project binding).",
+            "Sonar project key (defaults to the checkout’s project binding).",
           ),
         sonarBranch: optionValue("--sonar-branch")
           .optional()
@@ -4788,7 +4788,7 @@ export async function main(
                 `Cloud account: ${diagnosticValue(cloud.accountId)} on ${diagnosticValue(cloud.cloudApiUrl)}`,
               );
               note(
-                `Cloud repository: ${diagnosticValue(cloud.destination.url)} Â· ${cloud.privateImport ? `Private inbox Â· ${cloud.privateImport.format} (${cloud.privateImport.bytes} bytes)` : `Environments: ${[...environments].map(diagnosticValue).join(", ")}`}`,
+                `Cloud repository: ${diagnosticValue(cloud.destination.url)} · ${cloud.privateImport ? `Private inbox · ${cloud.privateImport.format} (${cloud.privateImport.bytes} bytes)` : `Environments: ${[...environments].map(diagnosticValue).join(", ")}`}`,
               );
               note(
                 `Cloud: ${cloud.findings.length} ready, ${cloud.excluded.length} excluded.`,
@@ -5124,7 +5124,7 @@ export async function main(
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
-              "Stable hashed end-user ID for this scan's model requests (1â€“64 characters).",
+              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
             ),
           path: z
             .array(optionValue("--path"))
@@ -5507,7 +5507,7 @@ export async function main(
       destructive: true,
       options: z.object({
         runs: reviewRunsOption.describe(
-          `Number of independent classification runs (1â€“10; default: ${DEFAULT_REVIEW_RUNS}).`,
+          `Number of independent classification runs (1–10; default: ${DEFAULT_REVIEW_RUNS}).`,
         ),
         records: z
           .boolean()
@@ -6034,7 +6034,7 @@ export async function main(
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings â†’ ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(
@@ -11390,7 +11390,7 @@ async function executeScan(
       onTrustedAccessStatus: (status) => {
         if (status === "granted") {
           errorOutput.write(
-            "codex-security: âœ“ Your account has Trusted Access for Cyber.\n",
+            "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
           );
         }
       },
@@ -11884,7 +11884,7 @@ async function executeScan(
     };
   }
   progress?.stage(
-    `Scan ${result.manifest.scan.status === "completed" ? "complete" : result.manifest.scan.status} Â· ${result.manifest.scan.id.slice(0, 8)}`,
+    `Scan ${result.manifest.scan.status === "completed" ? "complete" : result.manifest.scan.status} · ${result.manifest.scan.id.slice(0, 8)}`,
   );
   printScanSummary(
     result,
@@ -12382,7 +12382,7 @@ function printScanReference(
   ];
   const argument = quoteCliPath(diagnosticValue(scanId));
   output.write(
-    `\n${detail.join(" Â· ")}\n` +
+    `\n${detail.join(" · ")}\n` +
       (selection === undefined ? "" : `Selected ${selection}.\n`) +
       `Inspect: codex-security scans show ${argument}\n` +
       (showLogs ? `Logs:    codex-security scans logs ${argument}\n` : ""),
