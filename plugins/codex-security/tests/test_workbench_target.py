@@ -1166,13 +1166,17 @@ def test_windows_directory_query_preserves_exclusions_with_inherited_noglob(
     assert dict(os.environ) == environment
 
 
-def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pathspec_mode", ["GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"])
+def test_directory_content_digest_uses_git_file_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pathspec_mode: str
+) -> None:
     target = tmp_path / "target"
     initialize_unborn_git_repository(target)
     (target / ".gitignore").write_text("ignored-cache/\n")
     source = target / "app.py"
     source.write_text("print('fixture')\n")
     original_digest = directory_content_digest(target)
+    monkeypatch.setenv(pathspec_mode, "1")
 
     source.write_text("print('changed')\n")
     assert directory_content_digest(target) != original_digest
