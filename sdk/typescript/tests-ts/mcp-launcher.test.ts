@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmod,
   copyFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -14,6 +15,140 @@ import { dirname, join, parse } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
+
+test.skipIf(process.platform !== "win32")(
+  "runs the documented policy command with long and literal paths and preserves the selected launcher's exit code",
+  async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "policy-launch-")),
+    );
+    try {
+      const reference = await readFile(
+        join(PLUGIN_ROOT, "references", "security-guidance.md"),
+        "utf8",
+      );
+      const command = reference.match(
+        /```powershell\r?\n([\s\S]+?)\r?\n```/u,
+      )?.[1];
+      expect(command).toBeDefined();
+      const selected = join(
+        root,
+        "p".repeat(100),
+        "q".repeat(100),
+        "plugin %QA_TOKEN%",
+      );
+      const launcher = join("scripts", "launch_codex_security_mcp.cmd");
+      expect(join(selected, launcher).length).toBeGreaterThanOrEqual(260);
+      await mkdir(join(selected, "scripts"), { recursive: true });
+      await copyFile(join(PLUGIN_ROOT, launcher), join(selected, launcher));
+      await cp(join(PLUGIN_ROOT, "mcp"), join(selected, "mcp"), {
+        recursive: true,
+      });
+      const repo = join(root, "repo %QA_TOKEN% !QA_TOKEN! [1]");
+      const scope = "nested %QA_TOKEN% !QA_TOKEN! [2]";
+      await mkdir(join(repo, scope), { recursive: true });
+      await writeFile(join(repo, "SECURITY.md"), "literal repository policy\n");
+      await writeFile(
+        join(repo, scope, "SECURITY.md"),
+        "literal scope policy\n",
+      );
+      const custom = join(root, "custom launcher");
+      await mkdir(join(custom, "scripts"), { recursive: true });
+      await writeFile(
+        join(custom, launcher),
+        "@echo selected custom launcher 1>&2\r\n@exit /b 23\r\n",
+      );
+      const system = join(process.env["SystemRoot"]!, "System32");
+      const shells = [
+        join(system, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ];
+      const pwsh = Bun.which("pwsh.exe");
+      if (pwsh !== null) shells.push(pwsh);
+      for (const shell of shells) {
+        const run = (
+          plugin: string,
+          scopePath: string,
+          pathExtensions = ".COM;.EXE;.BAT;.CMD",
+          strict = false,
+        ) =>
+          spawnSync(
+            shell,
+            [
+              "-NoProfile",
+              "-NonInteractive",
+              "-EncodedCommand",
+              Buffer.from(
+                [
+                  ...(strict
+                    ? [
+                        "$PSNativeCommandArgumentPassing = 'Standard'",
+                        "$PSNativeCommandUseErrorActionPreference = $true",
+                        "$ErrorActionPreference = 'Stop'",
+                      ]
+                    : []),
+                  "$global:LASTEXITCODE = 0",
+                  command,
+                  'Write-Output "after-policy $PSNativeCommandArgumentPassing/$PSNativeCommandUseErrorActionPreference/$ErrorActionPreference"',
+                ].join("\n"),
+                "utf16le",
+              ).toString("base64"),
+            ],
+            {
+              cwd: root,
+              encoding: "utf8",
+              windowsHide: true,
+              env: {
+                SystemRoot: process.env["SystemRoot"],
+                PATH: system,
+                PATHEXT: pathExtensions,
+                CODEX_MCP_NODE_PATH: Bun.which("node")!,
+                CODEX_SECURITY_PLUGIN_ROOT: plugin,
+                CODEX_SECURITY_REPOSITORY: repo,
+                scopePolicyPath: scopePath,
+                QA_TOKEN: "expanded-directory",
+              },
+            },
+          );
+        const success = run(selected, scope);
+        expect(success.status, success.stderr || success.error?.message).toBe(
+          0,
+        );
+        expect(success.stdout, success.stderr).toContain(
+          "literal repository policy",
+        );
+        expect(success.stdout).toContain("literal scope policy");
+        expect(success.stdout).toContain("after-policy");
+        const missing = run(selected, "missing");
+        expect(missing.status).toBe(2);
+        expect(missing.stderr).toContain("scan scope does not exist");
+        expect(missing.stdout).not.toContain("after-policy");
+        const customFailure = run(custom, scope);
+        expect(customFailure.status).toBe(23);
+        expect(customFailure.stderr).toContain("selected custom launcher");
+        expect(customFailure.stdout).not.toContain("after-policy");
+        if (shell === shells[0]) {
+          const unavailable = run(custom, scope, "");
+          expect(unavailable.status).not.toBe(0);
+          expect(unavailable.stderr).toContain("cmd.exe exit code");
+          expect(unavailable.stdout).not.toContain("after-policy");
+        } else {
+          const strictSuccess = run(selected, scope, undefined, true);
+          expect(strictSuccess.status, strictSuccess.stderr).toBe(0);
+          expect(strictSuccess.stdout).toContain("literal scope policy");
+          expect(strictSuccess.stdout).toContain(
+            "after-policy Standard/True/Stop",
+          );
+          const strictFailure = run(custom, scope, undefined, true);
+          expect(strictFailure.status).toBe(23);
+          expect(strictFailure.stderr).toContain("selected custom launcher");
+          expect(strictFailure.stdout).not.toContain("after-policy");
+        }
+      }
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
 
 test.skipIf(process.platform !== "win32")(
   "launches the PATH Node executable independently of command extensions and the caller directory",

@@ -2017,7 +2017,9 @@ export async function validateOutputDir(
       const writableLeaf =
         !archiveExisting ||
         (process.platform === "win32" && (await readdir(path)).length === 0);
-      const canonical = await checkedOutputPath(path, writableLeaf);
+      const canonical = await checkedOutputPath(path, writableLeaf).catch(
+        rethrowOutputPathValidationError,
+      );
       requireModelSafeOutputDir(canonical);
       return canonical;
     }
@@ -2031,7 +2033,9 @@ export async function validateOutputDir(
             relative(parent, path),
           );
           requireModelSafeOutputDir(canonical);
-          await requireSecureOutputAncestry(canonical);
+          await requireSecureOutputAncestry(canonical).catch(
+            rethrowOutputPathValidationError,
+          );
           return canonical;
         }
         break;
@@ -2052,6 +2056,25 @@ export async function validateOutputDir(
       { cause: error },
     );
   }
+}
+
+function rethrowOutputPathValidationError(error: unknown): never {
+  if (
+    process.platform !== "win32" ||
+    nodeErrorCode(error) !== "ERR_DLOPEN_FAILED"
+  )
+    throw error;
+  const blocked =
+    error instanceof Error &&
+    /^(?:LoadLibrary failed: )?An Application Control policy has blocked this file\.(?:\s|$)/u.test(
+      error.message,
+    );
+  throw new OutputDirectoryError(
+    blocked
+      ? "Windows Application Control blocked the bundled Codex Security filesystem module (windows.node). Check the CodeIntegrity Operational log in Event Viewer."
+      : "Could not load the bundled Codex Security filesystem module (windows.node) on Windows.",
+    { cause: error },
+  );
 }
 
 export async function prepareScanArtifactRestorer(
@@ -3035,7 +3058,7 @@ export function resolveCodexCommand(
   const expanded =
     configured === undefined
       ? undefined
-      : expandExecutableHome(configured, environment);
+      : expandHomeForLookup(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
@@ -3847,7 +3870,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandExecutableHome(candidate, environment)
+      ? expandHomeForLookup(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3895,9 +3918,9 @@ export function sameFile(left: string, right: string): Promise<boolean> {
   );
 }
 
-function expandExecutableHome(
+export function expandHomeForLookup(
   value: string,
-  environment: ProcessEnvironment,
+  environment: ProcessEnvironment = process.env,
 ): string {
   const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
   // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
