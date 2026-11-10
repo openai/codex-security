@@ -61,6 +61,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import type { Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1800,20 +1801,21 @@ sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 `;
 
-const ARCHIVE_READY = "codex-security-archive-ready\n";
-const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
-import io, json, runpy, sys
-control = sys.stdin
-payload = json.loads(control.readline())
-sys.stdin = io.TextIOWrapper(io.BytesIO(payload.encode("utf-8")), encoding="utf-8")
+const WORKBENCH_REGISTRATION_PROGRAM = String.raw`
+import os, runpy, sys
 sys.argv = sys.argv[1:]
-workbench = runpy.run_path(sys.argv[0])
-def before_archive():
-    sys.stdout.buffer.write(b"codex-security-archive-ready\n")
-    sys.stdout.buffer.flush()
-    if control.readline() != "\n":
-        raise SystemExit("Scan registration canceled before archival.")
-workbench["main"](before_archive=before_archive)
+def before_output_change():
+    with os.fdopen(3, "r+b", buffering=0) as control:
+        control.write(b"?")
+        if control.read(1) != b"!":
+            raise SystemExit("Scan registration canceled before changing the output.")
+sys._codex_security_before_output_change = before_output_change
+if "--archive-existing" in sys.argv[1:] and "--archived-scan-dir" not in sys.argv[1:]:
+    # Released workbenches accept this callback before moving an existing output.
+    runpy.run_path(sys.argv[0])["main"](before_archive=before_output_change)
+else:
+    # A selected plugin keeps its script entrypoint, argv, stdin and stdout.
+    runpy.run_path(sys.argv[0], run_name="__main__")
 `;
 
 export async function runWorkbench(
@@ -1830,7 +1832,7 @@ export async function runWorkbench(
   const run = async (
     arguments_: readonly string[],
     input?: string,
-    archiveHandshake = false,
+    registrationHandshake = false,
   ): Promise<string> => {
     const native =
       nativeLocalDedupe ||
@@ -1885,8 +1887,8 @@ export async function runWorkbench(
             "-B",
             "-c",
             WORKBENCH_ARGUMENTS_PROGRAM +
-              (archiveHandshake
-                ? ARCHIVE_REGISTRATION_PROGRAM
+              (registrationHandshake
+                ? WORKBENCH_REGISTRATION_PROGRAM
                 : WORKBENCH_SCRIPT_PROGRAM),
             script,
           ],
@@ -1916,7 +1918,7 @@ export async function runWorkbench(
             )
           : input,
       signal,
-      archiveHandshake,
+      registrationHandshake,
       // Frame Python arguments on stdin to preserve NUL and long diagnostics.
       native
         ? undefined
@@ -1933,12 +1935,13 @@ export async function runWorkbench(
   };
   let stdout: string;
   try {
-    const archiveHandshake =
+    const registrationHandshake =
       signal !== undefined &&
       args[0] === "register-cli-scan" &&
-      args.includes("--archive-existing") &&
-      !args.includes("--archived-scan-dir");
-    stdout = await run(args, input, archiveHandshake);
+      (process.platform === "win32" ||
+        (args.includes("--archive-existing") &&
+          !args.includes("--archived-scan-dir")));
+    stdout = await run(args, input, registrationHandshake);
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
@@ -2289,7 +2292,13 @@ async function prepareOutputDirectory(
       );
       await createWindowsOutputDirectory(created, false);
     } else {
-      created = await mkdtemp(join(canonicalRoot, `${prefix}-`));
+      try {
+        created = await mkdtemp(join(canonicalRoot, `${prefix}-`));
+      } catch (error) {
+        if (nodeErrorCode(error) !== "ENAMETOOLONG") throw error;
+        // The repository name itself can fill a filesystem component.
+        created = await mkdtemp(join(canonicalRoot, "codex-security-"));
+      }
     }
     try {
       if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
@@ -3580,19 +3589,22 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
-  archiveHandshake = false,
+  registrationHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
-  const cancellation = archiveHandshake ? new AbortController() : undefined;
+  const cancellation = registrationHandshake
+    ? new AbortController()
+    : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
-  let awaitingArchive = archiveHandshake;
   const child = spawn(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {
       env: environment,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: registrationHandshake
+        ? ["pipe", "pipe", "pipe", "pipe"]
+        : ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
     },
@@ -3600,19 +3612,20 @@ export async function runCodexCommand(
   let stdout = "";
   let stderr = "";
   let processError: Error | undefined;
+  const control = child.stdio[3] as Duplex | undefined;
+  control?.once("data", () => {
+    // The helper cannot change the output until the host allows the transaction.
+    signal?.removeEventListener("abort", abort);
+    if (signal?.aborted) abort();
+    else control.end("!");
+  });
+  control?.on("error", (error: NodeJS.ErrnoException) => {
+    if (!isDisconnectedChildStdin(error)) processError = error;
+  });
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     stdout += chunk;
-    if (awaitingArchive && stdout.startsWith(ARCHIVE_READY)) {
-      awaitingArchive = false;
-      stdout = stdout.slice(ARCHIVE_READY.length);
-      signal?.removeEventListener("abort", abort);
-      // The helper cannot rename until this acknowledgement. Detach and check
-      // cancellation before allowing the filesystem/database transaction.
-      if (signal?.aborted) abort();
-      else child.stdin.end("\n");
-    }
   });
   child.stderr.on("data", (chunk: string) => {
     stderr += chunk;
@@ -3641,21 +3654,22 @@ export async function runCodexCommand(
     child.stdin.destroy();
     child.stdout.destroy();
     child.stderr.destroy();
+    control?.destroy();
   };
   commandSignal?.addEventListener("abort", settleCanceledChild, { once: true });
   child.once("exit", settleCanceledChild);
   if (commandSignal?.aborted) settleCanceledChild();
-  if (archiveHandshake) {
+  if (registrationHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
   }
   try {
     if (stdinPrefix !== undefined) child.stdin.write(stdinPrefix);
-    if (archiveHandshake) child.stdin.write(`${JSON.stringify(input ?? "")}\n`);
-    else child.stdin.end(input);
+    child.stdin.end(input);
     return await completion;
   } finally {
-    if (archiveHandshake) signal?.removeEventListener("abort", abort);
+    if (registrationHandshake) signal?.removeEventListener("abort", abort);
+    control?.destroy();
     clearTimeout(forceTermination);
     commandSignal?.removeEventListener("abort", settleCanceledChild);
     child.removeListener("exit", settleCanceledChild);

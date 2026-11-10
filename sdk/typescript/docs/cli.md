@@ -2133,6 +2133,11 @@ The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
 
+On Windows, keep the protected `.codex-security-resume` directory in the scan
+output. It lets the workbench verify the original output even before the first
+checkpoint. If an older scan stopped with an empty output, start a new scan with
+`codex-security scans rerun SCAN_ID`.
+
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
 settings/instructions. Knowledge-bearing scans save their extracted documents in
 the private `.scan-knowledge.json` continuation file beside the scan artifacts.
