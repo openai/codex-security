@@ -19,7 +19,6 @@ import {
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
 import { git } from "./git-fixture.js";
-import { repository } from "./support/multiscan.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
@@ -309,6 +308,22 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
   },
 );
 
+test("scan --validate rejects a repository link before sharing knowledge with validation", async () => {
+  const input = await fixture({});
+  const link = join(input.repository, "documents");
+  await symlink(input.configDirectory, link, "junction");
+  const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+  const stderr = captureCli(main, "stderr");
+  expect(
+    await stderr.run(
+      ["scan", "--validate", "--knowledge-base", join(link, "scan.json")],
+      dependencies({ currentDirectory: input.repository, onTurn }),
+    ),
+  ).not.toBe(0);
+  expect(stderr.text()).toContain("repository symbolic link");
+  expect(onTurn).not.toHaveBeenCalled();
+});
+
 test("a missing operator-selected environment file fails without falling back", async () => {
   const input = await fixture({});
   const onConfig = mock();
@@ -380,24 +395,6 @@ test("rerun rejects a blank replacement when scan instructions are required", as
   expect(onConfig).not.toHaveBeenCalled();
 });
 
-async function expectRejectedBulkPrompt(
-  csv: string,
-  config: string,
-  currentDirectory: string,
-) {
-  const onConfig = mock(throwing("Runtime must not start"));
-  const stderr = captureCli(main, "stderr");
-  const exit = await stderr.run(
-    ["bulk-scan", csv, "-c", config, "--json"],
-    dependencies({ currentDirectory, onConfig }),
-  );
-  expect(exit).toBe(2);
-  expect(stderr.text()).toContain(
-    "Input files must not follow repository directory links",
-  );
-  expect(onConfig).not.toHaveBeenCalled();
-}
-
 test.each(["instructions_file", "validation_file"] as const)(
   "bulk %s retains directory-link protection for local CSV repositories",
   async (file) => {
@@ -405,55 +402,32 @@ test.each(["instructions_file", "validation_file"] as const)(
       scan: { [file]: "../repository/linked/prompt.md" },
       output: { directory: "../batch-results" },
     });
+    git(input.repository, "init", "--quiet");
     const external = join(input.root, "external");
     await mkdir(external);
     await writeFile(join(external, "prompt.md"), "Synthetic external data.");
     await symlink(external, join(input.repository, "linked"), "junction");
-    const csv = await bulkInventory(input, ["standard"]);
-    await expectRejectedBulkPrompt(csv, input.config, input.repository);
+    const csv = join(input.root, "repositories.csv");
+    await writeFile(
+      csv,
+      `id,repository,revision\nsource,${input.repository},${"a".repeat(40)}\n`,
+    );
+    const onConfig = mock(throwing("Runtime must not start"));
+    const stderr = captureCli(main, "stderr");
+    const exit = await stderr.run(
+      ["bulk-scan", csv, "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+      }),
+    );
+    expect(exit).toBe(2);
+    expect(stderr.text()).toContain(
+      "Input files must not follow repository directory links",
+    );
+    expect(onConfig).not.toHaveBeenCalled();
   },
 );
-
-test("bulk project instructions respect a worktree inside shared Git storage", async () => {
-  const root = await temporaryDirectory();
-  const primary = await repository(root, "primary");
-  const storage = join(primary.path, ".git");
-  const worktree = join(storage, "nested-checkout");
-  git(
-    primary.path,
-    "worktree",
-    "add",
-    "--detach",
-    "--quiet",
-    worktree,
-    primary.revision,
-  );
-  const config = join(worktree, "scan.json");
-  await writeFile(
-    config,
-    JSON.stringify({
-      scan: { instructions_file: "shared/guide.md" },
-      output: { directory: join(root, "results") },
-    }),
-  );
-  git(worktree, "add", "scan.json");
-  git(
-    worktree,
-    "commit",
-    "--no-gpg-sign",
-    "-qm",
-    "Synthetic scan configuration",
-  );
-
-  await writeFile(join(storage, "guide.md"), "Synthetic shared document.");
-  await symlink(storage, join(worktree, "shared"), "junction");
-  const csv = join(root, "repositories.csv");
-  await writeFile(
-    csv,
-    `id,repository,revision\nsource,${worktree},${git(worktree, "rev-parse", "HEAD")}\n`,
-  );
-  await expectRejectedBulkPrompt(csv, config, worktree);
-});
 
 test.each([
   ["standard", [""], { max_time_minutes: 6000 }, undefined],

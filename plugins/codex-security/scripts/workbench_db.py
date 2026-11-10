@@ -115,7 +115,6 @@ from workbench_source_scopes import (
     public_scan_recipe,
     requested_scan_paths,
     safe_source_path,
-    saved_document_source_roots,
 )
 from workbench_target import (
     clean_worktree_content_digest,
@@ -2595,31 +2594,6 @@ def scan_context(
 
 
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    if getattr(args, "document_link_owners_stdin", False):
-        scan = require_scan(connection, args.scan_id)
-        values = json.load(sys.stdin)
-        if not isinstance(values, list) or not all(
-            isinstance(value, str) and "\0" not in value and Path(value).is_absolute()
-            for value in values
-        ):
-            raise SystemExit(
-                "Document link owners must be a JSON array of absolute directory paths."
-            )
-        owners = []
-        for value in dict.fromkeys(values):
-            owner = require_target(value)
-            if owner != Path(value):
-                raise SystemExit("Document link owners must be canonical absolute directories.")
-            owners.append(owner)
-        roots, matched = saved_document_source_roots(scan, owners)
-        return {
-            "scan": {
-                "scanId": scan["id"],
-                "targetPath": scan["target_path"],
-                "documentSourceRoots": roots,
-                "matchedDocumentSourceRoots": matched,
-            }
-        }
     if getattr(args, "progress_only", False):
         scan = connection.execute(
             """

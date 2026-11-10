@@ -1,19 +1,8 @@
-import { constants } from "node:fs";
-import {
-  access,
-  lstat,
-  open,
-  readlink,
-  realpath,
-  stat,
-} from "node:fs/promises";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { buffer } from "node:stream/consumers";
 import { environmentEntry } from "./auth.js";
 import { abortReason } from "./errors.js";
-import { nullIfUnavailableInputRoot } from "./prompt-files.js";
 import { canonicalConfigPath } from "./runtime.js";
-import { isWithin } from "./trusted-executable.js";
 import {
   abortable,
   gitMarkerRoot,
@@ -51,68 +40,18 @@ async function bareMetadataRoots(
   }
 }
 
-async function readMetadataText(
-  path: string,
-  signal?: AbortSignal,
-  format?: "gitfile" | "HEAD" | "generated config",
-): Promise<string | undefined> {
-  const selected = await abortable(
-    () =>
-      (format === "generated config" ? lstat : stat)(path).catch(
-        nullIfMissingPath,
-      ),
-    signal,
-  );
-  if (!selected?.isFile()) return undefined;
-  const file = await open(
-    path,
-    constants.O_RDONLY |
-      (constants.O_NONBLOCK ?? 0) |
-      (format === "HEAD" || format === "generated config"
-        ? (constants.O_NOFOLLOW ?? 0)
-        : 0),
-  );
-  try {
-    const metadata = await abortable(() => file.stat(), signal);
-    if (!metadata.isFile()) return undefined;
-    if (format === undefined)
-      return await file.readFile({ encoding: "utf8", signal });
-    // Git reads a 255-byte HEAD prefix. Use its 1 MiB gitfile limit for optional config recognition too.
-    if (format !== "HEAD" && metadata.size > 1024 * 1024) return undefined;
-    if (
-      format === "generated config" &&
-      (metadata.dev !== selected.dev || metadata.ino !== selected.ino)
-    )
-      return undefined;
-    const end = format === "HEAD" ? 254 : metadata.size;
-    const bytes = await buffer(file.createReadStream({ end, signal }));
-    if (format !== "HEAD" && bytes.length !== metadata.size) return undefined;
-    if (format === "generated config") {
-      const current = await lstat(path).catch(nullIfMissingPath);
-      if (
-        !current?.isFile() ||
-        current.dev !== metadata.dev ||
-        current.ino !== metadata.ino ||
-        current.size !== metadata.size ||
-        current.ctimeMs !== metadata.ctimeMs
-      )
-        return undefined;
-    }
-    return bytes.toString("utf8");
-  } finally {
-    await file.close();
-  }
-}
-
 async function metadataPointer(
   path: string,
   prefix: string,
   context: { directory: string; environment: NodeJS.ProcessEnv },
   signal?: AbortSignal,
-  format?: "gitfile",
-): Promise<{ path: string; canonical: string } | undefined> {
-  const text = await readMetadataText(path, signal, format);
-  if (text === undefined) return undefined;
+): Promise<string | undefined> {
+  const metadata = await abortable(
+    () => stat(path).catch(nullIfMissingPath),
+    signal,
+  );
+  if (!metadata?.isFile()) return undefined;
+  const text = await abortable(() => readFile(path, "utf8"), signal);
   if (!text.startsWith(prefix) || (prefix === "" && text.length === 0))
     return undefined;
   const payload = text.slice(prefix.length).replace(/[\r\n]+$/u, "");
@@ -131,11 +70,12 @@ async function metadataPointer(
       target = resolve(directory, value.slice(2));
     } else if (isAbsolute(value)) target = resolve(context.directory, value);
   }
-  const canonical = await abortable(
-    () => realpath(target).catch(nullIfMissingPath),
-    signal,
+  return (
+    (await abortable(
+      () => realpath(target).catch(nullIfMissingPath),
+      signal,
+    )) ?? undefined
   );
-  return canonical === null ? undefined : { path: target, canonical };
 }
 
 async function associatedMetadataRoots(
@@ -155,25 +95,17 @@ async function associatedMetadataRoots(
     signal,
   );
   const common = hasCommon
-    ? (await metadataPointer(commonMarker, "", context, signal))?.canonical
+    ? await metadataPointer(commonMarker, "", context, signal)
     : undefined;
   if (hasCommon && common === undefined) return [];
   const storage = common ?? directory;
-  const objects = await abortable(
-    () => stat(join(storage, "objects")).catch(nullIfMissingPath),
-    signal,
-  );
-  if (!objects?.isDirectory()) return [];
-  // With packed refs, a pinned fetch only needs refs to pass Git's access(X_OK) check.
-  const refs = await abortable(
-    () =>
-      access(join(storage, "refs"), constants.X_OK).then(
-        () => true,
-        nullIfUnavailableInputRoot,
-      ),
-    signal,
-  );
-  if (!refs) return [];
+  for (const name of ["objects", "refs"]) {
+    const metadata = await abortable(
+      () => stat(join(storage, name)).catch(nullIfMissingPath),
+      signal,
+    );
+    if (!metadata?.isDirectory()) return [];
+  }
   const roots = common === undefined ? [directory] : [directory, common];
   if (
     process.platform === "win32" &&
@@ -196,189 +128,6 @@ async function associatedMetadataRoots(
     );
   }
   return roots;
-}
-
-async function metadataDirectory(
-  entry: string,
-  directory: boolean,
-  signal?: AbortSignal,
-) {
-  if (directory) return realpath(entry);
-  const context = { directory: dirname(entry), environment: process.env };
-  return (await metadataPointer(entry, "gitdir: ", context, signal, "gitfile"))
-    ?.canonical;
-}
-
-async function gitSourceStorage(
-  entry: string,
-  directory: boolean,
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const target = await metadataDirectory(entry, directory, signal);
-  if (target === undefined) return [];
-  const head = join(target, "HEAD");
-  const metadata = await lstat(head).catch(nullIfMissingPath);
-  if (metadata?.isSymbolicLink()) {
-    if (!(await readlink(head)).startsWith("refs/")) return [];
-  } else {
-    const text = await readMetadataText(head, signal, "HEAD");
-    if (!text || !/^(?:ref:[ \t\r\n]*refs\/|[0-9a-fA-F]{40})/u.test(text))
-      return [];
-  }
-  const context = { directory: dirname(entry), environment: process.env };
-  return associatedMetadataRoots(target, context, signal, context.directory);
-}
-
-async function isGeneratedBareStorage(directory: string, signal?: AbortSignal) {
-  // Bulk checkout drops caller repository locations and forwards command-scope Git config.
-  const count = environmentEntry(process.env, "GIT_CONFIG_COUNT");
-  if (
-    (count !== undefined && count !== "0") ||
-    environmentEntry(process.env, "GIT_CONFIG_PARAMETERS") !== undefined
-  )
-    return false;
-  if (await lstat(join(directory, "config.worktree")).catch(nullIfMissingPath))
-    return false;
-  const config = await readMetadataText(
-    join(directory, "config"),
-    signal,
-    "generated config",
-  );
-  if (config === undefined) return false;
-  const text = config.replaceAll("\r\n", "\n");
-  // Only Git's generated core header, platform flags and optional bare-clone remote describe bare storage here.
-  const header =
-    /^\[core\]\n\trepositoryformatversion = 0\n\tfilemode = (?:true|false)\n\tbare = true\n/u.exec(
-      text,
-    );
-  if (header === null) return false;
-  const tail = text
-    .slice(header[0].length)
-    .replace(
-      /^(?:\t(?:ignorecase|precomposeunicode|symlinks) = (?:true|false)\n)*/u,
-      "",
-    );
-  return (
-    tail === "" ||
-    /^\[remote "[A-Za-z0-9_.-]+"\]\n\turl = [^\0\r\n]+\n$/u.test(tail)
-  );
-}
-
-/** Match the local upload-pack source and its document boundaries before workers fetch it. */
-export async function localGitSourceRoots(
-  repository: string,
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const suffixed = repository + ".git";
-  const worktreeMarker = join(repository, ".git");
-  for (const entry of [
-    worktreeMarker,
-    repository,
-    join(suffixed, ".git"),
-    suffixed,
-  ]) {
-    signal?.throwIfAborted();
-    const metadata = await stat(entry).catch(nullIfUnavailableInputRoot);
-    if (!metadata || (!metadata.isDirectory() && !metadata.isFile())) continue;
-    const storage = await gitSourceStorage(
-      entry,
-      metadata.isDirectory(),
-      signal,
-    ).catch(nullIfUnavailableInputRoot);
-    const target = storage?.[0];
-    if (storage && target) {
-      const selectedDirectory =
-        entry === worktreeMarker ? await realpath(repository) : undefined;
-      return worktreeDocumentRoots(
-        entry,
-        target,
-        storage,
-        selectedDirectory,
-        signal,
-      );
-    }
-    // A regular file (including a bundle) ends Git's search and owns no directories.
-    if (metadata.isFile()) return [];
-  }
-  return [];
-}
-
-async function worktreeDocumentRoots(
-  entry: string,
-  target: string,
-  storage: readonly string[],
-  selectedDirectory: string | undefined,
-  signal?: AbortSignal,
-) {
-  const common = storage[1];
-  const candidates = new Set<string>();
-  const physical = await realpath(entry);
-  for (const parent of new Set([
-    dirname(entry),
-    dirname(physical),
-    dirname(target),
-  ])) {
-    const checkout = await gitMarkerRoot(parent, signal, "nearest").catch(
-      nullIfUnavailableInputRoot,
-    );
-    if (checkout !== null) candidates.add(checkout);
-  }
-  // A worktree registered in the common directory records its own .git marker.
-  if (
-    common &&
-    dirname(target) ===
-      (await realpath(join(common, "worktrees")).catch(
-        nullIfUnavailableInputRoot,
-      ))
-  ) {
-    const backlink = await metadataPointer(
-      join(target, "gitdir"),
-      "",
-      { directory: target, environment: process.env },
-      signal,
-    ).catch(nullIfUnavailableInputRoot);
-    if (backlink) {
-      const parent = await realpath(dirname(backlink.path)).catch(
-        nullIfUnavailableInputRoot,
-      );
-      if (
-        parent &&
-        backlink.canonical ===
-          (await realpath(join(parent, ".git")).catch(
-            nullIfUnavailableInputRoot,
-          ))
-      )
-        candidates.add(parent);
-    }
-  }
-  const owners: string[] = [];
-  for (const candidate of candidates) {
-    const marker = join(candidate, ".git");
-    const metadata = await stat(marker).catch(nullIfUnavailableInputRoot);
-    if (
-      metadata &&
-      (await metadataDirectory(marker, metadata.isDirectory(), signal).catch(
-        nullIfUnavailableInputRoot,
-      )) === target
-    )
-      owners.push(candidate);
-  }
-  const worktrees =
-    common === undefined &&
-    owners.some((owner) => owner !== selectedDirectory) &&
-    (await isGeneratedBareStorage(target, signal).catch(() => {
-      signal?.throwIfAborted();
-      return false;
-    }))
-      ? owners.filter((owner) => owner === selectedDirectory)
-      : owners;
-  const roots = [...new Set([...worktrees, ...storage])];
-  // A worktree retains its own link boundary even when it lives inside Git storage.
-  return roots.filter(
-    (root) =>
-      worktrees.includes(root) ||
-      !roots.some((other) => other !== root && isWithin(other, root)),
-  );
 }
 
 export async function localGitProtectionRoots(
@@ -417,8 +166,7 @@ export async function localGitProtectionRoots(
         roots.add(directory);
         const gitDirectory = metadata.isDirectory()
           ? await abortable(() => realpath(marker), signal)
-          : (await metadataPointer(marker, "gitdir: ", context, signal))
-              ?.canonical;
+          : await metadataPointer(marker, "gitdir: ", context, signal);
         if (gitDirectory !== undefined)
           for (const associated of await associatedMetadataRoots(
             gitDirectory,

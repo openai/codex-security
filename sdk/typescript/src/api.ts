@@ -1012,7 +1012,7 @@ export class CodexSecurity {
           (await readKnowledgeBaseSnapshot(
             options.knowledgeBasePaths,
             signal,
-            options.repositoryPath,
+            resolveRepositoryPath(options.repositoryPath),
           )))
         : undefined;
       let protectedRoots: string[] | undefined;
@@ -2731,7 +2731,7 @@ export class CodexSecurity {
         else if (options.rubricPath !== undefined)
           severityRubric = await readSeverityRubricFile(
             resolve(expandHome(options.rubricPath)),
-            [repo, protectedRoot],
+            protectedRoot,
           );
         else
           severityRubric = await getDefaultSeverityRubric({

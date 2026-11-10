@@ -7,8 +7,8 @@ import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
-import { readKnowledgeBaseSnapshot } from "./knowledge-base.js";
-import type { DocumentSourceSelection } from "./prompt-files.js";
+import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
+import type { DocumentRoots } from "./prompt-files.js";
 import type { Finding } from "./models.js";
 import {
   runReadOnlyCodex,
@@ -124,7 +124,7 @@ export async function classifySeverityInternal(
   options: ClassifySeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   checkpoint?: SeverityClassificationCheckpoint,
-  documentSelection?: DocumentSourceSelection,
+  documentRoots?: DocumentRoots,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
   const classificationRuns = reviewRunsOption.parse(options.classificationRuns);
@@ -137,19 +137,17 @@ export async function classifySeverityInternal(
     }
     ids.add(finding.findingId);
   }
-  const readDocuments = async (paths: readonly string[]): Promise<string[]> => {
-    const { documents } = await readKnowledgeBaseSnapshot(
+  const readDocuments = async (paths: readonly string[]) => {
+    const contents = await readKnowledgeBaseDocuments(
       paths,
       options.signal,
-      documentSelection ?? options.workingDirectory ?? process.cwd(),
+      documentRoots,
     );
-    const contents = Object.keys(documents)
-      .sort()
-      .map((name) => documents[name]!);
-    if (contents.every((text) => !text.trim()))
+    if (contents.every((text) => !text.trim())) {
       throw new CodexSecurityError(
         "Classification documents must not be empty.",
       );
+    }
     return contents;
   };
   let rubric: string[];

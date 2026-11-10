@@ -6458,9 +6458,6 @@ export async function main(
               options.knowledgeBase.map((path) =>
                 resolveCliPath(dependencies.currentDirectory(), path),
               ),
-              undefined,
-              undefined,
-              dependencies.currentDirectory(),
             );
           }
           exitCode = await runSkill(

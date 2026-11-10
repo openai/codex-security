@@ -1,4 +1,4 @@
-"""Capture the checkout and Git objects selected at scan start."""
+"""Bind optional finding excerpts to the Git objects selected at scan start."""
 
 from __future__ import annotations
 
@@ -15,12 +15,10 @@ from typing import Any
 from unicodedata import normalize
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from filesystem_identity import stored_filesystem_identity_matches
 from workbench_target import (
     clean_worktree_content_digest,
     git_command,
     git_worktree_context,
-    repository_marker_root,
 )
 from workbench_validation import reject_non_finite_json
 
@@ -225,7 +223,7 @@ def capture_source_scopes(
     *,
     diff_target_kind: str | None = None,
 ) -> dict[str, Any]:
-    """Record the checkout boundary and bind requested paths to Git objects for later excerpts.
+    """Bind requested paths to the local Git objects that may supply excerpts later.
 
     Return the revision and the file or tree IDs that can be verified locally.
     A working-tree diff, dirty snapshot, or replacement ref leaves the scope list
@@ -233,17 +231,6 @@ def capture_source_scopes(
     """
     revision, snapshot = target_identity[:2]
     result: dict[str, Any] = {"version": 1, "revision": revision, "scopes": []}
-    try:
-        root = repository_marker_root(target, outermost=False)
-        metadata = root.lstat()
-        if stat.S_ISDIR(metadata.st_mode):
-            result["documentSourceRoot"] = {
-                "path": str(root),
-                "device": str(metadata.st_dev),
-                "inode": str(metadata.st_ino),
-            }
-    except (OSError, RuntimeError):
-        pass  # Historical checkout ownership is unavailable if the ancestry cannot be inspected.
     # HEAD cannot represent the uncommitted bytes reviewed by a working-tree scan.
     if diff_target_kind == "working_tree":
         return result
@@ -287,55 +274,6 @@ def capture_source_scopes(
         # must not prevent the scan itself from starting.
         pass
     return result
-
-
-def saved_document_source_roots(
-    scan: sqlite3.Row, link_owners: list[Path]
-) -> tuple[list[str] | None, list[str]]:
-    """Return a legacy checkout if known and observed ancestors matching either saved directory."""
-    owner = json.loads(scan["source_scopes_json"] or "{}").get("documentSourceRoot")
-    target = Path(scan["target_path"])
-    checkout_identity = None
-    if (
-        isinstance(owner, dict)
-        and isinstance(owner.get("path"), str)
-        and target.is_relative_to(owner["path"])
-        and isinstance(owner.get("device"), str)
-        and isinstance(owner.get("inode"), str)
-    ):
-        checkout_identity = owner["device"], owner["inode"]
-
-    def matches_target(info: os.stat_result) -> bool:
-        return stored_filesystem_identity_matches(
-            scan["target_device"], info.st_dev
-        ) and stored_filesystem_identity_matches(scan["target_inode"], info.st_ino)
-
-    lstat = cache(os.lstat)
-    # Fully recorded scans need only physical matches among the observed ancestors.
-    roots: list[str] | None = []
-    if checkout_identity is None:
-        roots = None
-        if scan["target_device"] is None or scan["target_inode"] is None:
-            return roots, []
-        try:
-            current = target.resolve(strict=True)
-            info = lstat(str(current))
-            if stat.S_ISDIR(info.st_mode) and matches_target(info):
-                roots = [str(repository_marker_root(current, outermost=False))]
-        except (OSError, RuntimeError):
-            pass  # The former enclosing checkout cannot be established from this path.
-
-    candidates = dict.fromkeys(
-        str(ancestor) for directory in link_owners for ancestor in (directory, *directory.parents)
-    )
-    matched = []
-    for candidate in candidates:
-        info = lstat(candidate)
-        if stat.S_ISDIR(info.st_mode) and (
-            matches_target(info) or (str(info.st_dev), str(info.st_ino)) == checkout_identity
-        ):
-            matched.append(candidate)
-    return roots, matched
 
 
 def load_source_scopes(

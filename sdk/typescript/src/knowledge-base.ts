@@ -11,17 +11,18 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
+import {
+  type DocumentRoots,
+  type DocumentRootSource,
+  escapingInputDirectoryLink,
+} from "./prompt-files.js";
 import { expandHome } from "./runtime.js";
 import {
-  type DocumentSourceSelection,
-  escapingInputDirectoryLink,
-  nullIfUnavailableInputRoot,
-} from "./prompt-files.js";
-import {
+  documentSourceRoot,
   gitMarkerRoot,
   isGitMetadataDirectory,
   nullIfMissingFile,
@@ -62,49 +63,20 @@ export async function knowledgeBaseProtectedRoots(
     : [...snapshot.protectedRoots];
 }
 
-export async function documentSourceRoots(
-  root: string,
-  signal?: AbortSignal,
-  legacyTarget = false,
-): Promise<string[]> {
-  const selected = resolve(expandHome(root));
-  const roots: string[] = [];
-  for (let ancestor = selected; ; ancestor = dirname(ancestor)) {
-    signal?.throwIfAborted();
-    try {
-      const canonical = await realpath(ancestor);
-      if (ancestor === selected) roots.push(canonical);
-      // A replaced legacy target can be a new checkout. Its surviving parent may own the link.
-      const stable =
-        !legacyTarget ||
-        (ancestor !== selected && relative(ancestor, canonical) === "");
-      if (ancestor === selected || stable) {
-        const checkout = await gitMarkerRoot(canonical, signal, "nearest");
-        if (checkout !== null && !roots.includes(checkout))
-          roots.push(checkout);
-      }
-      if (stable) return roots;
-    } catch (error) {
-      nullIfUnavailableInputRoot(error as NodeJS.ErrnoException);
-    }
-    if (ancestor === dirname(ancestor)) return roots;
-  }
-}
-
 /** @internal Extract once so campaign identity and workers use identical inputs. */
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
-  selection?: string | DocumentSourceSelection,
+  repositoryOrRoots: string | DocumentRootSource = [],
 ): Promise<KnowledgeBaseSnapshot> {
   try {
     const sources = new Set<string>();
     const documents = new Set<string>();
-
     const roots =
-      typeof selection === "string"
-        ? { directories: await documentSourceRoots(selection, signal) }
-        : (selection ?? { directories: [] });
+      typeof repositoryOrRoots === "string"
+        ? [await documentSourceRoot(repositoryOrRoots, signal)]
+        : repositoryOrRoots;
+
     for (const requested of paths) {
       signal?.throwIfAborted();
       if (!requested.trim())
@@ -129,7 +101,7 @@ export async function readKnowledgeBaseSnapshot(
         roots,
         signal,
       );
-      if (escaped !== null) {
+      if (escaped) {
         throw new Error(
           `Knowledge base paths cannot traverse a repository symbolic link to an external document: ${escaped}`,
         );
@@ -230,6 +202,18 @@ export async function prepareKnowledgeBase(
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
     throw new ConfigurationError(errorMessage(error), { cause: error });
   }
+}
+
+/** @internal Read the same extracted document text used by scans. */
+export async function readKnowledgeBaseDocuments(
+  paths: readonly string[],
+  signal?: AbortSignal,
+  roots?: DocumentRoots,
+): Promise<string[]> {
+  const { documents } = await readKnowledgeBaseSnapshot(paths, signal, roots);
+  return Object.keys(documents)
+    .sort()
+    .map((name) => documents[name]!);
 }
 
 async function discover(

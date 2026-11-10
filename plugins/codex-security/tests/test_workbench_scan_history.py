@@ -281,35 +281,6 @@ def create_cli_scan(
     return launched
 
 
-def test_get_scan_checks_document_link_owners_only_on_request(tmp_path: Path) -> None:
-    state_dir, repository = tmp_path / "state", tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    selected = repository / "selected"
-    selected.mkdir()
-    scan_id = create_cli_scan(state_dir, tmp_path / "scans", selected, target_revision=revision)[
-        "scanId"
-    ]
-    normal = get_scan(state_dir, scan_id, input_text="ignored")["scan"]
-    assert "documentSourceRoots" not in normal
-    moved_target, moved_checkout = tmp_path / "moved-target", tmp_path / "moved-checkout"
-    selected.rename(moved_target)
-    repository.rename(moved_checkout)
-    repository.mkdir()
-    owners = [str(path.resolve()) for path in (moved_target, moved_checkout, repository)]
-    mode = "--document-link-owners-stdin"
-    assert get_scan(state_dir, scan_id, mode, input_text=json.dumps([*owners, *owners])) == {
-        "scan": {
-            "scanId": scan_id,
-            "targetPath": str(selected.resolve()),
-            "documentSourceRoots": [],
-            "matchedDocumentSourceRoots": owners[:2],
-        }
-    }
-    invalid = get_scan(state_dir, scan_id, mode, input_text='{"path": "."}', check=False)
-    assert invalid["returncode"] != 0
-    assert "JSON array" in invalid["stderr"]
-
-
 @pytest.mark.parametrize("artifact", ["findings.json", "coverage.json", "scan-manifest.json"])
 @pytest.mark.parametrize("mutation", ["remove", "modify"])
 def test_get_scan_reads_pinned_coverage_independently_of_unrelated_artifacts(

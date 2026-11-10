@@ -13,7 +13,6 @@ import {
   rename,
   rm,
   rmdir,
-  stat,
   truncate,
   utimes,
   writeFile,
@@ -46,7 +45,8 @@ import {
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import {
-  nullIfUnavailableInputRoot,
+  type DocumentRoots,
+  requireCanonicalDocumentPaths,
   resolveScanPrompts,
 } from "./prompt-files.js";
 import {
@@ -67,7 +67,6 @@ import {
   type ScanPromptSettings,
   type ScanSettings,
 } from "./scan-settings.js";
-import { localGitSourceRoots } from "./local-git-metadata.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -193,15 +192,11 @@ export async function runMultiscan(
       "Bulk scans do not support diff or working-tree scopes because their checkouts are clean, shallow snapshots. Use repository or path scopes instead.",
     );
   }
-  const hasPromptFile = [
-    [options.scanPrompt, options.scanPromptFile],
-    [options.validationPrompt, options.validationPromptFile],
-    [options.postScanPrompt, options.postScanPromptFile],
-  ].some(([inline, file]) => inline === undefined && file !== undefined);
-  const prompts = await resolveScanPrompts(
-    options,
-    hasPromptFile ? await bulkDocumentRoots(tasks, options.signal) : [],
-  );
+  // Direct input paths need no source discovery. Prompts and knowledge share the result.
+  let pendingRoots: Promise<DocumentRoots> | undefined;
+  const documentRoots = () =>
+    (pendingRoots ??= bulkDocumentRoots(tasks, options));
+  const prompts = await resolveScanPrompts(options, documentRoots);
   const resolvedOptions: MultiscanOptions = {
     ...options,
     ...prompts,
@@ -251,6 +246,7 @@ export async function runMultiscan(
       tasks,
       output,
       resumePluginRoot,
+      documentRoots,
     );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
@@ -267,25 +263,42 @@ export async function runMultiscan(
 
 async function bulkDocumentRoots(
   tasks: readonly MultiscanTask[],
-  signal?: AbortSignal,
-) {
-  const sources = new Set<string>();
-  for (const repository of new Set(tasks.map((task) => task.repository))) {
+  options: MultiscanOptions,
+): Promise<DocumentRoots> {
+  const roots: string[] = [];
+  for (const [repository, revision] of new Map(
+    tasks.map((task) => [task.repository, task.revision]),
+  )) {
     if (!isAbsolute(repository)) continue;
-    // The selected directory can supply links even if its checkout later fails.
-    const directory = await stat(repository).catch(nullIfUnavailableInputRoot);
-    if (directory?.isDirectory()) {
-      const selected = await realpath(repository).catch(
-        nullIfUnavailableInputRoot,
-      );
-      if (selected !== null) sources.add(selected);
+    const source = await realpath(repository).catch(() => null);
+    if (source === null) {
+      // Git also accepts an omitted .git suffix; wholly missing rows fail at checkout.
+      if (await lstat(repository + ".git").catch(() => null))
+        return requireCanonicalDocumentPaths;
+      continue;
     }
-    const roots = await localGitSourceRoots(repository, signal).catch(
-      nullIfUnavailableInputRoot,
+    const git = await bulkGit(
+      source,
+      revision,
+      options.signal,
+      options.githubHost,
     );
-    for (const root of roots ?? []) sources.add(root);
+    const gitPath = async (arg: string) =>
+      git("rev-parse", "--path-format=absolute", arg)
+        .then((path) => realpath(path))
+        .catch(() => null);
+    // A normal checkout owns its directory. Other layouts can supply links from
+    // elsewhere, so require the operator to name a document directly.
+    if (
+      (await gitPath("--show-toplevel")) !== source ||
+      (await gitPath("--git-common-dir")) !== join(source, ".git")
+    ) {
+      options.signal?.throwIfAborted();
+      return requireCanonicalDocumentPaths;
+    }
+    roots.push(source);
   }
-  return [...sources];
+  return roots;
 }
 
 async function runCampaign(
@@ -293,26 +306,26 @@ async function runCampaign(
   tasks: MultiscanTask[],
   output: string,
   resumePluginRoot: () => Promise<string>,
+  documentRoots: () => Promise<DocumentRoots>,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   const knowledgeByMode: MultiscanKnowledge = {};
-  let sources: Promise<string[]> | undefined;
-  const readDocuments = async (paths: readonly string[]) => {
-    sources ??= bulkDocumentRoots(tasks, options.signal);
-    return readKnowledgeBaseSnapshot(paths, options.signal, {
-      directories: await sources,
-    });
-  };
   const sharedKnowledge = options.knowledgeBasePaths?.length
-    ? readDocuments(options.knowledgeBasePaths)
+    ? readKnowledgeBaseSnapshot(
+        options.knowledgeBasePaths,
+        options.signal,
+        documentRoots,
+      )
     : undefined;
   for (const mode of new Set(tasks.map((task) => task.mode))) {
     try {
       const paths = options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
       const snapshot = await (sharedKnowledge ??
-        (paths?.length ? readDocuments(paths) : undefined));
+        (paths?.length
+          ? readKnowledgeBaseSnapshot(paths, options.signal, documentRoots)
+          : undefined));
       if (snapshot !== undefined) knowledgeByMode[mode] = { snapshot };
     } catch (error) {
       options.signal?.throwIfAborted();
@@ -1315,12 +1328,12 @@ function normalizeRepository(repository: string, directory: string): string {
   return repository;
 }
 
-async function checkoutRevision(
-  task: MultiscanTask,
+async function bulkGit(
   path: string,
+  revision: string,
   signal?: AbortSignal,
   githubHost?: string,
-): Promise<void> {
+) {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
     if (UNSUPPORTED_GIT_ENVIRONMENT.has(name.toUpperCase()))
@@ -1328,8 +1341,7 @@ async function checkoutRevision(
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
-  environment["GIT_DEFAULT_HASH"] =
-    task.revision.length === 64 ? "sha256" : "sha1";
+  environment["GIT_DEFAULT_HASH"] = revision.length === 64 ? "sha256" : "sha1";
   const command = await resolveTrustedExecutable(
     "git",
     environment,
@@ -1338,7 +1350,7 @@ async function checkoutRevision(
   if (command === null) {
     throw new Error("Git is not available on a trusted PATH.");
   }
-  const git = async (...args: string[]): Promise<string> => {
+  return async (...args: string[]): Promise<string> => {
     // Use the resolved absolute path so Windows PATHEXT cannot prefer a
     // .bat/.cmd shim over the trusted executable selected above.
     const result = await execFile(
@@ -1353,8 +1365,20 @@ async function checkoutRevision(
       ],
       { env: command.environment, signal },
     );
-    return result.stdout.trim();
+    return result.stdout.replace(
+      process.platform === "win32" ? /\r?\n$/u : /\n$/u,
+      "",
+    );
   };
+}
+
+async function checkoutRevision(
+  task: MultiscanTask,
+  path: string,
+  signal?: AbortSignal,
+  githubHost?: string,
+): Promise<void> {
+  const git = await bulkGit(path, task.revision, signal, githubHost);
   await git("init", "--quiet");
   await git(
     "fetch",

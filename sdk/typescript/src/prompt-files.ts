@@ -6,6 +6,13 @@ import { expandHome } from "./runtime.js";
 import { isWithin } from "./trusted-executable.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
 
+export const requireCanonicalDocumentPaths = Symbol(
+  "requireCanonicalDocumentPaths",
+);
+export type DocumentRoots =
+  readonly string[] | typeof requireCanonicalDocumentPaths;
+export type DocumentRootSource = DocumentRoots | (() => Promise<DocumentRoots>);
+
 type ResolvedScanPrompts = Pick<
   ScanPromptSettings,
   "scanPrompt" | "validationPrompt" | "postScanPrompt"
@@ -18,7 +25,7 @@ type ResolvedScanPrompts = Pick<
 /** Resolve selected files once; an inline SDK prompt overrides its file. */
 export async function resolveScanPrompts(
   options: ScanPromptSettings,
-  repository: string | readonly string[],
+  repository: string | DocumentRootSource,
   directory = process.cwd(),
 ): Promise<ResolvedScanPrompts> {
   const read = async (inline: string | undefined, file: string | undefined) =>
@@ -58,74 +65,47 @@ export async function resolveScanPrompts(
   };
 }
 
-/** An unavailable source row must not prevent other rows from loading shared inputs. */
-export function nullIfUnavailableInputRoot(error: NodeJS.ErrnoException): null {
-  if (
-    ["ENOENT", "ENOTDIR", "ENAMETOOLONG", "ELOOP", "EACCES", "EPERM"].includes(
-      error.code ?? "",
-    )
-  )
-    return null;
-  throw error;
-}
-
-export interface DocumentSourceSelection {
-  directories: readonly string[];
-  lookupSavedRoots?: (
-    linkOwners: readonly string[],
-  ) => Promise<readonly string[]>;
-}
-
-/** Walk the selected path and the raw targets of any directory links it traverses. */
+/** A selected source cannot use a directory link to supply a document outside it. */
 export async function escapingInputDirectoryLink(
-  selected: string,
+  path: string,
   destination: string,
-  selection: DocumentSourceSelection,
+  source: DocumentRootSource,
   signal?: AbortSignal,
-): Promise<string | null> {
-  if (selected === destination) return null;
-  const outside = (roots: readonly string[]) =>
-    roots.filter((root) => !isWithin(root, destination));
-  const known = outside(selection.directories);
-  if (!known.length && !selection.lookupSavedRoots) return null;
-  const linkOwners = new Map<string, string>();
+): Promise<string | undefined> {
+  if (path === destination) return;
+  const roots = typeof source === "function" ? await source() : source;
+  if (roots === requireCanonicalDocumentPaths) {
+    throw new CodexSecurityError(
+      "Select the document by its canonical path when the source checkout is unknown.",
+    );
+  }
+  const outside = roots.filter((root) => !isWithin(root, destination));
+  if (!outside.length) return;
 
-  const directory = dirname(selected);
-  const pending = [
-    isAbsolute(directory) ? directory : `${process.cwd()}${sep}${directory}`,
-  ];
+  const pending = [dirname(path)];
   const inspected = new Set<string>();
   while (pending.length) {
     for (let path = pending.pop()!; ; path = dirname(path)) {
       const parent = dirname(path);
       if (parent === path) break;
-      // Drop trailing separators without normalizing a link target's ".." components.
+      // Strip trailing separators without collapsing ".." after a directory link.
       const entry = parent + (parent.endsWith(sep) ? "" : sep) + basename(path);
       if (inspected.has(entry)) break;
-      signal?.throwIfAborted();
       inspected.add(entry);
+      signal?.throwIfAborted();
       if (!(await lstat(entry)).isSymbolicLink()) continue;
       const owner = await realpath(parent);
-      if (known.some((root) => isWithin(root, owner))) return entry;
-      if (selection.lookupSavedRoots) linkOwners.set(owner, entry);
+      if (outside.some((root) => isWithin(root, owner))) return entry;
+      // An operator alias can itself point through a link in a selected source.
       const target = await readlink(entry);
       pending.push(isAbsolute(target) ? target : `${owner}${sep}${target}`);
     }
   }
-  if (linkOwners.size && selection.lookupSavedRoots) {
-    const recorded = outside(
-      await selection.lookupSavedRoots([...linkOwners.keys()]),
-    );
-    for (const [owner, entry] of linkOwners) {
-      if (recorded.some((root) => isWithin(root, owner))) return entry;
-    }
-  }
-  return null;
 }
 
 export async function readRegularInputFile(
   path: string,
-  repository: string | readonly string[],
+  repository: string | DocumentRootSource,
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
   const selected = metadata ?? (await lstat(path, { bigint: true }));
@@ -135,11 +115,11 @@ export async function readRegularInputFile(
   const canonicalParent = await realpath(dirname(path));
   const repositories =
     typeof repository === "string" ? [repository] : repository;
-  const roots = await Promise.all(repositories.map((root) => realpath(root)));
+  const roots = Array.isArray(repositories)
+    ? await Promise.all(repositories.map((root: string) => realpath(root)))
+    : repositories;
   const canonical = join(canonicalParent, basename(path));
-  if (
-    await escapingInputDirectoryLink(path, canonical, { directories: roots })
-  ) {
+  if (await escapingInputDirectoryLink(path, canonical, roots)) {
     throw new CodexSecurityError(
       "Input files must not follow repository directory links outside the selected repository.",
     );
