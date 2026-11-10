@@ -42,6 +42,33 @@ describe("deep scan completion summary", () => {
       "--max-discovery-runs greater than 40",
     ],
     [
+      "completed review limit even if finalization outlasts the deadline",
+      { completedAt: "2026-01-05T00:01:00Z" },
+      "40 review rounds. The latest review still found new issues",
+      "--max-discovery-runs greater than 40",
+    ],
+    [
+      "time limit before any dispatched review completed",
+      {
+        dispatchedCount: 1,
+        completionSequence: 0,
+        config: { maxDiscoveryRuns: 1, maxTimeHours: 5 / 60 },
+        completedAt: "2026-01-01T00:05:01Z",
+      },
+      "5-minute time limit. No source review completed.",
+      "--max-time greater than 5",
+    ],
+    [
+      "a one-round review limit",
+      {
+        dispatchedCount: 1,
+        completionSequence: 1,
+        config: { maxDiscoveryRuns: 1, maxTimeHours: 96 },
+      },
+      "limit of 1 review round. The latest review still found new issues",
+      "--max-discovery-runs greater than 1",
+    ],
+    [
       "quiet round",
       { noNewStreak: 1 },
       "More issues may remain",
@@ -51,6 +78,12 @@ describe("deep scan completion summary", () => {
       "no recent new issues",
       { terminalReason: "saturated", noNewStreak: 4 },
       "last 4 review rounds found no new issues",
+      null,
+    ],
+    [
+      "one quiet review round",
+      { terminalReason: "saturated", noNewStreak: 1 },
+      "last 1 review round found no new issues",
       null,
     ],
     [
