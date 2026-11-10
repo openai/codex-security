@@ -564,7 +564,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         request.signal.removeEventListener("abort", forwardAbort);
       }
     } catch (error) {
-      request.signal.throwIfAborted();
+      // Pin checks throw the caller's reason directly; keep SDK worker errors intact.
+      if (request.signal.aborted && error === request.signal.reason) throw error;
       throw classifyCodexWorkerError(error);
     } finally {
       if (includePathsFile !== undefined)
