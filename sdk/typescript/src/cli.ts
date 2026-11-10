@@ -4960,6 +4960,19 @@ export async function main(
         });
       },
     });
+  const withLoginEnvironment = async (
+    run: (
+      environment: NodeJS.ProcessEnv & { CODEX_HOME: string },
+    ) => Promise<number>,
+  ) => {
+    const home = await prepareCodexSecurityCredentialHome(
+      dependencies.environment,
+    );
+    return withCredentialHomeLock(home, () =>
+      run({ ...dependencies.environment, CODEX_HOME: home }),
+    );
+  };
+
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
@@ -7417,13 +7430,10 @@ export async function main(
           },
         ],
         async run({ options }) {
-          const credentialHome = await prepareCodexSecurityCredentialHome(
-            dependencies.environment,
-          );
           const authentication = scanAuthentication(dependencies.environment);
-          exitCode = await withCredentialHomeLock(credentialHome, async () => {
+          exitCode = await withLoginEnvironment(async (environment) => {
             await prepareLoginConfig(
-              credentialHome,
+              environment.CODEX_HOME,
               await readCodexAuthConfig(
                 scanCodexHome(dependencies.environment),
                 true,
@@ -7437,10 +7447,13 @@ export async function main(
                 ...(options.withAccessToken ? ["--with-access-token"] : []),
               ],
               undefined,
-              { ...dependencies.environment, CODEX_HOME: credentialHome },
+              environment,
             );
             if (status === 0)
-              await setCodexSecurityCredentialLogout(credentialHome, false);
+              await setCodexSecurityCredentialLogout(
+                environment.CODEX_HOME,
+                false,
+              );
             return status;
           });
           if (
@@ -7448,14 +7461,13 @@ export async function main(
             !options.withApiKey &&
             authentication.method === "api_key"
           ) {
-            const configuredApiKeyVariables = Object.entries(
+            const configuredApiKeyVariables = Object.keys(
               dependencies.environment,
-            ).flatMap(([name, value]) =>
-              value?.trim() &&
-              (name.toUpperCase() === "OPENAI_API_KEY" ||
-                name.toUpperCase() === "CODEX_API_KEY")
-                ? name
-                : [],
+            ).filter(
+              (name) =>
+                ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(
+                  name.toUpperCase(),
+                ) && dependencies.environment[name]?.trim(),
             );
             const loginWarning = options.withAccessToken
               ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
@@ -7483,20 +7495,13 @@ export async function main(
           .optional(),
         async run({ format }) {
           const structured = !useDefaultOutput(format);
-          const credentialHome = await prepareCodexSecurityCredentialHome(
-            dependencies.environment,
-          );
           const authentication = scanAuthentication(dependencies.environment);
-          const environment = {
-            ...dependencies.environment,
-            CODEX_HOME: credentialHome,
-          };
-          exitCode = await withCredentialHomeLock(credentialHome, async () => {
+          exitCode = await withLoginEnvironment(async (environment) => {
             if (authentication.method !== "api_key")
               await initialCredentialsAvailable(
                 dependencies.environment,
                 scanCodexHome(dependencies.environment),
-                credentialHome,
+                environment.CODEX_HOME,
               );
             if (!structured)
               return await dependencies.runCodex(
@@ -7530,13 +7535,12 @@ export async function main(
           if (structured)
             return {
               authenticated: exitCode === 0,
-              method:
-                authentication.method === "api_key"
-                  ? ("api_key" as const)
-                  : ("stored_credentials" as const),
               ...(authentication.method === "api_key"
-                ? { source: authentication.source }
-                : {}),
+                ? {
+                    method: authentication.method,
+                    source: authentication.source,
+                  }
+                : { method: "stored_credentials" as const }),
             };
         },
       }),
@@ -7546,16 +7550,9 @@ export async function main(
       hint: "Check the effective account with codex-security login status. Scans can still use an API key configured in your environment.",
       destructive: true,
       async run() {
-        const credentialHome = await prepareCodexSecurityCredentialHome(
-          dependencies.environment,
-        );
-        const environment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await withCredentialHomeLock(credentialHome, () =>
+        exitCode = await withLoginEnvironment((environment) =>
           logoutCredentialHome(
-            credentialHome,
+            environment.CODEX_HOME,
             scanCodexHome(dependencies.environment),
             (store) =>
               dependencies.runCodex(
@@ -7580,38 +7577,32 @@ export async function main(
       }),
       output: z.object({ path: z.string() }).optional(),
       async run({ args, format }) {
+        const directory = dependencies.currentDirectory();
+        const path = resolveCliPath(
+          directory,
+          args.file ?? "codex-security.yaml",
+        );
+        const preview = `${PREVIEW_LABEL}: ${projectPreviewCommand(directory, path)}`;
         try {
-          const directory = dependencies.currentDirectory();
-          const path = resolveCliPath(
-            directory,
-            args.file ?? "codex-security.yaml",
-          );
           await writeFile(path, projectConfigStarter(path, directory), {
             flag: "wx",
             mode: 0o600,
           });
-          if (useDefaultOutput(format)) {
-            const next = projectPreviewCommand(directory, path);
-            if (output.isTTY)
-              renderedOutput = `Created ${escapeTerminalText(path)}\n${PREVIEW_LABEL}: ${next}\n`;
-            else errorOutput.write(`${PREVIEW_LABEL}: ${next}\n`);
-          }
-          return { path };
         } catch (error) {
           exitCode = 2;
-          if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-            const path = resolveCliPath(
-              dependencies.currentDirectory(),
-              args.file ?? "codex-security.yaml",
-            );
-            errorOutput.write(
-              `codex-security: Configuration already exists at ${escapeTerminalText(path)}. ${PREVIEW_LABEL}: ${projectPreviewCommand(dependencies.currentDirectory(), path)}\n`,
-            );
-          } else {
-            errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
-          }
+          const message =
+            (error as NodeJS.ErrnoException).code === "EEXIST"
+              ? `Configuration already exists at ${escapeTerminalText(path)}. ${preview}`
+              : diagnosticLines(error);
+          errorOutput.write(`codex-security: ${message}\n`);
           throw error;
         }
+        if (useDefaultOutput(format)) {
+          if (output.isTTY)
+            renderedOutput = `Created ${escapeTerminalText(path)}\n${preview}\n`;
+          else errorOutput.write(`${preview}\n`);
+        }
+        return { path };
       },
     })
     .command("feedback", {
@@ -7731,9 +7722,8 @@ export async function main(
         const model = scanModelConfiguration(codex);
         const sources = configurationSources(resolved.sources, deep?.sources);
         const nextStep = projectPreviewCommand(directory, project?.path);
-        const bundledPluginAvailable = await bundledPluginRoot().then(
-          () => true,
-          () => false,
+        const bundledPluginAvailable = Boolean(
+          await bundledPluginRoot().catch(() => undefined),
         );
         if (output.isTTY && useDefaultOutput(format)) {
           const overrides = Object.entries(sources)
