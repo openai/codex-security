@@ -71,6 +71,7 @@ _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
@@ -468,9 +469,11 @@ def _verify_handle_path(handle: int, expected_path: Path, *, opened_name: bool =
         raise _invalid_path(expected_path, "opened file resolved outside its verified scan path")
 
 
-def _verify_directory(handle: int, expected_path: Path) -> None:
+def _verify_directory(handle: int, expected_path: Path, checkout: bool = False) -> None:
     info = _attributes(handle)
-    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT and (
+        not checkout or not info.ReparseTag or info.ReparseTag & _REPARSE_TAG_NAME_SURROGATE
+    ):
         raise _invalid_path(expected_path, "scan-local directories must not be reparse points")
     if not info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY:
         raise _invalid_path(expected_path, "expected a scan-local directory")
@@ -506,6 +509,7 @@ def _open_directory(
     missing_ok: bool = False,
     missing_is_path_error: bool = True,
     movable: bool = False,
+    checkout: bool = False,
 ) -> _OwnedHandle | None:
     try:
         handle = _create_file(
@@ -526,7 +530,7 @@ def _open_directory(
     if handle is not None:
         try:
             assert handle.value is not None
-            _verify_directory(handle.value, path)
+            _verify_directory(handle.value, path, checkout)
         except BaseException:
             handle.close()
             raise
@@ -731,24 +735,44 @@ def deep_resume_output_identity(scan_dir: Path) -> list[int]:
         return _pinned_resume_identity(parent, child, retained, grants)
 
 
-def _resume_directory_id(handle: int, path: Path) -> tuple[int, int]:
+def _full_directory_id(handle: int, path: Path) -> tuple[int, int] | None:
     info = _FileIdInfo()
-    if _GetFileInformationByHandleEx(
+    if not _GetFileInformationByHandleEx(
         handle, _FILE_ID_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
     ):
-        volume, file_id = info.VolumeSerialNumber, int.from_bytes(info.FileId, "little")
-    elif ctypes.get_last_error() in {50, 87}:  # ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER.
-        # Some filesystems expose only the legacy 64-bit file index.
-        legacy = _ByHandleFileInformation()
-        if not _GetFileInformationByHandle(handle, ctypes.byref(legacy)):
-            _raise_last_error("GetFileInformationByHandle", path)
-        volume = legacy.dwVolumeSerialNumber
-        file_id = (legacy.nFileIndexHigh << 32) | legacy.nFileIndexLow
-    else:
+        if ctypes.get_last_error() in {50, 87}:  # ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER.
+            return None
         _raise_last_error("GetFileInformationByHandleEx(FileIdInfo)", path)
+    file_id = int.from_bytes(info.FileId, "little")
     if not file_id:
         raise _invalid_path(path, "The resume directory has no stable file identity.")
-    return volume, file_id
+    return info.VolumeSerialNumber, file_id
+
+
+def _resume_directory_id(handle: int, path: Path) -> tuple[int, int]:
+    if (identity := _full_directory_id(handle, path)) is not None:
+        return identity
+    # Some filesystems expose only the legacy 64-bit file index.
+    legacy = _ByHandleFileInformation()
+    if not _GetFileInformationByHandle(handle, ctypes.byref(legacy)):
+        _raise_last_error("GetFileInformationByHandle", path)
+    file_id = (legacy.nFileIndexHigh << 32) | legacy.nFileIndexLow
+    if not file_id:
+        raise _invalid_path(path, "The resume directory has no stable file identity.")
+    return legacy.dwVolumeSerialNumber, file_id
+
+
+@contextlib.contextmanager
+def pinned_resume_checkout(target: Path) -> Iterator[tuple[int, int] | None]:
+    """Keep the canonical checkout fixed while reading its full native identity and snapshot."""
+    with contextlib.ExitStack() as pins:
+        for directory in (*reversed(target.parents), target):
+            # A source provider directory may carry a reparse tag without redirecting its name.
+            handle = _open_directory(directory, checkout=True)
+            assert handle is not None
+            pins.enter_context(handle)
+        assert handle.value is not None
+        yield _full_directory_id(handle.value, target)
 
 
 def _pinned_resume_identity(parent: int, child: int, retained: Path, grants: int) -> list[int]:
@@ -1010,14 +1034,19 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 
 
 @contextlib.contextmanager
-def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
-    """Bind a canonical worktree beneath a fixed-drive root to its exact .git marker."""
+def pinned_root_git_marker(
+    cwd: Path, metadata: Path, *, work_tree: Path | None = None
+) -> Iterator[Path | None]:
+    """Return a short explicit worktree marker while its cwd and Git metadata are pinned."""
+    if work_tree is None:
+        work_tree = cwd
     if (
         not cwd.is_absolute()
         or not metadata.is_absolute()
         or len(cwd.drive) != 2
         or cwd.drive != metadata.drive
-        or len(cwd.parts) < 2
+        or len(work_tree.parts) < 2
+        or cwd.parts[: len(work_tree.parts)] != work_tree.parts
         or len(metadata.parts) < 2
         or _GetDriveTypeW(cwd.anchor) != _DRIVE_FIXED
     ):
@@ -1037,9 +1066,11 @@ def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
                 assert handle.value is not None
                 if _final_path(handle.value) != _extended_path(path):
                     raise ValueError("the selected Git directory spelling is not canonical")
-            if str(cwd / ".git") != str(metadata):
+            root_marker = work_tree / ".git"
+            reference = Path(os.path.relpath(root_marker, cwd))
+            if str(root_marker) != str(metadata):
                 # The literal canonical root is already pinned before opening its regular file.
-                fd, leaf = open_read_fd_with_path(cwd, ".git", "Git metadata pointer")
+                fd, leaf = open_read_fd_with_path(work_tree, ".git", "Git metadata pointer")
                 pointer = pins.enter_context(os.fdopen(fd, "rb"))
                 if leaf != ".git":
                     raise ValueError("the root marker name does not match .git")
@@ -1047,7 +1078,10 @@ def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
                 value = pointer.read(len(expected) + 3).removesuffix(b"\n").removesuffix(b"\r")
                 if value.replace(b"/", b"\\") != expected:
                     raise ValueError("the root marker does not name the selected Git directory")
-            marker = Path(".git")
+                # A deep scope can make the relative spelling longer than the gitfile itself.
+                if len(os.fsencode(root_marker)) < len(os.fsencode(reference)):
+                    reference = root_marker
+            marker = reference
         except (OSError, ValueError):
             pins.close()
         yield marker

@@ -110,6 +110,7 @@ EXPECTED_MIGRATIONS = [
     (63, "retain unverified Deep Scan worker attempts"),
     (64, "persist scan log completion boundaries"),
     (65, "bind Windows Deep Scan resume output directories"),
+    (66, "bind Windows Deep Scan resume checkouts"),
 ]
 
 
@@ -1216,7 +1217,13 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
 
     after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
     assert after == [
-        {**row, "log_completed_at": None, "windows_resume_output_identity": None} for row in before
+        {
+            **row,
+            "log_completed_at": None,
+            "windows_resume_output_identity": None,
+            "windows_resume_target_identity": None,
+        }
+        for row in before
     ]
 
 
