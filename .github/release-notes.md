@@ -43,6 +43,7 @@
 - verify assumed-unchanged files for committed diffs ([#2554](https://github.com/openai/codex-security/pull/2554))
 - resolve temporary paths before patching a saved checkout ([#2558](https://github.com/openai/codex-security/pull/2558))
 - stage knowledge in the selected temporary directory ([#2559](https://github.com/openai/codex-security/pull/2559))
+- isolate Git pathspec modes for file inventories ([#2565](https://github.com/openai/codex-security/pull/2565))
 
 </details>
 
