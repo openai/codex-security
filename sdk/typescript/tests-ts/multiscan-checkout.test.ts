@@ -908,14 +908,18 @@ describe("multiscan", () => {
       active -= 1;
       return completedScan(scanOptions.outputDir!);
     });
-    const contenders = Promise.allSettled([
+    const contenders = [
       runMultiscan(options(paths, security)),
       runMultiscan(options(paths, security)),
-    ]);
+    ];
 
-    await running.promise;
-    finish.resolve();
-    const outcomes = await contenders;
+    try {
+      // One contender can lose the lock before the winning client starts.
+      await Promise.race([running.promise, Promise.any(contenders)]);
+    } finally {
+      finish.resolve();
+    }
+    const outcomes = await Promise.allSettled(contenders);
 
     expect(maximum).toBe(1);
     expect(
