@@ -281,6 +281,7 @@ import {
   prepareOutputDir,
   prepareScanRegistrationOutput,
   preparePersistentOutputRoot,
+  prepareWindowsScanPluginZip,
   probeCodexSandbox,
   requireModelSafeOutputDir,
   requireOutputOutsideRepositories,
@@ -289,11 +290,13 @@ import {
   preparePolicyOutputDirectory,
   resolveCodexCommand,
   resolvePluginPath,
+  resolvePluginSource,
   resolvePluginPython,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginInstall,
+  type PluginZipSource,
   type ProcessEnvironment,
   type ScanArtifactRestorer,
   type WorkbenchCommandOptions,
@@ -340,6 +343,7 @@ interface CodexClientLike {
 interface PreparedRuntime {
   codexHome: string;
   bootstrapWorkspace?: string;
+  pluginZipSource?: PluginZipSource;
   configPath?: string;
   deepScanConfigDirectory?: string;
   deepScanConfigPath?: string;
@@ -2200,6 +2204,7 @@ export class CodexSecurity {
     let scanDir = "";
     let targetPathsFile: string | null = null;
     let stagedPluginRoot: string | undefined;
+    let stagedPluginDirectory: string | undefined;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let scanProgressTracker: ScanProgressTracker | null = null;
@@ -2496,14 +2501,14 @@ export class CodexSecurity {
         );
       }
       // Windows grants directory reads to its sandbox account through inheritable
-      // ACLs. Keep those grants on a disposable copy of the SDK's shipped plugin.
+      // ACLs. Grant only disposable plugin content prepared for this scan.
       if (
         process.platform === "win32" &&
         this.config.pluginPath === undefined &&
         runtime.bootstrapWorkspace !== undefined &&
         this.#dependencies.hostedScan === undefined
       ) {
-        stagedPluginRoot = await mkdtemp(
+        stagedPluginDirectory = stagedPluginRoot = await mkdtemp(
           join(runtime.bootstrapWorkspace, "bundled-plugin-"),
         );
         await copyPluginTree(
@@ -2511,6 +2516,27 @@ export class CodexSecurity {
           stagedPluginRoot,
           signal,
         );
+      } else if (runtime.pluginZipSource !== undefined) {
+        const staged = await prepareWindowsScanPluginZip(
+          runtime.pluginZipSource,
+          scanDir,
+          [
+            runtimeHome,
+            ...(runtime.bootstrapWorkspace ? [runtime.bootstrapWorkspace] : []),
+            await canonicalConfigPath(
+              scanCodexHome(this.#dependencies.environment),
+            ),
+          ],
+          (path) =>
+            requireOutputOutsideRepositories(
+              inputs.protectedRoots,
+              path,
+              "runtime",
+            ),
+          signal,
+        );
+        stagedPluginDirectory = staged?.workspace;
+        stagedPluginRoot = staged?.root;
       }
       const shellPluginRoot = stagedPluginRoot ?? runtime.plugin.pluginRoot;
       const skillName = skillNameFor(normalized, mode);
@@ -4218,9 +4244,9 @@ export class CodexSecurity {
         for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
-          stagedPluginRoot === undefined
+          stagedPluginDirectory === undefined
             ? undefined
-            : cleanupSdkDirectory(stagedPluginRoot),
+            : cleanupSdkDirectory(stagedPluginDirectory),
           savedProviderProfile?.cleanup(),
         ])) {
           if (cleanup.status === "rejected") {
@@ -5670,11 +5696,13 @@ export class CodexSecurity {
         await lstat(bootstrapWorkspace),
         bootstrapWorkspace,
       );
-      const pluginRoot = await resolvePluginPath(
-        this.config.pluginPath,
-        bootstrapWorkspace,
-        signal,
-      );
+      const { root: pluginRoot, zip: pluginZipSource } =
+        await resolvePluginSource(
+          this.config.pluginPath,
+          bootstrapWorkspace,
+          signal,
+          process.platform === "win32",
+        );
       const ambientHome = scanCodexHome(processEnvironment);
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
@@ -5717,6 +5745,7 @@ export class CodexSecurity {
       return {
         codexHome,
         bootstrapWorkspace,
+        pluginZipSource,
         configPath,
         deepScanConfigDirectory,
         deepScanConfigPath,

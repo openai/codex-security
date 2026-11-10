@@ -50,6 +50,8 @@
 - reuse verified generated plugin cache content ([#2538](https://github.com/openai/codex-security/pull/2538))
 - use UTF-8 for workbench responses and diagnostics ([#2566](https://github.com/openai/codex-security/pull/2566))
 - report local failures from mock scans ([#2567](https://github.com/openai/codex-security/pull/2567))
+- stage validated plugin ZIPs for scan workers ([#2507](https://github.com/openai/codex-security/pull/2507))
+- tolerate executable metadata changes on first launch ([#2555](https://github.com/openai/codex-security/pull/2555))
 
 </details>
 

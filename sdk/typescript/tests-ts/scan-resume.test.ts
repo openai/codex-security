@@ -20,10 +20,15 @@ import {
 import { dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
+import { strToU8, zipSync } from "fflate";
 import { main } from "../src/cli.js";
 import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
-import { writeCodexConfig, type JsonObject } from "../src/config.js";
-import { runWorkbench } from "../src/runtime.js";
+import {
+  writeCodexConfig,
+  type CodexSecurityConfig,
+  type JsonObject,
+} from "../src/config.js";
+import { resolvePluginSource, runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { workflowDigest } from "../src/finding-workflow.js";
@@ -440,7 +445,14 @@ test.each([
   },
 );
 
-test("CLI resumes through native execution with current permissions and preserves interrupted state and output permissions", async () => {
+const resumePlugins =
+  process.platform === "win32" ? ["bundled", "zip"] : ["bundled"];
+test.each(resumePlugins)(
+  "CLI resumes through native execution with current permissions and preserves interrupted state and output permissions (%s)",
+  resumeWithPlugin,
+);
+
+async function resumeWithPlugin(source: string) {
   const markdown = "Keep the grading policy chosen when this scan started.";
   const severityRubric = {
     markdown,
@@ -450,6 +462,24 @@ test("CLI resumes through native execution with current permissions and preserve
   const f = await interruptedScan("deep", false, { severityRubric });
   const bootstrapWorkspace = join(f.root, "resumed-bootstrap");
   await mkdir(bootstrapWorkspace);
+  const archive = join(f.root, "selected.zip");
+  if (source === "zip") {
+    await writeFile(
+      archive,
+      zipSync({
+        ".codex-plugin/plugin.json": strToU8(
+          JSON.stringify({ name: "codex-security", version: "0.1.0" }),
+        ),
+        "skills/deep-security-scan/SKILL.md": strToU8(
+          "# Custom resumed workflow",
+        ),
+      }),
+    );
+  }
+  const selected =
+    source === "zip"
+      ? await resolvePluginSource(archive, bootstrapWorkspace, undefined, true)
+      : undefined;
   Object.assign(f.environment, {
     CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1",
   });
@@ -474,7 +504,9 @@ test("CLI resumes through native execution with current permissions and preserve
   );
   const originalFeedback =
     JSON.stringify([{ reason: "Original reviewer rationale." }]) + "\n";
-  await mkdir(join(f.scanDir, "artifacts", "01_context"), { recursive: true });
+  await mkdir(join(f.scanDir, "artifacts", "01_context"), {
+    recursive: true,
+  });
   await writeFile(feedbackPath, originalFeedback, { mode: 0o600 });
   const originalHome = join(f.root, "original-codex-home");
   await appendFile(
@@ -503,17 +535,21 @@ test("CLI resumes through native execution with current permissions and preserve
   ]);
   let resumedThread: string | undefined;
   const { stderr, runCli } = createCliTest(main);
+  // The host can supply a ZIP through its SDK client when replaying a scan.
+  const withPlugin = (config: CodexSecurityConfig) =>
+    selected ? { ...config, pluginPath: archive } : config;
 
   const flags = ["scans", "resume", f.scanId, "--json", "--verbose"];
   const code = await runCli(flags, {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
     runWorkbench: f.command,
     createSecurity: (config) =>
-      new TestClient(config, {
+      new TestClient(withPlugin(config), {
         environment: f.environment,
         prepareRuntime: async () => ({
           ...preparedRuntime(f.codexHome),
           bootstrapWorkspace,
+          pluginZipSource: selected?.zip,
           deepScanConfigDirectory: join(f.codexHome, "worker-config"),
           deepScanConfigPath: join(
             f.codexHome,
@@ -549,7 +585,9 @@ test("CLI resumes through native execution with current permissions and preserve
               options.configOverrides!.join("\n"),
             ) as {
               permissions: {
-                codex_security_scan: { filesystem: Record<string, unknown> };
+                codex_security_scan: {
+                  filesystem: Record<string, unknown>;
+                };
               };
             };
             const filesystem =
@@ -558,7 +596,13 @@ test("CLI resumes through native execution with current permissions and preserve
             expect(filesystem[originalHome]).toBeUndefined();
             if (process.platform === "win32") {
               const currentPlugin = options.env!["CODEX_SECURITY_PLUGIN_ROOT"]!;
-              expect(dirname(currentPlugin)).toBe(bootstrapWorkspace);
+              if (selected) {
+                // The fixture root and its process temp parent can both host the ZIP.
+                expect([f.root, dirname(f.root)]).toContain(
+                  dirname(dirname(currentPlugin)),
+                );
+                expect(currentPlugin).not.toBe(selected.root);
+              } else expect(dirname(currentPlugin)).toBe(bootstrapWorkspace);
               expect(filesystem[currentPlugin]).toEqual({ ".": "read" });
             }
             expect(options.env).toMatchObject({
@@ -568,6 +612,16 @@ test("CLI resumes through native execution with current permissions and preserve
             return {
               id: threadId,
               async runStreamed(prompt) {
+                if (selected)
+                  expect(
+                    await readFile(
+                      join(
+                        options.env!["CODEX_SECURITY_PLUGIN_ROOT"]!,
+                        "skills/deep-security-scan/SKILL.md",
+                      ),
+                      "utf8",
+                    ),
+                  ).toBe("# Custom resumed workflow");
                 if (process.platform !== "win32")
                   expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
                 expect(await readFile(feedbackPath, "utf8")).toBe(
@@ -616,7 +670,7 @@ test("CLI resumes through native execution with current permissions and preserve
   expect(await readFile(feedbackPath, "utf8")).toBe(originalFeedback);
   if (process.platform !== "win32")
     expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
-});
+}
 
 test.each([false, true])(
   "resume restores private provider refinements (bulk: %p)",
