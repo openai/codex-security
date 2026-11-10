@@ -104,6 +104,12 @@ report for the imported evidence. If this destination requires a known
 severity, findings whose scanner reported no severity appear in the preview's
 exclusions. The private inbox also accepts unknown severity.
 
+For the repository publisher, Cloud deployments need the `/external/v3` import
+and source-report endpoints for GitHub, Semgrep (including OpenGrep), Inspector,
+Black Duck, Veracode, Continuum, Checkmarx, Trivy and Tenable. Sonar uses
+`/external/v2`. Wiz, Endor and Snyk use `/external`. The CLI uses the same
+request ID and findings when it resumes a saved submission.
+
 The repository publisher allows up to 256 KiB and 20 levels of nesting per finding. The publisher
 batches up to 100 items and 5 MiB per request. Local file imports do not apply
 these Cloud limits.

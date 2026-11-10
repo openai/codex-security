@@ -533,6 +533,19 @@ function sourcePath(repository: ImportRepository): string {
   return `/repository_connectors/${encodeURIComponent(repository.repo_connector_id)}/repositories/${encodeURIComponent(repository.id)}/source_reports`;
 }
 
+function repositoryImportPrefix(provider: Provider): string {
+  switch (provider) {
+    case "wiz":
+    case "endor":
+    case "snyk":
+      return "";
+    case "sonar":
+      return "/v2";
+    default:
+      return "/v3";
+  }
+}
+
 class CloudImportError extends CodexSecurityError {
   constructor(
     public readonly status: number,
@@ -1631,6 +1644,8 @@ async function preparePublicationInput(
   )();
   let canStartJob = false;
   let repositorySeverities: string[] | undefined;
+  const importPrefix = repositoryImportPrefix(options.provider);
+  const repositoryVersionHeader = "Codex-Security-Repository-Import-Version";
   const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
   const providerJobVersion = privateJobVersions[options.provider];
   // Older services recognize an exact v2 request for AWS. Only ask for v3
@@ -1654,7 +1669,12 @@ async function preparePublicationInput(
           "ChatGPT-Account-ID": credentials.account_id,
           Accept: "application/json",
           ...(repositoryCatalog
-            ? { [jobVersionHeader]: requestedJobVersion }
+            ? {
+                [jobVersionHeader]: requestedJobVersion,
+                ...(importPrefix === "/v3" && {
+                  [repositoryVersionHeader]: "3",
+                }),
+              }
             : {}),
           ...(body ? { "Content-Type": "application/json" } : {}),
         },
@@ -1687,9 +1707,12 @@ async function preparePublicationInput(
           .get(header)
           ?.split(",")
           .map((item) => item.trim());
-      repositorySeverities = advertised(
-        "Codex-Security-Repository-Import-Severities",
-      );
+      // A legacy catalog's severity list describes its unversioned publisher.
+      repositorySeverities =
+        importPrefix !== "/v3" ||
+        response.headers.get(repositoryVersionHeader) === "3"
+          ? advertised("Codex-Security-Repository-Import-Severities")
+          : undefined;
       canStartJob =
         advertised("Codex-Security-Private-Import-Providers")?.includes(
           options.provider,
@@ -1745,7 +1768,6 @@ async function preparePublicationInput(
   const report: ExternalFindings & Partial<SnykIssuesFindings> =
     resolved.current;
   const source = { provider: options.provider, source_key: options.sourceKey };
-  const importPrefix = source.provider === "sonar" ? "/v2" : "";
   const sourceReportsPath = importPrefix + sourcePath(destination);
   const checkpointIdentity = [
     // Keep existing production checkpoints readable; other deployments must

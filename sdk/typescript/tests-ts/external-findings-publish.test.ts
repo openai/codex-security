@@ -453,9 +453,14 @@ test("Dependabot retries the approved subset when a numeric size correction admi
       "50c57ce23ee63e16bd06580d955f37110cdc827b26b4737c58ae13bfb88c2bca",
   });
 
+  using transport = spyOn(f.deps, "fetch");
   const resumed = await prepare();
   expect(resumed.preview.resumed).toBe(true);
   expect((await resumed.publish()).receipts[0]!.id).toBe(request.request_id);
+  expect(transport).toHaveBeenCalledWith(
+    expect.stringMatching(/\/external\/v3\/finding_imports$/u),
+    expect.objectContaining({ method: "POST" }),
+  );
   expect(f.posts).toEqual([JSON.stringify(request)]);
 });
 
@@ -900,6 +905,44 @@ test.each([true, false])(
     expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
   },
 );
+
+test("a v3 retry replays the approved severity subset after discovery expands", async () => {
+  const f = await fixture();
+  const input: ExternalFindings = {
+    read: 2,
+    findings: [
+      {
+        source_finding_id: "a",
+        evidence: { title: "Rated", severity: "high" },
+      },
+      {
+        source_finding_id: "b",
+        evidence: { title: "Unrated", severity: "unknown" },
+      },
+    ],
+    excluded: [],
+  };
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      input,
+      { ...options, provider: "github" },
+      f.deps,
+    );
+  const header = "Codex-Security-Repository-Import-Severities";
+  f.state.catalogHeaders["Codex-Security-Repository-Import-Version"] = "3";
+  f.state.catalogHeaders[header] = "high";
+  const first = await prepare();
+  expect(first.preview.findings.map((row) => row.source_finding_id)).toEqual([
+    "a",
+  ]);
+  await f.loseResponse(first);
+  f.state.catalogHeaders[header] = "high,unknown";
+  const retry = await prepare();
+  expect(retry.preview.requests).toEqual(first.preview.requests);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts[1]).toBe(f.posts[0]);
+  expect((await prepare()).preview.findings).toHaveLength(2);
+});
 
 test.each([
   "equivalent",
@@ -2015,6 +2058,7 @@ test.each(["sast", "sca"])(
     unscored.structuredContent.findings[0]!.severity = "UNSPECIFIED";
     const inbox = await privateUploadFixture(unscored, "semgrep", url);
     const headers = inbox.f.state.catalogHeaders;
+    headers["Codex-Security-Repository-Import-Version"] = "3";
     headers["Codex-Security-Repository-Import-Severities"] = "high";
     delete headers["Codex-Security-Private-Import-Providers"];
     await expect(inbox.prepareFile()).rejects.toMatchObject({
@@ -11042,6 +11086,7 @@ test("repository severity exclusions identify every original OpenGrep trace", as
       source_finding_id,
     ]),
   );
+  f.state.catalogHeaders["Codex-Security-Repository-Import-Version"] = "3";
   f.state.catalogHeaders["Codex-Security-Repository-Import-Severities"] =
     "high";
   const prepare = (input: ExternalFindings) =>
@@ -11077,6 +11122,12 @@ test("repository severity exclusions identify every original OpenGrep trace", as
     ).toEqual([...expectedIds]);
     expect(selection.excluded[2]).toEqual(parsed.excluded[0]);
   }
+  // A catalog without a v3 acknowledgement describes the older publisher.
+  delete f.state.catalogHeaders["Codex-Security-Repository-Import-Version"];
+  const preview = (await prepare(parsed)).preview;
+  expect(
+    preview.findings.map(({ source_finding_id }) => source_finding_id),
+  ).toEqual([...ids.values()]);
   expect(f.posts).toHaveLength(0);
 });
 
@@ -12251,25 +12302,25 @@ test("an interrupted native Endor checkpoint retains its original bytes and IDs 
   });
 });
 
-// Pair a native report with the private job route it requires; omitted versions
-// use the unversioned jobs endpoint even when the catalog acknowledges v2.
+// Repository imports and private upload jobs have independent API versions.
 const readerReports = {
-  blackduck: [blackDuckBomReport(), 3],
+  blackduck: [blackDuckBomReport(), "/v3", 3],
   checkmarx: [
     { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
+    "/v3",
     3,
   ],
-  continuum: [continuumDetail(), 2],
-  endor: [[endorSource]],
-  github: [[importedAlert()]],
-  inspector: [inspectorReport(), 2],
-  opengrep: [opengrepJson()],
-  semgrep: [nativeSemgrep],
-  snyk: [snykJson()],
-  sonar: [sonarReport, 3],
-  tenable: [tenableReport, 3],
-  trivy: [trivy, 3],
-  veracode: [veracodePolicyPage(), 3],
+  continuum: [continuumDetail(), "/v3", 2],
+  endor: [[endorSource], ""],
+  github: [[importedAlert()], "/v3"],
+  inspector: [inspectorReport(), "/v3", 2],
+  opengrep: [opengrepJson(), "/v3"],
+  semgrep: [nativeSemgrep, "/v3"],
+  snyk: [snykJson(), ""],
+  sonar: [sonarReport, "/v2", 3],
+  tenable: [tenableReport, "/v3", 3],
+  trivy: [trivy, "/v3", 3],
+  veracode: [veracodePolicyPage(), "/v3", 3],
   wiz: [
     [
       {
@@ -12280,8 +12331,12 @@ const readerReports = {
         vulnerableAsset: { id: "asset-1" },
       },
     ],
+    "",
   ],
-} satisfies Record<ExternalFindingsReader, [unknown, (2 | 3)?]>;
+} satisfies Record<
+  ExternalFindingsReader,
+  [unknown, "" | "/v2" | "/v3", (2 | 3)?]
+>;
 
 // Private structured evidence uses nullable severity and start/end lines.
 // Pin those wire fields to the native fixtures, including the second Continuum
@@ -12345,13 +12400,15 @@ const privateReaderFields = {
 test.each(EXTERNAL_FINDINGS_READERS)(
   "the SDK sends the reviewed %s source identity and evidence to either Cloud destination",
   async (reader) => {
-    const [report, jobVersion] = readerReports[reader];
+    const [report, repositoryPrefix, jobVersion] = readerReports[reader];
     const provider = reader === "opengrep" ? "semgrep" : reader;
     const url =
       reader === "tenable" ? tenableReport.repository_url : exampleRepository;
     const { f, deps, inbox, uploads, jobs, fileId } =
       await privateUploadFixture(report, provider, url);
     const versionHeader = "Codex-Security-Private-Import-Job-Version";
+    const repositoryHeader = "Codex-Security-Repository-Import-Version";
+    const paths: string[] = [];
     const prepare = () =>
       prepareExternalPublication(
         f.file,
@@ -12366,10 +12423,14 @@ test.each(EXTERNAL_FINDINGS_READERS)(
           ...deps,
           fetch(url, init) {
             const path = new URL(url).pathname;
-            if (path.endsWith("/external/repositories"))
-              expect(new Headers(init.headers).get(versionHeader)).toBe(
-                String(jobVersion ?? 2),
+            paths.push(path);
+            if (path.endsWith("/external/repositories")) {
+              const headers = new Headers(init.headers);
+              expect(headers.get(versionHeader)).toBe(String(jobVersion ?? 2));
+              expect(headers.get(repositoryHeader)).toBe(
+                repositoryPrefix === "/v3" ? "3" : null,
               );
+            }
             if (path.endsWith("/finding-imports/jobs"))
               expect(path).toBe(
                 `/backend-api/aardvark${jobVersion ? `/v${jobVersion}` : ""}/finding-imports/jobs`,
@@ -12380,6 +12441,13 @@ test.each(EXTERNAL_FINDINGS_READERS)(
       );
     const capability = "Codex-Security-Private-Import-Providers";
     delete f.state.catalogHeaders[capability];
+    const knownSeverities = "critical,high,medium,low,informational";
+    if (repositoryPrefix === "/v3")
+      f.state.catalogHeaders[repositoryHeader] = "3";
+    f.state.catalogHeaders["Codex-Security-Repository-Import-Severities"] =
+      repositoryPrefix === "/v3"
+        ? `${knownSeverities},unknown`
+        : knownSeverities;
     const repository = await prepare();
     expect(repository.preview.findings).toHaveLength(1);
     // Reader-specific tests cover native ID generation. Here the reviewed ID
@@ -12393,6 +12461,15 @@ test.each(EXTERNAL_FINDINGS_READERS)(
     const stored = f.reports.get(source_finding_id);
     expect(stored).toMatchObject({ source, source_finding_id });
     expect(stored?.evidence).toEqual(evidence);
+    const { repo_connector_id, id } = f.destination();
+    const root = "/backend-api/aardvark/external";
+    const reportsPath = `${root}${repositoryPrefix}/repository_connectors/${repo_connector_id}/repositories/${id}/source_reports`;
+    expect(paths).toEqual([
+      `${root}/repositories`,
+      reportsPath,
+      `${root}${repositoryPrefix}/finding_imports`,
+      `${reportsPath}/${stored!.id}`,
+    ]);
 
     // An unsupported inbox format must not silently switch back to the still
     // connected repository publisher.
