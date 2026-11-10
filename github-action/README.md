@@ -461,6 +461,9 @@ Anyone signed in to GitHub with read access to the repository can download the
 reports, which can contain source code and vulnerability details. Set
 `retention-days` to change the default of seven days.
 
+When the scan records scope limitations, the job summary displays them. For
+example, a time-limited Deep scan can finish before any source review completes.
+
 The job summary includes the configured provider, reported input/cached/output
 token usage, and estimated USD cost, including a range when supplied by the CLI.
 Missing measurements or pricing appear as `unavailable`; measured zeros remain

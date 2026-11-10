@@ -262,15 +262,23 @@ test("managed policy uses the saved login on its own endpoint and disables Blue 
       id_token: `eyJhbGciOiJub25lIn0.${claims}.c2ln`,
     },
   });
-  const requests: Request[] = [];
+  const paths: string[] = [];
+  let servedPolicy = false;
   const policyPath = "/backend-api/wham/config/bundle";
   const endpoint = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch(request) {
-      requests.push(request);
-      if (new URL(request.url).pathname !== policyPath)
-        return new Response(null, { status: 404 });
+      const path = new URL(request.url).pathname;
+      paths.push(path);
+      if (path !== policyPath) return new Response(null, { status: 404 });
+      if (
+        request.headers.get("authorization") !==
+          `Bearer ${chatGptTokens.access_token}` ||
+        request.headers.get("chatgpt-account-id") !== account
+      )
+        return new Response(null, { status: 403 });
+      servedPolicy = true;
       return Response.json({
         requirements_toml: {
           enterprise_managed: [
@@ -297,17 +305,8 @@ test("managed policy uses the saved login on its own endpoint and disables Blue 
         openai_base_url: origin + "/project/v1",
       }),
     ).toBeUndefined();
-    const paths = requests.map((request) => new URL(request.url).pathname);
-    expect(paths).toContain(policyPath);
+    expect(servedPolicy).toBe(true);
     expect(paths.some((path) => path.startsWith("/project"))).toBe(false);
-    for (const request of requests.filter(
-      (entry) => new URL(entry.url).pathname === policyPath,
-    )) {
-      expect(request.headers.get("authorization")).toBe(
-        `Bearer ${chatGptTokens.access_token}`,
-      );
-      expect(request.headers.get("chatgpt-account-id")).toBe(account);
-    }
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(login);
   } finally {
     await endpoint.stop(true);

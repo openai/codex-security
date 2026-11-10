@@ -100,6 +100,9 @@ what will run, ask for the effective worker count, subagents per worker, stop
 conditions, review cap, and discovery time limit. The plugin returns each value
 and its source in `setup.deepScanConfig` from `inspect_codex_security_setup`.
 Both setup and `start_codex_security_deep_scan` accept `projectConfigPath`.
+For a file under your home directory, `~/security/scan.yaml` and
+`~\security\scan.yaml` both select the same file. On POSIX, use the `~/`
+spelling when the filename itself contains a backslash.
 
 Explicit project settings override per-user `[deep_scan]` settings, which override
 built-in defaults. The per-user file remains
@@ -150,7 +153,7 @@ load the same config also use that setting. The usual config file is
 | `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                               | Report-only                        |
 | `output.directory`             | Artifact directory outside the scanned Git worktree                                  | Existing private artifact location |
 
-See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
+See [owner suggestions](../sdk/typescript/docs/cli.md#scan-options-and-output) for
 supported scan types, cost-limit behavior, and the saved report.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific
@@ -224,7 +227,9 @@ the file loader also returns
 `projectConfig` path and source metadata. The optional directory argument defaults
 to the current directory. It locates a selected file or anchors an in-memory
 object's context, prompt, and output paths. Files anchor those paths to their own
-directory. Neither helper reads prompt contents or prepares a runtime.
+directory. On POSIX, `link/../scan.yaml` selects the file in the parent of
+the directory that `link` points to. Neither helper reads prompt contents or
+prepares a runtime.
 Resolved context, prompt, and output paths have the SDK's `AbsolutePath` type;
 scope paths remain relative to the selected repository.
 

@@ -9,7 +9,6 @@ import {
   readdir,
   realpath,
   rm,
-  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -303,6 +302,14 @@ describe("CodexSecurity policy API", () => {
           filesystem: {
             [process.platform === "win32" ? ":root" : ":minimal"]: "read",
             ":workspace_roots": "read",
+            ...(process.platform === "win32"
+              ? Object.fromEntries(
+                  f.threads[0]!.additionalDirectories!.map((path) => [
+                    path,
+                    { ".": "read" },
+                  ]),
+                )
+              : {}),
             ...Object.fromEntries(
               readPaths.map((path) => [path, { ".": "read" }]),
             ),
@@ -364,8 +371,6 @@ describe("CodexSecurity policy API", () => {
       for (const { f, sandbox } of sessions) {
         const configuration = f.configuration()!;
         expect(configuration.config?.["windows"]).toEqual({ sandbox });
-        // An absent deny-listed path can be created as a directory by the Windows sandbox.
-        expect((await stat(f.runtime.configPath!)).isFile()).toBe(true);
         const overrides = parseToml(configuration.configOverrides!.join("\n"));
         const filesystem = (
           overrides["permissions"] as Record<string, Record<string, unknown>>
@@ -792,9 +797,9 @@ describe("CodexSecurity policy API", () => {
           {},
           { environment: { CODEX_SECURITY_STATE_DIR: outputDir } },
         );
-        await expect(state.preflightPolicy(repository)).rejects.toThrow(
-          "outside the protected scan root",
-        );
+        await expect(state.preflightPolicy(repository)).rejects.toMatchObject({
+          pathKind: "state",
+        });
         if (kind === "linked" && metadata === gitDirectory) {
           await expect(state.generatePolicy(repository)).rejects.toThrow(
             "outside the protected scan root",

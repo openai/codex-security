@@ -3,7 +3,6 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import {
-  CODEX_AUTH_CONFIG_KEYS,
   configuredCodexHome,
   environmentEntry,
   withoutOpenAiApiKeys,
@@ -15,6 +14,7 @@ import {
 } from "./cli-daybreak.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
+  CODEX_AUTH_CONFIG_KEYS,
   hasCommandAuth,
   inlineToml,
   resolveCodexProfile,
@@ -198,11 +198,12 @@ async function nativeModels(
   signal: AbortSignal,
 ) {
   const result = await runCodexCommand(
-    { ...command, cwd },
+    command,
     args,
     environment,
     undefined,
     signal,
+    { cwd },
   );
   signal.throwIfAborted();
   if (!result.success)
