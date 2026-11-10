@@ -7968,20 +7968,18 @@ export async function main(
         const messages = validationError["fieldErrors"].map((field) => {
           if (!isJsonObject(field) || typeof field["path"] !== "string")
             return message;
-          if (
-            field["missing"] &&
-            options &&
-            Object.hasOwn(options, field["path"])
-          ) {
+          const detail =
+            typeof field["message"] === "string" ? field["message"] : message;
+          if (options && Object.hasOwn(options, field["path"])) {
             const flag = field["path"].replace(
               /[A-Z]/g,
               (letter) => `-${letter.toLowerCase()}`,
             );
-            return `Missing required option --${flag}.`;
+            return field["missing"]
+              ? `Missing required option --${flag}.`
+              : `Invalid value for --${flag}: ${detail}`;
           }
-          return typeof field["message"] === "string"
-            ? field["message"]
-            : message;
+          return detail;
         });
         message = messages.join("\n");
         validationError["message"] = message;

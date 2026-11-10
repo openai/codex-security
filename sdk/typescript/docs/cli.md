@@ -600,8 +600,8 @@ on stderr without `--full-output`, or when retained results are unavailable.
 
 Scan argument errors with `--full-output` and JSON or JSONL use an `ok: false`
 envelope with `error.code` and `error.message`. Command schema validation errors
-with JSON or JSONL retain their field details and name missing options by their
-CLI flags. Diagnostics stay on stderr.
+with JSON or JSONL retain their field details and name missing or invalid
+options by their CLI flags. Diagnostics stay on stderr.
 `scan --schema --format json` describes optional caller inputs before defaults
 and the fields returned by preflight, completed scans, and execution failures,
 including sealed results recovered after an interruption.
