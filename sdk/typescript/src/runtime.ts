@@ -240,7 +240,11 @@ function environmentValue(
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
-  const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
+  const configured = environmentValue(
+    environment,
+    "CODEX_SECURITY_STATE_DIR",
+    process.platform !== "win32",
+  );
   const path =
     configured !== undefined
       ? resolve(expandHome(configured, environment))

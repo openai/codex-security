@@ -5717,6 +5717,19 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing whitespace in an explicit POSIX state directory",
+    async () => {
+      const root = await temporaryDirectory();
+      for (const suffix of [" ", "\u00a0"]) {
+        const state = join(root, `explicit-state${suffix}`);
+        expect(
+          codexSecurityStateDirectory({ CODEX_SECURITY_STATE_DIR: state }),
+        ).toBe(state);
+      }
+    },
+  );
+
   test("derives persistent state from the ambient home or explicit override", async () => {
     const root = await temporaryDirectory();
     expect(codexSecurityStateDirectory({ CODEX_HOME: root })).toBe(
