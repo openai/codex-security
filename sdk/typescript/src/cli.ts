@@ -372,7 +372,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
-import { quoteCliPath } from "./cli-argument.js";
+import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import type { PatchSelection } from "./patch-tui.js";
@@ -2666,6 +2666,7 @@ export async function main(
   const findingFeedback = Cli.create("findings", {
     description: "Review saved findings (default: list).",
   }).command("false-positive", {
+    usage: [{ suffix: "OCCURRENCE_ID --reason TEXT" }],
     description: "Mark a finding as a false positive for future scans.",
     examples: [
       {
@@ -2709,6 +2710,8 @@ export async function main(
   });
   findingFeedback.command("list", {
     description: "List open findings for a repository across its scans.",
+    examples: [{ args: { repository: "." } }],
+    hint: "Use findings false-positive to record a triage decision for an occurrence.",
     args: z.object({
       repository: z
         .string()
@@ -2772,6 +2775,8 @@ export async function main(
   });
   findingFeedback.command("imported", {
     description: "List imported vendor evidence for a local repository.",
+    examples: [{ args: { repository: "." } }],
+    hint: "Use publish findings FILE --to local to save a vendor report. See publish findings --help for its required selectors.",
     args: z.object({
       repository: z
         .string()
@@ -2830,6 +2835,8 @@ export async function main(
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
+      examples: [{ args: { repository: "." } }],
+      hint: "Use scans show SCAN_ID for results or scans logs SCAN_ID for activity.",
       args: z.object({
         repository: z
           .string()
@@ -3003,6 +3010,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
+      examples: [{ args: { scanId: "SCAN_ID" } }],
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -3073,6 +3081,7 @@ export async function main(
     .command("rerun", {
       description:
         "Start a new scan using saved settings and current checkout/context files.",
+      examples: [{ args: { scanId: "SCAN_ID" } }],
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
       args: z.object({
@@ -3201,6 +3210,12 @@ export async function main(
     })
     .command("match", {
       description: "Match findings by root cause across saved scans.",
+      usage: [
+        { suffix: "BEFORE AFTER [options]" },
+        { suffix: "--all [options]" },
+      ],
+      examples: [{ options: { all: true } }],
+      hint: "Use scans compare for a pair. Match all completed scans with --all; --force recomputes saved matches.",
       destructive: true,
       args: z.object({
         beforeId: z
@@ -3246,7 +3261,11 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Match and compare findings between scans.",
+      description:
+        "Compare findings from two scans. Uncached matches can use the model and save matching decisions.",
+      examples: [
+        { args: {}, description: "Compare the latest two completed scans." },
+      ],
       destructive: true,
       args: z.object({
         beforeId: z
@@ -3299,12 +3318,25 @@ export async function main(
   const publication = Cli.create("publish", {
     description: "Publish Codex Security findings.",
   }).command("scan", {
-    description:
-      "Publish findings from a completed scan, or a CSV for internal publication.",
-    hint:
-      "Examples:\n" +
-      "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
-      "  codex-security publish scan --to custom --scan latest --findings-url http://localhost:3000",
+    description: "Publish findings from a completed scan.",
+    examples: [
+      {
+        options: {
+          to: "linear",
+          scan: ["latest"],
+          linearTeam: "TEAM_ID",
+          dryRun: true,
+        },
+      },
+      {
+        options: {
+          to: "custom",
+          scan: ["latest"],
+          findingsUrl: "http://localhost:3000",
+        },
+      },
+    ],
+    hint: "Use --dry-run to preview the selected findings before publishing.",
     destructive: true,
     args: z.object({
       scanDir: z
@@ -3923,7 +3955,31 @@ export async function main(
     .command("findings", {
       description:
         "Preview and import a saved scanner report locally or to Cloud.",
-      hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      usage: [
+        {
+          args: { file: true },
+          options: {
+            to: true,
+            repository: true,
+            provider: true,
+            sourceKey: true,
+          },
+          suffix: "[options]",
+        },
+      ],
+      examples: [
+        {
+          args: { file: "selected-wiz.json" },
+          options: {
+            to: "local",
+            repository: "./project",
+            provider: "wiz",
+            sourceKey: "tenant/vulnerability-finding",
+            dryRun: true,
+          },
+        },
+      ],
+      hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.",
       destructive: true,
       args: z.object({
         file: z
@@ -4136,7 +4192,7 @@ export async function main(
               const summary =
                 disposition === "empty"
                   ? "The report contains no findings. Nothing was stored.\n"
-                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nStored evidence: ${importedFindingsCommand(preview.repository)}\n`;
+                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\n${importedFindingsCommand(preview.repository)}\n`;
               if (humanSummary) renderedOutput = summary;
               else if (!structured) writeDiagnostic(summary);
               return { ...result };
@@ -4274,6 +4330,13 @@ export async function main(
     .command("check", {
       description:
         "Check saved scan history and Linear access without creating issues.",
+      examples: [
+        {
+          args: { scanDir: "../scan-results" },
+          options: { to: "linear", linearTeam: "TEAM_ID" },
+        },
+      ],
+      hint: "Use publish scan --dry-run to preview a publication offline.",
       args: z.object({
         scanDir: z.string().describe("Completed scan directory."),
       }),
@@ -4302,9 +4365,9 @@ export async function main(
       },
     });
   const imports = Cli.create("import", {
-    description:
-      "Import Sonar security issues or read hosted Semgrep, Snyk, and GitHub findings.",
+    description: "Collect findings from GitHub, Semgrep, Snyk or Sonar.",
   }).command("github", {
+    examples: [{ args: { repository: "owner/repo" } }],
     description: "Read GitHub code scanning alerts without changing GitHub.",
     hint: "Save complete --format json output for publish findings --provider github. This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
@@ -4431,6 +4494,7 @@ export async function main(
   }
   imports
     .command("github-advisories", {
+      examples: [{ args: { repository: "owner/repo" } }],
       description: "Read GitHub security advisories without changing GitHub.",
       hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
       destructive: false,
@@ -4498,8 +4562,24 @@ export async function main(
         ),
     })
     .command("snyk", {
+      usage: [
+        {
+          args: { project: true },
+          options: { snykOrg: true, sourceRepositoryUrl: true },
+          suffix: "[options]",
+        },
+      ],
       description:
         "Read Snyk Open Source or Code issues for one monitored project.",
+      examples: [
+        {
+          args: { project: "PROJECT_ID" },
+          options: {
+            snykOrg: "ORG_ID",
+            sourceRepositoryUrl: "https://github.com/example/project",
+          },
+        },
+      ],
       hint: "Requires SNYK_TOKEN. Save the complete --format json output. Use publish findings --provider snyk with --to local or --to cloud.",
       destructive: false,
       args: z.object({
@@ -4558,8 +4638,24 @@ export async function main(
       },
     })
     .command("semgrep", {
+      usage: [
+        {
+          args: { project: true },
+          options: { semgrepDeployment: true, semgrepRef: true },
+          suffix: "[options]",
+        },
+      ],
       description:
         "Read a full Semgrep Platform project and ref through the Web API.",
+      examples: [
+        {
+          args: { project: "owner/project" },
+          options: {
+            semgrepDeployment: "DEPLOYMENT",
+            semgrepRef: "refs/heads/main",
+          },
+        },
+      ],
       hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output with publish findings --provider semgrep and --to local or --to cloud. Selected Guardian MCP captures also support both destinations.",
       destructive: false,
       args: z.object({
@@ -4623,8 +4719,16 @@ export async function main(
       },
     })
     .command("sonar", {
+      usage: [
+        { suffix: "[--sonar-project KEY] [options]" },
+        { suffix: "CAPTURE [options]" },
+      ],
       description:
         "Collect Sonar security findings or replay a saved capture into the local workbench.",
+      examples: [
+        { options: { sonarProject: "PROJECT_KEY", dryRun: true } },
+        { args: { capture: "../reports/sonar.json" } },
+      ],
       hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a live capture for review without importing findings.",
       destructive: true,
       args: z.object({
@@ -4835,7 +4939,7 @@ export async function main(
               );
             if (humanSummary) {
               const { created, updated, unchanged } = result.local.counts;
-              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\nStored evidence: ${importedFindingsCommand(info.repository)}\n`;
+              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\n${importedFindingsCommand(info.repository)}\n`;
               if (result.cloud)
                 renderedOutput += renderExternalPublicationSummary(
                   result.cloud,
@@ -4883,6 +4987,7 @@ export async function main(
     },
   };
   const cli = Cli.create("codex-security", cliOptions)
+    .command(scanHistory)
     .command("policy", {
       description: "Draft SECURITY.md for review.",
       destructive: true,
@@ -5051,21 +5156,27 @@ export async function main(
           return fail(message, 2);
         }
       },
-    })
-    .command("scan", {
+    });
+  function createScanCommands() {
+    return Cli.create("scan", {
       description: "Scan a repository, selected paths, or Git changes.",
-      hint:
-        "Examples:\n" +
-        "  codex-security scan .\n" +
-        "  codex-security scan . --path src --path tests\n" +
-        "  codex-security scan . --working-tree\n" +
-        "  codex-security scan . --diff origin/main\n" +
-        "  codex-security scan . --mode deep\n\n" +
-        "Import existing findings without security analysis:\n" +
-        "  codex-security scan import --csv findings.csv\n" +
-        "  codex-security scan import --json findings.json\n" +
-        "Use ./import to scan a repository named import.\n" +
-        "Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
+      usage: [
+        {
+          suffix:
+            "[repository] [--path PATH | --diff REF | --working-tree] [options]",
+        },
+        { suffix: "--host" },
+        { suffix: "import (--csv FILE | --json FILE) [options]" },
+      ],
+      examples: [
+        { args: { repository: "." }, options: { dryRun: true } },
+        { args: { repository: "." } },
+        { args: { repository: "." }, options: { path: ["src", "tests"] } },
+        { args: { repository: "." }, options: { workingTree: true } },
+        { args: { repository: "." }, options: { diff: "origin/main" } },
+        { args: { repository: "." }, options: { mode: "deep" } },
+      ],
+      hint: "Import existing findings without security analysis with scan import --help. Use ./import to scan a repository named import. Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
       alias: { config: "c" },
       args: z.object({
@@ -5099,7 +5210,7 @@ export async function main(
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
-              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+              "Stable hashed end-user ID for model requests (1–64 characters). Requires a compatible Codex runtime.",
             ),
           path: z
             .array(optionValue("--path"))
@@ -5320,10 +5431,89 @@ export async function main(
           ? finishScan(outcome, format, incurError)
           : finishScanCommand(outcome, format, incurError);
       },
-    })
+    }).command("import", {
+      usage: [{ suffix: "(--csv FILE | --json FILE) [options]" }],
+      description:
+        "Save CSV or JSON findings as a completed scan without security analysis.",
+      destructive: true,
+      options: z
+        .object({
+          csv: optionValue("--csv")
+            .optional()
+            .describe("Findings CSV in the codex-security export format."),
+          json: optionValue("--json")
+            .optional()
+            .describe(
+              "Findings JSON document or object with a findings array.",
+            ),
+          outputDir: optionValue("--output-dir")
+            .optional()
+            .describe(
+              "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+            ),
+          archiveExisting: z
+            .boolean()
+            .default(false)
+            .describe("Archive existing results; requires --output-dir."),
+          dryRun: z
+            .boolean()
+            .default(false)
+            .describe("Validate the input without saving a scan."),
+        })
+        .refine(
+          (options) =>
+            Number(options.csv !== undefined) +
+              Number(options.json !== undefined) ===
+            1,
+          { message: "Provide exactly one of --csv FILE or --json FILE." },
+        )
+        .refine(
+          (options) =>
+            !options.archiveExisting || options.outputDir !== undefined,
+          { message: "--archive-existing requires --output-dir." },
+        )
+        .meta({ oneOf: [{ required: ["csv"] }, { required: ["json"] }] }),
+      examples: [
+        { options: { csv: "findings.csv" } },
+        { options: { json: "findings.json" } },
+      ],
+      hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ options, format, error: incurError }) {
+        const directory = dependencies.currentDirectory();
+        const outcome = await runImport({
+          sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
+          format: options.csv === undefined ? "json" : "csv",
+          outputDir:
+            options.outputDir === undefined
+              ? undefined
+              : resolveCliPath(directory, options.outputDir),
+          archiveExisting: options.archiveExisting,
+          dryRun: options.dryRun,
+        });
+        exitCode = outcome.exitCode;
+        if (outcome.error !== undefined) {
+          return incurError({
+            code: "SCAN_IMPORT_FAILED",
+            message: outcome.error,
+            exitCode,
+          });
+        }
+        if (!options.dryRun && useDefaultOutput(format)) {
+          return;
+        }
+        return outcome.data;
+      },
+    });
+  }
+  cli
+    .command(createScanCommands())
     .command("install-hook", {
       description:
         "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
+      examples: [
+        { args: { repository: "." }, options: { failOnSeverity: "high" } },
+      ],
       hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
       args: z.object({
@@ -5410,10 +5600,10 @@ export async function main(
         }
       },
     })
-    .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
     .command("suggest-owners", {
+      examples: [{ args: { findings: "findings.json" } }],
       description: "Suggest finding owners from CODEOWNERS and Git history.",
       destructive: false,
       args: z.object({
@@ -5481,7 +5671,12 @@ export async function main(
     })
     .command("classify-severity", {
       description: "Assess severity for saved findings or canonical records.",
-      hint: "For saved findings, use --rubric for your own policy or set CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1 for the Statsig default. For host-provided reviews, use --records.",
+      usage: [
+        { suffix: "(--scan ID | --scan-dir DIR) [options]" },
+        { suffix: "--records [--runs COUNT]" },
+      ],
+      examples: [{ options: { scan: "latest" } }],
+      hint: `Use the built-in severity rubric or select --rubric FILE. Each uncached finding receives ${DEFAULT_REVIEW_RUNS} model reviews by default. Use --reprocess to replace saved assessments. --records accepts host-provided reviews over JSON-RPC.`,
       destructive: true,
       options: z.object({
         runs: reviewRunsOption.describe(
@@ -5602,8 +5797,14 @@ export async function main(
       },
     })
     .command("dedupe", {
-      description: "Identify duplicate findings in a saved scan.",
-      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
+      description: "Find duplicates against the saved findings corpus.",
+      usage: [
+        { suffix: "--scan ID [--workflow-id ID] [options]" },
+        { suffix: "--workflow-id ID [options]" },
+        { suffix: "--records" },
+      ],
+      examples: [{ options: { scan: "latest" } }],
+      hint: "Service-backed deduplication can save duplicate groups to the selected findings service. Use --records alone for host-provided reviews over JSON-RPC.",
       destructive: true,
       options: z.object({
         concurrency: positiveInteger
@@ -5784,7 +5985,32 @@ export async function main(
     })
     .command(imports)
     .command("scan-components", {
-      description: "Scan project components and combine results.",
+      description:
+        "Scan project components independently and combine their results.",
+      usage: [
+        {
+          suffix:
+            "[repository] (--component PATH | --components-file FILE | --auto) --output-dir DIR [options]",
+        },
+      ],
+      examples: [
+        {
+          args: { repository: "." },
+          options: {
+            component: ["services/api"],
+            outputDir: "../component-results",
+          },
+        },
+        {
+          args: { repository: "." },
+          options: {
+            auto: true,
+            planOnly: true,
+            outputDir: "../component-plan",
+          },
+        },
+      ],
+      hint: "Supply --output-dir or configure output.directory. Automatic planning can call a model even with --plan-only. A per-component --max-cost does not cover planning.",
       destructive: true,
       alias: { config: "c" },
       args: z.object({
@@ -6104,17 +6330,22 @@ export async function main(
         ),
         ...runtimeOptions(() => z.string().min(1)),
       }),
+      usage: [
+        { suffix: "[options]" },
+        { suffix: "repositories.csv --output-dir DIR [options]" },
+        { suffix: "repositories.csv --recover --output-dir DIR [options]" },
+      ],
       examples: [
         {
-          args: {},
-          options: { model: "gpt-5.6-terra", effort: "high" },
+          args: { input: "repositories.csv" },
+          options: { outputDir: "../campaign", workers: 4, maxAttempts: 3 },
+        },
+        {
+          args: { input: "repositories.csv" },
+          options: { recover: true, outputDir: "../campaign" },
         },
       ],
-      hint:
-        "CSV example:\n" +
-        "  codex-security bulk-scan repositories.csv " +
-        "--output-dir /path/outside/repositories/results " +
-        "--workers 4 --max-attempts 3",
+      hint: "Omit the CSV to select repositories interactively. A configured output.directory can supply the results directory; --max-cost applies per repository attempt.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
@@ -6483,6 +6714,8 @@ export async function main(
       },
     })
     .command("validate", {
+      usage: [{ suffix: "<findings...> [options]" }, { suffix: "--records" }],
+      examples: [{ args: { "findings...": "findings.json" } }],
       hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       description:
         "Assess candidate security findings using source evidence only.",
@@ -6558,6 +6791,12 @@ export async function main(
       },
     })
     .command("verify-fix", {
+      usage: [
+        { suffix: "FINDING... [options]" },
+        { suffix: "--scan ID [--severity LEVEL] [options]" },
+        { suffix: "(--linear-issue ID | --linear-project PROJECT) [options]" },
+        { suffix: "--host" },
+      ],
       description:
         "Verify existing security fixes without changing the repository.",
       destructive: false,
@@ -6790,6 +7029,13 @@ export async function main(
       },
     })
     .command("patch", {
+      usage: [
+        { suffix: "ISSUE... [options]" },
+        { suffix: "--scan ID [--severity LEVEL] [options]" },
+        { suffix: "(--linear-issue ID | --linear-project PROJECT) [options]" },
+        { suffix: "--resume-pr BRANCH" },
+        { suffix: "--host" },
+      ],
       description: "Patch one or more security issues.",
       destructive: true,
       args: z.object({
@@ -7369,6 +7615,8 @@ export async function main(
       },
     })
     .command("feedback", {
+      usage: [{ suffix: "[scan-id] --reason TEXT [--include-logs]" }],
+      examples: [{ options: { reason: "unexpected-result" } }],
       description: "Send feedback to OpenAI and return a feedback ID.",
       destructive: true,
       args: z.object({
@@ -7531,6 +7779,7 @@ export async function main(
     });
 
   const commands = Cli.toCommands.get(cli)!;
+  prepareCliExamples(commands);
   const valueOptions = cliValueOptions(commands);
   const commandIndex = argv.findIndex((value, index) => {
     if (value.startsWith("-")) return false;
@@ -7539,6 +7788,20 @@ export async function main(
   const command = argv[commandIndex];
   const following = argv[commandIndex + 1];
   const scanImport = command === "scan" && following === "import";
+  if (
+    command === "scan" &&
+    !scanImport &&
+    (!argv.some((arg) =>
+      ["--help", "-h", "--schema", "--llms", "--llms-full"].includes(arg),
+    ) ||
+      (following !== undefined && !following.startsWith("-")))
+  ) {
+    // Even directories named "imports" or "./import" are valid targets.
+    // Bypass Incur's subcommand typo suggestions for an explicit scan path.
+    const scan = commands.get(command);
+    if (scan && "_group" in scan && scan.root) commands.set(command, scan.root);
+  }
+
   if (
     (command === "scans" || command === "findings") &&
     !argv.includes("--help") &&
@@ -7675,6 +7938,8 @@ export async function main(
         continue;
       const next = argv[index + 1];
       if (next === undefined || next.startsWith("--") || next === "-h") {
+        if (scanImport && option === "--json" && argv.includes("--schema"))
+          continue;
         return `Missing value for flag: ${option}`;
       }
       index += 1;
@@ -7754,6 +8019,7 @@ export async function main(
     errorOutput.isTTY === true &&
     argv.length > 0 &&
     argv[0] !== "completions" &&
+    !process.env["COMPLETE"] &&
     !argv.some((argument) =>
       [
         "--help",
@@ -7770,87 +8036,6 @@ export async function main(
           .checkForUpdate(updateController.signal)
           .catch(() => undefined)
       : undefined;
-
-  // Incur cannot mount a command with both a handler and subcommands.
-  // Select the nested import route while preserving scan [repository].
-  if (scanImport) {
-    cli.command(
-      Cli.create("scan", {
-        description: "Run or import a saved scan.",
-      }).command("import", {
-        description:
-          "Save CSV or JSON findings as a completed scan without security analysis.",
-        destructive: true,
-        options: z
-          .object({
-            csv: optionValue("--csv")
-              .optional()
-              .describe("Findings CSV in the codex-security export format."),
-            json: optionValue("--json")
-              .optional()
-              .describe(
-                "Findings JSON document or object with a findings array.",
-              ),
-            outputDir: optionValue("--output-dir")
-              .optional()
-              .describe(
-                "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
-              ),
-            archiveExisting: z
-              .boolean()
-              .default(false)
-              .describe("Archive existing results; requires --output-dir."),
-            dryRun: z
-              .boolean()
-              .default(false)
-              .describe("Validate the input without saving a scan."),
-          })
-          .refine(
-            (options) =>
-              Number(options.csv !== undefined) +
-                Number(options.json !== undefined) ===
-              1,
-            { message: "Provide exactly one of --csv FILE or --json FILE." },
-          )
-          .refine(
-            (options) =>
-              !options.archiveExisting || options.outputDir !== undefined,
-            { message: "--archive-existing requires --output-dir." },
-          ),
-        examples: [
-          { options: { csv: "findings.csv" } },
-          { options: { json: "findings.json" } },
-        ],
-        hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
-        output: z.record(z.string(), z.unknown()).optional(),
-        async run({ options, format, error: incurError }) {
-          const directory = dependencies.currentDirectory();
-          const outcome = await runImport({
-            sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
-            format: options.csv === undefined ? "json" : "csv",
-            outputDir:
-              options.outputDir === undefined
-                ? undefined
-                : resolveCliPath(directory, options.outputDir),
-            archiveExisting: options.archiveExisting,
-            dryRun: options.dryRun,
-          });
-          exitCode = outcome.exitCode;
-          if (outcome.error !== undefined) {
-            return incurError({
-              code: "SCAN_IMPORT_FAILED",
-              message: outcome.error,
-              exitCode,
-            });
-          }
-          if (!options.dryRun && useDefaultOutput(format)) {
-            return;
-          }
-          return outcome.data;
-        },
-      }),
-    );
-  }
 
   let notice: UpdateNotice | undefined;
   try {
@@ -7872,6 +8057,21 @@ export async function main(
   )
     onInterruptedSignIn?.();
   let frameworkOutput = frameworkCapture.text();
+  if (
+    command !== undefined &&
+    (argv.includes("--help") || argv.includes("-h")) &&
+    frameworkOutput.includes("\nUsage: codex-security <command>\n")
+  ) {
+    // Incur returns the root menu for unresolved application help paths.
+    const parent = commands.get(command);
+    const group = parent && "_group" in parent ? command : undefined;
+    const path = group && following ? `${group} ${following}` : command;
+    errorOutput.write(
+      `codex-security: Unknown command ${diagnosticValue(path)}. Use codex-security${group ? ` ${group}` : ""} --help.\n`,
+    );
+    return 2;
+  }
+
   if (filteredScanFailure !== undefined) {
     // Success-field filters do not apply to diagnostics. Reuse Incur's format
     // and token controls without running the saved scan a second time.
@@ -8309,19 +8509,53 @@ function frameworkOutputFlags(argv: readonly string[]) {
   };
 }
 
+/** Incur prints example keys verbatim and treats every option as a single value.
+ * Give its shared help, manifest and skill renderers the actual shell tokens.
+ */
+function prepareCliExamples(
+  commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
+): void {
+  for (const entry of commands.values()) {
+    if ("_group" in entry) prepareCliExamples(entry.commands);
+    const command = "_group" in entry ? entry.root : entry;
+    if (!command || !("examples" in command)) continue;
+    for (const example of command.examples ?? []) {
+      const tokens = Object.values(example.args ?? {}).map((value) =>
+        quoteCliPath(String(value)),
+      );
+      for (const [key, value] of Object.entries(example.options ?? {})) {
+        const flag = `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+        for (const item of Array.isArray(value) ? value : [value]) {
+          tokens.push(item === false ? `${flag}=false` : flag);
+          if (typeof item !== "boolean")
+            tokens.push(quoteCliPath(String(item)));
+        }
+      }
+      example.args = tokens;
+      delete example.options;
+    }
+  }
+}
+
 function cliValueOptions(
   commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
 ): Set<string> {
   const options = new Set(FRAMEWORK_VALUE_OPTIONS);
-  for (const command of commands.values()) {
-    if ("_group" in command) {
-      for (const option of cliValueOptions(command.commands))
-        options.add(option);
-    } else if ("options" in command && command.options) {
+  for (const entry of commands.values()) {
+    if ("_group" in entry) {
+      for (const option of cliValueOptions(entry.commands)) options.add(option);
+    }
+    const command = "_group" in entry ? entry.root : entry;
+    if (command && "options" in command && command.options) {
       for (const [name, schema] of Object.entries(
         z.toJSONSchema(command.options, { io: "input" }).properties ?? {},
       )) {
-        if (typeof schema === "object" && schema.type === "boolean") continue;
+        // Bare --json is the framework output shortcut, except on scan import.
+        if (
+          name === "json" ||
+          (typeof schema === "object" && schema.type === "boolean")
+        )
+          continue;
         options.add(
           `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`,
         );
@@ -11411,7 +11645,7 @@ async function executeScan(
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
       const scanId = quoteCliPath(diagnosticValue(result.manifest.scan.id));
-      const message = `Validation interrupted. Original output directory: ${errorMessage(result.scanDir)}. Run codex-security scans show ${scanId} to inspect the completed scan.`;
+      const message = `Validation interrupted. Original output directory: ${errorMessage(result.scanDir)}. Run${cliShellLabel(scanId)} codex-security scans show ${scanId} to inspect the completed scan.`;
       errorOutput.write(`codex-security: ${message}\n`);
       return {
         exitCode,
@@ -12044,8 +12278,10 @@ function printScanReference(
   output.write(
     `\n${detail.join(" · ")}\n` +
       (selection === undefined ? "" : `Selected ${selection}.\n`) +
-      `Inspect: codex-security scans show ${argument}\n` +
-      (showLogs ? `Logs:    codex-security scans logs ${argument}\n` : ""),
+      `Inspect${cliShellLabel(argument)}: codex-security scans show ${argument}\n` +
+      (showLogs
+        ? `Logs${cliShellLabel(argument)}:    codex-security scans logs ${argument}\n`
+        : ""),
   );
 }
 
@@ -12255,7 +12491,7 @@ function protectedRootErrorMessage(
     error.pathKind === "output"
       ? suggestion === undefined
         ? "Choose an output directory outside the protected root."
-        : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
+        : `Re-run${cliShellLabel(quoteCliPath(suggestion))} with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
         : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`,
@@ -12296,7 +12532,8 @@ function suggestedOutputDirectory(protectedRoot: string): string | undefined {
 function importedFindingsCommand(repository: string): string {
   if (diagnosticValue(repository) !== repository)
     return "From the repository directory, run codex-security findings imported.";
-  return `codex-security findings imported ${quoteCliPath(repository)}`;
+  const path = quoteCliPath(repository);
+  return `Stored evidence${cliShellLabel(path)}: codex-security findings imported ${path}`;
 }
 
 async function selectedProjectConfig(
