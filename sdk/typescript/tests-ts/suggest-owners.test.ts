@@ -1170,26 +1170,56 @@ test("deduplicates citation IDs on the first model candidate", async () => {
   expect(result.evidence).toEqual(result.suggestions[0]!.evidence);
 });
 
-test("scan fallback uses file history without lines and abstains for conflicting line authors", async () => {
+test("scan fallback ranks up to three distinct authors by committer time for ranges and file paths", async () => {
   const repo = await repository();
   const { codex, calls } = fakeCodex();
+  const path = "handler.ts";
+  const file = join(repo.path, path);
+  const base = Number(await repo.git("show", "-s", "--format=%ct", "HEAD"));
+  // Author dates run in the opposite direction. Repeated emails and equal
+  // committer timestamps exercise deduplication and the stable tiebreaker.
+  for (const [i, author] of ["zoe", "amy", "zoe", "lee"].entries()) {
+    await writeFile(file, (await readFile(file, "utf8")) + author + "\n");
+    await execFile(
+      "git",
+      [
+        "-C",
+        repo.path,
+        "-c",
+        "user.name=" + author,
+        "-c",
+        "user.email=" + author + "@example.test",
+        "commit",
+        "-qam",
+        "Append source",
+      ],
+      {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_DATE: String(base - i - 10) + " +0000",
+          GIT_COMMITTER_DATE: String(base + Math.min(i + 1, 3)) + " +0000",
+        },
+      },
+    );
+  }
   const inputs = [
-    [{ path: "handler.ts" }],
-    [{ path: "handler.ts", startLine: 1, endLine: 3 }],
-    [{ path: "handler.ts" }, { path: "missing.ts" }],
+    [{ path }],
+    [{ path, startLine: 1, endLine: 8 }],
+    [{ path }, { path: "missing.ts" }],
   ].map((locations, index) => ({
     ...finding,
     findingId: String(index),
     locations,
   }));
   const report = await suggestOwnersFromScan(repo.path, inputs, { codex });
-  expect(report.results[0]).toMatchObject({
-    owner: { email: "blair@example.test" },
-    evidence: [{ kind: "history", commit: repo.revision, path: "handler.ts" }],
-  });
-  expect(report.results.slice(1).map((item) => item.suggestions)).toEqual([
-    [],
-    [],
-  ]);
+  for (const [index, kind] of ["history", "blame"].entries()) {
+    expect(report.results[index]!.suggestions).toMatchObject(
+      ["lee", "zoe", "amy"].map((author) => ({
+        owner: { email: author + "@example.test" },
+        evidence: [{ kind, path }],
+      })),
+    );
+  }
+  expect(report.results[2]!.suggestions).toEqual([]);
   expect(calls).toHaveLength(0);
 });

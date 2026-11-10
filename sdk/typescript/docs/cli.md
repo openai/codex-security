@@ -522,8 +522,9 @@ Replaying completion preserves the sealed finding bytes. Deep Scan automatic
 completion and committed-diff scans use the separate owner report. This option is unsupported for working-tree and
 directory snapshots. With `--max-cost`, completion still resolves owners from the checkout without
 another model call. It lists declared CODEOWNERS first, then checks Git blame for the reported
-lines or the most recent non-merge file commit for path-only locations. Git
-evidence must agree on one author across affected paths.
+lines or the latest 100 non-merge commits touching each file for path-only locations.
+When Git has evidence for every affected path, it includes up to three distinct author
+emails, ordered by their newest commit timestamp. Equal timestamps use email order.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;

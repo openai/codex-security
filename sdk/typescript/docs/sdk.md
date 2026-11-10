@@ -209,9 +209,9 @@ On Standard path scans, the bundled plugin also saves verified candidates in
 preserves those bytes. Deep Scan automatic completion uses the sidecar.
 
 Completion lists CODEOWNERS first, then reads Git blame for
-the reported lines, or the latest non-merge commit touching a file when only a
-path is available. It suggests a Git author only when the evidence covers every
-affected path and agrees on one email. This uses the checkout directly, including
+the reported lines, or the latest 100 non-merge commits touching a file when only a
+path is available. When Git evidence covers every affected path, it ranks up to
+three authors by their newest commit timestamp, breaking ties by email. This uses the checkout directly, including
 when `maxCostUsd` is set. Working-tree and directory snapshots are
 unsupported. Explicit owner-only analysis remains available through `suggestOwners`
 and `suggest-owners`, sharing the same evidence validation and report code.

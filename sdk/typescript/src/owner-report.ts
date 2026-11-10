@@ -104,25 +104,42 @@ export async function ownerResult(
         stale,
         "scan",
       );
-      const gitEvidence = context.evidence.filter(
-        (e) => e.kind === "blame" || e.kind === "history",
-      );
-      const authors = new Set(
-        context.identities.map(({ email }) => email.toLowerCase()),
-      );
-      const citedPaths = new Set(gitEvidence.map(({ path }) => path));
-      if (
-        authors.size === 1 &&
-        finding.locations.every(({ path }) => citedPaths.has(path))
-      ) {
-        addSuggestion(result.suggestions, {
-          owner: context.identities[0]!,
-          reason: "Git attributes the affected source to this contributor.",
-          evidence: publicEvidence(gitEvidence),
-        });
+      // One citation per author is enough to explain their place in the ranking.
+      const latest = new Map<
+        string,
+        {
+          owner: OwnerContext["identities"][number];
+          evidence: OwnerEvidence;
+          time: number;
+        }
+      >();
+      const citedPaths = new Set<string>();
+      for (const evidence of context.evidence) {
+        if (
+          evidence.identityIndex === null ||
+          evidence.commitTime === undefined
+        )
+          continue;
+        const owner = context.identities[evidence.identityIndex]!;
+        const email = owner.email.toLowerCase();
+        const previous = latest.get(email);
+        citedPaths.add(evidence.path);
+        if (!previous || evidence.commitTime > previous.time)
+          latest.set(email, { owner, evidence, time: evidence.commitTime });
+      }
+      if (finding.locations.every(({ path }) => citedPaths.has(path))) {
+        const ranked = [...latest.entries()].sort(
+          ([emailA, a], [emailB, b]) =>
+            b.time - a.time || (emailA < emailB ? -1 : emailA > emailB ? 1 : 0),
+        );
+        for (const [, candidate] of ranked.slice(0, 3))
+          addSuggestion(result.suggestions, {
+            owner: candidate.owner,
+            reason: "Recent author of the affected source in Git.",
+            evidence: publicEvidence([candidate.evidence]),
+          });
       } else {
-        result.reason =
-          "Git did not identify a single contributor across the affected source.";
+        result.reason = "Git evidence was unavailable for an affected path.";
       }
     } else if (
       !result.suggestions.length &&
@@ -207,6 +224,7 @@ function publicEvidence(
     ({
       content: _content,
       blameCommit: _blameCommit,
+      commitTime: _commitTime,
       identityIndex: _index,
       ...citation
     }) => citation,

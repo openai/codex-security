@@ -34,6 +34,7 @@ export interface OwnerEvidence {
   commit: string;
   /** Original blamed commit; blame citations keep commit at the checkout revision. */
   blameCommit?: string;
+  commitTime?: number;
   startLine?: number;
   endLine?: number;
   rule?: string;
@@ -167,35 +168,35 @@ export async function ownerRepository(
     };
   };
   let codeowners: ReturnType<typeof loadCodeowners> | undefined;
-  const recentAuthors = new Map<string, string[]>();
-  async function lastFileAuthor(path: string) {
-    let record = recentAuthors.get(path);
-    if (!record) {
-      record = (
+  // Cache the bounded history window when several findings mention the same file.
+  const fileHistories = new Map<string, string[]>();
+  async function recentFileHistory(path: string) {
+    let history = fileHistories.get(path);
+    if (!history) {
+      history = (
         await git(
           "log",
-          "-1",
+          "-100",
           "--no-merges",
           "--no-use-mailmap",
           "--no-show-signature",
           "--no-notes",
-          "--format=%H%x00%an%x00%ae",
+          "-z",
+          "--format=%H%x00%an%x00%ae%x00%ct",
           revision,
           "--",
           path,
         )
-      )
-        .trimEnd()
-        .split("\0");
-      recentAuthors.set(path, record);
+      ).split("\0");
+      fileHistories.set(path, history);
     }
-    return record;
+    return history;
   }
   return {
     git,
     revision,
     hasFile,
-    lastFileAuthor,
+    recentFileHistory,
     shallow,
     // Keep the load lazy so failures remain inside per-finding error handling.
     codeowners: () => (codeowners ??= loadCodeowners()),
@@ -342,15 +343,24 @@ export async function collectGitOwnerEvidence(
       (location) => location.startLine !== undefined,
     );
     if (policy === "scan" && !lineLocations.length) {
-      const [commit, name, email] = await repository.lastFileAuthor(path);
-      if (commit && name && email)
-        add({
-          kind: "history",
-          path,
-          commit,
-          content: "",
-          identityIndex: identityIndex(name, email),
-        });
+      const history = await repository.recentFileHistory(path);
+      for (let i = 0; i + 3 < history.length; i += 4) {
+        const [commit, name, email, timestamp] = history.slice(i, i + 4) as [
+          string,
+          string,
+          string,
+          string,
+        ];
+        if (name && email.trim())
+          add({
+            kind: "history",
+            path,
+            commit,
+            commitTime: Number(timestamp),
+            content: "",
+            identityIndex: identityIndex(name, email),
+          });
+      }
       continue;
     }
     const source = await git("cat-file", "blob", `${revision}:${path}`);
@@ -405,7 +415,8 @@ export async function collectGitOwnerEvidence(
       let commit = "",
         name = "",
         email = "",
-        line = 0;
+        line = 0,
+        commitTime = 0;
       for (const value of blame.split("\n")) {
         const header = /^([a-f0-9]{40,64}) \d+ (\d+)(?: \d+)?$/u.exec(value);
         if (header) {
@@ -413,6 +424,8 @@ export async function collectGitOwnerEvidence(
           line = Number(header[2]);
         } else if (value.startsWith("author ")) name = value.slice(7);
         else if (value.startsWith("author-mail <")) email = value.slice(13, -1);
+        else if (value.startsWith("committer-time "))
+          commitTime = Number(value.slice(15));
         else if (value.startsWith("\t") && email.trim()) {
           const index = identityIndex(name, email);
           const previous = context.evidence.at(-1);
@@ -430,6 +443,7 @@ export async function collectGitOwnerEvidence(
               path,
               commit: revision,
               blameCommit: commit,
+              ...(policy === "scan" && { commitTime }),
               startLine: line,
               endLine: line,
               content: `Authored in ${commit}.`,

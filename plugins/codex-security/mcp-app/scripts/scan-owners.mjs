@@ -1211,35 +1211,34 @@ async function ownerRepository(repository2, environment, signal2) {
     };
   };
   let codeowners;
-  const recentAuthors = /* @__PURE__ */ new Map();
-  async function lastFileAuthor(path) {
-    let record = recentAuthors.get(path);
-    if (!record) {
-      record = (
+  const fileHistories = /* @__PURE__ */ new Map();
+  async function recentFileHistory(path) {
+    let history = fileHistories.get(path);
+    if (!history) {
+      history = (
         await git2(
           "log",
-          "-1",
+          "-100",
           "--no-merges",
           "--no-use-mailmap",
           "--no-show-signature",
           "--no-notes",
-          "--format=%H%x00%an%x00%ae",
+          "-z",
+          "--format=%H%x00%an%x00%ae%x00%ct",
           revision2,
           "--",
           path,
         )
-      )
-        .trimEnd()
-        .split("\0");
-      recentAuthors.set(path, record);
+      ).split("\0");
+      fileHistories.set(path, history);
     }
-    return record;
+    return history;
   }
   return {
     git: git2,
     revision: revision2,
     hasFile,
-    lastFileAuthor,
+    recentFileHistory,
     shallow,
     // Keep the load lazy so failures remain inside per-finding error handling.
     codeowners: () => (codeowners ??= loadCodeowners()),
@@ -1377,15 +1376,19 @@ async function collectGitOwnerEvidence(
       (location) => location.startLine !== void 0,
     );
     if (policy === "scan" && !lineLocations.length) {
-      const [commit, name, email] = await repository2.lastFileAuthor(path);
-      if (commit && name && email)
-        add({
-          kind: "history",
-          path,
-          commit,
-          content: "",
-          identityIndex: identityIndex(name, email),
-        });
+      const history2 = await repository2.recentFileHistory(path);
+      for (let i = 0; i + 3 < history2.length; i += 4) {
+        const [commit, name, email, timestamp] = history2.slice(i, i + 4);
+        if (name && email.trim())
+          add({
+            kind: "history",
+            path,
+            commit,
+            commitTime: Number(timestamp),
+            content: "",
+            identityIndex: identityIndex(name, email),
+          });
+      }
       continue;
     }
     const source = await git2("cat-file", "blob", `${revision2}:${path}`);
@@ -1439,7 +1442,8 @@ async function collectGitOwnerEvidence(
       let commit = "",
         name = "",
         email = "",
-        line = 0;
+        line = 0,
+        commitTime = 0;
       for (const value of blame.split("\n")) {
         const header = /^([a-f0-9]{40,64}) \d+ (\d+)(?: \d+)?$/u.exec(value);
         if (header) {
@@ -1447,6 +1451,8 @@ async function collectGitOwnerEvidence(
           line = Number(header[2]);
         } else if (value.startsWith("author ")) name = value.slice(7);
         else if (value.startsWith("author-mail <")) email = value.slice(13, -1);
+        else if (value.startsWith("committer-time "))
+          commitTime = Number(value.slice(15));
         else if (value.startsWith("	") && email.trim()) {
           const index = identityIndex(name, email);
           const previous = context.evidence.at(-1);
@@ -1464,6 +1470,7 @@ async function collectGitOwnerEvidence(
               path,
               commit: revision2,
               blameCommit: commit,
+              ...(policy === "scan" && { commitTime }),
               startLine: line,
               endLine: line,
               content: `Authored in ${commit}.`,
@@ -1579,25 +1586,31 @@ async function ownerResult(repository2, finding, signal2, policy) {
         stale,
         "scan",
       );
-      const gitEvidence = context.evidence.filter(
-        (e) => e.kind === "blame" || e.kind === "history",
-      );
-      const authors = new Set(
-        context.identities.map(({ email }) => email.toLowerCase()),
-      );
-      const citedPaths = new Set(gitEvidence.map(({ path }) => path));
-      if (
-        authors.size === 1 &&
-        finding.locations.every(({ path }) => citedPaths.has(path))
-      ) {
-        addSuggestion(result.suggestions, {
-          owner: context.identities[0],
-          reason: "Git attributes the affected source to this contributor.",
-          evidence: publicEvidence(gitEvidence),
-        });
+      const latest = /* @__PURE__ */ new Map();
+      const citedPaths = /* @__PURE__ */ new Set();
+      for (const evidence of context.evidence) {
+        if (evidence.identityIndex === null || evidence.commitTime === void 0)
+          continue;
+        const owner = context.identities[evidence.identityIndex];
+        const email = owner.email.toLowerCase();
+        const previous = latest.get(email);
+        citedPaths.add(evidence.path);
+        if (!previous || evidence.commitTime > previous.time)
+          latest.set(email, { owner, evidence, time: evidence.commitTime });
+      }
+      if (finding.locations.every(({ path }) => citedPaths.has(path))) {
+        const ranked = [...latest.entries()].sort(
+          ([emailA, a], [emailB, b]) =>
+            b.time - a.time || (emailA < emailB ? -1 : emailA > emailB ? 1 : 0),
+        );
+        for (const [, candidate] of ranked.slice(0, 3))
+          addSuggestion(result.suggestions, {
+            owner: candidate.owner,
+            reason: "Recent author of the affected source in Git.",
+            evidence: publicEvidence([candidate.evidence]),
+          });
       } else {
-        result.reason =
-          "Git did not identify a single contributor across the affected source.";
+        result.reason = "Git evidence was unavailable for an affected path.";
       }
     } else if (
       !result.suggestions.length &&
@@ -1655,6 +1668,7 @@ function publicEvidence(evidence) {
     ({
       content: _content,
       blameCommit: _blameCommit,
+      commitTime: _commitTime,
       identityIndex: _index,
       ...citation
     }) => citation,

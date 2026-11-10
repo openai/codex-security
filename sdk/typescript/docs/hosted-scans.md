@@ -244,8 +244,9 @@ validated, sealed scan receipt.
 
 Set `ownerSuggestions: true` to resolve candidates directly from the checkout.
 Standard path scans write `extensions.ownerSuggestion.suggestions` at first
-completion. All owners declared in CODEOWNERS appear first. The resolver also uses blame for the reported lines or the latest non-merge commit
-for a file-only location. Conflicting authors or missing Git evidence leave the declared list unchanged. The SDK also writes `owner-suggestions.json` without inference. A completed receipt includes the artifact
+completion. Declared CODEOWNERS appear first, followed by up to three Git authors
+ordered by their most recent commit timestamp. The resolver uses blame for the reported
+lines or the latest 100 non-merge commits touching a file-only location. The SDK also writes `owner-suggestions.json` without inference. A completed receipt includes the artifact
 when available, or `ownerSuggestionsError` if finalization fails.
 
 Read the owner report from the completed receipt. Finalization uses
