@@ -7347,8 +7347,8 @@ export async function main(
           if (useDefaultOutput(format)) {
             const next = projectPreviewCommand(directory, path);
             if (output.isTTY)
-              renderedOutput = `Created ${escapeTerminalText(path)}\nNext: ${next}\n`;
-            else errorOutput.write(`Next: ${next}\n`);
+              renderedOutput = `Created ${escapeTerminalText(path)}\n${PREVIEW_LABEL}: ${next}\n`;
+            else errorOutput.write(`${PREVIEW_LABEL}: ${next}\n`);
           }
           return { path };
         } catch (error) {
@@ -7359,7 +7359,7 @@ export async function main(
               args.file ?? "codex-security.yaml",
             );
             errorOutput.write(
-              `codex-security: Configuration already exists at ${escapeTerminalText(path)}. Use it with ${projectPreviewCommand(dependencies.currentDirectory(), path)}\n`,
+              `codex-security: Configuration already exists at ${escapeTerminalText(path)}. ${PREVIEW_LABEL}: ${projectPreviewCommand(dependencies.currentDirectory(), path)}\n`,
             );
           } else {
             errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -7494,7 +7494,7 @@ export async function main(
           const { mode, auth, target, maxCostUsd } = resolved.options;
           renderedOutput =
             [
-              `Next: ${nextStep}`,
+              `${PREVIEW_LABEL}: ${nextStep}`,
               `Configuration: ${project?.path ?? "defaults"}`,
               `Scope: ${typeof target === "string" ? target : JSON.stringify(target)}`,
               `Scan: ${mode} · ${model.model} (${model.reasoningEffort}) · auth ${auth}`,
@@ -10375,6 +10375,9 @@ type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 function diagnosticLines(value: unknown): string {
   return errorMessage(value).split("\n").map(diagnosticValue).join("\n");
 }
+
+const PREVIEW_LABEL =
+  process.platform === "win32" ? "Next (PowerShell)" : "Next";
 
 function projectPreviewCommand(directory: string, path?: string): string {
   if (path === undefined) return "codex-security scan . --dry-run";
