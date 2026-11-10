@@ -13,6 +13,8 @@
 - prevent stale SDK archives on long Windows paths ([#2511](https://github.com/openai/codex-security/pull/2511))
 - follow directory links in selected project config paths ([#2514](https://github.com/openai/codex-security/pull/2514))
 - report filesystem module failures during output validation ([#2516](https://github.com/openai/codex-security/pull/2516))
+- build the bundled plugin in long Windows checkouts ([#2508](https://github.com/openai/codex-security/pull/2508))
+- preserve Linux install path case in update notices ([#2521](https://github.com/openai/codex-security/pull/2521))
 
 </details>
 
