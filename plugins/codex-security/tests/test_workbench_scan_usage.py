@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -328,7 +329,7 @@ def _state_graph(
 ) -> None:
     sqlite_home = Path(environment["CODEX_SQLITE_HOME"])
     sqlite_home.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(sqlite_home / "state_5.sqlite") as connection:
+    with closing(sqlite3.connect(sqlite_home / "state_5.sqlite")) as connection, connection:
         connection.execute(
             "CREATE TABLE threads "
             "(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)"
