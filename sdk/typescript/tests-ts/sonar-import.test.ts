@@ -371,7 +371,7 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
     fetch: async (url: string, options: RequestInit) => {
       expect(options.method ?? "GET").toBe("GET");
       const repositories = new URL(url).pathname.endsWith("/repositories");
-      return Response.json({
+      const page = {
         object: "page",
         has_more: false,
         next: null,
@@ -408,7 +408,13 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
                 },
               ]
             : [],
-      });
+      };
+      return Response.json(
+        page,
+        repositories
+          ? { headers: { "Codex-Security-Import-Scope": "personal" } }
+          : undefined,
+      );
     },
   };
   const preview = await prepareSonarImport(selection, deps);
