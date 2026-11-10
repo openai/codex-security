@@ -1395,7 +1395,10 @@ def verified_windows_checkout(
     if binding is None:
 
         def stat_identity() -> tuple[int | str, int | str]:
-            metadata = target.stat()
+            try:
+                metadata = target.stat()
+            except OSError as exc:
+                raise SystemExit(f"Cannot verify the original Windows checkout: {exc}") from exc
             return serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(
                 metadata.st_ino
             )

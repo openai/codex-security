@@ -244,6 +244,44 @@ def test_high_windows_file_id_survives_resume_validation_and_remediation(
         assert not workbench_db.remediation_availability(row)[0]
 
 
+def test_history_remains_available_if_a_legacy_checkout_moves_after_the_revision_read(
+    deep_registration, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state, output, register = deep_registration
+    target = output.parent / "repository"
+    moved = target.with_name("moved checkout")
+    scan_id = register()["scanId"]
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    monkeypatch.setenv("CODEX_HOME", str(state.parent / "home"))
+    monkeypatch.setattr(sys, "argv", ["workbench", "get-scan", "--scan-id", scan_id])
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO()))
+    info = target.stat()
+    with closing(workbench_db.connect()) as connection, connection:
+        connection.execute(
+            "UPDATE scans SET status='complete', windows_resume_target_identity=NULL, "
+            "target_device=?, target_inode=? WHERE id=?",
+            (*map(serialize_filesystem_identity, (info.st_dev, info.st_ino)), scan_id),
+        )
+    git_revision = workbench_db.git_revision
+
+    def revision_before_move(directory: Path) -> str:
+        revision = git_revision(directory)
+        if directory == target and not moved.exists():
+            target.rename(moved)
+        return revision
+
+    with monkeypatch.context() as patch:
+        patch.setattr(workbench_db, "git_revision", revision_before_move)
+        workbench_db.main()
+    result = json.loads(capsys.readouterr().out)["scan"]
+    assert moved.is_dir() and result["scanId"] == scan_id
+    assert result["remediationAvailable"] is False
+    assert "Cannot verify the original Windows checkout" in result["remediationUnavailableReason"]
+    moved.rename(target)
+    workbench_db.main()
+    assert json.loads(capsys.readouterr().out)["scan"]["remediationAvailable"] is True
+
+
 def test_legacy_checkout_keeps_exact_stat_matches_and_requires_full_native_proof(
     deep_registration, monkeypatch: pytest.MonkeyPatch
 ) -> None:
