@@ -20,7 +20,6 @@ import {
 } from "node:util/types";
 import {
   privateImportClient,
-  privateJobVersions,
   selectPrivateReport,
   type PrivateImportFormat,
   readPrivateCheckpoint,
@@ -69,7 +68,6 @@ import {
 import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { isWizPackageFinding, wizFindingRepository } from "./wiz-findings.js";
-import { getOpenGrepSourcePositions } from "./opengrep-findings.js";
 import {
   previousReaderSelection,
   hasPreviousCloudProjection,
@@ -249,7 +247,6 @@ interface SavedSubmission {
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: {
-    repositorySeverities?: string[];
     retainedHostedSelection?: true;
     semgrepPartialScopeDigest?: string;
     identityFormat?: 2;
@@ -342,78 +339,6 @@ function matchesRepositoryEvidence(
     return path ? { ...item, manifest_path: path } : item;
   });
   return wireJson({ ...expected, locations, packages }) === storedWire;
-}
-
-function isCompleteUnscoredOpenGrepReport(report: ExternalFindings) {
-  let rows = report.excluded.length;
-  for (const { evidence } of report.findings) {
-    const traces = evidence.source_data?.["results"];
-    if (
-      evidence.details?.scanner_origin !== "OpenGrep" ||
-      evidence.severity !== "unknown" ||
-      !Array.isArray(traces)
-    )
-      return false;
-    rows += traces.length;
-  }
-  return rows === report.read;
-}
-
-function repositoryFindings(
-  report: ExternalFindings,
-  severities: readonly string[] | undefined,
-) {
-  return severities
-    ? report.findings.filter(({ evidence }) =>
-        severities.includes(evidence.severity),
-      )
-    : report.findings;
-}
-
-function repositorySelection(
-  report: ExternalFindings,
-  severities: readonly string[] | undefined,
-  sourcePositions: PublicationSelection["sourcePositions"],
-): ExternalFindings {
-  const findings = repositoryFindings(report, severities);
-  if (findings.length === report.findings.length) return report;
-  const excluded = [...report.excluded];
-  const skipped = new Set(excluded.map(({ position }) => position));
-  function exclude(position: number, id: string | null, severity: string) {
-    excluded.push({
-      position,
-      source_finding_id: id,
-      reason: `The repository publisher does not accept severity ${JSON.stringify(severity)}. A local import or an available private inbox can retain this finding.`,
-    });
-  }
-  // Serialized OpenGrep selections retain every trace but lose the reader's
-  // position map. All these traces have unknown severity, so the remaining
-  // source rows are provably excluded even when their individual IDs are lost.
-  if (!sourcePositions && isCompleteUnscoredOpenGrepReport(report)) {
-    const id =
-      report.findings.length === 1
-        ? report.findings[0]!.source_finding_id
-        : null;
-    for (let row = 1; row <= report.read; row++)
-      if (!skipped.has(row)) exclude(row, id, "unknown");
-  } else {
-    const retained = new Set(findings);
-    let position = 0;
-    for (const finding of report.findings) {
-      do {
-        position++;
-      } while (skipped.has(position));
-      if (retained.has(finding)) continue;
-      const { source_finding_id, evidence } = finding;
-      for (const row of sourcePositions?.get(source_finding_id) ?? [position])
-        exclude(row, source_finding_id, evidence.severity);
-    }
-  }
-  return {
-    ...report,
-    findings,
-    excluded: excluded.sort((a, b) => a.position - b.position),
-  };
 }
 
 function sameSubmission(
@@ -531,19 +456,6 @@ export async function writeAtomicJson(
 
 function sourcePath(repository: ImportRepository): string {
   return `/repository_connectors/${encodeURIComponent(repository.repo_connector_id)}/repositories/${encodeURIComponent(repository.id)}/source_reports`;
-}
-
-function repositoryImportPrefix(provider: Provider): string {
-  switch (provider) {
-    case "wiz":
-    case "endor":
-    case "snyk":
-      return "";
-    case "sonar":
-      return "/v2";
-    default:
-      return "/v3";
-  }
 }
 
 class CloudImportError extends CodexSecurityError {
@@ -1052,7 +964,6 @@ function hostedRepositoryMatcher(
 
 interface PublicationSelection extends ExternalPublicationInput {
   requiresStructuredReport?: boolean;
-  sourcePositions?: ReadonlyMap<string, readonly number[]>;
   previousReaders?: (() => ExternalFindings)[];
   original?: {
     parsed: ExternalFindings;
@@ -1377,7 +1288,6 @@ function normalizedPublicationInput(
       provider === "continuum"
         ? [() => previousContinuumCweProjection(current)]
         : undefined,
-    sourcePositions: getOpenGrepSourcePositions(ownData(input, "findings")),
     original,
     freshError,
     unprovenIdPrefixes: reader?.unprovenIdPrefixes,
@@ -1642,16 +1552,8 @@ async function preparePublicationInput(
     dependencies.credentials ??
     (() => readCloudCredentials(environment, dependencies.signal))
   )();
+  let importScope: "personal" | "workspace" | undefined;
   let canStartJob = false;
-  let repositorySeverities: string[] | undefined;
-  const importPrefix = repositoryImportPrefix(options.provider);
-  const repositoryVersionHeader = "Codex-Security-Repository-Import-Version";
-  const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
-  const providerJobVersion = privateJobVersions[options.provider];
-  // Older services recognize an exact v2 request for AWS. Only ask for v3
-  // when publishing a provider introduced by that contract.
-  const requestedJobVersion = String(providerJobVersion ?? 2);
-  let jobApiVersion: typeof providerJobVersion;
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -1668,14 +1570,6 @@ async function preparePublicationInput(
           Authorization: `Bearer ${credentials.access_token}`,
           "ChatGPT-Account-ID": credentials.account_id,
           Accept: "application/json",
-          ...(repositoryCatalog
-            ? {
-                [jobVersionHeader]: requestedJobVersion,
-                ...(importPrefix === "/v3" && {
-                  [repositoryVersionHeader]: "3",
-                }),
-              }
-            : {}),
           ...(body ? { "Content-Type": "application/json" } : {}),
         },
         ...(body ? { body: JSON.stringify(body) } : {}),
@@ -1702,25 +1596,20 @@ async function preparePublicationInput(
       throw new CloudImportError(response.status, message);
     }
     if (repositoryCatalog) {
-      const advertised = (header: string) =>
-        response.headers
-          .get(header)
-          ?.split(",")
-          .map((item) => item.trim());
-      // A legacy catalog's severity list describes its unversioned publisher.
-      repositorySeverities =
-        importPrefix !== "/v3" ||
-        response.headers.get(repositoryVersionHeader) === "3"
-          ? advertised("Codex-Security-Repository-Import-Severities")
-          : undefined;
+      const scope = response.headers.get("Codex-Security-Import-Scope");
+      if (
+        (scope !== "personal" && scope !== "workspace") ||
+        (importScope !== undefined && scope !== importScope)
+      )
+        throw new CodexSecurityError(
+          "Cloud returned an invalid import scope for this account.",
+        );
+      importScope = scope;
       canStartJob =
-        advertised("Codex-Security-Private-Import-Providers")?.includes(
-          options.provider,
-        ) ?? false;
-      jobApiVersion =
-        response.headers.get(jobVersionHeader) === requestedJobVersion
-          ? providerJobVersion
-          : undefined;
+        response.headers
+          .get("Codex-Security-Private-Import-Providers")
+          ?.split(",")
+          .some((provider) => provider.trim() === options.provider) ?? false;
     }
     return response.json();
   }
@@ -1768,7 +1657,7 @@ async function preparePublicationInput(
   const report: ExternalFindings & Partial<SnykIssuesFindings> =
     resolved.current;
   const source = { provider: options.provider, source_key: options.sourceKey };
-  const sourceReportsPath = importPrefix + sourcePath(destination);
+  const sourceReportsPath = sourcePath(destination);
   const checkpointIdentity = [
     // Keep existing production checkpoints readable; other deployments must
     // never share a saved request or receipt with the production default.
@@ -2242,10 +2131,7 @@ async function preparePublicationInput(
     const saved = submissionFindings(content.requests);
     const wire = wireJson(saved);
     const projection = content.inputProjection;
-    const expected = repositoryFindings(
-      legacy ? legacyParsed : parsed,
-      projection?.repositorySeverities,
-    );
+    const expected = (legacy ? legacyParsed : parsed).findings;
     if (
       projection &&
       (!sameFindingSelection(saved, expected) ||
@@ -2931,8 +2817,18 @@ async function preparePublicationInput(
     throw new CodexSecurityError(
       "The saved publication changed. Run the command again to preview this report.",
     );
-  const usePrivateImport =
-    !saved && (canStartJob || privateSaved !== undefined);
+  const usePrivateImport = importScope === "workspace";
+  if (
+    (usePrivateImport && saved) ||
+    (!usePrivateImport && privateSaved !== undefined)
+  )
+    throw new CodexSecurityError(
+      "The saved import belongs to a different Cloud destination. Use the account and scope shown in its preview.",
+    );
+  if (usePrivateImport && !canStartJob && privateSaved === undefined)
+    throw new CodexSecurityError(
+      "Private findings import is unavailable for this account or provider.",
+    );
   async function preparePrivateAttempt() {
     const context = previewContext ?? (await privateClient.context());
     if (source.source_key.trim() !== source.source_key)
@@ -3422,22 +3318,17 @@ async function preparePublicationInput(
             throw new CodexSecurityError(
               "A repository submission is pending. Review its saved request before continuing.",
             );
-          // Both routes share request IDs. A server upgrade can promote an
-          // existing job, and its saved route also survives gate rollback.
-          const checkpoint = {
-            ...(active ?? {
-              ...binding,
-              approvedRepositoryUrl: destination.url,
-              approvedRepositoryPlatform:
-                hostedSource?.github === false ? ("other" as const) : undefined,
-              uploadRequestId: randomUUID(),
-              jobRequestId: randomUUID(),
-              fileId: undefined,
-              jobId: undefined,
-              receipt: undefined,
-              previousReceipt: retrying ? stored?.receipt : undefined,
-            }),
-            jobApiVersion: stored?.jobApiVersion ?? jobApiVersion,
+          const checkpoint = active ?? {
+            ...binding,
+            approvedRepositoryUrl: destination.url,
+            approvedRepositoryPlatform:
+              hostedSource?.github === false ? ("other" as const) : undefined,
+            uploadRequestId: randomUUID(),
+            jobRequestId: randomUUID(),
+            fileId: undefined,
+            jobId: undefined,
+            receipt: undefined,
+            previousReceipt: retrying ? stored?.receipt : undefined,
           };
           const result: ExternalPublicationResult = {
             cloudApiUrl: preview.cloudApiUrl,
@@ -3479,8 +3370,7 @@ async function preparePublicationInput(
             const savedReceipt =
               checkpoint.receipt ?? checkpoint.previousReceipt;
             if (savedReceipt) acknowledge(savedReceipt);
-            if (!active || active.jobApiVersion !== checkpoint.jobApiVersion)
-              await writeAtomicJson(privatePath, checkpoint);
+            if (!active) await writeAtomicJson(privatePath, checkpoint);
             if (!checkpoint.fileId) {
               progress({ phase: "uploading", completed: 0 });
               checkpoint.fileId = await client.upload({
@@ -3501,7 +3391,6 @@ async function preparePublicationInput(
                 source,
                 repository: binding.repository,
                 jobId: checkpoint.jobId,
-                jobApiVersion: checkpoint.jobApiVersion,
               },
               async (id) => {
                 checkpoint.jobId = id;
@@ -3524,22 +3413,17 @@ async function preparePublicationInput(
     };
   }
 
-  // The original selection and request bytes govern a retry even if discovery changes.
-  const severities = saved
-    ? saved.inputProjection?.repositorySeverities
-    : repositorySeverities;
-  const direct = repositorySelection(parsed, severities, input.sourcePositions);
-  if (!direct.findings.length) throw new NoPublishableFindingsError(direct);
+  if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
   let requests = saved?.requests;
   if (!requests) {
     let preparedCount = 0;
     progress({
       phase: "preparing",
       completed: 0,
-      total: direct.findings.length,
+      total: parsed.findings.length,
     });
     const previousReports = await readInBatches(
-      direct.findings,
+      parsed.findings,
       async (finding): Promise<SourceReportSummary | undefined> => {
         const query = new URLSearchParams({
           provider: source.provider,
@@ -3569,7 +3453,7 @@ async function preparePublicationInput(
         progress({
           phase: "preparing",
           completed: ++preparedCount,
-          total: direct.findings.length,
+          total: parsed.findings.length,
         });
         return previous;
       },
@@ -3577,7 +3461,7 @@ async function preparePublicationInput(
     requests = [];
     let current: FindingImportRequest | undefined;
     let currentBytes = 0;
-    for (const [index, finding] of direct.findings.entries()) {
+    for (const [index, finding] of parsed.findings.entries()) {
       const previous = previousReports[index];
       const environmentId =
         previous?.environment_id ?? destination.import_environment_id;
@@ -3639,7 +3523,6 @@ async function preparePublicationInput(
     legacyApproval: saved?.legacyApproval,
     wireKey: saved?.wireKey ?? (fileKey === key ? undefined : key),
     inputProjection: saved?.inputProjection ?? {
-      ...(direct !== parsed && { repositorySeverities: severities }),
       identityFormat: saved ? undefined : 2,
       ...(scopedSemgrepReport && { retainedHostedSelection: true }),
       ...(bindSemgrepScope && {
@@ -3662,7 +3545,7 @@ async function preparePublicationInput(
     submission.approvedRepositoryPlatform = "other";
   if (inspectorProjectMap) submission.inspectorProjectMapRequired = true;
   const preview: ExternalPublicationPreview = {
-    ...direct,
+    ...parsed,
     findings: submissionFindings(requests),
     cloudApiUrl,
     cloudUrl: cloudFindingsUrl(environment, destination.id),
@@ -3702,18 +3585,18 @@ async function preparePublicationInput(
           cloudApiUrl,
           cloudUrl: preview.cloudUrl,
           status:
-            direct.excluded.length || counts.error ? "partial" : "complete",
+            parsed.excluded.length || counts.error ? "partial" : "complete",
           read: parsed.read,
           ...(parsed.report === undefined
             ? {}
             : snapshotNormalizedFindings({ report: parsed.report })),
-          ready: direct.findings.length,
-          excluded: direct.excluded,
+          ready: parsed.findings.length,
+          excluded: parsed.excluded,
           receipts: acknowledged,
           counts,
           failures,
           unacknowledged:
-            direct.findings.length -
+            parsed.findings.length -
             Object.values(counts).reduce((sum, count) => sum + count, 0),
           verified,
         };
@@ -3839,13 +3722,12 @@ async function preparePublicationInput(
           progress({
             phase: "uploading",
             completed: 0,
-            total: direct.findings.length,
+            total: parsed.findings.length,
           });
           let acknowledgedCount = 0;
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validatePublicationReceipt(
-              cached[batchIndex] ??
-                (await request(`${importPrefix}/finding_imports`, batch)),
+              cached[batchIndex] ?? (await request("/finding_imports", batch)),
               batch,
             );
             acknowledged.push(receipt);
@@ -3853,7 +3735,7 @@ async function preparePublicationInput(
             progress({
               phase: "uploading",
               completed: acknowledgedCount,
-              total: direct.findings.length,
+              total: parsed.findings.length,
             });
             if (batchIndex >= cached.length) {
               // Acknowledged batches must not consume another POST quota on retry.

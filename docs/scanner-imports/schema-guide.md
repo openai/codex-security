@@ -101,15 +101,9 @@ authorize that update.
 **Cloud repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
 Check the per-item result for conflicts. The receipt's source-report,
 observation and canonical-finding IDs identify Cloud records. Read the source
-report for the imported evidence. If this destination requires a known
-severity, findings whose scanner reported no severity appear in the preview's
-exclusions. The private inbox also accepts unknown severity.
-
-For the repository publisher, Cloud deployments need the `/external/v3` import
-and source-report endpoints for GitHub, Semgrep (including OpenGrep), Inspector,
-Black Duck, Veracode, Continuum, Checkmarx, Trivy and Tenable. Sonar uses
-`/external/v2`. Wiz, Endor and Snyk use `/external`. The CLI uses the same
-request ID and findings when it resumes a saved submission.
+report for the imported evidence. All scanner providers use the same import and
+source-report endpoints. The CLI reuses the approved request ID and evidence
+when it resumes a saved submission.
 
 The repository publisher allows up to 256 KiB and 20 levels of nesting per finding. The publisher
 batches up to 100 items and 5 MiB per request. Local file imports do not apply

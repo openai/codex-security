@@ -15,20 +15,6 @@ const privateFormat = z.enum([
   "wiz.vulnerability_json.v1",
 ]);
 export type PrivateImportFormat = z.infer<typeof privateFormat>;
-const jobVersion = z.union([z.literal(2), z.literal(3)]);
-export type PrivateJobVersion = z.infer<typeof jobVersion>;
-export const privateJobVersions: Partial<
-  Record<ImportSource["provider"], PrivateJobVersion>
-> = {
-  inspector: 2,
-  continuum: 2,
-  blackduck: 3,
-  checkmarx: 3,
-  sonar: 3,
-  trivy: 3,
-  tenable: 3,
-  veracode: 3,
-};
 const fileId = z.string().regex(/^aifile_[0-9a-f]{32}$/u);
 const contextSchema = z.object({
   object: z.literal("security.finding_import_context"),
@@ -300,8 +286,6 @@ const checkpointSchema = z.object({
   repository: z.object({ id: z.string(), repo_connector_id: z.string() }),
   uploadRequestId: z.uuid(),
   jobRequestId: z.uuid(),
-  // Earlier checkpoints used the unversioned job route.
-  jobApiVersion: jobVersion.optional(),
   approvedRepositoryUrl: z.string().optional(),
   approvedRepositoryPlatform: z.literal("other").optional(),
   fileId: fileId.optional(),
@@ -487,12 +471,10 @@ export function privateImportClient(
         source: ImportSource;
         repository: { id: string; repo_connector_id: string };
         jobId?: string;
-        jobApiVersion?: PrivateJobVersion;
       },
       accepted: (id: string) => Promise<void>,
     ) {
-      const prefix = input.jobApiVersion ? `/v${input.jobApiVersion}` : "";
-      const jobs = prefix + "/finding-imports/jobs";
+      const jobs = "/finding-imports/jobs";
       let id = input.jobId;
       let response = id
         ? await request(`${jobs}/${id}`)

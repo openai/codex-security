@@ -29,15 +29,6 @@ export interface OpenGrepImportOptions {
 }
 
 // Occurrences are sorted by ID and can retain traces from nonadjacent input rows.
-const sourcePositions = new WeakMap<
-  ExternalFindings["findings"],
-  ReadonlyMap<string, readonly number[]>
->();
-
-export function getOpenGrepSourcePositions(findings: unknown) {
-  return Array.isArray(findings) ? sourcePositions.get(findings) : undefined;
-}
-
 /** Import native scanner evidence without assigning a Codex assessment. */
 export function normalizeOpenGrepFindings(
   input: unknown,
@@ -196,17 +187,12 @@ export function normalizeOpenGrepFindings(
       exclude(index + 1, id, error);
     }
   }
-  const positions = new Map<string, number[]>();
   for (const [id, observations] of [...groups].sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0,
   )) {
     if (observations.length === 1) {
       const { position } = observations[0]!;
-      selection.append(position, id, () => {
-        const evidence = projectGroup(observations);
-        positions.set(id, [position]);
-        return evidence;
-      });
+      selection.append(position, id, () => projectGroup(observations));
       continue;
     }
     const ordered = observations
@@ -250,17 +236,12 @@ export function normalizeOpenGrepFindings(
       }
       if (previousAdmission(evidence) === null) selection.uncertainIds.add(id);
       output.findings.push({ source_finding_id: id, evidence });
-      positions.set(
-        id,
-        retained.map(({ position }) => position),
-      );
     } catch (error) {
       for (const observation of retained)
         exclude(observation.position, id, error);
     }
   }
   output.excluded.sort((left, right) => left.position - right.position);
-  sourcePositions.set(output.findings, positions);
   return selection.finish();
 }
 
