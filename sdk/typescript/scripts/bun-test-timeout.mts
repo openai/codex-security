@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 
-// Keep arities aligned with the pinned Bun's test_params:
-// https://github.com/oven-sh/bun/blob/bun-v1.3.14/src/cli/Arguments.zig
+// Keep arities aligned with the pinned Bun's TEST_PARAMS.
+// https://github.com/oven-sh/bun/blob/bun-v1.4.4/src/runtime/cli/Arguments.rs
 const optionalBunOptions = {
   bail: { type: "string" },
   changed: { type: "string" },
@@ -9,6 +9,7 @@ const optionalBunOptions = {
   inspect: { type: "string" },
   "inspect-wait": { type: "string" },
   "inspect-brk": { type: "string" },
+  "disallow-code-generation-from-strings": { type: "string" },
   config: { type: "string", short: "c" },
 } as const;
 
@@ -39,6 +40,8 @@ export function bunTestTimeout(testArguments: readonly string[]) {
         "path-ignore-patterns": { type: "string" },
         "parallel-delay": { type: "string" },
         shard: { type: "string" },
+        timings: { type: "string" },
+        "watch-kill-signal": { type: "string" },
         preload: { type: "string", short: "r" },
         require: { type: "string" },
         import: { type: "string" },
@@ -47,6 +50,7 @@ export function bunTestTimeout(testArguments: readonly string[]) {
         "cpu-prof-interval": { type: "string" },
         "heap-prof-name": { type: "string" },
         "heap-prof-dir": { type: "string" },
+        "heap-prof-interval": { type: "string" },
         install: { type: "string" },
         eval: { type: "string", short: "e" },
         print: { type: "string", short: "p" },
@@ -58,6 +62,11 @@ export function bunTestTimeout(testArguments: readonly string[]) {
         "dns-result-order": { type: "string" },
         title: { type: "string" },
         "unhandled-rejections": { type: "string" },
+        "redirect-warnings": { type: "string" },
+        "disable-warning": { type: "string" },
+        "trace-event-categories": { type: "string" },
+        "trace-event-file-pattern": { type: "string" },
+        "stack-trace-limit": { type: "string" },
         "console-depth": { type: "string" },
         "user-agent": { type: "string" },
         "cron-title": { type: "string" },

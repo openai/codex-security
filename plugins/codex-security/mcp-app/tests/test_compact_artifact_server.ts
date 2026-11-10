@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, snapshotScanDraft, writeJson } from "./support/json.ts";
 import { workerDraft, finding } from "./scan-draft-fixture.ts";
 import { gitText } from "../scripts/git.mjs";
@@ -89,6 +90,8 @@ try {
   }
   await test("shipped: claimed parent operations", () =>
     testClaimedParentArtifactOperations(shipped, "shipped"));
+  await test("shipped: registered scan uses its attached thread", () =>
+    testRegisteredScanOwner(shipped));
   await test("shipped: semantic scan draft completion", () =>
     testSemanticScanDraftCompletion(shipped, "shipped"));
   for (const artifactWriter of [false, true]) {
@@ -110,6 +113,62 @@ async function createScanFixture(label: string) {
   };
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
   return { repoRoot, environment };
+}
+
+async function testRegisteredScanOwner(bundle: string) {
+  const { repoRoot, environment } = await createScanFixture("registered-owner");
+  const runWorkbench = (...args: string[]) =>
+    JSON.parse(
+      execFileSync(
+        fixturePython,
+        [path.join(bundledPluginRoot, "scripts/workbench_db.py"), ...args],
+        { env: { ...process.env, ...environment }, encoding: "utf8" },
+      ),
+    );
+  const scanDir = await realpath(
+    await mkdtemp(path.join(temporaryRoot, "registered-scan-")),
+  );
+  const { scanId } = runWorkbench(
+    "register-cli-scan",
+    "--repository",
+    repoRoot,
+    "--scan-dir",
+    scanDir,
+    "--recipe-json",
+    JSON.stringify({
+      config: {},
+      mode: "standard",
+      repository: repoRoot,
+      target: { kind: "repository", paths: [] },
+    }),
+  );
+  const owner = "registered-scan-thread";
+  const client = await startClient(bundle, environment);
+  const call = toolCaller(client, owner);
+  try {
+    requireToolError(
+      await call("get_codex_security_scan_context", { scanId }),
+      /owning Codex thread/,
+      "the registered scan awaits thread attachment",
+    );
+    runWorkbench("set-scan-thread", "--scan-id", scanId, "--thread-id", owner);
+    const current = requireSuccessfulTool<ScanResult>(
+      await call("get_codex_security_scan_context", { scanId }),
+      "load registered scan context",
+    );
+    assert.equal(current.scan.continuationThreadId, owner);
+    const stop = { scanId, message: "Fixture complete" };
+    requireSuccessfulTool(
+      await call("fail_codex_security_scan", stop),
+      "finish scan",
+    );
+    requireSuccessfulTool(
+      await call("fail_codex_security_scan", stop),
+      "repeat scan update",
+    );
+  } finally {
+    await client.close();
+  }
 }
 
 async function testLargeScanDraftCheckpoints(
@@ -427,6 +486,15 @@ async function testCompactDiffScanCompletion(
     requireSuccessfulTool<ScanResult>(
       await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
       `${runtimeLabel}: complete compact diff scan`,
+    );
+    requireSuccessfulTool(
+      await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
+      "the owner can retry completed scans",
+    );
+    requireToolError(
+      await call("complete_codex_security_scan", { scanId }, "previous-thread"),
+      /owned by another continuation/,
+      "a previous continuation cannot complete the scan",
     );
     await rename(repoRoot, repoRoot + "-moved");
     const saved = requireSuccessfulTool<{ content: string }>(
@@ -971,7 +1039,7 @@ async function testClaimedParentArtifactOperations(
       scanDir: scanDirectory,
       handoffClaimToken: claimToken,
     } = await startScan(
-      call,
+      toolCaller(client, null),
       ownerThread,
       { targetPath: repoRoot, scope: ".", mode: "deep" },
       {
@@ -1020,6 +1088,14 @@ async function testClaimedParentArtifactOperations(
     );
     assert.equal(delivered.scan.continuationThreadId, ownerThread);
     assert.equal(delivered.scan.handoffClaimToken, undefined);
+    requireSuccessfulTool(
+      await call("update_codex_security_scan_progress", {
+        scanId,
+        handoffClaimToken: claimToken,
+        phase: "preflight",
+      }),
+      "the owner can refresh Deep Scan preflight progress",
+    );
 
     for (const [name, arguments_] of [
       ["prepare_codex_security_review_items", { scanId }],
@@ -1197,7 +1273,7 @@ async function testClaimedParentArtifactOperations(
       assert.equal(await readFile(inventoryPath, "utf8"), originalInventory);
     }
 
-    execFileSync(process.env.PYTHON ?? "python3", [
+    execFileSync(fixturePython, [
       "-c",
       "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); " +
         "c.execute('UPDATE scans SET handoff_claim_token = ? WHERE id = ?', " +
@@ -1708,7 +1784,7 @@ async function startClient(
   return client;
 }
 
-function toolCaller(client: Client, ownerThread: string) {
+function toolCaller(client: Client, ownerThread: string | null) {
   return (
     name: string,
     arguments_: Record<string, unknown>,

@@ -1029,7 +1029,18 @@ describe("inventory source ordering", () => {
         return handle;
       },
     );
-    tracker.start("scan-thread");
+    // These cases stage writes and close hooks around explicit refreshes.
+    // A periodic poll must not consume the rows before those hooks are ready.
+    const originalSetInterval = globalThis.setInterval;
+    const polling = spyOn(globalThis, "setInterval").mockImplementationOnce(((
+      _: unknown,
+      delay?: number,
+    ) => originalSetInterval(() => {}, delay)) as typeof originalSetInterval);
+    try {
+      tracker.start("scan-thread");
+    } finally {
+      polling.mockRestore();
+    }
     await tracker.refresh();
     tracker.beginParentTurn();
     return {
@@ -2292,45 +2303,43 @@ describe("scan cost", () => {
       },
     });
   });
-  test.each(["gpt-6-sol", "openai.gpt-6-sol"])(
-    "prices every token category and both context ranges for %s",
-    (model) => {
-      expect(
-        estimateScanCost(model, {
-          input_tokens: 1_000_000,
-          cached_input_tokens: 200_000,
-          cache_write_input_tokens: 300_000,
-          output_tokens: 100_000,
-        }),
-      ).toEqual({
-        model,
-        inputTokens: 1_000_000,
-        cachedInputTokens: 200_000,
-        cacheWriteInputTokens: 300_000,
-        outputTokens: 100_000,
-        estimatedUsd: 2.79,
-        estimatedUsdRange: { min: 2.79, max: 5.08, context: "unknown" },
-        pricing: {
-          source: "https://developers.openai.com/api/docs/models/gpt-6-sol",
-          asOf: "2026-10-10",
-          serviceTier: "standard",
-          context: "short",
-          usdPerMillionTokens: {
-            input: 2,
-            cacheRead: 0.2,
-            cacheWrite: 2.5,
-            output: 10,
-          },
-          longContextUsdPerMillionTokens: {
-            input: 4,
-            cacheRead: 0.4,
-            cacheWrite: 5,
-            output: 15,
-          },
+  test("prices every token category and both context ranges for gpt-6-sol", () => {
+    const model = "gpt-6-sol";
+    expect(
+      estimateScanCost(model, {
+        input_tokens: 1_000_000,
+        cached_input_tokens: 200_000,
+        cache_write_input_tokens: 300_000,
+        output_tokens: 100_000,
+      }),
+    ).toEqual({
+      model,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 200_000,
+      cacheWriteInputTokens: 300_000,
+      outputTokens: 100_000,
+      estimatedUsd: 2.79,
+      estimatedUsdRange: { min: 2.79, max: 5.08, context: "unknown" },
+      pricing: {
+        source: "https://developers.openai.com/api/docs/models/gpt-6-sol",
+        asOf: "2026-10-10",
+        serviceTier: "standard",
+        context: "short",
+        usdPerMillionTokens: {
+          input: 2,
+          cacheRead: 0.2,
+          cacheWrite: 2.5,
+          output: 10,
         },
-      });
-    },
-  );
+        longContextUsdPerMillionTokens: {
+          input: 4,
+          cacheRead: 0.4,
+          cacheWrite: 5,
+          output: 15,
+        },
+      },
+    });
+  });
   test.each([
     [{ cache_write_tokens: 15 }, 15],
     [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],
@@ -6038,16 +6047,18 @@ describe("live scan cost tracking", () => {
           type: "item.completed",
           item: { type: "agent_message", text },
         });
-        await appendSessionItem(parent, {
-          type: "custom_tool_call_output",
-          output:
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}',
-        });
-        // The inventory marker is absent from this persisted output. Matching its
-        // completion is the only proof that the live 9-file inventory is newer.
+        // Publish the older receipt and its ordering evidence in the same batch.
+        // Until the persisted command is visible, the tool receipt can be newer.
         await appendFile(
           parent,
           jsonLines([
+            {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                output: progressMarker("discovery", 0, 8),
+              },
+            },
             native({
               type: "CommandExecution",
               command: ["inventory"],

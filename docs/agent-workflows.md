@@ -20,7 +20,7 @@ security context:
 
 The [task map](#choose-a-task) below also gives explicit skill names. Local scans
 do not require the optional Cloud connection. To read existing Cloud findings,
-follow the separate [Cloud setup](../sdk/typescript/README.md#read-existing-cloud-findings).
+follow the separate [Cloud setup](../sdk/typescript/docs/sdk.md#read-existing-cloud-findings).
 
 The terminal package includes the plugin used by its own scans. You can follow
 [the CLI quick start](../README.md#quick-start) without setting up an interactive
@@ -40,10 +40,10 @@ Codex plugin session.
 | Track a validated finding                               | Give [`$track-findings`](../plugins/codex-security/skills/track-findings/SKILL.md) the finding and destination. See [plugin connectors](plugin-connectors.md).                                                                             | For completed scans, see [publishing to Linear](../sdk/typescript/docs/cli.md#publish-completed-scans-to-linear).     |
 | Inspect a downloaded skill                              | [Review the skill before installation](#review-a-skill-before-installation) in a trusted Codex chat.                                                                                                                                       | Use the interactive Codex CLI with the plugin enabled.                                                                |
 
-**Read a saved dependency alert.** With `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`,
-run `cs findings imported ./project --format json` to list the repository's
-imported records. Give the relevant record to `$resolve-dependency-alert` when
-you want Codex to check the installed versions and upgrade options.
+**Read a saved dependency alert.** Run `cs findings imported ./project --format json`
+to list the records saved for that checkout. Give the relevant record to
+`$resolve-dependency-alert` to check installed versions and upgrade options.
+To bring in an alert from your scanner, use the [scanner import guides](scanner-imports/README.md).
 
 A scan or triage request produces findings. Ask to fix a specific finding when
 you want a patch. A separate fix verification reports `fixed`,
@@ -91,7 +91,7 @@ For automation, scan exit codes distinguish these outcomes:
 
 Coverage gaps and investigation notes do not by themselves fail a completed
 scan. See [scan output](../sdk/typescript/docs/cli.md#scan-options-and-output)
-and [SDK results](../sdk/typescript/README.md#read-results) for the saved fields
+and [SDK results](../sdk/typescript/docs/sdk.md#read-results) for the saved fields
 and failure output.
 
 ### Check a revision-range scan for missing files
@@ -133,8 +133,9 @@ cs scan --schema --format json
 cs scan --help
 ```
 
-Use [the CLI reference](../sdk/typescript/docs/cli.md#command-discovery-and-integrations)
-for integrations and output formats.
+Choose a [connected app or CLI integration](plugin-connectors.md) for your
+destination. See the [CLI reference](../sdk/typescript/docs/cli.md#command-discovery-and-integrations)
+for command discovery and output formats.
 
 ## Troubleshoot setup
 
