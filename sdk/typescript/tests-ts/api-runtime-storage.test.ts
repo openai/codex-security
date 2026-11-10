@@ -722,5 +722,5 @@ test.each(["directory", "zip"])(
       expect(existsSync(workspace)).toBe(false);
     }
   },
-  60_000,
+  process.platform === "win32" ? 120_000 : 60_000,
 );
