@@ -2266,7 +2266,13 @@ async function prepareOutputDirectory(
       );
       await createWindowsOutputDirectory(created, false);
     } else {
-      created = await mkdtemp(join(canonicalRoot, `${prefix}-`));
+      try {
+        created = await mkdtemp(join(canonicalRoot, `${prefix}-`));
+      } catch (error) {
+        if (nodeErrorCode(error) !== "ENAMETOOLONG") throw error;
+        // The repository name itself can fill a filesystem component.
+        created = await mkdtemp(join(canonicalRoot, "codex-security-"));
+      }
     }
     try {
       if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
