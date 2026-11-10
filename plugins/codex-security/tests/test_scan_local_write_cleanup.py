@@ -6,8 +6,11 @@ import ctypes
 import errno
 import os
 import secrets
+import sys
+import sysconfig
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -203,6 +206,30 @@ def test_new_patch_on_a_filesystem_without_hardlinks(tmp_path, monkeypatch, outc
                 else:
                     assert failed.value.errno == errno.ENOSPC
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux"
+    or (sysconfig.get_config_var("MULTIARCH") or "").partition("-")[0] not in {"x86_64", "aarch64"}
+    or ctypes.sizeof(ctypes.c_void_p) != 8,
+    reason="requires a supported 64-bit Linux syscall ABI",
+)
+def test_exclusive_rename_without_a_libc_wrapper(tmp_path, monkeypatch):
+    writer = load_script("posix_scan_local_files")
+    libc = SimpleNamespace(syscall=ctypes.CDLL(None, use_errno=True).syscall)
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: libc)
+    staged = tmp_path / "staged"
+    target = tmp_path / "résumé.patch"
+    staged.write_bytes(b"first")
+    original = staged.stat()
+    with writer.managed_fd(os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)) as parent_fd:
+        writer._rename_exclusive(parent_fd, staged.name, target.name)
+        assert os.path.samestat(target.stat(), original)
+        staged.write_bytes(b"second")
+        with pytest.raises(FileExistsError):
+            writer._rename_exclusive(parent_fd, staged.name, target.name)
+    assert target.read_bytes() == b"first"
+    assert staged.read_bytes() == b"second"
 
 
 @pytest.mark.parametrize("moved", ["parent", "scan"])
