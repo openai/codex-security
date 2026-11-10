@@ -2,8 +2,13 @@ import { execFile as execFileCallback } from "node:child_process";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { promisify } from "node:util";
-import { CodexSecurityError, InvalidTargetError } from "./errors.js";
-import type { OwnerFinding } from "./suggest-owners.js";
+import { CodexSecurityError, InvalidTargetError } from "../checkout/errors.js";
+import type {
+  OwnerFinding,
+  OwnerContext,
+  OwnerEvidence,
+  CodeownerIdentity,
+} from "./types.js";
 import {
   nullIfMissingFile,
   enclosingGitWorktreeRoot,
@@ -12,46 +17,11 @@ import {
   relativePathIsOutside,
   repositoryRevision,
   validatedGitEnvironment,
-} from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
-import {
-  codeownersForPath,
-  parseCodeowners,
-  type CodeownerIdentity,
-} from "./codeowners.js";
+} from "../checkout/git.js";
+import { resolveTrustedExecutable } from "../checkout/trusted-executable.js";
+import { codeownersForPath, parseCodeowners } from "./codeowners.js";
 
 const execFile = promisify(execFileCallback);
-
-export interface OwnerIdentity {
-  name: string;
-  email: string;
-}
-
-export interface OwnerEvidence {
-  id: string;
-  kind: "source" | "blame" | "history" | "codeowners";
-  path: string;
-  commit: string;
-  /** Original blamed commit; blame citations keep commit at the checkout revision. */
-  blameCommit?: string;
-  commitTime?: number;
-  startLine?: number;
-  endLine?: number;
-  rule?: string;
-  matchedPath?: string;
-  content: string;
-  identityIndex: number | null;
-}
-
-export interface OwnerContext {
-  identities: OwnerIdentity[];
-  evidence: OwnerEvidence[];
-  limitations: string[];
-  declaredOwners: {
-    owner: CodeownerIdentity;
-    evidenceIds: string[];
-  }[];
-}
 
 export async function findingsAtScanRevision(
   repository: string,

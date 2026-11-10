@@ -126,7 +126,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
 
   await build({
     bundle: true,
-    entryPoints: [join(root, "scripts/scan-owners.mjs")],
+    entryPoints: [join(root, "src/owners/scan-owners.ts")],
     format: "esm",
     outfile: join(mcpDir, "scan-owners.mjs"),
     platform: "node",

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { ScanResult } from "./result.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import type { ReadOnlyCodexOptions } from "./scan-comparison.js";
-import { findingsAtScanRevision } from "./owner-evidence.js";
+import { ownerPlugin, withOwnerErrors } from "./owner-plugin.js";
 import {
   suggestOwnersFromScan,
   type SuggestOwnersOptions,
@@ -28,13 +28,16 @@ export async function writeScanOwnerSuggestions(
     throw new Error(
       "Owner suggestions require a completed scan of committed Git content.",
     );
+  const { findingsAtScanRevision } = await ownerPlugin();
   const report = await suggestOwnersFromScan(
     repository,
-    await findingsAtScanRevision(
-      repository,
-      revision,
-      result.findings.findings,
-      options.signal,
+    await withOwnerErrors(() =>
+      findingsAtScanRevision(
+        repository,
+        revision,
+        result.findings.findings,
+        options.signal,
+      ),
     ),
     options,
   );

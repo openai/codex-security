@@ -32,6 +32,9 @@
     "strictNullChecks": true,
     "target": "ESNext",
     "types": ["node", "bun"],
-    "rewriteRelativeImportExtensions": true
+    "rewriteRelativeImportExtensions": true,
+    "paths": {
+      "#plugin-shared/*": ["../../plugins/codex-security/mcp-app/src/*.ts"]
+    }
   }
 }

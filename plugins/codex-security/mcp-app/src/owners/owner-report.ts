@@ -3,11 +3,16 @@ import {
   collectOwnerEvidence,
   collectGitOwnerEvidence,
   type ownerRepository,
-  type OwnerContext,
-  type OwnerEvidence,
 } from "./owner-evidence.js";
-import { CodexSecurityError, errorMessage } from "./errors.js";
-import type { OwnerCandidate, OwnerSuggestion } from "./suggest-owners.js";
+import { CodexSecurityError, errorMessage } from "../checkout/errors.js";
+import type {
+  OwnerCandidate,
+  OwnerSuggestion,
+  OwnerContext,
+  OwnerEvidence,
+  OwnerFinding,
+  OwnerPolicy,
+} from "./types.js";
 
 const text = z.string().refine((value) => value.trim().length > 0);
 const locationSchema = z
@@ -32,7 +37,6 @@ export const findingSchema = z.object({
   extensions: z.record(z.string(), z.unknown()).optional(),
 });
 
-export type OwnerFinding = z.infer<typeof findingSchema>;
 export const decisionSchema = z.strictObject({
   suggestions: z.array(
     z.strictObject({
@@ -44,10 +48,6 @@ export const decisionSchema = z.strictObject({
   reason: text,
 });
 
-type ModelDecision = (finding: OwnerFinding, context: OwnerContext) => unknown;
-type OwnerPolicy =
-  | { kind: "scan"; onWarning?: (warning: string) => void }
-  | { kind: "standalone"; decide: ModelDecision };
 type RankedResult = Pick<
   OwnerSuggestion,
   | "findingId"

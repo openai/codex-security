@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.build.json",
+  "include": [
+    "../../plugins/codex-security/mcp-app/src/checkout/*.ts",
+    "../../plugins/codex-security/mcp-app/src/owners/types.ts"
+  ],
+  "compilerOptions": {
+    "rootDir": "../../plugins/codex-security/mcp-app/src",
+    "outDir": "dist/shared",
+    "stripInternal": false
+  }
+}

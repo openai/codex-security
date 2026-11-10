@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, expect, test } from "bun:test";
 import { InvalidTargetError } from "../src/errors.js";
-import { type OwnerContext } from "../src/owner-evidence.js";
+import { type OwnerContext } from "#plugin-shared/owners/types";
 import {
   suggestOwners,
   suggestOwnersFromScan,

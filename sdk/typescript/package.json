@@ -61,7 +61,7 @@
   "scripts": {
     "audit:prod": "pnpm audit --prod --audit-level high",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "node --run clean && node scripts/generate-plugin-defaults.mjs && tsc -p tsconfig.build.json && node scripts/build-embedding-tokenizer.mjs",
+    "build": "node --run clean && node scripts/generate-plugin-defaults.mjs && tsc -p tsconfig.plugin-shared.json && tsc -p tsconfig.build.json && node scripts/build-embedding-tokenizer.mjs",
     "build:ci": "tsc -p tsconfig.ci.json",
     "build:evals": "node --run build && tsc -p ../../evals/tsconfig.json",
     "build:examples": "tsc -p tsconfig.examples.json",
@@ -122,5 +122,8 @@
     "json5": "2.2.3",
     "prettier": "3.9.10",
     "typescript": "7.0.2"
+  },
+  "imports": {
+    "#plugin-shared/*": "./dist/shared/*.js"
   }
 }

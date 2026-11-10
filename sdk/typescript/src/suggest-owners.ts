@@ -1,53 +1,31 @@
 import { tmpdir } from "node:os";
-import { z } from "zod";
 import { scanCodexHome } from "./api.js";
-import {
-  ownerRepository,
-  type OwnerEvidence,
-  type OwnerIdentity,
-} from "./owner-evidence.js";
+import { ownerPlugin, withOwnerErrors } from "./owner-plugin.js";
+import type {
+  OwnerFinding,
+  OwnerSuggestion,
+} from "#plugin-shared/owners/types";
 import {
   mergedCodexConfig,
   scanModelConfiguration,
   type ScanModelConfiguration,
 } from "./config.js";
 import {
-  decisionSchema,
-  findingSchema,
-  ownerResults,
-  type OwnerFinding,
-} from "./owner-report.js";
-import {
   runReadOnlyCodex,
   type ReadOnlyCodexOptions,
 } from "./scan-comparison.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
-import type { CodeownerIdentity } from "./codeowners.js";
-
-export type { OwnerFinding } from "./owner-report.js";
+export type {
+  CodeownerIdentity,
+  OwnerCandidate,
+  OwnerFinding,
+  OwnerIdentity,
+  OwnerSuggestion,
+} from "#plugin-shared/owners/types";
 export type SuggestOwnersOptions = Omit<
   ReadOnlyCodexOptions,
   "auth" | "workingDirectory"
 >;
-export type { OwnerIdentity } from "./owner-evidence.js";
-export type { CodeownerIdentity } from "./codeowners.js";
-
-export interface OwnerCandidate {
-  owner: OwnerIdentity | CodeownerIdentity;
-  reason: string;
-  evidence: Omit<OwnerEvidence, "identityIndex" | "content" | "blameCommit">[];
-}
-
-export interface OwnerSuggestion {
-  findingId: string;
-  occurrenceId: string | null;
-  status: "identified" | "abstained" | "error";
-  owner: OwnerCandidate["owner"] | null;
-  reason: string;
-  evidence: OwnerCandidate["evidence"];
-  suggestions: OwnerCandidate[];
-  limitations: string[];
-}
 
 export interface OwnerSuggestions extends ScanModelConfiguration {
   schemaVersion: 2;
@@ -73,11 +51,14 @@ export async function suggestOwnersInternal(
   policy: "standalone" | "scan" = "standalone",
 ): Promise<OwnerSuggestions> {
   options.signal?.throwIfAborted();
-  const inputs = z.array(findingSchema).parse(findings);
-  const git = await ownerRepository(
-    repository,
-    options.environment ?? process.env,
-    options.signal,
+  const owners = await ownerPlugin();
+  const session = await withOwnerErrors(() =>
+    owners.prepare(
+      repository,
+      findings,
+      options.environment ?? process.env,
+      options.signal,
+    ),
   );
   const configured = scanModelConfiguration(
     await mergedCodexConfig(
@@ -89,13 +70,10 @@ export async function suggestOwnersInternal(
   const reasoningEffort = options.reasoningEffort ?? configured.reasoningEffort;
   return {
     schemaVersion: 2,
-    revision: git.revision,
+    revision: session.revision,
     model,
     reasoningEffort,
-    results: await ownerResults(
-      git,
-      inputs,
-      options.signal,
+    results: await session.resolve(
       policy === "scan"
         ? { kind: "scan" }
         : {
@@ -110,11 +88,11 @@ export async function suggestOwnersInternal(
                   "Cite supplied evidence IDs for each suggestion. Each contributor needs at least one citation linked to that identity. Explain each recommendation in plain language, including uncertainty. Give an overall reason, including why you returned no suggestions when abstaining. Use names in prose, not internal indices.",
                   JSON.stringify({
                     finding,
-                    revision: git.revision,
+                    revision: session.revision,
                     ...context,
                   }),
                 ].join("\n\n"),
-                z.toJSONSchema(decisionSchema),
+                owners.decisionJsonSchema(),
                 {
                   ...options,
                   model,

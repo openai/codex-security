@@ -1,0 +1,597 @@
+import { isUtf8 } from "node:buffer";
+import { execFile as execFileCallback } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { promisify } from "node:util";
+import { InvalidTargetError, abortReason, errorMessage } from "./errors.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { windowsUnsafePathComponent } from "../windows-path.js";
+
+const execFile = promisify(execFileCallback);
+export const UNSUPPORTED_GIT_ENVIRONMENT: ReadonlySet<string> = new Set([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_REPLACE_REF_BASE",
+]);
+const GIT_REPOSITORY_ENVIRONMENT = new Set([
+  ...UNSUPPORTED_GIT_ENVIRONMENT,
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_GRAFT_FILE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_NAMESPACE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
+]);
+
+export async function normalizeRepository(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const candidate = resolveRepositoryPath(repository);
+  requirePortableWindowsRepositoryPath(candidate);
+  let resolved: Buffer;
+  try {
+    resolved = await abortable(
+      () => realpath(candidate, { encoding: "buffer" }),
+      signal,
+    );
+    if (!(await abortable(() => lstat(resolved), signal)).isDirectory()) {
+      throw new Error("not a directory");
+    }
+  } catch (error) {
+    throwIfAborted(signal);
+    throw new InvalidTargetError(
+      `Repository is not a directory: ${candidate}`,
+      {
+        cause: error,
+      },
+    );
+  }
+  requireUtf8Path("Repository path", candidate, resolved);
+  const canonical = resolved.toString();
+  requirePortableWindowsRepositoryPath(canonical);
+  return canonical;
+}
+
+export function resolveRepositoryPath(repository: string): string {
+  requireUtf8Path("Repository path", repository);
+  return resolve(expandHome(repository));
+}
+
+export function requireUtf8Path(
+  label: "Repository path" | "Path target",
+  value: string,
+  resolved?: Buffer,
+): void {
+  if (resolved === undefined ? !value.isWellFormed() : !isUtf8(resolved)) {
+    throw new InvalidTargetError(
+      `${label} cannot be represented as UTF-8: ${value}`,
+    );
+  }
+}
+
+function requirePortableWindowsRepositoryPath(path: string): void {
+  if (process.platform !== "win32") return;
+  const ambiguous = windowsUnsafePathComponent(path);
+  if (ambiguous !== undefined) {
+    throw new InvalidTargetError(
+      `Repository paths must not contain Windows-ambiguous components: ${ambiguous}`,
+    );
+  }
+}
+
+type ReadWorktreeGit = (
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+) => Promise<string>;
+
+export async function enclosingGitWorktreeRoot(
+  repository: string,
+  signal?: AbortSignal,
+  options: { requireIfPresent?: boolean; readGit?: ReadWorktreeGit } = {},
+): Promise<string | null> {
+  const strict = options.requireIfPresent === true;
+  const readGit = options.readGit ?? gitOutput;
+  const markerRoot = strict
+    ? await gitMarkerRoot(repository, signal, "nearest")
+    : null;
+  let canonicalRoot: string;
+  try {
+    if (strict) {
+      if (
+        (await readGit(
+          repository,
+          ["rev-parse", "--is-inside-git-dir"],
+          signal,
+        )) === "true"
+      ) {
+        throw new InvalidTargetError(
+          "The selected path is inside Git metadata. Select a worktree directory instead.",
+        );
+      }
+      if (markerRoot === null) return null;
+    }
+    const root = await readGit(
+      repository,
+      ["rev-parse", "--show-toplevel"],
+      signal,
+    );
+    canonicalRoot = await abortable(() => realpath(root), signal);
+  } catch (error) {
+    throwIfAborted(signal);
+    if (strict && error instanceof InvalidTargetError) throw error;
+    if (markerRoot !== null) {
+      throw new InvalidTargetError(
+        `Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible. ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
+    return null;
+  }
+  if (
+    markerRoot !== null &&
+    relative(
+      await abortable(() => realpath(markerRoot), signal),
+      canonicalRoot,
+    ) !== ""
+  ) {
+    throw new InvalidTargetError(
+      "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
+    );
+  }
+  if (markerRoot !== null)
+    await requireGitWorktreeBinding(canonicalRoot, signal, readGit);
+  return canonicalRoot;
+}
+
+export async function gitMetadataDirectories(
+  repository: string,
+  signal?: AbortSignal,
+  options: { includeLocalObjects?: boolean; readGit?: ReadWorktreeGit } = {},
+): Promise<[string, string, ...string[]]> {
+  const readGit = options.readGit ?? gitOutput;
+  const [directory, commonDirectory] = await Promise.all([
+    readGit(repository, ["rev-parse", "--absolute-git-dir"], signal),
+    readGit(repository, ["rev-parse", "--git-common-dir"], signal),
+  ]);
+  const roots = await Promise.all([
+    abortable(() => realpath(resolve(repository, directory)), signal),
+    abortable(() => realpath(resolve(repository, commonDirectory)), signal),
+  ]);
+  return [...roots, ...(await gitObjectDirectories(roots, signal, options))];
+}
+
+function gitAlternatePaths(contents: Buffer): string[] {
+  const text = contents.toString("latin1").split("\0", 1)[0]!;
+  const paths: string[] = [];
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  for (let offset = 0; offset < text.length;) {
+    const newline = text.indexOf("\n", offset);
+    let end = newline === -1 ? text.length : newline;
+    let path = text.slice(offset, end);
+    if (path.startsWith("#")) path = "";
+    const quoted = /^"(?:[^"\\]|\\[\s\S])*"/u.exec(text.slice(offset))?.[0];
+    if (quoted !== undefined) {
+      try {
+        // Git uses C-quoted bytes; JSON handles the shared escapes after conversion.
+        path = JSON.parse(
+          quoted.replace(
+            /\\(?:[0-3][0-7]{2}|[\s\S])|[\u0000-\u001f]/gu,
+            (escape) => {
+              if (/^\\[btnfr\\"]$/u.test(escape)) return escape;
+              const byte =
+                escape[0] !== "\\"
+                  ? escape.charCodeAt(0)
+                  : escape === "\\a"
+                    ? 7
+                    : escape === "\\v"
+                      ? 11
+                      : /^\\[0-3][0-7]{2}$/u.test(escape)
+                        ? Number.parseInt(escape.slice(1), 8)
+                        : undefined;
+              if (byte === undefined)
+                throw new SyntaxError("Invalid Git path escape.");
+              return `\\u${byte.toString(16).padStart(4, "0")}`;
+            },
+          ),
+        ) as string;
+        end = offset + quoted.length;
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        // Git treats malformed quoting as an unquoted pathname.
+      }
+    }
+    if (path !== "") {
+      try {
+        paths.push(utf8.decode(Buffer.from(path, "latin1")));
+      } catch (error) {
+        throw new InvalidTargetError("Git object-store paths must use UTF-8.", {
+          cause: error,
+        });
+      }
+    }
+    offset = end + 1;
+  }
+  return paths;
+}
+
+export async function gitObjectDirectories(
+  metadataDirectories: readonly string[],
+  signal?: AbortSignal,
+  options: { includeLocalObjects?: boolean } = {},
+): Promise<string[]> {
+  const pending = metadataDirectories.map((path) => join(path, "objects"));
+  const visited = new Set<string>();
+  const canonical = (path: string): string | null => {
+    try {
+      return realpathSync.native(path);
+    } catch (error) {
+      if (
+        ["ENOENT", "ENOTDIR"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        )
+      )
+        return null;
+      throw error;
+    }
+  };
+  while (pending.length > 0) {
+    throwIfAborted(signal);
+    const directory = canonical(pending.pop()!);
+    if (directory === null || visited.has(directory)) continue;
+    if (!(await stat(directory)).isDirectory()) continue;
+    visited.add(directory);
+    const contents = await readFile(join(directory, "info", "alternates"), {
+      signal,
+    }).catch(nullIfMissingPath);
+    if (contents === null) continue;
+    for (const path of gitAlternatePaths(contents)) {
+      throwIfAborted(signal);
+      pending.push(resolve(directory, path));
+    }
+  }
+  return [...visited].filter(
+    (path) =>
+      options.includeLocalObjects ||
+      metadataDirectories.every((root) =>
+        relativePathIsOutside(relative(root, path)),
+      ),
+  );
+}
+
+async function requireGitWorktreeBinding(
+  repository: string,
+  signal: AbortSignal | undefined,
+  readGit: ReadWorktreeGit,
+): Promise<void> {
+  let cause: unknown;
+  try {
+    const [directory, commonDirectory] = await gitMetadataDirectories(
+      repository,
+      signal,
+      { readGit },
+    );
+    if (
+      [directory, commonDirectory].every(
+        (path) => !relativePathIsOutside(relative(repository, path)),
+      )
+    )
+      return;
+    if (relative(directory, commonDirectory) === "") {
+      // The toplevel check already verified the configured worktree path.
+      if (
+        await readGit(repository, ["config", "--get", "core.worktree"], signal)
+      )
+        return;
+    } else {
+      // A copied backlink is not registration in the common Git directory.
+      const worktreesDirectory = await abortable(
+        () => realpath(join(commonDirectory, "worktrees")),
+        signal,
+      );
+      if (relative(worktreesDirectory, dirname(directory)) === "") {
+        const contents = await abortable(
+          () => readFile(join(directory, "gitdir"), "utf8"),
+          signal,
+        );
+        const backlink = resolve(directory, contents.trimEnd());
+        if (
+          basename(backlink) === ".git" &&
+          relative(
+            repository,
+            await abortable(() => realpath(dirname(backlink)), signal),
+          ) === ""
+        )
+          return;
+      }
+    }
+  } catch (error) {
+    throwIfAborted(signal);
+    cause = error;
+  }
+  throw new InvalidTargetError(
+    "Git metadata is not bound to the selected checkout. Select the intended checkout, repair a moved worktree with git worktree repair, or set core.worktree for a separate Git directory you own.",
+    { cause },
+  );
+}
+
+export function relativePathIsOutside(path: string): boolean {
+  return path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path);
+}
+
+export function validatedGitEnvironment(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): void {
+  const unsupported = Object.entries(environment).find(
+    ([name, value]) =>
+      UNSUPPORTED_GIT_ENVIRONMENT.has(name.toUpperCase()) &&
+      value !== undefined &&
+      value.trim() !== "",
+  );
+  if (unsupported !== undefined) {
+    throw new InvalidTargetError(
+      `${unsupported[0]} is not supported for Codex Security scans.`,
+    );
+  }
+}
+
+export async function repositoryRevision(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  try {
+    return await gitOutput(
+      repository,
+      ["rev-parse", "--verify", "HEAD^{commit}"],
+      signal,
+    );
+  } catch {
+    throwIfAborted(signal);
+    return null;
+  }
+}
+
+/** Resolve Git and its sanitized executable search path for a single selected checkout. */
+export async function trustedGitCommand(
+  repository: string,
+  preserveConfiguration: boolean,
+  sourceEnvironment: NodeJS.ProcessEnv,
+  protectedRoots: string | readonly string[],
+  signal?: AbortSignal,
+) {
+  const command = await resolveTrustedExecutable(
+    "git",
+    isolatedGitEnvironment(preserveConfiguration, sourceEnvironment),
+    [
+      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+      ...(typeof protectedRoots === "string"
+        ? [protectedRoots]
+        : protectedRoots),
+    ],
+  );
+  if (!command) throw new Error("Git is not available on a trusted PATH.");
+  return command;
+}
+
+export function gitOutput(
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+  environment?: NodeJS.ProcessEnv,
+  workingDirectory?: string,
+  encoding?: "utf8",
+  protectedRoots?: string | readonly string[],
+  sourceEnvironment?: NodeJS.ProcessEnv,
+): Promise<string>;
+export function gitOutput(
+  repository: string,
+  args: readonly string[],
+  signal: AbortSignal | undefined,
+  environment: NodeJS.ProcessEnv | undefined,
+  workingDirectory: string | undefined,
+  encoding: "buffer",
+  protectedRoots?: string | readonly string[],
+  sourceEnvironment?: NodeJS.ProcessEnv,
+): Promise<Buffer>;
+export async function gitOutput(
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+  environment: NodeJS.ProcessEnv = {},
+  workingDirectory = repository,
+  encoding: "utf8" | "buffer" = "utf8",
+  protectedRoots: string | readonly string[] = [],
+  sourceEnvironment: NodeJS.ProcessEnv = process.env,
+): Promise<string | Buffer> {
+  throwIfAborted(signal);
+  const command = await trustedGitCommand(
+    repository,
+    args[0] === "rev-parse" ||
+      (args[0] === "symbolic-ref" &&
+        args[1] === "--quiet" &&
+        args[2] === "HEAD" &&
+        args.length === 3) ||
+      (args[0] === "--exec-path" && args.length === 1) ||
+      args[0] === "config" ||
+      (args[0] === "fetch-pack" &&
+        args[1] === "--diag-url" &&
+        args.length === 3) ||
+      (args[0] === "ls-remote" &&
+        args[1] === "--get-url" &&
+        (args.length === 2 || (args[2] === "--" && args.length === 4))) ||
+      args[0] === "ls-files" ||
+      (args[0] === "remote" &&
+        (args.length === 1 ||
+          (args[1] === "get-url" &&
+            (args[2] === "--all" || args[2] === "--")))),
+    sourceEnvironment,
+    protectedRoots,
+    signal,
+  );
+  throwIfAborted(signal);
+  const { stdout } = await execFile(
+    command.executable,
+    ["-c", "core.fsmonitor=false", "-C", workingDirectory, ...args],
+    {
+      encoding,
+      signal,
+      env: { ...command.environment, ...environment },
+      maxBuffer: Infinity,
+    },
+  );
+  if (typeof stdout !== "string") return stdout;
+  // Git writes remote URLs to binary stdout even on Windows. Only the final LF
+  // is a delimiter; a preceding CR belongs to the configured URL.
+  const remoteUrl = args[0] === "remote" && args[1] === "get-url";
+  return stdout.replace(
+    process.platform === "win32" && !remoteUrl ? /\r?\n$/u : /\n$/u,
+    "",
+  );
+}
+
+export async function gitMarkerRoot(
+  repository: string,
+  signal: AbortSignal | undefined,
+  search: "nearest" | "outermost",
+): Promise<string | null> {
+  let candidate = resolve(repository);
+  let current: string;
+  while (true) {
+    try {
+      const canonical = await abortable(() => realpath(candidate), signal);
+      current = (await lstat(canonical)).isDirectory()
+        ? canonical
+        : dirname(canonical);
+      break;
+    } catch (error) {
+      // Stale or inaccessible descendants still belong to their accessible checkout ancestors.
+      throwIfAborted(signal);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        search !== "outermost" ||
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
+      )
+        throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) throw error;
+      candidate = parent;
+    }
+  }
+  return await walkGitMarkers(current, signal, search);
+}
+
+export async function walkGitMarkers(
+  current: string,
+  signal: AbortSignal | undefined,
+  search: "nearest" | "outermost",
+): Promise<string | null> {
+  let root: string | null = null;
+  while (true) {
+    throwIfAborted(signal);
+    try {
+      await lstat(join(current, ".git"));
+      if (search === "nearest") return current;
+      root = current;
+    } catch (error) {
+      throwIfAborted(signal);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        code !== "ENOENT" &&
+        code !== "ENOTDIR" &&
+        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
+      )
+        throw error;
+    }
+    const parent = dirname(current);
+    if (parent === current) return root;
+    current = parent;
+  }
+}
+
+export function isolatedGitEnvironment(
+  preserveGitConfiguration: boolean,
+  source: Readonly<Record<string, string | undefined>> = process.env,
+): NodeJS.ProcessEnv {
+  const environment = { ...source };
+  for (const name of Object.keys(environment)) {
+    const normalized = name.toUpperCase();
+    if (
+      GIT_REPOSITORY_ENVIRONMENT.has(normalized) ||
+      normalized === "GIT_ALLOW_PROTOCOL" ||
+      (!preserveGitConfiguration && normalized.startsWith("GIT_"))
+    ) {
+      delete environment[name];
+    }
+  }
+  environment["GIT_ALLOW_PROTOCOL"] = "";
+  return environment;
+}
+
+export async function abortable<T>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal === undefined) return await operation();
+  throwIfAborted(signal);
+  return await new Promise<T>((resolvePromise, reject) => {
+    const onAbort = (): void => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    const finish =
+      <U>(settle: (value: U) => void) =>
+      (value: U): void => {
+        signal.removeEventListener("abort", onAbort);
+        settle(value);
+      };
+    void Promise.resolve()
+      .then(() => {
+        throwIfAborted(signal);
+        return operation();
+      })
+      .then(finish(resolvePromise), finish(reject));
+  });
+}
+
+export function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted === true) throw abortReason(signal);
+}
+
+export function expandHome(value: string): string {
+  if (value === "~") {
+    return homedir();
+  }
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    const separators =
+      sep === "/" && value.startsWith("~/") ? /^\/+/ : /^[/\\]+/;
+    return resolve(homedir(), value.slice(2).replace(separators, ""));
+  }
+  return value;
+}
+
+/** @internal */
+export function nullIfMissingFile(error: NodeJS.ErrnoException): null {
+  if (error.code === "ENOENT") return null;
+  throw error;
+}
+
+/** @internal */
+export function nullIfMissingPath(error: NodeJS.ErrnoException): null {
+  if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+  throw error;
+}
