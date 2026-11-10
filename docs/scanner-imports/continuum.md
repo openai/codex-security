@@ -1,10 +1,9 @@
 # Import AWS Continuum code findings
 
-Use `GetCodeFinding` JSON to import selected findings with their locations,
-mitigation, and AWS validation evidence. Findings that Continuum detects include
-its validation result; findings you submitted to Continuum can omit it. Use
-`ListCodeFindings` JSON for summaries from an environment dedicated to one
-repository.
+Use `GetCodeFinding` JSON to import selected findings with their locations
+and mitigation. When AWS has run validation, the export also includes the
+validation result. Use `ListCodeFindings` JSON for summaries from an
+environment dedicated to one repository.
 
 ## Quick start
 
@@ -31,7 +30,7 @@ export one verified finding at a time. [AWS CLI get-code-finding](https://docs.a
 
 ```sh
 report=
-out=$(mktemp -d) &&
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   aws continuum get-code-finding --environment-id "$ENVIRONMENT_ID" \
     --finding-id "$FINDING_ID" --output json > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&
@@ -44,7 +43,7 @@ combine the saved objects into a JSON array with `jq`.
 
 ```sh
 report=
-out=$(mktemp -d) &&
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   jq -s '.' first-detail.json second-detail.json > "$out/selected.json" &&
   report="$out/selected.json"
 ```
@@ -55,7 +54,7 @@ page. [AWS CLI list-code-findings](https://docs.aws.amazon.com/cli/latest/refere
 
 ```sh
 report=
-out=$(mktemp -d) &&
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   aws continuum list-code-findings --environment-id "$ENVIRONMENT_ID" \
     --output json > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&
