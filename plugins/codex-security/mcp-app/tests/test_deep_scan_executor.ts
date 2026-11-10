@@ -1457,7 +1457,7 @@ async function testWorkerRuntimeSettings() {
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
     "CODEX_CLI_PATH",
-    "CODEX_MCP_NODE_PATH",
+    "CODEX_BROWSER_USE_NODE_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_CONFIG_PATH",
@@ -1498,6 +1498,8 @@ async function testWorkerRuntimeSettings() {
         { account: null, requiresOpenaiAuth: false },
         process.platform === "win32" && configuration === "",
       );
+      const browserNode = path.join(fixture.root, "browser node");
+      process.env.CODEX_BROWSER_USE_NODE_PATH = browserNode;
       const python = path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
         fixture.root,
@@ -1749,6 +1751,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ? undefined
                 : {
                     ...workerScanEnvironment(fixture.root, index),
+                    CODEX_BROWSER_USE_NODE_PATH: path.join(
+                      fixture.root,
+                      `scan browser node ${index}`,
+                    ),
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                     [headerKey]: ` synthetic-canonical-header-${index}\t`,
@@ -2278,6 +2284,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               nodePaths[index],
           );
           assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
+          assert.equal(
+            invocation.runtimeEnvironment.CODEX_BROWSER_USE_NODE_PATH,
+            selectedProvider.environment?.CODEX_BROWSER_USE_NODE_PATH ??
+              browserNode,
+          );
           assert.equal(invocation.providerHeader, providerHeaders[index]);
 
           assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);

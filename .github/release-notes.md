@@ -9,6 +9,7 @@
 
 - resolve home-relative project config paths on POSIX ([#2505](https://github.com/openai/codex-security/pull/2505))
 - preserve literal paths when loading scan policy ([#2510](https://github.com/openai/codex-security/pull/2510))
+- select a SQLite-capable Node runtime on Linux ([#2499](https://github.com/openai/codex-security/pull/2499))
 
 </details>
 
