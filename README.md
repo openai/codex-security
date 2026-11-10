@@ -63,7 +63,7 @@ reports an `EEXIST` conflict, use `npx @openai/codex-security` in place of
 `cs` for both login and scanning.
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
-For a headless machine, see [device or SSH login](sdk/typescript/README.md#authentication).
+For a headless machine, see [device or SSH login](sdk/typescript/docs/cli.md#authentication).
 
 ### Scan options
 
@@ -124,7 +124,7 @@ try {
 }
 ```
 
-The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
+The [SDK guide](sdk/typescript/docs/sdk.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
 
 Use `findings list` to browse saved findings across scans, `findings list --scan SCAN_ID`
@@ -138,7 +138,7 @@ When Codex Security Cloud is available to your account, the Security plugin's
 verification, and scan status in Codex desktop or the Codex CLI. Cloud is an
 optional connection; local scans work without it.
 
-See [Cloud connection setup and CLI reads](sdk/typescript/README.md#read-existing-cloud-findings)
+See [Cloud connection setup and CLI reads](sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
 for authentication requirements and a read-only example.
 
 ## Generate SECURITY.md

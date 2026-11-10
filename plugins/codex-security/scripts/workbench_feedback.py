@@ -16,6 +16,7 @@ from workbench_constants import (
     FINDING_LOCATION_PATH_BYTES,
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
+    PRIMARY_FINDING_LOCATION_SQL,
 )
 from workbench_finding_results import finding_triage_result
 from workbench_native_indexes import _indexed_findings
@@ -68,7 +69,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
         deterministic=True,
     )
     rows = connection.execute(
-        """
+        f"""
         WITH ranked_decisions AS (
             SELECT findings.id AS finding_id, findings.fingerprint, findings.rule_id,
                 findings.identity_anchor, findings.identity_instance, occurrences.title,
@@ -89,12 +90,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             JOIN findings ON findings.id = occurrences.finding_id
             JOIN scans AS source_scans ON source_scans.id = occurrences.scan_id
             JOIN finding_locations AS locations ON locations.id = (
-                SELECT candidate.id
-                FROM finding_locations AS candidate
-                WHERE candidate.occurrence_id = occurrences.id
-                ORDER BY CASE WHEN candidate.role = 'root_control' THEN 0 ELSE 1 END,
-                    candidate.sort_order
-                LIMIT 1
+                SELECT id {PRIMARY_FINDING_LOCATION_SQL}
             )
             WHERE source_scans.target_id = ?
                 AND source_scans.id != ?

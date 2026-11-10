@@ -15,7 +15,7 @@ Use the same acquisition format for repeated imports. Check the provider's ident
 
 ## Import locally
 
-Use the checkout path with `--repository`. A saved report can be imported locally offline. Use this destination for Tenable One Code Repository captures and selected Semgrep Guardian findings. [Supported inputs by provider](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#choose-your-scanner)
+Use the checkout path with `--repository`. A saved report can be imported locally offline. Use this destination for Tenable One Code Repository captures. [Supported inputs by provider](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#choose-your-scanner)
 
 ```sh
 codex-security publish findings /path/to/selected-wiz-findings.json \
@@ -96,13 +96,15 @@ Retain package versions, reported fixed versions, provenance and original eviden
 
 ## Semgrep Code
 
-Prefer native Code/SAST CLI or CI JSON for this reader; use self-contained SARIF 2.1.0 as a compatibility path. JSON retains the original severity better than SARIF. Use the selected Guardian workflow below for existing Code or Supply Chain findings. Select SAST rules or Code-only CI output; identifiable non-SAST records are excluded, but SARIF may omit the product metadata needed to distinguish Secrets.
+Prefer native Code/SAST CLI or CI JSON for this reader; use self-contained SARIF 2.1.0 as a compatibility path. JSON retains the original severity better than SARIF. Select SAST rules or Code-only CI output; identifiable non-SAST records are excluded, but SARIF may omit the product metadata needed to distinguish Secrets.
 
 For a user-requested new scan, use the installed Semgrep CLI from the source repository root with the selected SAST rules: `semgrep scan --config /path/to/sast-rules.yaml --json-output /path/to/semgrep.json .`. Existing CI jobs can produce the same artifact using `--json-output`; authenticated `semgrep ci --code` follows the job's policy and baseline scope. Explain that this generates fresh scan findings, and do not substitute it for a request to retrieve existing Platform findings.
 
-For a selection of existing Code or Supply Chain findings in Codex, use the signed-in [Semgrep Guardian plugin](https://docs.semgrep.dev/semgrep-guardian/quickstart). Call its `get_semgrep_sast_findings` or `get_semgrep_supply_chain_findings` tool with the selected `deployment_name`, `repository_name` and full `ref`. Preserve any state and severity filters used for that selection. Reuse an existing successful tool result when its scope is explicit. If a selected ID is missing, report it and check the query scope and filters with the user. A project-wide fetch is a separate request.
+For selected rule-based Code findings from the hosted Semgrep AppSec Platform MCP, call `semgrep_account` and match the project's SCM URL to the requested repository. Fetch the project with `ProjectsService_GetProject` and the requested string issue IDs with `IssuesService_ListIssues`, scoped to the project ID, full ref and `ISSUE_TYPE_SAST`. Copy the original selected issue rows into a private capture with `deploymentId`, `project`, `ref`, `findingIds` and `issues`. Follow the [hosted MCP SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-code-findings-from-the-hosted-mcp) to preview and save to the verified local checkout or the explicitly selected Cloud destination. Verify the private inbox job or the connected repository’s receipts and readback, as shown in the preview.
 
-Save a private JSON capture outside the checkout with `format: "semgrep-guardian-selection/v1"`, the verified `sourceRepositoryUrl`, the MCP `request` (tool `name` and `arguments`), the exact selected string `findingIds`, and `structuredContent: { findings: [...] }` containing the original selected tool rows. Match IDs exactly and keep the tool's repository, ref and evidence. Guardian returns a repository name, so confirm its mapping to the selected checkout URL. Use the [Guardian preview command](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings) and confirm the selection locally. Guardian handles sign-in for this workflow. Guardian and Web API IDs remain separate even when the strings match.
+For a selection of existing Code or Supply Chain findings from Guardian, use the signed-in [Semgrep Guardian plugin](https://docs.semgrep.dev/semgrep-guardian/quickstart). Call its `get_semgrep_sast_findings` or `get_semgrep_supply_chain_findings` tool with the selected `deployment_name`, `repository_name` and full `ref`. Preserve any state and severity filters used for that selection. Reuse an existing successful tool result when its scope is explicit. If a selected ID is missing, report it and check the query scope and filters with the user. A project-wide fetch is a separate request.
+
+Save a private JSON capture outside the checkout with `format: "semgrep-guardian-selection/v1"`, the verified `sourceRepositoryUrl`, the MCP `request` (tool `name` and `arguments`), the exact selected string `findingIds`, and `structuredContent: { findings: [...] }` containing the original selected tool rows. Match IDs exactly and keep the tool's repository, ref and evidence. Guardian returns a repository name, so verify its SCM URL for the local checkout or selected Cloud repository. Use the [Guardian preview command](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings) for the intended destination and confirm after reviewing the selection. Guardian handles sign-in for this workflow. Guardian and Web API IDs remain separate even when the strings match.
 
 For a whole project and ref, use the [Web API collector](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch) with its read-capable token. If the user supplies [saved Web API responses](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings), use the IDs from those records. Preview Web API findings against the requested local or Cloud repository.
 
@@ -163,9 +165,11 @@ Obtain explicit confirmation for this concrete upload, including skipped records
 
 ### Upload and report
 
-Read the structured result even when the process exits nonzero. Progress appears on stderr. For a private inbox import, check `privateJob.status`, the job counts, errors and unprocessed records. A completed job can have `verified: 0`. For the repository publisher, report verified and unacknowledged records from the item receipts. For either destination, include exclusions, failures and any `savedSubmission` checkpoint. [Result fields and exit codes](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#results-and-exit-codes)
+Read the structured result even when the process exits nonzero. Progress appears on stderr. For a private inbox import, check `privateJob.status`, the job counts, errors and unprocessed records. A completed job can have `verified: 0`.
 
-A receipt confirms ingestion of scanner evidence. A private finding can then be assessed against the repository and published to shared Findings. Link to the returned `cloudUrl` when available.
+For the repository publisher, report `verified` for findings the CLI confirmed by readback and `unacknowledged` for records without a receipt. Use `failures` to identify records the publisher rejected. For either destination, include exclusions and any `savedSubmission` checkpoint. [Result fields and exit codes](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#results-and-exit-codes)
+
+A private finding can be assessed against the repository and published to shared Findings. Link to the returned `cloudUrl` when available.
 
 ### Resume an interrupted upload
 

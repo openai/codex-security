@@ -4,9 +4,10 @@ import { hash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
-import { copyCompletedScan } from "./plugin-root.js";
+import { parse as parseToml } from "smol-toml";
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import {
   completedEvents,
@@ -26,6 +27,8 @@ test.each([undefined, "Summarize the completed scan."])(
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
+    const bootstrapWorkspace = join(root, "bootstrap");
+    await mkdir(bootstrapWorkspace);
     await mkdir(repository);
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
@@ -50,6 +53,10 @@ test.each([undefined, "Summarize the completed scan."])(
       { codexOverrides: { model: "gpt-5.6-sol" } },
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          bootstrapWorkspace,
+        }),
         canRunDirectDeepScan: () => true,
         environment: {
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
@@ -61,6 +68,27 @@ test.each([undefined, "Summarize the completed scan."])(
         }),
         runDeepScan: async function* (options) {
           expect(options.scanId).toBe("scan_example_001");
+          expect(options.pluginRoot).toBe(PLUGIN_ROOT);
+          const shellPlugin =
+            options.codexOptions.env!["CODEX_SECURITY_PLUGIN_ROOT"]!;
+          if (process.platform === "win32") {
+            expect(dirname(shellPlugin)).toBe(bootstrapWorkspace);
+            const skill = join("skills", "security-scan", "SKILL.md");
+            expect(await readFile(join(shellPlugin, skill))).toEqual(
+              await readFile(join(options.pluginRoot, skill)),
+            );
+            const override = options.codexOptions.configOverrides!.find(
+              (entry) =>
+                entry.startsWith("permissions.codex_security_scan.filesystem="),
+            )!;
+            expect(parseToml(override)).toMatchObject({
+              permissions: {
+                codex_security_scan: {
+                  filesystem: { [shellPlugin]: { ".": "read" } },
+                },
+              },
+            });
+          } else expect(shellPlugin).toBe(PLUGIN_ROOT);
           expect(options.codexOptions.env).toMatchObject({
             CODEX_SECURITY_SCAN_ID: options.scanId,
             CODEX_SECURITY_SCAN_DIR: scanDir,

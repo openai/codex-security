@@ -13,7 +13,6 @@ from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -28,7 +27,9 @@ from finalize_scan_contract import (
     write_export_output,
     write_sarif_projection,
 )
+from snapshot_sqlite import readonly_sqlite_uri
 from validate_scan_contract import validate_contract
+from workbench_constants import PRIMARY_FINDING_LOCATION_SQL
 
 
 def destination_key(destination: Any) -> str:
@@ -226,9 +227,8 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         except PermissionError:
             pass  # Let SQLite report the open failure used by the host's state fallback.
     if payload["action"] == "inspect":
-        database_uri = f"file:{quote(str(path), safe='')}?mode=ro"
         try:
-            connection = sqlite3.connect(database_uri, uri=True, timeout=5)
+            connection = sqlite3.connect(readonly_sqlite_uri(path), uri=True, timeout=5)
         except sqlite3.OperationalError as exc:
             if str(exc) == "unable to open database file":
                 exc._codex_security_state_unavailable = True
@@ -425,7 +425,7 @@ def finding_export_rows(
     connection: sqlite3.Connection, scan_id: str, triage: dict[str, dict[str, Any]]
 ) -> Iterator[dict[str, Any]]:
     for row in connection.execute(
-        """
+        f"""
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
@@ -439,15 +439,8 @@ def finding_export_rows(
             locations.end_line
         FROM finding_occurrences AS occurrences
         LEFT JOIN finding_locations AS locations
-            ON locations.occurrence_id = occurrences.id
-            AND locations.sort_order = (
-                SELECT primary_location.sort_order
-                FROM finding_locations AS primary_location
-                WHERE primary_location.occurrence_id = occurrences.id
-                ORDER BY
-                    CASE WHEN primary_location.role = 'root_control' THEN 0 ELSE 1 END,
-                    primary_location.sort_order
-                LIMIT 1
+            ON locations.id = (
+                SELECT id {PRIMARY_FINDING_LOCATION_SQL}
             )
         WHERE occurrences.scan_id = ?
         ORDER BY occurrences.created_at, occurrences.id
