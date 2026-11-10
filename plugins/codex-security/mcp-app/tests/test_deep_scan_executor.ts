@@ -95,9 +95,9 @@ try {
     );
     await check(t, testWorkerTerminalEvents);
     await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
+    await check(t, testAbortPropagation);
     if (process.platform !== "win32") {
       await check(t, testStreamTerminationWithoutTerminalEventFails);
-      await check(t, testAbortPropagation);
     }
   });
 
