@@ -132,6 +132,12 @@ function resolveUpdate(
   ) {
     manager = "pnpm";
     args = global ? ["add", "-g"] : ["add"];
+    if (
+      !global &&
+      fields.length === 1 &&
+      existsSync(join(directory, "pnpm-workspace.yaml"))
+    )
+      args.push("--workspace-root");
   } else if (
     path.includes("/.yarn/") ||
     path.includes("/yarn/global/") ||
@@ -150,7 +156,7 @@ function resolveUpdate(
         args.push("-D");
         break;
       case "optionalDependencies":
-        args.push("-O");
+        args.push(manager === "bun" ? "--optional" : "-O");
         break;
       case "peerDependencies":
         args.push(manager === "npm" ? "--save-peer" : "--peer");

@@ -168,6 +168,39 @@ describe("CLI update notice", () => {
     }
   });
 
+  test("selects supported options for workspace roots and optional dependencies", () => {
+    const directories = createTemporaryDirectoriesSync(true);
+    const root = directories.create("codex-update-options-");
+    const entrypoint = join(
+      root,
+      "node_modules",
+      "@openai",
+      "codex-security",
+      "dist",
+      "version.js",
+    );
+    try {
+      writeFileSync(join(root, "pnpm-workspace.yaml"), "packages: ['apps/*']");
+      for (const [manager, expected] of [
+        ["pnpm", "pnpm add --workspace-root -O"],
+        ["bun", "bun add --optional"],
+      ]) {
+        writeFileSync(
+          join(root, "package.json"),
+          JSON.stringify({
+            packageManager: manager + "@1.0.0",
+            optionalDependencies: { "@openai/codex-security": "0.9.0" },
+          }),
+        );
+        expect(updateCommand({}, entrypoint)).toBe(
+          expected + " @openai/codex-security@latest",
+        );
+      }
+    } finally {
+      directories.cleanup();
+    }
+  });
+
   test("updates the declaring installation using its package manager", async () => {
     const temporaryDirectories = createTemporaryDirectoriesSync(true);
     const root = realpathSync(
