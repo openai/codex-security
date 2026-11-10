@@ -6,6 +6,8 @@ When delegation is unavailable or a worker cannot start, continue the assigned r
 
 For a host-backed Standard or diff scan, use its authoritative scan context and advance to `threat_model` before starting architecture mapping. The host still validates ownership, target, scope, authentication, and sandbox permissions. Deep Scan's coordinator owns its worker setup and progress; it does not depend on this thread's delegation tools.
 
+A scan from an older workbench may have no recorded owner. The workbench can still display it. A conversation can continue it once the host attaches its thread.
+
 ## Daybreak Access Advisory
 
 Read `access-advisory.md` for the optional account advisory before the first substantive scan action. It does not gate the scan or change runtime setup.
