@@ -1682,7 +1682,8 @@ def test_git_submodule_display_preserves_selected_working_content(
     diff = ["git", "diff", "HEAD", "--", "submodule"]
     original = subprocess.check_output(diff, cwd=target)
     subprocess.run(["git", "config", "--local", "diff.submodule", display], cwd=target, check=True)
-    assert subprocess.check_output(diff, cwd=target) != original
+    configured = subprocess.check_output(diff, cwd=target)
+    assert configured != original
     assert require_target(target, "working_tree", None, None, selected)["contentDigest"] == selected
 
     advance_child("Changed child")
