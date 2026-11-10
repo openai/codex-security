@@ -1446,6 +1446,7 @@ async function testWorkerRuntimeSettings() {
   ];
   const saved = [
     "PYTHON",
+    "PYTHONIOENCODING",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
     "HOME",
@@ -1717,6 +1718,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           };
           return {
             nativePaths,
+            pythonIoEncoding: index % 2 === 0 ? "utf-16-le" : "utf-8-sig",
             knowledgePath: path.join(fixture.root, `knowledge-${index}`),
             knowledgeDocuments: {
               "1-architecture.md.txt": `Synthetic architecture for scan ${index}.`,
@@ -2125,6 +2127,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ]) {
               process.env[name] = path.join(fixture.root, `libraries-${index}`);
             }
+            process.env.PYTHONIOENCODING =
+              workerConfigurations[index].pythonIoEncoding;
             restoreEnv(
               "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
               workerConfigurations[index].workerConfigPath,
@@ -2248,6 +2252,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.environment![name],
             );
           }
+          assert.equal(
+            invocation.runtimeEnvironment.PYTHONIOENCODING,
+            workerConfigurations[index].pythonIoEncoding,
+          );
           assert.equal(
             invocation.knowledgePath,
             workerConfigurations[index].knowledgePath,
