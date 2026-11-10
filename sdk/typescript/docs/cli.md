@@ -2128,7 +2128,8 @@ checkpoint. If an older scan stopped with an empty output, start a new scan with
 `codex-security scans rerun SCAN_ID`.
 
 New Windows Deep Scans also record the checkout's native volume and file ID
-when the filesystem supplies them. An older scan can resume across Python
+when the filesystem supplies them. Validation and remediation verify the same
+checkout identity. An older scan can resume across Python
 versions when its saved checkout identity can be verified. If the workbench
 cannot verify it, resume with the Python runtime that started the scan or use
 `codex-security scans rerun SCAN_ID` to start a new scan.

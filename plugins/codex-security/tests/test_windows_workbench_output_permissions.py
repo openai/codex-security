@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+import io
 import json
 import os
 import sqlite3
@@ -124,6 +125,123 @@ def test_resume_distinguishes_a_changed_checkout_from_different_stat_widths(
         replacement["returncode"] != 0
         and "checkout is missing or was replaced" in replacement["stderr"]
     )
+
+
+@pytest.mark.parametrize(
+    ("tag", "source_allowed"),
+    [(0x9000001A, True), (0x80000017, True), (0xA0000003, False), (0xA000000C, False)],
+    ids=["cloud-files", "wof", "junction", "symlink"],
+)
+def test_checkout_pins_distinguish_name_surrogates_from_provider_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tag: int, source_allowed: bool
+) -> None:
+    windows = windows_scan_local_files
+    provider = tmp_path / "provider"
+    repository = provider / "repository"
+    repository.mkdir(parents=True)
+    attrs = windows._attributes
+
+    def provider_attributes(handle):
+        info = attrs(handle)
+        if windows._final_path(handle) == windows._extended_path(provider):
+            info.FileAttributes |= windows._FILE_ATTRIBUTE_REPARSE_POINT
+            info.ReparseTag = tag
+        return info
+
+    monkeypatch.setattr(windows, "_attributes", provider_attributes)
+    if source_allowed:
+        with windows.pinned_resume_checkout(repository) as identity:
+            assert identity is not None
+            with pytest.raises(PermissionError):
+                provider.rename(tmp_path / "moved")
+    else:
+        with pytest.raises(OSError, match="reparse"):
+            with windows.pinned_resume_checkout(repository):
+                pytest.fail("a redirecting ancestor was followed")
+    with pytest.raises(OSError, match="reparse"):
+        windows.require_windows_output_path(repository)
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["stored-native-id", "legacy-full-id"])
+def test_high_windows_file_id_survives_resume_validation_and_remediation(
+    deep_registration,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy: bool,
+) -> None:
+    import workbench_target
+
+    state, output, register = deep_registration
+    target = output.parent / "repository"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    monkeypatch.setenv("CODEX_HOME", str(state.parent / "home"))
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO()))
+    scan_id = register()["scanId"]
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    read_identity = windows_scan_local_files._full_directory_id
+    high_bits = 1 << 96
+
+    def read_wide_identity(handle, path):
+        identity = read_identity(handle, path)
+        if path == target:
+            return identity[0], identity[1] | high_bits
+        return identity
+
+    monkeypatch.setattr(windows_scan_local_files, "_full_directory_id", read_wide_identity)
+    with closing(workbench_db.connect()) as connection:
+        with windows_scan_local_files.pinned_resume_checkout(target) as native:
+            assert native is not None and native[1] != target.stat().st_ino
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ?, windows_resume_target_identity = ? WHERE id = ?",
+            (
+                *map(serialize_filesystem_identity, native),
+                None if legacy else json.dumps(native),
+                scan_id,
+            ),
+        )
+        connection.commit()
+        row = workbench_db.require_scan(connection, scan_id)
+        monkeypatch.setattr(sys, "argv", ["workbench", "get-cli-scan-resume", "--scan-id", scan_id])
+        workbench_db.main()
+        assert json.loads(capsys.readouterr().out)["threadId"] == "original-thread"
+        monkeypatch.setattr(
+            sys, "argv", ["workbench", "get-scan", "--scan-id", scan_id, "--check-target"]
+        )
+        directory_digest = workbench_target.directory_content_digest
+
+        def digest_while_pinned(directory, **options):
+            with pytest.raises(PermissionError):
+                directory.rename(directory.with_name("different checkout"))
+            return directory_digest(directory, **options)
+
+        monkeypatch.setattr(workbench_target, "directory_content_digest", digest_while_pinned)
+        workbench_db.main()
+        assert json.loads(capsys.readouterr().out)["scan"]["scanId"] == scan_id
+        assert workbench_db.remediation_checkout_snapshot(row) == (
+            row["target_revision"],
+            row["target_snapshot_digest"],
+        )
+        connection.execute("UPDATE scans SET status='complete' WHERE id=?", (scan_id,))
+        if not legacy:
+            # A matching legacy stat tuple must never override a differing stored full ID.
+            info = target.stat()
+            connection.execute(
+                "UPDATE scans SET target_device=?, target_inode=? WHERE id=?",
+                (
+                    serialize_filesystem_identity(info.st_dev),
+                    serialize_filesystem_identity(info.st_ino),
+                    scan_id,
+                ),
+            )
+        connection.commit()
+        row = workbench_db.require_scan(connection, scan_id)
+        assert workbench_db.remediation_availability(row) == (True, None)
+        high_bits = 1 << 97
+        with pytest.raises(SystemExit):
+            workbench_db.main()
+        with pytest.raises(SystemExit):
+            workbench_db.remediation_checkout_snapshot(row)
+        assert not workbench_db.remediation_availability(row)[0]
 
 
 def test_legacy_checkout_keeps_exact_stat_matches_and_requires_full_native_proof(

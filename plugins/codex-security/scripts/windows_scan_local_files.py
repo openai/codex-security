@@ -71,6 +71,7 @@ _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
@@ -468,9 +469,11 @@ def _verify_handle_path(handle: int, expected_path: Path, *, opened_name: bool =
         raise _invalid_path(expected_path, "opened file resolved outside its verified scan path")
 
 
-def _verify_directory(handle: int, expected_path: Path) -> None:
+def _verify_directory(handle: int, expected_path: Path, checkout: bool = False) -> None:
     info = _attributes(handle)
-    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT and (
+        not checkout or not info.ReparseTag or info.ReparseTag & _REPARSE_TAG_NAME_SURROGATE
+    ):
         raise _invalid_path(expected_path, "scan-local directories must not be reparse points")
     if not info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY:
         raise _invalid_path(expected_path, "expected a scan-local directory")
@@ -506,6 +509,7 @@ def _open_directory(
     missing_ok: bool = False,
     missing_is_path_error: bool = True,
     movable: bool = False,
+    checkout: bool = False,
 ) -> _OwnedHandle | None:
     try:
         handle = _create_file(
@@ -526,7 +530,7 @@ def _open_directory(
     if handle is not None:
         try:
             assert handle.value is not None
-            _verify_directory(handle.value, path)
+            _verify_directory(handle.value, path, checkout)
         except BaseException:
             handle.close()
             raise
@@ -763,7 +767,8 @@ def pinned_resume_checkout(target: Path) -> Iterator[tuple[int, int] | None]:
     """Keep the canonical checkout fixed while reading its full native identity and snapshot."""
     with contextlib.ExitStack() as pins:
         for directory in (*reversed(target.parents), target):
-            handle = _open_directory(directory)
+            # A source provider directory may carry a reparse tag without redirecting its name.
+            handle = _open_directory(directory, checkout=True)
             assert handle is not None
             pins.enter_context(handle)
         assert handle.value is not None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -14,13 +15,15 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, cast
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from filesystem_identity import stored_filesystem_identity_matches
+from filesystem_identity import serialize_filesystem_identity, stored_filesystem_identity_matches
 from windows_scan_local_files import copy_directory_junction, pinned_root_git_marker
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
@@ -624,17 +627,17 @@ def remediation_checkout_snapshot(
     ),
 ) -> tuple[str, str | None]:
     """Return the current revision and content digest after verifying the recorded checkout identity and required revision."""
-    target = require_scan_target_identity(scan)
-    revision = git_revision(target)
-    required_revision = expected_revision or scan["target_revision"]
-    if revision != required_revision:
-        raise SystemExit(head_changed_message)
-    content_digest = (
-        worktree_content_digest(target)
-        if revision != "unversioned"
-        else directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
-    )
-    return revision, content_digest
+    with checked_scan_target(scan) as target:
+        revision = git_revision(target)
+        required_revision = expected_revision or scan["target_revision"]
+        if revision != required_revision:
+            raise SystemExit(head_changed_message)
+        content_digest = (
+            worktree_content_digest(target)
+            if revision != "unversioned"
+            else directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
+        )
+        return revision, content_digest
 
 
 def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
@@ -646,10 +649,10 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
         and scan["target_revision"] != "unversioned"
     ):
         # Legacy Git records bind only the revision, not working-tree contents.
-        target = require_scan_target_identity(scan)
-        if git_revision(target) != scan["target_revision"]:
-            raise SystemExit(head_changed_message)
-        require_clean_submodule_worktrees(target)
+        with checked_scan_target(scan) as target:
+            if git_revision(target) != scan["target_revision"]:
+                raise SystemExit(head_changed_message)
+            require_clean_submodule_worktrees(target)
         return
     _, current_digest = remediation_checkout_snapshot(
         scan, head_changed_message=head_changed_message
@@ -1380,9 +1383,75 @@ def require_remediation_target(value: str) -> Path:
     return stored
 
 
-def require_scan_target_identity(scan: sqlite3.Row) -> Path:
-    """Return the recorded checkout path or raise SystemExit if it no longer identifies the original directory."""
+@contextmanager
+def verified_windows_checkout(
+    scan: sqlite3.Row, target: Path, *, replaced_message: str
+) -> Iterator[None]:
+    """Bind a Windows Deep checkout for the full operation, including legacy stat-width changes."""
+    from windows_scan_local_files import pinned_resume_checkout
+
+    binding = scan["windows_resume_target_identity"]
+    stored = (scan["target_device"], scan["target_inode"])
+    if binding is None:
+
+        def stat_identity() -> tuple[int | str, int | str]:
+            metadata = target.stat()
+            return serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(
+                metadata.st_ino
+            )
+
+        if stat_identity() == stored:
+            yield
+            if stat_identity() != stored:
+                raise SystemExit(replaced_message)
+            return
+
+    with pinned_resume_checkout(target) as native:
+        if binding is not None:
+            if native is None:
+                raise SystemExit("Cannot verify the original Windows checkout identity.")
+            if list(native) != json.loads(binding):
+                raise SystemExit(replaced_message)
+        # Legacy stat returned at most a 32-bit volume and 64-bit file index.
+        elif (
+            native is None
+            or (native[0] < 1 << 32 and native[1] < 1 << 64)
+            or tuple(map(serialize_filesystem_identity, native)) != stored
+        ):
+            raise SystemExit(
+                "Cannot verify the saved Windows checkout identity with this Python runtime. "
+                "Use its original Python runtime or start a new scan with "
+                f"'codex-security scans rerun {scan['id']}'."
+            )
+        yield
+
+
+@contextmanager
+def checked_scan_target(scan: sqlite3.Row) -> Iterator[Path]:
+    """Keep any recorded Windows checkout binding intact while a caller reads the target."""
     target = require_remediation_target(scan["target_path"])
+    replaced = "Remediation is unavailable because the selected checkout path was replaced. Start a new scan."
+    if (
+        os.name == "nt"
+        and "windows_resume_target_identity" in scan.keys()
+        and (
+            scan["windows_resume_target_identity"] is not None
+            or (
+                scan["mode"] == "deep"
+                and scan["launch_kind"] == "scan"
+                and scan["recipe_json"] is not None
+            )
+        )
+    ):
+        with ExitStack() as pins:
+            try:
+                pins.enter_context(
+                    verified_windows_checkout(scan, target, replaced_message=replaced)
+                )
+            except OSError as exc:
+                raise SystemExit(f"Cannot verify the original Windows checkout: {exc}") from exc
+            yield target
+        return
     expected_inode = scan["target_inode"]
     if expected_inode is None:
         raise SystemExit(
@@ -1396,11 +1465,14 @@ def require_scan_target_identity(scan: sqlite3.Row) -> Path:
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc
     if not stored_filesystem_identity_matches(expected_inode, metadata.st_ino):
-        raise SystemExit(
-            "Remediation is unavailable because the selected checkout path was replaced. "
-            "Start a new scan."
-        )
-    return target
+        raise SystemExit(replaced)
+    yield target
+
+
+def require_scan_target_identity(scan: sqlite3.Row) -> Path:
+    """Return the recorded checkout path after checking its filesystem identity."""
+    with checked_scan_target(scan) as target:
+        return target
 
 
 def require_git_worktree_head(target: Path) -> str:
@@ -1414,37 +1486,37 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
     if scan["diff_target_kind"] != "working_tree" and not scan["target_snapshot_digest"]:
         return None
     try:
-        target = require_scan_target_identity(scan)
-        if scan["target_revision"] == "unversioned":
-            if (
-                directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
-                != scan["target_snapshot_digest"]
-            ):
+        with checked_scan_target(scan) as target:
+            if scan["target_revision"] == "unversioned":
+                if (
+                    directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
+                    != scan["target_snapshot_digest"]
+                ):
+                    return (
+                        "Directory contents changed while the scan was running; "
+                        "results were saved for the original snapshot."
+                    )
+                return None
+            if git_revision(target) == "unversioned":
                 return (
-                    "Directory contents changed while the scan was running; "
+                    "The scanned Git repository became unavailable while the scan was running; "
+                    "results were saved for the original revision."
+                )
+            working_tree = scan["diff_target_kind"] == "working_tree"
+            expected_head = scan["diff_head_revision"] if working_tree else scan["target_revision"]
+            if require_git_worktree_head(target) != expected_head:
+                return (
+                    "Repository HEAD changed while the scan was running; "
+                    "results were saved for the original revision."
+                )
+            expected_digest = (
+                scan["diff_content_digest"] if working_tree else scan["target_snapshot_digest"]
+            )
+            if worktree_content_digest(target) != expected_digest:
+                return (
+                    "Working-tree contents changed while the scan was running; "
                     "results were saved for the original snapshot."
                 )
-            return None
-        if git_revision(target) == "unversioned":
-            return (
-                "The scanned Git repository became unavailable while the scan was running; "
-                "results were saved for the original revision."
-            )
-        working_tree = scan["diff_target_kind"] == "working_tree"
-        expected_head = scan["diff_head_revision"] if working_tree else scan["target_revision"]
-        if require_git_worktree_head(target) != expected_head:
-            return (
-                "Repository HEAD changed while the scan was running; "
-                "results were saved for the original revision."
-            )
-        expected_digest = (
-            scan["diff_content_digest"] if working_tree else scan["target_snapshot_digest"]
-        )
-        if worktree_content_digest(target) != expected_digest:
-            return (
-                "Working-tree contents changed while the scan was running; "
-                "results were saved for the original snapshot."
-            )
     except (OSError, SystemExit) as error:
         return (
             f"Could not verify the scan target after scanning: {error}; "
