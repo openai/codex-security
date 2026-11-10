@@ -23,6 +23,24 @@ async function generate(parser, source, ...outputs) {
   }
 }
 
+// The standalone plugin build runs without the SDK checkout. Ship the same verifier
+// source there, with package dependencies left for the plugin's own lockfile.
+const verifier = await build({
+  absWorkingDir: fileURLToPath(sdk),
+  entryPoints: ["scripts/plugin-scan-owners.mts"],
+  bundle: true,
+  packages: "external",
+  platform: "node",
+  format: "esm",
+  write: false,
+});
+await generate(
+  "babel",
+  "// Generated from the SDK owner verifier. Run pnpm build in sdk/typescript.\n" +
+    verifier.outputFiles[0].text,
+  new URL("mcp-app/scripts/scan-owners.mjs", plugin),
+);
+
 const deepDefaults = JSON.parse(
   await readFile(new URL("scripts/deep_scan_defaults.json", plugin), "utf8"),
 );

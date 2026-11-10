@@ -515,9 +515,11 @@ files marked `assume-unchanged` and preserves their Git index flags.
 `--owner-suggestions` writes optional `owner-suggestions.json` after a completed
 committed Git scan, using the same checkout, model, and reasoning effort. Owner
 errors leave the base scan completed. The JSON result includes
-`ownerSuggestionsPath` or `ownerSuggestionsError`. For path scans with the bundled
-plugin, each finding can also carry the verified candidates and scanned revision
-in `extensions.ownerSuggestion` before the findings are sealed. This option is unsupported for working-tree and
+`ownerSuggestionsPath` or `ownerSuggestionsError`. For Standard path scans with the bundled plugin, the SDK requests verified
+candidates in `extensions.ownerSuggestion.suggestions` when it first seals
+the findings. Workbench callers can also request this on first completion.
+Replaying completion preserves the sealed finding bytes. Deep Scan automatic
+completion and committed-diff scans use the separate owner report. This option is unsupported for working-tree and
 directory snapshots. It works with `--max-cost`: hints are recorded within the
 existing scan execution and budget, and the report is finalized without another
 model call. Missing hints abstain; invalid hints produce per-finding owner errors.
@@ -1983,9 +1985,9 @@ external object stores such as `git clone --shared` are rejected.
 
 CODEOWNERS declarations take priority over Git history, following
 [GitHub's CODEOWNERS rules](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners).
-The last matching rule wins. Results include ranked `suggestions`: declared
-owners first, followed by contributors recommended from source, blame, and
-history. The existing `owner` is the first suggestion. Git activity does not
+The last matching rule wins. Results include ranked `suggestions`. A matching declaration returns its
+owners without contributor inference. When there is no declaration, the
+standalone command can recommend contributors from source, blame, and history. The existing `owner` is the first suggestion. Git activity does not
 verify membership in a declared team.
 
 Results preserve IDs and report `identified`, `abstained`, or `error`. Identified

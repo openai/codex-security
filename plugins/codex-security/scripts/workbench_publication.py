@@ -301,29 +301,6 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     return result
 
 
-def complete_scan(
-    db: Any,
-    connection: sqlite3.Connection,
-    args: argparse.Namespace,
-    *,
-    prepare_only: bool = False,
-) -> dict[str, Any]:
-    scan_id = db.require_uuid(args.scan_id, "scan-id")
-    cost_json = None if prepare_only else db.parse_scan_cost(args.cost_json)
-    with db.scan_completion_lock(scan_id):
-        return db.complete_scan_locked(
-            connection,
-            scan_id,
-            args.claim_token,
-            cost_json,
-            prepare_only=prepare_only,
-            owner_suggestions=getattr(args, "owner_suggestions", False),
-            thread_id=getattr(args, "thread_id", None),
-            turn_id=getattr(args, "turn_id", None),
-            model_thread_id=getattr(args, "model_thread_id", None),
-        )
-
-
 def export_findings(
     db: Any,
     connection: sqlite3.Connection,

@@ -118,6 +118,7 @@ const distModules = [
   "mock-scan",
   "operation-telemetry",
   "owner-evidence",
+  "owner-report",
   "patch-publication",
   "patch-tui",
   "plugin-python-probe",

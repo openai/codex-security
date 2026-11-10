@@ -114,6 +114,7 @@ from workbench_setup import (
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
     capture_source_scopes,
+    expected_coverage_mode,
     expected_target_kinds,
     public_scan_recipe,
     requested_scan_paths,
@@ -344,26 +345,6 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
         },
         "target": target_contract,
     }
-
-
-def expected_coverage_mode(scan: sqlite3.Row) -> str:
-    """Return the coverage mode implied by the recorded scope, scan mode, and diff target kind."""
-    if scan["mode"] == "diff":
-        mode = {
-            "commit": "commit",
-            "range": "branch_diff",
-            "working_tree": "working_tree",
-        }.get(scan["diff_target_kind"])
-        if mode is None:
-            raise SystemExit("This migrated diff scan does not have a validated change set.")
-        return mode
-    if scan["scope"] != "." or (
-        "recipe_json" in scan.keys()
-        and scan["recipe_json"] is not None
-        and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
-    ):
-        return "scoped_path"
-    return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
 def workbench_completion_binding(
@@ -1015,6 +996,28 @@ def pin_legacy_manifest_digest(
                 "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
                 (manifest_digest, scan["id"]),
             )
+
+
+def complete_scan(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    prepare_only: bool = False,
+) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = None if prepare_only else parse_scan_cost(args.cost_json)
+    with scan_completion_lock(scan_id):
+        return complete_scan_locked(
+            connection,
+            scan_id,
+            args.claim_token,
+            cost_json,
+            prepare_only=prepare_only,
+            owner_suggestions=getattr(args, "owner_suggestions", False),
+            thread_id=getattr(args, "thread_id", None),
+            turn_id=getattr(args, "turn_id", None),
+            model_thread_id=getattr(args, "model_thread_id", None),
+        )
 
 
 def read_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3506,8 +3509,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 read_coverage=coverage_for_comparison,
             )
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
-            result = publication.complete_scan(
-                sys.modules[__name__],
+            result = complete_scan(
                 connection,
                 args,
                 prepare_only=args.command == "prepare-scan-completion",

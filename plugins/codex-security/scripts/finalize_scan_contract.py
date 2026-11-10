@@ -3086,27 +3086,39 @@ def _record_owner_results(
         if isinstance(hint, dict):
             hint.pop("suggestions", None)
             hint.pop("revision", None)
+            if not hint:
+                del extensions["ownerSuggestion"]
     if not findings or repository is None or target.get("kind") != "git_revision":
         return
     try:
         revision = target["revision"]
         helper = Path(__file__).resolve().parents[1] / "mcp" / "scan-owners.mjs"
-        result = subprocess.run(
-            [os.environ["CODEX_MCP_NODE_PATH"], str(helper), str(repository), revision],
-            input=json.dumps(findings),
-            capture_output=True,
-            encoding="utf-8",
-            timeout=10,
-            check=False,
-        )
-        if result.returncode:
-            raise RuntimeError(result.stderr.strip() or f"helper exited with {result.returncode}")
-        reports = json.loads(result.stdout)
-        for finding, item in zip(findings, reports, strict=True):
-            if (
-                item["occurrenceId"] != finding["occurrenceId"]
-                or item["findingId"] != finding["findingId"]
-            ):
+        result = None
+        try:
+            result = subprocess.run(
+                [os.environ["CODEX_MCP_NODE_PATH"], str(helper), str(repository), revision],
+                input=json.dumps(findings),
+                capture_output=True,
+                encoding="utf-8",
+                timeout=10,
+                check=False,
+            )
+            output = result.stdout
+            if result.returncode:
+                warnings.append(
+                    f"Optional owner verification stopped: {result.stderr.strip() or result.returncode}"
+                )
+        except subprocess.TimeoutExpired as error:
+            # TimeoutExpired carries bytes even when subprocess.run uses text mode.
+            output = (error.stdout or b"").decode("utf-8", errors="replace")
+            warnings.append("Optional owner verification timed out")
+        by_occurrence = {finding["occurrenceId"]: finding for finding in findings}
+        for line in output.splitlines(keepends=True):
+            if not line.endswith("\n"):
+                raise ValueError("Incomplete owner result")
+            item = json.loads(line)
+            finding = by_occurrence.pop(item["occurrenceId"])
+            if item["findingId"] != finding["findingId"]:
                 raise ValueError("Owner result identities differ from the scan")
             if item["status"] == "error":
                 warnings.append(f"Skipped owner for {item['occurrenceId']}: {item['reason']}")
@@ -3122,6 +3134,8 @@ def _record_owner_results(
                 hint = extensions["ownerSuggestion"] = {}
             hint["revision"] = revision
             hint["suggestions"] = item["suggestions"]
+        if by_occurrence and result is not None and result.returncode == 0:
+            warnings.append(f"Owner verifier omitted results for {len(by_occurrence)} findings")
     except Exception as error:
         warnings.append(f"Optional owner suggestions could not be completed: {error}")
 

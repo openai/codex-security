@@ -38,6 +38,26 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
     return ["git_worktree"]
 
 
+def expected_coverage_mode(scan: sqlite3.Row) -> str:
+    """Return the coverage mode implied by the recorded scope, scan mode, and diff target kind."""
+    if scan["mode"] == "diff":
+        mode = {
+            "commit": "commit",
+            "range": "branch_diff",
+            "working_tree": "working_tree",
+        }.get(scan["diff_target_kind"])
+        if mode is None:
+            raise SystemExit("This migrated diff scan does not have a validated change set.")
+        return mode
+    if scan["scope"] != "." or (
+        "recipe_json" in scan.keys()
+        and scan["recipe_json"] is not None
+        and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
+    ):
+        return "scoped_path"
+    return "deep_repository" if scan["mode"] == "deep" else "repository"
+
+
 def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     """Return the explicit paths in the saved launch recipe, falling back to the scan’s original scope."""
     if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:

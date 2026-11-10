@@ -126,9 +126,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
 
   await build({
     bundle: true,
-    entryPoints: [
-      join(root, "../../../sdk/typescript/scripts/plugin-scan-owners.mts"),
-    ],
+    entryPoints: [join(root, "scripts/scan-owners.mjs")],
     format: "esm",
     outfile: join(mcpDir, "scan-owners.mjs"),
     platform: "node",

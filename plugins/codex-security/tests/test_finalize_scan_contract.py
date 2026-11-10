@@ -87,6 +87,82 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         )
         self.assertTrue(any("git unavailable" in warning for warning in prepared.warnings))
 
+    def test_first_seal_records_abstention_and_replay_preserves_bytes(self) -> None:
+        target = self.manifest["scan"]["target"]
+        target.update(kind="git_revision", revision="a" * 40)
+        target.pop("snapshotDigest")
+        self.findings["findings"][0]["extensions"] = {
+            "ownerSuggestion": {"revision": "unverified", "suggestions": ["unverified"]}
+        }
+        self.write_scan()
+
+        def verify(command, *, input, **kwargs):
+            finding = json.loads(input)[0]
+            self.assertNotIn("ownerSuggestion", finding["extensions"])
+            result = {key: finding[key] for key in ("findingId", "occurrenceId")}
+            result.update(status="abstained", suggestions=[])
+            return subprocess.CompletedProcess(command, 0, json.dumps(result) + "\n", "")
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": "node"}),
+            mock.patch.object(FINALIZER.subprocess, "run", side_effect=verify) as helper,
+        ):
+            first = FINALIZER._prepare_scan_finalization(
+                self.scan_dir, owner_repository=self.scan_dir
+            )
+            FINALIZER._write_prepared_scan_finalization(first)
+            finding_file = self.scan_dir / "findings.json"
+            sealed = finding_file.read_bytes()
+            self.assertEqual(
+                json.loads(sealed)["findings"][0]["extensions"]["ownerSuggestion"],
+                {"revision": target["revision"], "suggestions": []},
+            )
+            replay = FINALIZER._prepare_scan_finalization(
+                self.scan_dir, owner_repository=self.scan_dir
+            )
+            FINALIZER._write_prepared_scan_finalization(replay)
+            self.assertEqual(finding_file.read_bytes(), sealed)
+            helper.assert_called_once()
+
+    def test_timeout_retains_only_completed_occurrences(self) -> None:
+        rows = [
+            {"findingId": "a", "occurrenceId": "one"},
+            {"findingId": "b", "occurrenceId": "two"},
+        ]
+        candidate = {"owner": {"kind": "person", "handle": "reviewer", "provider": "github"}}
+        completed = {**rows[0], "status": "identified", "suggestions": [candidate]}
+        partial = json.dumps(completed).encode() + b'\n{"findingId":'
+        warnings = []
+        with (
+            mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": "node"}),
+            mock.patch.object(
+                FINALIZER.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired("node", 10, output=partial),
+            ),
+        ):
+            FINALIZER._record_owner_results(
+                rows, self.scan_dir, {"kind": "git_revision", "revision": "a" * 40}, warnings
+            )
+        self.assertEqual(rows[0]["extensions"]["ownerSuggestion"]["suggestions"], [candidate])
+        self.assertNotIn("extensions", rows[1])
+        self.assertTrue(any("timed out" in warning for warning in warnings))
+
+    def test_missing_owner_result_leaves_finding_intact_and_warns(self) -> None:
+        finding = {"findingId": "one", "occurrenceId": "one-here"}
+        warnings = []
+        with (
+            mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": "node"}),
+            mock.patch.object(
+                FINALIZER.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
+            ),
+        ):
+            FINALIZER._record_owner_results(
+                [finding], self.scan_dir, {"kind": "git_revision", "revision": "a" * 40}, warnings
+            )
+        self.assertNotIn("extensions", finding)
+        self.assertTrue(any("omitted results" in warning for warning in warnings))
+
     def write_sealed_scan(self) -> tuple[dict, dict, dict]:
         self.write_scan()
         return FINALIZER.finalize_scan(self.scan_dir)

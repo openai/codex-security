@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   collectOwnerEvidence,
+  hasScanOwnerHint,
   type ownerRepository,
   type OwnerContext,
   type OwnerEvidence,
@@ -43,36 +44,45 @@ export const decisionSchema = z.strictObject({
   reason: text,
 });
 
-export async function ownerResults(
-  git: Awaited<ReturnType<typeof ownerRepository>>,
-  inputs: readonly OwnerFinding[],
+type ModelDecision = (finding: OwnerFinding, context: OwnerContext) => unknown;
+type OwnerPolicy =
+  { kind: "scan" } | { kind: "standalone"; decide: ModelDecision };
+type RankedResult = Pick<
+  OwnerSuggestion,
+  | "findingId"
+  | "occurrenceId"
+  | "status"
+  | "suggestions"
+  | "reason"
+  | "limitations"
+>;
+
+export async function ownerResult(
+  repository: Awaited<ReturnType<typeof ownerRepository>>,
+  finding: OwnerFinding,
   signal: AbortSignal | undefined,
-  decide: (finding: OwnerFinding, context: OwnerContext) => unknown,
-): Promise<OwnerSuggestion[]> {
-  const results: OwnerSuggestion[] = [];
-  for (const finding of inputs) {
+  policy: OwnerPolicy,
+): Promise<RankedResult> {
+  signal?.throwIfAborted();
+  const result: RankedResult = {
+    findingId: finding.findingId,
+    occurrenceId: finding.occurrenceId ?? null,
+    status: "abstained",
+    suggestions: [],
+    limitations: [],
+    reason: "No source with observed contributors was available.",
+  };
+  try {
+    const context = await collectOwnerEvidence(
+      finding,
+      repository,
+      policy.kind,
+    );
     signal?.throwIfAborted();
-    const result: OwnerSuggestion = {
-      findingId: finding.findingId,
-      occurrenceId: finding.occurrenceId ?? null,
-      status: "abstained",
-      owner: null,
-      reason: "No source with observed contributors was available.",
-      evidence: [],
-      suggestions: [],
-      limitations: [],
-    };
-    results.push(result);
-    try {
-      const context = await collectOwnerEvidence(
-        finding,
-        git,
-        decide === scanOwnerDecision,
-      );
-      signal?.throwIfAborted();
-      result.limitations = context.limitations;
+    result.limitations = context.limitations;
+    if (context.declaredOwners.length) {
       for (const declared of context.declaredOwners)
-        addSuggestion(result, {
+        addSuggestion(result.suggestions, {
           owner: declared.owner,
           reason: "Declared owner of an affected file in CODEOWNERS.",
           evidence: publicEvidence(
@@ -81,29 +91,36 @@ export async function ownerResults(
             ),
           ),
         });
-      if (
-        context.identities.length === 0 ||
-        !context.evidence.some(({ kind }) => kind === "source")
-      )
-        continue;
-      const decision = decisionSchema.parse(await decide(finding, context));
+    } else if (policy.kind === "scan") {
+      if (hasScanOwnerHint(finding)) {
+        const candidate = verifiedGitCandidate(finding, context);
+        result.suggestions.push(candidate);
+      } else
+        result.reason = "The scan did not record a supported owner suggestion.";
+    } else if (
+      context.identities.length &&
+      context.evidence.some(({ kind }) => kind === "source")
+    ) {
+      const decision = decisionSchema.parse(
+        await policy.decide(finding, context),
+      );
+      signal?.throwIfAborted();
       const candidates = decision.suggestions.map(
         (suggestion): OwnerCandidate => {
           const owner = context.identities[suggestion.identityIndex];
-          const cited = suggestion.evidenceIds.map((id) =>
+          const cited = [...new Set(suggestion.evidenceIds)].map((id) =>
             context.evidence.find((item) => item.id === id),
           );
           if (
-            owner === undefined ||
+            !owner ||
             !cited.every((item) => item !== undefined) ||
             !cited.some(
               (item) => item.identityIndex === suggestion.identityIndex,
             )
-          ) {
+          )
             throw new CodexSecurityError(
               "The recommendation contains an unknown owner or unsupported citation.",
             );
-          }
           return {
             owner,
             reason: suggestion.reason,
@@ -111,50 +128,49 @@ export async function ownerResults(
           };
         },
       );
-      for (const candidate of candidates) addSuggestion(result, candidate);
-      if (
-        candidates.length > 0 &&
-        context.declaredOwners.some(({ owner }) => owner.kind === "group")
-      )
-        result.limitations.push(
-          "Git contributors are not verified members of the declared CODEOWNERS teams.",
-        );
-      if (result.suggestions.length === 0) result.reason = decision.reason;
-    } catch (error) {
-      signal?.throwIfAborted();
-      if (result.suggestions.length > 0)
-        result.limitations.push(
-          `Additional contributor suggestions failed: ${errorMessage(error)}`,
-        );
-      else {
-        result.status = "error";
-        result.reason = errorMessage(error);
-      }
+      for (const candidate of candidates)
+        addSuggestion(result.suggestions, candidate);
+      result.reason = decision.reason;
     }
+    if (result.suggestions.length) {
+      result.status = "identified";
+      result.reason = result.suggestions[0]!.reason;
+    }
+  } catch (error) {
+    signal?.throwIfAborted();
+    result.status = "error";
+    result.reason = errorMessage(error);
+  }
+  return result;
+}
+
+export async function ownerResults(
+  git: Awaited<ReturnType<typeof ownerRepository>>,
+  inputs: readonly OwnerFinding[],
+  signal: AbortSignal | undefined,
+  policy: OwnerPolicy,
+): Promise<OwnerSuggestion[]> {
+  const results: OwnerSuggestion[] = [];
+  for (const finding of inputs) {
+    const ranked = await ownerResult(git, finding, signal, policy);
+    const primary = ranked.suggestions[0];
+    results.push({
+      ...ranked,
+      owner: primary?.owner ?? null,
+      evidence: primary?.evidence ?? [],
+    });
   }
   signal?.throwIfAborted();
   return results;
 }
 
-export function scanOwnerDecision(
+function verifiedGitCandidate(
   finding: OwnerFinding,
   context: OwnerContext,
-) {
-  const value = finding.extensions?.["ownerSuggestion"];
-  if (
-    value === undefined ||
-    value === null ||
-    (typeof value === "object" &&
-      "suggestions" in value &&
-      !("email" in value || "commit" in value || "reason" in value))
-  )
-    return {
-      suggestions: [],
-      reason: "The scan did not record a supported owner suggestion.",
-    };
+): OwnerCandidate {
   const hint = z
     .object({ email: text, commit: text, reason: text })
-    .parse(value);
+    .parse(finding.extensions?.["ownerSuggestion"]);
   const supports = (item: OwnerEvidence) =>
     item.kind === "blame"
       ? item.blameCommit === hint.commit
@@ -175,14 +191,9 @@ export function scanOwnerDecision(
       "The scan owner is not supported by the finding's Git evidence.",
     );
   return {
-    suggestions: [
-      {
-        identityIndex,
-        reason: hint.reason,
-        evidenceIds: cited.map((item) => item.id),
-      },
-    ],
+    owner: context.identities[identityIndex]!,
     reason: hint.reason,
+    evidence: publicEvidence(cited),
   };
 }
 
@@ -206,20 +217,15 @@ function ownerKey(owner: OwnerCandidate["owner"]): string {
 }
 
 function addSuggestion(
-  result: OwnerSuggestion,
+  suggestions: OwnerCandidate[],
   candidate: OwnerCandidate,
 ): void {
-  const existing = result.suggestions.find(
+  const existing = suggestions.find(
     ({ owner }) => ownerKey(owner) === ownerKey(candidate.owner),
   );
   if (existing) {
     for (const citation of candidate.evidence)
       if (!existing.evidence.some(({ id }) => id === citation.id))
         existing.evidence.push(citation);
-  } else result.suggestions.push(candidate);
-  const primary = result.suggestions[0]!;
-  result.owner = primary.owner;
-  result.reason = primary.reason;
-  result.evidence = primary.evidence;
-  result.status = "identified";
+  } else suggestions.push(candidate);
 }

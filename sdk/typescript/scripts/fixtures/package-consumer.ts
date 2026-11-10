@@ -71,14 +71,6 @@ import {
   SqliteFindingsStore,
 } from "@openai/codex-security/server";
 
-export async function ownerSuggestions(
-  repository: string,
-  findings: OwnerFinding[],
-): Promise<OwnerCandidate[][]> {
-  const report = await suggestOwners(repository, findings);
-  return report.results.map(({ suggestions }) => suggestions);
-}
-
 export async function classify(
   findings: Finding[],
   scanId: string,
@@ -387,8 +379,12 @@ export async function suggestFindingOwners(
 ) {
   const report = await suggestOwners(repository, findings);
   const schemaVersion: 2 = report.schemaVersion;
+  const suggestions: OwnerCandidate[][] = report.results.map(
+    (item) => item.suggestions,
+  );
   return {
     schemaVersion,
+    suggestions,
     identifiers: report.results.map(({ owner }) => ownerIdentifier(owner)),
   };
 }

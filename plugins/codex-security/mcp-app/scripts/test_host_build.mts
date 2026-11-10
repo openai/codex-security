@@ -55,6 +55,55 @@ test("builds and loads the host runtime from standalone plugin source", async (t
   );
   assert.deepEqual(actual.sort(), expected.sort());
 
+  // Exercise the shipped verifier without an SDK checkout or model.
+  const repo = join(output, "fixture");
+  await mkdir(repo);
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+  git("init", "-q");
+  await writeFile(join(repo, "CODEOWNERS"), "/owned.ts @reviewer\n");
+  await writeFile(join(repo, "owned.ts"), "export const owned = true;\n");
+  await writeFile(join(repo, "other.ts"), "export const other = true;\n");
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=Example",
+    "-c",
+    "user.email=reviewer@example.test",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "-qm",
+    "Fixture",
+  );
+  const inputs = Array.from({ length: 1000 }, (_, index) => ({
+    findingId: String(index),
+    occurrenceId: String(index),
+    title: "Fixture",
+    summary: "",
+    locations: [{ path: index === 0 ? "owned.ts" : "other.ts" }],
+  }));
+  const verified = execFileSync(
+    process.execPath,
+    [join(mcp, "scan-owners.mjs"), repo, git("rev-parse", "HEAD")],
+    { input: JSON.stringify(inputs), encoding: "utf8" },
+  )
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(verified.length, inputs.length);
+  assert.equal(verified[0].suggestions[0].owner.handle, "reviewer");
+  assert.ok(
+    verified
+      .slice(1)
+      .every(
+        (entry, index) =>
+          entry.occurrenceId === String(index + 1) &&
+          entry.status === "abstained" &&
+          entry.suggestions.length === 0,
+      ),
+  );
+
   const emptyPathEnvironment = {
     ...Object.fromEntries(
       Object.entries(process.env).filter(

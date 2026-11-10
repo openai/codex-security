@@ -1,12 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { lstat, readdir, realpath } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { promisify } from "node:util";
-import {
-  CodexSecurityError,
-  InvalidTargetError,
-  errorMessage,
-} from "./errors.js";
+import { CodexSecurityError, InvalidTargetError } from "./errors.js";
 import type { OwnerFinding } from "./suggest-owners.js";
 import {
   nullIfMissingFile,
@@ -14,6 +10,7 @@ import {
   gitMetadataDirectories,
   normalizeRepository,
   relativePathIsOutside,
+  repositoryRevision,
   validatedGitEnvironment,
 } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -53,6 +50,32 @@ export interface OwnerContext {
     owner: CodeownerIdentity;
     evidenceIds: string[];
   }[];
+}
+
+export async function findingsAtScanRevision(
+  repository: string,
+  revision: string,
+  findings: readonly OwnerFinding[],
+  signal?: AbortSignal,
+): Promise<OwnerFinding[]> {
+  if ((await repositoryRevision(repository, signal)) !== revision)
+    throw new Error(
+      "Owner checkout does not match the completed scan revision.",
+    );
+  const scanRoot = await normalizeRepository(repository, signal);
+  const gitRoot =
+    (await enclosingGitWorktreeRoot(scanRoot, signal, {
+      requireIfPresent: true,
+    })) ?? scanRoot;
+  const prefix = relative(gitRoot, scanRoot).split(sep).join("/");
+  return findings.map((finding) => ({
+    ...finding,
+    sourceRevision: revision,
+    locations: finding.locations.map((location) => ({
+      ...location,
+      path: prefix ? `${prefix}/${location.path}` : location.path,
+    })),
+  }));
 }
 
 /** Read committed objects, so dirty files and source symlinks are never followed. */
@@ -196,7 +219,7 @@ async function requireBoundMetadata(
 export async function collectOwnerEvidence(
   finding: OwnerFinding,
   repository: Awaited<ReturnType<typeof ownerRepository>>,
-  declaredOwnersFirst = false,
+  policy: "scan" | "standalone",
 ): Promise<OwnerContext> {
   const { revision, hasFile, shallow } = repository;
   const context: OwnerContext = {
@@ -226,7 +249,7 @@ export async function collectOwnerEvidence(
         "CODEOWNERS meets or exceeds GitHub's 3 MB file-size limit and was ignored.",
       );
     } else {
-      for (const { path } of finding.locations) {
+      for (const path of new Set(finding.locations.map(({ path }) => path))) {
         if (!hasFile(path)) continue;
         const rule = codeownersForPath(codeowners.rules, path);
         if (rule === undefined) continue;
@@ -251,16 +274,19 @@ export async function collectOwnerEvidence(
     context.limitations.push(
       "CODEOWNERS identities are declarations; their existence and repository access are not verified.",
     );
-  if (declaredOwnersFirst && context.declaredOwners.length) return context;
-  try {
-    await collectGitOwnerEvidence(finding, repository, context, stale);
-  } catch (error) {
-    if (context.declaredOwners.length === 0) throw error;
-    context.limitations.push(
-      `Git contributor evidence failed: ${errorMessage(error)}`,
-    );
-  }
+  if (context.declaredOwners.length > 0) return context;
+  if (policy === "scan" && !hasScanOwnerHint(finding)) return context;
+  await collectGitOwnerEvidence(finding, repository, context, stale);
   return context;
+}
+
+export function hasScanOwnerHint(finding: OwnerFinding): boolean {
+  const value = finding.extensions?.["ownerSuggestion"];
+  if (value == null) return false;
+  if (typeof value !== "object" || Array.isArray(value)) return true;
+  return Object.keys(value).some(
+    (key) => key !== "revision" && key !== "suggestions",
+  );
 }
 
 function addOwnerEvidence(

@@ -1,40 +1,35 @@
-/** Build verified per-finding results for the workbench before it seals a scan. */
-import { relative, sep } from "node:path";
+/** Verify committed ownership evidence before the workbench seals the scan. */
 import { readFileSync } from "node:fs";
-import { ownerRepository } from "../src/owner-evidence.js";
+import { once } from "node:events";
 import {
-  findingSchema,
-  ownerResults,
-  scanOwnerDecision,
-} from "../src/owner-report.js";
-import {
-  enclosingGitWorktreeRoot,
-  normalizeRepository,
-} from "../src/targets.js";
+  findingsAtScanRevision,
+  ownerRepository,
+} from "../src/owner-evidence.js";
+import { findingSchema, ownerResult } from "../src/owner-report.js";
 
 const [, , repository, revision] = process.argv;
 if (!repository || !revision)
   throw new Error("Expected a checkout and scan revision.");
-const target = await normalizeRepository(repository);
 const signal = AbortSignal.timeout(8_000);
-const git = await ownerRepository(target, process.env, signal);
+const inputs = findingSchema.array().parse(JSON.parse(readFileSync(0, "utf8")));
+const findings = await findingsAtScanRevision(
+  repository,
+  revision,
+  inputs,
+  signal,
+);
+const git = await ownerRepository(repository, process.env, signal);
 if (git.revision !== revision)
   throw new Error("Owner checkout differs from the scan revision.");
-const root = await enclosingGitWorktreeRoot(target, signal, {
-  requireIfPresent: true,
-});
-const prefix = relative(root ?? target, target)
-  .split(sep)
-  .join("/");
-const findings = findingSchema
-  .array()
-  .parse(JSON.parse(readFileSync(0, "utf8")));
 for (const finding of findings) {
-  finding.sourceRevision = revision;
-  if (prefix) {
-    for (const location of finding.locations)
-      location.path = prefix + "/" + location.path;
-  }
+  const { findingId, occurrenceId, status, reason, suggestions } =
+    await ownerResult(git, finding, signal, { kind: "scan" });
+  // Flush each completed occurrence so a later timeout cannot discard its result.
+  if (
+    !process.stdout.write(
+      JSON.stringify({ findingId, occurrenceId, status, reason, suggestions }) +
+        "\n",
+    )
+  )
+    await once(process.stdout, "drain", { signal });
 }
-const results = await ownerResults(git, findings, signal, scanOwnerDecision);
-process.stdout.write(JSON.stringify(results));

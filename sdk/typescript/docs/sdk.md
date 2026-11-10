@@ -204,6 +204,10 @@ files can set `scan.owner_suggestions: true`. The report uses the scan's finding
 IDs and frozen revision; it does not change the sealed findings or assign users.
 Owner failures leave the base scan completed and appear as
 `result.ownerSuggestionsError`; successful reports set `result.ownerSuggestionsPath`.
+On Standard path scans, the bundled plugin also saves verified candidates in
+`extensions.ownerSuggestion.suggestions` at the first seal. Completion replay
+preserves those bytes. Deep Scan automatic completion uses the sidecar.
+
 The scan records optional owner hints within its existing session and budget.
 Report finalization applies CODEOWNERS and validates Git evidence without another
 model call, including when `maxCostUsd` is set. Missing hints abstain and invalid
