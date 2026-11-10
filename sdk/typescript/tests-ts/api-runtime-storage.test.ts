@@ -160,6 +160,10 @@ test.each(["ready", "denied", "canceled"])(
               "filesystem"
             ] as Record<string, unknown>;
             expect(roots[dirname(profileFile)]).toEqual({ ".": "deny" });
+            if (process.platform === "win32" && operation !== "validation")
+              expect(roots[await realpath(repository)]).toEqual({
+                ".": "read",
+              });
             if (process.platform === "win32" && operation !== "validation") {
               const staged = options.env!["CODEX_SECURITY_PLUGIN_ROOT"]!;
               expect(dirname(staged)).toBe(protectedDirectory!);

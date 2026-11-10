@@ -154,7 +154,7 @@ export async function prepareKnowledgeBase(
         : await readKnowledgeBaseSnapshot(input, signal);
     const protectedRoots = await knowledgeBaseProtectedRoots(snapshot, signal);
     const path = await mkdtemp(
-      join(directory ?? tmpdir(), "codex-security-knowledge-"),
+      join(await realpath(directory ?? tmpdir()), "codex-security-knowledge-"),
     );
     try {
       for (const [filename, text] of Object.entries(snapshot.documents)) {
