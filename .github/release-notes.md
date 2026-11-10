@@ -42,6 +42,7 @@
 - grant scan workers explicit source read access ([#2545](https://github.com/openai/codex-security/pull/2545))
 - verify assumed-unchanged files for committed diffs ([#2554](https://github.com/openai/codex-security/pull/2554))
 - resolve temporary paths before patching a saved checkout ([#2558](https://github.com/openai/codex-security/pull/2558))
+- stage knowledge in the selected temporary directory ([#2559](https://github.com/openai/codex-security/pull/2559))
 
 </details>
 
