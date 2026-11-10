@@ -1010,14 +1010,19 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 
 
 @contextlib.contextmanager
-def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
-    """Bind a canonical worktree beneath a fixed-drive root to its exact .git marker."""
+def pinned_root_git_marker(
+    cwd: Path, metadata: Path, *, work_tree: Path | None = None
+) -> Iterator[Path | None]:
+    """Return a short explicit worktree marker while its cwd and Git metadata are pinned."""
+    if work_tree is None:
+        work_tree = cwd
     if (
         not cwd.is_absolute()
         or not metadata.is_absolute()
         or len(cwd.drive) != 2
         or cwd.drive != metadata.drive
-        or len(cwd.parts) < 2
+        or len(work_tree.parts) < 2
+        or cwd.parts[: len(work_tree.parts)] != work_tree.parts
         or len(metadata.parts) < 2
         or _GetDriveTypeW(cwd.anchor) != _DRIVE_FIXED
     ):
@@ -1037,9 +1042,11 @@ def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
                 assert handle.value is not None
                 if _final_path(handle.value) != _extended_path(path):
                     raise ValueError("the selected Git directory spelling is not canonical")
-            if str(cwd / ".git") != str(metadata):
+            root_marker = work_tree / ".git"
+            reference = Path(os.path.relpath(root_marker, cwd))
+            if str(root_marker) != str(metadata):
                 # The literal canonical root is already pinned before opening its regular file.
-                fd, leaf = open_read_fd_with_path(cwd, ".git", "Git metadata pointer")
+                fd, leaf = open_read_fd_with_path(work_tree, ".git", "Git metadata pointer")
                 pointer = pins.enter_context(os.fdopen(fd, "rb"))
                 if leaf != ".git":
                     raise ValueError("the root marker name does not match .git")
@@ -1047,7 +1054,10 @@ def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
                 value = pointer.read(len(expected) + 3).removesuffix(b"\n").removesuffix(b"\r")
                 if value.replace(b"/", b"\\") != expected:
                     raise ValueError("the root marker does not name the selected Git directory")
-            marker = Path(".git")
+                # A deep scope can make the relative spelling longer than the gitfile itself.
+                if len(os.fsencode(root_marker)) < len(os.fsencode(reference)):
+                    reference = root_marker
+            marker = reference
         except (OSError, ValueError):
             pins.close()
         yield marker

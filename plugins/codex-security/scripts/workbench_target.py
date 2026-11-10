@@ -869,7 +869,7 @@ def _windows_inventory_query(
     input_data: bytes | None = None,
     environment_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Retry a root inventory's metadata length error with its verified literal marker."""
+    """Retry an inventory's metadata length error with its verified worktree marker."""
 
     def query(
         directory: Path, environment: dict[str, str] | None
@@ -891,7 +891,7 @@ def _windows_inventory_query(
     if (
         result.returncode != 128
         or result.stdout
-        or str(target) != str(work_tree)
+        or not target.is_relative_to(work_tree)
         or b"GIT_DIR" not in result.stderr
     ):
         return result
@@ -901,7 +901,7 @@ def _windows_inventory_query(
         probe = query(git_dir, {**(environment_overrides or {}), "LC_ALL": "C", "LANGUAGE": "C"})
         if probe.returncode != 128 or probe.stdout or diagnostic not in probe.stderr.splitlines():
             return result
-    with pinned_root_git_marker(target, git_dir) as marker:
+    with pinned_root_git_marker(target, git_dir, work_tree=work_tree) as marker:
         if marker is not None:
             retry = query(marker, environment_overrides)
             if retry.returncode == 0 or (retry.returncode == 1 and "check-ignore" in args):
