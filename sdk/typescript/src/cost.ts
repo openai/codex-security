@@ -39,6 +39,7 @@ import {
 import {
   scanProgressUpdatesFromText,
   type ScanProgress,
+  type ScanWorkerPhase,
 } from "./worker-progress.js";
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
@@ -147,12 +148,31 @@ const rateLimitSnapshot = z.object({
   secondary: rateLimitWindow.nullish(),
 });
 
-/** A persisted worker session discovered during this run. Contains no model text. */
-export interface ScanWorkerEvent {
-  kind: "observed";
-  /** Scan-local number shared with activity and session observers. */
-  worker: number;
-}
+/**
+ * Worker signals delivered through onWorkerEvent.
+ * `observed` is a persisted session discovered during this run and contains no
+ * model text. `dispatch` and `failed` are runtime spawn_agent boundaries from
+ * the live event stream, distinct from late session observations.
+ */
+export type ScanWorkerEvent =
+  | {
+      kind: "observed";
+      /** Scan-local number shared with activity and session observers. */
+      worker: number;
+    }
+  | {
+      kind: "dispatch";
+      phase: ScanWorkerPhase;
+      planned: number;
+      started: number;
+    }
+  | {
+      kind: "failed";
+      phase: ScanWorkerPhase;
+      planned: number;
+      started: number;
+      reason: string;
+    };
 
 export interface ScanSessionEvent {
   threadId: string;
