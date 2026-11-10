@@ -360,7 +360,6 @@ interface PreparedSession {
   runtime: PreparedRuntime;
   runtimeHome: string;
   effectiveConfig: JsonObject;
-  preflightConfig: JsonObject;
   sessionConfig: JsonObject;
   modelProvider: unknown;
   providerEnvKey?: string;
@@ -2367,7 +2366,6 @@ export class CodexSecurity {
         runtime,
         runtimeHome,
         effectiveConfig,
-        preflightConfig,
         modelProvider,
         pricingContext,
         authentication,
@@ -2712,6 +2710,7 @@ export class CodexSecurity {
         typeof profileName === "string" &&
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]));
       const overrides = this.config.codexOverrides ?? {};
+      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       const recipeConfig: JsonObject = {
         ...(fileProfile
           ? scanPreflightCodexConfig(overrides)
@@ -2883,18 +2882,16 @@ export class CodexSecurity {
             await cleanupSdkDirectory(archiveWorkspace);
         }
       }
-      if (
-        cyberAccessProgram !== undefined &&
-        cyberAccessProgram !== options.cyberAccessProgram
-      ) {
+      if (cyberAccessProgram !== undefined) {
         // A continuation restores the selection. A new rerun uses the caller's original choice.
-        recipe["requestedCyberAccessProgram"] = cyberAccessProgram;
-        if (runtime.configPath !== undefined)
-          await writeCodexConfig(runtime.configPath, {
-            ...preflightConfig,
-            codex_security: { cyber_access_program: cyberAccessProgram },
-          });
+        if (options.cyberAccessProgram === undefined)
+          recipe["requestedCyberAccessProgram"] = cyberAccessProgram;
+        preflightConfig["codex_security"] = {
+          cyber_access_program: cyberAccessProgram,
+        };
       }
+      if (runtime.configPath !== undefined)
+        await writeCodexConfig(runtime.configPath, preflightConfig);
       checkOpen();
       const registration =
         resumeRegistration !== undefined
@@ -4953,7 +4950,6 @@ export class CodexSecurity {
         approval_policy: "never",
         ...this.config.codexOverrides,
       };
-      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       const runtimeHome = await createIsolatedHome(temporaryRoot, (path) =>
         requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
       );
@@ -4973,7 +4969,6 @@ export class CodexSecurity {
         },
       };
       this.#runtime = runtime;
-      await writeCodexConfig(configPath, preflightConfig);
       const python = await resolvePluginPython({
         environment,
         protectedRoot,
@@ -4983,8 +4978,7 @@ export class CodexSecurity {
         runtime,
         runtimeHome,
         effectiveConfig,
-        preflightConfig,
-        sessionConfig: preflightConfig,
+        sessionConfig: scanPreflightCodexConfig(effectiveConfig),
         modelProvider: "host",
         apiKey: null,
         scanEnvironment: environment,
@@ -5076,21 +5070,8 @@ export class CodexSecurity {
         runtime.codexHome,
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
-      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       const resolvedConfig = resolveCodexProfile(effectiveConfig);
       const providers = resolvedConfig["model_providers"];
-      if (runtime.configPath !== undefined) {
-        await writeCodexConfig(runtime.configPath, {
-          ...preflightConfig,
-          ...(options.cyberAccessProgram === undefined
-            ? {}
-            : {
-                codex_security: {
-                  cyber_access_program: options.cyberAccessProgram,
-                },
-              }),
-        });
-      }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
       await runtime.providerProfile?.cleanup();
@@ -5195,7 +5176,6 @@ export class CodexSecurity {
         safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
         effectiveConfig,
-        preflightConfig,
         sessionConfig,
         modelProvider,
         pricingContext: scanPricingContext(
