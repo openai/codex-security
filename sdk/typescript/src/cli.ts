@@ -64,7 +64,11 @@ import {
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, Formatter, z } from "incur";
-import { completionShell, serveIntegration } from "./cli-integrations.js";
+import {
+  completeCli,
+  completionShell,
+  serveIntegration,
+} from "./cli-integrations.js";
 import type { ZodType } from "zod";
 import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
@@ -2312,11 +2316,11 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
   onInterruptedSignIn?: () => void,
 ): Promise<number> {
-  // The shell's cursor index refers to its original words, including --key=value.
-  const completionArgv = completionShell.safeParse(process.env["COMPLETE"])
-    .success
-    ? [...argv]
-    : undefined;
+  // Build the command tree with no executable arguments for shell callbacks.
+  // Completion words, including literal action flags, belong to the shell.
+  const completion = completionShell.safeParse(process.env["COMPLETE"]);
+  const shellArgv = argv;
+  if (completion.success) argv = [];
   if (
     argv.includes("--mcp") &&
     argv.some((arg) =>
@@ -7452,6 +7456,14 @@ export async function main(
       },
     });
 
+  if (completion.success) {
+    await writeCliOutput(
+      output,
+      completeCli(cli, cliOptions, completion.data, shellArgv),
+    );
+    return 0;
+  }
+
   const commands = Cli.toCommands.get(cli)!;
   const valueOptions = cliValueOptions(commands);
   const commandIndex = argv.findIndex((value, index) => {
@@ -7774,9 +7786,10 @@ export async function main(
         frameworkExit = code;
       },
     };
-    const args = completionArgv ?? frameworkArgv;
-    if (!(await serveIntegration(args, cli, cliOptions, serveOptions))) {
-      await cli.serve(args, serveOptions);
+    if (
+      !(await serveIntegration(frameworkArgv, cli, cliOptions, serveOptions))
+    ) {
+      await cli.serve(frameworkArgv, serveOptions);
     }
     if (pendingUpdate !== undefined) {
       notice = await Promise.race([pendingUpdate, undefined]);

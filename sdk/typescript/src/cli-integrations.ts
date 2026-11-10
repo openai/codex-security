@@ -49,57 +49,19 @@ const options = {
   agent: { ...string, multiple: true },
 } as const;
 
-/** Incur dispatches its built-in writers before schema and version. Serve
- * ordinary command groups so its normal parser and metadata handling run first. */
-export async function serveIntegration(
-  argv: string[],
+function integrationGroups(
   cli: Cli.Cli,
   cliOptions: Cli.create.Options,
-  output: Cli.serve.Options,
-): Promise<boolean> {
-  const manifest =
-    (argv.includes("--llms") || argv.includes("--llms-full")) &&
-    !argv.some((arg) =>
-      ["--help", "-h", "--version", "--schema"].includes(arg),
-    );
-  if (
-    !manifest &&
-    !argv.some((arg) => ["mcp", "skills", "skill"].includes(arg))
-  )
-    return false;
-  const completion = completionShell.safeParse(process.env["COMPLETE"]);
-  const discovery = manifest || completion.success;
-  const words = parseArgs({
-    args: argv,
-    options: outputOptions,
-    strict: false,
-    allowPositionals: true,
-  }).positionals;
-  // Incur also accepts its binary name before a built-in command.
-  if (!completion.success && words[0] === cliName) {
-    argv = argv.toSpliced(argv.indexOf(cliName), 1);
-    words.shift();
-  }
-  const group = words[0] === "skill" ? "skills" : words[0];
-  if (!discovery && group !== "mcp" && group !== "skills") return false;
-  const { tokens, positionals, values } = parseArgs({
-    args: argv,
-    options,
-    allowPositionals: true,
-    tokens: true,
-    strict: !completion.success && (group === "mcp" || group === "skills"),
-  });
-  const plain = !Object.keys(formatOptions).some((key) =>
-    Object.hasOwn(values, key),
-  );
-  const full = values["full-output"];
+  invocation?: { output: Cli.serve.Options; plain: boolean; full?: boolean },
+) {
+  const { output, plain, full } = invocation ?? {};
   const commands = Cli.toCommands.get(cli)!;
   const config = {
     sync: false,
     update: false,
     version: cliOptions.version,
   } as const;
-  const prefix = discovery ? "" : cliName + " ";
+  const prefix = invocation ? cliName + " " : "";
   async function builtin(args: string[]) {
     let text = "";
     await cli.serve(args, {
@@ -203,7 +165,7 @@ export async function serveIntegration(
         return { name: cliName, ...result };
       },
     });
-  if (discovery) {
+  if (!invocation) {
     cli
       .command(skills)
       .command(mcp)
@@ -214,23 +176,88 @@ export async function serveIntegration(
       });
     // Incur mounts aliases for leaf commands, but not for a whole group.
     commands.set("skill", { _alias: true, target: "skills" });
-    if (completion.success) {
-      // Completion words may contain literal action flags. Use Incur's pure
-      // completion API before routing anything as an executable command.
-      const words = argv.slice(argv.indexOf("--") + 1);
-      const index = Number(process.env["_COMPLETE_INDEX"] ?? words.length - 1);
-      output.stdout?.(
-        Completions.format(
-          completion.data,
-          Completions.complete(commands, undefined, words, index, {
-            schema: z.object({
-              format: z.enum(["toon", "json", "yaml", "md", "jsonl"]),
-            }),
-          }),
-        ),
-      );
-      return true;
-    }
+  }
+  return { skills, mcp };
+}
+
+/** Complete shell words without dispatching or validating any command. */
+export function completeCli(
+  cli: Cli.Cli,
+  cliOptions: Cli.create.Options,
+  shell: z.infer<typeof completionShell>,
+  argv: readonly string[],
+) {
+  const words = argv[0] === "--" ? argv.slice(1) : [...argv];
+  if (words.length === 0)
+    return [cliName, ...(cliOptions.aliases ?? [])]
+      .map((name) => Completions.register(shell, name))
+      .join("\n");
+  const index = Number(process.env["_COMPLETE_INDEX"] ?? words.length - 1);
+  if (!Number.isSafeInteger(index) || index < 0 || index > words.length)
+    return "";
+  integrationGroups(cli, cliOptions);
+  const candidates = Completions.complete(
+    Cli.toCommands.get(cli)!,
+    undefined,
+    words,
+    index,
+    {
+      schema: z.object({
+        format: z.enum(["toon", "json", "yaml", "md", "jsonl"]),
+      }),
+    },
+  );
+  return Completions.format(shell, candidates);
+}
+
+/** Incur dispatches its built-in writers before schema and version. Serve
+ * ordinary command groups so its normal parser and metadata handling run first. */
+export async function serveIntegration(
+  argv: string[],
+  cli: Cli.Cli,
+  cliOptions: Cli.create.Options,
+  output: Cli.serve.Options,
+): Promise<boolean> {
+  const manifest =
+    (argv.includes("--llms") || argv.includes("--llms-full")) &&
+    !argv.some((arg) =>
+      ["--help", "-h", "--version", "--schema"].includes(arg),
+    );
+  if (
+    !manifest &&
+    !argv.some((arg) => ["mcp", "skills", "skill"].includes(arg))
+  )
+    return false;
+  const words = parseArgs({
+    args: argv,
+    options: outputOptions,
+    strict: false,
+    allowPositionals: true,
+  }).positionals;
+  // Incur also accepts its binary name before a built-in command.
+  if (words[0] === cliName) {
+    argv = argv.toSpliced(argv.indexOf(cliName), 1);
+    words.shift();
+  }
+  const group = words[0] === "skill" ? "skills" : words[0];
+  if (!manifest && group !== "mcp" && group !== "skills") return false;
+  const { tokens, positionals, values } = parseArgs({
+    args: argv,
+    options,
+    allowPositionals: true,
+    tokens: true,
+    strict: group === "mcp" || group === "skills",
+  });
+  const plain = !Object.keys(formatOptions).some((key) =>
+    Object.hasOwn(values, key),
+  );
+  const full = values["full-output"] === true;
+  const { skills, mcp } = integrationGroups(
+    cli,
+    cliOptions,
+    manifest ? undefined : { output, plain, full },
+  );
+  if (manifest) {
     // Put the mode first so a missing format/filter operand cannot consume it
     // and fall through to a command handler.
     const flag = argv.includes("--llms-full") ? "--llms-full" : "--llms";

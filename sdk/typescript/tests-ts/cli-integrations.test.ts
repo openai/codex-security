@@ -160,6 +160,76 @@ describe("integration command dispatch", () => {
     expect(result.stdout).toStartWith("--depth:");
   }, 30_000);
 
+  test.each([
+    {
+      shell: "zsh",
+      words: ["cs", "info", "--co", "--mcp", "--help", "--update", "--schema"],
+      index: 2,
+      candidate: "--config:",
+    },
+    {
+      shell: "bash",
+      words: [
+        "codex-security",
+        "scan",
+        "--mode",
+        "d",
+        "--mcp",
+        "--format=invalid",
+      ],
+      index: 3,
+      candidate: "deep",
+    },
+    {
+      shell: "bash",
+      words: ["cs", "scan", "--mode"],
+      index: 3,
+      candidate: "standard\vdeep",
+    },
+    {
+      shell: "zsh",
+      words: ["cs", "info", "--config", "--update"],
+      index: 2,
+      candidate: "--config:",
+    },
+    {
+      shell: "fish",
+      words: ["cs", "scans", "sh"],
+      candidate: "show\t",
+    },
+    {
+      shell: "nushell",
+      words: ["cs", "sk"],
+      candidate: '"value":"skills"',
+    },
+  ])(
+    "the $shell hook completes ordinary CLI words without running actions",
+    async ({ shell, words, index, candidate }) => {
+      await using temp = await scopedTemporaryDirectory("cli-shell-word-");
+      const { home, project, run } = await isolatedCli(temp.path, {
+        COMPLETE: shell,
+        _COMPLETE_INDEX: index?.toString(),
+        PATH: join(temp.path, "no-package-runners"),
+      });
+      const result = await run("--", ...words);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(candidate);
+      expect(result.stderr).toBe("");
+      expect(await readdir(home)).toEqual([]);
+      expect(await readdir(project)).toEqual([]);
+    },
+    30_000,
+  );
+
+  test("empty completion callbacks emit the shell registration script", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-shell-script-");
+    const { run } = await isolatedCli(temp.path, { COMPLETE: "zsh" });
+    const result = await run();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("#compdef codex-security");
+    expect(result.stdout).toContain("#compdef cs");
+  }, 30_000);
+
   test("the command manifest includes integration leaves without installing them", async () => {
     await using temp = await scopedTemporaryDirectory(
       "cli-integration-discovery-",
