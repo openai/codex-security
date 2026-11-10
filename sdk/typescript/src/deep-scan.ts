@@ -1,12 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import {
   bundledCodexSdkEnvironment,
-  resolveBundledCodexExecutable,
+  isBundledExecutable,
 } from "./codex-sdk-environment.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -26,7 +25,7 @@ import {
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import {
   nativePermissionPreflight,
-  nativeProfileClient,
+  preflightConfigOverrides,
   withCodexPreflightLock,
 } from "./provider-profile.js";
 
@@ -42,16 +41,6 @@ export interface DirectDeepScanOptions {
   scanId: string;
   prompt: string;
   signal: AbortSignal;
-}
-
-// The stock SDK emits one flag per leaf, including literal dotted keys in order.
-export function sdkConfigFlags(config: JsonObject, prefix = ""): string[] {
-  return Object.entries(config).flatMap(([key, value]) => {
-    const path = prefix ? `${prefix}.${key}` : key;
-    return isRecord(value) && Object.keys(value).length
-      ? sdkConfigFlags(value, path)
-      : [`${path}=${inlineToml(value)}`];
-  });
 }
 
 // An older custom launcher must start in the caller's directory. Only use
@@ -117,11 +106,10 @@ export async function readDeepScanParentConfig(
 ): Promise<JsonObject | undefined> {
   const { codexOptions, preflightCommand: command } = options;
   const config = codexOptions.config ?? {};
-  // The provider-profile launcher emits whole top-level tables instead.
-  const overrides =
-    codexOptions.nativeProfile === undefined
-      ? sdkConfigFlags(config)
-      : (await nativeProfileClient()).profileConfigOverrides(config);
+  const overrides = await preflightConfigOverrides(
+    config,
+    codexOptions.nativeProfile !== undefined,
+  );
   const environment = bundledCodexSdkEnvironment(command.command, {
     ...codexOptions.env,
     ...(codexOptions.apiKey === undefined
@@ -177,17 +165,6 @@ export async function readDeepScanParentConfig(
       ) => inspectFilteredPeers(config, options.pluginServers, hasEmptyCatalog),
     ),
   );
-}
-
-export function isBundledExecutable(command: string): boolean {
-  try {
-    return (
-      realpathSync.native(command) ===
-      realpathSync.native(resolveBundledCodexExecutable())
-    );
-  } catch {
-    return false; // An installation may supply only an external launcher.
-  }
 }
 
 async function inspectFilteredPeers(

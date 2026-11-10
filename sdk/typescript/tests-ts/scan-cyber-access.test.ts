@@ -32,8 +32,10 @@ beforeEach(async () => {
   await writeJson(catalog, {
     models: [
       base,
+      { ...model("standard", ["daybreak_red"]), priority: 10 },
       model("standard", ["daybreak_red", "standard"]),
       model("red", ["daybreak_red"]),
+      { ...model("chatgpt-only", ["daybreak_red"]), supported_in_api: false },
       model("no-metadata"),
     ],
   });
@@ -86,8 +88,11 @@ test("bundled scans use available model programs even with remote discovery disa
   await expect(select("red", offline)).rejects.toThrow(
     "--cyber-access-program daybreak_red",
   );
-  for (const model of ["no-metadata", "absent"])
+  for (const model of ["chatgpt-only", "no-metadata", "absent"])
     expect(await select(model, offline)).toBe("standard");
+  await expect(select("chatgpt-only", offline, stored)).rejects.toThrow(
+    "requires Daybreak Red",
+  );
   expect(
     await select("gpt-test", { ...offline, model_catalog_json: null }),
   ).toBe("standard");
@@ -124,6 +129,7 @@ test("native catalog routing follows the scan's selected identity", async () => 
   );
   for (const credentials of [stored, {}])
     expect(await select("gpt-test", route, credentials)).toBe("daybreak_blue");
+  expect(await select("chatgpt-only", route)).toBe("standard");
   expect(await Bun.file(join(home, "auth.json")).json()).toEqual(savedLogin);
   await writeJson(join(home, "auth.json"), {
     auth_mode: "apikey",

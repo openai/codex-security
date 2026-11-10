@@ -35,6 +35,26 @@ export interface ProviderProfile {
   cleanup(): Promise<void>;
 }
 
+/** Match the flags the selected launcher will pass to Codex. */
+export async function preflightConfigOverrides(
+  config: JsonObject,
+  nativeProfile = false,
+): Promise<string[]> {
+  if (nativeProfile)
+    return (await nativeProfileClient()).profileConfigOverrides(config);
+  return sdkConfigFlags(config);
+}
+
+// The stock SDK emits one flag per leaf, including literal dotted keys in order.
+function sdkConfigFlags(config: JsonObject, prefix = ""): string[] {
+  return Object.entries(config).flatMap(([key, value]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    return isRecord(value) && Object.keys(value).length
+      ? sdkConfigFlags(value, path)
+      : [`${path}=${inlineToml(value)}`];
+  });
+}
+
 /** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
 export async function providerPreflightCommand(
   command: CodexCommand,
