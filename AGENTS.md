@@ -11,6 +11,7 @@ Codex Security is a thin wrapper around Codex and its security plugin.
 - Keep credential access, storage, and configuration protections, unsafe-path
   checks, and settings the user explicitly requests.
 - Prefer straightforward code and tests for real behavior.
+- Declare plugin app connections with `required: false` so local scans work without them.
 - Pass Codex-owned settings through existing SDK configuration interfaces.
   Accept reasoning-effort values as strings and pass them through unchanged.
   Do not maintain wrapper-owned model or reasoning-effort enums or allowlists;
@@ -39,7 +40,7 @@ node --test .github/scripts/test_check_plugin_source_compatibility.mjs
 
 When changing runtime settings, authentication, environment forwarding,
 permissions, or executable selection, trace the change through Deep Scan
-discovery and reducer workers, including resumed workers. Extend the worker
+discovery workers, including resumed workers. Extend the worker
 launch tests to verify inherited values and intentional overrides at the
 child-process boundary. Keep per-scan settings isolated from concurrent scans.
 

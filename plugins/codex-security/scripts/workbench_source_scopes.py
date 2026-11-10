@@ -17,7 +17,7 @@ from unicodedata import normalize
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_target import (
     clean_worktree_content_digest,
-    git_bytes,
+    git_command,
     git_worktree_context,
 )
 from workbench_validation import reject_non_finite_json
@@ -26,6 +26,7 @@ OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
 def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
+    """Return the manifest target kinds compatible with the stored scan mode, revision, and snapshot digest."""
     if scan["mode"] == "diff":
         return ["git_diff"]
     if scan["target_revision"] == "unversioned":
@@ -38,6 +39,7 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
 
 
 def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
+    """Return the explicit paths in the saved launch recipe, falling back to the scan’s original scope."""
     if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
         recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
         target = recipe["target"]
@@ -47,6 +49,7 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
 
 
 def public_scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
+    """Return the decoded launch recipe with the internal file-scope metadata removed."""
     recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
     recipe.pop("_codexSecurityFileScopes", None)
     return recipe
@@ -62,6 +65,7 @@ def relative_path(value: str) -> PurePosixPath | None:
 
 
 def safe_source_path(target: Path, value: str) -> Path | None:
+    """Resolve a repository-relative POSIX path and return None if it is invalid or resolves outside the target."""
     parsed = relative_path(value)
     if parsed is None:
         return None
@@ -74,23 +78,20 @@ def safe_source_path(target: Path, value: str) -> Path | None:
 
 
 def offline_git_bytes(repository: Path, *arguments: str) -> bytes | None:
-    names = ("GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL", "GIT_NO_REPLACE_OBJECTS")
-    previous = {name: os.environ.get(name) for name in names}
-    os.environ["GIT_NO_LAZY_FETCH"] = "1"
-    os.environ["GIT_ALLOW_PROTOCOL"] = ""
-    os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
-    try:
-        return git_bytes(repository, *arguments)
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+    """Return raw stdout for a successful offline Git command with replacement objects disabled, otherwise None."""
+    result = git_command(
+        repository,
+        *arguments,
+        text=False,
+        offline=True,
+        environment_overrides={"GIT_NO_REPLACE_OBJECTS": "1"},
+    )
+    return result.stdout if result.returncode == 0 else None
 
 
 @cache
 def tree_entries(repository: Path, tree: str) -> dict[str, tuple[tuple[str, str, str], ...]] | None:
+    """Index a Git tree by normalized name, retaining every original name, entry kind, and object ID in each group."""
     content = offline_git_bytes(repository, "ls-tree", "-z", tree)
     if content is None:
         return None
@@ -222,6 +223,12 @@ def capture_source_scopes(
     *,
     diff_target_kind: str | None = None,
 ) -> dict[str, Any]:
+    """Bind requested paths to the local Git objects that may supply excerpts later.
+
+    Return the revision and the file or tree IDs that can be verified locally.
+    A working-tree diff, dirty snapshot, or replacement ref leaves the scope list
+    empty. A path that cannot be bound adds no authority to read other paths.
+    """
     revision, snapshot = target_identity[:2]
     result: dict[str, Any] = {"version": 1, "revision": revision, "scopes": []}
     # HEAD cannot represent the uncommitted bytes reviewed by a working-tree scan.
@@ -272,6 +279,11 @@ def capture_source_scopes(
 def load_source_scopes(
     scan: sqlite3.Row, target: Path, requested: list[str]
 ) -> tuple[Path, str, list[dict[str, str]]] | None:
+    """Return the repository, tree ID, and valid source scopes, or None when none can be established.
+
+    Use saved object IDs for current records. For a legacy scan, reconstruct only
+    unambiguous entries from its original revision and respect any recorded file kinds.
+    """
     kind = scan["diff_target_kind"] if "diff_target_kind" in scan.keys() else None
     if kind == "working_tree" or (
         "mode" in scan.keys() and scan["mode"] == "diff" and kind not in ("commit", "range")
@@ -348,6 +360,7 @@ def load_source_scopes(
 def source_object_for_path(
     repository: Path, tree: str, target: Path, value: str, scope: dict[str, str]
 ) -> str | None:
+    """Return the Git blob ID for a file covered by the recorded scope, or None if the path cannot be verified."""
     path = relative_path(value)
     if path is None or safe_source_path(target, value) is None:
         return None

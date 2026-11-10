@@ -1,44 +1,22 @@
+import {
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
+  workerRequest,
+  assertReadOnlyWorkerPolicy,
+  assertWorkerSubagentPolicy,
+} from "./deep_scan_executor_fixture.ts";
+import { restoreEnv } from "./support/fake-codex-source.ts";
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
-import type { CodexSdkWorkerExecutor as Executor } from "../src/deep-scan/executor.js";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import { assertFlagPair } from "./assertions.ts";
+import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
+import { assertFlagPair, assertConfigOverrides } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
 
-export async function testWorkerCyberAccessSettings({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  parentSandbox,
-  workerRequest,
-  assertConfigOverrides,
-  assertReadOnlyWorkerPolicy,
-  assertWorkerSubagentPolicy,
-  restoreEnv,
-}: {
-  CodexSdkWorkerExecutor: typeof Executor;
-  fakeCodexFixture: () => Promise<{ root: string; executablePath: string }>;
-  parentSandbox: DeepWorkerParentSandbox;
-  workerRequest: (
-    promptPath: string,
-    workingDirectory: string,
-    options: Partial<CodexWorkerRequest>,
-  ) => CodexWorkerRequest;
-  assertConfigOverrides: (
-    args: readonly string[],
-    values: Record<string, string | number | boolean | undefined>,
-  ) => void;
-  assertReadOnlyWorkerPolicy: (args: readonly string[]) => void;
-  assertWorkerSubagentPolicy: (
-    args: readonly string[],
-    subagents: number,
-  ) => void;
-  restoreEnv: (name: string, value: string | undefined) => void;
-}) {
+export async function testWorkerCyberAccessSettings() {
   const cases: {
     name: string;
     configuration?: string;
@@ -51,6 +29,7 @@ export async function testWorkerCyberAccessSettings({
     parentTurn?: { threadId: string; turnId: string };
     missingParentTurn?: boolean;
     failParentReadOnce?: boolean;
+    parentServiceTier?: string;
     serviceTier?: string;
     features?: Record<string, boolean>;
     configPath?: string;
@@ -58,6 +37,18 @@ export async function testWorkerCyberAccessSettings({
     executor?: import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
   }[] = [
     { name: "unset", configuration: "" },
+    {
+      name: "parent-default-speed",
+      configuration: 'service_tier = "ultrafast"\n',
+      parentServiceTier: "default",
+      serviceTier: "default",
+    },
+    {
+      name: "parent-fast-speed",
+      configuration: 'service_tier = "ultrafast"\n',
+      parentServiceTier: "fast",
+      serviceTier: "fast",
+    },
     {
       name: "blue",
       configuration:
@@ -74,7 +65,7 @@ export async function testWorkerCyberAccessSettings({
     {
       name: "explicit-false",
       configuration:
-        'daybreak = false\nservice_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\ncli_daybreak = false\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+        'profile = "selected"\ndaybreak = false\nservice_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\ncli_daybreak = false\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n[profiles.selected.features]\napi_key_cyber_access_programs = false\n',
       daybreak: false,
       serviceTier: "flex",
       program: "daybreak_blue",
@@ -302,6 +293,7 @@ export async function testWorkerCyberAccessSettings({
         model: testCase.name,
         parentSandbox,
         parentTurn: testCase.parentTurn,
+        serviceTier: testCase.parentServiceTier,
       });
     }
     for (const testCase of cases.filter(
@@ -340,7 +332,8 @@ export async function testWorkerCyberAccessSettings({
         { method: "thread/read", threadId: testCase.parentTurn!.threadId },
       ]);
     }
-    for (const kind of ["discovery", "dedup"] as const) {
+    {
+      const kind = "discovery";
       for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
         launches.length = 0;
         await Promise.all(

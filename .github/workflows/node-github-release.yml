@@ -52,27 +52,8 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24.15.0"
-          registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
-
-      - name: Install provenance-capable npm
-        shell: bash
-        run: |
-          set -euo pipefail
-          source .github/scripts/release-npm.sh
-          install_release_npm
-          printf '%s\n' "$release_npm_bin" >> "$GITHUB_PATH"
-
-      - name: Verify npm on PATH
-        shell: bash
-        run: |
-          set -euo pipefail
-          source .github/scripts/release-npm.sh
-          verify_release_npm "$(command -v npm)"
+      - name: Set up release npm
+        uses: ./.github/actions/setup-release-npm
 
       - name: Resolve the successful protected release
         id: release
@@ -194,8 +175,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # npm can finish publishing before its registry makes the version available.
-          for attempt in {1..21}; do
+          # npm scans new versions before making them available to install.
+          for attempt in {1..61}; do
             if metadata="$(
               npm view "@openai/codex-security@$RELEASE_VERSION" version \
                 --json --prefer-online --registry=https://registry.npmjs.org/
@@ -210,8 +191,8 @@ jobs:
             '; then
               exit 1
             fi
-            if (( attempt == 21 )); then
-              echo "The published npm version did not become available within ten minutes." >&2
+            if (( attempt == 61 )); then
+              echo "The published npm version did not become available within thirty minutes." >&2
               exit 1
             fi
             echo "Waiting for npm publication to become available." >&2
@@ -405,68 +386,6 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-      - name: Resolve published release history
-        id: history
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
-        run: |
-          set -euo pipefail
-
-          published_versions="$(
-            npm view @openai/codex-security versions \
-              --json \
-              --registry=https://registry.npmjs.org/
-          )"
-          published_github_tags="$(
-            gh api --paginate \
-              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'
-          )"
-          reachable_tags=""
-          if git rev-parse "$RELEASE_SHA^" >/dev/null 2>&1; then
-            reachable_tags="$(
-              git tag --merged "$RELEASE_SHA^" \
-                --list 'npm-v*' \
-                --sort=-version:refname
-            )"
-          fi
-
-          history="$(
-            CODEX_SECURITY_PUBLISHED_NPM_VERSIONS="$published_versions" \
-            CODEX_SECURITY_PUBLISHED_GITHUB_TAGS="$published_github_tags" \
-            CODEX_SECURITY_REACHABLE_RELEASE_TAGS="$reachable_tags" \
-              node sdk/typescript/scripts/release-automation.mjs \
-                release-history "$RELEASE_TAG"
-          )"
-
-          previous_tag="$(
-            printf '%s\n' "$history" |
-              node --input-type=module --eval '
-                import { readFileSync } from "node:fs";
-                const history = JSON.parse(readFileSync(0, "utf8"));
-                process.stdout.write(history.previousTag ?? "");
-              '
-          )"
-          make_latest="$(
-            printf '%s\n' "$history" |
-              node --input-type=module --eval '
-                import { readFileSync } from "node:fs";
-                const history = JSON.parse(readFileSync(0, "utf8"));
-                if (typeof history.makeLatest !== "boolean") {
-                  throw new Error("Release latest status must be explicit.");
-                }
-                process.stdout.write(String(history.makeLatest));
-              '
-          )"
-
-          {
-            printf 'previous-tag=%s\n' "$previous_tag"
-            printf 'make-latest=%s\n' "$make_latest"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Publish GitHub Release and generated notes
         shell: bash
         env:
@@ -475,8 +394,6 @@ jobs:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
           RELEASE_ARCHIVE: ${{ steps.artifact.outputs.archive }}
-          PREVIOUS_TAG: ${{ steps.history.outputs.previous-tag }}
-          MAKE_LATEST: ${{ steps.history.outputs.make-latest }}
         run: |
           set -euo pipefail
           release_workspace="$(mktemp -d)"

@@ -26,12 +26,12 @@ const deepScanOwnershipProbe = [
   "connection.row_factory = sqlite3.Row",
   "connection.executescript('''",
   "CREATE TABLE workspaces (id TEXT PRIMARY KEY, thread_id TEXT, updated_at TEXT);",
-  "CREATE TABLE scans (id TEXT PRIMARY KEY, workspace_id TEXT, mode TEXT, status TEXT, recipe_json TEXT, handoff_status TEXT, handoff_claim_token TEXT, deep_scan_owner_thread_id TEXT, updated_at TEXT);",
+  "CREATE TABLE scans (id TEXT PRIMARY KEY, workspace_id TEXT, mode TEXT, status TEXT, recipe_json TEXT, handoff_status TEXT, handoff_claim_token TEXT, deep_scan_owner_thread_id TEXT, continuation_thread_id TEXT, updated_at TEXT);",
   "CREATE TABLE deep_scan_runs (scan_id TEXT PRIMARY KEY);",
   "''')",
   "scan_id = '11111111-1111-4111-8111-111111111111'",
   "connection.execute(\"INSERT INTO workspaces VALUES ('workspace', NULL, 'before')\")",
-  "connection.execute(\"INSERT INTO scans VALUES (?, 'workspace', 'deep', 'running', '{}', 'delivered', ?, NULL, 'before')\", (scan_id, case['storedToken']))",
+  "connection.execute(\"INSERT INTO scans VALUES (?, 'workspace', 'deep', 'running', '{}', 'delivered', ?, NULL, NULL, 'before')\", (scan_id, case['storedToken']))",
   "connection.execute('INSERT INTO deep_scan_runs VALUES (?)', (scan_id,))",
   "connection.commit()",
   "if case.get('mutation') == 'rotate':",
@@ -78,7 +78,7 @@ function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
   >;
 }
 
-test("recovers an interrupted publication when the filesystem rejects hardlinks", async () => {
+test("recovers a legacy publication copied without hardlinks", async () => {
   const root = await temporaryDirectories.create(
     "codex-security-deep-copy-recovery-",
   );
@@ -89,7 +89,7 @@ test("recovers an interrupted publication when the filesystem rejects hardlinks"
   const result = runPython(python!, [
     "-c",
     [
-      "import errno, json, sqlite3, sys",
+      "import json, shutil, sqlite3, sys",
       "from pathlib import Path",
       "sys.path.insert(0, sys.argv[1])",
       "import deep_scan_workbench as deep_scan",
@@ -101,13 +101,10 @@ test("recovers an interrupted publication when the filesystem rejects hardlinks"
       "ledger.parent.mkdir(parents=True)",
       "snapshot.parent.mkdir(parents=True)",
       "ledger.write_text('old ledger\\n', encoding='utf-8')",
-      "def reject_hardlink(source, destination):",
-      "    raise OSError(errno.ENOTSUP, 'hardlinks are unavailable')",
-      "deep_scan.os.link = reject_hardlink",
-      "deep_scan.create_publication_copy(ledger, backup)",
+      "shutil.copyfile(ledger, backup)",
       "snapshot.write_text('new ledger\\n', encoding='utf-8')",
       "ledger.unlink()",
-      "deep_scan.create_publication_copy(snapshot, ledger)",
+      "shutil.copyfile(snapshot, ledger)",
       "assert ledger.read_bytes() == snapshot.read_bytes()",
       "connection = sqlite3.connect(':memory:')",
       "connection.row_factory = sqlite3.Row",
@@ -196,8 +193,6 @@ test.each([
       "synthetic-thread",
       "--scan-root",
       join(root, "scans"),
-      "--available-parallelism",
-      "4",
       "--workflow-version",
       "deep-scan-mcp/v1",
     ]);
@@ -277,8 +272,6 @@ describe("deep scan workbench ownership", () => {
         "--user-context-stdin",
         "--scan-root",
         join(root, "scans"),
-        "--available-parallelism",
-        "4",
       ],
       {
         env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir },
@@ -455,8 +448,6 @@ describe("deep scan workbench ownership", () => {
         "budget-recovery-thread",
         "--scan-root",
         join(root, "scans"),
-        "--available-parallelism",
-        "4",
         "--workflow-version",
         "deep-scan-mcp/v1",
       ]);
@@ -789,8 +780,6 @@ describe("deep scan workbench ownership", () => {
         "empty-deadline-thread",
         "--scan-root",
         join(root, "scans"),
-        "--available-parallelism",
-        "4",
         "--workflow-version",
         "deep-scan-mcp/v1",
       ])

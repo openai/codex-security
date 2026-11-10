@@ -4,17 +4,18 @@ This contract defines the canonical machine-readable documents for scans that re
 
 ## Canonical Documents
 
-A sealed terminal bundle contains these files under `<scan_dir>`:
+Open the [current example manifest](../examples/completed-scan/scan-manifest.json) alongside its [findings](../examples/completed-scan/findings.json) and [readable report](../examples/completed-scan/report.md).
 
-- `scan-manifest.json`: immutable terminal scan receipt after finalization
-- `findings.json`: semantic finding records retained when the scan reached its terminal outcome
-- `scan.review`: additional excluded paths, stored in the manifest
+| File or field | What it contains |
+| --- | --- |
+| `scan-manifest.json` | Immutable receipt with scan ID, target, scope, terminal status, seal time, and artifact digests. |
+| `findings.json` | Semantic finding records retained at the terminal outcome. The manifest's `scan.findingsRef` points to this file. See [finding detail fields](finding-detail-fields.md) for optional evidence and analysis. |
+| `scan.review` inside the manifest | Additional excluded paths (`excludedPaths`). |
+| `report.md` | Human-readable report generated from the canonical JSON. The [SARIF adapter](sarif-adapter.md) explains which fields survive export. |
 
-Keep detailed evidence in scan-local artifacts and reference it from the canonical summaries.
+See [final report paths](scan-artifacts.md#final-report-paths) for the complete directory layout and optional outputs.
 
-Optional structured finding details used by rich consumers are documented in `finding-detail-fields.md`. They remain part of each semantic finding record, not a projection parsed from a readable report.
-
-The existing `report.md` output remains a readable projection. Generated exports such as SARIF are also downstream projections, not part of the canonical semantic source of truth.
+For a [legacy manifest](../examples/legacy-completed-scan/scan-manifest.json) with `scan.coverageRef`, read the [referenced coverage document](../examples/legacy-completed-scan/coverage.json) alongside the findings. Check for this field before opening a separate coverage file. Keep detailed evidence in scan-local artifacts and reference it from the canonical summaries.
 
 Deep-scan SARIF results and CSV rows preserve their existing instance-level presentation and add only the canonical candidate id needed to group child reports. Standard-scan CSV presentation remains unchanged.
 
@@ -24,7 +25,7 @@ Retention is an explicit consumer decision. Producing a sealed bundle must not s
 
 ## Manifest Semantics
 
-A sealed manifest records the terminal timestamp and hashes for the canonical documents and immutable evidence receipts included in that bundle. Readable reports and generated exports are projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
+The manifest records the terminal timestamp and a SHA-256 digest for each file listed in `scan.artifacts`. Each path appears exactly once. The current example lists `findings.json` alone. A legacy bundle also lists its referenced coverage file, and scans that retain immutable evidence receipts list those files too. The manifest carries these digests and does not hash itself. Adapters read the sealed files and write reports or exports separately from the seal.
 
 Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format. All schema-valid fractional widths remain readable on supported Python versions; parsing uses native microsecond precision. History and finding queries use native date precision and stable ID tie-breakers; ordering beyond millisecond precision is not guaranteed. Stored timestamp text remains unchanged.
 
@@ -110,20 +111,15 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 New scans publish `scan-manifest.json` and `findings.json`. The manifest owns scan identity, mode, and configured scope. `scan.review` contains only `excludedPaths`, used when comparing scans. These values do not measure the percentage of files read.
 
-A Deep parent retains the configured paths and notes from accepted reviews. Worker IDs distinguish each review's surfaces and deferred items; receipt references point to the original evidence. Findings reduction does not clear pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
+A Deep parent retains the configured paths and notes from accepted reviews. Worker IDs distinguish each review's surfaces and deferred items. Receipt references point to the original evidence. Merging duplicate findings preserves pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
 
 For file-authored drafts, put `reviewState` inside `scan` in the unsealed manifest. Finalization preserves recovery details in checkpoints and replaces the draft state with the small `scan.review` summary. For tool-authored drafts, pass `reviewState` to `record_codex_security_scan_draft`.
 
-Deep reducers work on findings and do not need review state. Deep workers retain their own checkpoints. Comparison uses the later scan's execution status, configured scope, and additional exclusions before classifying an absent finding as resolved.
+Comparison uses the later scan's execution status, configured scope and additional exclusions before classifying an absent finding as resolved.
 
-- scan mode and inventory strategy
-- included and excluded paths
-- reviewed surfaces
-- detailed receipt references
-- explicit exclusions
-- deferred work
+### Scan modes and inventory
 
-`mode` records the requested scan workflow:
+`scan.mode` (or `mode` in a legacy coverage document) records the requested scan workflow:
 
 | Mode              | Meaning                                                       |
 | ----------------- | ------------------------------------------------------------- |
@@ -135,11 +131,7 @@ Deep reducers work on findings and do not need review state. Deep workers retain
 | `working_tree`    | Staged or unstaged local changes                              |
 | `deep_repository` | Exhaustive repeated repository-wide scan                      |
 
-`inventoryStrategy` records how the producer enumerated the reviewed content, independently of the requested scan workflow:
-
-The discovery helper's `in_scope_files.txt` input contains one UTF-8 path per line. LF and CRLF separators are accepted; filenames containing CR or LF are unsupported. Other path whitespace and spelling are preserved.
-
-For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repeated discovery is workflow metadata, not a different inventory strategy.
+In a legacy coverage document, `inventoryStrategy` records how the producer enumerated the reviewed content:
 
 | Inventory strategy | Meaning                                                   |
 | ------------------ | --------------------------------------------------------- |
@@ -149,7 +141,11 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 | `directory`        | Deterministic non-Git directory inventory                 |
 | `custom`           | Producer-defined inventory described by detailed receipts |
 
-Review state lists reviewed surfaces, exclusions, and follow-up work. The manifest records execution status. Existing sealed bundles retain legacy metadata unchanged.
+The discovery helper reads one UTF-8 path per line from `in_scope_files.txt`. It accepts LF and CRLF separators and preserves other whitespace. Filenames containing CR or LF are unsupported. For a whole-repository Deep scan, use `repository` for the inventory strategy and `deep_repository` for the mode.
+
+### Detailed review state in drafts, checkpoints, and legacy coverage
+
+These records can list reviewed surfaces, exclusions, and follow-up work. Use the terminal manifest for execution status.
 
 Map detailed ledger closure into completed surface summaries in this order:
 
@@ -163,18 +159,18 @@ Map detailed ledger closure into completed surface summaries in this order:
 
 Record each explicit exclusion with a `pattern` and `reason`. Record each deferred unit with a stable `id`, a `reason`, and optional `paths` or `surfaceIds`.
 
-Detailed ledgers remain under the numbered scan artifact directories.
+When retained, detailed ledgers live under the numbered scan artifact directories.
 Receipt references must point to regular non-symlink files under `artifacts/`.
 `scan.review` retains additional exclusions for adapters and comparison. Legacy sealed scans continue to reference their original `coverage.json`.
 
 ## Canonical Report Semantics
 
-The two canonical JSON files are also the only semantic inputs to final report generation. Producers must not author `report.md`; finalization deterministically projects it after validating the canonical seal. The report remains an unsealed downstream projection and can be regenerated without changing canonical JSON or evidence artifacts.
+In the current format, the manifest and findings are the semantic inputs to final report generation. Producers must not author `report.md`; finalization deterministically projects it after validating the canonical seal. The report remains an unsealed downstream projection and can be regenerated without changing canonical JSON or evidence artifacts.
 
 Record report-specific semantics without duplicating data already represented elsewhere:
 
 - `scan.scope`: optional narrative `summary`, reviewed artifact names, runtime/test status, validation mode, scan context, and limitations. Include/exclude paths remain the authoritative scope boundaries.
-- `scan.threatModel`: structured summary plus assets, trust boundaries, attacker capabilities, security objectives, and assumptions, or `{ "format": "markdown", "content": "<exact model text>" }` for a retained document. Optional model `scope` and `origin` identify the modeled paths and source separately from the scan's scope. The host derives `<scan_dir>/threatmodel.md` from this content; it is an exportable projection, not an independently authored input.
+- `scan.threatModel`: structured summary plus assets, trust boundaries, attacker capabilities, security objectives, and assumptions, or `{ "format": "markdown", "content": "<exact model text>" }` for a retained document. Optional model `scope` and `origin` identify the modeled paths and source separately from the scan's scope. When completed Deep reviews supply different models, the parent retains the first model here and the other models on their worker records in the retained draft or checkpoint review state. The host derives `<scan_dir>/threatmodel.md` from the primary model; it is an exportable projection, not an independently authored input.
 - finding `validation`: validation method, direct evidence, counterevidence, and the conclusion used by the report.
 - finding `codeEvidence`: stable, exact source snippets with labels, locations, language, and explanations; `rootCause`, `validation`, and `attackPath` select the snippets they need through `evidenceRefs`.
 - finding `rootCause`: the violated invariant and the code that breaks it. Do not substitute a path/line restatement for the explanation.
@@ -187,12 +183,10 @@ These fields are optional for compatibility with existing v1 canonical artifacts
 
 ## Schemas
 
-New completed findings must match `schemas/tools/scan-draft.schema.json`. Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
+New completed findings must match the [scan draft schema](../schemas/tools/scan-draft.schema.json). Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
 
-- `schemas/scan-manifest.schema.json`
-- `schemas/findings.schema.json`
-- `schemas/coverage.schema.json` for legacy scans only
+- [Scan manifest schema](../schemas/scan-manifest.schema.json)
+- [Findings schema](../schemas/findings.schema.json)
+- [Coverage schema](../schemas/coverage.schema.json) for legacy scans
 
 V1 consumers ignore unknown properties for forward compatibility. Producers must still validate documented fields and should not emit undocumented properties casually.
-
-Representative valid contract examples live under `examples/completed-scan/`.

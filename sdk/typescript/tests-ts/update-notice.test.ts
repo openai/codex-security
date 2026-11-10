@@ -185,6 +185,18 @@ describe("CLI update notice", () => {
     }
   });
 
+  test.skipIf(process.platform !== "linux")(
+    "keeps local npm updates local in case-distinct Linux directories",
+    () => {
+      for (const directory of ["Lib", "_NPX", ".YARN"]) {
+        const entrypoint = `/workspace/${directory}/node_modules/pkg/dist/version.js`;
+        expect(updateCommand({}, entrypoint)).toBe(
+          "npm install @openai/codex-security@latest",
+        );
+      }
+    },
+  );
+
   test("ignores current, older, invalid, and lower prerelease versions", async () => {
     for (const [current, latest, available] of [
       ["0.1.0", "0.1.0", false],

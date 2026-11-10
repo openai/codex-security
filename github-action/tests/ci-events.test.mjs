@@ -49,3 +49,12 @@ test('the called workflow requires every eligible job to finish successfully', (
     }
   }
 });
+
+
+test('hosted smoke uses the shipped sandbox setup without a CI-only prerequisite', () => {
+  for (const job of [workflow.jobs.validate, workflow.jobs.smoke]) {
+    assert.ok(job.steps.every(step => !/needrestart|setup-ubuntu-sandbox/.test(step.run ?? '')));
+  }
+  assert.ok(workflow.jobs.validate.steps.some(step => step.run === 'node scripts/linux-smoke.mjs'));
+  assert.ok(workflow.jobs.smoke.steps.some(step => step.uses === './'));
+});

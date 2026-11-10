@@ -37,6 +37,11 @@ def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False)
 
 
 def parse_args(description: str, *, inspection_only: bool = False) -> argparse.Namespace:
+    """Parse the workbench command line into the namespace consumed by its dispatcher.
+
+    For a full command, read UTF-8 user context from stdin when requested. In
+    inspection mode, recognized inspection arguments return before that read.
+    """
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -112,6 +117,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     )
 
     begin_deep_scan = add_command("begin-deep-scan", "--thread-id")
+    begin_deep_scan.add_argument("--model-thread-id")
     begin_target = begin_deep_scan.add_mutually_exclusive_group(required=True)
     begin_target.add_argument("--scan-id")
     begin_target.add_argument("--target-path")
@@ -121,6 +127,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     begin_deep_scan.add_argument("--claim-token")
     begin_deep_scan.add_argument("--model")
     begin_deep_scan.add_argument("--reasoning-effort")
+    begin_deep_scan.add_argument("--service-tier")
     begin_deep_scan.add_argument("--available-parallelism", type=positive_int)
     begin_deep_scan.add_argument("--deep-scan-project-json")
     begin_deep_scan.add_argument("--project-config-path")
@@ -148,24 +155,20 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     upsert_deep_worker.add_argument("--attempt", type=non_negative_int)
     upsert_deep_worker.add_argument("--sdk-thread-id")
     upsert_deep_worker.add_argument("--error-message")
+    upsert_deep_worker.add_argument("--terminal-failure", action="store_true")
     upsert_deep_worker.add_argument(
         "--replaceable-failure-kind",
         choices=("policy_refusal", "transient_error", "invalid_discovery_artifacts"),
     )
     upsert_deep_worker.add_argument("--coordinator-generation", type=positive_int)
 
-    claim_deep_dedup = add_command(
-        "claim-deep-scan-dedup", "--scan-id", "--worker-id", "--prompt-path", "--artifact-dir"
+    iteration = add_command(
+        "record-deep-scan-iteration", "--scan-id", "--worker-id", "--result-manifest-path"
     )
-    claim_deep_dedup.add_argument("--input-worker-id", action="append", required=True)
-    claim_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
-
-    commit_deep_dedup = add_command(
-        "commit-deep-scan-dedup", "--scan-id", "--worker-id", "--result-manifest-path"
-    )
-    commit_deep_dedup.add_argument("--candidate-ledger-path")
-    commit_deep_dedup.add_argument("--new-findings-count", type=non_negative_int, required=True)
-    commit_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
+    iteration.add_argument("--input-worker-id", action="append", required=True)
+    iteration.add_argument("--no-new-streak", type=non_negative_int, required=True)
+    iteration.add_argument("--consecutive-errors", type=non_negative_int, required=True)
+    iteration.add_argument("--coordinator-generation", type=positive_int)
 
     finish_deep_scan = add_command("finish-deep-scan", "--scan-id")
     finish_deep_scan.add_argument(
@@ -190,10 +193,19 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     publication_failure.add_argument("--coordinator-generation", type=positive_int)
 
     get_scan = add_command("get-scan", "--scan-id")
-    get_scan.add_argument("--occurrence-id")
+    get_scan.add_argument("--model-thread-id")
+    get_scan.add_argument("--context-claim-token")
+    get_scan.add_argument("--request-id")
+    get_scan.add_argument("--action-token")
+    detail = get_scan.add_mutually_exclusive_group()
+    detail.add_argument("--occurrence-id")
+    detail.add_argument("--progress-only", action="store_true")
     get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")
+
+    read_scan_usage = add_command("read-scan-usage", "--scan-id", "--thread-id")
+    read_scan_usage.add_argument("--validation-thread-id")
 
     add_command("get-scan-feedback", "--scan-id")
 
@@ -276,6 +288,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     list_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
 
     update_progress = add_command("update-progress", "--scan-id")
+    update_progress.add_argument("--model-thread-id")
     update_progress.add_argument("--phase", choices=PHASES)
     update_progress.add_argument("--phase-items-total", type=non_negative_int)
     update_progress.add_argument("--phase-items-completed", type=non_negative_int)
@@ -293,6 +306,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     prepare_scan_completion.add_argument("--claim-token")
 
     complete_scan = add_command("complete-scan", "--scan-id")
+    complete_scan.add_argument("--model-thread-id")
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")
     complete_scan.add_argument("--thread-id")
@@ -312,8 +326,10 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     cancel_scan = add_command("cancel-scan", "--scan-id")
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument("--cost-json")
 
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
+    fail_scan.add_argument("--model-thread-id")
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
 
@@ -329,11 +345,13 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     recover_scan.add_argument("--scan-id", required=True, help="ID of the stopped scan to recover.")
 
     write_scan_draft = add_command("write-scan-draft", "--scan-id", "--draft-path")
+    write_scan_draft.add_argument("--model-thread-id")
     write_scan_draft.add_argument("--checkpoint-path")
     write_scan_draft.add_argument("--expected-draft-digest")
     write_scan_draft.add_argument("--claim-token")
 
     save_scan_artifact = add_command("save-scan-artifact", "--scan-id", "--artifact-path")
+    save_scan_artifact.add_argument("--model-thread-id")
     save_scan_artifact.add_argument("--claim-token")
 
     for command in ("save-artifact", "read-artifact"):
@@ -382,7 +400,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     set_finding_remediation.add_argument(
         "--state", choices=REMEDIATION_UPDATE_STATES, required=True
     )
+    set_finding_remediation.add_argument("--assigned-finding", action="store_true")
     set_finding_remediation.add_argument("--summary")
+    set_finding_remediation.add_argument("--patch-stdin", action="store_true")
     set_finding_remediation.add_argument("--patch-path")
     set_finding_remediation.add_argument("--patch-digest")
     set_finding_remediation.add_argument("--base-revision")
@@ -399,7 +419,6 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
-    subparsers.add_parser("local-dedupe")
     args = parser.parse_args()
     if getattr(args, "user_context_stdin", False):
         args.user_context = sys.stdin.buffer.read().decode("utf-8")

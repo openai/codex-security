@@ -5,23 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { expect, test } from "bun:test";
-
-type Job = {
-  uses?: string;
-  needs?: string | string[];
-  if?: string;
-  steps?: Array<{ name?: string }>;
-  strategy?: { matrix: { include: Array<{ architecture: string }> } };
-};
-
-function workflow(name: string) {
-  return Bun.YAML.parse(
-    readFileSync(
-      new URL(`../../../.github/workflows/${name}.yml`, import.meta.url),
-      "utf8",
-    ),
-  ) as { on: Record<string, unknown>; jobs: Record<string, Job> };
-}
+import { workflow } from "./support/workflow.js";
 
 const ci = workflow("node-ci");
 
@@ -48,11 +32,9 @@ test("shares one native build and container matrix in automatic CI", () => {
     needs: "native",
     uses: "./.github/workflows/container-validate.yml",
   });
-  expect(
-    validation.jobs["validate"]?.strategy?.matrix.include.map(
-      ({ architecture }) => architecture,
-    ),
-  ).toEqual(["amd64", "arm64"]);
+  expect(validation.jobs["validate"]?.strategy?.matrix).toMatchObject({
+    include: [{ architecture: "amd64" }, { architecture: "arm64" }],
+  });
   const steps = validation.jobs["validate"]!.steps!;
   for (const name of [
     "Verify customer build excludes secrets and scan data",

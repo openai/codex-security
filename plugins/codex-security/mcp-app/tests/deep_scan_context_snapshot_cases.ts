@@ -1,7 +1,12 @@
+import { fixturePython } from "./support/python.ts";
+import {
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
+} from "./deep_scan_executor_fixture.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,22 +15,13 @@ import { importModule } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 import type { DeepScanWorkerRunner as Runner } from "../src/deep-scan/worker-runner.js";
 import type { createDeepScanArtifacts as Artifacts } from "../src/deep-scan/artifacts.js";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
+import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
 import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
 } from "../src/deep-scan/types.js";
 
-export async function testDeepScanContextSnapshots({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  parentSandbox,
-}: {
-  CodexSdkWorkerExecutor: typeof WorkerExecutor;
-  fakeCodexFixture: () => Promise<{ root: string; executablePath: string }>;
-  parentSandbox: DeepWorkerParentSandbox;
-}) {
+export async function testDeepScanContextSnapshots() {
   const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
   const {
     WorkbenchDeepScanStore,
@@ -46,7 +42,7 @@ export async function testDeepScanContextSnapshots({
     DeepScanWorkerRunner: typeof Runner;
     createDeepScanArtifacts: typeof Artifacts;
   };
-  const fixture = await fakeCodexFixture();
+  const fixture = await fakeCodexFixture(null);
   // Concurrent children record their input in their own working directories.
   await writeFile(
     fixture.executablePath,
@@ -64,18 +60,26 @@ export async function testDeepScanContextSnapshots({
     CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
   };
   try {
+    const markdown = "# Saved policy\n";
+    const policy = {
+      markdown,
+      revision: 17,
+      sha256: createHash("sha256").update(markdown).digest("hex"),
+    };
     const targetPath = path.join(fixture.root, "target");
     await mkdir(targetPath);
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const outcomes = await Promise.allSettled(
       ["Review authentication only.", undefined].map(
         async (userContext, index) => {
+          const severityRubric = userContext === undefined ? undefined : policy;
           const deepConfig = path.join(fixture.root, `deep-${index}.toml`);
-          const maxTimeHours = 1.5 + index;
+          const maxTimeMinutes = 15.5 + index;
+          const maxTimeHours = maxTimeMinutes / 60;
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
           const command = async (args: string[], input?: string) => {
             const execution = promisify(execFile)(
-              process.env.PYTHON?.trim() || "python3",
+              fixturePython,
               [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
               {
                 env: {
@@ -97,29 +101,80 @@ export async function testDeepScanContextSnapshots({
             projectConfigPath,
             JSON.stringify({
               scan: {
+                max_time_minutes: maxTimeMinutes,
                 deep: {
-                  max_time_hours: maxTimeHours,
                   subagents_per_worker: index,
                 },
               },
             }),
           );
           let store = new WorkbenchDeepScanStore(command);
+          let registeredScanId: string | undefined;
+          if (userContext !== undefined) {
+            await writeFile(
+              deepConfig,
+              `[deep_scan]\nmax_time_hours = ${maxTimeHours}\nsubagents = ${index}\n`,
+            );
+            const scanDir = path.join(fixture.root, `registered-${index}`);
+            await mkdir(scanDir, { mode: 0o700 });
+            const { scanId } = await command(
+              [
+                "register-cli-scan",
+                "--repository",
+                targetPath,
+                "--scan-dir",
+                scanDir,
+                "--registration-json-stdin",
+              ],
+              JSON.stringify({
+                recipe: {
+                  repository: targetPath,
+                  mode: "deep",
+                  target: { kind: "repository", paths: [] },
+                  config: {},
+                  severityRubric,
+                },
+                userContext: "Original user instructions.",
+              }),
+            );
+            await command([
+              "set-scan-thread",
+              "--scan-id",
+              scanId,
+              "--thread-id",
+              threadId,
+            ]);
+            await command([
+              "update-scan-context",
+              "--scan-id",
+              scanId,
+              "--thread-id",
+              threadId,
+              "--user-context",
+              userContext,
+            ]);
+            registeredScanId = scanId;
+          }
           let run = await store.begin({
-            targetPath,
-            scope: ".",
+            ...(registeredScanId
+              ? { scanId: registeredScanId }
+              : { targetPath, userContext, projectConfigPath }),
             threadId,
-            userContext,
-            projectConfigPath,
             scanRoot: path.join(fixture.root, "scans"),
           });
           const createdAt = run.createdAt;
           assert.ok(createdAt);
+          const workerUsageDirectory = run.workerUsageDirectory;
+          assert.ok(workerUsageDirectory);
           assert.equal(run.config.maxTimeHours, maxTimeHours);
           assert.equal(run.config.subagents, index);
           const invocations: {
             kind: DeepScanWorkerKind;
-            invocation: { argv: string[]; stdin: string; deepConfig: string };
+            invocation: {
+              argv: string[];
+              stdin: string;
+              deepConfig: string;
+            };
           }[] = [];
           let sdk = new CodexSdkWorkerExecutor({
             parentSandbox,
@@ -177,7 +232,10 @@ export async function testDeepScanContextSnapshots({
             randomUUID(),
             "before-edit",
           );
-          assert.ok(first.status === "succeeded");
+          assert.ok(
+            first.status === "succeeded",
+            "error" in first ? String(first.error) : first.status,
+          );
           const editedContext = `Updated instructions for later phases ${index}.`;
           await command([
             "update-scan-context",
@@ -189,6 +247,7 @@ export async function testDeepScanContextSnapshots({
             editedContext,
           ]);
           // Reload through a new store to model a coordinator restart after editing.
+          await writeFile(deepConfig, "[deep_scan]\nmax_time_hours = 23\n");
           store = new WorkbenchDeepScanStore(command);
           run = await store.begin({
             scanId: run.scanId,
@@ -197,6 +256,7 @@ export async function testDeepScanContextSnapshots({
           });
           assert.equal(run.config.maxTimeHours, maxTimeHours);
           assert.equal(run.createdAt, createdAt);
+          assert.equal(run.workerUsageDirectory, workerUsageDirectory);
           sdk = new CodexSdkWorkerExecutor({
             parentSandbox,
             deepScanConfig: run.config,
@@ -206,26 +266,32 @@ export async function testDeepScanContextSnapshots({
             "after-edit",
           );
           assert.ok(second.status === "succeeded");
-          const reducerId = randomUUID();
-          const reduced = await runner().runReducer({
-            id: reducerId,
-            label: "reducer",
-            consumed: [first.worker, second.worker],
-          });
-          assert.ok(!("status" in reduced), "Reducer did not succeed");
-          assert.equal(
-            reduced.run.persistedWorkers?.find(
-              (worker) => worker.id === reducerId,
-            )?.attempt,
-            2,
-          );
-          assert.equal(invocations.length, 6);
+          assert.equal(invocations.length, 4);
           for (let offset = 0; offset < invocations.length; offset += 2) {
             const fresh = invocations[offset]!;
             const resumed = invocations[offset + 1]!;
             assert.equal(fresh.invocation.argv.includes("resume"), false);
             assert.equal(resumed.invocation.argv.includes("resume"), true);
             for (const { invocation } of [fresh, resumed]) {
+              const permissionOverride = invocation.argv.find((arg) =>
+                arg.startsWith("permissions.codex_security_deep_scan_worker="),
+              );
+              assert.ok(permissionOverride);
+              assert.deepEqual(
+                JSON.parse(
+                  JSON.stringify(parseToml(permissionOverride).permissions),
+                ),
+                {
+                  codex_security_deep_scan_worker: {
+                    extends: ":read-only",
+                    filesystem: {
+                      ":root": "read",
+                      [workerUsageDirectory]: { ".": "deny" },
+                    },
+                    network: { enabled: false },
+                  },
+                },
+              );
               assert.deepEqual(
                 { ...(parseToml(invocation.deepConfig).deep_scan as object) },
                 {
@@ -242,16 +308,21 @@ export async function testDeepScanContextSnapshots({
             const context = JSON.parse(
               fresh.invocation.stdin.match(/```json\n([\s\S]*?)\n```/)![1],
             );
-            if (fresh.kind === "discovery") {
-              assert.equal(context.userContext, userContext ?? null);
-              assert.equal(context.scanId, run.scanId);
-            } else {
-              assert.equal(Object.hasOwn(context, "userContext"), false);
-              assert.deepEqual(context.claimedWorkerIds, [
-                first.worker.id,
-                second.worker.id,
-              ]);
+            assert.deepEqual(context.severityRubric, severityRubric);
+            if (severityRubric) {
+              assert.ok(
+                resumed.invocation.stdin.includes(
+                  JSON.stringify({ severityRubric }),
+                ),
+              );
+              assert.equal(
+                fresh.invocation.stdin.includes("Original user instructions."),
+                false,
+              );
             }
+            assert.equal(fresh.kind, "discovery");
+            assert.equal(context.userContext, userContext ?? null);
+            assert.equal(context.scanId, run.scanId);
             assert.equal(fresh.invocation.stdin.includes(editedContext), false);
             assert.equal(
               resumed.invocation.stdin.includes(editedContext),
@@ -259,7 +330,6 @@ export async function testDeepScanContextSnapshots({
             );
             assert.match(resumed.invocation.stdin, /record_codex_security_/);
           }
-          await writeFile(deepConfig, "[deep_scan]\nmax_time_hours = 48\n");
           const restarted = await new WorkbenchDeepScanStore(command).begin({
             scanId: run.scanId,
             threadId,

@@ -1,3 +1,4 @@
+import type { ScanPricingContext } from "./cost-model.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -15,6 +16,9 @@ export interface TurnResultMetadata {
   id?: string;
   status?: string;
   model?: string;
+  pricingContext?: ScanPricingContext;
+  /** Source region recorded for Bedrock scans. */
+  bedrockRegion?: string | null;
   durationMs?: number;
   finalResponse?: string;
   usage?: unknown;
@@ -44,6 +48,8 @@ export interface ScanResultOptions {
   scanDir: string;
   threadId: string;
   turnResult: TurnResultMetadata;
+  /** Cost saved when this scan completed. */
+  recordedCost?: Readonly<ScanCost>;
   sarifPath?: string | null;
   threatModelPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
@@ -84,10 +90,13 @@ export class ScanResult {
     this.ownerSuggestionsPath = options.ownerSuggestionsPath;
     this.ownerSuggestionsError = options.ownerSuggestionsError;
     this.threatModelPath = options.threatModelPath ?? null;
-    this.cost = estimateScanCost(
-      options.turnResult.model,
-      options.turnResult.usage,
-    );
+    this.cost =
+      options.recordedCost ??
+      estimateScanCost(
+        options.turnResult.model,
+        options.turnResult.usage,
+        options.turnResult.pricingContext ?? options.turnResult.bedrockRegion,
+      );
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
     } else {

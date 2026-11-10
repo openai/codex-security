@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { JsonObject } from "./config.js";
+import { resolveCodexProfile, type JsonObject } from "./config.js";
 import { IncompleteScanError } from "./errors.js";
 import { PLUGIN_NAME } from "./runtime.js";
 
@@ -9,8 +9,11 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md": [
+    "07abac7382a66338bfbe3def9a0e89e715a89561332c88ccb4477f97b6e84fe5",
+    "0e301a70d9f20acbb797f5eafcac84c09dd0513991714812d5c4f7b1f64a4a89",
     "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
     "83bafdc4089803e631eaaa86ec57167c7da3f51794514d0dcdb62c5afdced8a7",
+    "848eb40d42b0bf9cf21748b9927d031b0461a4443f63e3954139f9801f41c3f6",
   ],
   "skills/security-scan/SKILL.md": [
     "b6a69658d48fff6979d6690e95d2096da236bb7e51b96ebb4f92102a9863d66c",
@@ -111,6 +114,7 @@ export async function customValidationConfig(
   config: JsonObject,
   pluginRoot: string,
 ): Promise<JsonObject> {
+  config = resolveCodexProfile(config);
   const manifest = JSON.parse(
     await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
   );

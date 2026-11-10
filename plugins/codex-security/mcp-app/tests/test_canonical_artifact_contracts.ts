@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import * as z from "zod/v4";
 import { readJson } from "./support/json.ts";
@@ -128,21 +131,23 @@ for (const kind of [
     document.scan.target.snapshotDigest = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
   assert.equal(manifest.validate(document), true);
 }
-for (const example of [
-  manifest.example,
-  await readJson(
-    import.meta.dirname,
-    "../../examples/legacy-completed-scan/scan-manifest.json",
-  ),
-]) {
+for (const directory of ["completed-scan", "legacy-completed-scan"]) {
+  const root = join(import.meta.dirname, "../../examples", directory);
+  const example = await readJson(root, "scan-manifest.json");
   assert.equal(manifest.validate(example), true);
-  for (const path of [
-    "findings.json",
-    ...(example.scan.coverageRef ? ["coverage.json"] : []),
-  ]) {
+  const paths = ["findings.json"];
+  assert.equal(example.scan.findingsRef, "findings.json");
+  if (example.scan.coverageRef) paths.push("coverage.json");
+  for (const path of paths) {
     const document = structuredClone(example);
     const artifact = document.scan.artifacts.find(
       (entry: { path: string }) => entry.path === path,
+    );
+    const bytes = await readFile(join(root, path));
+    assert.equal(JSON.parse(bytes.toString("utf8")).scanId, document.scan.id);
+    assert.equal(
+      createHash("sha256").update(bytes).digest("hex"),
+      artifact.sha256,
     );
     document.scan.artifacts = document.scan.artifacts.filter(
       (entry: { path: string }) => entry.path !== path,

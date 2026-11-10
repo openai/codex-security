@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import { finding } from "./scan-draft-fixture.ts";
@@ -22,8 +23,10 @@ import type {
   DeepScanPublication,
   ScanDraftInput,
 } from "../src/artifact-scan-draft.js";
+import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import {
   DeepScanCoordinator,
+  DeepScanCoordinatorRegistry,
   FakeExecutor,
 } from "./deep_scan_coordinator_fixture.ts";
 
@@ -33,23 +36,29 @@ const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const {
   WorkbenchDeepScanStore,
+  startDeepScanEngine,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
   saveScanDraftCheckpoint,
 } = await importModule({
   stdin: {
     contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
+export { startDeepScanEngine } from "./src/deep-scan/engine.ts";
 export { createScanArtifactContext } from "./src/artifact-context.ts";
 export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";`,
     resolveDir: mcpAppRoot,
   },
+  loader: { ".md": "text" },
 });
 
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
+await testJoiningCallerAdmission("fresh-empty");
+await testJoiningCallerAdmission("resumed-empty");
+await testJoiningCallerAdmission("resumed-with-source");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
-await testReducerCommitAndFinishAgainstRealWorkbench(true);
+
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
 await testPartialWorkerCoverageSurvivesParentCompletion();
 await testReceiptRepairSurvivesStoppedRecovery();
@@ -64,16 +73,108 @@ await testNoopStoppedRefreshRetainsPublicationFailure();
 await testConcurrentParentDraftsPreserveBothCheckpoints();
 await testReplacementFailureDuringCancellation();
 await testCoordinatorCommitResponseRecovery();
-await testCoordinatorCommitResponseRecovery("commit-deep-scan-dedup");
+await testCoordinatorCommitResponseRecovery("record-deep-scan-iteration");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
 
+async function testJoiningCallerAdmission(
+  scenario: "fresh-empty" | "resumed-empty" | "resumed-with-source",
+) {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-joining-caller-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  const owner = new WorkbenchDeepScanStore(runWorkbench);
+  const joiner = new WorkbenchDeepScanStore(runWorkbench);
+  const threadId = "admission-thread";
+  const scanRoot = path.join(fixtureRoot, "scans");
+  const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+  const registry = new DeepScanCoordinatorRegistry();
+  const start = registry.start.bind(registry);
+  registry.start = (options: CoordinatorOptions) =>
+    start({ ...options, executor });
+  try {
+    const created = await owner.begin({ targetPath, threadId, scanRoot });
+    const lease = { scanId: created.scanId, threadId };
+    // Admission uses the later claim, even if the owner entered discovery before it expired.
+    const discoveryProgress = {
+      scanId: created.scanId,
+      phase: "discovery",
+    } as const;
+    const joined = await joiner.begin({ ...lease, scanRoot });
+    assert.equal(joined.discoveryStarted, false);
+    if (scenario !== "fresh-empty") {
+      const claimed = await owner.claimCoordinator(lease);
+      assert.equal(claimed.acquired, true);
+      await owner.updateProgress(discoveryProgress);
+      const observer = await joiner.claimCoordinator(lease);
+      assert.equal(observer.acquired, false);
+      assert.equal(observer.run.discoveryStarted, true);
+      assert.equal(observer.run.dispatchedCount, 0);
+      await expireLease(environment, created.scanId);
+    }
+    if (scenario !== "resumed-with-source")
+      await rm(path.join(targetPath, "fixture.py"));
+    const { coordinator } = await startDeepScanEngine({
+      run: joined,
+      store: joiner,
+      registry,
+      runWorkbench,
+      pluginRoot,
+      pythonCommand: fixturePython,
+      parentSandbox: { filesystemDenies: [] },
+      threadId,
+    });
+    try {
+      const terminal = await Promise.race([
+        executor.discoveryStarted.promise,
+        coordinator.wait(undefined, 30_000),
+      ]);
+      const persisted = await joiner.get(created.scanId, threadId);
+      if (scenario !== "fresh-empty")
+        assert.equal(persisted.coordinatorGeneration, 3);
+      if (scenario === "resumed-with-source") {
+        assert.ok(executor.discoveryCalls > 0, terminal?.error);
+        assert.ok(persisted.dispatchedCount > 0);
+        await assert.rejects(
+          owner.updateProgress(discoveryProgress),
+          /newer generation/,
+        );
+      } else {
+        assert.equal(terminal?.status, "failed");
+        assert.match(terminal.error, /target is empty.*no security audit/iu);
+        assert.equal(executor.discoveryCalls, 0);
+        assert.equal(persisted.status, "failed");
+        assert.deepEqual(persisted.persistedWorkers, []);
+        assert.equal(persisted.dispatchedCount, 0);
+      }
+    } finally {
+      coordinator.cancel("fixture cleanup");
+      await coordinator.wait(undefined, 30_000);
+    }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function expireLease(environment: NodeJS.ProcessEnv, scanId: string) {
+  await execFileAsync(fixturePython, [
+    "-c",
+    `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE deep_scan_runs SET updated_at = '2000-01-01T00:00:00Z' WHERE scan_id = ?", (sys.argv[2],))`,
+    path.join(environment.CODEX_SECURITY_STATE_DIR!, "workbench.sqlite3"),
+    scanId,
+  ]);
+}
+
 async function testCoordinatorCommitResponseRecovery(
-  exhaustOperation?: "commit-deep-scan-dedup" | "finish-deep-scan",
+  exhaustOperation?: "record-deep-scan-iteration" | "finish-deep-scan",
 ) {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-commit-response-",
   );
-  const exhaustCommitRetries = exhaustOperation === "commit-deep-scan-dedup";
+  const exhaustCommitRetries =
+    exhaustOperation === "record-deep-scan-iteration";
   const runWorkbench = createWorkbenchRunner(environment);
   const attempts = new Map<string, string[][]>();
   let failureWrites = 0;
@@ -88,7 +189,7 @@ async function testCoordinatorCommitResponseRecovery(
       );
     }
     if (
-      args[0] !== "commit-deep-scan-dedup" &&
+      args[0] !== "record-deep-scan-iteration" &&
       args[0] !== "finish-deep-scan" &&
       !(
         args[0] === "upsert-deep-scan-worker" &&
@@ -101,7 +202,7 @@ async function testCoordinatorCommitResponseRecovery(
     calls.push([...args]);
     attempts.set(args[0], calls);
     if (
-      args[0] === "commit-deep-scan-dedup" &&
+      args[0] === "record-deep-scan-iteration" &&
       (calls.length === 1 || exhaustCommitRetries)
     ) {
       throw Object.assign(
@@ -172,7 +273,7 @@ async function testCoordinatorCommitResponseRecovery(
     );
     assert.equal(failureWrites, exhaustCommitRetries ? 1 : 0);
     assert.equal(
-      attempts.get("commit-deep-scan-dedup")?.length,
+      attempts.get("record-deep-scan-iteration")?.length,
       exhaustCommitRetries ? 3 : 2,
     );
     assert.equal(attempts.get("upsert-deep-scan-worker")?.length, 2);
@@ -231,13 +332,16 @@ async function createWorkbenchFixture(prefix: string) {
 }
 
 function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
-  const python = process.env.PYTHON?.trim() || "python3";
   return async (args: string[]) => {
-    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
-      cwd: pluginRoot,
-      env: environment,
-      ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
-    });
+    const { stdout } = await execFileAsync(
+      fixturePython,
+      [workbenchPath, ...args],
+      {
+        cwd: pluginRoot,
+        env: environment,
+        ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
+      },
+    );
     return JSON.parse(stdout);
   };
 }
@@ -683,16 +787,13 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
   }
 }
 
-async function testReducerCommitAndFinishAgainstRealWorkbench(
-  replaceFailedReducer = false,
-) {
+async function testReducerCommitAndFinishAgainstRealWorkbench() {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-store-integration-",
   );
   const scanRoot = path.join(fixtureRoot, "scans");
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-integration-thread";
-  const python = process.env.PYTHON?.trim() || "python3";
   const runWorkbench = mock.fn(createWorkbenchRunner(environment));
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
@@ -742,7 +843,7 @@ max_time_hours = 2.5
       observer.fail(run.scanId, "observer cannot fail its owner"),
       /current coordinator lease/,
     );
-    const writer = spawn(python, [
+    const writer = spawn(fixturePython, [
       "-c",
       `import sqlite3, sys
 connection = sqlite3.connect(sys.argv[1])
@@ -805,66 +906,19 @@ connection.rollback()`,
     const first = await createDiscovery(store, run, "first", "succeeded");
     const second = await createDiscovery(store, run, "second", "succeeded");
     const late = await createDiscovery(store, run, "late", "running");
-    if (replaceFailedReducer) {
-      const retired = await createWorkerFixture(
-        run,
-        "retired-reducer",
-        "dedup",
-      );
-      await store.claimDedup({
-        ...retired,
-        workerIds: [first.id, second.id],
-      });
-      await store.updateWorker({ ...retired, status: "running" });
-      await store.updateWorker({
-        ...retired,
-        status: "failed",
-        error: "Request blocked by cyberPolicy.",
-      });
-      const afterRetirement = await store.get(run.scanId, threadId);
-      assert.equal(afterRetirement.status, "running");
-      for (const workerId of [first.id, second.id]) {
-        assert.equal(
-          afterRetirement.persistedWorkers.find(
-            (worker: { id: string }) => worker.id === workerId,
-          )?.mergeState,
-          "buffered",
-          "a retired reducer must release every input for its replacement",
-        );
-      }
-    }
     const reducer = await createWorkerFixture(run, "dedup-0001", "dedup");
     await writeJsonLine(reducer.resultPath, {
-      schemaVersion: 1,
-      consumedWorkerIds: [first.id, second.id],
-      merges: [],
+      scanId: run.scanId,
+      findings: [],
     });
-    await store.claimDedup({
-      ...reducer,
-      workerIds: [first.id, second.id],
-    });
-    await store.updateWorker({
-      ...reducer,
-      status: "running",
-      threadId: "fixture-reducer-thread",
-    });
-
     const canonical = await createCanonicalFixture(run.scanDir);
-    const stagedCandidateLedgerPath = path.join(
-      reducer.artifactDir,
-      "canonical",
-      "candidate_ledger.jsonl",
-    );
-    await writePrivateFile(
-      stagedCandidateLedgerPath,
-      '{"candidate_id":"replacement"}\n',
-    );
-    const afterCommit = await store.commitDedup({
+    const afterCommit = await store.recordIteration({
       id: reducer.id,
       scanId: run.scanId,
-      newFindings: 0,
-      resultManifestPath: reducer.resultPath,
-      candidateLedgerPath: stagedCandidateLedgerPath,
+      workerIds: [first.id, second.id],
+      resultPath: reducer.resultPath,
+      noNewStreak: 2,
+      consecutiveErrors: 0,
     });
     assert.equal(afterCommit.status, "running");
     assert.equal(afterCommit.terminalReason, undefined);
@@ -875,15 +929,6 @@ connection.rollback()`,
         .canonicalArtifacts,
       null,
     );
-    assert.equal(
-      await readFile(canonical.candidateLedgerPath, "utf8"),
-      '{"candidate_id":"replacement"}\n',
-    );
-    assert.equal(
-      await readFile(stagedCandidateLedgerPath, "utf8"),
-      '{"candidate_id":"replacement"}\n',
-    );
-
     const acceptedLate = await store.updateWorker({
       ...late,
       status: "succeeded",
@@ -1376,7 +1421,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     );
     const runSql = async (sql: string) =>
       execFileAsync(
-        process.env.PYTHON?.trim() || "python3",
+        fixturePython,
         [
           "-c",
           "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); connection.executescript(sys.argv[2]); connection.close()",
@@ -2001,15 +2046,7 @@ async function testReplacementFailureDuringCancellation() {
     assert.equal((await store.get(run.scanId, threadId)).status, "running");
 
     // Expire only the lease clock; claim and failure use the real workbench.
-    await execFileAsync(process.env.PYTHON?.trim() || "python3", [
-      "-c",
-      `import sqlite3, sys
-connection = sqlite3.connect(sys.argv[1])
-connection.execute("UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?", ("2000-01-01T00:00:00Z", sys.argv[2]))
-connection.commit()`,
-      path.join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-      run.scanId,
-    ]);
+    await expireLease(environment, run.scanId);
     await rm(
       path.join(
         run.scanDir,

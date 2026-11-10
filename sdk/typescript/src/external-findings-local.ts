@@ -1,9 +1,31 @@
+import {
+  semgrepLegacyRepositoryWitnesses,
+  semgrepPlatformFindingBinding,
+  semgrepPlatformReportScope,
+  semgrepPlatformRepositoryReference,
+  isSemgrepPlatformEvidence,
+  semgrepReferenceMatches,
+} from "./semgrep-platform-findings.js";
+import {
+  gitPathToHttpPath,
+  gitServiceHostname,
+  isPublicGitHost,
+  gitTransportBytes,
+  hostedRepositoryMatches,
+} from "./hosted-git-repository.js";
+import {
+  checkRetainedTrivyProvider,
+  checkTrivyReportProvider,
+  matchTrivyCheckout,
+} from "./trivy-import.js";
+import {
+  readGitRemoteNames,
+  readHostedGitRemotes,
+} from "./hosted-git-remotes.js";
 import { CodexSecurityError } from "./errors.js";
 import {
-  forwardExternalImportSetting,
-  requireExternalImports,
-} from "./external-imports-feature.js";
-import {
+  externalImportDisposition,
+  NoPublishableFindingsError,
   cloneImportPreview,
   snapshotImportOptions,
   snapshotNormalizedFindings,
@@ -15,16 +37,29 @@ import {
   cloudRepositoryUrlKey,
   requireSafeJsonInteger,
   repositoryUrlKey,
+  validateExternalEvidence,
 } from "./external-import-contract.js";
 import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { localFindingRepositories } from "./external-findings-read.js";
+import {
+  localFindingRepositories,
+  semgrepSarifRepositories,
+  type LocalFindingProvider,
+} from "./external-findings-read.js";
+import {
+  tenableReportFormat,
+  tenableSourceRepository,
+} from "./tenable-findings.js";
+import {
+  guardianFindingRepository,
+  guardianSelectionFormat,
+} from "./semgrep-guardian-findings.js";
 import {
   hasGitMetadata,
   localGitProtectionRoots,
-  importGitProtectionRoots,
+  commandGitProtectionRoots,
 } from "./local-git-metadata.js";
 import {
   blackDuckReportRepositories,
@@ -37,12 +72,20 @@ import {
   isGitSsh,
   parseGitRemote,
 } from "./git-remote.js";
+import { checkmarxSelection } from "./checkmarx-repository.js";
+import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
+import { retainedGitHubRepository } from "./github-findings.js";
+import {
+  type SnykIssuesFindings,
+  snykRestImportRepository,
+  snykRestCheckoutMatches,
+} from "./snyk-rest-findings.js";
 import {
   bundledPluginRoot,
   canonicalConfigPath,
@@ -64,7 +107,7 @@ import {
 export interface StoredExternalFinding {
   id: string;
   repository: string;
-  provider: Provider;
+  provider: LocalFindingProvider;
   sourceKey: string;
   sourceFindingId: string;
   evidence: ExternalFindingEvidence;
@@ -77,10 +120,10 @@ export interface StoredExternalFinding {
 export interface NormalizedLocalImportOptions {
   /** Local checkout or source directory to associate with these records. */
   repository: string;
-  provider: Provider;
+  provider: LocalFindingProvider;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
-  /** Explicitly verified Sonar repository when a checkout uses an SSH host alias. */
+  /** Verified Git repository URL for readers that bind a finding to a checkout. */
   sourceRepositoryUrl?: string;
   /** Full Inspector project ARNs mapped to independently verified repository URLs. */
   inspectorProjectMap?: ReadonlyMap<string, string>;
@@ -96,7 +139,7 @@ export interface LocalExternalImportDependencies {
 
 export interface LocalExternalImportPreview extends ExternalFindings {
   repository: string;
-  source: { provider: Provider; source_key: string };
+  source: { provider: LocalFindingProvider; source_key: string };
 }
 
 export interface LocalExternalImportResult {
@@ -152,17 +195,9 @@ interface RemoteRepositoryIdentity {
   homeRelative?: boolean;
 }
 
-function sonarHostedGit(hostname: string) {
-  return (
-    isGitHubCloudHost(hostname) ||
-    hostname === "gitlab.com" ||
-    hostname === "bitbucket.org"
-  );
-}
-
 function sonarHostedHostname(hostname: string) {
-  const name = hostname.toLowerCase().replace(/\.$/u, "");
-  return sonarHostedGit(name) ||
+  const name = gitServiceHostname(hostname.toLowerCase());
+  return isPublicGitHost(name) ||
     ["ssh.github.com", "ssh.dev.azure.com", "dev.azure.com"].includes(name)
     ? name
     : undefined;
@@ -238,16 +273,8 @@ function remoteRepository(
   }
 
   // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
-  const literal = (raw: string) => {
-    const bytes = Buffer.from(raw).toString("latin1");
-    return scpStyle
-      ? bytes
-      : bytes.replace(/%(?!00)([\da-f]{2})/giu, (_, hex: string) =>
-          String.fromCharCode(parseInt(hex, 16)),
-        );
-  };
   if (!scpStyle && !transport) return { key: value };
-  const gitPath = literal(transport?.[2] ?? path);
+  const gitPath = gitTransportBytes(transport?.[2] ?? path, scpStyle);
   const login = scpStyle
     ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
     : /^(.*)@/u.exec(authority ?? "")?.[1];
@@ -255,17 +282,11 @@ function remoteRepository(
     /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
   const suffix = /[?#].*$/su.exec(gitPath);
   // Express upload-pack bytes as a URL path for comparison with the HTTP source.
-  const name = gitPath
-    .slice(0, suffix?.index)
-    .replace(/^\//u, "")
-    .replace(
-      /[%\x00-\x20\x7f-\xff]/gu,
-      (byte) =>
-        "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
-    );
+  const name = gitPathToHttpPath(gitPath.slice(0, suffix?.index));
   // Azure's generated SCP clone URL spells spaces as %20, even though Git sends SCP paths literally.
   const azure =
-    provider === "sonar" && !(scpStyle && path.startsWith("/"))
+    (provider === "sonar" || provider === "checkmarx") &&
+    !(scpStyle && path.startsWith("/"))
       ? azureReposHttpsUrl(
           url,
           scpStyle ? name.replace(/%2520/gu, "%20") : name,
@@ -278,7 +299,7 @@ function remoteRepository(
     : key(azure ?? origin + name);
   return {
     key: repository,
-    account: ssh && login ? literal(login) : undefined,
+    account: ssh && login ? gitTransportBytes(login, scpStyle) : undefined,
     // GitHub serves the same repository path through its SCP and SSH URLs.
     homeRelative:
       ssh && platform !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
@@ -300,6 +321,41 @@ function matchingRemote(
       left.account === undefined ||
       right.account === undefined ||
       left.account === right.account)
+  );
+}
+
+// Within one fetch key and home-relative mode, matchingRemote can use any
+// account, the requested login, or an unspecified login.
+function fetchAliasMatcher(
+  rows: readonly { fetch: RemoteRepositoryIdentity }[],
+) {
+  const homes = Map.groupBy(rows, ({ fetch }) => fetch.homeRelative);
+  const accounts = Array.from(
+    homes.values(),
+    (group) => new Map(group.map(({ fetch }) => [fetch.account, fetch])),
+  );
+  return (fetch: RemoteRepositoryIdentity) =>
+    accounts.some((group) =>
+      [
+        group.values().next().value,
+        group.get(fetch.account),
+        group.get(undefined),
+      ].some(
+        (candidate) =>
+          candidate !== undefined && matchingRemote(fetch, candidate),
+      ),
+    );
+}
+
+function fetchAliasMatchers<
+  Row extends { fetch: RemoteRepositoryIdentity },
+  Key,
+>(rows: readonly Row[], key: (row: Row) => Key) {
+  return new Map(
+    Array.from(
+      Map.groupBy(rows, key),
+      ([name, group]) => [name, fetchAliasMatcher(group)] as const,
+    ),
   );
 }
 
@@ -327,7 +383,7 @@ export function sonarRepositoryForRemote(origin: string): string | undefined {
       isGitSsh(url.protocol) &&
       url.username === "git" &&
       (!url.port || url.port === "22") &&
-      sonarHostedGit(hostname)
+      isPublicGitHost(hostname)
     ) {
       candidate = `https://${hostname}/${path}`;
     } else {
@@ -463,30 +519,12 @@ export async function configuredFetchRemotes(
         ),
       signal,
     );
-  let remoteNames: string;
-  try {
-    remoteNames = await readGit(["remote"]);
-  } catch (error) {
-    signal?.throwIfAborted();
-    // A local source directory need not be a Git checkout.
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === 128 &&
-      "stderr" in error &&
-      typeof error.stderr === "string" &&
-      (error.stderr.trimEnd() ===
-        "fatal: not a git repository (or any of the parent directories): .git" ||
-        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
-          error.stderr.trimEnd(),
-        ))
-    )
-      return [];
-    throw error;
-  }
+  const remoteNames = await readGitRemoteNames(readGit, signal);
+  if (remoteNames === undefined) return [];
   const remotes: ConfiguredFetchRemote[] = [];
+  const firstUrlOnly = provider === "sonar" || provider === "checkmarx";
   for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
-    if (provider === "sonar") {
+    if (firstUrlOnly) {
       // Git fetches from only the first URL, after insteadOf rewrites.
       const url = await readGit(["remote", "get-url", "--", name]);
       if (/[\r\n]/u.test(url))
@@ -507,29 +545,67 @@ async function requireMatchingRepository(
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
   strictSources: ReadonlyMap<string, Provider>,
-  strictPlatformFor: (source: ExternalSourceRepository) => Provider,
-  protectedRoots: WorkbenchCommandOptions["protectedRoot"],
+  hostedSources: readonly ExternalSourceRepository[],
+  platformFor: (source: ExternalSourceRepository, bound: boolean) => Provider,
+  snyk: ReturnType<typeof snykRestImportRepository>,
+  protectedRoots: string[],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
   possibleSshHost?: string,
   fetchRemotes?: readonly ConfiguredFetchRemote[],
+  isCheckmarxSource?: (url: string) => boolean,
 ): Promise<boolean> {
-  if (sources.length === 0) return false;
+  if (!snyk && sources.length === 0 && hostedSources.length === 0) return false;
+  let allSourcesMatched = true;
+  if (snyk || hostedSources.length) {
+    if (!(await hasGitMetadata(repository, signal))) return false;
+    const remotes = await readHostedGitRemotes(
+      repository,
+      [
+        ...protectedRoots,
+        await abortable(() => canonicalConfigPath(process.cwd()), signal),
+      ],
+      environment,
+      signal,
+    );
+    if (snyk) {
+      if (
+        remotes &&
+        !remotes.some((remote) => snykRestCheckoutMatches(snyk, remote))
+      )
+        throw new CodexSecurityError(
+          `Imported repository ${JSON.stringify(snyk.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+        );
+      return remotes !== undefined;
+    }
+    allSourcesMatched = remotes !== undefined;
+    if (remotes) {
+      for (const source of hostedSources)
+        if (!remotes.some((remote) => hostedRepositoryMatches(source, remote)))
+          throw new CodexSecurityError(
+            `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+          );
+    }
+    if (!sources.length) return allSourcesMatched;
+  }
+  const remoteProvider = (checkmarx?: boolean) =>
+    checkmarx && provider !== "sonar" ? "checkmarx" : provider;
   const remotes =
     fetchRemotes ??
     (await configuredFetchRemotes(
       repository,
-      provider,
+      remoteProvider(Boolean(isCheckmarxSource)),
       protectedRoots,
       environment,
       signal,
     ));
   const boundProvider =
     provider === "sonar" ||
+    provider === "checkmarx" ||
+    provider === "continuum" ||
     provider === "inspector" ||
     provider === "blackduck" ||
     provider === "veracode";
-  const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
   const comparable: string[] = [];
   const unverified: string[] = [];
   for (const { url: remote } of remotes) {
@@ -538,14 +614,13 @@ async function requireMatchingRepository(
     if (verified) comparable.push(verified);
     else if (!/[\s\\\p{Cc}?#]/u.test(remote)) unverified.push(remote);
   }
-  let allSourcesMatched = true;
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
-    const platform = bound
-      ? (strictSources.get(source.url) ?? strictPlatformFor(source))
-      : loosePlatformFor(source);
-    const identity = (url: string) =>
-      remoteRepository(url, provider, bound, platform);
+    const platform =
+      strictSources.get(source.url) ?? platformFor(source, bound);
+    const sourceProvider = remoteProvider(isCheckmarxSource?.(source.url));
+    const identity = (url: string, fallbackHost?: string) =>
+      remoteRepository(url, sourceProvider, bound, platform, fallbackHost);
     const targets = comparable.flatMap((remote) => identity(remote) ?? []);
     const target = identity(source.url);
     if (target && targets.some((remote) => matchingRemote(remote, target)))
@@ -554,9 +629,7 @@ async function requireMatchingRepository(
     // A custom SSH upstream can agree with a manual mapping even when a
     // recognized HTTPS remote points at a fork. It cannot prove a Cloud binding.
     const configured = unverified.flatMap(
-      (remote) =>
-        remoteRepository(remote, provider, bound, platform, possibleSshHost) ??
-        [],
+      (remote) => identity(remote, possibleSshHost) ?? [],
     );
     if (target && configured.some((remote) => matchingRemote(remote, target)))
       continue;
@@ -580,7 +653,9 @@ export function sonarCheckoutMatchesSource(
     "sonar",
     [{ url }],
     new Map(),
+    [],
     () => "sonar",
+    undefined,
     [...protectedRoots],
     environment,
     signal,
@@ -593,10 +668,9 @@ async function localContext(
   mode: "import" | "read" = "import",
 ) {
   dependencies.signal?.throwIfAborted();
-  const selected = dependencies.environment ?? process.env;
-  const environment = workbenchEnvironment(selected);
-  forwardExternalImportSetting(selected, environment);
-  requireExternalImports(environment);
+  const environment = workbenchEnvironment(
+    dependencies.environment ?? process.env,
+  );
   const path = expandHome(selectedRepository, environment);
   const repository =
     mode === "read"
@@ -606,7 +680,7 @@ async function localContext(
     ...new Set([
       repository,
       ...(await abortable(
-        () => importGitProtectionRoots(path, environment, dependencies.signal),
+        () => commandGitProtectionRoots(path, environment, dependencies.signal),
         dependencies.signal,
       )),
     ]),
@@ -641,7 +715,6 @@ export async function prepareNormalizedLocalImport(
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   return prepareLocalImport(
     input,
     snapshotImportOptions(options),
@@ -649,17 +722,57 @@ export async function prepareNormalizedLocalImport(
   );
 }
 
+// A scanner can repeat the same repository reference for every finding in a run.
+export function distinctSourceRepositories(
+  sources: readonly ExternalSourceRepository[],
+) {
+  const seen = new Map<ExternalSourceRepository["platform"], Set<string>>();
+  return sources.filter(({ url, platform }) => {
+    const urls = seen.get(platform) ?? new Set<string>();
+    if (urls.has(url)) return false;
+    urls.add(url);
+    seen.set(platform, urls);
+    return true;
+  });
+}
+
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
-  input: ExternalFindings,
-  options: NormalizedLocalImportOptions,
+  input: ExternalFindings & Partial<SnykIssuesFindings>,
+  options: NormalizedLocalImportOptions &
+    ({ provider: "tenable" } | { provider: Provider }),
   dependencies: LocalExternalImportDependencies,
-  readerSources = snapshotSourceRepositories(dependencies.sourceRepositories),
-  parsedSources: readonly ExternalSourceRepository[] = [],
+  readerSources = distinctSourceRepositories(
+    snapshotSourceRepositories(dependencies.sourceRepositories),
+  ),
+  parsedInput: readonly ExternalSourceRepository[] = [],
   fetchRemotes?: readonly ConfiguredFetchRemote[],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
+  const parsedSources = distinctSourceRepositories(parsedInput);
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
+  if (
+    options.provider !== "tenable" &&
+    (current.report?.["format"] === tenableReportFormat ||
+      current.findings.some(
+        (row) => row.evidence?.source_data?.["format"] === tenableReportFormat,
+      ))
+  )
+    throw new CodexSecurityError(
+      "Retained Tenable evidence requires the tenable provider.",
+    );
+  checkTrivyReportProvider(options.provider, current.report);
+  // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
+  if (!("snykRestContext" in current) && "snykRestContext" in input)
+    current.snykRestContext = structuredClone(input.snykRestContext);
+  if (options.provider === "snyk" || current.snykRestContext !== undefined) {
+    for (const key of [
+      "sourceRepositoryUrl",
+      "sourceRepositoryPlatform",
+    ] as const)
+      if (key in input && !(key in current))
+        Object.assign(current, { [key]: structuredClone(input[key]) });
+  }
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
@@ -671,6 +784,7 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    checkRetainedTrivyProvider(options.provider, finding, "local");
     if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
     if (!native) continue;
@@ -688,10 +802,32 @@ export async function prepareLocalImport(
       );
     dependabotSource = native;
   }
-  const { repository, options: workbenchOptions } = await localContext(
-    options.repository,
-    dependencies,
-  );
+  const context = await localContext(options.repository, dependencies);
+  if (options.provider === "tenable") {
+    const source = tenableSourceRepository(
+      current,
+      options.sourceRepositoryUrl,
+      [...readerSources, ...parsedSources],
+    );
+    const remotes = await readHostedGitRemotes(
+      context.repository,
+      [
+        ...context.options.protectedRoot,
+        await abortable(
+          () => canonicalConfigPath(process.cwd()),
+          dependencies.signal,
+        ),
+      ],
+      context.options.environment,
+      dependencies.signal,
+    );
+    if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
+      throw new CodexSecurityError(
+        "Tenable's source repository must match a configured Git fetch remote of the selected checkout.",
+      );
+    return preparedLocalStorage(current, options, context, dependencies, true);
+  }
+  const { repository, options: workbenchOptions } = context;
   const sources = new Map<string, ExternalSourceRepository>();
   const references = [...readerSources, ...parsedSources];
   const inspector = inspectorReportRepository(
@@ -700,12 +836,18 @@ export async function prepareLocalImport(
     "local",
     options.inspectorProjectMap,
   );
-  const projected =
-    options.provider === "blackduck"
-      ? []
-      : current.findings.filter((finding) =>
-          projectedBlackDuckRepositoryUrl(finding, "local"),
-        );
+  const checkmarx = checkmarxSelection(
+    options.provider,
+    current.findings,
+    current.report,
+    "local",
+  );
+  const projected = current.findings.filter(
+    (finding) =>
+      (options.provider !== "blackduck" &&
+        projectedBlackDuckRepositoryUrl(finding, "local")) ||
+      checkmarx.projections.has(finding),
+  );
   const mixed = projected.length > 0 && readerSources.length > 0;
   const nativeSources = new Map(
     (mixed ? current.findings : projected)
@@ -752,27 +894,150 @@ export async function prepareLocalImport(
     "local",
     sameRepositories,
   );
-  for (const source of veracodeReportRepositories(
-    options.provider,
-    current.findings,
-    "local",
-    sameRepositories,
-  ).values()) {
-    sources.set(source.url, source);
+  const checkmarxRepository = checkmarx.repositories(sameRepositories);
+  for (const repositories of [
+    veracodeReportRepositories,
+    continuumReportRepositories,
+  ]) {
+    for (const source of repositories(
+      options.provider,
+      current.findings,
+      "local",
+      sameRepositories,
+    ).values()) {
+      sources.set(source.url, source);
+    }
   }
   const strictSources = new Map<string, Provider>();
+  const checkmarxKeys = new Set<string>();
+  const hostedSources = new Map<string, ExternalSourceRepository>();
+  const semgrepReportScope = semgrepPlatformReportScope(
+    current,
+    options.provider,
+    readerSources,
+  );
+  const semgrepPlatformRepositoryUrl = semgrepReportScope?.url;
+  function addSemgrepSource(url: string) {
+    if (options.provider !== "semgrep")
+      throw new CodexSecurityError(
+        "Use the semgrep provider for Semgrep Platform findings.",
+      );
+    const source = semgrepPlatformRepositoryReference(url, readerSources);
+    if (
+      semgrepPlatformRepositoryUrl &&
+      semgrepPlatformRepositoryUrl !== url &&
+      !semgrepReferenceMatches(source, semgrepPlatformRepositoryUrl)
+    )
+      throw new CodexSecurityError(
+        "The Semgrep report repository does not match the native finding's project.",
+      );
+    hostedSources.set(source.url, source);
+  }
+  function addGuardianSource(value: unknown) {
+    if (options.provider !== "semgrep")
+      throw new CodexSecurityError(
+        "Use the semgrep provider for Guardian findings.",
+      );
+    const url = declaredScannerRepositoryUrl(value, "Guardian", "local");
+    const source =
+      hostedSources.get(url) ??
+      semgrepPlatformRepositoryReference(url, readerSources);
+    hostedSources.set(url, source);
+    return source;
+  }
+  const guardianReport =
+    current.report?.["format"] === guardianSelectionFormat
+      ? addGuardianSource(current.report["repositoryUrl"])
+      : undefined;
+  if (semgrepPlatformRepositoryUrl)
+    addSemgrepSource(semgrepPlatformRepositoryUrl);
   const known = new Set<string>(parsedSources.map(({ url }) => url));
+  const legacyWitnesses = semgrepLegacyRepositoryWitnesses(
+    current.findings,
+    options.provider,
+    readerSources,
+  );
+  const hasPlatformEvidence =
+    options.provider === "semgrep" &&
+    (semgrepReportScope !== undefined ||
+      current.findings.some((row) =>
+        isSemgrepPlatformEvidence(row, options.provider),
+      ));
+  let hasOrdinaryRows = false;
+  let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
-    const { evidence, source_finding_id: id } = finding;
-    const url = evidence.details?.repository?.url;
-    if (url) sources.set(url, { url });
-    const retained = bound.get(id);
+    const retained =
+      bound.get(finding.source_finding_id) ?? checkmarxRepository(finding);
     const native = nativeSources.get(finding) ?? [];
-    if (retained) {
+    const sarif = hasPlatformEvidence ? semgrepSarifRepositories(finding) : [];
+    const semgrep = semgrepPlatformFindingBinding(
+      finding,
+      options.provider,
+      readerSources,
+      legacyWitnesses,
+      semgrepReportScope,
+      [retained, ...native, ...sarif],
+    );
+    if (semgrep) {
+      addSemgrepSource(semgrep.url);
+      if (semgrep.sourceData) finding.evidence.source_data = semgrep.sourceData;
+      if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
+    }
+    const { evidence } = finding;
+    if (options.provider === "github") {
+      const source = retainedGitHubRepository(
+        finding,
+        (url) => identify(url).key,
+      );
+      if (source) sources.set(source, { url: source, platform: "github" });
+    }
+    const guardian = guardianFindingRepository(finding, "local");
+    const url = evidence.details?.repository?.url;
+    if (guardian) {
+      const source = addGuardianSource(guardian);
+      if (
+        (guardianReport &&
+          !semgrepReferenceMatches(guardianReport, source.url)) ||
+        (url &&
+          !semgrepReferenceMatches(
+            source,
+            declaredScannerRepositoryUrl(url, "Guardian", "local"),
+          ))
+      )
+        throw new CodexSecurityError(
+          "The Guardian finding repository does not match its recorded selection.",
+        );
+    } else if (!semgrep) {
+      hasOrdinaryRows = true;
+      if (url) sources.set(url, { url });
+    }
+    if (
+      hasPlatformEvidence &&
+      !semgrep &&
+      !guardian &&
+      !retained &&
+      !native.length
+    ) {
+      for (const source of sarif) sources.set(source.url, source);
+      if (!url && !sarif.length) ordinaryRowNeedsReferences = true;
+      if (!url && references.length) {
+        for (const source of sarif) {
+          const claim = identify(source.url);
+          if (
+            !references.some((ref) => matchingRemote(claim, identify(ref.url)))
+          )
+            throw new CodexSecurityError(
+              `The reader must supply the projected Semgrep SARIF repository ${JSON.stringify(source.url)} for the configured remote.`,
+            );
+        }
+      }
+    }
+    const projectedCheckmarx = checkmarx.projections.has(finding);
+    if (retained || (projectedCheckmarx && native.length)) {
+      const rowSources = retained ? [retained, ...native] : native;
       const claims = [
-        retained.url,
+        ...rowSources.map((ref) => ref.url),
         ...(url ? [url] : []),
-        ...native.map((ref) => ref.url),
       ];
       const rowPlatform = (claim: string) =>
         options.provider !== "wiz"
@@ -798,9 +1063,9 @@ export async function prepareLocalImport(
         throw new CodexSecurityError(
           "The retained scanner repository does not match the original provider finding.",
         );
-      for (const source of [retained, ...native])
-        sources.set(source.url, source);
+      for (const source of rowSources) sources.set(source.url, source);
       for (const claim of claims) {
+        if (projectedCheckmarx) checkmarxKeys.add(identify(claim).key);
         const platform = rowPlatform(claim);
         if (!strictSources.has(claim) || platform !== "github")
           strictSources.set(claim, platform);
@@ -808,12 +1073,76 @@ export async function prepareLocalImport(
     }
     for (const source of native) known.add(source.url);
   }
+  // Match references for native Platform rows using their hosted Git identity.
+  const hosted = Array.from(hostedSources.values());
+  const hostedReferences = new Set(
+    references.filter((ref) =>
+      hosted.some((source) => semgrepReferenceMatches(source, ref.url)),
+    ),
+  );
+  const sharedReferences = new Set<ExternalSourceRepository>();
+  const ordinaryReferences = new Set<ExternalSourceRepository>();
+  if (hostedReferences.size) {
+    const readerPlatform = localRepositoryPlatform(
+      options.provider,
+      [...sources.values(), ...references],
+      false,
+    );
+    const ordinaryIdentity = (url: string) =>
+      remoteRepository(
+        url,
+        options.provider,
+        false,
+        readerPlatform({ url }),
+      ) ?? { key: url };
+    const aliases = references.map((ref) => ({
+      ref,
+      fetch: identify(ref.url),
+      ordinary: ordinaryIdentity(ref.url).key,
+    }));
+    const claims = Map.groupBy(
+      Array.from(sources.keys(), (url) => ({
+        fetch: identify(url),
+        ordinary: strictSources.has(url)
+          ? undefined
+          : ordinaryIdentity(url).key,
+      })),
+      (claim) => claim.fetch.key,
+    );
+    for (const [key, refs] of Map.groupBy(
+      aliases,
+      (alias) => alias.fetch.key,
+    )) {
+      const hosted = refs.filter(({ ref }) => hostedReferences.has(ref));
+      const group = claims.get(key);
+      if (!hosted.length || !group) continue;
+      const shared = fetchAliasMatcher(group);
+      const readers = fetchAliasMatchers(refs, (alias) => alias.ordinary);
+      // Keep a sole fetch alias subject to checkout validation. A redundant
+      // Platform spelling can be dropped when another reference serves the reader.
+      const required = fetchAliasMatchers(group, ({ fetch, ordinary }) =>
+        ordinary !== undefined && readers.get(ordinary)?.(fetch)
+          ? ordinary
+          : undefined,
+      );
+      for (const alias of hosted) {
+        if (!shared(alias.fetch)) continue;
+        sharedReferences.add(alias.ref);
+        if (
+          required.get(undefined)?.(alias.fetch) ||
+          required.get(alias.ordinary)?.(alias.fetch)
+        )
+          ordinaryReferences.add(alias.ref);
+      }
+    }
+  }
   if (mixed) {
-    // A caller reference with no matching row spelling can still be a Git alias.
+    // Other caller references must identify an ordinary row or one of its Git aliases.
     const rows = [...sources.keys(), ...known].map(identify);
     const byKey = Map.groupBy(rows, (remote) => remote.key);
     const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
     const aliases = readerSources
+      .filter((ref) => !hostedReferences.has(ref) || sharedReferences.has(ref))
       .map(({ url }) => identify(url))
       .filter((remote) => !represented.has(JSON.stringify(remote)));
     for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
@@ -829,11 +1158,17 @@ export async function prepareLocalImport(
       Array.from(strictSources.keys(), (url) => identify(url).key),
     );
     for (const source of references)
-      if (!strictSources.has(source.url) && keys.has(identify(source.url).key))
+      if (
+        !strictSources.has(source.url) &&
+        keys.has(identify(source.url).key)
+      ) {
         strictSources.set(source.url, platformFor(source));
+        if (sharedReferences.has(source)) ordinaryReferences.add(source);
+      }
   }
   if (inspector) {
-    const platform = inspector.platform ?? options.provider;
+    const platform =
+      inspector.platform === "github" ? "github" : options.provider;
     const native = remoteRepository(
       inspector.url,
       options.provider,
@@ -851,7 +1186,28 @@ export async function prepareLocalImport(
         );
     }
   }
+  if (
+    readerSources.length &&
+    hosted.length &&
+    ((!hasOrdinaryRows &&
+      !readerSources.every((ref) => hostedReferences.has(ref))) ||
+      hosted.some(
+        (source) =>
+          !readerSources.some((ref) =>
+            semgrepReferenceMatches(source, ref.url),
+          ),
+      ))
+  )
+    throw new CodexSecurityError(
+      "The reader's source repository does not match the selected Semgrep project.",
+    );
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
+    if (
+      !ordinaryRowNeedsReferences &&
+      hostedReferences.has(source) &&
+      !ordinaryReferences.has(source)
+    )
+      continue;
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
@@ -859,6 +1215,23 @@ export async function prepareLocalImport(
         options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
+  const reportUrl = checkmarx.reportUrl;
+  if (reportUrl) {
+    const source = sources.get(reportUrl) ?? { url: reportUrl };
+    sources.set(reportUrl, source);
+    checkmarxKeys.add(identify(reportUrl).key);
+    if (!strictSources.has(reportUrl))
+      strictSources.set(reportUrl, platformFor(source));
+  }
+  if (
+    ((options.provider === "checkmarx" || reportUrl) &&
+      !sameRepositories(sources.keys())) ||
+    (reportUrl &&
+      hosted.some((source) => !semgrepReferenceMatches(source, reportUrl)))
+  )
+    throw new Error(
+      "The retained Checkmarx report repository does not match the finding repository.",
+    );
   const sonarSources = sonarRepositoryUrls(
     options.provider,
     current.findings,
@@ -896,19 +1269,89 @@ export async function prepareLocalImport(
       url: dependabotSource,
       platform: "github",
     });
-  const selected = manualSource ? new URL(manualSource) : undefined;
-  const matchesRepositoryRemote = await requireMatchingRepository(
-    repository,
+  const snyk = snykRestImportRepository(
+    current,
     options.provider,
-    [...sources.values()],
-    strictSources,
-    platformFor,
-    workbenchOptions.protectedRoot,
-    workbenchOptions.environment,
-    dependencies.signal,
-    selected?.protocol === "https:" ? selected.hostname : undefined,
-    fetchRemotes,
+    [
+      ...sources.keys(),
+      ...(options.sourceRepositoryUrl === undefined
+        ? []
+        : [options.sourceRepositoryUrl]),
+    ],
+    readerSources,
+    (finding, source) => {
+      finding.evidence.source_data = source;
+    },
   );
+  if (snyk) {
+    // Preserve reader display fields while validating their complete native evidence.
+    for (const { evidence } of current.findings)
+      validateExternalEvidence(structuredClone(evidence), "local");
+  } else if (options.provider === "snyk" && current.sourceRepositoryUrl) {
+    const declared = { url: current.sourceRepositoryUrl };
+    const native = current.findings.flatMap((finding) =>
+      localFindingRepositories("snyk", finding),
+    );
+    for (const source of [declared, ...native])
+      if (!sources.has(source.url)) sources.set(source.url, source);
+    if (!sameRepositories(sources.keys()))
+      throw new CodexSecurityError(
+        "The normalized repository does not match the Snyk reader's repository.",
+      );
+  }
+  const ordinarySources = [...sources.values()];
+  // A reader can identify the VCS for both a hosted project and an ordinary row.
+  const loosePlatformFor = localRepositoryPlatform(
+    options.provider,
+    [...ordinarySources, ...hostedReferences],
+    false,
+  );
+  const selected = manualSource ? new URL(manualSource) : undefined;
+  const matchesRepositoryRemote =
+    options.provider === "trivy"
+      ? await matchTrivyCheckout(
+          repository,
+          current,
+          references,
+          workbenchOptions,
+        )
+      : await requireMatchingRepository(
+          repository,
+          options.provider,
+          ordinarySources,
+          strictSources,
+          hosted,
+          (source, bound) =>
+            bound ? platformFor(source) : loosePlatformFor(source),
+          snyk,
+          workbenchOptions.protectedRoot,
+          workbenchOptions.environment,
+          dependencies.signal,
+          selected?.protocol === "https:" ? selected.hostname : undefined,
+          fetchRemotes,
+          checkmarx.projections.size
+            ? (url) => checkmarxKeys.has(identify(url).key)
+            : undefined,
+        );
+  return preparedLocalStorage(
+    current,
+    options,
+    context,
+    dependencies,
+    matchesRepositoryRemote,
+  );
+}
+
+function preparedLocalStorage(
+  current: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+  {
+    repository,
+    options: workbenchOptions,
+  }: Awaited<ReturnType<typeof localContext>>,
+  dependencies: LocalExternalImportDependencies,
+  matchesRepositoryRemote: boolean,
+): PreparedLocalExternalImport {
   dependencies.signal?.throwIfAborted();
   const preview = {
     ...cloneImportPreview(current),
@@ -929,6 +1372,25 @@ export async function prepareLocalImport(
     preview,
     async import() {
       dependencies.signal?.throwIfAborted();
+      const disposition = externalImportDisposition(current);
+      if (disposition === "failed")
+        throw new NoPublishableFindingsError(cloneImportPreview(current));
+      const summary = {
+        repository,
+        read: current.read,
+        ...(current.report === undefined
+          ? {}
+          : snapshotNormalizedFindings({ report: current.report })),
+        ready: current.findings.length,
+        excluded: structuredClone(current.excluded),
+      };
+      if (disposition !== "ready") {
+        return {
+          ...summary,
+          findings: [],
+          counts: { created: 0, updated: 0, unchanged: 0 },
+        };
+      }
       const protectedRoot = [
         ...new Set([
           ...workbenchOptions.protectedRoot,
@@ -963,13 +1425,7 @@ export async function prepareLocalImport(
         );
       }, dependencies.signal);
       return {
-        repository,
-        read: current.read,
-        ...(current.report === undefined
-          ? {}
-          : snapshotNormalizedFindings({ report: current.report })),
-        ready: current.findings.length,
-        excluded: structuredClone(current.excluded),
+        ...summary,
         findings: result["findings"] as unknown as StoredExternalFinding[],
         counts: result["counts"] as LocalExternalImportResult["counts"],
       };
@@ -983,7 +1439,6 @@ export async function listLocalExternalFindings(
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<StoredExternalFinding[]> {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
   const { repository, options } = await localContext(
     selection.repository,

@@ -1,5 +1,6 @@
+import type { ScanPricingContext } from "./cost-model.js";
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
@@ -60,6 +61,12 @@ export function isExternalModelProvider(
   );
 }
 
+export const MODEL_FILE_SETTINGS = [
+  "model_instructions_file",
+  "model_catalog_json",
+  "experimental_compact_prompt_file",
+] as const;
+
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
   approval_policy: "on-request",
   approvals_reviewer: "auto_review",
@@ -81,6 +88,41 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
     sandbox: "elevated",
   }),
 });
+
+/** @internal Authentication settings shared by login and model commands. */
+export const CODEX_AUTH_CONFIG_KEYS = [
+  "cli_auth_credentials_store",
+  "forced_login_method",
+  "forced_chatgpt_workspace_id",
+] as const;
+
+/**
+ * @internal Read only the native sign-in preferences. Scans with independently
+ * supplied credentials may not have access to the ambient home.
+ */
+export async function readCodexAuthConfig(
+  home: string,
+  required = false,
+): Promise<JsonObject> {
+  let config: JsonObject;
+  try {
+    config = parse(await readFile(join(home, "config.toml"), "utf8"), {
+      integersAsBigInt: "asNeeded",
+    }) as JsonObject;
+  } catch (error) {
+    if (!required || (error as NodeJS.ErrnoException).code === "ENOENT")
+      return {};
+    throw new ConfigurationError(
+      `Could not read Codex sign-in settings from ${join(home, "config.toml")}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return Object.fromEntries(
+    CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
+      config[key] === undefined ? [] : [[key, config[key]]],
+    ),
+  );
+}
 
 export function scanModelConfiguration(
   config: Readonly<JsonObject>,
@@ -114,6 +156,97 @@ export function scanModel(config: Readonly<JsonObject>): unknown {
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
+}
+
+function bedrockPricingRegion(
+  provider: JsonValue | undefined,
+  environment: Readonly<Record<string, string | undefined>>,
+): string | null {
+  const baseUrl = isObject(provider) ? provider["base_url"] : undefined;
+  if (typeof baseUrl === "string") {
+    // Codex sends inference to an explicit endpoint even when aws.region differs.
+    const host = URL.parse(baseUrl)?.hostname ?? "";
+    return (
+      /^bedrock-(?:mantle|runtime)(?:-fips)?\.([a-z0-9-]+)\.(?:api\.aws|amazonaws\.com(?:\.cn)?)$/.exec(
+        host,
+      )?.[1] ?? null
+    );
+  }
+  const aws = isObject(provider) ? provider["aws"] : undefined;
+  const region = isObject(aws) ? aws["region"] : undefined;
+  return (
+    (typeof region === "string" && region.trim()) ||
+    environment["AWS_REGION"]?.trim() ||
+    environment["AWS_DEFAULT_REGION"]?.trim() ||
+    null
+  );
+}
+
+/** @internal Keep billing selection separate from model names shared by providers. */
+export function scanPricingContext(
+  config: Readonly<JsonObject>,
+  environment: Readonly<Record<string, string | undefined>>,
+): ScanPricingContext | undefined {
+  const selected = scanModelProvider(config) ?? "openai";
+  if (typeof selected !== "string") return undefined;
+  const resolved = selectedScanProfile(config)
+    ? resolveCodexProfile(config)
+    : config;
+  const providers = resolved["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  if (selected === "amazon-bedrock" || selected === "amazon-bedrock-runtime") {
+    return {
+      provider: "amazon-bedrock",
+      region: bedrockPricingRegion(provider, environment),
+    };
+  }
+  // Native Codex only accepts inference routing for the built-in OpenAI
+  // provider through the top-level openai_base_url setting.
+  const baseUrl =
+    selected === "openai"
+      ? resolved["openai_base_url"]
+      : isObject(provider)
+        ? provider["base_url"]
+        : undefined;
+  if (baseUrl == null)
+    return selected === "gcp" ? { provider: "gcp" } : undefined;
+
+  const url = typeof baseUrl === "string" ? URL.parse(baseUrl) : null;
+  const host = url?.hostname.replace(/\.$/, "") ?? "";
+  if (host.endsWith(".prediction.vertexai.goog")) {
+    return { provider: "gcp", managedEndpoint: false };
+  }
+  const vertexHost =
+    url &&
+    /^(?:[a-z0-9-]+-)?aiplatform(?:\.mtls)?\.googleapis\.com$/.test(host);
+  if (selected !== "gcp" && !vertexHost) return undefined;
+  // A dedicated endpoint bills the serving infrastructure. Only publisher and
+  // shared OpenAPI endpoints identify the managed token-based service.
+  const managedEndpoint =
+    !!vertexHost &&
+    /^\/v1(?:beta1)?\/projects\/[^/]+\/locations\/[^/]+\/(?:publishers\/openai\/v1|endpoints\/openapi)\/?$/.test(
+      url.pathname,
+    );
+  return { provider: "gcp", managedEndpoint };
+}
+
+/** @internal Use the selected native provider's configured credential key. */
+export function scanProviderEnvKey(
+  config: Readonly<JsonObject>,
+): string | undefined {
+  const selected = scanModelProvider(config);
+  if (
+    typeof selected !== "string" ||
+    ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
+  )
+    return undefined;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  return isObject(provider) && typeof provider["env_key"] === "string"
+    ? provider["env_key"]
+    : isExternalModelProvider(selected)
+      ? EXTERNAL_CODEX_PROVIDERS[selected].env_key
+      : undefined;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
@@ -178,6 +311,8 @@ export function inlineToml(value: JsonValue): string {
     throw new ConfigurationError(
       "Codex TOML overrides cannot contain null values.",
     );
+  // Match the Codex SDK's numeric spelling, including integers above 2**53 - 1.
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)
@@ -225,22 +360,120 @@ export function scanCyberAccessConfig(
   program: CyberAccessProgram | undefined,
 ): JsonObject {
   if (program === undefined) return config;
-  const resolved = resolveCodexProfile(config);
-  const features = isObject(resolved["features"]) ? resolved["features"] : {};
+  const features = isObject(config["features"]) ? config["features"] : {};
   return {
     ...config,
     features: {
-      ...(isObject(config["features"]) ? config["features"] : {}),
-      // Explicit selections opt in to upstream API-key support. Keep a user's
-      // explicit disable so Codex can report it instead of silently dropping it.
+      ...features,
+      // Set a root default. Normal profile resolution preserves explicit overrides.
       api_key_cyber_access_programs:
         features["api_key_cyber_access_programs"] ?? true,
     },
   };
 }
 
+/** @internal Read file-profile settings before wrapper defaults or CLI model validation. */
+export async function readCodexFileProfile(
+  overrides: JsonObject,
+  profileHome?: string,
+): Promise<JsonObject> {
+  let nativeProfile: JsonObject = {};
+  const profileName = overrides["profile"];
+  if (profileName != null && typeof profileName !== "string") {
+    throw new ConfigurationError("Codex profile must be a name.");
+  }
+  if (
+    profileHome !== undefined &&
+    typeof profileName === "string" &&
+    selectedScanProfile(overrides) === undefined
+  ) {
+    if (!/^[A-Za-z0-9_-]+$/u.test(profileName)) {
+      throw new ConfigurationError("Codex profile must be a plain name.");
+    }
+    try {
+      nativeProfile = parse(
+        await readFile(join(profileHome, `${profileName}.config.toml`), "utf8"),
+      ) as JsonObject;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new ConfigurationError(
+          `Could not read Codex profile ${profileName}.`,
+          {
+            cause: error,
+          },
+        );
+      }
+    }
+    if ("profile" in nativeProfile || "profiles" in nativeProfile) {
+      throw new ConfigurationError(
+        `Codex profile ${profileName} contains legacy profile settings.`,
+      );
+    }
+    validateOverrideKeys(nativeProfile);
+    validateOverrides(nativeProfile);
+    // CLI overrides otherwise resolve this file against the scan directory.
+    for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home", "log_dir"]) {
+      resolveConfigPath(nativeProfile, key, profileHome);
+    }
+    resolveNestedConfigPaths(nativeProfile, profileHome);
+    normalizeLegacyWindowsSandboxOverride(nativeProfile);
+  }
+  return nativeProfile;
+}
+
+function resolveConfigPath(
+  config: JsonObject,
+  key: string,
+  directory: string,
+): void {
+  const path = config[key];
+  if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+    config[key] = resolve(directory, path);
+  }
+}
+
+/** @internal Keep agent, skill, and TLS file paths anchored to their config directory. */
+export function resolveNestedConfigPaths(
+  config: JsonObject,
+  directory: string,
+): void {
+  const agents = config["agents"];
+  if (isObject(agents)) {
+    for (const agent of Object.values(agents)) {
+      if (isObject(agent)) resolveConfigPath(agent, "config_file", directory);
+    }
+  }
+  const skills = config["skills"];
+  if (isObject(skills) && Array.isArray(skills["config"])) {
+    for (const skill of skills["config"]) {
+      if (!isObject(skill)) continue;
+      resolveConfigPath(skill, "path", directory);
+    }
+  }
+
+  const otel = config["otel"];
+  if (!isObject(otel)) return;
+  for (const key of ["exporter", "trace_exporter", "metrics_exporter"]) {
+    const exporter = otel[key];
+    if (!isObject(exporter)) continue;
+    for (const configuration of Object.values(exporter)) {
+      if (!isObject(configuration) || !isObject(configuration["tls"])) continue;
+      const tls = configuration["tls"];
+      for (const field of [
+        "ca-certificate",
+        "client-certificate",
+        "client-private-key",
+      ]) {
+        resolveConfigPath(tls, field, directory);
+      }
+    }
+  }
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
+  profileHome?: string,
+  purpose: "scan" | "login" = "scan",
 ): Promise<JsonObject> {
   if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
     throw new ConfigurationError("codexOverrides must be an object.");
@@ -248,65 +481,31 @@ export async function mergedCodexConfig(
   validateOverrideKeys(config.codexOverrides ?? {});
   const overrides = structuredClone(config.codexOverrides ?? {});
   validateOverrides(overrides);
-  const agents = overrides["agents"];
-  if (isObject(agents) && "max_threads" in agents) {
-    throw new ConfigurationError(
-      "The selected Codex Security plugin requires native multi-agent v2; " +
-        "agents.max_threads is a legacy v1 setting. Use " +
-        "features.multi_agent_v2.max_concurrent_threads_per_session instead.",
-    );
-  }
-  const features = overrides["features"];
-  if (isObject(features) && "multi_agent_v2" in features) {
-    const multiAgentV2 = features["multi_agent_v2"];
-    if (!isObject(multiAgentV2)) {
-      throw new ConfigurationError(
-        "The selected Codex Security plugin requires native multi-agent v2; " +
-          "features.multi_agent_v2 must remain a table with enabled = true.",
-      );
-    }
-    if ("enabled" in multiAgentV2 && multiAgentV2["enabled"] !== true) {
-      throw new ConfigurationError(
-        "The selected Codex Security plugin requires native multi-agent v2; " +
-          "features.multi_agent_v2.enabled cannot be disabled.",
-      );
-    }
-  }
-
-  const profiles = Object.entries(
-    (overrides["profiles"] ?? {}) as Record<string, JsonObject>,
-  );
-  for (const [name, profile] of profiles) {
-    const profileAgents = profile["agents"];
-    if (isObject(profileAgents) && "max_threads" in profileAgents) {
-      throw new ConfigurationError(
-        `The selected Codex Security plugin requires native multi-agent v2; profile ${name} agents.max_threads is a legacy v1 setting.`,
-      );
-    }
-    const profileFeatures = profile["features"];
-    if (!isObject(profileFeatures) || !("multi_agent_v2" in profileFeatures)) {
-      continue;
-    }
-    const profileV2 = profileFeatures["multi_agent_v2"];
-    if (
-      !isObject(profileV2) ||
-      ("enabled" in profileV2 && profileV2["enabled"] !== true)
-    ) {
-      throw new ConfigurationError(
-        `The selected Codex Security plugin requires native multi-agent v2; profile ${name} features.multi_agent_v2 cannot be disabled.`,
-      );
-    }
-  }
   normalizeLegacyWindowsSandboxOverride(overrides);
-  for (const [, profile] of profiles) {
-    normalizeLegacyWindowsSandboxOverride(profile);
+  const nativeProfile = await readCodexFileProfile(overrides, profileHome);
+  const profiles = overrides["profiles"];
+  if (isObject(profiles)) {
+    for (const profile of Object.values(profiles)) {
+      if (isObject(profile)) {
+        normalizeLegacyWindowsSandboxOverride(profile);
+      }
+    }
   }
   const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
-  if (scanModelProvider(overrides) === "amazon-bedrock") {
+  // Native login keeps the credential home's existing store unless one was requested.
+  if (purpose === "login") delete defaults["cli_auth_credentials_store"];
+  if (profileHome !== undefined)
+    Object.assign(
+      defaults,
+      await readCodexAuthConfig(profileHome, purpose === "login"),
+    );
+  const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  validateNativeMultiAgentV2Overrides(effectiveOverrides);
+  if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
   }
-  return deepMerge(defaults, overrides);
+  return deepMerge(defaults, effectiveOverrides);
 }
 
 /** @internal Preserve existing native Windows backend selections. */
@@ -338,8 +537,6 @@ export async function writeCodexConfig(
   path: string,
   config: JsonObject,
 ): Promise<void> {
-  const parent = dirname(path);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
   let contents: string;
   try {
     contents = stringify(config);
@@ -348,6 +545,16 @@ export async function writeCodexConfig(
       cause: error,
     });
   }
+  await writePrivateConfig(path, contents);
+}
+
+/** @internal Write private configuration without changing its serialized contents. */
+export async function writePrivateConfig(
+  path: string,
+  contents: string,
+): Promise<void> {
+  const parent = dirname(path);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
   const temporary = join(parent, `.${randomUUID()}.config.toml.tmp`);
   let created = false;
   try {
@@ -383,27 +590,13 @@ function validateOverrideKeys(value: JsonValue): void {
   }
 }
 
-function validateOverrides(overrides: JsonObject): void {
-  if ("plugins" in overrides || "marketplaces" in overrides) {
-    throw new ConfigurationError(
-      "Codex Security owns plugin loading configuration.",
-    );
-  }
-  const features = overrides["features"];
-  if ("features" in overrides && !isObject(features)) {
-    throw new ConfigurationError(
-      "Codex override features must be a TOML table.",
-    );
-  }
-  if (isObject(features) && "plugins" in features) {
-    throw new ConfigurationError(
-      "Codex Security owns plugin loading configuration.",
-    );
-  }
+// Validate the root before visiting profiles in configuration order.
+function* overrideTables(
+  overrides: JsonObject,
+): Generator<[JsonObject, string?]> {
+  yield [overrides];
   const profiles = overrides["profiles"];
-  if (profiles === undefined) {
-    return;
-  }
+  if (profiles === undefined) return;
   if (!isObject(profiles)) {
     throw new ConfigurationError(
       "Codex override profiles must be TOML tables.",
@@ -415,22 +608,62 @@ function validateOverrides(overrides: JsonObject): void {
         `Codex override profile ${name} must be a TOML table.`,
       );
     }
-    if ("plugins" in profile || "marketplaces" in profile) {
+    yield [profile, name];
+  }
+}
+
+function validateOverrides(overrides: JsonObject): void {
+  for (const [table, name] of overrideTables(overrides)) {
+    const features = table["features"];
+    if (
+      "plugins" in table ||
+      "marketplaces" in table ||
+      (isObject(features) && "plugins" in features)
+    ) {
+      const location = name === undefined ? "" : ` in profile ${name}`;
       throw new ConfigurationError(
-        `Codex Security owns plugin loading configuration in profile ${name}.`,
+        `Codex Security owns plugin loading configuration${location}.`,
       );
     }
-    const profileFeatures = profile["features"];
-    if (profileFeatures !== undefined && !isObject(profileFeatures)) {
+    if (
+      !isObject(features) &&
+      (features !== undefined || (name === undefined && "features" in table))
+    ) {
+      const location = name === undefined ? "" : ` profile ${name}`;
       throw new ConfigurationError(
-        `Codex override profile ${name} features must be a TOML table.`,
+        `Codex override${location} features must be a TOML table.`,
       );
     }
-    if (isObject(profileFeatures) && "plugins" in profileFeatures) {
-      throw new ConfigurationError(
-        `Codex Security owns plugin loading configuration in profile ${name}.`,
-      );
+  }
+}
+
+function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
+  const required =
+    "The selected Codex Security plugin requires native multi-agent v2; ";
+  for (const [table, name] of overrideTables(overrides)) {
+    const agents = table["agents"];
+    if (isObject(agents) && "max_threads" in agents) {
+      const message =
+        name === undefined
+          ? "agents.max_threads is a legacy v1 setting. Use features.multi_agent_v2.max_concurrent_threads_per_session instead."
+          : `profile ${name} agents.max_threads is a legacy v1 setting.`;
+      throw new ConfigurationError(required + message);
     }
+    const features = table["features"];
+    if (!isObject(features) || !("multi_agent_v2" in features)) continue;
+    const setting = features["multi_agent_v2"];
+    if (
+      isObject(setting) &&
+      (!("enabled" in setting) || setting["enabled"] === true)
+    )
+      continue;
+    const message =
+      name !== undefined
+        ? `profile ${name} features.multi_agent_v2 cannot be disabled.`
+        : isObject(setting)
+          ? "features.multi_agent_v2.enabled cannot be disabled."
+          : "features.multi_agent_v2 must remain a table with enabled = true.";
+    throw new ConfigurationError(required + message);
   }
 }
 

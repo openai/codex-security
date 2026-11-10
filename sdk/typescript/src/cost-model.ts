@@ -1,5 +1,11 @@
+import { vertexModelPricing } from "./vertex-pricing.js";
+import { bedrockModelPricing } from "./bedrock-pricing.js";
 import { isRecord } from "./record.js";
 import { isSafeNonNegativeInteger } from "./value.js";
+
+export type ScanPricingContext =
+  | { provider: "amazon-bedrock"; region: string | null }
+  | { provider: "gcp"; managedEndpoint?: boolean };
 
 export interface ScanCost {
   model: string;
@@ -47,76 +53,67 @@ export interface ScanTokenUsage {
   total_tokens: number;
 }
 
-const BEDROCK_MODEL_PRICING: Readonly<
-  Record<
-    string,
-    {
-      short: ModelPricing;
-      long?: ModelPricing;
-      unitsPerUsd: number;
-      source: string;
-      asOf: string;
-    }
-  >
-> = {
-  // AWS commercial in-region Standard prices already include the 10% fee.
-  "openai.gpt-daybreak-blue-5.6-sol": {
-    short: [4_400, 440, 5_500, 22_000],
-    long: [8_800, 880, 11_000, 33_000],
-    unitsPerUsd: 1_000_000_000,
-    source:
-      "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
-    asOf: "2026-10-01",
-  },
-  "openai.gpt-5.6-cyber": {
-    // Half-nanodollar units preserve the $17.1875/M cache-write rate exactly,
-    // including an odd number of cache-write tokens.
-    short: [27_500, 2_750, 34_375, 165_000],
-    unitsPerUsd: 2_000_000_000,
-    source:
-      "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html",
-    asOf: "2026-10-01",
-  },
-};
+// Direct Standard rates in nanodollars per token. Omit the long-context
+// rate when there is no verified upper estimate for a model.
+function directRate(
+  asOf: string,
+  short: ModelPricing,
+  long?: ModelPricing,
+  source = "https://developers.openai.com/api/docs/pricing",
+) {
+  return { short, long, unitsPerUsd: 1_000_000_000, source, asOf };
+}
 
-const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
-  // GPT-5.5 has no additional cache-write charge.
-  "gpt-5.5": [5_000, 500, 5_000, 30_000],
-  "gpt-5.5-2026-04-23": [5_000, 500, 5_000, 30_000],
-  "gpt-6-sol": [2_000, 200, 2_500, 10_000],
-  "gpt-6.1-sol": [2_000, 100, 2_500, 10_000],
-  "gpt-6-astra": [10_000, 1_000, 12_500, 50_000],
-  "gpt-6-luna": [100, 10, 125, 500],
-  "gpt-5.6": [4_000, 400, 5_000, 20_000],
-  "gpt-5.6-sol": [4_000, 400, 5_000, 20_000],
-  "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
-  "gpt-5.6-luna": [200, 20, 250, 1_200],
-  // https://developers.openai.com/api/docs/pricing#cyber-models
-  "gpt-5.6-cyber": [12_500, 1_250, 15_625, 75_000],
-  "gpt-daybreak-blue-latest": [4_000, 400, 5_000, 20_000],
-  "gpt-daybreak-red-latest": [12_500, 1_250, 15_625, 75_000],
+const gpt55 = directRate(
+  "2026-09-14",
+  [5_000, 500, 5_000, 30_000],
+  [10_000, 1_000, 10_000, 45_000],
+  "https://developers.openai.com/api/docs/models/gpt-5.5",
+);
+const gpt56Sol = directRate(
+  "2026-09-14",
+  [4_000, 400, 5_000, 20_000],
+  [8_000, 800, 10_000, 30_000],
+);
+const directPricing: Readonly<Record<string, ReturnType<typeof directRate>>> = {
+  "gpt-5.5": gpt55,
+  "gpt-5.5-2026-04-23": gpt55,
+  "gpt-6-sol": directRate(
+    "2026-10-10",
+    [2_000, 200, 2_500, 10_000],
+    [4_000, 400, 5_000, 15_000],
+    "https://developers.openai.com/api/docs/models/gpt-6-sol",
+  ),
+  "gpt-6.1-sol": directRate(
+    "2026-09-30",
+    [2_000, 100, 2_500, 10_000],
+    [4_000, 200, 5_000, 15_000],
+  ),
+  "gpt-6-astra": directRate(
+    "2026-09-14",
+    [10_000, 1_000, 12_500, 50_000],
+    [20_000, 2_000, 25_000, 75_000],
+  ),
+  "gpt-6-luna": directRate(
+    "2026-09-30",
+    [100, 10, 125, 500],
+    [200, 20, 250, 750],
+  ),
+  "gpt-5.6": gpt56Sol,
+  "gpt-5.6-sol": gpt56Sol,
+  "gpt-5.6-terra": directRate(
+    "2026-09-14",
+    [2_000, 200, 2_500, 12_000],
+    [4_000, 400, 5_000, 18_000],
+  ),
+  "gpt-5.6-luna": directRate(
+    "2026-09-14",
+    [200, 20, 250, 1_200],
+    [400, 40, 500, 1_800],
+  ),
+  "gpt-5.6-cyber": directRate("2026-10-06", [12_500, 1_250, 15_625, 75_000]),
+  "gpt-6-cyber": directRate("2026-11-05", [20_000, 2_000, 25_000, 100_000]),
 };
-
-// Verified Standard rates: https://developers.openai.com/api/docs/pricing
-// GPT-5.5: https://developers.openai.com/api/docs/models/gpt-5.5
-// GPT-6 Sol: https://developers.openai.com/api/docs/models/gpt-6-sol
-// Do not infer tiers from aggregate scan tokens: the runtime does not report
-// which usage received long-context pricing. Cyber/Daybreak Red has no verified
-// long-context rate in the pricing table, so its upper estimate stays unavailable.
-const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
-  {
-    "gpt-5.5": [10_000, 1_000, 10_000, 45_000],
-    "gpt-5.5-2026-04-23": [10_000, 1_000, 10_000, 45_000],
-    "gpt-6-sol": [4_000, 400, 5_000, 15_000],
-    "gpt-6.1-sol": [4_000, 200, 5_000, 15_000],
-    "gpt-6-astra": [20_000, 2_000, 25_000, 75_000],
-    "gpt-6-luna": [200, 20, 250, 750],
-    "gpt-5.6": [8_000, 800, 10_000, 30_000],
-    "gpt-5.6-sol": [8_000, 800, 10_000, 30_000],
-    "gpt-5.6-terra": [4_000, 400, 5_000, 18_000],
-    "gpt-5.6-luna": [400, 40, 500, 1_800],
-    "gpt-daybreak-blue-latest": [8_000, 800, 10_000, 30_000],
-  };
 
 function usdPerMillionTokens(pricing: ModelPricing, unitsPerUsd: number) {
   const [input, cacheRead, cacheWrite, output] = pricing;
@@ -171,26 +168,39 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   };
 }
 
+function providerModelPricing(
+  model: string,
+  context?: ScanPricingContext | string | null,
+) {
+  if (context === undefined && Object.hasOwn(directPricing, model))
+    return directPricing[model];
+  if (context == null || typeof context === "string") {
+    return bedrockModelPricing(model, context);
+  }
+  if (context.provider === "amazon-bedrock") {
+    return bedrockModelPricing(model, context.region);
+  }
+  if (context.provider === "gcp" && context.managedEndpoint !== false) {
+    return vertexModelPricing(model);
+  }
+  return undefined;
+}
+
+/**
+ * Estimates Standard token costs using the selected provider's published rates.
+ * A string (or null for an unknown region) selects Bedrock for compatibility.
+ * Model-only Bedrock frontier estimates use the commercial in-region price.
+ */
 export function estimateScanCost(
   model: string | undefined,
   usage: unknown,
+  context?: ScanPricingContext | string | null,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const bedrockPricing = Object.hasOwn(BEDROCK_MODEL_PRICING, model)
-    ? BEDROCK_MODEL_PRICING[model]
-    : undefined;
-  const unitsPerUsd = bedrockPricing?.unitsPerUsd ?? 1_000_000_000;
-  const pricingModel = model.startsWith("openai.")
-    ? model.slice("openai.".length)
-    : model;
-  const pricing =
-    bedrockPricing?.short ??
-    (Object.hasOwn(MODEL_PRICING_NANODOLLARS, pricingModel)
-      ? MODEL_PRICING_NANODOLLARS[pricingModel]
-      : undefined);
+  const rate = providerModelPricing(model, context);
   const normalized = tokenUsage(usage);
-  if (pricing === undefined || normalized === null) return null;
-  const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;
+  if (rate === undefined || normalized === null) return null;
+  const { short, long, unitsPerUsd, source, asOf } = rate;
   const {
     input_tokens: inputTokens,
     cached_input_tokens: cachedInputTokens,
@@ -198,73 +208,49 @@ export function estimateScanCost(
     output_tokens: outputTokens,
   } = normalized;
 
-  const costUnits =
-    (inputTokens - cachedInputTokens - cacheWriteInputTokens) * inputRate +
-    cachedInputTokens * cachedInputRate +
-    cacheWriteInputTokens * cacheWriteInputRate +
-    outputTokens * outputRate;
-  if (!Number.isSafeInteger(costUnits)) return null;
+  const uncachedTokens =
+    inputTokens - cachedInputTokens - cacheWriteInputTokens;
 
-  const longPricing = bedrockPricing
-    ? bedrockPricing.long
-    : LONG_CONTEXT_PRICING_NANODOLLARS[pricingModel];
-  let maximumUnits: number | null = null;
-  if (longPricing !== undefined) {
-    const [longInput, longRead, longWrite, longOutput] = longPricing;
-    // Unclassified input may include additional cache writes. Preserve the
-    // reported subtotal, but include that uncertainty in the upper estimate.
-    const uncachedRate =
-      normalized.cache_write_input_tokens_reported === false
-        ? Math.max(longInput, longWrite)
-        : longInput;
-    const maximum =
-      (inputTokens - cachedInputTokens - cacheWriteInputTokens) * uncachedRate +
-      cachedInputTokens * longRead +
-      cacheWriteInputTokens * longWrite +
-      outputTokens * longOutput;
-    if (Number.isSafeInteger(maximum)) maximumUnits = maximum;
+  function priceInUsd(
+    [input, read, write, output]: ModelPricing,
+    unknownWrites: boolean,
+  ) {
+    // Unclassified input may include writes. Account for them only in the upper bound.
+    const units =
+      uncachedTokens * (unknownWrites ? Math.max(input, write) : input) +
+      cachedInputTokens * read +
+      cacheWriteInputTokens * write +
+      outputTokens * output;
+    return Number.isSafeInteger(units) ? units / unitsPerUsd : null;
   }
+  const estimatedUsd = priceInUsd(short, false);
+  if (estimatedUsd === null) return null;
+  const unknownWrites = normalized.cache_write_input_tokens_reported === false;
 
   return {
     model,
     inputTokens,
     cachedInputTokens,
     cacheWriteInputTokens,
-    ...(normalized.cache_write_input_tokens_reported === false
-      ? { cacheWriteInputTokensReported: false }
-      : {}),
+    ...(unknownWrites ? { cacheWriteInputTokensReported: false } : {}),
     outputTokens,
-    estimatedUsd: costUnits / unitsPerUsd,
+    estimatedUsd,
     estimatedUsdRange: {
-      min: costUnits / unitsPerUsd,
-      max: maximumUnits === null ? null : maximumUnits / unitsPerUsd,
+      min: estimatedUsd,
+      max: long === undefined ? null : priceInUsd(long, unknownWrites),
       context: "unknown",
     },
     pricing: {
-      source: bedrockPricing
-        ? bedrockPricing.source
-        : pricingModel.startsWith("gpt-5.5")
-          ? "https://developers.openai.com/api/docs/models/gpt-5.5"
-          : pricingModel === "gpt-6-sol"
-            ? "https://developers.openai.com/api/docs/models/gpt-6-sol"
-            : "https://developers.openai.com/api/docs/pricing",
-      asOf: bedrockPricing
-        ? bedrockPricing.asOf
-        : pricingModel === "gpt-6-sol"
-          ? "2026-10-10"
-          : pricingModel === "gpt-5.6-cyber"
-            ? "2026-10-06"
-            : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
-              ? "2026-09-30"
-              : "2026-09-14",
+      source,
+      asOf,
       serviceTier: "standard",
       context: "short",
-      usdPerMillionTokens: usdPerMillionTokens(pricing, unitsPerUsd),
-      ...(longPricing === undefined
+      usdPerMillionTokens: usdPerMillionTokens(short, unitsPerUsd),
+      ...(long === undefined
         ? {}
         : {
             longContextUsdPerMillionTokens: usdPerMillionTokens(
-              longPricing,
+              long,
               unitsPerUsd,
             ),
           }),

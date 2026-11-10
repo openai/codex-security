@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "./helper-files";
 import { encodePosixPath } from "./posix-path";
-import { formatDiagnostic, object, parseJson } from "./json";
+import { compareCodePoints, formatDiagnostic, object, parseJson } from "./json";
 import { expandHome } from "./resolve-security-md";
 
 export interface RankRow {
@@ -17,15 +17,6 @@ export interface RankRow {
   preview?: string;
 }
 const blank = (value: string) => value.trim().length === 0;
-export function compare(left: string, right: string): number {
-  const a = Array.from(left, (character) => character.codePointAt(0)!);
-  const b = Array.from(right, (character) => character.codePointAt(0)!);
-  for (let index = 0; index < Math.min(a.length, b.length); index++) {
-    if (a[index] !== b[index]) return a[index]! - b[index]!;
-  }
-  return a.length - b.length;
-}
-
 function missingNames(
   expected: Iterable<string>,
   actual: Iterable<string>,
@@ -33,7 +24,7 @@ function missingNames(
   const present = new Set(actual);
   return Array.from(expected)
     .filter((name) => !present.has(name))
-    .sort(compare);
+    .sort(compareCodePoints);
 }
 
 export function loadRankRows(path: string): RankRow[] {
@@ -83,7 +74,7 @@ export function requireUniquePaths(rows: RankRow[], label: string): void {
   }
   if (duplicates.size)
     throw new Error(
-      `${label} contains duplicate paths: ${formatDiagnostic([...duplicates].sort(compare))}`,
+      `${label} contains duplicate paths: ${formatDiagnostic([...duplicates].sort(compareCodePoints))}`,
     );
 }
 

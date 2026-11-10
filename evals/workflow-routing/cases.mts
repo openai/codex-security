@@ -39,6 +39,12 @@ export const cases = [
     skill: "verify-fix",
   },
   {
+    id: "skill-before-install",
+    request:
+      "I downloaded an agent skill. Review the files in ./downloaded-skill for security risks before I install it.",
+    skill: "check-skills",
+  },
+  {
     id: "ordinary-bug-fix",
     request:
       "Fix the invoice table's incorrect alphabetical sort order and run its tests.",

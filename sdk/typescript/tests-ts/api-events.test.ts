@@ -266,6 +266,7 @@ describe("one-shot scan events", () => {
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
       "CHEAPER_INFERENCE_API_KEY",
+      "CUSTOM_GATEWAY_TOKEN",
     ] as const) {
       for (const status of ["not_granted", "unknown"] as const) {
         const { warnings } = await runTacEvents(
@@ -718,6 +719,9 @@ describe("one-shot scan events", () => {
         "Reconnecting... 3/5 (Rate limit reached. Please try again in 999999s.)",
         "Reconnecting... 4/5",
         "Reconnecting... 5/5 (429 rate limit reached org-private)",
+        "Reconnecting... 6/8 (Rate limit reached for org-private. Please try again in 28ms.)",
+        "Reconnecting... 7/8 (Rate limit reached. Please try again in 3600000ms.)",
+        "Reconnecting... 8/8 (Rate limit reached. Please try again in 3600001ms.)",
       ])
         yield { type: "error", message };
       yield* completedEvents();
@@ -729,6 +733,9 @@ describe("one-shot scan events", () => {
       [3, 5, { reason: "rate_limit" }],
       [4, 5, undefined],
       [5, 5, { reason: "rate_limit" }],
+      [6, 8, { reason: "rate_limit", retryAfterSeconds: 0.028 }],
+      [7, 8, { reason: "rate_limit", retryAfterSeconds: 3600 }],
+      [8, 8, { reason: "rate_limit" }],
     ]);
   });
 
@@ -944,6 +951,16 @@ describe("one-shot scan events", () => {
       { phase: "validation", filesCompleted: 8, filesTotal: 8 },
     ]);
   });
+});
+
+test("preserves the reason a required scan artifact cannot be read", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const artifact = join(scanDir, "findings.json");
+  await rm(artifact);
+  await mkdir(artifact);
+  await expect(runEvents(scanDir, completedEvents())).rejects.toThrow(
+    /findings\.json:.*Expected a regular non-(?:symlink|reparse) scan file/u,
+  );
 });
 
 test.each(["scan-manifest.json", "findings.json", "report.md"])(

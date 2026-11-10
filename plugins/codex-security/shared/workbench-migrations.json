@@ -476,5 +476,65 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN terminal_reviewed_surface_count INTEGER CHECK (terminal_reviewed_surface_count >= 0);"
     ]
+  },
+  {
+    "version": 59,
+    "name": "retain the launching Deep Scan service tier",
+    "statements": ["ALTER TABLE deep_scan_runs ADD COLUMN service_tier TEXT;"]
+  },
+  {
+    "version": 60,
+    "name": "record classification rubric provenance",
+    "statements": [
+      "ALTER TABLE scan_severity_classifications ADD COLUMN rubric_binding_json TEXT;"
+    ]
+  },
+  {
+    "version": 61,
+    "name": "record scan launch attribution",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN launch_surface TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_package_version TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_plugin_version TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_kind TEXT CHECK (launch_kind IN ('scan', 'mock', 'import'));"
+    ]
+  },
+  {
+    "version": 62,
+    "name": "project scan lifecycle snapshots",
+    "statements": [
+      "CREATE TRIGGER classify_legacy_scan_recipe\nAFTER UPDATE OF recipe_json ON scans\nWHEN OLD.recipe_json IS NULL AND (NEW.launch_kind IS NULL OR NEW.launch_plugin_version IS NULL)\n     AND json_valid(NEW.recipe_json)\nBEGIN\n    UPDATE scans SET\n        launch_kind = COALESCE(launch_kind, CASE\n            WHEN json_type(recipe_json, '$.import') = 'object' THEN 'import'\n            WHEN json_type(recipe_json, '$.mock') = 'true' THEN 'mock' END),\n        launch_plugin_version = COALESCE(launch_plugin_version, CASE\n            WHEN json_type(recipe_json, '$.pluginVersion') = 'text'\n                AND trim(json_extract(recipe_json, '$.pluginVersion'), char(9, 10, 11, 12, 13, 32)) <> ''\n            THEN json_extract(recipe_json, '$.pluginVersion') END)\n    WHERE id = NEW.id;\nEND;",
+      "UPDATE scans\nSET launch_kind = CASE WHEN json_type(recipe_json, '$.import') = 'object' THEN 'import' ELSE 'mock' END\nWHERE launch_kind IS NULL AND CASE WHEN json_valid(recipe_json) THEN\n    json_type(recipe_json, '$.import') = 'object' OR json_type(recipe_json, '$.mock') = 'true'\nEND;",
+      "UPDATE scans SET launch_plugin_version = json_extract(recipe_json, '$.pluginVersion')\nWHERE launch_plugin_version IS NULL AND CASE WHEN json_valid(recipe_json) THEN\n    json_type(recipe_json, '$.pluginVersion') = 'text'\n        AND trim(json_extract(recipe_json, '$.pluginVersion'), char(9, 10, 11, 12, 13, 32)) <> ''\nEND;",
+      "CREATE VIEW scan_lifecycles AS\nSELECT scans.id AS scan_id, json_object(\n    'scanId', scans.id,\n    'mode', CASE WHEN launch_kind = 'import' THEN 'import' ELSE scans.mode END,\n    'startedAt', scans.started_at,\n    'status', CASE WHEN canceled_at IS NOT NULL THEN 'canceled'\n                   WHEN scans.status = 'complete' THEN 'completed' ELSE scans.status END,\n    'finishedAt', COALESCE(canceled_at, completed_at),\n    'hasReportableFindings', json(CASE\n        WHEN scans.status = 'complete' AND canceled_at IS NULL\n        THEN (SELECT CASE WHEN reportable_findings_count > 0 THEN 'true' ELSE 'false' END\n              FROM scan_progress WHERE scan_id = scans.id) END),\n    'surface', launch_surface,\n    'packageVersion', launch_package_version,\n    'pluginVersion', launch_plugin_version,\n    'mock', json(CASE WHEN launch_kind = 'mock' THEN 'true'\n                      WHEN launch_kind IS NOT NULL THEN 'false' END)\n) AS snapshot\nFROM scans;"
+    ]
+  },
+  {
+    "version": 63,
+    "name": "retain unverified Deep Scan worker attempts",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN worker_usage_gap INTEGER NOT NULL DEFAULT 0 CHECK (worker_usage_gap IN (0, 1));",
+      "UPDATE deep_scan_runs SET worker_usage_gap = 1\nWHERE scan_id IN (\n    SELECT w.scan_id FROM deep_scan_workers AS w\n    WHERE w.kind IN ('discovery', 'dedup') AND w.attempt > 1\n      AND w.started_at IS NOT NULL AND w.sdk_thread_id IS NULL\n      AND NOT EXISTS (SELECT 1 FROM deep_scan_worker_threads AS t\n                      WHERE t.scan_id = w.scan_id AND t.worker_id = w.id)\n);",
+      "CREATE TRIGGER retain_unverified_deep_scan_worker_attempt\nAFTER UPDATE OF attempt ON deep_scan_workers\nWHEN NEW.attempt > OLD.attempt AND OLD.started_at IS NOT NULL\n     AND OLD.sdk_thread_id IS NULL AND OLD.kind IN ('discovery', 'dedup')\nBEGIN\n    UPDATE deep_scan_runs SET worker_usage_gap = 1 WHERE scan_id = OLD.scan_id;\nEND;"
+    ]
+  },
+  {
+    "version": 64,
+    "name": "persist scan log completion boundaries",
+    "statements": ["ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"]
+  },
+  {
+    "version": 65,
+    "name": "bind Windows Deep Scan resume output directories",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_output_identity TEXT;"
+    ]
+  },
+  {
+    "version": 66,
+    "name": "bind Windows Deep Scan resume checkouts",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_target_identity TEXT;"
+    ]
   }
 ]

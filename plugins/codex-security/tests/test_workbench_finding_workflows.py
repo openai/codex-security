@@ -1,5 +1,8 @@
+"""Exercise competing finding workflow registrations and the scope of their optional evidence snapshots."""
+
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -8,6 +11,7 @@ from functools import partial
 from pathlib import Path
 
 import pytest
+from workbench_test_support import run_workbench
 
 TIMESTAMP = "2026-08-01T00:00:00Z"
 
@@ -21,6 +25,57 @@ def run_workflow(api, connection, action, *, workflow_id="synthetic-workflow", *
 @pytest.fixture
 def workflow(workbench_api, workbench_db):
     return partial(run_workflow, workbench_api, workbench_db)
+
+
+def test_competing_workflow_registrations_preserve_the_first_rubric(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "source.py").write_text("pass\n")
+    state = tmp_path / "state"
+    workflow_id = "concurrent-registrations"
+    recipe = {
+        "repository": str(repository),
+        "mode": "standard",
+        "target": {"kind": "repository", "paths": []},
+        "config": {},
+    }
+    run_workbench(
+        state,
+        "finding-workflow",
+        input_text=json.dumps({"id": workflow_id, "action": "bind", "binding": {}}),
+    )
+
+    def register(name, policy, *, check=True):
+        directory = tmp_path / name
+        directory.mkdir(mode=0o700)
+        return run_workbench(
+            state,
+            "register-cli-scan",
+            "--scan-dir",
+            str(directory),
+            "--repository",
+            str(repository),
+            "--registration-json-stdin",
+            check=check,
+            input_text=json.dumps(
+                {"workflowId": workflow_id, "recipe": {**recipe, "severityRubric": policy}}
+            ),
+        )
+
+    markdown = "First policy"
+    policy = {
+        "markdown": markdown,
+        "revision": 1,
+        "sha256": hashlib.sha256(markdown.encode()).hexdigest(),
+    }
+    first = register("first", policy)
+    stale = register("stale", {**policy, "revision": 2}, check=False)
+    assert stale["returncode"] != 0 and "different severity rubric" in stale["stderr"]
+    current = run_workbench(
+        state, "finding-workflow", input_text=json.dumps({"id": workflow_id, "action": "get"})
+    )
+    assert current["workflow"]["scanId"] == first["scanId"]
+    assert register("retry", policy)["scanId"] != first["scanId"]
 
 
 @pytest.mark.parametrize("optional", [False, True])

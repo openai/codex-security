@@ -1,3 +1,5 @@
+"""Exercise persisted workbench operations, including scan budgets, finding state, and patch identity."""
+
 from __future__ import annotations
 
 import hashlib
@@ -261,6 +263,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
     assert "No findings were reported." in report
+    assert "Validation was deferred because the scan reached its cost limit." in report
 
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
@@ -273,6 +276,11 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
         coverage_mode="deep_repository",
     )
 
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    draft["scan"]["scope"]["limitations"] = ["The deployment configuration was unavailable."]
+    manifest_path.write_text(json.dumps(draft))
+
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
@@ -281,6 +289,12 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["deferred"][0]["id"] == "candidate-1"
+    limitation = "Validation was deferred because the scan reached its cost limit."
+    assert json.loads(manifest_path.read_text())["scan"]["scope"]["limitations"] == [
+        "The deployment configuration was unavailable.",
+        limitation,
+    ]
+    assert limitation in (scan_dir / "report.md").read_text()
 
 
 @pytest.mark.parametrize(
@@ -1066,6 +1080,10 @@ def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_au
     assert generated["findings"][0]["remediationState"]["summary"] == (
         "Contained archive extraction under the selected output directory."
     )
+    selected = get_scan(state_dir, scan_id, "--occurrence-id", f" {occurrence_id}\t")
+    for result in (selected["scan"], selected["workspace"]["results"]):
+        assert result["findingCount"] == 1
+        assert result["findings"] == generated["findings"]
     apply_token = str(uuid.uuid4())
     apply_requested = request.request_action("2", "apply", apply_token)["scan"]
     assert apply_requested["findings"][0]["remediationState"]["pendingAction"] == "apply"
@@ -2436,6 +2454,7 @@ def test_workbench_starts_diff_without_presentation_label(tmp_path: Path) -> Non
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
+    (target / "checkout-only.py").write_text("untracked = True\n")
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
     save_workspace(
@@ -2456,6 +2475,7 @@ def test_workbench_starts_diff_without_presentation_label(tmp_path: Path) -> Non
             "UPDATE workspaces SET target_summary = NULL WHERE id = ?", (workspace_id,)
         )
     started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
+    assert started["results"]["progress"]["coverage"]["filesTotal"] == 1
     assert started["results"]["diffTarget"]["headRevision"] == revision
     assert started["results"]["targetSummary"] == f"Commit {revision[:7]}"
 
@@ -3058,6 +3078,29 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     reopened = get_scan(state_dir, scan_id)
     assert reopened["scan"]["reportAvailable"] is False
     assert "markdownReport" not in reopened["scan"]["artifacts"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="changes permissions on an open patch")
+def test_patch_digest_accepts_file_becoming_read_only(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "reviewed.patch"
+    patch = b"reviewed content\n"
+    path.write_bytes(patch)
+    path.chmod(0o600)
+    db = load_script("workbench_db")
+    with db.open_scan_local_file(tmp_path, path.name) as source:
+        read = source.read
+
+        def read_and_protect(size):
+            chunk = read(size)
+            os.fchmod(source.fileno(), 0o400)
+            return chunk
+
+        monkeypatch.setattr(source, "read", read_and_protect)
+        monkeypatch.setattr(db, "open_scan_local_file", lambda *_: source)
+        db.require_matching_patch_digest(
+            {"scan_dir": str(tmp_path)}, path.name, "sha256:" + hashlib.sha256(patch).hexdigest()
+        )
+    assert path.stat().st_mode & 0o777 == 0o400
 
 
 @pytest.mark.cross_platform

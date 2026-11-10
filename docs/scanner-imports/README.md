@@ -1,86 +1,121 @@
 # Import external scanner findings
 
-Choose the guide for your report. Each guide shows how to preview the findings
-in a local checkout and which source key to reuse on later imports.
+Preview a scanner report with the CLI, then save the findings in the local
+workbench or send a supported report to Codex Security Cloud.
 
-Use a supported report or retrieve the full records for the requested repository
-and ref with a connected tool or signed-in CLI. Fetch selected IDs directly when
-the provider supports it. If a saved report or collector covers more findings,
-use the provider's selection controls or retain only the selected native records
-where the report format permits. Check the accepted findings and their evidence
-in the JSON preview against the requested selection before saving or publishing.
-Use an API response only for an input and destination supported by the provider
-guide. Otherwise, ask for a supported report. A fresh scan produces new results.
+## Choose your scanner
 
-| Guide                                                       | Supported input                                                                 |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| [Amazon Inspector](inspector.md)                            | Inspector2 `ListFindings` JSON for one Code Security repository                 |
-| [Black Duck SCA](blackduck.md)                              | BOM component vulnerabilities for one project version                           |
-| [Endor Labs](endor.md)                                      | Finding JSON from `endorctl`, or SARIF with finding UUIDs                       |
-| [GitHub code scanning](github-code-scanning.md)             | Alerts selected for one repository and Git ref                                  |
-| [GitHub Dependabot](github-dependabot.md)                   | Dependency alerts exported from one repository                                  |
-| [GitHub Security Advisories](github-security-advisories.md) | Selected repository or global advisories                                        |
-| [OpenGrep](opengrep.md)                                     | Native scan JSON, optionally gzip-compressed                                    |
-| [Semgrep Code](semgrep.md)                                  | CLI/CI JSON, self-contained SARIF, or selected Platform API pages (local SDK)   |
-| [Snyk Open Source](snyk.md)                                 | CLI JSON, a Codex plugin export, or SARIF                                       |
-| [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
-| [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |
-| [Wiz](wiz.md)                                               | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV |
+The `--provider` value selects the reader for a saved report. To see which
+readers your installed CLI supports, run `codex-security publish findings --help`.
+The guides cover local and Cloud imports unless an input is marked local only.
+
+| Guide                                                       | `--provider` | Supported input                                                                 |
+| ----------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
+| [Amazon Inspector](inspector.md)                            | `inspector`  | Inspector2 `ListFindings` JSON for one Code Security repository                 |
+| [AWS Continuum](continuum.md)                               | `continuum`  | Summaries or selected code finding details for one verified repository          |
+| [Black Duck SCA](blackduck.md)                              | `blackduck`  | BOM-6 vulnerable components for one project version                             |
+| [Checkmarx SAST](checkmarx.md)                              | `checkmarx`  | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |
+| [Endor Labs](endor.md)                                      | `endor`      | Native Finding JSON, or self-contained `endorctl` SARIF with finding UUIDs      |
+| [GitHub code scanning](github-code-scanning.md)             | `github`     | Alerts selected for one repository and Git ref                                  |
+| [GitHub Dependabot](github-dependabot.md)                   | `github`     | Dependency alerts exported from one repository                                  |
+| [GitHub Security Advisories](github-security-advisories.md) | `github`     | Selected repository or global advisories                                        |
+| [OpenGrep](opengrep.md)                                     | `opengrep`   | Native scan JSON, optionally gzip-compressed                                    |
+| [Semgrep](semgrep.md)                                       | `semgrep`    | CLI/CI JSON, SARIF, selected Guardian findings, or Platform Web API reports     |
+| [Snyk](snyk.md)                                             | `snyk`       | CLI JSON, plugin exports, SARIF, or monitored Code and Open Source issues       |
+| [SonarQube Cloud](sonar.md)                                 | `sonar`      | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
+| [Tenable One](tenable.md)                                   | `tenable`    | Selected Code Repository inventory findings (local only)                        |
+| [Trivy](trivy.md)                                           | `trivy`      | Native schema-v2 repository or filesystem JSON, optionally gzip-compressed      |
+| [Veracode Static Analysis](veracode.md)                     | `veracode`   | Findings API pages for one application's policy flaws                           |
+| [Wiz](wiz.md)                                               | `wiz`        | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV |
 
 ## Preview a report
 
-Enable external imports in the shell where you run the CLI.
+[Install the CLI](../../README.md#quick-start) and open the repository the
+findings apply to. Keep reports and preview output in a private directory
+outside that checkout. To choose where `mktemp -d` creates the directory,
+set `TMPDIR` to an existing directory outside the checkout and pass it in the
+template, as in `mktemp -d "${TMPDIR:-/tmp}/report.XXXXXX"`. This works on
+both macOS and Linux. In CI, redirect stdout and stderr to private files.
 
-```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
-```
+**In the terminal**, follow your scanner's guide. Run examples that use
+`--repository .` from the checkout root. For a saved report, `publish findings`
+with `--to local --dry-run` works offline without a Cloud login or model call.
+Add `--format json` to see every finding and exclusion.
+For repeat local file imports, reuse the preview's exact `repository` and
+`source.source_key` to update matching findings.
 
-In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
-Follow your guide's quick start to collect or select the report. Run examples
-that use `--repository .` from the checkout root, or pass the same checkout
-path you used previously. Use `--dry-run` to review the repository, source key,
-findings, and exclusions.
-Keep the export private. In automation, direct stdout and stderr for collection,
-preview, confirmation, and readback to private files outside the checkout.
-For examples that use `mktemp -d` without a path, set `TMPDIR` to a private
-directory outside the checkout if temporary files would otherwise land inside it.
+**In Codex**, [enable the Codex Security plugin and start a new chat](../agent-workflows.md#get-started).
+Ask it to preview the report with your configured model.
+
+> Preview `../reports/endor-findings.json` for this checkout. Show me which
+> Endor findings the CLI would import and which it would skip. Stop there.
+
+If you selected specific findings, compare the preview with your selection.
+Check for missing, duplicate or unexpected occurrences. For OpenGrep, check
+`report.errors` as well as exclusions, even when the findings list is empty.
 
 ## Save or publish and verify
 
-The steps below apply to `publish findings FILE`. For `import sonar`,
-[confirm the capture returned by the Sonar preview](sonar.md#import-and-verify).
+These steps cover `publish findings FILE`. For `import sonar`, [use the capture
+from the preview for your destination](sonar.md#import-and-verify).
 
-**Local workbench.** Run the same command with the same file, checkout, and
-source key. Remove `--dry-run` and confirm the prompt.
-For noninteractive use, add `--yes` after reviewing that preview. Read back
-the stored evidence using the checkout path from the preview:
+**Save locally.** Remove `--dry-run` and confirm. In automation, use `--yes`
+after reviewing the preview.
+
+**Send to Cloud.** Tenable One reports support local import only. For a Cloud-supported report, keep the file, provider,
+source key, and scanner options from your local preview. Change the destination
+to `--to cloud`, and pass the connected repository URL or Cloud ID to
+`--repository`. Preview again with `--dry-run --format json`. [Cloud setup](../../sdk/typescript/docs/cli.md#preview-and-publish)
+
+Check the account, endpoint, repository, selected findings, and exclusions.
+The preview shows where your workspace will store the evidence. A
+`privateImport` entry identifies your private inbox and the suggested
+repository for assessment. Entries in `requests` identify the repository
+environments that will receive the findings. Once you have reviewed the
+destination, remove `--dry-run` and confirm.
+
+### Verify the import
+
+For a local import, list the saved findings using the checkout path from the preview.
 
 ```sh
 codex-security findings imported /path/to/project --format json
 ```
 
-**Codex Security Cloud.** Use a file-backed ChatGPT login for a deployment that
-accepts the provider and a repository environment you can publish to. See
-[Cloud setup](../../sdk/typescript/docs/cli.md#preview-and-publish). Keep the
-file, provider, source key, and scanner-specific options. Set `--to cloud` and
-replace the local checkout in `--repository` with the connected repository URL
-or Cloud repository ID. Use the ID if several connectors share the URL.
-Run with `--dry-run` first. Check that `cloudApiUrl`
-is the intended API endpoint, then review the account, repository, environments,
-and exclusions. Remove `--dry-run` and confirm, or use `--yes` after that
-review. Check `status`, the `verified` and
-`unacknowledged` counts, and the `failures` and `excluded` lists. For a `partial`
-result, correct exclusions or resolve version conflicts before starting a new
-submission. If an `interrupted` result includes `savedSubmission`,
-[resume from that checkpoint](schema-guide.md#retry-a-cloud-submission).
+For a Cloud import, check the receipt for the destination shown in the preview.
+
+| What the Cloud preview shows                      | How to verify the import                                                                                                                                 |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private inbox (`privateImport`)                   | Check that `privateJob.status` is `completed` and its counts account for the selected findings, with zero errors or unprocessed rows. Review exclusions. |
+| Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                                                    |
+
+To inspect published findings in Codex, [connect the Cloud app](../../sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
+and ask for imported findings in the destination repository. If the scanner has no
+filter in the findings view, use the source and finding IDs from your receipt to
+identify the record. For a private import, ask for your private import history.
+
+If the repository publisher requires a reported severity, the preview excludes
+findings whose severity the scanner left unknown. You can keep those findings
+in a local import or a private inbox when available.
+
+If `publish findings` stops and returns `savedSubmission`, [resume from that checkpoint](schema-guide.md#retry-a-cloud-submission).
+
+## Troubleshoot Semgrep and Snyk collection
+
+If `import semgrep` or `import snyk` stops with HTTP 429, check the vendor's
+`Retry-After` value. Wait for that interval, rerun collection, and preview
+the complete export before importing it.
 
 ## Work with imported findings
 
-Imported records start with assessment state `not_assessed`. Use the source
-evidence to check whether a finding affects your repository. For the identity
-of a record, the fields each reader retains, and how repeat imports update
-evidence, see [Imported finding identity and evidence](schema-guide.md).
+New local findings start as `not_assessed`. To check whether one affects your
+code, give its evidence and the matching checkout to the [triage workflow](../agent-workflows.md#choose-a-task).
+For a dependency alert, [check the installed version and trace the dependency](github-dependabot.md#identity-and-evidence).
 
-For findings from a completed Codex scan, see
-[Track findings in Linear, Jira, or GitHub](../../plugins/codex-security/skills/track-findings/SKILL.md)
-or [Export findings for ServiceNow](../../sdk/typescript/docs/cli.md#export-findings-for-servicenow).
+With the SDK, look up a local record by its `id` with
+`listLocalExternalFindings({ repository, id })`. Pass `record.evidence` and the
+matching checkout to [`security.validate()`](../../sdk/typescript/docs/sdk.md#validate-an-existing-finding).
+Your configured model provider returns a separate assessment.
+
+See [Imported finding identity and evidence](schema-guide.md) for what each
+reader stores and how repeat imports work.

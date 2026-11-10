@@ -1,3 +1,5 @@
+"""Distinguish workbench timestamps from model-supplied times when sealing and exporting a scan."""
+
 from __future__ import annotations
 
 import os

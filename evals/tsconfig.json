@@ -6,7 +6,6 @@
   },
   "include": [
     "../plugins/codex-security/mcp-app/src/assets.d.ts",
-    "deep-reducer/*.mts",
     "secret-discovery/*.mts",
     "standard-time-budget/*.mts",
     "workflow-routing/*.mts",

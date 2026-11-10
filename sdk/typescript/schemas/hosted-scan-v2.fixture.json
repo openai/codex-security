@@ -14,6 +14,11 @@
       "stateDirectory": "/scan/state",
       "model": "fixture-model",
       "reasoningEffort": "medium",
+      "severityRubric": {
+        "markdown": "# Security team rubric\n\nGrade the impact on the affected tenant.\n",
+        "revision": 3,
+        "sha256": "0735ad8680e64cc58dae0f2ac171cfbe98816494176fe95ca28b122476b61cfa"
+      },
       "identity": {
         "runId": "run-1",
         "attemptId": "attempt-1",
@@ -39,9 +44,14 @@
       },
       "model": "fixture-model",
       "reasoningEffort": "medium",
+      "severityRubric": {
+        "markdown": "# Security team rubric\n\nGrade the impact on the affected tenant.\n",
+        "revision": 3,
+        "sha256": "0735ad8680e64cc58dae0f2ac171cfbe98816494176fe95ca28b122476b61cfa"
+      },
       "requestId": "request-1",
       "scanId": "scan-1",
-      "prompt": "Scan the selected paths.",
+      "prompt": "Scan the selected paths using the supplied severity rubric.\n{\"severityRubric\":{\"markdown\":\"# Security team rubric\\n\\nGrade the impact on the affected tenant.\\n\",\"revision\":3,\"sha256\":\"0735ad8680e64cc58dae0f2ac171cfbe98816494176fe95ca28b122476b61cfa\"}}",
       "runtime": {
         "pluginRoot": "/opt/runtime/cli/_bundled_plugin",
         "pluginVersion": "0.1.95",
@@ -98,6 +108,11 @@
         "runId": "run-1",
         "attemptId": "attempt-1",
         "buildId": "fixture-build"
+      },
+      "severityRubric": {
+        "markdown": "# Security team rubric\n\nGrade the impact on the affected tenant.\n",
+        "revision": 3,
+        "sha256": "0735ad8680e64cc58dae0f2ac171cfbe98816494176fe95ca28b122476b61cfa"
       },
       "outputDirectory": "/scan/output",
       "status": "completed",

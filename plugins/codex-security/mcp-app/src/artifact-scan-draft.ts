@@ -1,12 +1,14 @@
 import type { JsonObject } from "./types.js";
+import { normalizedScanRelativePath } from "./contract-values.js";
 import {
   coverageReceiptComponents,
   validateRetainedCoverage,
+  validateWorkerReport,
 } from "./coverage-publication.js";
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname, isAbsolute, join, posix, sep } from "node:path";
+import { basename, dirname, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import * as z from "zod/v4";
 import type { ArtifactContext } from "./artifact-context.js";
@@ -272,6 +274,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         "--checkpoint-path",
         checkpointPath,
       ];
+      if (context.modelThreadId !== undefined) {
+        arguments_.push(`--model-thread-id=${context.modelThreadId}`);
+      }
       if (expectedDigest !== undefined) {
         arguments_.push("--expected-draft-digest", expectedDigest);
       }
@@ -545,13 +550,17 @@ export async function retainRecordedReceiptOwnership(
   context: ArtifactContext,
   input: JsonObject,
 ): Promise<void> {
-  if (await hasScanDraftCheckpoint(context, input)) return;
   const coverage = input.reviewState ?? input.coverage;
   if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return;
-  for (const surface of coverage.surfaces) {
-    if (isObject(surface) && isObject(surface.provenance))
-      delete surface.provenance.scanReceiptRefs;
-  }
+  const owners = coverage.surfaces.flatMap((surface) =>
+    isObject(surface) &&
+    isObject(surface.provenance) &&
+    "scanReceiptRefs" in surface.provenance
+      ? [surface.provenance]
+      : [],
+  );
+  if (!owners.length || (await hasScanDraftCheckpoint(context, input))) return;
+  for (const owner of owners) delete owner.scanReceiptRefs;
 }
 
 export function workerCoverageReceiptLocation(
@@ -562,13 +571,14 @@ export function workerCoverageReceiptLocation(
   const components = coverageReceiptComponents(ref);
   if (context.layout !== "worker") return { context, components };
   const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+  const normalized = components.join("/");
   const shared =
     isObject(surface.provenance) &&
     (surface.provenance.scanReceiptRefs as string[] | undefined)?.includes(ref);
   if (
     shared ||
-    ref.startsWith(`${workerPrefix}output/`) ||
-    ref.startsWith(`${workerPrefix}attempts/`)
+    normalized.startsWith(`${workerPrefix}output/`) ||
+    normalized.startsWith(`${workerPrefix}attempts/`)
   ) {
     return {
       context: {
@@ -691,6 +701,7 @@ async function preserveScanDraft(
   warnings?: string[];
 }> {
   requireFiniteNumbers(input);
+  if (context.layout === "worker") validateWorkerReport(input);
   const warnings: string[] = [];
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation =
@@ -2808,31 +2819,6 @@ export async function getCodexSecurityCompletedScan(
   };
 }
 
-function safeRelativePath(value: string, context: string): string {
-  const parts = value.split("/");
-  if (
-    value.length === 0 ||
-    Buffer.from(value, "utf8").toString("utf8") !== value ||
-    value === "." ||
-    value.startsWith("/") ||
-    /^[A-Za-z]:/.test(value) ||
-    parts.includes("..") ||
-    value.includes("\\") ||
-    /[\u0000-\u001f]/u.test(value)
-  ) {
-    throw new Error(`${context}: expected a safe scan-relative POSIX path.`);
-  }
-  const normalized = posix.normalize(value).replace(/\/+$/, "");
-  if (
-    normalized === "." ||
-    normalized.startsWith("../") ||
-    isAbsolute(normalized)
-  ) {
-    throw new Error(`${context}: expected a safe scan-relative POSIX path.`);
-  }
-  return normalized;
-}
-
 /** Admit file-authored drafts through the current contract after removing host fields. */
 export function parseCanonicalScanDraft(input: {
   scanId?: string;
@@ -2873,10 +2859,10 @@ function parseCanonicalCheckpoint(
       for (const [locationIndex, location] of (
         (finding[field] as JsonObject[] | undefined) ?? []
       ).entries()) {
-        safeRelativePath(
-          location.path as string,
-          `findings[${index}].${field}[${locationIndex}].path`,
-        );
+        if (normalizedScanRelativePath(location.path as string) === undefined)
+          throw new Error(
+            `findings[${index}].${field}[${locationIndex}].path: expected a safe scan-relative POSIX path.`,
+          );
       }
     }
   }

@@ -1,4 +1,7 @@
-"""Load TOML using the supported Python runtime."""
+"""Expose tomllib to workbench callers, using tomli on Python 3.10.
+
+Import exits with setup guidance when the runtime is too old or the backport is missing.
+"""
 
 import sys
 

@@ -41,7 +41,7 @@ type Output = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
   off?(event: "error", listener: (error: Error) => void): unknown;
 };
-type Execute = (
+export type HostExecute = (
   id: string,
   request: unknown,
   onProgress?: (event: unknown) => void,
@@ -61,7 +61,7 @@ export async function runHostProtocol(
     errorData?: (error: unknown) => object | undefined;
     run(
       params: unknown,
-      execute: Execute,
+      execute: HostExecute,
       signal: AbortSignal,
       onProgress: (event: unknown) => void,
     ): Promise<{ status: string }>;

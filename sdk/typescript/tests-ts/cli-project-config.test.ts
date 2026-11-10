@@ -187,6 +187,7 @@ test("info resolves a config and its sources without a target, prompt reads, or 
   expect(stdout.text()).not.toContain("synthetic-private-value");
   expect(JSON.parse(stdout.text())).toMatchObject({
     model: "gpt-5.6-terra",
+    nextStep: expect.stringContaining("scan . -c FILE --dry-run"),
     configuration: {
       path: input.config,
       settings: {
@@ -1240,6 +1241,34 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     },
     failOnSeverity: "high",
   });
+  const nativeProject = JSON.parse(
+    await readFile(input.config, "utf8"),
+  ) as Record<string, JsonObject>;
+  delete nativeProject["codex"]!["profiles"];
+  delete nativeProject["codex"]!["model"];
+  await writeFile(input.config, JSON.stringify(nativeProject));
+  await writeFile(
+    join(ambient, "review.config.toml"),
+    'model = "synthetic-native-model"\nmodel_provider = "openrouter"\nmodel_reasoning_effort = "high"\n',
+  );
+  Object.assign(environment, {
+    OPENROUTER_API_KEY: "synthetic-cli-provider-key",
+  });
+  const nativeCli = createCliTest(main);
+  expect(
+    await nativeCli.runCli(
+      ["scan", "-c", input.config, "--dry-run", "--json"],
+      deps,
+    ),
+    nativeCli.stderr.text(),
+  ).toBe(0);
+  expect(JSON.parse(nativeCli.stdout.text())).toMatchObject({
+    model: "synthetic-native-model",
+    modelProvider: "openrouter",
+    reasoningEffort: "high",
+  });
+  expect(createCodex).not.toHaveBeenCalled();
+  expect(prepareRuntime).not.toHaveBeenCalled();
 });
 
 test.each([
@@ -1352,7 +1381,7 @@ test.each([
         ["scans", "rerun", "saved", "--json", "--full-output"],
         dependencies({
           currentDirectory: input.repository,
-          onWorkbench: async () => ({ recipe }),
+          onWorkbench: async () => ({ recipe, scanId: "saved" }),
           onRun,
         }),
       ),

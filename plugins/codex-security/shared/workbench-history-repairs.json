@@ -1,21 +1,24 @@
 [
   [
-    "-- Move checkpoint previews before source-scope history checks.",
-    "WITH input AS (SELECT :history AS history)",
-    "SELECT 'sql' AS operation,",
-    "    'UPDATE schema_migrations SET version = 57 WHERE version = ' || version AS value",
-    "FROM schema_migrations",
-    "WHERE version IN (47, 48, 50, 52, 53, 54)",
-    "    AND name = 'freeze stopped scan checkpoint selections';"
-  ],
-  [
-    "-- Move source-scope previews before the shared history repairs.",
-    "WITH input AS (SELECT :history AS history)",
-    "SELECT 'sql' AS operation,",
-    "    'UPDATE schema_migrations SET version = 50 WHERE version = ' || version AS value",
-    "FROM schema_migrations",
-    "WHERE version IN (34, 40, 41, 42, 43, 44, 48)",
-    "    AND name = 'persist authorized source excerpt scopes';"
+    "WITH input AS (SELECT :history AS history),",
+    "previews AS (",
+    "    SELECT version, CASE",
+    "        WHEN version IN (48, 50, 63) AND name = 'persist scan log completion boundaries'",
+    "            THEN 'UPDATE schema_migrations SET version = 64'",
+    "        WHEN version IN (58, 59) AND name = 'record classification rubric provenance'",
+    "            THEN 'UPDATE schema_migrations SET version = 60'",
+    "        WHEN version IN (47, 48, 50, 52, 53, 54) AND name = 'freeze stopped scan checkpoint selections'",
+    "            THEN 'UPDATE schema_migrations SET version = 57'",
+    "        WHEN version IN (34, 40, 41, 42, 43, 44, 48) AND name = 'persist authorized source excerpt scopes'",
+    "            THEN 'UPDATE schema_migrations SET version = 50'",
+    "        WHEN version = 63 AND name = 'retain native investigation time allowances'",
+    "            THEN 'DELETE FROM schema_migrations'",
+    "    END AS repair FROM schema_migrations",
+    ")",
+    "SELECT 'sql' AS operation, repair || ' WHERE version = ' || version AS value",
+    "FROM previews WHERE repair IS NOT NULL",
+    "-- Vacate checkpoint preview 50 before moving a lower source-scope receipt into it.",
+    "ORDER BY version DESC;"
   ],
   [
     "WITH history AS (",

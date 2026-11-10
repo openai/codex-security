@@ -179,7 +179,20 @@ test("failed publication records its error, dry-run does not advance it, and ret
     },
     ...publicationBinding(id, document.scanId, scanDir),
     begin,
-    { request: { id, action: "complete", stage: "publish", result } },
+    {
+      request: {
+        id,
+        action: "complete",
+        stage: "publish",
+        result: {
+          ...result,
+          telemetry: expect.objectContaining({
+            destination: "custom",
+            outcome: "completed",
+          }),
+        },
+      },
+    },
   ]);
   await expect(
     publishScanToCustomInternal(scanDir, options, {
@@ -199,7 +212,15 @@ test("failed publication records its error, dry-run does not advance it, and ret
         fetch: rejecting("Dry-run must not publish"),
       },
     ),
-  ).toEqual({ ...result, dryRun: true, findings: document.findings });
+  ).toEqual({
+    ...result,
+    dryRun: true,
+    findings: document.findings,
+    telemetry: expect.objectContaining({
+      outcome: "preview",
+      attempted: false,
+    }),
+  });
   dryRunWorkbench.assertDone();
   expect(
     await publishScanToCustomInternal(scanDir, options, {
@@ -207,7 +228,13 @@ test("failed publication records its error, dry-run does not advance it, and ret
       runWorkbench: workbench.run,
       fetch: async () => Response.json(result.findingIds),
     }),
-  ).toEqual(result);
+  ).toEqual({
+    ...result,
+    telemetry: expect.objectContaining({
+      outcome: "completed",
+      attempted: true,
+    }),
+  });
   workbench.assertDone();
 });
 

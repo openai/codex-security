@@ -1,37 +1,42 @@
-import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
 } from "./external-import-contract.js";
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
+  type ExternalFindingsReaderOptions,
   readExternalFindings,
 } from "./external-findings-read.js";
 import {
+  distinctSourceRepositories,
   prepareLocalImport,
   type LocalExternalImportDependencies,
+  type NormalizedLocalImportOptions,
 } from "./external-findings-local.js";
 import {
   snapshotImportOptions,
   snapshotSourceRepositories,
 } from "./external-findings.js";
 import { abortable } from "./targets.js";
-import { requireExternalImports } from "./external-imports-feature.js";
+
+export interface LocalExternalImportOptions
+  extends
+    Omit<NormalizedLocalImportOptions, "provider">,
+    ExternalFindingsReaderOptions {}
 
 /** Read an installed vendor format and prepare it for the local workbench. */
 export async function prepareLocalExternalImport(
   path: string,
-  options: ExternalPublicationOptions,
+  options: LocalExternalImportOptions,
   dependencies: LocalExternalImportDependencies = {},
 ) {
   dependencies.signal?.throwIfAborted();
-  requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
-  const readerSources = snapshotSourceRepositories(
-    dependencies.sourceRepositories,
+  const readerSources = distinctSourceRepositories(
+    snapshotSourceRepositories(dependencies.sourceRepositories),
   );
   const parsed = await abortable(
-    () => readExternalFindings(path, settings, "local"),
+    () => readExternalFindings(path, settings, "local", readerSources),
     dependencies.signal,
   );
   const normalizedOptions = {
@@ -39,16 +44,21 @@ export async function prepareLocalExternalImport(
     provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider],
   };
   let sourceRepositories = parsed.sourceRepositories ?? [];
-  if (normalizedOptions.provider === "semgrep") {
+  if (
+    normalizedOptions.provider === "semgrep" &&
+    parsed.sourceRepositories &&
+    settings.sourceRepositoryUrl
+  ) {
     // The Cloud reader allows custom GitHub casing. Local provenance must also
     // agree with the caller's source URL when the checkout has no remote.
-    const source = settings.sourceRepositoryUrl!;
+    const source = settings.sourceRepositoryUrl;
     const knownGitHub = readerSources.some(
       ({ url, platform }) =>
         platform === "github" &&
         cloudRepositoryUrlKey(url) === cloudRepositoryUrlKey(source),
     );
     const key = knownGitHub ? cloudRepositoryUrlKey : repositoryUrlKey;
+    sourceRepositories = distinctSourceRepositories(sourceRepositories);
     for (const reference of sourceRepositories) {
       if (key(reference.url) !== key(source))
         throw new Error(

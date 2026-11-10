@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { test } from "node:test";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -65,7 +66,7 @@ async function app(t) {
     const cookie = response.headers.get("set-cookie").split(";")[0];
     return (path, options = {}) => request(path, { ...options, cookie });
   };
-  return { request, login };
+  return { request, login, origin };
 }
 
 function scenario(id, run) {
@@ -492,6 +493,36 @@ test("health, static assets, and every ordinary page are served", async (t) => {
     assert.ok(response.body.includes("Invoice Desk"));
   }
 });
+
+test(
+  "JSON requests accept 64 KiB and reject larger bodies",
+  { timeout: 5000 },
+  async (t) => {
+    const { request, origin } = await app(t);
+    const [email, password] = accounts.alex;
+    const body = { email, password, note: "é" };
+    const size = Buffer.byteLength(JSON.stringify(body));
+    body.note += " ".repeat(64 * 1024 - size);
+    const post = () => request("/api/login", { method: "POST", body });
+    assert.equal((await post()).status, 200);
+    const atLimit = JSON.stringify(body);
+    body.note += " ";
+    assert.equal((await post()).status, 413);
+
+    // A chunked upload can receive the response before sending its final chunk.
+    const upload = httpRequest(`${origin}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    t.after(() => upload.destroy());
+    upload.write(atLimit);
+    upload.write(" ");
+    const [rejected] = await once(upload, "response");
+    assert.equal(rejected.statusCode, 413);
+    assert.equal(rejected.headers.connection, "close");
+    rejected.resume();
+  },
+);
 
 test("anonymous callers and incorrect passwords do not authenticate", async (t) => {
   const { request } = await app(t);

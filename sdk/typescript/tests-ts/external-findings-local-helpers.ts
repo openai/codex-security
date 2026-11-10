@@ -1,10 +1,15 @@
 import { expect } from "bun:test";
-import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import type { ExternalFindings } from "../src/external-findings.js";
+import { EXTERNAL_FINDINGS_PROVIDERS } from "../src/external-findings-read.js";
+import {
+  prepareLocalExternalImport,
+  type LocalExternalImportOptions,
+} from "../src/external-findings-import.js";
 import {
   listLocalExternalFindings,
+  prepareNormalizedLocalImport,
   type StoredExternalFinding,
 } from "../src/external-findings-local.js";
-import type { ExternalPublicationOptions } from "../src/external-findings-publish.js";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,12 +17,22 @@ import { join } from "node:path";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
 /** Real Git checkout and separate state, shared by normalized and vendor import tests. */
-export async function localFindingsFixture(options: { remote?: string } = {}) {
+type Checkout = {
+  remote?: string;
+  environment?: NodeJS.ProcessEnv;
+  isolatedGit?: boolean;
+};
+
+export async function localFindingsFixture(options: Checkout = {}) {
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-external-local-"),
   );
   const repository = join(root, "repository");
-  const env = sonarGitTestEnvironment();
+  const env = sonarGitTestEnvironment(options.environment);
+  if (options.isolatedGit) {
+    env.GIT_CONFIG_GLOBAL = join(root, "global.gitconfig");
+    await writeFile(env.GIT_CONFIG_GLOBAL, "");
+  }
   const dispose = () => rm(root, { recursive: true, force: true });
   const git = (...args: string[]) =>
     execFileSync("git", ["-C", repository, ...args], { env, encoding: "utf8" });
@@ -37,14 +52,8 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
     stateDirectory,
     git,
     environment: {
-      ...Object.fromEntries(
-        Object.entries(env).filter(
-          ([name]) =>
-            name.toUpperCase() !== "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
-        ),
-      ),
+      ...env,
       CODEX_SECURITY_STATE_DIR: stateDirectory,
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     },
     dispose,
     [Symbol.asyncDispose]: dispose,
@@ -53,12 +62,16 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
 
 export async function localReportFixture(
   filename: string,
-  source: Omit<ExternalPublicationOptions, "repository">,
-  checkout: { remote?: string } = {},
+  source: Omit<LocalExternalImportOptions, "repository">,
+  checkout: Checkout = {},
 ) {
   const fixture = await localFindingsFixture(checkout);
   const file = join(fixture.root, filename);
   const options = { ...source, repository: fixture.repository };
+  const normalizedOptions = {
+    ...options,
+    provider: EXTERNAL_FINDINGS_PROVIDERS[source.provider],
+  };
   const dependencies = { environment: fixture.environment };
   return {
     ...fixture,
@@ -71,14 +84,32 @@ export async function localReportFixture(
         { ...options, ...overrides },
         dependencies,
       ),
+    prepareNormalized: (input: ExternalFindings) =>
+      prepareNormalizedLocalImport(input, normalizedOptions, dependencies),
     read: () => listLocalExternalFindings(options, dependencies),
   };
 }
 
+export function isolatedGitReportFixture(
+  filename: string,
+  source: Omit<LocalExternalImportOptions, "repository">,
+  checkout: Checkout = {},
+) {
+  return localReportFixture(filename, source, {
+    ...checkout,
+    isolatedGit: true,
+  });
+}
+
 type LocalReportFixture = Awaited<ReturnType<typeof localReportFixture>>;
 
-export async function createAndReplayFinding(fixture: LocalReportFixture) {
-  const prepared = await fixture.prepare();
+export async function createAndReplayFinding(
+  fixture: LocalReportFixture,
+  normalized?: ExternalFindings,
+) {
+  const prepared = normalized
+    ? await fixture.prepareNormalized(normalized)
+    : await fixture.prepare();
   expect(prepared.preview.excluded).toEqual([]);
   expect(prepared.preview.findings).toHaveLength(1);
   expect(await fixture.read()).toEqual([]);

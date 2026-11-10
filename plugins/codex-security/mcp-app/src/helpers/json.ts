@@ -1,5 +1,14 @@
 export { isRecord as object } from "../record.ts";
 
+export function compareCodePoints(left: string, right: string): number {
+  const a = Array.from(left, (character) => character.codePointAt(0)!);
+  const b = Array.from(right, (character) => character.codePointAt(0)!);
+  for (let index = 0; index < Math.min(a.length, b.length); index++) {
+    if (a[index] !== b[index]) return a[index]! - b[index]!;
+  }
+  return a.length - b.length;
+}
+
 export function requireFiniteNumbers(value: unknown): void {
   if (typeof value === "number" && !Number.isFinite(value))
     throw new TypeError(

@@ -46,6 +46,7 @@ export type {
   ProjectScope,
 } from "./project-config-schema.js";
 export type { ScanSettings } from "./scan-settings.js";
+export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners, suggestOwnersFromScan } from "./suggest-owners.js";
 export type {
@@ -89,10 +90,11 @@ export type {
   ScanAccountRateLimitWindow,
   ScanCost,
   ScanSessionEvent,
+  ScanUsageMeasurement,
   ScanUsageObservation,
   ScanWorkerEvent,
 } from "./cost.js";
-export type { ScanTokenUsage } from "./cost-model.js";
+export type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
@@ -111,6 +113,7 @@ export type {
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,
+  ScanLifecycle,
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
@@ -201,10 +204,18 @@ export type {
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
 export type { FindingEmbeddingBinding } from "./deduplication/local.js";
 export type {
+  PublicationTelemetry,
+  PublicationTelemetryObserver,
+} from "./publication-telemetry.js";
+export type {
   DeduplicationDiagnostic,
   DeduplicationDiagnosticObserver,
 } from "./deduplication/diagnostics.js";
-export type { FindingEmbedder } from "./server/embeddings.js";
+export type {
+  FindingEmbedder,
+  EmbeddingUsageObservation,
+  EmbeddingUsageObserver,
+} from "./server/embeddings.js";
 export {
   ExternalPublicationError,
   prepareExternalPublication,
@@ -231,10 +242,11 @@ export type {
   LocalExternalImportResult,
   PreparedLocalExternalImport,
 } from "./external-findings-local.js";
-export type {
-  ExternalFinding,
-  ExternalFindings,
-  ExternalSourceRepository,
+export {
+  NoPublishableFindingsError,
+  type ExternalFinding,
+  type ExternalFindings,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 export type {
   ExternalFindingEvidence,
@@ -325,7 +337,21 @@ export type {
   ValidationReviewRequest,
 } from "./validation-records.js";
 
-export { prepareLocalExternalImport } from "./external-findings-import.js";
+export {
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "./operation-telemetry.js";
+export type {
+  OperationTelemetryEvent,
+  OperationOutcome,
+  OperationFailureCategory,
+} from "./operation-telemetry.js";
+
+export {
+  prepareLocalExternalImport,
+  type LocalExternalImportOptions,
+} from "./external-findings-import.js";
+export { readTenableFindings } from "./tenable-findings.js";
 export {
   normalizeOpenGrepFindings,
   readOpenGrepFindings,
@@ -340,10 +366,16 @@ export {
   normalizeVeracodeFindings,
   readVeracodeFindings,
 } from "./veracode-findings.js";
+export { normalizeTrivyFindings, readTrivyFindings } from "./trivy-findings.js";
 export {
   normalizeBlackDuckFindings,
   readBlackDuckFindings,
 } from "./blackduck-findings.js";
+export {
+  normalizeContinuumFindings,
+  readContinuumFindings,
+} from "./continuum-findings.js";
+export { readCheckmarxFindings } from "./checkmarx-findings.js";
 export {
   normalizeInspectorFindings,
   readInspectorFindings,
@@ -354,13 +386,34 @@ export {
   normalizeSnykSarif,
   readSnykFindings,
 } from "./snyk-findings.js";
-export { normalizeSelectedSemgrepPlatformFindings } from "./semgrep-platform-findings.js";
+export {
+  collectSnykIssues,
+  normalizeSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
+  type CollectSnykIssuesOptions,
+  type SnykIssuesExport,
+  type SnykIssuesFindings,
+  type SnykIssuesProduct,
+} from "./snyk-rest-findings.js";
 export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export { collectSemgrepPlatformFindings } from "./semgrep-platform-collector.js";
+export { collectSelectedSemgrepGuardianFindings } from "./semgrep-guardian-findings.js";
+export type {
+  SemgrepPlatformOptions,
+  SemgrepPlatformReport,
+} from "./semgrep-platform-collector.js";
+export type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
+export {
+  normalizeSelectedSemgrepPlatformFindings,
+  selectSemgrepPlatformFindings,
+  normalizeSemgrepPlatformFindings,
+  type SemgrepPlatformSelection,
+} from "./semgrep-platform-findings.js";
 export {
   normalizeEndorFindings,
   normalizeEndorSarif,

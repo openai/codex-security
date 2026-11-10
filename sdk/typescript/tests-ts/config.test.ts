@@ -10,6 +10,8 @@ import {
   quoteTomlString,
   modelProviderConfigOverride,
   resolveCodexProfile,
+  resolveCommandAuthConfig,
+  scanPricingContext,
   scanModelConfiguration,
   scanModelProvider,
 } from "../src/config.js";
@@ -70,6 +72,25 @@ test("inline Codex overrides preserve literal keys and string values", () => {
     ).toThrow();
   }
 });
+
+test.each([
+  ["absent", undefined],
+  ["null", null],
+])(
+  "omits an optional %s profile selector before native configuration",
+  async (_name, profile) => {
+    const config = await mergedCodexConfig({
+      codexOverrides: {
+        ...(profile === undefined ? {} : { profile }),
+        model: "synthetic-selected-model",
+      },
+    });
+    expect(resolveCodexProfile(config)).toMatchObject({
+      model: "synthetic-selected-model",
+    });
+    expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
+  },
+);
 
 test("inline Codex overrides omit optional null fields like the file writer", async () => {
   for (const value of [null, { args: ["fixture", null] }]) {
@@ -154,6 +175,70 @@ function macOsSandboxUnavailable(): boolean {
       "sandbox-exec: sandbox_apply: Operation not permitted"
   );
 }
+
+function shouldScheduleNativeSandboxTests(
+  platform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv,
+): boolean {
+  if (platform !== "win32") return true;
+  const setting =
+    environment["CODEX_SECURITY_TEST_WINDOWS_SANDBOX"]?.toLowerCase();
+  if (setting === "1" || setting === "true") return true;
+  if (setting === "0" || setting === "false") return false;
+  return (
+    environment["GITHUB_ACTIONS"] === "true" &&
+    environment["RUNNER_ENVIRONMENT"] === "github-hosted"
+  );
+}
+
+const skipNativeSandboxTests =
+  !shouldScheduleNativeSandboxTests(process.platform, process.env) ||
+  macOsSandboxUnavailable();
+
+describe("native sandbox test scheduling", () => {
+  const local = { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false" };
+  const hosted = {
+    ...local,
+    GITHUB_ACTIONS: "true",
+    RUNNER_ENVIRONMENT: "github-hosted",
+  };
+  const setting = "CODEX_SECURITY_TEST_WINDOWS_SANDBOX";
+  const onWindows = (env: NodeJS.ProcessEnv) =>
+    shouldScheduleNativeSandboxTests("win32", env);
+
+  test("defaults Windows coverage to GitHub-hosted Actions runners", () => {
+    expect(onWindows(local)).toBe(false);
+    expect(onWindows(hosted)).toBe(true);
+    expect(onWindows({ ...hosted, [setting]: "" })).toBe(true);
+    expect(onWindows({ RUNNER_ENVIRONMENT: "github-hosted" })).toBe(false);
+    expect(onWindows({ ...hosted, RUNNER_ENVIRONMENT: "self-hosted" })).toBe(
+      false,
+    );
+  });
+
+  test.each(["1", "true", "True"])(
+    "opts into local Windows coverage with %s",
+    (value) => {
+      expect(onWindows({ ...local, [setting]: value })).toBe(true);
+    },
+  );
+
+  test.each(["0", "false"])(
+    "opts out of hosted Windows coverage with %s",
+    (value) => {
+      expect(onWindows({ ...hosted, [setting]: value })).toBe(false);
+    },
+  );
+
+  test.each(["darwin", "linux"] as const)(
+    "ignores the Windows setting on %s",
+    (platform) => {
+      expect(
+        shouldScheduleNativeSandboxTests(platform, { [setting]: "false" }),
+      ).toBe(true);
+    },
+  );
+});
 
 async function sandboxFailureDetails(codexHome: string, details: string) {
   if (process.platform !== "win32") return details;
@@ -252,6 +337,36 @@ describe("Codex configuration", () => {
     );
   });
 
+  test("uses the sign-in settings from the user's Codex config below explicit overrides", async () => {
+    const home = await temporaryDirectory();
+    expect(
+      (await mergedCodexConfig({}, home))["cli_auth_credentials_store"],
+    ).toBe("auto");
+    await writeFile(
+      join(home, "config.toml"),
+      [
+        'cli_auth_credentials_store = "file"',
+        'forced_login_method = "chatgpt"',
+        'model = "ambient-model"',
+      ].join("\n"),
+    );
+
+    const config = await mergedCodexConfig({}, home);
+    expect(config).toMatchObject({
+      cli_auth_credentials_store: "file",
+      forced_login_method: "chatgpt",
+    });
+    expect(config["model"]).toBe(DEFAULT_CODEX_CONFIG["model"]);
+    expect(
+      (
+        await mergedCodexConfig(
+          { codexOverrides: { cli_auth_credentials_store: "keyring" } },
+          home,
+        )
+      )["cli_auth_credentials_store"],
+    ).toBe("keyring");
+  });
+
   test("resolves selected profile model and effort before root settings", async () => {
     const scenarios = [
       {
@@ -292,6 +407,273 @@ describe("Codex configuration", () => {
       });
       expect(scanModelConfiguration(config)).toEqual(scenario.expected);
     }
+  });
+
+  test("loads a native profile below explicit scan overrides", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model = "profile-model"\nmodel_reasoning_effort = "high"\nmodel_provider = "synthetic"\n',
+    );
+    const config = await mergedCodexConfig(
+      {
+        codexOverrides: {
+          profile: "review",
+          model: "explicit-model",
+        },
+      },
+      home,
+    );
+
+    expect(scanModelConfiguration(config)).toEqual({
+      model: "explicit-model",
+      reasoningEffort: "high",
+    });
+    expect(scanModelProvider(config)).toBe("synthetic");
+    expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
+  });
+
+  test.each(
+    [
+      "model_instructions_file",
+      "experimental_compact_prompt_file",
+      "model_catalog_json",
+      "sqlite_home",
+      "log_dir",
+    ].flatMap((key) =>
+      [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
+    ),
+  )(
+    "resolves file-profile paths before explicit overrides: %j",
+    async ({ key, explicit }) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        `${key} = "instructions.md"\n`,
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined ? {} : { [key]: explicit }),
+      };
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config[key]).toBe(explicit ?? join(home, "instructions.md"));
+      expect(overrides).toEqual({
+        profile: "review",
+        ...(explicit === undefined ? {} : { [key]: explicit }),
+      });
+    },
+  );
+
+  test.each([undefined, "explicit.toml"])(
+    "resolves file-profile agent paths before explicit overrides: %j",
+    async (explicit) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        '[agents.reviewer]\ndescription = "Synthetic reviewer"\nconfig_file = "agents/reviewer.toml"\n',
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { agents: { reviewer: { config_file: explicit } } }),
+      };
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["agents"]).toMatchObject({
+        reviewer: {
+          description: "Synthetic reviewer",
+          config_file: explicit ?? join(home, "agents/reviewer.toml"),
+        },
+      });
+      expect(overrides).toEqual({
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { agents: { reviewer: { config_file: explicit } } }),
+      });
+    },
+  );
+
+  test.each([undefined, "explicit/SKILL.md", "~/native/SKILL.md"])(
+    "preserves native skill path origins before explicit overrides (%s)",
+    async (explicit) => {
+      const home = await temporaryDirectory("codex-security-skill-profile-");
+      await writeFile(
+        join(home, "review.config.toml"),
+        '[[skills.config]]\npath="skill/SKILL.md"\nenabled=false\n',
+      );
+      const config = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            ...(explicit === undefined
+              ? {}
+              : { skills: { config: [{ path: explicit, enabled: true }] } }),
+          },
+        },
+        home,
+      );
+      expect(config["skills"]).toEqual({
+        config: [
+          {
+            path: explicit ?? join(home, "skill/SKILL.md"),
+            enabled: explicit !== undefined,
+          },
+        ],
+      });
+    },
+  );
+
+  test("validates effective native multi-agent settings after file overrides", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      "[features.multi_agent_v2]\nenabled = false\n",
+    );
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "review" } }, home),
+    ).rejects.toThrow("cannot be disabled");
+    await expect(
+      mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            features: { multi_agent_v2: { enabled: true } },
+          },
+        },
+        home,
+      ),
+    ).resolves.toMatchObject({
+      features: { multi_agent_v2: { enabled: true } },
+    });
+  });
+
+  test.each(
+    ["exporter", "trace_exporter", "metrics_exporter"].flatMap((exporter) =>
+      ["otlp-http", "otlp-grpc"].flatMap((protocol) =>
+        [undefined, "explicit-client.key", "~/native/client.key"].map(
+          (explicit) => ({
+            exporter,
+            protocol,
+            explicit,
+          }),
+        ),
+      ),
+    ),
+  )(
+    "preserves OTEL file origins before explicit TLS overrides: %j",
+    async ({ exporter, protocol, explicit }) => {
+      const home = await temporaryDirectory();
+      const paths = {
+        "ca-certificate": "tls/ca.pem",
+        "client-certificate": "tls/client.pem",
+        "client-private-key": "tls/client.key",
+      };
+      await writeFile(
+        join(home, "review.config.toml"),
+        `[otel.${exporter}.${protocol}.tls]\n` +
+          Object.entries(paths)
+            .map(([key, value]) => `${key}=${JSON.stringify(value)}\n`)
+            .join(""),
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : {
+              otel: {
+                [exporter]: {
+                  [protocol]: { tls: { "client-private-key": explicit } },
+                },
+              },
+            }),
+      };
+      const original = structuredClone(overrides);
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["otel"]).toEqual({
+        [exporter]: {
+          [protocol]: {
+            tls: {
+              "ca-certificate": join(home, paths["ca-certificate"]),
+              "client-certificate": join(home, paths["client-certificate"]),
+              "client-private-key":
+                explicit ?? join(home, paths["client-private-key"]),
+            },
+          },
+        },
+      });
+      expect(overrides).toEqual(original);
+    },
+  );
+
+  test.each([undefined, "other helpers", "~/helpers"])(
+    "retains inherited command auth cwd unless the profile overrides it: %s",
+    async (cwd) => {
+      const home = await temporaryDirectory();
+      const config: JsonObject = {
+        profile: "review",
+        model_provider: "synthetic",
+        model_providers: {
+          synthetic: {
+            auth: {
+              command: "./token",
+              cwd: "helpers",
+              refresh_interval_ms: 1000,
+            },
+          },
+        },
+        profiles: {
+          review: {
+            model_providers: {
+              synthetic: {
+                auth: {
+                  refresh_interval_ms: 2000,
+                  ...(cwd === undefined ? {} : { cwd }),
+                },
+              },
+            },
+          },
+        },
+      };
+      const saved = structuredClone(config);
+      expect(
+        resolveCodexProfile(resolveCommandAuthConfig(config, home)),
+      ).toMatchObject({
+        model_providers: {
+          synthetic: {
+            auth: {
+              command: "./token",
+              cwd: cwd?.startsWith("~") ? cwd : join(home, cwd ?? "helpers"),
+              refresh_interval_ms: 2000,
+            },
+          },
+        },
+      });
+      expect(config).toEqual(saved);
+    },
+  );
+
+  test("rejects invalid native profile names and owned settings", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      "[features]\nplugins = false\n",
+    );
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "../review" } }, home),
+    ).rejects.toThrow("plain name");
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "review" } }, home),
+    ).rejects.toThrow("owns plugin loading configuration");
   });
 
   test("ignores model overrides from unselected Codex profiles", async () => {
@@ -348,6 +730,133 @@ describe("Codex configuration", () => {
       const config = await mergedCodexConfig({ codexOverrides: overrides });
       expect(scanModelProvider(config)).toBe(expected);
     }
+  });
+
+  test.each(["amazon-bedrock", "amazon-bedrock-runtime"])(
+    "uses the selected %s provider's AWS region before the environment",
+    (provider) => {
+      const config = {
+        profile: "gov",
+        model_provider: "openai",
+        model_providers: { [provider]: { aws: { region: "us-east-2" } } },
+        profiles: {
+          gov: {
+            model_provider: provider,
+            model_providers: {
+              [provider]: { aws: { region: " us-gov-east-1 " } },
+            },
+          },
+        },
+      };
+      expect(scanPricingContext(config, { AWS_REGION: "us-west-1" })).toEqual({
+        provider: "amazon-bedrock",
+        region: "us-gov-east-1",
+      });
+    },
+  );
+
+  test("resolves Bedrock environment regions and preserves an unknown region", () => {
+    const config = { model_provider: "amazon-bedrock" };
+    const environment = {
+      AWS_REGION: "us-gov-west-1",
+      AWS_DEFAULT_REGION: "us-east-1",
+    };
+    expect(scanPricingContext(config, environment)).toEqual({
+      provider: "amazon-bedrock",
+      region: "us-gov-west-1",
+    });
+    expect(
+      scanPricingContext(config, { ...environment, AWS_REGION: " " }),
+    ).toEqual({ provider: "amazon-bedrock", region: "us-east-1" });
+    expect(scanPricingContext(config, { AWS_PROFILE: "synthetic" })).toEqual({
+      provider: "amazon-bedrock",
+      region: null,
+    });
+    expect(
+      scanPricingContext({ model_provider: "openai" }, environment),
+    ).toBeUndefined();
+  });
+
+  test.each([
+    ["https://bedrock-mantle.us-gov-east-1.api.aws/openai/v1", "us-gov-east-1"],
+    [
+      "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+      "us-gov-west-1",
+    ],
+    ["https://gateway.example.test", null],
+  ])(
+    "uses the billing region from a Bedrock endpoint override %s",
+    (baseUrl, region) => {
+      const config = {
+        model_provider: "amazon-bedrock",
+        model_providers: {
+          "amazon-bedrock": { base_url: baseUrl, aws: { region: "us-east-1" } },
+        },
+      };
+      expect(scanPricingContext(config, { AWS_REGION: "us-west-2" })).toEqual({
+        provider: "amazon-bedrock",
+        region,
+      });
+    },
+  );
+
+  test("distinguishes managed Vertex APIs from dedicated endpoints and other gateways", () => {
+    const base =
+      "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/example/locations/us-central1";
+    const fromUrl = (baseUrl: string) =>
+      scanPricingContext({ openai_base_url: baseUrl }, {});
+    expect(fromUrl(`${base}/endpoints/openapi`)).toEqual({
+      provider: "gcp",
+      managedEndpoint: true,
+    });
+    expect(fromUrl(`${base}/endpoints/1234`)).toEqual({
+      provider: "gcp",
+      managedEndpoint: false,
+    });
+    expect(
+      fromUrl("https://123.us-central1-example.prediction.vertexai.goog"),
+    ).toEqual({ provider: "gcp", managedEndpoint: false });
+    expect(
+      fromUrl(
+        "https://aiplatform.mtls.googleapis.com./v1/projects/example/locations/global/endpoints/openapi",
+      ),
+    ).toEqual({ provider: "gcp", managedEndpoint: true });
+    expect(fromUrl("https://gateway.example.test")).toBeUndefined();
+    expect(
+      scanPricingContext(
+        { model_providers: { openai: { base_url: base } } },
+        { OPENAI_BASE_URL: base },
+      ),
+    ).toBeUndefined();
+    const config = {
+      profile: "review",
+      profiles: {
+        review: {
+          model_provider: "vertex",
+          model_providers: {
+            vertex: {
+              base_url:
+                "https://aiplatform.googleapis.com/v1/projects/example/locations/global/publishers/openai/v1/",
+            },
+          },
+        },
+      },
+    };
+    expect(scanPricingContext(config, {})).toEqual({
+      provider: "gcp",
+      managedEndpoint: true,
+    });
+    expect(
+      scanPricingContext(
+        {
+          model_provider: "gcp",
+          model_providers: {
+            gcp: { base_url: "https://gateway.example.test" },
+          },
+        },
+        {},
+      ),
+    ).toEqual({ provider: "gcp", managedEndpoint: false });
   });
 
   test("rejects invalid model settings from the selected Codex profile", async () => {
@@ -600,7 +1109,7 @@ describe("Codex configuration", () => {
     expect(result.stdout.length).toBeGreaterThan(0);
   });
 
-  test.skipIf(macOsSandboxUnavailable())(
+  test.skipIf(skipNativeSandboxTests)(
     "allows scan helpers to write workspace files without writable credential ancestry",
     async () => {
       const { root, codexHome, stateDirectory, workspace, environment } =
@@ -694,7 +1203,7 @@ describe("Codex configuration", () => {
     },
   );
 
-  test.skipIf(macOsSandboxUnavailable())(
+  test.skipIf(skipNativeSandboxTests)(
     "reads policy source without exposing credentials or changing host files",
     async () => {
       const { root, codexHome, workspace, stateDirectory, environment } =

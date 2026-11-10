@@ -244,7 +244,7 @@
     "darwin": 9.2,
     "win32": 15.6
   },
-  "cli-external-imports-feature.test.ts": {
+  "cli-external-imports.test.ts": {
     "linux": 3,
     "win32": 4.9,
     "darwin": 3.1
@@ -519,7 +519,7 @@
     "darwin": 8.9,
     "win32": 11.2
   },
-  "deep-scan-reducer-recovery.test.ts": {
+  "deep-scan-worker-recovery.test.ts": {
     "linux": 0.4,
     "darwin": 0.5,
     "win32": 0.6
@@ -588,11 +588,6 @@
     "linux": 11.4,
     "darwin": 9.2,
     "win32": 21.9
-  },
-  "external-imports-feature.test.ts": {
-    "linux": 0.1,
-    "win32": 0.3,
-    "darwin": 0.1
   },
   "feedback.test.ts": {
     "linux": 0.6,

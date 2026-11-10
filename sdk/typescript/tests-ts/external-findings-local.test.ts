@@ -12,6 +12,8 @@ import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
+import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
+import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
@@ -70,131 +72,45 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
-  test("requires opt-in before resolving repositories or accessing the workbench", async () => {
-    const { root, stateDirectory, environment } = await fixture();
-    const disabledEnvironment: NodeJS.ProcessEnv = { ...environment };
-    delete disabledEnvironment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"];
-    const repository = join(root, "missing-repository");
-    let workbenchCalls = 0;
-    const dependencies = {
-      environment: disabledEnvironment,
-      runWorkbench: async () => {
-        workbenchCalls++;
-        throw new Error("Disabled imports must not access the workbench");
-      },
+  test("reports empty and excluded selections without storage and preserves failed scanner diagnostics", async () => {
+    const { repository, stateDirectory, environment } = await fixture();
+    const options = { repository, ...source };
+    const empty = { read: 0, findings: [], excluded: [] };
+    const failed = {
+      ...empty,
+      report: { errors: [{ message: "Scanner timed out" }] },
     };
-    await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        dependencies,
-      ),
-    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
-    await expect(
-      listLocalExternalFindings({ repository }, dependencies),
-    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
-    expect(workbenchCalls).toBe(0);
-    expect(existsSync(stateDirectory)).toBe(false);
-  });
-
-  test("requires opt-in from the workbench selected during normalization", async () => {
-    const { root, repository, stateDirectory, environment } = await fixture();
-    const disabledState = join(root, "disabled-state");
-    const dependencies = { environment };
-    const data = input();
-    const finding = data.findings[0]!;
-    const evidence = finding.evidence;
-    Object.defineProperty(finding, "evidence", {
-      enumerable: true,
-      get() {
-        dependencies.environment = {
-          ...environment,
-          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
-          CODEX_SECURITY_STATE_DIR: disabledState,
-        };
-        return evidence;
-      },
-    });
-    await expect(
-      prepareNormalizedLocalImport(
-        data,
-        { repository, ...source },
-        dependencies,
-      ).then((prepared) => prepared.import()),
-    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
-    expect(existsSync(disabledState)).toBe(false);
-    expect(existsSync(stateDirectory)).toBe(false);
-  });
-
-  test("forwards an inherited opt-in to store and read helpers while an overlapping import stays disabled", async () => {
-    const { root, repository, stateDirectory, environment } = await fixture();
-    const { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS, ...settings } = environment;
-    const enabledEnvironment = Object.assign(
-      Object.create({
-        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
-        get CODEX_SECURITY_CLOUD_WEB_URL() {
-          throw new Error("A local import does not use the Cloud endpoint");
-        },
-      }),
-      settings,
-    );
-    const disabledState = join(root, "disabled-state");
-    const disabledEnvironment = {
-      ...environment,
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
-      CODEX_SECURITY_STATE_DIR: disabledState,
-    };
-    const [enabled, disabled] = await Promise.allSettled([
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        { environment: enabledEnvironment },
-      ).then((prepared) => prepared.import()),
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
+    const excluded = {
+      ...empty,
+      read: 1,
+      excluded: [
         {
-          environment: disabledEnvironment,
+          position: 1,
+          source_finding_id: null,
+          reason: "Unsupported severity",
         },
-      ).then((prepared) => prepared.import()),
-    ]);
-    if (enabled.status !== "fulfilled") throw enabled.reason;
-    expect(enabled.value.counts).toEqual({
-      created: 2,
-      updated: 0,
-      unchanged: 0,
-    });
-    expect(disabled.status).toBe("rejected");
-    if (disabled.status !== "rejected")
-      throw new Error("Disabled import succeeded");
-    expect(disabled.reason.message).toContain(
-      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
-    );
-    const [readback, blockedRead] = await Promise.allSettled([
-      listLocalExternalFindings(
-        { repository },
-        { environment: enabledEnvironment },
-      ),
-      listLocalExternalFindings(
-        { repository },
-        { environment: disabledEnvironment },
-      ),
-    ]);
-    expect(readback.status).toBe("fulfilled");
-    if (readback.status !== "fulfilled") throw readback.reason;
-    expect(
-      new Map(readback.value.map((finding) => [finding.id, finding])),
-    ).toEqual(
-      new Map(enabled.value.findings.map((finding) => [finding.id, finding])),
-    );
-    expect(blockedRead.status).toBe("rejected");
-    if (blockedRead.status !== "rejected")
-      throw new Error("Disabled read succeeded");
-    expect(blockedRead.reason.message).toContain(
-      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
-    );
-    expect(existsSync(join(stateDirectory, "workbench.sqlite3"))).toBe(true);
-    expect(existsSync(disabledState)).toBe(false);
+      ],
+    };
+    for (const [selection, shouldFail] of [
+      [empty, false],
+      [excluded, false],
+      [failed, true],
+      [{ ...excluded, report: failed.report }, true],
+      [{ ...empty, read: 1 }, true],
+    ] as const) {
+      const prepared = await prepareNormalizedLocalImport(selection, options, {
+        environment,
+      });
+      expect(prepared.preview).toMatchObject(selection);
+      if (shouldFail)
+        await expect(prepared.import()).rejects.toMatchObject({ selection });
+      else
+        expect(await prepared.import()).toMatchObject({
+          ...selection,
+          counts: { created: 0, updated: 0, unchanged: 0 },
+        });
+      expect(existsSync(stateDirectory)).toBe(false);
+    }
   });
 
   test("rejects unserializable report metadata before storing findings", async () => {
@@ -629,10 +545,19 @@ describe("local normalized scanner findings", () => {
     },
   );
 
-  test.each(["repository", "prepare-state", "read-state", "prepare-metadata"])(
+  const pendingPaths = [
+    "repository",
+    "prepare-state",
+    "read-state",
+    "prepare-metadata",
+    "prepare-snyk-remotes",
+  ];
+  test.each(pendingPaths)(
     "cancels %s resolution while its filesystem lookup is pending",
     async (operation) => {
-      const { repository, stateDirectory, environment } = await fixture();
+      const { repository, stateDirectory, environment } = await fixture({
+        isolatedGit: operation === "prepare-snyk-remotes",
+      });
       if (operation === "prepare-metadata")
         await rm(join(repository, ".git"), { recursive: true });
       const module = new URL(
@@ -649,7 +574,9 @@ describe("local normalized scanner findings", () => {
       const operation = ${JSON.stringify(operation)};
       const heldPath = operation === "repository" ? repository
         : operation === "prepare-metadata" ? ${JSON.stringify(join(repository, "HEAD"))}
+        : operation === "prepare-snyk-remotes" ? ${JSON.stringify(join(repository, ".git", "remotes"))}
         : ${JSON.stringify(stateDirectory)};
+      const holdLstat = operation === "prepare-metadata" || operation === "prepare-snyk-remotes";
       const originalRealpath = fs.realpath;
       const originalLstat = fs.lstat;
       let enteredLookup, releaseLookup;
@@ -657,13 +584,13 @@ describe("local normalized scanner findings", () => {
       const lookup = new Promise((_, reject) => { releaseLookup = reject; });
       mockFs(() => ({
         realpath: (path, ...args) => {
-          if (operation === "prepare-metadata" || path !== heldPath)
+          if (holdLstat || path !== heldPath)
             return originalRealpath(path, ...args);
           enteredLookup();
           return lookup;
         },
         lstat: (path, ...args) => {
-          if (operation !== "prepare-metadata" || path !== heldPath)
+          if (!holdLstat || path !== heldPath)
             return originalLstat(path, ...args);
           enteredLookup();
           return lookup;
@@ -676,7 +603,15 @@ describe("local normalized scanner findings", () => {
       let outcome;
       const pending = operation.startsWith("prepare-")
         ? prepareNormalizedLocalImport(
-            { read: 0, findings: [], excluded: [] },
+            ${JSON.stringify(
+              operation === "prepare-snyk-remotes"
+                ? normalizeSnykIssues(
+                    snykRestFixture("open-source", {
+                      sourceRepositoryUrl: "https://github.com/example/project",
+                    }),
+                  )
+                : { read: 0, findings: [], excluded: [] },
+            )},
             { repository, provider: "snyk", sourceKey: "synthetic-project" },
             { signal: controller.signal,
               sourceRepositories: [{ url: "https://github.com/example/project" }] },
@@ -745,7 +680,8 @@ describe("local normalized scanner findings", () => {
       const original = { lstat: fs.lstat, realpath: fs.realpath, stat: fs.stat };
       const held = new Map();
       function lookup(method, path, args) {
-        const gate = held.get(method + ":" + path);
+        // Repository normalization checks a byte path before the protected-root lookups.
+        const gate = typeof path === "string" && held.get(method + ":" + path);
         if (gate) { gate.entered(); return gate.wait; }
         return original[method](path, ...args);
       }
@@ -779,7 +715,7 @@ describe("local normalized scanner findings", () => {
           },
         }),
       };
-      const input = { read: 0, findings: [], excluded: [] };
+      const input = ${JSON.stringify(input())};
       const options = { repository, provider: "snyk", sourceKey: "synthetic-project" };
       const prepared = operation === "import"
         ? await prepareNormalizedLocalImport(input, options, dependencies)
@@ -1683,9 +1619,16 @@ describe("local normalized scanner findings", () => {
     "a line break in the primary Git URL cannot establish a repository match: %j",
     async (suffix) => {
       const url = "https://github.com/example/project";
-      const { repository, environment } = await fixture({
-        remote: url + suffix,
-      });
+      const { repository, environment, git } = await fixture();
+      // A quoted value preserves a trailing carriage return on older Git.
+      const quotedSuffix = suffix.replaceAll("\n", "\\n");
+      await appendFile(
+        join(repository, ".git", "config"),
+        `\n[remote "origin"]\n\turl = "${url}${quotedSuffix}"\n`,
+      );
+      expect(git("config", "--null", "--get", "remote.origin.url")).toBe(
+        `${url}${suffix}\0`,
+      );
       await expect(
         prepareNormalizedLocalImport(
           input(),

@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -113,7 +114,7 @@ const commonJson = await readJson(
 );
 const pythonTextResults = JSON.parse(
   execFileSync(
-    process.env.PYTHON || "python3",
+    fixturePython,
     [
       "-c",
       "import json, re, sys; values, pattern = json.load(sys.stdin.buffer); print(json.dumps([[bool(value.strip()), bool(re.search(pattern, value))] for value in values]))",
@@ -184,15 +185,6 @@ for (const [startLine, runtime, json] of [
   assert.equal(location.safeParse(value).success, runtime);
   assert.equal(jsonSchema("tools/scan-draft", "location")(value), json);
 }
-const reducer =
-  artifactSchemaDocuments["tools/deep-reducer"].$defs.reducerInputs;
-const excessiveBudget = { maxBytes: Number.MAX_SAFE_INTEGER + 1 };
-assert.equal(reducer.safeParse(excessiveBudget).success, false);
-assert.equal(
-  jsonSchema("tools/deep-reducer", "reducerInputs")(excessiveBudget),
-  false,
-);
-
 // Uniqueness is checked on raw values before parsing the text items.
 const sourceFindingIds =
   artifactSchemaDocuments["tools/scan-draft"].$defs.finding.shape.provenance

@@ -29,14 +29,11 @@ import {
   recordCodexSecurityCandidateAttackPaths,
 } from "../artifact-candidate-ledger.js";
 import {
-  deepReducerInputsInputSchema,
-  deepReductionInputSchema,
-  recordCodexSecurityDeepReduction,
-} from "../artifact-deep-reducer.js";
-import {
-  deepReducerPageResponse,
-  getCodexSecurityDeepReducerInputsPage,
-} from "../artifact-deep-reducer-pages.js";
+  postPeerNote,
+  postPeerNoteInput,
+  readPeerNotes,
+  readPeerNotesInput,
+} from "../deep-scan/peer-notes.js";
 import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
@@ -55,6 +52,7 @@ import {
 } from "../artifact-storage.js";
 
 export interface CompactArtifactToolOptions {
+  threadIdFromExtra: (requestContext: unknown) => string | undefined;
   runWorkbench: RunArtifactWorkbench;
   pluginRoot: string;
   resolveScanRoot: () => Promise<string>;
@@ -264,56 +262,38 @@ export function registerCompactWorkerArtifactTools(
   server: McpServer,
   context: ArtifactContext,
 ): void {
-  if (context.layout === "worker") {
+  const board = context.discoveryBoard;
+  if (board) {
     registerCompactTool(server, {
-      name: "record_codex_security_scan_draft",
-      title: "Record Codex Security Scan Draft",
+      name: "post_deep_scan_peer_note",
+      title: "Post Deep Scan Peer Note",
       description:
-        "Save this Standard worker's semantic findings and reviewState. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in reviewState.deferred. On terminal drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
-        semanticFindingGuidance +
-        reviewStateGuidance,
-      inputSchema: scanDraftInputSchema,
+        "Share a lead or ask another discovery worker to check specific evidence. Pass its threadId to reply with your independent check. The host identifies the author.",
+      inputSchema: postPeerNoteInput,
       readOnly: false,
-      handler: async (value) =>
-        recordCodexSecurityWorkerScanDraft(context, value),
+      handler: (input) => postPeerNote(board, context.scanId, input),
     });
-    return;
-  }
-
-  if (context.layout !== "reducer") {
-    throw new Error(
-      "The lightweight artifact server requires a bound discovery or reducer worker.",
-    );
-  }
-
-  server.registerTool(
-    "get_codex_security_deep_reducer_inputs",
-    {
-      title: "Get Codex Security Deep Reducer Inputs",
+    registerCompactTool(server, {
+      name: "read_deep_scan_peer_notes",
+      title: "Read Deep Scan Peer Notes",
       description:
-        "Read a byte-budgeted JSON fragment of the assigned findings and previous aggregate. " +
-        "Continue with nextCursor until absent; concatenate json fragments before parsing. " +
-        "When using code-mode store, save fragments, cursor:nextCursor??null, and done:!nextCursor together in one state object; undefined cannot be stored. Reuse completed state without fetching again. " +
-        "Use findingRef source:<sourceFindingId> or previous:N to read full retained provenance.",
-      inputSchema: deepReducerInputsInputSchema,
-      annotations: readingAnnotations,
-      _meta: modelOnlyMeta,
-    },
-    async (input) =>
-      deepReducerPageResponse(
-        await getCodexSecurityDeepReducerInputsPage(context, input),
-      ),
-  );
-
+        "List this scan’s shared leads and questions, or pass a threadId to read that lead and its replies.",
+      inputSchema: readPeerNotesInput,
+      readOnly: true,
+      handler: (input) => readPeerNotes(board, input),
+    });
+  }
   registerCompactTool(server, {
-    name: "record_codex_security_deep_reduction",
-    title: "Record Codex Security Deep Reduction",
+    name: "record_codex_security_scan_draft",
+    title: "Record Codex Security Scan Draft",
     description:
-      'Record the merged findings and context for this Deep scan. Preserve every assigned provenance.sourceFindingIds reference; omit retained provenance.sourceFindings bodies. Use retainedFindingRefs:["previous:N"] to copy unchanged previous findings without resubmitting their bodies.' +
-      semanticFindingGuidance,
-    inputSchema: deepReductionInputSchema,
+      "Save this Standard worker's semantic findings and reviewState. Use complete:false for progress checkpoints or when source access or execution blocks the audit; record blockers and unvalidated candidates in reviewState.deferred. Use complete:true only after the source review finishes, including a review with no findings. On terminal drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
+      semanticFindingGuidance +
+      reviewStateGuidance,
+    inputSchema: scanDraftInputSchema,
     readOnly: false,
-    handler: async (value) => recordCodexSecurityDeepReduction(context, value),
+    handler: async (value) =>
+      recordCodexSecurityWorkerScanDraft(context, value),
   });
 }
 
@@ -374,6 +354,7 @@ async function scanContext(
   return createScanArtifactContext(input.scanId, options.runWorkbench, {
     requireRunning,
     requireClaim: true,
+    modelThreadId: options.threadIdFromExtra(requestContext) ?? "",
     handoffClaimToken:
       input.handoffClaimToken ??
       options.resolveHandoffClaimToken?.(input.scanId, requestContext),

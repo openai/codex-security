@@ -51,7 +51,7 @@ describe("delegated scan attribution", () => {
         (["cli", "sdk"] as const).map(async (surface) => {
           const model = selectModel
             ? surface === "cli"
-              ? "gpt-daybreak-blue-latest"
+              ? "gpt-6.1-sol"
               : "gpt-5.6-sol"
             : undefined;
           const program = surface === "cli" ? programs[0] : programs[1];
@@ -239,6 +239,8 @@ describe("delegated scan attribution", () => {
                         codex_security_package_version: VERSION,
                         codex_security_provider: "openai",
                         codex_security_scan_mode: mode,
+                        codex_security_operation_id: expect.any(String),
+                        codex_security_attempt_id: expect.any(String),
                       });
                       const deepConfigPath =
                         options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
@@ -371,7 +373,7 @@ describe("delegated scan attribution", () => {
               expect(
                 await client.preflight(repository, { mode }),
               ).toMatchObject({
-                model: index === 0 ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol",
+                model: index === 0 ? "gpt-6.1-sol" : "gpt-5.6-sol",
                 authentication: { method: "api_key", verified: false },
               });
             }),

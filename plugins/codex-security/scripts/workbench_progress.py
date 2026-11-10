@@ -8,7 +8,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_workbench import require_current_coordinator
-from workbench.handoff import require_current_continuation
+from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench_constants import PHASES
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
@@ -16,6 +16,7 @@ from workbench_validation import optional_text, require_uuid, user_context_argum
 def reportable_count(
     current_phase: str, requested_phase: str | None, count: int | None
 ) -> int | None:
+    """Default a missing count to zero on entering validation or a later phase from an earlier phase."""
     if count is None and requested_phase in PHASES[3:] and current_phase in PHASES[:3]:
         return 0
     return count
@@ -26,6 +27,7 @@ def update_context(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    """Update user context on a running scan and return the refreshed scan context in the same workbench."""
     scan_id = require_uuid(args.scan_id, "scan-id")
     context = user_context_argument(args)
     connection.execute("BEGIN IMMEDIATE")
@@ -72,6 +74,12 @@ def update_progress(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    """Record phase and review counters for a running scan and return its updated context.
+
+    Check continuation and coordinator ownership where applicable. A new phase
+    starts with fresh phase counters. A new Deep Scan review pass must start
+    with zero completed items. Invalid progress raises SystemExit.
+    """
     scan_id = require_uuid(args.scan_id, "scan-id")
     model = optional_text(args.model, maximum=200)
     reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
@@ -79,6 +87,7 @@ def update_progress(
     with connection:
         timestamp = wb.now()
         scan = wb.require_scan(connection, scan_id)
+        require_tokenless_scan_owner(connection, scan, getattr(args, "model_thread_id", None))
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can update progress.")
         if scan["mode"] == "deep":

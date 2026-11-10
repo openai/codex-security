@@ -1,3 +1,5 @@
+"""Check ownership, target identity, and backwards compatibility when starting scans without setup."""
+
 from __future__ import annotations
 
 import argparse
@@ -144,6 +146,10 @@ def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> 
     assert first["startDisposition"] == "created"
     assert Path(first["scan"]["scanDir"]).parent == scan_root / target.name
     assert joined["startDisposition"] == "joined"
+    assert first["scan"]["lifecycle"]["surface"] == "plugin"
+    assert first["scan"]["lifecycle"]["packageVersion"] is None
+    assert first["scan"]["lifecycle"]["mock"] is False
+    assert joined["scan"]["lifecycle"] == first["scan"]["lifecycle"]
     assert joined["scan"]["scanId"] == first["scan"]["scanId"]
     assert joined["scan"]["handoffClaimToken"] == first["scan"]["handoffClaimToken"]
     assert other["startDisposition"] == "created"
@@ -184,6 +190,33 @@ def test_prompt_only_scan_creates_submitted_delivered_scan(
     assert workspace["id"]
     assert workspace["setup"] == {"submitted": True}
     assert workspace["results"]["scanId"] == scan["scanId"]
+
+
+def test_prompt_only_rejoin_follows_the_attached_continuation(tmp_path: Path) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    scan_root = tmp_path / "scans"
+    started = start_prompt_only_scan(state_dir, target, scan_root)
+    scan_id = str(started["scan"]["scanId"])
+    continuation = "attached-prompt-thread"
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", continuation)
+    context = "Review the password-reset flow."
+    scan_command(
+        state_dir,
+        "update-scan-context",
+        scan_id,
+        "--thread-id",
+        continuation,
+        "--user-context",
+        context,
+    )
+
+    replacement = start_prompt_only_scan(state_dir, target, scan_root)
+    assert replacement["startDisposition"] == "created"
+    assert replacement["scan"]["scanId"] != scan_id
+    joined = start_prompt_only_scan(state_dir, target, scan_root, thread_id=continuation)
+    assert joined["startDisposition"] == "joined"
+    assert joined["scan"]["scanId"] == scan_id
+    assert joined["scan"]["userContext"] == context
 
 
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
@@ -477,6 +510,7 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
     target = tmp_path / "target"
     head = initialize_git_repository(target)
     (target / "README.md").write_text("changed fixture\n")
+    (target / "binary.dat").write_bytes(b"\0")
     started = start_prompt_only_scan(
         state_dir,
         target,
@@ -485,6 +519,7 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
         mode="diff",
         extra_args=("--diff-target-kind", "working_tree"),
     )
+    assert started["scan"]["progress"]["coverage"]["filesTotal"] == 1
     assert started["scan"]["diffTarget"]["kind"] == "working_tree"
     assert started["scan"]["diffTarget"]["baseRevision"] == head
     assert started["scan"]["diffTarget"]["headRevision"] == head

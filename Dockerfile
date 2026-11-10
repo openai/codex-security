@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 
-FROM node:26.12.1-bookworm-slim@sha256:28147155d47dc31abe0a46e0d12b59b2fb3d0a2dcc5dc65fce76a074180b16fe AS package
+FROM node:26.13-bookworm-slim@sha256:bc0a2afd3b74ce12222fc8bab99271e66257f021078f5f4a5d687a77d280c1d9 AS base
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes git python3 \
+    && apt-get install --no-install-recommends --yes ca-certificates git openssh-client python3 \
     && rm -rf /var/lib/apt/lists/*
 
+FROM base AS package
 WORKDIR /build/sdk/typescript
 
 COPY package.json /build/package.json
@@ -25,19 +26,11 @@ RUN pnpm run types \
     && pnpm pack --pack-destination /build/package \
     && node scripts/check-package.mjs /build/package/*.tgz
 
-FROM node:26.12.1-bookworm-slim@sha256:28147155d47dc31abe0a46e0d12b59b2fb3d0a2dcc5dc65fce76a074180b16fe AS runtime
+FROM base AS runtime
 
 LABEL org.opencontainers.image.title="Codex Security" \
       org.opencontainers.image.description="Codex Security scanner" \
       org.opencontainers.image.source="https://github.com/openai/codex-security"
-
-RUN apt-get update \
-    && apt-get install --no-install-recommends --yes \
-        ca-certificates \
-        git \
-        openssh-client \
-        python3 \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY --chmod=0555 docker/entrypoint.sh /usr/local/bin/codex-security-entrypoint
 COPY --chmod=0555 docker/git-credential.sh /usr/local/bin/codex-security-git-credential

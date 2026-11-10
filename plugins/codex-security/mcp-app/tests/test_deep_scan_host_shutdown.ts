@@ -3,11 +3,13 @@ import { readFile } from "node:fs/promises";
 import { mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { importModule } from "./import-module.ts";
 import {
   DeepScanCoordinatorRegistry,
   FakeExecutor,
+  pausePoint,
   FakeStore,
   fixtureRun,
   immediateClock,
@@ -69,18 +71,14 @@ try {
       const registry = new DeepScanCoordinatorRegistry();
       const store = new FakeStore(fixture.run);
       const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-      const entered = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
+      const shutdown = pausePoint();
       const secondStarted = Promise.withResolvers<void>();
       const handlers: Promise<unknown>[] = [];
       const outcomes: unknown[] = [];
       const signals: AbortSignal[] = [];
       let claims = 0;
       let now = 0;
-      const hold = async () => {
-        entered.resolve();
-        await release.promise;
-      };
+      const hold = async () => await shutdown.pause();
       Object.assign(globalThis, {
         [fixtureKey]: {
           registry,
@@ -152,7 +150,7 @@ try {
       const requests = [invoke()];
       try {
         await Promise.race([
-          entered.promise,
+          shutdown.entered,
           requests[0].then(() =>
             assert.fail("Request settled before the held operation"),
           ),
@@ -163,12 +161,11 @@ try {
         }
         await client.close();
         assert.ok(signals.every((signal) => signal.aborted));
-        release.resolve();
+        shutdown.release();
         // Client rejection precedes handler completion when the transport closes.
         await Promise.allSettled(handlers);
         assert.equal(registry.get(fixture.run.scanId), undefined);
         assert.equal(executor.discoveryCalls, 0);
-        assert.equal(executor.dedupCalls, 0);
         assert.deepEqual(store.workerUpdates, []);
         assert.deepEqual(store.finishCalls, []);
         assert.deepEqual(store.failureMessages, []);
@@ -189,15 +186,24 @@ try {
           assert.equal((await resumed.settled()).status, "succeeded");
         }
         for (const outcome of outcomes) {
+          const result = outcome as CallToolResult;
+          assert.equal(result.isError, true);
+          assert.deepEqual(result._meta, {
+            "codex/telemetry": { span: { target_id: fixture.run.scanId } },
+          });
+          if (stage === "takeover") {
+            // The remote coordinator's wait rejects after its lease claim.
+            assert.deepEqual(result.content, [
+              { type: "text", text: "Deep Scan coordinator host has closed." },
+            ]);
+          }
           assert.match(
-            outcome instanceof Error
-              ? outcome.message
-              : JSON.stringify(outcome),
+            JSON.stringify(result.content),
             /coordinator host has closed/,
           );
         }
       } finally {
-        release.resolve();
+        shutdown.release();
         await client.close();
         await Promise.allSettled([...handlers, ...requests]);
         const coordinator = registry.get(fixture.run.scanId);
