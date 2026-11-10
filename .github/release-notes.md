@@ -25,6 +25,7 @@
 - identify replaced checkout parent directories ([#2537](https://github.com/openai/codex-security/pull/2537))
 - register nested Windows scans with long Git metadata paths ([#2534](https://github.com/openai/codex-security/pull/2534))
 - preserve closed helper stdin under BusyBox ash ([#2540](https://github.com/openai/codex-security/pull/2540))
+- preserve Continuum import retries and active sign-in credentials ([#2531](https://github.com/openai/codex-security/pull/2531))
 
 </details>
 
