@@ -90,6 +90,6 @@ jq -se --slurpfile preview "$qa_dir/preview.json" '
      end))' "$qa_dir/receipt.json"
 ```
 
-For a private job, open the staging account's private import history and confirm the source key and expected native finding ID appear. This proves intake, not publication to shared findings. For the repository route, inspect the QA repository's source report and confirm the synthetic title and initial `not_assessed` state. Keep account identifiers, raw previews and receipts in the private QA record. Record the tested revisions, route, counts and readback outcome; if access or provider support is missing, record the blocker.
+For a private job, open the staging account's private imported-findings inbox and confirm the source key and expected native finding ID on the saved record. For the repository route, inspect the QA repository's source report and confirm the synthetic title and initial `not_assessed` state. Keep account identifiers, raw previews and receipts in the private QA record. Record the tested revisions, route, counts and readback outcome; if access or provider support is missing, record the blocker.
 
 For an interrupted write, keep the file, source key and state directory unchanged and follow [retrying a Cloud submission](schema-guide.md#retry-a-cloud-submission). Have the owner retire the test data under the workspace's retention policy. Removing the local directory does not delete a Cloud finding.
