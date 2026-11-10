@@ -141,6 +141,25 @@ describe("integration command dispatch", () => {
     expect(await readdir(project)).toEqual([]);
   }, 30_000);
 
+  test("zsh completes at the supplied cursor after an equals-form option", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-zsh-completions-");
+    const { run } = await isolatedCli(temp.path, {
+      COMPLETE: "zsh",
+      _COMPLETE_INDEX: "4",
+    });
+    const result = await run(
+      "--",
+      "cs",
+      "skills",
+      "list",
+      "--format=json",
+      "--de",
+      "--json",
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toStartWith("--depth:");
+  }, 30_000);
+
   test("the command manifest includes integration leaves without installing them", async () => {
     await using temp = await scopedTemporaryDirectory(
       "cli-integration-discovery-",

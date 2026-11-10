@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { registerMcp } from "./cli-mcp.js";
 
 const cliName = "codex-security";
-const shells = z.enum(["bash", "fish", "nushell", "zsh"]);
+export const completionShell = z.enum(["bash", "fish", "nushell", "zsh"]);
 const depth = z
   .number()
   .int()
@@ -67,7 +67,7 @@ export async function serveIntegration(
     !argv.some((arg) => ["mcp", "skills", "skill"].includes(arg))
   )
     return false;
-  const completion = shells.safeParse(process.env["COMPLETE"]);
+  const completion = completionShell.safeParse(process.env["COMPLETE"]);
   const discovery = manifest || completion.success;
   const words = parseArgs({
     args: argv,
@@ -209,7 +209,7 @@ export async function serveIntegration(
       .command(mcp)
       .command("completions", {
         description: "Generate a shell completion script.",
-        args: z.object({ shell: shells }),
+        args: z.object({ shell: completionShell }),
         run: () => undefined,
       });
     // Incur mounts aliases for leaf commands, but not for a whole group.
