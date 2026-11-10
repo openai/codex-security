@@ -14,6 +14,8 @@ import {
   updateStoredFinding,
 } from "./external-findings-local-helpers.js";
 import { createCliTest } from "./support/cli-run.js";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 const repositoryUrl = "https://github.com/example/repo";
 const detection = {
@@ -79,10 +81,15 @@ const source = {
   sourceRepositoryUrl: repositoryUrl,
 } as const;
 
-function checkout() {
-  return localReportFixture("fcs-iac.json", source, {
+// The scanned files exist in the checkout, as they do after a scan from its root.
+async function checkout() {
+  const fixture = await localReportFixture("fcs-iac.json", source, {
     remote: repositoryUrl + ".git",
   });
+  await mkdir(join(fixture.repository, "infra", "net"), { recursive: true });
+  for (const file of ["infra/net/main.tf", "infra/provider.tf"])
+    await writeFile(join(fixture.repository, ...file.split("/")), "");
+  return fixture;
 }
 
 test("the reader maps misconfigurations and secrets to typed IaC evidence", async () => {
@@ -168,6 +175,65 @@ test("a remote git scan reports paths from the clone root", async () => {
   ]);
 });
 
+test("registry module detections use the call line that FCS reports for the module", async () => {
+  await using fixture = await checkout();
+  const call = (line: number) =>
+    `This finding originates in module "example/sg/aws" (version 1.0.0), called by main.tf at line ${line}. To remediate, update the module.`;
+  const registry = {
+    ...detection,
+    file: "main.tf",
+    line: 1,
+    module_path: "first_sg",
+    module_source: "example/sg/aws",
+    module_version: "1.0.0",
+    is_from_module: true,
+    module_remediation: call(5),
+  };
+  await fixture.writeJson({
+    ...report,
+    rule_detections: [
+      {
+        ...misconfiguration,
+        detections: [
+          registry,
+          {
+            ...registry,
+            module_path: "second_sg",
+            module_remediation: call(9),
+          },
+          {
+            ...registry,
+            module_path: "third_sg",
+            module_remediation: "Update it.",
+          },
+          {
+            ...detection,
+            file: "modules/sg/main.tf",
+            module_path: "local_sg",
+            module_source: "modules/sg",
+            is_from_module: true,
+            module_remediation: call(1),
+          },
+        ],
+      },
+    ],
+  });
+  const { findings, excluded } = await readCrowdStrikeFindings(
+    fixture.file,
+    repositoryUrl,
+  );
+  expect(excluded).toEqual([]);
+  expect(findings.map(({ evidence }) => evidence.locations)).toEqual([
+    [{ path: "main.tf", line: 5 }],
+    [{ path: "main.tf", line: 9 }],
+    [{ path: "main.tf", line: null }],
+    [{ path: "modules/sg/main.tf", line: 7 }],
+  ]);
+  expect(findings[0]!.evidence.details?.remediation_instructions).toBe(
+    `${detection.recommendation}\n\n${call(5)}`,
+  );
+});
+
 test("the reader rejects legacy reports and excludes paths outside the checkout", async () => {
   await using fixture = await checkout();
   await fixture.writeJson({ fcs_version: "1.0.0", violations: [] });
@@ -238,23 +304,51 @@ test("the CLI preview can be saved, replayed and updated with its original ident
   );
 });
 
-test("file and normalized imports verify the repository, even for empty selections", async () => {
+test("a plain directory imports without Git or a repository URL", async () => {
   await using fixture = await checkout();
   await fixture.writeJson(single);
-  await expect(
-    fixture.prepare({ sourceRepositoryUrl: undefined }),
-  ).rejects.toThrow(/repository/i);
-  const otherUrl = "https://github.com/example/other";
+  await rm(join(fixture.repository, ".git"), { recursive: true });
+  const { preview } = await fixture.prepare({ sourceRepositoryUrl: undefined });
+  expect(preview.excluded).toEqual([]);
+  const { evidence } = preview.findings[0]!;
+  expect(evidence.details).toBeUndefined();
+  expect(evidence.locations).toEqual([{ path: "infra/net/main.tf", line: 7 }]);
+  expect(evidence.source_data).toMatchObject({
+    fcs_version: "4.2.3",
+    detection,
+  });
+  expect(evidence.source_data).not.toHaveProperty("repository_url");
+  // Without Git there are no remotes to compare, so the URL is retained as supplied.
+  const bound = await fixture.prepare();
+  expect(bound.preview.findings[0]!.evidence.details?.repository).toMatchObject(
+    {
+      url: repositoryUrl,
+    },
+  );
+});
+
+test("imports check the checkout files and repository claims, even for empty selections", async () => {
+  await using fixture = await checkout();
+  await fixture.writeJson(single);
   const { preview } = await fixture.prepare();
+  await rm(join(fixture.repository, "infra", "net", "main.tf"));
+  await expect(fixture.prepare()).rejects.toThrow(
+    /"infra\/net\/main\.tf" is not in .*run the FCS CLI from its root/u,
+  );
+  await expect(fixture.prepareNormalized(preview)).rejects.toThrow(
+    /is not in/u,
+  );
+  await writeFile(join(fixture.repository, "infra", "net", "main.tf"), "");
+  const otherUrl = "https://github.com/example/other";
   const wrongReport = structuredClone(preview);
   wrongReport.report!["repositoryUrl"] = otherUrl;
   await expect(fixture.prepareNormalized(wrongReport)).rejects.toThrow(
-    /repository/i,
+    /different repository/u,
   );
   const wrongRow = structuredClone(preview);
   wrongRow.findings[0]!.evidence.source_data!["repository_url"] = otherUrl;
   await expect(fixture.prepareNormalized(wrongRow)).rejects.toThrow(
-    /repository/i,
+    /different repository/u,
   );
   await expect(
     prepareNormalizedLocalImport(
@@ -270,7 +364,7 @@ test("file and normalized imports verify the repository, even for empty selectio
   fixture.git("remote", "set-url", "origin", otherUrl);
   for (const rule_detections of [[misconfiguration], []]) {
     await fixture.writeJson({ ...report, rule_detections });
-    await expect(fixture.prepare()).rejects.toThrow(/remote|checkout/i);
+    await expect(fixture.prepare()).rejects.toThrow(/fetch remote/u);
   }
 });
 

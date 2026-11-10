@@ -239,7 +239,12 @@ export async function readExternalFindings(
   }
   if (provider === "crowdstrike") {
     if (target === "cloud") requireCloudReader(options);
-    return { findings: await readCrowdStrikeFindings(path, url) };
+    return {
+      findings: await readCrowdStrikeFindings(
+        path,
+        options.sourceRepositoryUrl,
+      ),
+    };
   }
   if (provider === "sonar") {
     const findings = await readSonarFindings(path, url, target);

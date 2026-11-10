@@ -54,8 +54,8 @@ import {
   tenableSourceRepository,
 } from "./tenable-findings.js";
 import {
+  crowdstrikeCheckout,
   crowdstrikeReportFormat,
-  crowdstrikeSourceRepository,
 } from "./crowdstrike-findings.js";
 import {
   guardianFindingRepository,
@@ -816,24 +816,11 @@ export async function prepareLocalImport(
     dependabotSource = native;
   }
   const context = await localContext(options.repository, dependencies);
-  if (options.provider === "tenable" || options.provider === "crowdstrike") {
-    const url = (
-      options.provider === "tenable"
-        ? tenableSourceRepository
-        : crowdstrikeSourceRepository
-    )(current, options.sourceRepositoryUrl, [
-      ...readerSources,
-      ...parsedSources,
-    ]);
-    const { hostname } = new URL(url);
-    const source = {
-      url,
-      platform: isGitHubCloudHost(hostname)
-        ? "github"
-        : hostname === "gitlab.com"
-          ? "gitlab"
-          : undefined,
-    };
+  // Neither report records the checkout, so check the operator's URL against its remotes.
+  const requireFetchRemote = async (
+    source: { url: string; platform?: string },
+    provider: keyof typeof LOCAL_ONLY_PROVIDERS,
+  ) => {
     const remotes = await readHostedGitRemotes(
       context.repository,
       [
@@ -848,9 +835,32 @@ export async function prepareLocalImport(
     );
     if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
       throw new CodexSecurityError(
-        `${LOCAL_ONLY_PROVIDERS[options.provider]}'s source repository must match a configured Git fetch remote of the selected checkout.`,
+        `${LOCAL_ONLY_PROVIDERS[provider]}'s source repository must match a configured Git fetch remote of the selected checkout.`,
       );
+  };
+  if (options.provider === "tenable") {
+    await requireFetchRemote(
+      tenableSourceRepository(current, options.sourceRepositoryUrl, [
+        ...readerSources,
+        ...parsedSources,
+      ]),
+      "tenable",
+    );
     return preparedLocalStorage(current, options, context, dependencies, true);
+  }
+  if (options.provider === "crowdstrike") {
+    const source = await crowdstrikeCheckout(
+      current,
+      options.sourceRepositoryUrl,
+      [...readerSources, ...parsedSources],
+      context.repository,
+    );
+    // FCS scans plain directories; only a Git checkout has remotes to compare.
+    const bound =
+      source !== undefined &&
+      (await hasGitMetadata(context.repository, dependencies.signal));
+    if (bound) await requireFetchRemote(source, "crowdstrike");
+    return preparedLocalStorage(current, options, context, dependencies, bound);
   }
   const { repository, options: workbenchOptions } = context;
   const sources = new Map<string, ExternalSourceRepository>();

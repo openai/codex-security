@@ -1,3 +1,5 @@
+import { lstat } from "node:fs/promises";
+import { join } from "node:path";
 import { CodexSecurityError } from "./errors.js";
 import type {
   ExternalFindings,
@@ -7,6 +9,7 @@ import {
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
+import { isGitHubCloudHost } from "./git-remote.js";
 import {
   array,
   normalizeRecords,
@@ -33,6 +36,12 @@ function joined(...values: (string | null)[]): string | null {
   return values.filter((value) => value !== null).join("\n\n") || null;
 }
 
+function positive(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
+}
+
 // FCS writes paths relative to its working directory. A remote git:: scan
 // writes them relative to the clone root with a leading slash.
 function detectionPath(detection: NativeRecord, remote: boolean) {
@@ -45,34 +54,40 @@ function detectionPath(detection: NativeRecord, remote: boolean) {
   return path;
 }
 
-function detectionLine(detection: NativeRecord): number | null {
-  const line = detection["line"];
-  return typeof line === "number" && Number.isSafeInteger(line) && line > 0
-    ? line
-    : null;
+// A detection in a registry or Git module names the calling file, but its line
+// is inside the module. FCS states the call line only in module_remediation.
+function detectionLine(detection: NativeRecord, path: string): number | null {
+  const line = positive(detection["line"]);
+  const source = text(detection["module_source"]);
+  if (
+    detection["is_from_module"] !== true ||
+    !source ||
+    path.startsWith(`${source}/`)
+  )
+    return line;
+  const call = /called by (.+?) at line (\d+)\b/u.exec(
+    text(detection["module_remediation"]) ?? "",
+  );
+  return call?.[1] === path ? positive(Number(call[2])) : null;
 }
 
-function assertRepository(claim: unknown, expected: string) {
-  const url = declaredScannerRepositoryUrl(claim, "CrowdStrike", "local");
-  if (repositoryUrlKey(url) !== repositoryUrlKey(expected))
-    throw new CodexSecurityError(
-      "CrowdStrike repository URL does not match --source-repository-url.",
-    );
-}
-
-/** Verify retained identities when importing a normalized selection through the SDK. */
-export function crowdstrikeSourceRepository(
+/** Check repository claims, and that each finding's file is in the selected checkout. */
+export async function crowdstrikeCheckout(
   input: ExternalFindings,
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
-): string {
-  const url = declaredScannerRepositoryUrl(declared, "CrowdStrike", "local");
+  repository: string,
+): Promise<{ url: string; platform?: string } | undefined> {
   if (input.report?.["format"] !== crowdstrikeReportFormat)
     throw new CodexSecurityError(
       "CrowdStrike imports require a report from the crowdstrike reader.",
     );
-  assertRepository(input.report["repositoryUrl"], url);
-  for (const ref of references) assertRepository(ref.url, url);
+  const claims: unknown[] = [
+    declared,
+    input.report["repositoryUrl"],
+    ...references.map(({ url }) => url),
+  ];
+  const paths = new Set<string>();
   for (const { evidence } of input.findings) {
     validateExternalEvidence(evidence, "local");
     const data = evidence.source_data;
@@ -80,23 +95,57 @@ export function crowdstrikeSourceRepository(
       throw new CodexSecurityError(
         "CrowdStrike findings must retain their native detection.",
       );
-    assertRepository(data["repository_url"], url);
-    if (evidence.details?.repository?.url !== undefined)
-      assertRepository(evidence.details.repository.url, url);
+    claims.push(data["repository_url"], evidence.details?.repository?.url);
+    for (const { path } of evidence.locations ?? []) {
+      const file = repositoryFilePath(path);
+      if (!file)
+        throw new CodexSecurityError(
+          "CrowdStrike finding locations must be checkout-relative files.",
+        );
+      paths.add(file);
+    }
   }
-  return url;
+  const urls = claims
+    .filter((claim) => claim != null)
+    .map((claim) =>
+      declaredScannerRepositoryUrl(claim, "CrowdStrike", "local"),
+    );
+  if (new Set(urls.map((url) => repositoryUrlKey(url))).size > 1)
+    throw new CodexSecurityError(
+      "CrowdStrike findings name a different repository than --source-repository-url.",
+    );
+  // Paths are relative to where FCS ran, so a missing file means a different root or checkout.
+  for (const file of paths)
+    if (!(await lstat(join(repository, ...file.split("/"))).catch(() => null)))
+      throw new CodexSecurityError(
+        `${JSON.stringify(file)} is not in ${JSON.stringify(repository)}. Select the checkout that FCS scanned, and run the FCS CLI from its root.`,
+      );
+  const url = urls[0];
+  if (url === undefined) return undefined;
+  const { hostname } = new URL(url);
+  return {
+    url,
+    platform: isGitHubCloudHost(hostname)
+      ? "github"
+      : hostname === "gitlab.com"
+        ? "gitlab"
+        : undefined,
+  };
 }
 
-/** Read a saved FCS CLI 4.x IaC JSON report for one local checkout. */
+/** Read a saved FCS CLI 4.x IaC JSON report. */
 export async function readCrowdStrikeFindings(
   path: string,
-  sourceRepositoryUrl: string,
+  sourceRepositoryUrl?: string,
 ): Promise<ExternalFindings> {
-  const repositoryUrl = declaredScannerRepositoryUrl(
-    sourceRepositoryUrl,
-    "CrowdStrike",
-    "local",
-  );
+  const repositoryUrl =
+    sourceRepositoryUrl === undefined
+      ? undefined
+      : declaredScannerRepositoryUrl(
+          sourceRepositoryUrl,
+          "CrowdStrike",
+          "local",
+        );
   const document = record(await readScannerJson(path), "CrowdStrike report");
   if (!Array.isArray(document["rule_detections"]))
     throw new CodexSecurityError(
@@ -123,19 +172,16 @@ export async function readCrowdStrikeFindings(
         rule["rule_category"] === "Secret Management" ? "secret" : "iac";
       const reason = text(detection["reason"]);
       const recommendation = text(detection["recommendation"]);
+      const file = detectionPath(detection, remote);
       return validateExternalEvidence(
         {
           title: requiredText(rule["rule_name"], "CrowdStrike rule_name"),
           severity: scannerSeverity(text(rule["severity"])?.toLowerCase()),
           description: joined(text(rule["description"]), reason),
-          locations: [
-            {
-              path: detectionPath(detection, remote),
-              line: detectionLine(detection),
-            },
-          ],
+          locations: [{ path: file, line: detectionLine(detection, file) }],
           source_scan_id: text(document["scan_uuid"]),
-          details: {
+          // Typed IaC and secret details must name their source repository.
+          details: repositoryUrl && {
             kind,
             repository: { url: repositoryUrl },
             rule: {
@@ -161,7 +207,8 @@ export async function readCrowdStrikeFindings(
           },
           source_data: structuredClone({
             format: crowdstrikeReportFormat,
-            repository_url: repositoryUrl,
+            fcs_version: version,
+            ...(repositoryUrl && { repository_url: repositoryUrl }),
             rule,
             detection,
           }),
@@ -173,16 +220,17 @@ export async function readCrowdStrikeFindings(
       stableId("crowdstrike", [
         requiredText(rule["rule_uuid"], "CrowdStrike rule_uuid"),
         detectionPath(detection, remote),
-        detectionLine(detection),
+        positive(detection["line"]),
         detection["resource_type"] ?? null,
         detection["resource_name"] ?? null,
         detection["reason"] ?? null,
+        detection["module_path"] ?? null,
       ]),
     "local",
     {
       report: {
         format: crowdstrikeReportFormat,
-        repositoryUrl,
+        ...(repositoryUrl && { repositoryUrl }),
         fcs_version: version,
         scan_uuid: text(document["scan_uuid"]),
       },

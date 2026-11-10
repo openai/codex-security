@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import { asRecord } from "./record.js";
+import { isGitHubCloudHost } from "./git-remote.js";
 import type {
   ExternalFindings,
   ExternalSourceRepository,
@@ -73,7 +74,7 @@ export function tenableSourceRepository(
   input: ExternalFindings,
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
-): string {
+) {
   const url = declaredScannerRepositoryUrl(declared, "Tenable", "local");
   const asset = asRecord(input.report?.["asset"]);
   if (
@@ -105,7 +106,15 @@ export function tenableSourceRepository(
     if (evidence.details?.repository?.url !== undefined)
       assertRepository(evidence.details.repository.url, url);
   }
-  return url;
+  const { hostname } = new URL(url);
+  return {
+    url,
+    platform: isGitHubCloudHost(hostname)
+      ? "github"
+      : hostname === "gitlab.com"
+        ? "gitlab"
+        : undefined,
+  };
 }
 
 export async function readTenableFindings(
