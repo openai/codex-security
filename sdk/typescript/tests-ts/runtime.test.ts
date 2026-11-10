@@ -1,4 +1,5 @@
-import { runNodePython } from "./support/python-probe.js";
+import { execNodePython, runNodePython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import {
@@ -119,6 +120,11 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const { temporaryDirectory, cleanup, temporaryDirectories } =
   createApiTestFixtures("codex-security-runtime-");
+const pythonWithLauncher = useTestPython(false);
+const pythonOnPath =
+  process.platform === "win32"
+    ? pythonWithLauncher
+    : () => Bun.which("python3") ?? Bun.which("python");
 const testPosix = process.platform === "win32" ? test.skip : test;
 const restoreSpawn = (spawn: typeof childProcess.spawn) =>
   mock.module("node:child_process", () => ({ ...childProcess, spawn }));
@@ -530,7 +536,7 @@ describe("plugin runtime preparation", () => {
   );
 
   test("preserves remediation when the filesystem device changes", async () => {
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     expect(python).not.toBeNull();
     const target = await temporaryDirectory("codex-security-remounted-target-");
     const verification = runNodePython(python!, [
@@ -3327,7 +3333,8 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
       // chmod; fall back to the process temp root when it is already sticky.
-      let stickyParent = join(root, "shared");
+      const shared = join(root, "shared");
+      let stickyParent = shared;
       await mkdir(stickyParent, { mode: 0o1777 });
       await chmod(stickyParent, 0o1777);
       if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
@@ -3340,7 +3347,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.track(stateDirectory);
+      if (stickyParent !== shared) temporaryDirectories.track(stateDirectory);
       await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -6027,7 +6034,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await mkdir(stateDirectory);
     await mkdir(scanDirectory, { mode: 0o700 });
 
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     expect(python).not.toBeNull();
     const fixture = runNodePython(python!, [
       "-c",
@@ -6142,7 +6149,7 @@ describe("runtime directories and plugin Python boundary", () => {
   ] as const)(
     "rejects recipe scans when the agent did not create %s",
     async (_description, present) => {
-      const python = Bun.which("python3") ?? Bun.which("python");
+      const python = pythonOnPath();
       expect(python).not.toBeNull();
       const requiredDrafts = ["scan-manifest.json", "findings.json"] as const;
       const root = await temporaryDirectory("codex-security-missing-drafts-");
@@ -6362,7 +6369,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.track(output);
+      if (stickyParent !== shared) temporaryDirectories.track(output);
 
       await expect(
         requireSecureOutputAncestry(output),
@@ -6397,6 +6404,31 @@ describe("runtime directories and plugin Python boundary", () => {
       requireTrustedOutputAncestor({ mode: 0o41777, uid: 0 }, "/tmp", 1000),
     ).not.toThrow();
   });
+
+  testPosix.each([
+    [230, "a".repeat(230)],
+    [250, "é".repeat(125)],
+  ] as const)(
+    "previews and archives a %i-byte output name",
+    async (_bytes, name) => {
+      const root = await temporaryDirectory();
+      const output = join(root, name);
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, "report.md"), "first report");
+      const preview = await planOutputArchive(output);
+      expect(dirname(preview!)).toBe(root);
+      await expect(lstat(preview!)).rejects.toMatchObject({ code: "ENOENT" });
+      const archived: string[] = [];
+      await prepareOutputDir(output, "repo", root, undefined, true, (path) => {
+        archived.push(path);
+      });
+      expect(archived).toHaveLength(1);
+      expect(await readFile(join(archived[0]!, "report.md"), "utf8")).toBe(
+        "first report",
+      );
+      expect(await readdir(output)).toEqual([]);
+    },
+  );
 
   test("prepares an output directory without moving prior results", async () => {
     const root = await temporaryDirectory();
@@ -6639,6 +6671,23 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "creates private scan directories for a maximum-length repository name",
+    async () => {
+      const root = await realpath(await temporaryDirectory());
+      const repositoryName = "r".repeat(255);
+      const outputs = await Promise.all([
+        prepareOutputDir(undefined, repositoryName, root),
+        prepareOutputDir(undefined, repositoryName, root),
+      ]);
+      expect(new Set(outputs).size).toBe(2);
+      for (const output of outputs) {
+        expect(dirname(output)).toBe(root);
+        expect((await stat(output)).mode & 0o777).toBe(0o700);
+      }
+    },
+  );
+
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
@@ -6766,8 +6815,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("resolves inherited Python names case-insensitively", async () => {
-    const discovered =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    const discovered = pythonWithLauncher();
     expect(discovered).not.toBeNull();
     const interpreter = join(
       await realpath(dirname(discovered!)),
@@ -7080,7 +7128,7 @@ describe("runtime directories and plugin Python boundary", () => {
   test.skipIf(process.platform !== "win32")(
     "uses a configured Windows Python path without the executable suffix",
     async () => {
-      const discovered = Bun.which("python3") ?? Bun.which("python");
+      const discovered = pythonOnPath();
       expect(discovered).not.toBeNull();
       if (discovered === null) return;
       const python = await realpath(discovered);
@@ -7106,9 +7154,18 @@ describe("runtime directories and plugin Python boundary", () => {
     async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
-      const installedPython = process.env["PYTHON"] ?? Bun.which("python");
-      expect(installedPython).not.toBeNull();
-      if (installedPython === null) return;
+      let installedPython = process.env["PYTHON"];
+      if (installedPython === undefined) {
+        const command = pythonWithLauncher();
+        expect(command).not.toBeNull();
+        if (command === null) return;
+        // The Windows py launcher and the interpreter's DLLs can live in different directories.
+        installedPython = execNodePython(
+          command,
+          ["-X", "utf8", "-c", "import sys; print(sys.executable)"],
+          process.env,
+        ).trimEnd();
+      }
       await mkdir(repository);
       const launcher = join(root, "py.exe");
       await copyFile(installedPython, launcher);

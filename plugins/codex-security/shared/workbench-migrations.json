@@ -522,5 +522,12 @@
     "version": 64,
     "name": "persist scan log completion boundaries",
     "statements": ["ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"]
+  },
+  {
+    "version": 65,
+    "name": "bind Windows Deep Scan resume output directories",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_output_identity TEXT;"
+    ]
   }
 ]

@@ -1369,7 +1369,10 @@ def require_remediation_target(value: str) -> Path:
         raise SystemExit("Remediation target must be an absolute local directory path.")
     try:
         resolved = stored.resolve(strict=True)
-    except (FileNotFoundError, OSError) as exc:
+    except NotADirectoryError:
+        # A component of the recorded checkout path now names a non-directory.
+        resolved = None
+    except OSError as exc:
         raise SystemExit(
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc

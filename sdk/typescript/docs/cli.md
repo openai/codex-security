@@ -538,7 +538,9 @@ through inheritance. Other users must not have permission to set reparse data
 on the destination directory itself.
 `--archive-existing` moves earlier output to a sibling directory with a unique
 suffix, such as `results.previous-ab12cd34` for an output directory named
-`results`. Use `--dry-run` to preview the move.
+`results`. If adding the suffix exceeds the filesystem's filename limit on POSIX,
+the archive uses a short sibling name starting with `.previous-` and a hash of the
+original filename. Use `--dry-run` to preview the move.
 
 Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
 optional export fails, the scan can still complete. Use the
@@ -1140,6 +1142,11 @@ and does not migrate existing credentials or reports.
 Sandbox startup errors include the native diagnostic followed by a command to
 reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
 
+If Windows Application Control blocks `windows.node` while validating a scan
+output directory, look for the module's block event in Event Viewer under
+Applications and Services Logs → Microsoft → Windows → CodeIntegrity → Operational.
+[Microsoft's App Control event reference](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/operations/event-id-explanations)
+
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
 the credential home and its descendants; it does not change ancestor ownership
@@ -1219,8 +1226,9 @@ work is needed, the scan is preserved and you can run `scans match --all`.
 
 A scan with a cost limit requires complete token usage for its recorded scan,
 worker, and custom validation sessions before the SDK returns a completed result.
-Verifying compressed `.jsonl.zst` sessions requires Python 3.14 or later, or
-`backports.zstd` installed in the selected Python environment.
+The workbench reads compressed `.jsonl.zst` sessions with `compression.zstd`
+(Python 3.14+) or `backports.zstd` when available. Otherwise it uses the
+Node.js decoder bundled with the plugin.
 Missing or unreadable usage fails budget verification. Without a limit, usage
 reporting remains best effort.
 
@@ -2127,6 +2135,11 @@ codex-security scans resume SCAN_ID
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
+
+On Windows, keep the protected `.codex-security-resume` directory in the scan
+output. It lets the workbench verify the original output even before the first
+checkpoint. If an older scan stopped with an empty output, start a new scan with
+`codex-security scans rerun SCAN_ID`.
 
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
 settings/instructions. Knowledge-bearing scans save their extracted documents in

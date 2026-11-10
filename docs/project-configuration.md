@@ -228,7 +228,9 @@ the file loader also returns
 `projectConfig` path and source metadata. The optional directory argument defaults
 to the current directory. It locates a selected file or anchors an in-memory
 object's context, prompt, and output paths. Files anchor those paths to their own
-directory. Neither helper reads prompt contents or prepares a runtime.
+directory. On POSIX, `link/../scan.yaml` selects the file in the parent of
+the directory that `link` points to. Neither helper reads prompt contents or
+prepares a runtime.
 Resolved context, prompt, and output paths have the SDK's `AbsolutePath` type;
 scope paths remain relative to the selected repository.
 
