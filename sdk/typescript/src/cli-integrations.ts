@@ -1,7 +1,6 @@
-import { Cli, Completions, Help, SyncMcp, SyncSkills, z } from "incur";
-import { execFile } from "node:child_process";
-import { dirname, join } from "node:path";
-import { parseArgs, promisify } from "node:util";
+import { Cli, Completions, Help, SyncSkills, z } from "incur";
+import { parseArgs } from "node:util";
+import { registerMcp } from "./cli-mcp.js";
 
 const cliName = "codex-security";
 const shells = z.enum(["bash", "fish", "nushell", "zsh"]);
@@ -188,18 +187,12 @@ export async function serveIntegration(
             "The MCP installer can register Amp only in the user profile. For a project installation, select a project-capable client with --no-global --agent NAME.",
           );
         const launch = options.command ?? cliOptions.mcp!.command!;
-        const result =
-          options.noGlobal && !agents.length
-            ? await registerProjectMcp(launch)
-            : await SyncMcp.register(cliName, {
-                agents,
-                command: launch,
-                global: !options.noGlobal,
-              });
-        if (agents.includes("amp") && !result.agents.includes("Amp"))
-          throw new Error(
-            "The Amp settings file could not be updated. Check its JSON and retry.",
-          );
+        const result = await registerMcp(
+          cliName,
+          launch,
+          agents,
+          options.noGlobal === true,
+        );
         if (plain)
           return [
             `✓ Registered ${cliName} as MCP server`,
@@ -296,45 +289,4 @@ export async function serveIntegration(
   args.splice(groupToken.index, 1);
   await section.serve(args, output);
   return true;
-}
-
-// Incur also writes Amp's home settings after add-mcp finishes selecting
-// project clients. Invoke only the project-capable installer in this case.
-async function registerProjectMcp(
-  command: string,
-): Promise<SyncMcp.register.Result> {
-  const args = ["add-mcp", command, "--name", cliName, "-y"];
-  const userAgent = process.env["npm_config_user_agent"] ?? "";
-  const npm = process.env["npm_execpath"];
-  const runner = userAgent.startsWith("pnpm/")
-    ? "pnpx"
-    : userAgent.startsWith("bun/")
-      ? "bunx"
-      : "npx";
-  let executable: string = runner;
-  if (runner === "npx" && process.platform === "win32") {
-    const npx =
-      npm && /[\\/]npm-cli\.js$/iu.test(npm)
-        ? join(dirname(npm), "npx-cli.js")
-        : join(
-            dirname(process.execPath),
-            "node_modules",
-            "npm",
-            "bin",
-            "npx-cli.js",
-          );
-    executable = process.execPath;
-    args.unshift(npx);
-  } else if (runner === "pnpx" && npm && /\.(?:c?js|mjs)$/iu.test(npm)) {
-    executable = process.execPath;
-    args.unshift(npm, "dlx");
-  }
-  const { stdout } = await promisify(execFile)(executable, args, {
-    encoding: "utf8",
-  });
-  const agents = stdout.split("\n").flatMap((line) => {
-    const match = /[✓✔]\s*([^:│┃|]+):/u.exec(line);
-    return match ? [match[1]!.trim()] : [];
-  });
-  return { command, agents };
 }

@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  readFile,
+  readdir,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { runCommand } from "./support/shell.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -63,6 +71,16 @@ describe("integration command dispatch", () => {
     { args: ["skills", "add", "--depth", "NaN"], mode: "error" },
     { args: ["skills", "list", "--depth=NaN"], mode: "error" },
     { args: ["mcp", "add", "--agent", "amp", "--no-global"], mode: "error" },
+    {
+      args: [
+        "mcp",
+        "add",
+        "--agent=cursor",
+        "--agent=claude-desktop",
+        "--no-global",
+      ],
+      mode: "error",
+    },
     { args: ["--mcp", "--help"], mode: "help" },
   ])(
     "leaves both installation scopes untouched for $args",
@@ -145,31 +163,65 @@ describe("integration command dispatch", () => {
     expect(await readdir(project)).toEqual([]);
   }, 30_000);
 
-  test("automatic project registration delegates to project discovery without touching Amp user settings", async () => {
+  test("registers selected clients from the installed SDK with no package runners on PATH", async () => {
     await using temp = await scopedTemporaryDirectory("cli-project-clients-");
-    const runner = join(temp.path, "pnpm.cjs");
-    await writeFile(
-      runner,
-      'require("node:fs").writeFileSync("selected.json", JSON.stringify(process.argv.slice(2))); console.log("✓ Editor: project");',
-    );
     const { home, project, run } = await isolatedCli(temp.path, {
+      PATH: join(temp.path, "no-executables"),
       npm_config_user_agent: "pnpm/11",
-      npm_execpath: runner,
+      npm_execpath: join(temp.path, "unavailable-pnpm.cjs"),
     });
-    const result = await run("mcp", "add", "--no-global", "--json");
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).agents).toEqual(["Editor"]);
-    expect(
-      JSON.parse(await readFile(join(project, "selected.json"), "utf8")),
-    ).toEqual([
-      "dlx",
-      "add-mcp",
-      "npx --yes @openai/codex-security --mcp",
-      "--name",
-      "codex-security",
-      "-y",
-    ]);
+    await mkdir(join(project, ".cursor"));
+    const decoy = join(project, "node_modules", "add-mcp");
+    await mkdir(decoy, { recursive: true });
+    await writeFile(
+      join(decoy, "package.json"),
+      JSON.stringify({ name: "add-mcp", main: "missing.js" }),
+    );
+    const local = await run("mcp", "add", "--no-global", "--json");
+    expect(local.status).toBe(0);
+    expect(JSON.parse(local.stdout).agents).toEqual(["Cursor"]);
+    const projectConfig = JSON.parse(
+      await readFile(join(project, ".cursor", "mcp.json"), "utf8"),
+    );
+    expect(projectConfig.mcpServers["codex-security"]).toMatchObject({
+      command: "npx",
+      args: ["--yes", "@openai/codex-security", "--mcp"],
+    });
     expect(await readdir(home)).toEqual([]);
+    const global = await run(
+      "mcp",
+      "add",
+      "--agent=cursor",
+      "--command",
+      "my-tool --mcp",
+      "--json",
+    );
+    expect(global.status).toBe(0);
+    expect(JSON.parse(global.stdout).agents).toEqual(["Cursor"]);
+    const userConfig = JSON.parse(
+      await readFile(join(home, ".cursor", "mcp.json"), "utf8"),
+    );
+    expect(userConfig.mcpServers["codex-security"]).toMatchObject({
+      command: "my-tool",
+      args: ["--mcp"],
+    });
+  }, 30_000);
+
+  test("project registration keeps linked configurations inside the project", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-project-links-");
+    const { home, project, run } = await isolatedCli(temp.path);
+    const dir = join(project, ".cursor");
+    const external = join(home, "mcp.json");
+    const register = () =>
+      run("mcp", "add", "--agent=cursor", "--no-global", "--json");
+    await writeFile(external, "{}");
+    await symlink(home, dir, process.platform === "win32" ? "junction" : "dir");
+    expect((await register()).status).toBe(2);
+    await unlink(dir);
+    await mkdir(dir);
+    await link(external, join(dir, "mcp.json"));
+    expect((await register()).status).toBe(2);
+    expect(await readFile(external, "utf8")).toBe("{}");
   }, 30_000);
 
   test("explicit JSON returns a parseable MCP installer result", async () => {

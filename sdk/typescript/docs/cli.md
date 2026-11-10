@@ -2708,7 +2708,9 @@ For both installers, `--help`, `--schema`, and `--version` can be inspected
 before writing any configuration.
 
 `mcp add` registers in the user profile by default. `mcp add --no-global`
-selects project-capable clients. For example, use
+selects project-capable clients. Registration uses the client adapters installed
+with the SDK. Selecting a user-only client in project scope fails before the
+CLI writes configuration. For example, use
 `mcp add --no-global --agent cursor` to target Cursor. The built-in Amp
 registration supports only user settings. `mcp doctor` checks the current CLI's
 server startup and tool catalog. To verify a registered launcher, connect from
