@@ -1044,11 +1044,12 @@ def pinned_root_git_marker(
         not cwd.is_absolute()
         or not metadata.is_absolute()
         or len(cwd.drive) != 2
-        or cwd.drive != metadata.drive
+        or len(metadata.drive) != 2
         or len(work_tree.parts) < 2
         or cwd.parts[: len(work_tree.parts)] != work_tree.parts
         or len(metadata.parts) < 2
         or _GetDriveTypeW(cwd.anchor) != _DRIVE_FIXED
+        or _GetDriveTypeW(metadata.anchor) != _DRIVE_FIXED
     ):
         yield None
         return
