@@ -15,7 +15,8 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { shortArchivePrefix } from "./scan-archive-path.js";
 import {
   chmodSync,
   close as closeCallback,
@@ -2154,10 +2155,10 @@ export async function planOutputArchive(
   // The workbench reserves a sibling with an eight-character random suffix.
   const sibling = `${outputDirectory}.previous-${id}`;
   if (!(await archiveNameTooLong(sibling))) return sibling;
-  const digest = createHash("sha256")
-    .update(basename(outputDirectory))
-    .digest("hex");
-  return join(dirname(outputDirectory), `.previous-${digest}-${id}`);
+  return join(
+    dirname(outputDirectory),
+    shortArchivePrefix(basename(outputDirectory)) + id,
+  );
 }
 
 async function archiveNameTooLong(path: string): Promise<boolean> {

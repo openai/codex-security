@@ -1,4 +1,5 @@
 import { writeJsonLines } from "./support/json.js";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -173,9 +174,14 @@ describe("saved scan logs", () => {
     expect(result.sessions.map(({ threadId }) => threadId)).toEqual(["parent"]);
   });
 
-  test.each([false, true])(
-    "collects parentless comparisons inside a shared Desktop scan window (archived: %p)",
-    async (archived) => {
+  test.each([
+    "original",
+    "legacy archive",
+    "short archive",
+    "unrelated short archive",
+  ])(
+    "collects parentless comparisons inside a shared Desktop scan window (%s)",
+    async (layout) => {
       const home = await temporaryHome();
       const scanDir = join(home, "scan");
       const cwd = join(scanDir, "artifacts", "deep_discovery");
@@ -213,10 +219,27 @@ describe("saved scan logs", () => {
         "2026-08-02T01:00:00Z",
         cwd,
       );
+      await writeSession(
+        home,
+        "unbound-sibling",
+        [],
+        undefined,
+        "2026-08-02T01:00:00Z",
+        join(home, "scan-other", "artifacts"),
+      );
+      const digest = createHash("sha256")
+        .update(layout === "unrelated short archive" ? "scan-other" : "scan")
+        .digest("hex");
+      const directory =
+        layout === "original"
+          ? scanDir
+          : layout === "legacy archive"
+            ? scanDir + ".previous-test"
+            : join(home, `.previous-${digest}-test`);
       const result = await readSavedScanLogs(
         {
           scanId: "scan-1",
-          scanDir: archived ? scanDir + ".previous-test" : scanDir,
+          scanDir: directory,
           mode: "deep",
           continuationThreadId: "owner",
           lifecycle: {
@@ -228,11 +251,11 @@ describe("saved scan logs", () => {
         },
         home,
       );
-      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
-        "comparison",
-        "owner",
-        "worker",
-      ]);
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+        layout === "unrelated short archive"
+          ? ["owner", "worker"]
+          : ["comparison", "owner", "worker"],
+      );
     },
   );
 
@@ -832,6 +855,11 @@ describe("saved scan logs", () => {
     ]);
     expect(JSON.stringify(archivedLogs)).toContain("review archived scan");
     expect(JSON.stringify(archivedLogs)).not.toContain("PRIVATE REPLACEMENT");
+    const digest = createHash("sha256").update("results").digest("hex");
+    const shortArchive = join(home, "scans", `.previous-${digest}-a1b2c3d4`);
+    expect(
+      await readScanLogs({ ...options, scanDirectory: shortArchive }),
+    ).toEqual(archivedLogs);
 
     for (const logCompletedAt of [null, undefined]) {
       const legacyLogs = await readSavedScanLogs(

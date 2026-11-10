@@ -1,4 +1,4 @@
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
 import { parseJson } from "./value.js";
@@ -13,6 +13,7 @@ import {
   sessionStartedAt,
 } from "./scan-sessions.js";
 import { compareTimestamps } from "./timestamps.js";
+import { shortArchivePrefix } from "./scan-archive-path.js";
 
 interface ScanLogOptions {
   scanId: string;
@@ -164,12 +165,34 @@ export async function readScanLogs(options: ScanLogOptions) {
   if (options.scanDirectory && startedAt !== null) {
     const directories = [options.scanDirectory];
     const name = basename(options.scanDirectory);
+    const parent = dirname(options.scanDirectory);
+    const originals = new Set<string>();
     for (const marker of name.matchAll(/\.previous-/g)) {
-      if (!marker.index) continue;
-      const original = join(
-        dirname(options.scanDirectory),
-        name.slice(0, marker.index),
-      );
+      if (marker.index)
+        originals.add(join(parent, name.slice(0, marker.index)));
+    }
+    if (name.startsWith(".previous-")) {
+      // A short archive has no readable source name. Only already-bound
+      // sessions can supply a sibling whose complete filename matches its hash.
+      const boundCwds = [
+        root?.workingDirectory,
+        ...Array.from(traversed, (id) => logs.get(id)?.[0].workingDirectory),
+      ];
+      for (const cwd of boundCwds) {
+        if (!cwd) continue;
+        const path = relative(parent, cwd);
+        const sibling = path.split(sep, 1)[0];
+        if (
+          sibling &&
+          sibling !== ".." &&
+          !isAbsolute(path) &&
+          name.startsWith(shortArchivePrefix(sibling))
+        ) {
+          originals.add(join(parent, sibling));
+        }
+      }
+    }
+    for (const original of originals) {
       // A Desktop owner can work outside the scan directory. Its registered
       // workers provide the same binding after archiving the output.
       if (
