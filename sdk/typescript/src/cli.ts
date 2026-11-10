@@ -1624,6 +1624,9 @@ function signalHandlers(
   dependencies[`${operation}SignalListener`]("SIGTERM", terminate);
 }
 
+// Login and status must not load configuration from the caller's checkout.
+const NEUTRAL_CODEX_CWD = parse(process.execPath).root;
+
 export async function runCodexSkillCommand(
   args: readonly string[],
   output?: SkillCommandOutput,
@@ -1899,7 +1902,7 @@ async function runCodexSkillProcess(
       [...args],
       {
         env: environment,
-        cwd: output?.appServer?.directory ?? parse(process.execPath).root,
+        cwd: output?.appServer?.directory ?? NEUTRAL_CODEX_CWD,
         stdio:
           output === undefined
             ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
@@ -7510,6 +7513,9 @@ export async function main(
               resolveCodexCommand(environment),
               ["login", "status"],
               environment,
+              undefined,
+              undefined,
+              { cwd: NEUTRAL_CODEX_CWD },
             );
             for (const diagnostic of [native.stdout, native.stderr]) {
               if (diagnostic.trim())
