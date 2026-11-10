@@ -1700,7 +1700,9 @@ def test_root_git_marker_declines_unsupported_paths_without_opening_directories(
 ) -> None:
     import windows_scan_local_files as windows_files
 
-    monkeypatch.setattr(windows_files, "_GetDriveTypeW", lambda _anchor: 3)
+    monkeypatch.setattr(
+        windows_files, "_GetDriveTypeW", lambda anchor: 4 if anchor == "D:\\" else 3
+    )
 
     def unexpected_open(*_args, **_kwargs):
         pytest.fail("unsupported paths must be declined before opening directories")
@@ -1708,6 +1710,7 @@ def test_root_git_marker_declines_unsupported_paths_without_opening_directories(
     monkeypatch.setattr(windows_files, "_open_directory", unexpected_open)
     for target, metadata in (
         (r"C:\repo", r"D:\metadata"),
+        (r"C:\repo", r"\\server.invalid\share\metadata"),
         (r"\\?\C:\repo", r"\\?\C:\metadata"),
         (r"\\server.invalid\share\repo", r"\\server.invalid\share\metadata"),
         (r"C:checkout", r"C:\metadata"),
@@ -1719,6 +1722,52 @@ def test_root_git_marker_declines_unsupported_paths_without_opening_directories(
     for cwd in (Path(r"C:\repo-other\scope"), root / ".." / "scope", Path(r"D:\repo\scope")):
         with windows_files.pinned_root_git_marker(cwd, root / ".git", work_tree=root) as selected:
             assert selected is None
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows drive semantics")
+def test_root_git_marker_pins_the_checkout_and_metadata_on_independent_fixed_drives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import MagicMock
+
+    import windows_scan_local_files as windows_files
+
+    root, metadata = Path(r"C:\worktree"), Path(r"D:\metadata")
+    scope = root / "selected"
+    marker = tmp_path / "gitfile"
+    marker.write_bytes(f"gitdir: {metadata.as_posix()}\n".encode())
+    drives = []
+    opened = []
+
+    def fixed_drive(anchor):
+        drives.append(anchor)
+        return 3
+
+    def open_fixture(path):
+        opened.append(path)
+        return MagicMock(value=path)
+
+    monkeypatch.setattr(windows_files, "_GetDriveTypeW", fixed_drive)
+    monkeypatch.setattr(windows_files, "_open_directory", open_fixture)
+
+    monkeypatch.setattr(windows_files, "_final_path", windows_files._extended_path)
+
+    def open_marker(parent, name, context):
+        assert (parent, name) == (root, ".git")
+        return os.open(marker, os.O_RDONLY | os.O_BINARY), name
+
+    monkeypatch.setattr(windows_files, "open_read_fd_with_path", open_marker)
+    with windows_files.pinned_root_git_marker(scope, metadata, work_tree=root) as selected:
+        assert selected == Path("..", ".git")
+        assert opened == [
+            Path(root.anchor),
+            root,
+            scope,
+            Path(metadata.anchor),
+            metadata,
+        ]
+    assert set(drives) == {root.anchor, metadata.anchor}
 
 
 @pytest.mark.native_windows
