@@ -482,7 +482,25 @@ async function securityPolicyPaths(
     const directory = directories.pop()!;
     if (isGitData(directory)) continue;
     const entries = await readdir(directory, { withFileTypes: true });
-    if (await isGitMetadataDirectory(directory, signal)) {
+    let gitMetadata: boolean;
+    try {
+      gitMetadata = await isGitMetadataDirectory(directory, signal);
+    } catch (error) {
+      // POSIX can permit listing a directory but deny lookups of its children.
+      // A leaf containing only unrelated regular files needs no further lookups.
+      if (
+        process.platform !== "win32" &&
+        (error as NodeJS.ErrnoException).code === "EACCES" &&
+        entries.every(
+          (entry) =>
+            entry.isFile() &&
+            !/^(?:\.git|HEAD|SECURITY\.md)$/iu.test(entry.name),
+        )
+      )
+        continue;
+      throw error;
+    }
+    if (gitMetadata) {
       gitDirectories.add(directory);
       const common = await readFile(join(directory, "commondir"), "utf8").catch(
         nullIfMissingFile,

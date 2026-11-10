@@ -59,6 +59,7 @@
 - update install-action to v2.90.0 ([#2561](https://github.com/openai/codex-security/pull/2561))
 - isolate Git display settings in content snapshots ([#2568](https://github.com/openai/codex-security/pull/2568))
 - preserve native filename bytes in SQLite URIs ([#2571](https://github.com/openai/codex-security/pull/2571))
+- inventory policies in list-only POSIX directories ([#2572](https://github.com/openai/codex-security/pull/2572))
 
 </details>
 
