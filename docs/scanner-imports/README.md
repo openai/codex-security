@@ -90,9 +90,10 @@ For a Cloud import, check the receipt for the destination shown in the preview.
 | Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                                                    |
 
 To inspect published findings in Codex, [connect the Cloud app](../../sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
-and ask for imported findings in the destination repository. If the scanner has no
-filter in the findings view, use the source and finding IDs from your receipt to
-identify the record. For a private import, ask for your private import history.
+and ask for imported findings in the destination repository. The v4 findings
+view covers all the scanners above. If your Cloud app offers an older view
+that omits your scanner, use the CLI receipt and its readback counts to verify
+publication. For a private import, ask for your private import history.
 
 If the repository publisher requires a reported severity, the preview excludes
 findings whose severity the scanner left unknown. You can keep those findings
