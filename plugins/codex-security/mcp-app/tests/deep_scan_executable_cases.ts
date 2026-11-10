@@ -194,7 +194,12 @@ export async function testExecutorExecutablePinning({
         );
         assert.equal(
           resolveCodexPath(
-            { PATH: path.dirname(other), CODEX_CLI_PATH: bare },
+            {
+              PATH: [path.dirname(other), fixtures[0]!.root].join(
+                path.delimiter,
+              ),
+              CODEX_CLI_PATH: bare,
+            },
             process.platform,
             process.arch,
             fixtures[0]!.root,

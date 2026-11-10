@@ -201,6 +201,29 @@ try {
       }),
       fileCandidate,
     );
+    const trusted = path.join(executableFixtureRoot, "tools");
+    await mkdir(trusted);
+    await writeFile(
+      path.join(trusted, "python3"),
+      "#!/bin/sh\n/bin/cat >/dev/null\nprintf trusted",
+      {
+        mode: 0o700,
+      },
+    );
+    const previousPath = process.env.PATH;
+    try {
+      process.env.PATH = [trusted, executableFixtureRoot].join(path.delimiter);
+      const command = await resolvePythonCommand({
+        configuredPython: "python3 ",
+      });
+      assert.equal(
+        await runPythonWithInput(command, [], "", "fixture"),
+        "trusted",
+      );
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
   }
   process.env.PYTHON = ` ${fileCandidate} `;
   process.env.CODEX_SECURITY_PYTHON_COMMAND = resolvedPython;

@@ -1059,9 +1059,7 @@ export function resolveCodexPath(
     environmentVariable(env, "CODEX_CLI_PATH", platform),
     platform,
     (value) =>
-      isBareCommandName(value)
-        ? resolveFromSearchPath(searchPath, value, originalCwd) !== undefined
-        : isExecutableFile(absoluteCodexPath(value, platform, originalCwd)),
+      isExecutableFile(absoluteCodexPath(value, platform, originalCwd)),
   );
   if (configured && (platform !== "win32" || !isWindowsAppsPath(configured))) {
     if (isBareCommandName(configured)) {

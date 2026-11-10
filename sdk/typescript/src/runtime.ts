@@ -1,7 +1,7 @@
 import {
   configuredExecutableValue,
   executablePathForSpawn,
-  hasTrailingExecutableWhitespace,
+  isExplicitPathWithTrailingWhitespace,
   isExecutableFile,
 } from "./executable-path.js";
 import { retryWindowsRename } from "./retry-windows-rename.js";
@@ -3688,13 +3688,14 @@ export async function resolvePluginPython(
   }
   const inherited = environmentValue(environment, "PYTHON", true);
   if (inherited) {
-    const pathLike = isPythonPathCandidate(inherited);
-    const roots = pathLike ? protectedRoot : discoveryRoots;
-    // Check the literal spelling with the same PATH and repository protections as the launch.
+    const roots = isPythonPathCandidate(inherited)
+      ? protectedRoot
+      : discoveryRoots;
+    // Check an explicit literal path with the same repository protections as the launch.
     const candidate =
-      hasTrailingExecutableWhitespace(inherited, process.platform) &&
+      isExplicitPathWithTrailingWhitespace(inherited, process.platform) &&
       (await resolveTrustedExecutable(
-        pathLike ? expandHomeForLookup(inherited, environment) : inherited,
+        expandHomeForLookup(inherited, environment),
         environment,
         roots,
       ))

@@ -6946,22 +6946,26 @@ describe("runtime directories and plugin Python boundary", () => {
       await symlink(interpreter!, ordinary);
       await symlink(interpreter!, literal);
 
-      for (const [configured, name, expected] of [
-        [literal, "tool ", literal],
-        [` ${ordinary} `, " tool ", ordinary],
+      for (const [configured, expected] of [
+        [literal, literal],
+        [` ${ordinary} `, ordinary],
       ] as const) {
         expect(
           resolveCodexCommand({ CODEX_CLI_PATH: configured }).command,
         ).toBe(expected);
-        for (const python of [configured, name]) {
-          await expect(
-            resolvePluginPython({
-              environment: { PYTHON: python, PATH: tools },
-              protectedRoot: repository,
-            }),
-          ).resolves.toBe(expected);
-        }
+        await expect(
+          resolvePluginPython({
+            environment: { PYTHON: configured, PATH: tools },
+            protectedRoot: repository,
+          }),
+        ).resolves.toBe(expected);
       }
+      await expect(
+        resolvePluginPython({
+          environment: { PYTHON: "tool ", PATH: tools },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(ordinary);
 
       const paddedAbsolute = ` ${ordinary} `;
       const shadow = join(repository, paddedAbsolute);

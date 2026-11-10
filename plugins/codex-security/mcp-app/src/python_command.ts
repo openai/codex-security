@@ -38,19 +38,12 @@ export async function resolvePythonCommand(
   const configuredPython = configuredExecutableValue(
     options.configuredPython ?? process.env.PYTHON,
     platform,
-    (value) => {
-      const directories = value.includes("/")
-        ? [""]
-        : (process.env.PATH ?? "/usr/bin:/bin").split(":");
-      return directories.some((directory) => {
-        const candidate = directory ? `${directory}/${value}` : value;
-        return isExecutableFile(
-          candidate.startsWith("/")
-            ? candidate
-            : `${options.workingDirectory ?? process.cwd()}/${candidate}`,
-        );
-      });
-    },
+    (value) =>
+      isExecutableFile(
+        value.startsWith("/")
+          ? value
+          : `${options.workingDirectory ?? process.cwd()}/${value}`,
+      ),
   );
   if (configuredPython) return configuredPython;
 

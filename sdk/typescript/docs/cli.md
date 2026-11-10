@@ -1113,9 +1113,10 @@ Python lookup: `--python` on commands that expose interpreter selection or SDK
 `pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
 works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
-On POSIX, `CODEX_CLI_PATH` and `PYTHON` preserve trailing whitespace when
-the literal name selects an executable. Leading whitespace is treated as padding.
-Use an absolute path or a `./` prefix for a filename beginning with whitespace.
+On POSIX, `CODEX_CLI_PATH` and `PYTHON` preserve trailing whitespace in an
+explicit path that selects an executable. Use an absolute path or a `./`
+prefix for filenames beginning or ending in whitespace. Bare command names
+are trimmed before lookup.
 
 ### Troubleshooting
 
