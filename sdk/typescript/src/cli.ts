@@ -372,6 +372,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
+import { quoteCliPath } from "./cli-argument.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import type { PatchSelection } from "./patch-tui.js";
@@ -2612,16 +2613,17 @@ export async function main(
     }, selection);
   const useInteractiveHistory = (format: string) =>
     useDefaultOutput(format) && output.isTTY === true;
-  const presentHistory = (
-    result: JsonObject | undefined,
+  const presentHistory = <T extends JsonObject | undefined>(
+    result: T,
     command: HistoryCommand,
     format: string,
     settings: {
       repository?: string;
       scanRoot?: string;
       showLinkedFindings?: boolean;
+      missingRepositoryHistory?: boolean;
     } = {},
-  ): JsonObject | undefined => {
+  ): T => {
     if (result === undefined || !useInteractiveHistory(format)) {
       return result;
     }
@@ -2634,6 +2636,7 @@ export async function main(
       repository: settings.repository,
       scanRoot: settings.scanRoot,
       showLinkedFindings: settings.showLinkedFindings,
+      missingRepositoryHistory: settings.missingRepositoryHistory,
     });
     return result;
   };
@@ -2664,6 +2667,15 @@ export async function main(
     description: "Review saved findings (default: list).",
   }).command("false-positive", {
     description: "Mark a finding as a false positive for future scans.",
+    examples: [
+      {
+        args: { occurrenceId: "occurrence_abc123" },
+        options: { reason: "unreachable" },
+        description:
+          "Use the occurrence ID from findings list and explain why it does not apply.",
+      },
+    ],
+    hint: "Future scans of the repository can reuse the reason while it applies. Read the occurrence’s triage.note in codex-security scans show SCAN_ID --json.",
     destructive: true,
     args: z.object({
       occurrenceId: z
@@ -2712,52 +2724,49 @@ export async function main(
       const repository = await realpath(requestedRepository).catch(
         () => requestedRepository,
       );
-      return presentHistory(
-        await history(
-          ["list-repositories", "--status", "scanned"],
-          async (value): Promise<JsonObject> => {
-            const repositories = value["repositories"] as JsonObject[];
-            let target = repositories.find(
-              (entry) => entry["targetPath"] === requestedRepository,
-            );
-            const canonicalTarget = repositories.find(
-              (entry) => entry["targetPath"] === repository,
-            );
-            if (
-              target === undefined &&
-              canonicalTarget !== undefined &&
-              (await sameFile(
-                canonicalTarget["targetPath"] as string,
-                requestedRepository,
-              ))
-            ) {
-              target = canonicalTarget;
-            }
-            if (target === undefined) {
-              for (const entry of repositories) {
-                const storedPath = entry["targetPath"] as string;
-                if (await sameFile(storedPath, requestedRepository)) {
-                  target = entry;
-                  break;
-                }
+      return await history(
+        ["list-repositories", "--status", "scanned"],
+        async (value): Promise<JsonObject> => {
+          const repositories = value["repositories"] as JsonObject[];
+          let target = repositories.find(
+            (entry) => entry["targetPath"] === requestedRepository,
+          );
+          const canonicalTarget = repositories.find(
+            (entry) => entry["targetPath"] === repository,
+          );
+          if (
+            target === undefined &&
+            canonicalTarget !== undefined &&
+            (await sameFile(
+              canonicalTarget["targetPath"] as string,
+              requestedRepository,
+            ))
+          ) {
+            target = canonicalTarget;
+          }
+          if (target === undefined) {
+            for (const entry of repositories) {
+              const storedPath = entry["targetPath"] as string;
+              if (await sameFile(storedPath, requestedRepository)) {
+                target = entry;
+                break;
               }
             }
-            const findings =
-              target === undefined
-                ? []
-                : await listRepositoryFindings(
-                    dependencies.runWorkbench,
-                    target["targetId"] as string,
-                  );
-            return {
-              repository: requestedRepository,
-              findings: findings ?? [],
-            };
-          },
-        ),
-        "findings",
-        format,
-        { repository: requestedRepository },
+          }
+          const findings =
+            target === undefined
+              ? []
+              : await listRepositoryFindings(
+                  dependencies.runWorkbench,
+                  target["targetId"] as string,
+                );
+          return presentHistory(
+            { repository: requestedRepository, findings: findings ?? [] },
+            "findings",
+            format,
+            { missingRepositoryHistory: target === undefined },
+          );
+        },
       );
     },
   });
@@ -4127,7 +4136,7 @@ export async function main(
               const summary =
                 disposition === "empty"
                   ? "The report contains no findings. Nothing was stored.\n"
-                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
+                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nStored evidence: ${importedFindingsCommand(preview.repository)}\n`;
               if (humanSummary) renderedOutput = summary;
               else if (!structured) writeDiagnostic(summary);
               return { ...result };
@@ -4826,7 +4835,7 @@ export async function main(
               );
             if (humanSummary) {
               const { created, updated, unchanged } = result.local.counts;
-              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\n`;
+              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\nStored evidence: ${importedFindingsCommand(info.repository)}\n`;
               if (result.cloud)
                 renderedOutput += renderExternalPublicationSummary(
                   result.cloud,
@@ -5632,6 +5641,7 @@ export async function main(
         .object({
           scanId: z.string(),
           uniqueFindingIds: z.array(z.string()),
+          scanRepresentativeFindingIds: z.array(z.string()),
           duplicateGroups: z.array(z.array(z.string())),
           deduplicationStatus: z.enum(["completed", "completed_with_refusals"]),
           refusals: z
@@ -12290,11 +12300,10 @@ function suggestedOutputDirectory(protectedRoot: string): string | undefined {
   return undefined;
 }
 
-function quoteCliPath(path: string): string {
-  if (/^[A-Za-z0-9_./:\\-]+$/u.test(path)) return path;
-  return process.platform === "win32"
-    ? `"${path}"`
-    : `'${path.replaceAll("'", `'"'"'`)}'`;
+function importedFindingsCommand(repository: string): string {
+  if (diagnosticValue(repository) !== repository)
+    return "From the repository directory, run codex-security findings imported.";
+  return `codex-security findings imported ${quoteCliPath(repository)}`;
 }
 
 async function selectedProjectConfig(

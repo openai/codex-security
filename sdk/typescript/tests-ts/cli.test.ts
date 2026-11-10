@@ -1874,7 +1874,7 @@ describe("CLI", () => {
     });
   }, 30_000);
 
-  test("presents interactive scan history and hides abandoned running scans", async () => {
+  test("keeps inactive running scans visible with their last activity in interactive history", async () => {
     const stdout = captureCli(main, "stdout", true);
     const scan = {
       mode: "standard",
@@ -1897,6 +1897,9 @@ describe("CLI", () => {
           {
             ...scan,
             scanId: "abandoned-scan",
+            mode: "deep",
+            continuationThreadId: "thread-for-deep",
+            handoffStatus: "delivered",
             progress: { status: "running" },
             findingCount: 0,
             startedAt: "2026-07-20T12:00:00Z",
@@ -1940,7 +1943,11 @@ describe("CLI", () => {
     expect(text).not.toContain("latest: 0 findings");
     expect(text).toContain("active-scan");
     expect(text).toContain("completed-scan");
-    expect(text).not.toContain("abandoned-scan");
+    expect(text).toContain("abandoned-scan");
+    expect(text).toContain("Last activity: 2026-07-20T12:00:00Z");
+    expect(text).toContain("codex-security scans resume abandoned-scan");
+    expect(text).not.toContain("scans resume active-scan");
+    expect(text).toContain("4 scans");
     expect(text).not.toContain("juice-shop-remediated");
     expect(text).not.toContain("/private/tmp");
     expect(text).not.toContain("target-internal-id");
