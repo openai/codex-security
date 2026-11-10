@@ -55,6 +55,7 @@
 - discover Python for targets when launched from filesystem root ([#2569](https://github.com/openai/codex-security/pull/2569))
 - update the Linear SDK to 101.0.0 ([#2563](https://github.com/openai/codex-security/pull/2563))
 - read deep sealed artifacts under Linux descriptor limits ([#2570](https://github.com/openai/codex-security/pull/2570))
+- update semver to 7.8.6 across SDK and tooling ([#2562](https://github.com/openai/codex-security/pull/2562))
 
 </details>
 
