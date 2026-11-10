@@ -726,11 +726,10 @@ def test_reviewed_patch_restores_junction_git_context(
         assert (source / patched).read_bytes() == after.replace("\n", newline).encode()
 
 
-@pytest.mark.cross_platform
 @pytest.mark.parametrize(
     "short_reference",
     [
-        False,
+        pytest.param(False, marks=pytest.mark.cross_platform),
         pytest.param(
             True,
             marks=[
