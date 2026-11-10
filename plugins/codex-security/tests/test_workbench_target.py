@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import errno
 import hashlib
+import io
 import os
 import runpy
 import shutil
@@ -1689,6 +1690,63 @@ def test_git_submodule_display_preserves_selected_working_content(
     advance_child("Changed child")
     with pytest.raises(SystemExit, match="contents changed"):
         require_target(target, "working_tree", None, None, selected)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("key", "value", "binary"),
+    [
+        ("diff.python.xfuncname", "^class.*$", False),
+        ("diff.python.binary", "true", False),
+        ("diff.Mixed=driver.binary", "true", False),
+        ("diff.python.binary", "false", True),
+        ("core.compression", "0", True),
+    ],
+)
+def test_git_driver_settings_preserve_selected_working_content(
+    tmp_path: Path, workbench_api: dict[str, Any], key: str, value: str, binary: bool
+) -> None:
+    target = tmp_path / "source"
+    initialize_git_repository(target)
+    driver = "Mixed=driver" if key == "diff.Mixed=driver.binary" else "python"
+    (target / ".gitattributes").write_bytes(f"*.py diff={driver}\n".encode())
+    source = target / "example.py"
+    initial = (
+        b"class Example:\n    def sample(self):\n"
+        + b"".join(f"        a = {n}\n".encode() for n in range(24))
+        + (b"\0" + b"abcde" * 4096 if binary else b"")
+    )
+    source.write_bytes(initial)
+    subprocess.run(["git", "add", "--", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Track example"], cwd=target, check=True)
+    source.write_bytes(initial.replace(b"a = 15", b"a = 42"))
+    require_target = workbench_api["require_diff_target"]
+    selected = require_target(target, "working_tree", None, None, None)["contentDigest"]
+    args = ["git", "diff", "--binary", "--full-index", "HEAD"]
+    original = subprocess.check_output(args, cwd=target)
+    subprocess.run(["git", "config", "--local", key, value], cwd=target, check=True)
+    configured = subprocess.check_output(args, cwd=target)
+    assert configured != original
+    assert require_target(target, "working_tree", None, None, selected)["contentDigest"] == selected
+    assert require_target(target, "working_tree", None, None, None)["contentDigest"] == selected
+    legacy_hash = hashlib.sha256()
+    update_digest_field(legacy_hash, b"format", b"codex-security-snapshot/v1")
+    update_digest_field(legacy_hash, b"tracked-diff", configured)
+    legacy = f"codex-security-snapshot/v1:sha256:{legacy_hash.hexdigest()}"
+    assert require_target(target, "working_tree", None, None, legacy)["contentDigest"] == legacy
+    source.write_bytes(initial + b"actual change\n")
+    for digest in (selected, legacy):
+        with pytest.raises(SystemExit, match="contents changed"):
+            require_target(target, "working_tree", None, None, digest)
+
+
+def test_snapshot_keeps_hunk_coordinates_and_long_source_lines() -> None:
+    header = b"@@ -12,4 +12,5 @@"
+    # The next read starts with a header-shaped string in the middle of an added line.
+    long_line = b"+" + b"x" * (1024 * 1024 - 1) + header + b" literal content\n"
+    patch = header + b" def sample():\n" + long_line + header + b"\n"
+    chunks = WORKBENCH_TARGET["_canonical_patch_chunks"](io.BytesIO(patch))
+    assert b"".join(chunks) == header + b"\n" + long_line + header + b"\n"
 
 
 def test_worktree_content_digest_streams_tracked_binary_patch(

@@ -585,6 +585,56 @@ def _visible_git_character(char: str) -> str:
     return ascii(char)[1:-1]
 
 
+def _canonical_patch_chunks(output: BinaryIO) -> Iterator[bytes]:
+    """Drop Git's optional function label while preserving hunk coordinates and content."""
+    line_start = True
+    # Limit each read even when source lines are arbitrarily large.
+    for part in iter(lambda: output.readline(1024 * 1024), b""):
+        next_line_start = part.endswith(b"\n")
+        if line_start and part.startswith(b"@@ "):
+            coordinates, end, _ = part.partition(b" @@")
+            if end:
+                part = coordinates + end + b"\n"
+        yield part
+        line_start = next_line_start
+
+
+@contextmanager
+def _diff_driver_config(
+    target: Path, git_dir: Path | None, work_tree: Path | None
+) -> Iterator[tuple[str, ...]]:
+    names = git_command(
+        target,
+        "config",
+        "--name-only",
+        "--null",
+        "--get-regexp",
+        r"^diff\..+\.binary$",
+        text=False,
+        git_dir=git_dir,
+        work_tree=work_tree,
+        environment_overrides={"LC_ALL": "C"},
+    )
+    if names.returncode == 1:  # Git returns 1 when there are no matching keys.
+        yield ()
+        return
+    if names.returncode:
+        raise SystemExit(
+            os.fsdecode(names.stderr) or "Could not inspect Git diff-driver configuration."
+        )
+    # A private command-scope include preserves case and arbitrary driver-name bytes
+    # without putting an unbounded number of keys on the command line.
+    with tempfile.TemporaryDirectory(prefix="codex-security-diff-") as directory:
+        config = Path(directory) / "drivers"
+        with config.open("wb") as stream:
+            for key in names.stdout.split(b"\0"):
+                if key:
+                    driver = key.removeprefix(b"diff.").removesuffix(b".binary")
+                    escaped = driver.replace(b"\\", b"\\\\").replace(b'"', b'\\"')
+                    stream.write(b'[diff "' + escaped + b'"]\n\tbinary = auto\n')
+        yield "-c", f"include.path={config}"
+
+
 def _update_digest_field_from_git(
     digest: Any,
     label: bytes,
@@ -593,10 +643,17 @@ def _update_digest_field_from_git(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
     environment_overrides: dict[str, str] | None = None,
+    stable_display: bool = False,
 ) -> None:
-    with tempfile.TemporaryFile() as output:
+    with tempfile.TemporaryFile() as output, ExitStack() as stack:
+        driver_config = (
+            stack.enter_context(_diff_driver_config(target, git_dir, work_tree))
+            if stable_display
+            else ()
+        )
         completed = git_command(
             target,
+            *driver_config,
             *args,
             text=False,
             git_dir=git_dir,
@@ -612,11 +669,19 @@ def _update_digest_field_from_git(
             raise SystemExit(
                 f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
             )
-        output.seek(0, os.SEEK_END)
-        value_size = output.tell()
+        if stable_display:
+            output.seek(0)
+            value_size = sum(len(part) for part in _canonical_patch_chunks(output))
+        else:
+            value_size = output.seek(0, os.SEEK_END)
         _update_digest_field_header(digest, label, value_size)
         output.seek(0)
-        for chunk in iter(lambda: output.read(1024 * 1024), b""):
+        chunks = (
+            _canonical_patch_chunks(output)
+            if stable_display
+            else iter(lambda: output.read(1024 * 1024), b"")
+        )
+        for chunk in chunks:
             digest.update(chunk)
 
 
@@ -765,7 +830,14 @@ def _git_content_digest(
         ":(top,glob,exclude)**/.svn/**",
     ]
     config = (
-        ("-c", "core.quotePath=true", "-c", "diff.suppressBlankEmpty=false")
+        (
+            "-c",
+            "core.quotePath=true",
+            "-c",
+            "diff.suppressBlankEmpty=false",
+            "-c",
+            "core.compression=1",  # Git uses the fastest zlib level for binary patches by default.
+        )
         if stable_display
         else ()
     )
@@ -807,6 +879,7 @@ def _git_content_digest(
         work_tree=work_tree,
         # GIT_DIFF_OPTS overrides even an explicit --unified option.
         environment_overrides={"GIT_DIFF_OPTS": ""} if stable_display else None,
+        stable_display=stable_display,
     )
     untracked = git_bytes(
         repository,
