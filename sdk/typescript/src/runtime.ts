@@ -3164,15 +3164,12 @@ async function pluginRuntimeProjection(
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
-  if (
-    !Array.isArray(environment) ||
-    !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
-  ) {
-    server["env_vars"] = [
-      ...(Array.isArray(environment) ? environment : []),
-      "CODEX_SECURITY_PLUGIN_ROOT",
-    ];
-  }
+  server["env_vars"] = [
+    ...(environment ?? []),
+    ...["CODEX_SECURITY_PLUGIN_ROOT", "CODEX_SECURITY_REPOSITORY"].filter(
+      (name) => !environment?.includes(name),
+    ),
+  ];
   const files: PluginRuntimeProjection["files"] = new Map();
   server["command"] =
     server["command"] === "./scripts/launch_codex_security_mcp.cmd"

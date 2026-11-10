@@ -39,6 +39,7 @@
 - preserve trailing whitespace in POSIX scan roots ([#2552](https://github.com/openai/codex-security/pull/2552))
 - honor literal POSIX executable override paths ([#2551](https://github.com/openai/codex-security/pull/2551))
 - preserve explicit usage database paths ([#2556](https://github.com/openai/codex-security/pull/2556))
+- grant scan workers explicit source read access ([#2545](https://github.com/openai/codex-security/pull/2545))
 
 </details>
 
