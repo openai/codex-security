@@ -1,8 +1,9 @@
 # Import AWS Continuum code findings
 
-Use `GetCodeFinding` JSON to import selected findings with their locations,
-mitigation, and AWS validation evidence. Use `ListCodeFindings` JSON for
-summaries from an environment dedicated to one repository.
+Use `GetCodeFinding` JSON to import selected findings with their locations
+and mitigation. When AWS has run validation, the export also includes the
+validation result. Use `ListCodeFindings` JSON for summaries from an
+environment dedicated to one repository.
 
 ## Quick start
 
@@ -20,7 +21,8 @@ report=/private/path/continuum.json
 ### Export findings for one repository
 
 To create a report, sign in to the environment's AWS account and Region with
-an AWS CLI that supports `continuum`. Choose one export.
+AWS CLI v2.38.5 or later, the first release with `aws continuum`. Choose one
+export.
 
 **One finding.** Set `FINDING_ID` to the Continuum ID of the finding you
 verified. In an environment with several repositories, use this command to
@@ -28,7 +30,7 @@ export one verified finding at a time. [AWS CLI get-code-finding](https://docs.a
 
 ```sh
 report=
-out=$(mktemp -d) &&
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   aws continuum get-code-finding --environment-id "$ENVIRONMENT_ID" \
     --finding-id "$FINDING_ID" --output json > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&
@@ -41,7 +43,7 @@ combine the saved objects into a JSON array with `jq`.
 
 ```sh
 report=
-out=$(mktemp -d) &&
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   jq -s '.' first-detail.json second-detail.json > "$out/selected.json" &&
   report="$out/selected.json"
 ```
@@ -52,7 +54,7 @@ page. [AWS CLI list-code-findings](https://docs.aws.amazon.com/cli/latest/refere
 
 ```sh
 report=
-out=$(mktemp -d) &&
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   aws continuum list-code-findings --environment-id "$ENVIRONMENT_ID" \
     --output json > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&

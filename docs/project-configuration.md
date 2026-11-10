@@ -154,7 +154,7 @@ load the same config also use that setting. The usual config file is
 | `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                               | Report-only                        |
 | `output.directory`             | Artifact directory outside the scanned Git worktree                                  | Existing private artifact location |
 
-See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
+See [owner suggestions](../sdk/typescript/docs/cli.md#scan-options-and-output) for
 supported scan types, cost-limit behavior, and the saved report.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific

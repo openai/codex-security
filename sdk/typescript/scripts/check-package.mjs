@@ -109,6 +109,7 @@ function validatePackagePaths(entries) {
     "package/package.json",
     "package/README.md",
     "package/docs/cli.md",
+    "package/docs/sdk.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
     "package/docs/classify-severity-records.md",

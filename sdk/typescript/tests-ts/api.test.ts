@@ -1692,6 +1692,17 @@ describe("CodexSecurity orchestration", () => {
                 forced_login_method: index % 2 ? "api" : "chatgpt",
                 forced_chatgpt_workspace_id: `synthetic-workspace-${index}`,
               };
+        // The user's Codex config applies below explicit scan overrides.
+        const ambientHome = join(root, `ambient-${index}`);
+        const ambientAuthentication: Record<string, string> = {
+          cli_auth_credentials_store: "file",
+          forced_chatgpt_workspace_id: "synthetic-ambient-workspace",
+        };
+        await mkdir(ambientHome, { mode: 0o700 });
+        await writeFile(
+          join(ambientHome, "config.toml"),
+          'cli_auth_credentials_store = "file"\nforced_chatgpt_workspace_id = "synthetic-ambient-workspace"\n',
+        );
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -1704,6 +1715,7 @@ describe("CodexSecurity orchestration", () => {
           },
           {
             environment: {
+              CODEX_HOME: ambientHome,
               CODEX_SECURITY_STATE_DIR: stateDirectory,
               AWS_BEARER_TOKEN_BEDROCK: `synthetic-bedrock-key-${index}`,
               AWS_REGION: index % 2 === 0 ? "us-east-2" : "us-west-2",
@@ -1831,6 +1843,7 @@ describe("CodexSecurity orchestration", () => {
                     "forced_chatgpt_workspace_id",
                   ] as const) {
                     const expected = (authentication[key] ??
+                      ambientAuthentication[key] ??
                       DEFAULT_CODEX_CONFIG[key]) as string | undefined;
                     expect(workerConfig[key]).toEqual(expected);
                     expect(options.config?.[key]).toEqual(expected);
@@ -15738,9 +15751,11 @@ if __name__ == "__main__":
                 {},
                 { parent: "scan-thread" },
               );
-            await (options.signal.aborted
-              ? undefined
-              : once(options.signal, "abort"));
+            if (!options.signal.aborted) {
+              await once(options.signal, "abort", {
+                signal: AbortSignal.timeout(5_000),
+              });
+            }
             throw new DOMException("aborted", "AbortError");
           }
           return { events: events() };
@@ -15829,7 +15844,6 @@ if __name__ == "__main__":
           postScanPrompt: "Do not spend another model turn.",
           onLifecycle,
           onWarning: (warning) => warnings.push(warning),
-          signal: AbortSignal.timeout(5_000),
         });
         if (completion === "unavailable" || completion === "failed") {
           await expect(result).rejects.toBeInstanceOf(
