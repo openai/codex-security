@@ -5460,7 +5460,8 @@ export async function main(
           (options) =>
             !options.archiveExisting || options.outputDir !== undefined,
           { message: "--archive-existing requires --output-dir." },
-        ),
+        )
+        .meta({ oneOf: [{ required: ["csv"] }, { required: ["json"] }] }),
       examples: [
         { options: { csv: "findings.csv" } },
         { options: { json: "findings.json" } },

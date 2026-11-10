@@ -263,6 +263,7 @@ describe("scan import", () => {
     expect(JSON.parse(schema.text())).toMatchObject({
       options: {
         properties: { csv: { type: "string" }, json: { type: "string" } },
+        oneOf: [{ required: ["csv"] }, { required: ["json"] }],
       },
     });
     expect(calls).toHaveLength(0);
