@@ -1,9 +1,10 @@
-import { Cli, Help, SyncMcp, SyncSkills, z } from "incur";
+import { Cli, Completions, Help, SyncMcp, SyncSkills, z } from "incur";
 import { execFile } from "node:child_process";
 import { dirname, join } from "node:path";
 import { parseArgs, promisify } from "node:util";
 
 const cliName = "codex-security";
+const shells = z.enum(["bash", "fish", "nushell", "zsh"]);
 const depth = z
   .number()
   .int()
@@ -67,6 +68,8 @@ export async function serveIntegration(
     !argv.some((arg) => ["mcp", "skills", "skill"].includes(arg))
   )
     return false;
+  const completion = shells.safeParse(process.env["COMPLETE"]);
+  const discovery = manifest || completion.success;
   const words = parseArgs({
     args: argv,
     options: outputOptions,
@@ -74,18 +77,18 @@ export async function serveIntegration(
     allowPositionals: true,
   }).positionals;
   // Incur also accepts its binary name before a built-in command.
-  if (words[0] === cliName) {
+  if (!completion.success && words[0] === cliName) {
     argv = argv.toSpliced(argv.indexOf(cliName), 1);
     words.shift();
   }
   const group = words[0] === "skill" ? "skills" : words[0];
-  if (!manifest && group !== "mcp" && group !== "skills") return false;
+  if (!discovery && group !== "mcp" && group !== "skills") return false;
   const { tokens, positionals, values } = parseArgs({
     args: argv,
     options,
     allowPositionals: true,
     tokens: true,
-    strict: group === "mcp" || group === "skills",
+    strict: !completion.success && (group === "mcp" || group === "skills"),
   });
   const plain = !Object.keys(formatOptions).some((key) =>
     Object.hasOwn(values, key),
@@ -97,7 +100,7 @@ export async function serveIntegration(
     update: false,
     version: cliOptions.version,
   } as const;
-  const prefix = manifest ? "" : cliName + " ";
+  const prefix = discovery ? "" : cliName + " ";
   async function builtin(args: string[]) {
     let text = "";
     await cli.serve(args, {
@@ -207,15 +210,34 @@ export async function serveIntegration(
         return { name: cliName, ...result };
       },
     });
-  if (manifest) {
+  if (discovery) {
     cli
       .command(skills)
       .command(mcp)
       .command("completions", {
         description: "Generate a shell completion script.",
-        args: z.object({ shell: z.enum(["bash", "fish", "nushell", "zsh"]) }),
+        args: z.object({ shell: shells }),
         run: () => undefined,
       });
+    // Incur mounts aliases for leaf commands, but not for a whole group.
+    commands.set("skill", { _alias: true, target: "skills" });
+    if (completion.success) {
+      // Completion words may contain literal action flags. Use Incur's pure
+      // completion API before routing anything as an executable command.
+      const words = argv.slice(argv.indexOf("--") + 1);
+      const index = Number(process.env["_COMPLETE_INDEX"] ?? words.length - 1);
+      output.stdout?.(
+        Completions.format(
+          completion.data,
+          Completions.complete(commands, undefined, words, index, {
+            schema: z.object({
+              format: z.enum(["toon", "json", "yaml", "md", "jsonl"]),
+            }),
+          }),
+        ),
+      );
+      return true;
+    }
     // Put the mode first so a missing format/filter operand cannot consume it
     // and fall through to a command handler.
     const flag = argv.includes("--llms-full") ? "--llms-full" : "--llms";

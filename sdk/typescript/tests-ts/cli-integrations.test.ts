@@ -103,6 +103,26 @@ describe("integration command dispatch", () => {
     30_000,
   );
 
+  test("shell hooks complete integration flags without executing commands", async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "cli-integration-completions-",
+    );
+    const { home, project, run } = await isolatedCli(temp.path, {
+      COMPLETE: "bash",
+    });
+    for (const [args, flag] of [
+      [["cs", "skill", "ls", "--de"], "--depth"],
+      [["codex-security", "mcp", "add", "--ag"], "--agent"],
+      [["cs", "skills", "list", "--format", "ya"], "yaml"],
+    ] as const) {
+      const result = await run("--", ...args);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(flag);
+    }
+    expect(await readdir(home)).toEqual([]);
+    expect(await readdir(project)).toEqual([]);
+  }, 30_000);
+
   test("the command manifest includes integration leaves without installing them", async () => {
     await using temp = await scopedTemporaryDirectory(
       "cli-integration-discovery-",
