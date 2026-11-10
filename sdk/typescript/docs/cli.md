@@ -599,7 +599,9 @@ scan uses `SCAN_IMPORT_FAILED` if the import fails. YAML and TOON failures remai
 on stderr without `--full-output`, or when retained results are unavailable.
 
 Scan argument errors with `--full-output` and JSON or JSONL use an `ok: false`
-envelope with `error.code` and `error.message`. Diagnostics stay on stderr.
+envelope with `error.code` and `error.message`. Command schema validation errors
+with JSON or JSONL retain their field details and name missing options by their
+CLI flags. Diagnostics stay on stderr.
 `scan --schema --format json` describes optional caller inputs before defaults
 and the fields returned by preflight, completed scans and execution failures.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.

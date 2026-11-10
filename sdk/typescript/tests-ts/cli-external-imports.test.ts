@@ -65,6 +65,35 @@ test("Semgrep import advertises its saved report format and native finding JSON 
   });
 });
 
+test("publish validation names the missing CLI options and preserves machine error fields", async () => {
+  const args = [
+    "publish",
+    "findings",
+    "report.json",
+    "--provider",
+    "wiz",
+    "--repository",
+    ".",
+    "--dry-run",
+  ];
+  for (const flags of [[], ["--json"], ["--format=jsonl", "--full-output"]]) {
+    const cli = createCliTest(main);
+    expect(await cli.runCli([...args, ...flags], dependencies())).toBe(2);
+    expect(cli.stderr.text()).toContain(
+      "Missing required option --source-key.",
+    );
+    if (flags.length === 0) continue;
+    const parsed = JSON.parse(cli.stdout.text());
+    const error = flags.includes("--full-output") ? parsed.error : parsed;
+    expect(error.code).toBe("VALIDATION_ERROR");
+    expect(error.message).toContain("Missing required option --to.");
+    expect(error.message).toContain("Missing required option --source-key.");
+    expect(
+      error.fieldErrors.map((field: { path: string }) => field.path),
+    ).toEqual(["to", "sourceKey"]);
+  }
+});
+
 test("a closed diagnostic pipe preserves the Sonar error envelope", async () => {
   const stdout = capture();
   const stderr = new Writable({

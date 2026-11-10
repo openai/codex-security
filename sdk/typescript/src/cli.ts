@@ -544,7 +544,14 @@ const ASSESS_PATCH_RISK_OPTION = z
   .describe("Assess the completed patch and return the risk report.");
 
 function optionValue(flag: string) {
-  return z.string().min(1, `${flag} must not be empty.`);
+  return z
+    .string({
+      error: (issue) =>
+        issue.input === undefined
+          ? `Missing required option ${flag}.`
+          : undefined,
+    })
+    .min(1, `${flag} must not be empty.`);
 }
 
 function remediationInputOptions(verb: "Patch" | "Verify") {
@@ -7600,9 +7607,12 @@ export async function main(
       command === "publish" ||
       command === "import";
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
-    if (frameworkFlags.rawStructuredOutput) {
-      // Incur injects stale-skill notices into raw result objects and arrays.
-      // Full output has a separate metadata field for these notices.
+    if (
+      frameworkFlags.rawStructuredOutput &&
+      !(command === "scans" && subcommand === "logs")
+    ) {
+      // Saved logs include the framework's CTA after streamed events. Other
+      // raw result objects and arrays keep notices in full-output metadata.
       cliOptions.sync = false;
     }
     if (command === "info") {
@@ -7857,10 +7867,10 @@ export async function main(
     );
   }
 
+  let notice: UpdateNotice | undefined;
   if (argv.includes("--schema") || argv.includes("--llms-full")) {
     describeCommandInputs(commands);
   }
-  let notice: UpdateNotice | undefined;
   try {
     await cli.serve(frameworkArgv, {
       stdout: frameworkCapture.stream.write,
@@ -7915,21 +7925,65 @@ export async function main(
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
-      const envelope = scanErrorFormat
+      const jsonFormat =
+        frameworkFlags.format === "json" || frameworkFlags.format === "jsonl";
+      const envelope = jsonFormat
         ? parseJson(() => frameworkOutput)
         : undefined;
-      const message =
-        isJsonObject(envelope) &&
-        isJsonObject(envelope["error"]) &&
-        typeof envelope["error"]["message"] === "string"
-          ? envelope["error"]["message"]
+      const error =
+        isJsonObject(envelope) && envelope["ok"] === false
+          ? envelope["error"]
+          : envelope;
+      const validationError =
+        isJsonObject(error) && error["code"] === "VALIDATION_ERROR"
+          ? error
+          : undefined;
+      let message =
+        isJsonObject(error) && typeof error["message"] === "string"
+          ? error["message"]
           : await incurErrorMessage(frameworkOutput);
+      if (validationError && Array.isArray(validationError["fieldErrors"])) {
+        const entry = command ? commands.get(command) : undefined;
+        const leaf =
+          entry && "_group" in entry
+            ? (entry.commands.get(following ?? "") ?? entry.root)
+            : entry;
+        const options =
+          leaf && "options" in leaf ? leaf.options?.shape : undefined;
+        const messages = validationError["fieldErrors"].map((field) => {
+          if (!isJsonObject(field) || typeof field["path"] !== "string")
+            return message;
+          if (
+            field["missing"] &&
+            options &&
+            Object.hasOwn(options, field["path"])
+          ) {
+            const flag = field["path"].replace(
+              /[A-Z]/g,
+              (letter) => `-${letter.toLowerCase()}`,
+            );
+            return `Missing required option --${flag}.`;
+          }
+          return typeof field["message"] === "string"
+            ? field["message"]
+            : message;
+        });
+        message = messages.join("\n");
+        validationError["message"] = message;
+        frameworkOutput =
+          JSON.stringify(
+            envelope,
+            null,
+            frameworkFlags.format === "json" ? 2 : undefined,
+          ) + "\n";
+      }
       errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-      if (!scanErrorFormat) return 2;
+      if (!scanErrorFormat && !validationError) return 2;
       exitCode = 2;
       // Errors in built-in flags precede Incur's format selection. Its other
       // parse errors already carry the requested envelope or token view.
       if (
+        scanErrorFormat &&
         !(isJsonObject(envelope) && envelope["ok"] === false) &&
         !(
           typeof envelope === "number" &&
@@ -8306,6 +8360,23 @@ async function prepareScanArgumentsFromRecipe(
   };
 }
 
+/** Incur describes parsed Zod outputs by default. Callers supply the inputs,
+ * which may omit fields populated by CLI defaults. Keep the runtime defaults. */
+function describeCommandInputs(
+  commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
+): void {
+  for (const entry of commands.values()) {
+    if ("_group" in entry) describeCommandInputs(entry.commands);
+    const command = "_group" in entry ? entry.root : entry;
+    if (command && "options" in command && command.options) {
+      const input = z.toJSONSchema(command.options, { io: "input" });
+      command.options = command.options.meta({
+        required: input.required ?? [],
+      });
+    }
+  }
+}
+
 function frameworkOutputFlags(argv: readonly string[]) {
   let fullOutput = false;
   let format: string | undefined;
@@ -8340,23 +8411,6 @@ function frameworkOutputFlags(argv: readonly string[]) {
     filterOutput,
     tokenArguments,
   };
-}
-
-/** Incur describes parsed Zod outputs by default. Callers supply the inputs,
- * which may omit fields populated by CLI defaults. Keep the runtime defaults. */
-function describeCommandInputs(
-  commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
-): void {
-  for (const command of commands.values()) {
-    if ("_group" in command) {
-      describeCommandInputs(command.commands);
-    } else if ("options" in command && command.options) {
-      const input = z.toJSONSchema(command.options, { io: "input" });
-      command.options = command.options.meta({
-        required: input.required ?? [],
-      });
-    }
-  }
 }
 
 function cliValueOptions(
