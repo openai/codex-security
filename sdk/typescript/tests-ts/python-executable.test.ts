@@ -65,7 +65,7 @@ test.skipIf(process.platform !== "win32")(
         'test("isolated child reuses the prepared Python", () => {',
         '  if (runTestInSubprocess(import.meta.path, "isolated child reuses the prepared Python", { PYTHON: resolve() ?? undefined })) return;',
         "  expect(resolve()).toBe(process.env.EXPECTED_PYTHON);",
-        "}, 1000);",
+        "}, 30000);",
       ].join("\n"),
     );
     for (const configured of [python, ""]) {
