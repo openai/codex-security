@@ -54108,7 +54108,7 @@ var package_default = {
   name: "codex-security-action-runtime",
   private: true,
   dependencies: {
-    "@openai/codex-security": "0.6.0"
+    "@openai/codex-security": "0.9.1"
   }
 };
 
