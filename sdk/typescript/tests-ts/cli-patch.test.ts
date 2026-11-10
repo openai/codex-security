@@ -3,12 +3,12 @@ import { gitText } from "./support/shell.js";
 import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
 import { parse as parseToml } from "smol-toml";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import * as os from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
@@ -982,6 +982,9 @@ describe("scan and patch workflow", () => {
 
   test("assesses only changes made during a literal patch run", async () => {
     const directory = await temporaryDirectory("codex-security-patch-risk-");
+    using _temporary = spyOn(os, "tmpdir").mockReturnValue(
+      relative(process.cwd(), directory),
+    );
     const repository = join(directory, "repository");
     await mkdir(repository, { recursive: true });
     const git = repositoryGit(repository);
@@ -1046,6 +1049,7 @@ describe("scan and patch workflow", () => {
                   .split("\n")
                   .find((line) => line.startsWith('{"path":'))!,
               ) as { path: string; sha256: string };
+              expect(isAbsolute(artifact.path)).toBe(true);
               const patch = await readFile(artifact.path, "utf8");
               expect(patch).toContain("+patch change");
               expect(patch).not.toContain("+user change");
@@ -1059,7 +1063,11 @@ describe("scan and patch workflow", () => {
             output?.stdout.write("Patch complete.");
             return 0;
           },
-          onRepositoryCommand: runGitRepositoryCommand,
+          onRepositoryCommand: (command, args, cwd, options) => {
+            const index = options?.environment?.["GIT_INDEX_FILE"];
+            if (index !== undefined) expect(isAbsolute(index)).toBe(true);
+            return runGitRepositoryCommand(command, args, cwd, options);
+          },
         },
       );
 
@@ -1431,7 +1439,7 @@ describe("scan and patch workflow", () => {
   test.each(["synthetic.provider", "openai"])(
     "preserves %s command-provider authentication when patching after a scan",
     async (provider) => {
-      const home = join(tmpdir(), "synthetic-auth-home");
+      const home = join(os.tmpdir(), "synthetic-auth-home");
       let providerOverride: string | undefined;
       const outcome = await runWorkflow(
         [
