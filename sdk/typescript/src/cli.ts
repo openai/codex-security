@@ -7946,6 +7946,13 @@ export async function main(
         isJsonObject(error) && error["code"] === "VALIDATION_ERROR"
           ? error
           : undefined;
+      if (!scanErrorFormat && !validationError) {
+        // Other framework failures already have a stderr format used by callers.
+        errorOutput.write(
+          `codex-security: ${diagnosticLines(await incurErrorMessage(frameworkOutput))}\n`,
+        );
+        return 2;
+      }
       let message =
         isJsonObject(error) && typeof error["message"] === "string"
           ? error["message"]
@@ -7986,7 +7993,6 @@ export async function main(
           ) + "\n";
       }
       errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-      if (!scanErrorFormat && !validationError) return 2;
       exitCode = 2;
       // Errors in built-in flags precede Incur's format selection. Its other
       // parse errors already carry the requested envelope or token view.
