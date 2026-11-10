@@ -1309,14 +1309,14 @@ def test_usage_finds_state_database_in_configured_home(
 
 
 @pytest.mark.cross_platform
-@pytest.mark.parametrize("spelling", ["leading-relative", "trailing-absolute", "literal-tilde"])
+@pytest.mark.parametrize(
+    "spelling",
+    ["leading-relative", "trailing-absolute"]
+    + ([] if sys.platform == "win32" else ["literal-tilde"]),
+)
 def test_completion_reads_the_literal_usage_database(
     tmp_path: Path, spelling: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if spelling == "trailing-absolute" and sys.platform == "win32":
-        pytest.skip("Windows removes trailing spaces from ordinary file names.")
-    if spelling == "literal-tilde" and sys.platform == "win32":
-        pytest.skip("POSIX expands a named home only when that user exists.")
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     fixture.write_parent_rollout([_token_event(counted, 18, 2)])
@@ -1325,7 +1325,9 @@ def test_completion_reads_the_literal_usage_database(
         tmp_path
         / {
             "leading-relative": " usage.sqlite",
-            "trailing-absolute": "usage.sqlite ",
+            "trailing-absolute": "usage.sqlite\N{NO-BREAK SPACE}"
+            if sys.platform == "win32"
+            else "usage.sqlite ",
             "literal-tilde": "~synthetic-usage.sqlite",
         }[spelling]
     )
