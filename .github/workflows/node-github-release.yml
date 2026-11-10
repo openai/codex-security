@@ -175,8 +175,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # npm can finish publishing before its registry makes the version available.
-          for attempt in {1..21}; do
+          # npm scans new versions before making them available to install.
+          for attempt in {1..61}; do
             if metadata="$(
               npm view "@openai/codex-security@$RELEASE_VERSION" version \
                 --json --prefer-online --registry=https://registry.npmjs.org/
@@ -191,8 +191,8 @@ jobs:
             '; then
               exit 1
             fi
-            if (( attempt == 21 )); then
-              echo "The published npm version did not become available within ten minutes." >&2
+            if (( attempt == 61 )); then
+              echo "The published npm version did not become available within thirty minutes." >&2
               exit 1
             fi
             echo "Waiting for npm publication to become available." >&2
