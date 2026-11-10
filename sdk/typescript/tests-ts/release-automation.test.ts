@@ -9,12 +9,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { publishGitHubRelease } from "../scripts/publish-github-release.mjs";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
-import { bashCommand, runCommand } from "./support/shell.js";
+import { bashCommand, runCommand, writeSource } from "./support/shell.js";
+import { workflow } from "./support/workflow.js";
 
 import {
   type ReleaseMetadata,
@@ -26,7 +27,6 @@ import {
   releaseTagVersion,
   compareReleaseVersions,
   requireReleaseIncrease,
-  initialPublishedVersions,
   publishedReleaseMode,
   requirePublishedReleaseIncrease,
   releaseHistory,
@@ -45,6 +45,8 @@ const automationScript = new URL(
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
+const combinedPublisher = "Publish npm and container images";
+const recoveryPublisher = "Verify existing npm release";
 const releaseWorkflowTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const directories = createTemporaryDirectoriesSync();
@@ -67,6 +69,11 @@ function runPublisher({
   existingLookup = "existing",
   existingNotes = "Generated release notes",
   generatedNotes = "Generated release notes\n",
+  generateNotesResult = {
+    status: 0,
+    stdout: JSON.stringify({ body: generatedNotes }),
+    stderr: "",
+  },
 
   latestTag = "npm-v0.1.3",
   makeLatest = false,
@@ -116,15 +123,45 @@ function runPublisher({
         RELEASE_VERSION: "0.1.2",
         RELEASE_SHA: releaseCommit,
         RELEASE_ARCHIVE: archivePath,
-        PREVIOUS_TAG: "npm-v0.1.1",
-        MAKE_LATEST: String(makeLatest),
       },
       workspace,
       (program: string, args: string[]) => {
         calls.push([program, ...args]);
+        if (program === "npm") {
+          expect(args).toEqual([
+            "view",
+            "@openai/codex-security",
+            "versions",
+            "--json",
+            "--registry=https://registry.npmjs.org/",
+          ]);
+          return {
+            status: 0,
+            stdout: JSON.stringify(makeLatest ? ["0.1.2"] : ["0.1.2", "0.1.3"]),
+          };
+        }
+        if (program === "git" && args[0] === "rev-parse")
+          return { status: 0, stdout: "" };
+        if (program === "git" && args[0] === "tag") {
+          expect(args).toEqual([
+            "tag",
+            "--merged",
+            `${releaseCommit}^`,
+            "--list",
+            "npm-v*",
+            "--sort=-version:refname",
+          ]);
+          return { status: 0, stdout: "npm-v0.1.1\nnpm-v0.1.0\n" };
+        }
         const endpoint = args.find((argument) => argument.startsWith("repos/"));
         if (program === "gh" && args[0] === "api") {
           switch (endpoint) {
+            case "repos/test/codex-security/releases?per_page=100":
+              expect(args).toContain("--paginate");
+              expect(args).toContain(
+                ".[] | select(.draft == false and .prerelease == false) | .tag_name",
+              );
+              return { status: 0, stdout: "npm-v0.1.1\n" };
             case "repos/test/codex-security/releases/tags/npm-v0.1.2":
               return existingLookup !== "existing"
                 ? lookup(existingLookup)
@@ -151,12 +188,9 @@ function runPublisher({
               expect(
                 args.includes("configuration_file_path=.github/release.yml"),
               ).toBe(releaseConfiguration);
-              return {
-                status: 0,
-                stdout: JSON.stringify({
-                  body: generatedNotes,
-                }),
-              };
+              if (generateNotesResult.stderr)
+                console.error(generateNotesResult.stderr);
+              return generateNotesResult;
           }
         }
         if (program === "git" && args[0] === "cat-file")
@@ -204,7 +238,7 @@ function runPublisher({
   return { status, stdout, stderr, calls };
 }
 
-function releaseLabelGhMock(handlers: readonly string[], shiftEndpoint = true) {
+function releaseLabelGhMock(handlers: readonly string[]) {
   return [
     "gh() {",
     '  if [[ "$1" != "api" ]]; then return 64; fi',
@@ -215,12 +249,13 @@ function releaseLabelGhMock(handlers: readonly string[], shiftEndpoint = true) {
     "    shift 2",
     "  fi",
     '  local endpoint="$1"',
-    ...(shiftEndpoint ? ["  shift"] : []),
+    "  shift",
     '  case "$method $endpoint" in',
-    ...handlers,
     '    "GET repos/test/codex-security/issues/17")',
-    "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+    '      [[ $# == 2 && "$1" == --jq ]] || return 64',
+    `      jq ${process.platform === "win32" ? "--binary " : ""}-r "$2" <<< "$MOCK_ISSUE"`,
     "      ;;",
+    ...handlers,
     '    "POST repos/test/codex-security/issues/17/labels")',
     "      printf '%s\\n' \"$@\"",
     "      ;;",
@@ -274,6 +309,13 @@ const protectedReleaseWorkflow = readFileSync(
   new URL("../../../.github/workflows/node-release.yml", import.meta.url),
   "utf8",
 );
+const darwinSigningWorkflow = readFileSync(
+  new URL(
+    "../../../.github/workflows/sign-darwin-release.yml",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const releaseCutWorkflow = readFileSync(
   new URL("../../../.github/workflows/node-release-cut.yml", import.meta.url),
   "utf8",
@@ -298,10 +340,6 @@ const nodeCiWorkflow = readFileSync(
 );
 const titleWorkflow = readFileSync(
   new URL("../../../.github/workflows/validate-pr-title.yml", import.meta.url),
-  "utf8",
-);
-const releasingGuide = readFileSync(
-  new URL("../../../RELEASING.md", import.meta.url),
   "utf8",
 );
 function publishedMetadata(): ReleaseMetadata {
@@ -491,6 +529,39 @@ function verifySignatureFixture(options: SignatureAuditFixture = {}) {
   );
 }
 
+type WorkflowContract = {
+  on?: { workflow_call?: { secrets?: Record<string, { required?: boolean }> } };
+  concurrency?: Record<string, unknown>;
+  jobs: Record<
+    string,
+    {
+      name?: string;
+      uses?: string;
+      with?: Record<string, unknown>;
+      secrets?: Record<string, string>;
+      "cache-mode"?: string;
+      outputs?: Record<string, string>;
+      permissions?: Record<string, string>;
+      env?: Record<string, string>;
+      needs?: string | string[];
+      environment?: string;
+      if?: string;
+      strategy?: { matrix: Record<string, unknown>; "fail-fast"?: boolean };
+      concurrency?: Record<string, unknown>;
+      "continue-on-error"?: boolean;
+      steps?: {
+        name?: string;
+        uses?: string;
+        run?: string;
+        if?: string;
+        "continue-on-error"?: boolean;
+        with?: Record<string, unknown>;
+        env?: Record<string, string>;
+      }[];
+    }
+  >;
+};
+
 function workflowStepShell(workflow: string, stepName: string): string {
   const parsed = Bun.YAML.parse(workflow) as {
     jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
@@ -507,20 +578,83 @@ function workflowStepShell(workflow: string, stepName: string): string {
   return step.run;
 }
 
+function resolveProtectedRelease(env: Record<string, string>) {
+  const script = workflowStepShell(
+    githubReleaseWorkflow,
+    "Resolve the successful protected release",
+  );
+  return runShell(
+    String.raw`
+sleep() {
+  [[ $# == 1 && -n "$MOCK_SLEEP_LOG" ]] || return 99
+  printf '%s\n' "$1" >> "$MOCK_SLEEP_LOG"
+  MOCK_RUN_STATUS=$MOCK_NEXT_STATUS
+}
+git() {
+  [[ $# == 3 && "$1" == rev-parse && "$2" == --verify && "$3" == "$MOCK_TAG_OBJECT^{commit}" ]] || return 66
+  [[ "$MOCK_TAG_TYPE" == commit ]] || return 67
+  printf '%s\n' "$MOCK_TAG_OBJECT"
+}
+gh() {
+  printf '%s\n' "$*" >> "$MOCK_GH_LOG"
+  [[ $# == 4 && "$1" == api && "$3" == --jq ]] || return 64
+  case "$2" in
+    "repos/test/codex-security/git/ref/tags/npm-v0.1.2")
+      [[ -n "$MOCK_TAG_TYPE" ]] || return 1
+      [[ "$4" == '[.object.type, .object.sha] | @tsv' ]] || return 65
+      printf '%s\t%s\n' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"
+      ;;
+    "repos/test/codex-security/git/tags/$MOCK_TAG_OBJECT")
+      [[ "$MOCK_TAG_TYPE" == tag && "$4" == 'if .object.type == "commit" then .object.sha else empty end' ]] || return 65
+      printf '%s\n' '${releaseCommit}'
+      ;;
+    "repos/test/codex-security/commits/npm-v0.1.2")
+      printf '%s\n' "$MOCK_BRANCH_SHA"
+      ;;
+    "repos/test/codex-security/actions/runs/$INPUT_RUN_ID")
+      [[ "$4" == '[.path, .event, .status, (.conclusion // "pending"), .head_sha, .head_branch] | @tsv' ]] || return 65
+      local conclusion=pending
+      if [[ "$MOCK_RUN_STATUS" == completed ]]; then conclusion=success; fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$MOCK_WORKFLOW_PATH" "$MOCK_RUN_EVENT" "$MOCK_RUN_STATUS" "$conclusion" "$MOCK_RUN_SHA" npm-v0.1.2
+      ;;
+    *) return 65 ;;
+  esac
+}
+${script}`,
+    {
+      GITHUB_OUTPUT: "/dev/null",
+      GITHUB_REPOSITORY: "test/codex-security",
+      INPUT_RUN_ID: releaseRun,
+      INPUT_TAG: "npm-v0.1.2",
+      MOCK_TAG_TYPE: "commit",
+      MOCK_TAG_OBJECT: releaseCommit,
+      MOCK_RUN_STATUS: "completed",
+      MOCK_RUN_EVENT: "workflow_dispatch",
+      MOCK_NEXT_STATUS: "completed",
+      MOCK_SLEEP_LOG: "",
+      MOCK_RUN_SHA: releaseCommit,
+      MOCK_WORKFLOW_PATH:
+        ".github/workflows/node-release.yml@refs/tags/npm-v0.1.2",
+      MOCK_BRANCH_SHA: releaseCommit,
+      MOCK_GH_LOG: "/dev/null",
+      ...env,
+    },
+  );
+}
+
 function runReleaseLabels(
   title: string,
   routes: readonly string[],
   setup: readonly string[] = [],
-  shiftEndpoint = true,
 ) {
-  const mock = [...setup, releaseLabelGhMock(routes, shiftEndpoint)].join("\n");
+  const mock = [...setup, releaseLabelGhMock(routes)].join("\n");
   const script = workflowStepShell(
     releaseLabelsWorkflow,
     "Categorize pull request without checking out its code",
   );
   return runShell(`${mock}\n${script}`, {
     GITHUB_REPOSITORY: "test/codex-security",
-    MOCK_PR_TITLE: title,
+    MOCK_ISSUE: JSON.stringify({ title }),
     PR_NUMBER: "17",
   });
 }
@@ -600,29 +734,15 @@ describe("reviewed release note helpers", () => {
     );
   });
 
-  test("rejects NUL bytes before shell composition", async () => {
-    const workspace = directories.create("release-notes-nul-");
-    const taggedNotes = join(workspace, "tagged-notes.md");
-    const generatedNotes = join(workspace, "generated-notes.md");
-    writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
-    writeFileSync(generatedNotes, "Generated release notes\n");
-
-    const result = await runShell(
-      [
-        "set -euo pipefail",
-        'published_notes="$(node "$AUTOMATION_SCRIPT" compose-release-notes 1.2.3 "$GENERATED_NOTES" --tagged-notes-file "$TAGGED_NOTES")"',
-        'printf "%s" "$published_notes"',
-      ].join("\n"),
-      {
-        AUTOMATION_SCRIPT: fileURLToPath(automationScript),
-        GENERATED_NOTES: generatedNotes,
-        TAGGED_NOTES: taggedNotes,
-      },
-    );
-
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("include a reviewed summary");
-    expect(result.stderr).not.toContain("ignored null byte");
+  test("rejects Unicode whitespace-only reviewed summaries", () => {
+    for (const space of ["\u00a0", "\u2007", "\u202f", "\ufeff"]) {
+      expect(() =>
+        parseReviewedReleaseNotes(
+          "1.2.3",
+          `<!-- release-version: 1.2.3 -->\n${space}`,
+        ),
+      ).toThrow("include a reviewed summary");
+    }
   });
 
   test.each([
@@ -727,12 +847,24 @@ describe("reviewed release note helpers", () => {
   });
 
   test("composes reviewed and generated notes deterministically", () => {
-    expect(composeReleaseNotes("Generated notes", "Reviewed summary")).toBe(
-      "<!-- codex-security-release-summary:start -->\n" +
-        "Reviewed summary\n" +
-        "<!-- codex-security-release-summary:end -->\n\n" +
-        "Generated notes",
-    );
+    const summary = "## Highlights\n\nReviewed summary";
+    const generated = [
+      "## What's Changed",
+      "",
+      "- A change ([#1](https://github.com/example/project/pull/1))",
+      "",
+      "## New Contributors",
+      "",
+      "- @contributor",
+    ].join("\n");
+    const notes = composeReleaseNotes(generated, summary);
+    expect(extractHistoricalReleaseSummary(notes)).toBe(summary);
+    expect(notes.indexOf(summary)).toBeLessThan(notes.indexOf("<details>"));
+    expect(notes).toContain(`</summary>\n\n${generated}\n\n</details>`);
+    expect(notes.match(/<details>/gu)).toHaveLength(1);
+    expect(
+      composeReleaseNotes(generated, extractHistoricalReleaseSummary(notes)),
+    ).toBe(notes);
     expect(composeReleaseNotes("Generated notes", null)).toBe(
       "Generated notes",
     );
@@ -782,48 +914,39 @@ describe("protected Git release refs", () => {
     ).toBe("0.1.2");
   });
 
-  test("rejects a release-shaped branch", () => {
-    expect(() =>
-      releaseTagVersion(
-        "branch",
-        "refs/heads/npm-v0.1.2",
-        "npm-v0.1.2",
-        packageJson,
-      ),
-    ).toThrow("npm releases must be dispatched from a real Git tag.");
-  });
-
-  test("rejects a mismatched full Git ref", () => {
-    expect(() =>
-      releaseTagVersion(
-        "tag",
-        "refs/tags/npm-v0.1.3",
-        "npm-v0.1.2",
-        packageJson,
-      ),
-    ).toThrow("npm releases must be dispatched from a real Git tag.");
-  });
-
-  test("rejects an unstable release tag", () => {
-    expect(() =>
-      releaseTagVersion(
-        "tag",
-        "refs/tags/npm-v0.1.2-beta.1",
-        "npm-v0.1.2-beta.1",
-        packageJson,
-      ),
-    ).toThrow("Release tags must identify a stable npm-vX.Y.Z version.");
-  });
-
-  test("rejects a Git tag for a different package version", () => {
-    expect(() =>
-      releaseTagVersion(
-        "tag",
-        "refs/tags/npm-v0.1.3",
-        "npm-v0.1.3",
-        packageJson,
-      ),
-    ).toThrow("npm release tag must match the stable package version.");
+  test.each([
+    [
+      "rejects a release-shaped branch",
+      "branch",
+      "refs/heads/npm-v0.1.2",
+      "npm-v0.1.2",
+      "npm releases must be dispatched from a real Git tag.",
+    ],
+    [
+      "rejects a mismatched full Git ref",
+      "tag",
+      "refs/tags/npm-v0.1.3",
+      "npm-v0.1.2",
+      "npm releases must be dispatched from a real Git tag.",
+    ],
+    [
+      "rejects an unstable release tag",
+      "tag",
+      "refs/tags/npm-v0.1.2-beta.1",
+      "npm-v0.1.2-beta.1",
+      "Release tags must identify a stable npm-vX.Y.Z version.",
+    ],
+    [
+      "rejects a Git tag for a different package version",
+      "tag",
+      "refs/tags/npm-v0.1.3",
+      "npm-v0.1.3",
+      "npm release tag must match the stable package version.",
+    ],
+  ] as const)("%s", (_name, refType, ref, refName, message) => {
+    expect(() => releaseTagVersion(refType, ref, refName, packageJson)).toThrow(
+      message,
+    );
   });
 });
 
@@ -873,27 +996,6 @@ describe("monotonic stable release versions", () => {
   test("identifies a strictly increasing version as a new publication", () => {
     expect(publishedReleaseMode("0.1.3", ["0.1.0", "0.1.2"])).toBe("publish");
   });
-
-  test("allows a missing npm package only for its initial stable release", () => {
-    expect(
-      initialPublishedVersions("0.1.0", { error: { code: "E404" } }),
-    ).toEqual([]);
-  });
-
-  test.each([
-    { version: "0.1.1", registryError: { error: { code: "E404" } } },
-    { version: "0.1.0", registryError: { error: { code: "E403" } } },
-    { version: "0.1.0", registryError: { error: { code: "ETIMEDOUT" } } },
-    { version: "0.1.0", registryError: { error: null } },
-    { version: "0.1.0", registryError: null },
-  ])(
-    "rejects unverified npm history for $version and registry response $registryError",
-    ({ version, registryError }) => {
-      expect(() => initialPublishedVersions(version, registryError)).toThrow(
-        "Unable to verify published npm release history.",
-      );
-    },
-  );
 
   test("identifies the current published version as recoverable", () => {
     expect(publishedReleaseMode("0.1.2", ["0.1.0", "0.1.2"])).toBe("recover");
@@ -1114,6 +1216,7 @@ describe("GitHub release publication verification", () => {
   };
   const provenance = {
     ...expected,
+    runAttempt: "1",
     sha512,
   };
 
@@ -1217,6 +1320,7 @@ describe("cryptographically verified npm provenance", () => {
       gitHead: releaseCommit,
       repository: releaseRepository,
       runId: releaseRun,
+      runAttempt: "1",
       sha512,
     });
   });
@@ -1233,6 +1337,7 @@ describe("cryptographically verified npm provenance", () => {
       gitHead: releaseCommit,
       repository: releaseRepository,
       runId: releaseRun,
+      runAttempt: "1",
       sha512,
     });
   });
@@ -1269,6 +1374,24 @@ describe("cryptographically verified npm provenance", () => {
     ).toThrow("The Fulcio certificate must identify the exact release run.");
   });
 
+  test("rejects an invocation for a different attempt of the signing run", () => {
+    expect(() => verifySignatureFixture({ attempt: "2" })).toThrow(
+      "The Fulcio certificate must identify the exact release run.",
+    );
+  });
+
+  test("returns the attempt number authenticated by the statement and certificate", () => {
+    expect(
+      verifySignatureFixture({
+        attempt: "3",
+        signingCertificate: signingCertificateWithReplacement(
+          "/attempts/1",
+          "/attempts/3",
+        ),
+      }).runAttempt,
+    ).toBe("3");
+  });
+
   test("rejects a recovered archive signed for a different source commit", () => {
     expect(() =>
       verifyRecoveredSignatureAudit(signatureAudit(), archive, {
@@ -1299,6 +1422,7 @@ describe("cryptographically verified npm provenance", () => {
       gitHead: releaseCommit,
       repository: releaseRepository,
       runId: releaseRun,
+      runAttempt: "1",
       sha512,
     });
   });
@@ -1638,19 +1762,6 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stderr).not.toContain("late stderr");
   });
 
-  test("rejects unsupported jq mock filters", () => {
-    const result = spawnSync(
-      bash,
-      [
-        "-c",
-        `${jqMock}\nprintf '%s\\n' '{"object":{"type":"commit","sha":"abc"}}' | jq -r '.wrong | @tsv'`,
-      ],
-      { encoding: "utf8" },
-    );
-
-    expect(result.status).toBe(64);
-  });
-
   test("requires a real tag for protected npm publication", () => {
     expect(protectedReleaseWorkflow).toContain("release-tag");
     expect(protectedReleaseWorkflow).toContain('"$GITHUB_REF_TYPE"');
@@ -1680,32 +1791,8 @@ describe("GitHub release workflow safeguards", () => {
       message: "Release notes must start with <!-- release-version: 0.1.6 -->",
     },
     {
-      scenario: "an empty reviewed summary",
-      summary: "<!-- release-version: 0.1.6 -->\n   ",
-      status: 1,
-      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
-    },
-    {
       scenario: "a U+00A0-only reviewed summary",
       summary: "<!-- release-version: 0.1.6 -->\n\u00a0",
-      status: 1,
-      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
-    },
-    {
-      scenario: "a U+2007-only reviewed summary",
-      summary: "<!-- release-version: 0.1.6 -->\n\u2007",
-      status: 1,
-      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
-    },
-    {
-      scenario: "a U+202F-only reviewed summary",
-      summary: "<!-- release-version: 0.1.6 -->\n\u202f",
-      status: 1,
-      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
-    },
-    {
-      scenario: "a U+FEFF-only reviewed summary",
-      summary: "<!-- release-version: 0.1.6 -->\n\ufeff",
       status: 1,
       message: "Release notes must start with <!-- release-version: 0.1.6 -->",
     },
@@ -1745,9 +1832,8 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("pins both supported-minimum verification and protected signing runtimes", () => {
+  test("pins the supported-minimum release verification runtime", () => {
     expect(protectedReleaseWorkflow).toContain('node-version: "22.13.0"');
-    expect(protectedReleaseWorkflow).toContain('node-version: "24.15.0"');
   });
 
   test("restricts release cuts to main and increasing stable versions", () => {
@@ -1823,6 +1909,127 @@ describe("GitHub release workflow safeguards", () => {
     ).toBe(scenario.expected);
   });
 
+  async function createReleaseAncestryFixture() {
+    const cwd = directories.create("release-ancestry-");
+    // A maintainer may be running with GIT_DIR, a custom template or global hooks.
+    const env = {
+      PATH: process.env["PATH"],
+      SYSTEMROOT: process.env["SYSTEMROOT"],
+      HOME: cwd,
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    const setup = await runCommand(
+      bash,
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        `
+set -eu
+git init --quiet --bare --template= -b main .
+git init --quiet --bare --template= -b main remote.git
+git config --local user.name "Release fixture"
+git config --local user.email "release@example.invalid"
+tree=$(git mktree </dev/null)
+qualified=$(git commit-tree "$tree" -m qualified)
+main=$(git commit-tree "$tree" -p "$qualified" -m main)
+candidate=$(git commit-tree "$tree" -p "$qualified" -m off-main)
+git update-ref refs/heads/main "$main"
+git push --quiet ./remote.git "$main:refs/heads/main"
+git remote add origin ./remote.git
+printf '%s\\n%s\\n%s\\n' "$qualified" "$main" "$candidate"
+`,
+      ],
+      { cwd, env },
+    );
+    expect(setup.status, setup.stderr).toBe(0);
+    const [qualified, main, candidate] = setup.stdout.trim().split(/\r?\n/u);
+    return { cwd, env, qualified, main, candidate };
+  }
+
+  test("only consults release metadata for a CI commit on main", async () => {
+    const { cwd, env, qualified, main, candidate } =
+      await createReleaseAncestryFixture();
+    const script = `
+# actions/checkout detaches HEAD at the selected release SHA.
+git update-ref --no-deref HEAD "$RELEASE_SHA" || exit 1
+node() { echo "release metadata lookup" >&2; return 64; }
+npm() { echo "unexpected registry lookup" >&2; return 65; }
+${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
+`;
+    for (const [workflowSha, releaseSha, expectedStatus, expectedMessage] of [
+      [main, candidate, 1, "Release tags can only be cut from commits on main"],
+      [
+        candidate,
+        qualified,
+        1,
+        "Release tags can only be cut from commits on main",
+      ],
+      [main, qualified, 64, "release metadata lookup"],
+    ] as const) {
+      const result = await runCommand(
+        bash,
+        ["--noprofile", "--norc", "-c", script],
+        {
+          cwd,
+          env: {
+            ...env,
+            GITHUB_REF: "refs/heads/main",
+            GITHUB_EVENT_NAME: "workflow_run",
+            GITHUB_OUTPUT: "/dev/null",
+            GITHUB_SHA: workflowSha,
+            RELEASE_SHA: releaseSha,
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(expectedStatus);
+      expect(result.stderr).toContain(expectedMessage);
+      expect(result.stderr).not.toContain("unexpected registry lookup");
+    }
+  });
+
+  test("only builds a release tag whose exact commit is on protected main", async () => {
+    const { cwd, env, qualified, candidate } =
+      await createReleaseAncestryFixture();
+    const { jobs } = Bun.YAML.parse(darwinSigningWorkflow) as WorkflowContract;
+    const validation = jobs["validate"]!.steps!;
+    expect(validation[0]?.with?.["ref"]).toBe("refs/heads/main");
+    const validate = workflowStepShell(
+      darwinSigningWorkflow,
+      "Verify the release tag is on main",
+    );
+    for (const [tag, commit, eventSha, allowed] of [
+      ["npm-v1", qualified, qualified, true],
+      ["npm-v2", candidate, candidate, false],
+      ["npm-v3", candidate, qualified, false],
+    ] as const) {
+      const result = await runCommand(
+        bash,
+        [
+          "--noprofile",
+          "--norc",
+          "-c",
+          `set -eu
+git tag -a "$GITHUB_REF_NAME" "$TAG_COMMIT" -m fixture
+${validate}`,
+        ],
+        {
+          cwd,
+          env: {
+            ...env,
+            GITHUB_SHA: eventSha,
+            GITHUB_REF_TYPE: "tag",
+            GITHUB_REF_NAME: tag,
+            GITHUB_REF: `refs/tags/${tag}`,
+            GITHUB_OUTPUT: "/dev/null",
+            TAG_COMMIT: commit,
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(allowed ? 0 : 1);
+    }
+  });
+
   test("executes the manual release cut against all published versions", async () => {
     const script = workflowStepShell(
       releaseCutWorkflow,
@@ -1863,6 +2070,11 @@ describe("GitHub release workflow safeguards", () => {
       taggedSha: "cccccccccccccccccccccccccccccccccccccccc",
       taggedVersion: "0.1.6",
       changed: true,
+    },
+    {
+      scenario: "an unavailable blob for the previous package manifest",
+      previousVersion: null,
+      changed: false,
     },
     {
       scenario: "a successful fix after the version-increase commit failed CI",
@@ -1941,8 +2153,8 @@ describe("GitHub release workflow safeguards", () => {
         "      fi",
         "      ;;",
         "    rev-parse)",
-        '      if [[ "$2" == "$RELEASE_SHA^" ]]; then',
-        "        printf '%s\\n' \"$MOCK_PREVIOUS_SHA\"",
+        '      if [[ "$2" == "--verify" && "$3" == "$RELEASE_SHA^:sdk/typescript/package.json" ]]; then',
+        "        echo previous-manifest",
         '      elif [[ "$2" == "--verify" && "$3" == "refs/tags/npm-v$MOCK_RELEASE_VERSION^{commit}" ]]; then',
         '        [[ -n "$MOCK_TAGGED_SHA" ]] || return 1',
         "        printf '%s\\n' \"$MOCK_TAGGED_SHA\"",
@@ -1956,8 +2168,13 @@ describe("GitHub release workflow safeguards", () => {
         '      elif [[ "$2" == "$MOCK_TAGGED_SHA:sdk/typescript/package.json" ]]; then',
         '        printf \'{"version":"%s"}\\n\' "$MOCK_TAGGED_VERSION"',
         "      else",
-        '        printf \'{"version":"%s"}\\n\' "$MOCK_PREVIOUS_VERSION"',
+        "        return 64",
         "      fi",
+        "      ;;",
+        "    cat-file)",
+        '      [[ "$2 $3" == "blob previous-manifest" ]] || return 64',
+        '      [[ -n "$MOCK_PREVIOUS_VERSION" ]] || { echo "unavailable manifest blob" >&2; return 1; }',
+        '      printf \'{"version":"%s"}\\n\' "$MOCK_PREVIOUS_VERSION"',
         "      ;;",
         "    *) return 64 ;;",
         "  esac",
@@ -1981,8 +2198,7 @@ describe("GitHub release workflow safeguards", () => {
           GITHUB_OUTPUT: outputPath,
           GITHUB_REF: "refs/heads/main",
           GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          MOCK_PREVIOUS_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          MOCK_PREVIOUS_VERSION: previousVersion,
+          MOCK_PREVIOUS_VERSION: previousVersion ?? "",
           MOCK_PUBLISHED_VERSIONS: JSON.stringify(publishedVersions),
           MOCK_RELEASE_VERSION: currentVersion,
           MOCK_TAGGED_SHA: taggedSha,
@@ -1993,16 +2209,20 @@ describe("GitHub release workflow safeguards", () => {
         { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
+      if (previousVersion === null) {
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("unavailable manifest blob");
+        expect(existsSync(outputPath)).toBe(false);
+        return;
+      }
       expect(result.stderr).toBe("");
       expect(result.status).toBe(0);
 
       const outputs = readFileSync(outputPath, "utf8");
       expect(outputs).toContain(`changed=${changed}`);
       if (changed) {
-        expect(outputs).toContain(`version=${currentVersion}`);
-        expect(outputs).toContain(`tag=npm-v${currentVersion}`);
+        expect(outputs.split("\n")).toContain(`tag=npm-v${currentVersion}`);
       } else {
-        expect(outputs).not.toContain("version=");
         expect(outputs).not.toContain("tag=");
       }
     },
@@ -2069,41 +2289,35 @@ describe("GitHub release workflow safeguards", () => {
       workflow: "release cut",
       version: "0.1.0",
       errorCode: "E404",
-      status: 0,
     },
     {
       workflow: "protected publisher",
       version: "0.1.0",
       errorCode: "E404",
-      status: 0,
     },
     {
       workflow: "release cut",
       version: "0.1.1",
       errorCode: "E404",
-      status: 1,
     },
     {
       workflow: "protected publisher",
       version: "0.1.1",
       errorCode: "E404",
-      status: 1,
     },
     {
       workflow: "release cut",
       version: "0.1.0",
       errorCode: "ETIMEDOUT",
-      status: 1,
     },
     {
       workflow: "protected publisher",
       version: "0.1.0",
       errorCode: "E403",
-      status: 1,
     },
   ])(
-    "handles $errorCode during $workflow npm-history validation for $version",
-    async ({ workflow, version, errorCode, status }) => {
+    "stops the $workflow when npm history for $version fails with $errorCode",
+    async ({ workflow, version, errorCode }) => {
       const cutting = workflow === "release cut";
       const script = workflowStepShell(
         cutting ? releaseCutWorkflow : protectedReleaseWorkflow,
@@ -2150,12 +2364,10 @@ describe("GitHub release workflow safeguards", () => {
         { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
-      expect(result.status).toBe(status);
-      if (status !== 0) {
-        expect(result.stderr).toContain(
-          "Unable to verify published npm release history.",
-        );
-      }
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "Unable to verify published npm release history.",
+      );
     },
   );
 
@@ -2393,12 +2605,18 @@ describe("GitHub release workflow safeguards", () => {
       status: 0,
     },
   ])(
-    "revalidates the authoritative $kind immediately before npm publication",
+    "revalidates the authoritative $kind before signing and publication",
     async ({ tagType, tagObject, peeledCommit = "", status }) => {
-      const script = workflowStepShell(
-        protectedReleaseWorkflow,
-        "Revalidate protected release tag",
-      );
+      const action = Bun.YAML.parse(
+        readFileSync(
+          new URL(
+            "../../../.github/actions/revalidate-release-tag/action.yml",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ) as { runs: { steps: { run: string }[] } };
+      const script = action.runs.steps[0]!.run;
       const mock = [
         "gh() {",
         '  if [[ "$1" != "api" ]]; then return 64; fi',
@@ -2434,6 +2652,389 @@ describe("GitHub release workflow safeguards", () => {
       } else {
         expect(result.stderr).toContain(
           "Protected npm release tag must still point to the verified commit.",
+        );
+      }
+    },
+  );
+
+  test("binds signing to both verified Darwin builds and packaging to the signed artifact", () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const signing = Bun.YAML.parse(darwinSigningWorkflow) as WorkflowContract;
+    expect(jobs["sign-darwin"]?.needs).toBe("eligibility");
+    expect(jobs["sign-darwin"]?.if).toBe(
+      "needs.eligibility.outputs.mode == 'publish'",
+    );
+    expect(jobs["recover-native"]).toMatchObject({
+      needs: "eligibility",
+      if: "needs.eligibility.outputs.mode == 'recover'",
+      uses: "./.github/workflows/native-artifacts.yml",
+    });
+    expect(jobs["sign-darwin"]?.uses).toBe(
+      "openai/codex-security/.github/workflows/sign-darwin-release.yml@main",
+    );
+    const sign = signing.jobs["sign"]!;
+    expect(signing.jobs["build"]).toMatchObject({
+      needs: "validate",
+      uses: "./.github/workflows/native-artifacts.yml",
+      "cache-mode": "none",
+      with: { ref: "${{ github.sha }}", "reuse-verified": false },
+    });
+    expect(sign.needs).toBe("build");
+    expect(sign.environment).toBe("codesigning");
+    const signer = sign.steps!;
+    const usedSecrets = [
+      ...JSON.stringify(signer).matchAll(/\$\{\{ secrets\.(\w+) \}\}/gu),
+    ].map(([reference, name]) => [name!, reference] as const);
+    expect(jobs["sign-darwin"]?.secrets).toEqual(
+      Object.fromEntries(usedSecrets),
+    );
+    for (const [name] of usedSecrets) {
+      expect(signing.on?.workflow_call?.secrets?.[name]?.required).toBe(true);
+    }
+    const requireIds = signer.find(
+      (step) => step.name === "Require both build artifact IDs",
+    )!;
+    const digestCheck = signer.find(
+      (step) => step.name === "Verify both addon digests",
+    );
+    for (const arch of ["arm64", "x64"]) {
+      const download = signer.find(
+        (step) => step.name === `Download the ${arch} build`,
+      );
+      const artifactId = `\${{ needs.build.outputs.darwin-${arch}-artifact-id }}`;
+      expect(requireIds.env?.[arch.toUpperCase() + "_ID"]).toBe(artifactId);
+      expect(signer.indexOf(requireIds)).toBeLessThan(
+        signer.indexOf(download!),
+      );
+      expect(download?.with).toMatchObject({
+        "artifact-ids": artifactId,
+        "digest-mismatch": "error",
+        path: `${arch}-build`,
+      });
+      expect(digestCheck?.env?.[arch.toUpperCase() + "_SHA256"]).toBe(
+        `\${{ needs.build.outputs.darwin-${arch}-sha256 }}`,
+      );
+    }
+    const verify = jobs["verify"]!.steps!;
+    expect(
+      verify.find((step) => step.name === "Download verified native payload")
+        ?.with,
+    ).toMatchObject({
+      "artifact-ids": "${{ needs.native.outputs.artifact-id }}",
+      "digest-mismatch": "error",
+    });
+    expect(
+      verify.find(
+        (step) => step.name === "Overlay signed Darwin addons for publication",
+      )?.with,
+    ).toMatchObject({
+      "artifact-ids": "${{ needs.native.outputs.signed-darwin-id }}",
+      "digest-mismatch": "error",
+    });
+    const setup = signer.findIndex(
+      (step) => step.name === "Set up Developer ID signing",
+    );
+    expect(signer[setup]?.with?.["setup-mode"]).toBe("tools-only");
+    expect(signer[setup - 1]).toMatchObject({
+      name: "Revalidate tag before Developer ID signing",
+      uses: "$/.github/actions/revalidate-release-tag",
+    });
+    const publisher = jobs["publish"]!.steps!;
+    const publishIndex = publisher.findIndex(
+      (step) => step.name === "Publish to npm using trusted publishing",
+    );
+    expect(publisher[publishIndex - 1]).toMatchObject({
+      name: "Revalidate protected release tag",
+      if: "needs.verify.outputs.mode == 'publish'",
+      uses: "$/.github/actions/revalidate-release-tag",
+    });
+  });
+
+  test("publication and recovery select only their own successful native build", async () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const native = jobs["native"]!;
+    const select = native.steps!.find(
+      (step) =>
+        step.name === "Select the native artifact IDs for this release mode",
+    )!;
+    expect(select.env).toMatchObject({
+      PUBLISH_NATIVE_ID: "${{ needs.sign-darwin.outputs.native-artifact-id }}",
+      SIGNED_ID: "${{ needs.sign-darwin.outputs.artifact-id }}",
+      RECOVER_NATIVE_ID: "${{ needs.recover-native.outputs.artifact-id }}",
+    });
+    for (const mode of ["publish", "recover"]) {
+      const publish = mode === "publish";
+      const context = {
+        "!cancelled()": "true",
+        "needs.eligibility.result": "success",
+        "needs.eligibility.outputs.mode": mode,
+        "needs.sign-darwin.result": publish ? "success" : "skipped",
+        "needs.recover-native.result": publish ? "skipped" : "success",
+      };
+      expect(await evaluateWorkflowCondition(native.if!, context)).toBe(true);
+      const requiredJob = publish ? "sign-darwin" : "recover-native";
+      expect(
+        await evaluateWorkflowCondition(native.if!, {
+          ...context,
+          [`needs.${requiredJob}.result`]: "failure",
+        }),
+      ).toBe(false);
+      const output = join(
+        directories.create("release-native-"),
+        "outputs",
+      ).replaceAll("\\", "/");
+      const result = await runShell(select.run!, {
+        RELEASE_MODE: mode,
+        PUBLISH_NATIVE_ID: "101",
+        SIGNED_ID: "102",
+        RECOVER_NATIVE_ID: "201",
+        GITHUB_OUTPUT: output,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(output, "utf8").trim().split(/\r?\n/u)).toEqual(
+        publish ? ["native-id=101", "signed-id=102"] : ["native-id=201"],
+      );
+    }
+  });
+
+  test("requires the protected signing workflow before signing and consuming addons from this attempt", async () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const steps = jobs["native"]!.steps!;
+    const select = steps.findIndex(
+      (step) =>
+        step.name === "Select the native artifact IDs for this release mode",
+    );
+    const guard = steps[select - 1]!;
+    expect(guard.name).toBe("Verify reusable signing workflow ref");
+    expect(guard.if).toBe("needs.eligibility.outputs.mode == 'publish'");
+    const eligibility = jobs["eligibility"]!;
+    const early = eligibility.steps!.find(
+      (step) =>
+        step.name === "Verify reusable signing workflow ref before signing",
+    );
+    expect(early).toMatchObject({
+      if: "steps.release.outputs.mode == 'publish'",
+      run: guard.run,
+    });
+    expect(eligibility.permissions).toEqual({
+      actions: "read",
+      contents: "read",
+    });
+    expect(jobs["sign-darwin"]?.needs).toBe("eligibility");
+    expect(jobs["verify"]?.needs).toContain("native");
+    expect(
+      jobs["verify"]?.steps?.find(
+        (step) => step.name === "Overlay signed Darwin addons for publication",
+      )?.if,
+    ).toBe(guard.if);
+    const workflow = `${releaseRepository}/.github/workflows/sign-darwin-release.yml`;
+    const branch = {
+      path: `${workflow}@main`,
+      ref: "refs/heads/main",
+      sha: releaseCommit,
+    };
+    const tag = { ...branch, ref: "refs/tags/main" };
+    const other = {
+      ...branch,
+      path: `${releaseRepository}/.github/workflows/other.yml@main`,
+    };
+    const script = `set -e
+gh() {
+  [[ "$*" == "api repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" ]] || return 64
+  printf '%s\\n' "$MOCK_ATTEMPT"
+}
+${guard.run}
+echo 'overlay reached'`;
+    for (const [refs, allowed] of [
+      [[other, branch], true],
+      [[{ ...branch, path: `${workflow}@${releaseCommit}` }], true],
+      [[tag], false],
+      [[other, branch, tag], false],
+      [[{ ...branch, ref: "refs/heads/feature" }], false],
+      [[{ path: branch.path, sha: releaseCommit }], false],
+      [[other], false],
+      [[], false],
+    ] as const) {
+      const result = await runShell(script, {
+        GITHUB_REPOSITORY: releaseRepository,
+        GITHUB_RUN_ID: releaseRun,
+        GITHUB_RUN_ATTEMPT: "3",
+        MOCK_ATTEMPT: JSON.stringify({ referenced_workflows: refs }),
+      });
+      expect(result.status, JSON.stringify(refs) + result.stderr).toBe(
+        allowed ? 0 : 1,
+      );
+      expect(result.stdout.includes("overlay reached")).toBe(allowed);
+    }
+  });
+
+  test("each verified Darwin matrix leg forwards its own upload ID and addon digest", async () => {
+    const unix = workflow("native-unix");
+    const native = workflow("native-artifacts");
+    const build = unix.jobs["primitives"]!;
+    const steps = build.steps!;
+    const upload = steps.findIndex((step) => step.id === "upload");
+    const record = steps.findIndex((step) => step.id === "darwin");
+    const node20 = steps.findIndex(
+      (step) => step.with?.["node-version"] === "20.0.0",
+    );
+    expect(node20).toBeGreaterThan(0);
+    expect(
+      steps
+        .slice(node20 + 1, upload)
+        .some(
+          (step) =>
+            step.run?.includes("check.mjs") && step.run.includes("proof.mjs"),
+        ),
+    ).toBe(true);
+    expect(record).toBeGreaterThan(upload);
+    expect(steps[record]).toMatchObject({
+      if: "matrix.platform == 'darwin'",
+      env: {
+        DARWIN_TARGET: "${{ matrix.artifact }}",
+        ARTIFACT_ID: "${{ steps.upload.outputs.artifact-id }}",
+      },
+    });
+    for (const [target, id] of [
+      ["darwin-arm64", "101"],
+      ["darwin-x64", "202"],
+    ] as const) {
+      const cwd = directories.create("native-matrix-");
+      const output = join(cwd, "outputs").replaceAll("\\", "/");
+      writeSource(cwd, `dist/${target}/unix.node`, target);
+      const script = `if ! command -v shasum >/dev/null; then
+  shasum() { [[ "$1 $2" == "-a 256" ]] || return 64; shift 2; sha256sum "$@"; }
+fi
+${steps[record]!.run}`;
+      const result = await runShell(
+        script,
+        { DARWIN_TARGET: target, ARTIFACT_ID: id, GITHUB_OUTPUT: output },
+        { cwd },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(output, "utf8").trim().split(/\r?\n/u)).toEqual([
+        `${target}-artifact-id=${id}`,
+        `${target}-sha256=${createHash("sha256").update(target).digest("hex")}`,
+      ]);
+      for (const key of [`${target}-artifact-id`, `${target}-sha256`]) {
+        expect(build.outputs?.[key]).toBe(
+          `\${{ steps.darwin.outputs.${key} }}`,
+        );
+        expect(unix.on["workflow_call"]).toMatchObject({
+          outputs: {
+            [key]: { value: `\${{ jobs.primitives.outputs.${key} }}` },
+          },
+        });
+        expect(native.on["workflow_call"]).toMatchObject({
+          outputs: { [key]: { value: `\${{ jobs.unix.outputs.${key} }}` } },
+        });
+      }
+    }
+  });
+
+  test.each([
+    { scenario: "both verified builds" },
+    { scenario: "substituted arm64 addon", replaced: "darwin-arm64" },
+    { scenario: "substituted x64 addon", replaced: "darwin-x64" },
+    { scenario: "missing arm64 artifact ID", missingId: "ARM64_ID" },
+    { scenario: "missing x64 artifact ID", missingId: "X64_ID" },
+  ])(
+    "gates the Developer ID signer on $scenario",
+    async ({ replaced, missingId }) => {
+      const { jobs } = Bun.YAML.parse(
+        darwinSigningWorkflow,
+      ) as WorkflowContract;
+      const steps = jobs["sign"]!.steps!;
+      const step = steps.find((step) => step.name === "Sign Darwin addons")!;
+      expect(step.env).toMatchObject({
+        RCODESIGN: "${{ steps.signing-tools.outputs.rcodesign }}",
+        PKCS11_LIBRARY: "${{ steps.signing-tools.outputs.pkcs11-library }}",
+        AKV_PKCS11_BACKEND: "signer-service",
+        SIGNER_SERVICE_ENDPOINT: "${{ secrets.SIGNER_SERVICE_ENDPOINT }}",
+        SIGNER_SERVICE_PURPOSE: "${{ secrets.SIGNER_SERVICE_PURPOSE }}",
+        SIGNER_SERVICE_KEY_ID: "${{ secrets.SIGNER_SERVICE_KEY_ID }}",
+        SIGNER_SERVICE_KEY_LABEL: expect.stringMatching(/\S/),
+        SIGNING_CERTIFICATE_PEM: "${{ secrets.SIGNING_CERTIFICATE_PEM }}",
+      });
+
+      const cwd = directories.create("release signer ");
+      if (process.platform === "darwin" && !Bun.which("sha256sum")) {
+        writeFileSync(
+          join(cwd, "sha256sum"),
+          '#!/bin/sh\nexec shasum -a 256 "$@"\n',
+          { mode: 0o755 },
+        );
+      }
+      const architectures = ["arm64", "x64"];
+      for (const arch of architectures) {
+        const target = `darwin-${arch}`;
+        writeSource(
+          cwd,
+          `${arch}-build/${target}/unix.node`,
+          target === replaced ? "substituted artifact" : target,
+        );
+      }
+      const env = {
+        ...step.env,
+        PATH: `${cwd}${delimiter}${process.env["PATH"]}`,
+        ARM64_ID: missingId === "ARM64_ID" ? "" : "11",
+        X64_ID: missingId === "X64_ID" ? "" : "12",
+        ARM64_SHA256: createHash("sha256").update("darwin-arm64").digest("hex"),
+        X64_SHA256: createHash("sha256").update("darwin-x64").digest("hex"),
+        RCODESIGN: "./fixture signer",
+        PKCS11_LIBRARY: "fixture provider.so",
+        SIGNER_SERVICE_CERTIFICATE_FILE: "fixture certificate.pem",
+        SIGNING_CERTIFICATE_PEM:
+          "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
+      };
+      writeFileSync(
+        join(cwd, env.RCODESIGN),
+        '#!/usr/bin/env bash\nprintf "<%s>" "$@" >> "${!#}"\n',
+        { mode: 0o755 },
+      );
+      const script = steps
+        .filter((s) =>
+          [
+            "Require both build artifact IDs",
+            "Verify both addon digests",
+            "Sign Darwin addons",
+          ].includes(s.name!),
+        )
+        .map((s) => `(\n${s.run!}\n)`)
+        .join("\n");
+      const result = await runShell(`set -e\n${script}`, env, { cwd });
+      if (replaced || missingId) {
+        expect(result.status, result.stderr).toBe(1);
+        expect(existsSync(join(cwd, env.SIGNER_SERVICE_CERTIFICATE_FILE))).toBe(
+          false,
+        );
+        return;
+      }
+      expect(result.status, result.stderr).toBe(0);
+      const pem = readFileSync(
+        join(cwd, env.SIGNER_SERVICE_CERTIFICATE_FILE),
+        "utf8",
+      );
+      expect(pem.trimEnd()).toBe(env.SIGNING_CERTIFICATE_PEM);
+      for (const arch of architectures) {
+        const target = `darwin-${arch}`;
+        const signed = readFileSync(
+          join(cwd, "signed", target, "unix.node"),
+          "utf8",
+        );
+        expect(signed).toStartWith(`${target}<sign>`);
+        expect(signed).toContain(`<--pkcs11-library><${env.PKCS11_LIBRARY}>`);
+        expect(signed).toContain(
+          `<--pkcs11-certificate-file><${env.SIGNER_SERVICE_CERTIFICATE_FILE}>`,
+        );
+        expect(signed).toContain(
+          `<--pkcs11-key-label><${step.env!["SIGNER_SERVICE_KEY_LABEL"]}>`,
         );
       }
     },
@@ -2515,11 +3116,107 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
+  test("requires every release test shard before protected publication", () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    expect(jobs["test"]?.strategy?.matrix["suite"]).toEqual([1, 2, 3, "mcp"]);
+    expect(jobs["test"]?.strategy?.["fail-fast"]).toBe(false);
+    expect(jobs["test"]?.permissions).toEqual({ contents: "read" });
+    expect(jobs["test"]?.env).toEqual(jobs["verify"]?.env);
+    expect(jobs["publish"]?.needs).toEqual([
+      "verify",
+      "test",
+      "macos-review-items",
+    ]);
+    expect(
+      jobs["macos-review-items"]?.steps?.find(
+        (step) => step.name === "Download verified package",
+      )?.with?.["artifact-ids"],
+    ).toBe("${{ needs.verify.outputs.artifact-id }}");
+    expect(jobs["publish"]?.name).toBe(
+      `\${{ needs.verify.outputs.mode == 'recover' && '${recoveryPublisher}' || '${combinedPublisher}' }}`,
+    );
+    expect(jobs["publish"]?.environment).toBe("npm");
+    expect(jobs["publish"]?.permissions).toEqual({
+      contents: "read",
+      "id-token": "write",
+    });
+    expect(
+      jobs["publish"]?.steps?.find(
+        (step) => step.name === "Download verified package",
+      )?.with,
+    ).toMatchObject({
+      "artifact-ids": "${{ needs.verify.outputs.artifact-id }}",
+      "digest-mismatch": "error",
+    });
+    expect(
+      jobs["test"]?.steps?.find((step) => step.name === "Test TypeScript shard")
+        ?.run,
+    ).toContain("scripts/run-ci-tests.mts ${{ matrix.suite }}/3");
+    expect(
+      jobs["test"]?.steps?.find((step) => step.name === "Test MCP app")?.run,
+    ).toContain("run test:mcp");
+  });
+
+  test("isolates optional release comments from verification and publishing", () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const progress = Bun.YAML.parse(
+      readFileSync(
+        new URL(
+          "../../../.github/workflows/release-progress.yml",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as WorkflowContract;
+    expect(jobs["verify"]?.permissions).toEqual({ contents: "read" });
+    expect(jobs["native"]?.permissions).toEqual({ actions: "read" });
+    expect(progress.jobs["report"]?.["continue-on-error"]).toBe(true);
+    expect(progress.jobs["report"]?.permissions).toEqual({
+      actions: "read",
+      contents: "read",
+      "pull-requests": "write",
+    });
+    const checkout = progress.jobs["report"]?.steps?.find(
+      (step: { uses?: string }) => step.uses?.startsWith("actions/checkout@"),
+    );
+    expect(checkout?.with).toMatchObject({
+      ref: "refs/heads/main",
+      "persist-credentials": false,
+    });
+    expect(progress.concurrency?.["cancel-in-progress"]).toBe(false);
+    expect(progress.jobs["report"]?.concurrency?.["queue"]).toBe("max");
+    expect(progress.jobs["report"]?.needs).toBe("identify");
+    expect(progress.jobs["watch"]?.permissions).toEqual({
+      actions: "write",
+      contents: "read",
+    });
+    expect(progress.jobs["watch"]?.["continue-on-error"]).toBe(true);
+    expect(progress.jobs["watch"]?.if).toContain(
+      "github.event.action == 'in_progress'",
+    );
+    expect(progress.jobs["watch"]?.if).toContain("inputs.watch");
+    expect(progress.jobs["watch"]?.steps?.[0]?.with).toEqual({
+      ref: "refs/heads/main",
+      "persist-credentials": false,
+    });
+    expect(
+      progress.jobs["watch"]?.steps?.at(-1)?.env?.["RELEASE_PROGRESS_WATCH"],
+    ).toBe("true");
+    const publication = (
+      Bun.YAML.parse(githubReleaseWorkflow) as WorkflowContract
+    ).jobs;
+    expect(publication["installed"]?.needs).toBe("release");
+  });
+
   test("dispatches GitHub releases after publishing with isolated permissions", () => {
     expect(protectedReleaseWorkflow).toContain(
       [
         "  dispatch-github-release:",
-        "    if: github.repository == 'openai/codex-security'",
+        "    if: ${{ !cancelled() && needs.publish.result == 'success' }}",
         "    name: dispatch GitHub release",
         "    needs: publish",
         "    runs-on: ubuntu-latest",
@@ -2545,17 +3242,18 @@ describe("GitHub release workflow safeguards", () => {
       status: 0,
     },
     {
-      description: "a version becoming visible after npm processing",
-      missingAttempts: 4,
-      calls: 5,
-      waits: 4,
+      description:
+        "a version becoming visible after twenty minutes of npm processing",
+      missingAttempts: 40,
+      calls: 41,
+      waits: 40,
       status: 0,
     },
     {
       description: "a version remaining absent past the publication wait",
       missingAttempts: 100,
-      calls: 21,
-      waits: 20,
+      calls: 61,
+      waits: 60,
       status: 1,
     },
     {
@@ -2614,33 +3312,89 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("dispatches the exact protected run and release tag from trusted main", async () => {
-    const script = workflowStepShell(
-      protectedReleaseWorkflow,
-      "Dispatch the verified GitHub release",
-    );
-    const mock = "gh() { printf '%s\\n' \"$@\"; }";
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: releaseRepository,
-      RELEASE_RUN_ID: releaseRun,
-      RELEASE_TAG: "npm-v0.1.2",
-    });
-
-    expect(result.status).toBe(0);
-    expect(result.stdout.trim().split("\n")).toEqual([
-      "workflow",
-      "run",
-      "node-github-release.yml",
-      "--repo",
-      releaseRepository,
-      "--ref",
-      "main",
-      "-f",
-      "tag=npm-v0.1.2",
-      "-f",
-      `run_id=${releaseRun}`,
-    ]);
-  });
+  test.each([
+    {
+      workflow: readFileSync(
+        new URL(
+          "../../../.github/workflows/container-release.yml",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+      step: "Dispatch the coordinator on protected main",
+      target: "node-github-release.yml",
+      fields: ["-f", "ref=main", "-f", "inputs[tag]=npm-v0.1.2"],
+    },
+    {
+      workflow: releaseCutWorkflow,
+      step: "Dispatch the protected npm release",
+      target: "node-release.yml",
+      fields: ["-f", "ref=npm-v0.1.2"],
+    },
+    {
+      workflow: protectedReleaseWorkflow,
+      step: "Dispatch the verified GitHub release",
+      target: "node-github-release.yml",
+      fields: [
+        "-f",
+        "ref=main",
+        "-f",
+        "inputs[tag]=npm-v0.1.2",
+        "-f",
+        `inputs[run_id]=${releaseRun}`,
+      ],
+    },
+  ])(
+    "dispatches $target with exact release inputs and records its run",
+    async ({ workflow, step, target, fields }) => {
+      const script = workflowStepShell(workflow, step);
+      const output = join(directories.create("release-dispatch-"), "output");
+      writeFileSync(output, "");
+      const mock = "gh() { printf '%s\\n' \"$@\" >&2; printf '12345\\n'; }";
+      const env = {
+        GITHUB_REPOSITORY: releaseRepository,
+        GITHUB_SERVER_URL: "https://github.com",
+        GITHUB_STEP_SUMMARY: join(
+          directories.create("release-summary-"),
+          "summary",
+        ),
+        VERSION: "0.1.2",
+        RELEASE_RUN_ID: releaseRun,
+        RELEASE_TAG: "npm-v0.1.2",
+        GITHUB_OUTPUT: output,
+      };
+      const result = await runShell(`${mock}\n${script}`, env);
+      expect(result.status).toBe(0);
+      expect(result.stderr.trim().split("\n")).toEqual([
+        "api",
+        "--method",
+        "POST",
+        "-H",
+        "X-GitHub-Api-Version: 2026-03-10",
+        `repos/${releaseRepository}/actions/workflows/${target}/dispatches`,
+        ...fields,
+        "--jq",
+        ".workflow_run_id",
+      ]);
+      expect(readFileSync(output, "utf8")).toBe("run-id=12345\n");
+      writeFileSync(output, "");
+      const failed = await runShell(`gh() { return 1; }\n${script}`, env);
+      expect(failed.status).toBe(1);
+      expect(readFileSync(output, "utf8")).toBe("");
+      const parsed = Bun.YAML.parse(workflow) as WorkflowContract;
+      const notification = Object.values(parsed.jobs)
+        .flatMap((job) => job.steps ?? [])
+        .find((step) => step.name === "Start release progress observer");
+      expect(notification?.["continue-on-error"]).toBe(true);
+      expect(notification?.if).toBe("steps.dispatch.outputs.run-id != ''");
+      expect(notification?.run).toContain(
+        "timeout --kill-after=5s 10s gh workflow run release-progress.yml",
+      );
+      expect(notification?.run).toContain(
+        '-f "run-id=$RELEASE_RUN_ID" -f watch=true',
+      );
+    },
+  );
 
   test("serializes every GitHub release and historical backfill", () => {
     expect(githubReleaseWorkflow).toMatch(
@@ -2651,131 +3405,71 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("runs manually dispatched GitHub releases from trusted main", () => {
+  test("runs manually dispatched GitHub releases from the main commit selected for the run", () => {
     expect(githubReleaseWorkflow).toContain("workflow_dispatch:");
     expect(githubReleaseWorkflow).toContain("github.ref == 'refs/heads/main'");
     expect(githubReleaseWorkflow).toMatch(
-      /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: refs\/heads\/main/u,
-    );
-  });
-
-  test("requires an actual Git tag for GitHub releases", () => {
-    expect(githubReleaseWorkflow).toContain(
-      '"repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag"',
+      /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: \$\{\{ github\.sha \}\}/u,
     );
   });
 
   test.each(["queued", "in_progress"])(
     "waits for a %s protected npm release to finish before publishing notes",
     async (pendingStatus) => {
-      const script = workflowStepShell(
-        githubReleaseWorkflow,
-        "Resolve the successful protected release",
-      );
       const root = directories.create(
         "codex-security-release-wait-$(echo literal)-'-",
       );
-      const state = join(root, "release-state");
       const sleeps = join(root, "release-sleeps");
-      const mocks = [
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        '  case "$1" in',
-        '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
-        `      printf '%s\\t%s\\n' 'commit' '${releaseCommit}'`,
-        "      ;;",
-        `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
-        '      if [[ -f "$MOCK_RUN_STATE" ]]; then',
-        `        printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'completed' 'success' '${releaseCommit}' 'npm-v0.1.2'`,
-        "      else",
-        '        touch "$MOCK_RUN_STATE"',
-        `        printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' '${pendingStatus}' 'pending' '${releaseCommit}' 'npm-v0.1.2'`,
-        "      fi",
-        "      ;;",
-        "    *) return 65 ;;",
-        "  esac",
-        "}",
-        'sleep() { printf "%s\\n" "$1" >> "$MOCK_SLEEP_LOG"; }',
-      ].join("\n");
-
-      const result = await runShell(`${mocks}\n${script}`, {
-        GITHUB_OUTPUT: "/dev/null",
-        GITHUB_REPOSITORY: releaseRepository,
-        INPUT_RUN_ID: releaseRun,
-        INPUT_TAG: "npm-v0.1.2",
-        MOCK_RUN_STATE: state,
+      const result = await resolveProtectedRelease({
+        MOCK_RUN_STATUS: pendingStatus,
         MOCK_SLEEP_LOG: sleeps,
       });
-
       expect(result.status).toBe(0);
       expect(readFileSync(sleeps, "utf8")).toBe("2\n");
     },
   );
 
   test("rejects a pending npm release for a different tagged commit", async () => {
-    const script = workflowStepShell(
-      githubReleaseWorkflow,
-      "Resolve the successful protected release",
-    );
-    const differentCommit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const mocks = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      '  case "$1" in',
-      '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
-      `      printf '%s\\t%s\\n' 'commit' '${releaseCommit}'`,
-      "      ;;",
-      `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
-      `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'in_progress' 'pending' '${differentCommit}' 'npm-v0.1.2'`,
-      "      ;;",
-      "    *) return 65 ;;",
-      "  esac",
-      "}",
-      "sleep() { return 99; }",
-    ].join("\n");
-    const result = await runShell(`${mocks}\n${script}`, {
-      GITHUB_OUTPUT: "/dev/null",
-      GITHUB_REPOSITORY: releaseRepository,
-      INPUT_RUN_ID: releaseRun,
-      INPUT_TAG: "npm-v0.1.2",
+    const result = await resolveProtectedRelease({
+      MOCK_RUN_STATUS: "in_progress",
+      MOCK_RUN_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
-
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
       "The release run must successfully publish the exact tagged commit.",
     );
   });
 
-  test("times out safely if a protected npm release never completes", async () => {
-    const script = workflowStepShell(
-      githubReleaseWorkflow,
-      "Resolve the successful protected release",
-    );
-    const mocks = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      '  case "$1" in',
-      '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
-      `      printf '%s\\t%s\\n' 'commit' '${releaseCommit}'`,
-      "      ;;",
-      `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
-      `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'in_progress' 'pending' '${releaseCommit}' 'npm-v0.1.2'`,
-      "      ;;",
-      "    *) return 65 ;;",
-      "  esac",
-      "}",
-      "sleep() { :; }",
-    ].join("\n");
-    const result = await runShell(`${mocks}\n${script}`, {
-      GITHUB_OUTPUT: "/dev/null",
-      GITHUB_REPOSITORY: releaseRepository,
-      INPUT_RUN_ID: releaseRun,
-      INPUT_TAG: "npm-v0.1.2",
+  test("rejects a different workflow presenting the release tag and commit", async () => {
+    const result = await resolveProtectedRelease({
+      MOCK_WORKFLOW_PATH: ".github/workflows/other.yml",
     });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "The release run must successfully publish the exact tagged commit.",
+    );
+  });
 
+  test.each([
+    ["push", 0],
+    ["workflow_dispatch", 0],
+    ["pull_request", 1],
+  ] as const)(
+    "checks the %s event for the selected npm run",
+    async (event, status) => {
+      const result = await resolveProtectedRelease({ MOCK_RUN_EVENT: event });
+      expect(result.status).toBe(status);
+    },
+  );
+
+  test("times out safely if a protected npm release never completes", async () => {
+    const sleeps = join(directories.create("release-timeout-"), "sleeps");
+    const result = await resolveProtectedRelease({
+      MOCK_RUN_STATUS: "in_progress",
+      MOCK_NEXT_STATUS: "in_progress",
+      MOCK_SLEEP_LOG: sleeps,
+    });
+    expect(readFileSync(sleeps, "utf8")).toBe("2\n".repeat(29));
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
       `Timed out waiting for protected npm release ${releaseRun} to complete.`,
@@ -2783,35 +3477,12 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test("rejects a release-shaped branch before resolving its commit", async () => {
-    const script = workflowStepShell(
-      githubReleaseWorkflow,
-      "Resolve the successful protected release",
-    );
-    const mock = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      '  case "$1" in',
-      '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
-      "      return 1",
-      "      ;;",
-      '    "repos/openai/codex-security/commits/npm-v0.1.2")',
-      `      printf '%s\\n' '${releaseCommit}'`,
-      "      ;;",
-      `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
-      `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'completed' 'success' '${releaseCommit}' 'npm-v0.1.2'`,
-      "      ;;",
-      "    *) return 65 ;;",
-      "  esac",
-      "}",
-    ].join("\n");
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_OUTPUT: "/dev/null",
-      GITHUB_REPOSITORY: "openai/codex-security",
-      INPUT_RUN_ID: releaseRun,
-      INPUT_TAG: "npm-v0.1.2",
+    const calls = join(directories.create("missing-tag-"), "gh-calls");
+    const result = await resolveProtectedRelease({
+      MOCK_TAG_TYPE: "",
+      MOCK_GH_LOG: calls,
     });
-
+    expect(readFileSync(calls, "utf8")).not.toContain("/commits/");
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
       "GitHub releases require an existing stable npm-vX.Y.Z tag.",
@@ -2828,49 +3499,11 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "resolves the exact $kind tag when a same-named branch exists",
     async ({ tagType, objectSha }) => {
-      const script = workflowStepShell(
-        githubReleaseWorkflow,
-        "Resolve the successful protected release",
-      );
-      const branchCommit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-      const mocks = [
-        "git() {",
-        `  if [[ "$1" != "rev-parse" || "$2" != "--verify" || "$3" != "${objectSha}^{commit}" ]]; then return 66; fi`,
-        '  if [[ "$MOCK_TAG_TYPE" == "tag" ]]; then return 67; fi',
-        `  printf '%s\\n' '${releaseCommit}'`,
-        "}",
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        '  case "$1" in',
-        '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
-        '      if [[ "$3" == ".object.sha" ]]; then',
-        `        printf '%s\\n' '${objectSha}'`,
-        "      else",
-        `        printf '%s\\t%s\\n' '${tagType}' '${objectSha}'`,
-        "      fi",
-        "      ;;",
-        `    "repos/openai/codex-security/git/tags/${objectSha}")`,
-        `      printf '%s\\n' '${releaseCommit}'`,
-        "      ;;",
-        '    "repos/openai/codex-security/commits/npm-v0.1.2")',
-        `      printf '%s\\n' '${branchCommit}'`,
-        "      ;;",
-        `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
-        `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'completed' 'success' '${releaseCommit}' 'npm-v0.1.2'`,
-        "      ;;",
-        "    *) return 65 ;;",
-        "  esac",
-        "}",
-      ].join("\n");
-      const result = await runShell(`${mocks}\n${script}`, {
-        GITHUB_OUTPUT: "/dev/null",
-        GITHUB_REPOSITORY: "openai/codex-security",
-        INPUT_RUN_ID: releaseRun,
-        INPUT_TAG: "npm-v0.1.2",
+      const result = await resolveProtectedRelease({
         MOCK_TAG_TYPE: tagType,
+        MOCK_TAG_OBJECT: objectSha,
+        MOCK_BRANCH_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       });
-
       expect(result.status).toBe(0);
       expect(result.stderr).not.toContain(
         "The release run must successfully publish the exact tagged commit.",
@@ -2881,32 +3514,7 @@ describe("GitHub release workflow safeguards", () => {
   test.each(["0", "01", "000123"])(
     "rejects the noncanonical protected GitHub release run ID %j",
     async (runId) => {
-      const script = workflowStepShell(
-        githubReleaseWorkflow,
-        "Resolve the successful protected release",
-      );
-      const mocks = [
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        '  case "$1" in',
-        '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
-        `      printf '%s\\t%s\\n' 'commit' '${releaseCommit}'`,
-        "      ;;",
-        '    "repos/openai/codex-security/actions/runs/"*)',
-        `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'completed' 'success' '${releaseCommit}' 'npm-v0.1.2'`,
-        "      ;;",
-        "    *) return 65 ;;",
-        "  esac",
-        "}",
-      ].join("\n");
-      const result = await runShell(`${mocks}\n${script}`, {
-        GITHUB_OUTPUT: "/dev/null",
-        GITHUB_REPOSITORY: "openai/codex-security",
-        INPUT_RUN_ID: runId,
-        INPUT_TAG: "npm-v0.1.2",
-      });
-
+      const result = await resolveProtectedRelease({ INPUT_RUN_ID: runId });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(
         "No successful protected npm release exists for npm-v0.1.2.",
@@ -3012,8 +3620,10 @@ describe("GitHub release workflow safeguards", () => {
       import { syncBuiltinESMExports } from "node:module";
       import { readFileSync, writeFileSync } from "node:fs";
       childProcess.spawnSync = (program, args, options) => {
+        if (program === "npm") return { status: 0, stdout: '["0.1.2","0.1.3"]' };
         if (program === "git") return { status: 1, stdout: "" };
         if (program !== "gh") throw new Error("Unexpected command: " + program);
+        if (args.includes("repos/test/codex-security/releases?per_page=100")) return { status: 0, stdout: "" };
         if (args.includes("repos/test/codex-security/releases/tags/npm-v0.1.2")) {
           return { status: 1, stdout: 'HTTP/2.0 404 Not Found\\n\\n{"message":"Not Found"}' };
         }
@@ -3049,8 +3659,6 @@ describe("GitHub release workflow safeguards", () => {
             RELEASE_VERSION: "0.1.2",
             RELEASE_SHA: releaseCommit,
             RELEASE_ARCHIVE: join(workspace, "verified archive.tgz"),
-            PREVIOUS_TAG: "",
-            MAKE_LATEST: "false",
           },
           { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
         );
@@ -3068,16 +3676,28 @@ describe("GitHub release workflow safeguards", () => {
     const result = runPublisher({ existingLookup: "missing" });
     expect(result.status).toBe(0);
     expect(result.calls.at(-1)).toContain("--latest=false");
-    expect(githubReleaseWorkflow).toContain("release-history");
   });
 
+  test.each(["", "not-json"])(
+    "preserves note-generation failure before parsing %j output",
+    (stdout) => {
+      const result = runPublisher({
+        existingLookup: "missing",
+        generateNotesResult: {
+          status: 17,
+          stdout,
+          stderr: "Release notes are unavailable.",
+        },
+      });
+      expect(result.status).toBe(17);
+      expect(result.stderr).toBe("Release notes are unavailable.\n");
+      expect(result.calls.at(-1)).toContain(
+        "repos/test/codex-security/releases/generate-notes",
+      );
+    },
+  );
+
   test("generates notes only from a previously published release", () => {
-    expect(githubReleaseWorkflow).toContain(
-      "npm view @openai/codex-security versions",
-    );
-    expect(githubReleaseWorkflow).toContain(
-      "steps.history.outputs.previous-tag",
-    );
     const result = runPublisher({ existingLookup: "missing" });
     expect(
       result.calls.find((call) =>
@@ -3103,6 +3723,10 @@ describe("GitHub release workflow safeguards", () => {
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
     expect(result.calls.map((call) => call.slice(0, 3))).toEqual([
+      ["npm", "view", "@openai/codex-security"],
+      ["gh", "api", "--paginate"],
+      ["git", "rev-parse", `${releaseCommit}^`],
+      ["git", "tag", "--merged"],
       ["gh", "api", "--include"],
       ["gh", "release", "download"],
     ]);
@@ -3110,7 +3734,29 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     {
-      description: "the exact successful publishing run",
+      description:
+        "a successful signing attempt carried into a failed-jobs-only rerun",
+      exact: true,
+      resolvedPublisher: combinedPublisher,
+      originalCombined: true,
+      combined: true,
+      recoveryConclusion: "skipped",
+      status: 0,
+      message: "Verified npm provenance for the resolved release run.",
+    },
+    {
+      description:
+        "a failed signing attempt followed by a successful recovery in the same run",
+      exact: true,
+      resolvedPublisher: recoveryPublisher,
+      originalCombined: true,
+      originalConclusion: "failure",
+      recoveryConclusion: "success",
+      status: 0,
+      message: "Verified npm provenance for the resolved release run.",
+    },
+    {
+      description: "the historical npm-only publisher",
       exact: true,
       recoveryConclusion: "skipped",
       status: 0,
@@ -3124,7 +3770,44 @@ describe("GitHub release workflow safeguards", () => {
         "Signed npm provenance must identify the resolved successful release run.",
     },
     {
-      description: "the authenticated original signing run after recovery",
+      description: "a combined signing run recovered by an npm-only job",
+      originalCombined: true,
+      latestOriginalConclusion: "failure",
+      combined: true,
+      recoveryConclusion: "success",
+      status: 0,
+      message:
+        "Verified protected recovery provenance from its original signing run.",
+    },
+    {
+      description:
+        "an npm-only signing run verified by the current recovery job",
+      resolvedPublisher: recoveryPublisher,
+      recoveryConclusion: "success",
+      status: 0,
+      message:
+        "Verified protected recovery provenance from its original signing run.",
+    },
+    {
+      description: "a recovery run impersonating the combined publisher",
+      resolvedPublisher: combinedPublisher,
+      recoveryConclusion: "success",
+      status: 1,
+      message:
+        "Signed npm provenance must identify the resolved successful release run.",
+    },
+    {
+      description: "an exact historical signing run whose jobs are unavailable",
+      exact: true,
+      jobsUnavailable: true,
+      recoveryConclusion: "skipped",
+      status: 0,
+      message: "Verified npm provenance for the resolved release run.",
+    },
+    {
+      description: "a package signed before its combined publisher failed",
+      originalCombined: true,
+      originalConclusion: "failure",
       recoveryConclusion: "success",
       status: 0,
       message:
@@ -3141,7 +3824,13 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "binds GitHub release provenance to $description",
     async ({
+      combined = false,
       exact = false,
+      jobsUnavailable = false,
+      resolvedPublisher = "publish",
+      originalCombined = false,
+      originalConclusion = "success",
+      latestOriginalConclusion = originalConclusion,
       recoveryConclusion,
       originalCommit = releaseCommit,
       status,
@@ -3156,8 +3845,29 @@ describe("GitHub release workflow safeguards", () => {
       );
       mkdirSync(join(workspace, "dist"));
       writeFileSync(join(workspace, "dist", "release.tgz"), "verified archive");
+      const signingRun = exact ? releaseRun : "30481596228";
+      function jobsPayload(name: string, conclusion: string, recovery: string) {
+        return JSON.stringify({
+          jobs: [
+            {
+              name,
+              conclusion,
+              steps: [
+                {
+                  name: "Verify recovered npm release provenance",
+                  conclusion: recovery,
+                },
+              ],
+            },
+          ],
+        });
+      }
 
       const mocks = [
+        // Native Windows jq otherwise writes CRLF to the workflow's Bash substitutions.
+        process.platform === "win32"
+          ? 'jq() { command jq --binary "$@"; }'
+          : "",
         "npm() {",
         '  case "$1" in',
         "    view) printf '%s\\n' '{}' ;;",
@@ -3179,10 +3889,10 @@ describe("GitHub release workflow safeguards", () => {
         '        if [[ "$MOCK_EXACT_PROVENANCE" != "1" || "$7" != "$RELEASE_RUN_ID" ]]; then',
         "          return 68",
         "        fi",
-        '        printf \'{"runId":"%s"}\\n\' "$RELEASE_RUN_ID"',
+        '        printf \'{"runId":"%s","runAttempt":"3"}\\n\' "$RELEASE_RUN_ID"',
         "        ;;",
         "      verify-recovered-provenance)",
-        '        printf \'{"runId":"%s"}\\n\' "$MOCK_ORIGINAL_RUN_ID"',
+        '        printf \'{"runId":"%s","runAttempt":"3"}\\n\' "$MOCK_ORIGINAL_RUN_ID"',
         "        ;;",
         "      *) return 66 ;;",
         "    esac",
@@ -3195,10 +3905,17 @@ describe("GitHub release workflow safeguards", () => {
         "  shift",
         '  case "$1" in',
         `    "repos/test/codex-security/actions/runs/${releaseRun}/jobs?per_page=100")`,
-        "      printf '%s\\n' \"$MOCK_RECOVERY_CONCLUSION\"",
+        '      jq -r "${!#}" <<< "$MOCK_RESOLVED_JOBS"',
+        "      ;;",
+        '    "repos/test/codex-security/actions/runs/30481596228/jobs?per_page=100")',
+        '      jq -r "${!#}" <<< "$MOCK_ORIGINAL_LATEST_JOBS"',
+        "      ;;",
+        `    "repos/test/codex-security/actions/runs/${signingRun}/attempts/3/jobs?per_page=100")`,
+        '      if [[ "$MOCK_JOBS_UNAVAILABLE" == true ]]; then return 68; fi',
+        '      jq -r "${!#}" <<< "$MOCK_SIGNING_JOBS"',
         "      ;;",
         '    "repos/test/codex-security/actions/runs/30481596228")',
-        "      printf '%s\\t%s\\t%s\\t%s\\n' node-release completed \"$MOCK_ORIGINAL_COMMIT\" npm-v0.1.2",
+        "      printf '%s\\t%s\\t%s\\t%s\\n' .github/workflows/node-release.yml completed \"$MOCK_ORIGINAL_COMMIT\" npm-v0.1.2",
         "      ;;",
         "    *) return 67 ;;",
         "  esac",
@@ -3207,12 +3924,27 @@ describe("GitHub release workflow safeguards", () => {
       const result = await runShell(
         `${mocks}\n${script}`,
         {
-          GITHUB_OUTPUT: "/dev/null",
+          GITHUB_OUTPUT: "outputs",
           GITHUB_REPOSITORY: "test/codex-security",
           MOCK_EXACT_PROVENANCE: exact ? "1" : "0",
           MOCK_ORIGINAL_COMMIT: originalCommit,
           MOCK_ORIGINAL_RUN_ID: "30481596228",
-          MOCK_RECOVERY_CONCLUSION: recoveryConclusion,
+          MOCK_JOBS_UNAVAILABLE: String(jobsUnavailable),
+          MOCK_RESOLVED_JOBS: jobsPayload(
+            resolvedPublisher,
+            "success",
+            recoveryConclusion,
+          ),
+          MOCK_ORIGINAL_LATEST_JOBS: jobsPayload(
+            originalCombined ? combinedPublisher : "publish",
+            latestOriginalConclusion,
+            "skipped",
+          ),
+          MOCK_SIGNING_JOBS: jobsPayload(
+            originalCombined ? combinedPublisher : "publish",
+            originalConclusion,
+            "skipped",
+          ),
           RELEASE_RUN_ID: releaseRun,
           RELEASE_SHA: releaseCommit,
           RELEASE_TAG: "npm-v0.1.2",
@@ -3224,6 +3956,11 @@ describe("GitHub release workflow safeguards", () => {
       expect(result.status).toBe(status);
       if (status === 0) {
         expect(result.stdout).toContain(message);
+        expect(
+          readFileSync(join(workspace, "outputs"), "utf8").includes(
+            "combined-approval=true",
+          ),
+        ).toBe(combined);
       } else {
         expect(result.stderr).toContain(message);
       }
@@ -3304,6 +4041,14 @@ describe("GitHub release workflow safeguards", () => {
       existingNotes:
         "<!-- codex-security-release-summary:start -->\nReviewed\u0000summary\n<!-- codex-security-release-summary:end -->",
       expectedError: "Existing release summary is empty.",
+      updated: false,
+      latestUpdated: false,
+      status: 1,
+    },
+    {
+      description: "NUL-bearing tagged summary",
+      releaseSummary: "<!-- release-version: 0.1.2 -->\nReviewed\0summary",
+      expectedError: "include a reviewed summary",
       updated: false,
       latestUpdated: false,
       status: 1,
@@ -3555,75 +4300,66 @@ describe("GitHub release workflow safeguards", () => {
     expect(githubReleaseWorkflow).not.toContain("CODEX_SECURITY_SUMMARY_START");
   });
 
-  test.each([false, true])(
-    "composes notes with optional files: %p",
-    async (optional) => {
-      const workspace = mkdtempSync(join(tmpdir(), "release notes "));
-      const generated = join(workspace, "generated notes.md");
-      const tagged = join(workspace, "tagged notes.md");
-      const existing = join(workspace, "existing notes.md");
-      try {
-        writeFileSync(generated, "Generated notes\n");
-        writeFileSync(
-          tagged,
-          "<!-- release-version: 0.1.2 -->\nReviewed summary",
-        );
-        writeFileSync(existing, "Old generated notes");
-        const result = await runCommand("node", [
-          fileURLToPath(automationScript),
-          "compose-release-notes",
-          "0.1.2",
-          generated,
-          ...(optional
-            ? ["--tagged-notes-file", tagged, "--existing-notes-file", existing]
-            : []),
-        ]);
-        expect(result.status).toBe(0);
-        expect(result.stdout).toContain("Generated notes");
-        expect(result.stdout.includes("Reviewed summary")).toBe(optional);
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
-      }
-    },
-  );
-
   test("cryptographically verifies the exact npm provenance bundle", () => {
-    expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
-    expect(githubReleaseWorkflow).toContain(
-      'if [[ "$(npm --version)" != "11.12.1" ]]; then',
-    );
     expect(githubReleaseWorkflow).toContain("npm audit signatures");
     expect(githubReleaseWorkflow).toContain("--include-attestations");
     expect(githubReleaseWorkflow).toContain("verify-recovered-provenance");
   });
 
-  test("installs the exact attestation-capable npm through the Socket Firewall", () => {
-    for (const workflow of [githubReleaseWorkflow, protectedReleaseWorkflow]) {
-      expect(workflow).toContain("Install provenance-capable npm");
-      expect(workflow).toContain("npm@11.12.1");
-      expect(workflow).toContain(
-        "--registry=https://openai.firewall.socket.dev/npm/",
-      );
-      expect(workflow).toContain('>> "$GITHUB_PATH"');
-      expect(workflow).not.toContain("npm install --global");
+  test("both release jobs require the npm installed through the Socket Firewall", async () => {
+    const action = "./.github/actions/setup-release-npm";
+    for (const [workflow, job] of [
+      [protectedReleaseWorkflow, "publish"],
+      [githubReleaseWorkflow, "release"],
+    ] as const) {
+      const { jobs } = Bun.YAML.parse(workflow) as WorkflowContract;
+      expect(jobs[job]?.steps?.map((step) => step.uses)).toContain(action);
     }
+    const manifest = new URL(`../../../${action}/action.yml`, import.meta.url);
+    const { runs } = Bun.YAML.parse(readFileSync(manifest, "utf8")) as {
+      runs: { steps: NonNullable<WorkflowContract["jobs"][string]["steps"]> };
+    };
+    const [node, install, verifyPath] = runs.steps;
+    expect(node?.uses).toMatch(/^actions\/setup-node@[a-f0-9]{40}$/);
+    expect(node?.with).toEqual({
+      "node-version": "24.15.0",
+      "registry-url": "https://registry.npmjs.org",
+      "package-manager-cache": false,
+    });
+    const result = await runShell(
+      `RUNNER_TEMP="$(cd "$RUNNER_TEMP" && pwd)"
+GITHUB_PATH="$RUNNER_TEMP/path"
+npm() {
+  printf '<%s>' "$1" "$2" "\${3#"$RUNNER_TEMP/"}" "\${@:4}"
+  mkdir -p "$3/node_modules/.bin"
+  printf '#!/bin/sh\\necho "\${TEST_NPM_VERSION:-11.12.1}"\\n' > "$3/node_modules/.bin/npm"
+  chmod +x "$3/node_modules/.bin/npm"
+}
+${install!.run}
+export PATH="$(cat "$GITHUB_PATH"):$PATH"
+verify() { "$BASH" <<'VERIFY'
+${verifyPath!.run}
+VERIFY
+}
+verify && echo selected
+TEST_NPM_VERSION=11.10.1 verify && exit 2
+cp "$release_npm_bin/npm" "$RUNNER_TEMP/npm"
+PATH="$RUNNER_TEMP:$PATH" verify`,
+      { RUNNER_TEMP: directories.create("release npm ") },
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
+    );
+    expect(result.stdout).toBe(
+      "<install><--prefix><codex-security-provenance-npm><--ignore-scripts><--no-audit><--no-fund><--registry=https://openai.firewall.socket.dev/npm/><npm@11.12.1>selected\n",
+    );
+    expect(result.status, result.stderr).toBe(1);
   });
 
-  test("serializes label reconciliation and reads the current PR title", () => {
-    expect(releaseLabelsWorkflow).toContain(
-      "group: node-release-labels-${{ github.event.pull_request.number }}",
-    );
-    expect(releaseLabelsWorkflow).toContain(
-      'gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER"',
-    );
-    expect(releaseLabelsWorkflow).toContain(
-      'label="$(release_note_label "$type" "$breaking_marker" "$scope")"',
-    );
-    expect(releaseLabelsWorkflow).toContain(
-      "breaking-change | enhancement | bug | documentation | skip-release-notes)",
-    );
-    expect(releaseLabelsWorkflow).toContain("gh api --method DELETE");
-    expect(releaseLabelsWorkflow).toContain("return 0");
+  test("serializes label reconciliation per pull request", () => {
+    expect(Bun.YAML.parse(releaseLabelsWorkflow)).toMatchObject({
+      concurrency: {
+        group: "node-release-labels-${{ github.event.pull_request.number }}",
+      },
+    });
   });
 
   test("enforces the same Conventional Commit title in required CI", () => {
@@ -3636,15 +4372,11 @@ describe("GitHub release workflow safeguards", () => {
     )?.[1];
 
     expect(releasePattern).toBeDefined();
-    expect(ciPattern).toBe(releasePattern);
+    expect(ciPattern).toBeUndefined();
     expect(titlePattern).toBe(releasePattern);
-    expect(nodeCiWorkflow).toContain(
-      "types: [opened, edited, reopened, synchronize]",
-    );
-    expect(nodeCiWorkflow).toContain("needs: validate-title");
   });
 
-  test("keeps required contexts stable for every change", async () => {
+  test("requires every selected source validation in the centralized gate", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3655,179 +4387,111 @@ describe("GitHub release workflow safeguards", () => {
         {
           name: string;
           if?: string;
-          "timeout-minutes"?: number;
-          strategy?: { matrix: Record<string, string[]> };
+          needs?: string | string[];
+          uses?: string;
+          outputs?: Record<string, string>;
+          "timeout-minutes"?: number | string;
           steps: Array<{
             if?: string;
             name?: string;
             run?: string;
+            env?: Record<string, string>;
+            with?: Record<string, unknown>;
           }>;
         }
       >;
     };
 
-    expect(workflow.concurrency.group).toBe(
-      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
-    );
+    const sourceGroup =
+      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}";
+    expect(workflow.concurrency.group).toStartWith(sourceGroup);
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
       "${{ github.event_name == 'pull_request' }}",
     );
-    expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
-    expect(
-      workflow.jobs["validate-title"]?.steps.find(
-        ({ name }) =>
-          name === "Checkout pull request for change classification",
-      )?.if,
-    ).toContain("github.event.changes.base == null");
-
-    for (const job of [
-      "static-checks",
-      "package",
-      "test",
-      "compatibility",
-      "mcp",
-      "plugin-host",
-      "plugin-source",
-      "windows-test",
-      "windows-verify",
-    ]) {
-      expect(workflow.jobs[job]?.if).toBeUndefined();
-    }
-    const requiredJobCondition = "always()";
-    expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
-    expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
-    const coverageGate = (job: string) =>
-      workflow.jobs[job]?.steps.find(
-        ({ name }) =>
-          name ===
-          `Require every ${job === "windows" ? "Windows" : "Unix"} coverage job`,
-      );
-    const conditionCases: Array<{
-      condition: string;
-      values: Record<string, string>;
-      expected: boolean;
-      message: string;
-    }> = [];
-    for (const [validation, upstream, gateFailure] of [
-      ["success", "success", false],
-      ["success", "skipped", true],
-      ["failure", "skipped", true],
-    ] as const) {
-      const values = {
-        "needs.static-checks.result": upstream,
-        "needs.plugin-host.result": upstream,
-        "needs.plugin-source.result": upstream,
-        "needs.package.result": upstream,
-        "needs.compatibility.result": upstream,
-        "needs.mcp.result": upstream,
-        "needs.test.result": upstream,
-        "needs.validate-title.result": validation,
-        "needs.windows-test.result": upstream,
-        "needs.windows-verify.result": upstream,
-      };
-      for (const job of ["required-test", "windows"]) {
-        conditionCases.push({
-          condition: coverageGate(job)?.if ?? "",
-          values,
-          expected: gateFailure,
-          message: `${job}: ${validation}/${upstream}`,
-        });
-      }
-    }
-
-    for (const [gate, dependencies] of Object.entries({
-      "required-test": [
-        "static-checks",
-        "package",
-        "test",
-        "compatibility",
-        "mcp",
-        "plugin-host",
-        "plugin-source",
-      ],
-      windows: [
-        "static-checks",
-        "plugin-host",
-        "plugin-source",
-        "windows-test",
-        "windows-verify",
-      ],
-    })) {
-      for (const dependency of dependencies) {
-        for (const result of ["failure", "cancelled", "skipped"]) {
-          conditionCases.push({
-            condition: coverageGate(gate)?.if ?? "",
-            values: {
-              "needs.validate-title.result": "success",
-              ...Object.fromEntries(
-                dependencies.map((job) => [
-                  `needs.${job}.result`,
-                  job === dependency ? result : "success",
-                ]),
-              ),
-            },
-            expected: true,
-            message: `${gate}: ${dependency}/${result}`,
-          });
-        }
-      }
-      expect(coverageGate(gate)?.run).toBe("exit 1");
-    }
-
-    const conditions = await evaluateWorkflowConditions(conditionCases);
-    for (const [index, item] of conditionCases.entries()) {
-      expect(conditions[index], item.message).toBe(item.expected);
-    }
-
-    const renderName = (template: string, values: Record<string, string>) => {
-      let name = template;
-      for (const [key, value] of Object.entries(values)) {
-        name = name.replaceAll("${{ matrix." + key + " }}", value);
-      }
-      return name.replace(
-        "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-        values["node"] === "22.13.0" ? "22" : (values["node"] ?? ""),
-      );
-    };
-    const unixJob = workflow.jobs["required-test"];
-    const windowsJob = workflow.jobs["windows"];
-    const fullNames = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }),
-      ),
-    ];
-    const requiredContexts = new Set([
-      "ubuntu-latest / node-22",
-      "macos-latest / node-22",
-      "windows-latest / node-22",
-    ]);
-
-    expect(
-      fullNames.filter((name) => requiredContexts.has(name)).sort(),
-    ).toEqual([...requiredContexts].sort());
-  });
-
-  test("documents a canonical historical-summary prefix block", () => {
-    const start = "<!-- codex-security-release-summary:start -->";
-    const end = "<!-- codex-security-release-summary:end -->";
-    const recovery = releasingGuide.slice(
-      releasingGuide.indexOf("## Recover or repair a release"),
+    const classifier = workflow.jobs["classify-changes"]!;
+    expect(classifier["timeout-minutes"]).toEqual(
+      expect.stringContaining("40 || 10"),
     );
-    const markerBlock =
-      [...recovery.matchAll(/^```text\r?\n([\s\S]*?)^```[ \t]*$/gmu)]
-        .find(
-          (match) => match[1]?.includes(start) && match[1]?.includes(end),
-        )?.[1]
-        ?.replaceAll("\r\n", "\n") ?? "";
-
-    expect(markerBlock.startsWith(`${start}\n`)).toBe(true);
-    expect(markerBlock).toContain(`${end}\n\n`);
-    expect(extractHistoricalReleaseSummary(markerBlock)).toBe(
-      "Reviewed summary",
+    expect(classifier.if).toBeUndefined();
+    const checkout = classifier.steps.find(
+      ({ name }) => name === "Checkout repository for change classification",
     );
+    expect(checkout?.with).toMatchObject({
+      "fetch-depth": 2,
+      "persist-credentials": false,
+    });
+    expect(checkout).not.toHaveProperty("if");
+
+    expect(workflow.jobs["static-checks"]?.if).toBe(
+      "needs.classify-changes.outputs.source-run == ''",
+    );
+    const gate = workflow.jobs["ci"]!;
+    const checks = Object.entries(workflow.jobs).filter(
+      ([name]) => name !== "classify-changes" && name !== "ci",
+    );
+    expect(new Set([gate.needs].flat())).toEqual(
+      new Set(["classify-changes", ...checks.map(([name]) => name)]),
+    );
+    expect(gate.if).toContain("always()");
+    expect(workflow.jobs["action-ci"]).toMatchObject({
+      uses: "./.github/workflows/action-ci.yml",
+      with: {
+        "sdk-contracts":
+          "${{ needs.classify-changes.outputs.source-required == 'false' }}",
+      },
+    });
+    const sdkShards = ["test", "windows-test"];
+    for (const [name, job] of checks) {
+      if (sdkShards.includes(name))
+        expect(job.needs).toContain("static-checks");
+      else
+        expect(job.if ?? "", name).not.toMatch(
+          /\b(always|failure|cancelled)\(/u,
+        );
+    }
+
+    // With no job results, the gate must report exactly the jobs enabled in YAML.
+    const { failedChecks } = (await import(
+      new URL("../../../.github/scripts/check-ci-results.mjs", import.meta.url)
+        .href
+    )) as { failedChecks(needs: unknown): string[] };
+    const classifierOutputs = classifier.outputs!;
+    expect(classifierOutputs["source-run"]).toBe(
+      "${{ steps.proof.outputs.source-run }}",
+    );
+    const flags = Object.keys(classifierOutputs).filter(
+      (key) =>
+        !["source-run", "edit-attempt"].includes(key) &&
+        !key.startsWith("native-cache-") &&
+        !key.endsWith("-matrix"),
+    );
+    for (const enabled of flags) {
+      expect(classifierOutputs[enabled]).toBe(
+        `\${{ steps.scope.outputs.${enabled} }}`,
+      );
+      const outputs = Object.fromEntries(
+        flags.map((key) => [key, String(key === enabled)]),
+      );
+      const scheduled = checks.filter(
+        ([name, job]) =>
+          name === "static-checks" ||
+          !job.if ||
+          (sdkShards.includes(name) && enabled === "source-required") ||
+          job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
+      );
+      expect(
+        new Set(
+          failedChecks({ "classify-changes": { result: "success", outputs } }),
+        ),
+        enabled,
+      ).toEqual(new Set(scheduled.map(([name]) => name)));
+    }
+    expect(
+      gate.steps.find(({ name }) => name === "Require selected checks"),
+    ).toMatchObject({
+      run: "node .github/scripts/check-ci-results.mjs",
+      env: { CI_RESULTS: "${{ toJSON(needs) }}" },
+    });
   });
 
   test.each([
@@ -3836,7 +4500,6 @@ describe("GitHub release workflow safeguards", () => {
     "fix: preserve a trailing carriage return\r",
   ])("active title gates reject %s", (title) => {
     for (const [workflow, step] of [
-      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
     ] as const) {
       expect(
@@ -3853,7 +4516,6 @@ describe("GitHub release workflow safeguards", () => {
     "dependency-update2: refresh release tooling",
   ])("active title gates accept previously valid title %s", (title) => {
     for (const [workflow, step] of [
-      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
     ] as const) {
       expect(
@@ -3878,16 +4540,13 @@ describe("GitHub release workflow safeguards", () => {
     "fix: preserve a trailing carriage return\r",
   ])("rejects nonconventional pull request title %s", async (title) => {
     const result = await runReleaseLabels(title, [
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-      "      ;;",
       "    *)",
       "      printf '%s\\n' 'unexpected label mutation'",
       "      return 70",
       "      ;;",
     ]);
 
-    expect(result.status).toBe(1);
+    expect(result.status, result.stderr).toBe(1);
     expect(result.stderr).toContain(
       "Pull request title must follow <type>[optional scope][!]: <description>.",
     );
@@ -3896,7 +4555,10 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     { title: "fix: retitle an internal change", expectedLabel: "bug" },
-    { title: "feat: retitle an internal change", expectedLabel: "enhancement" },
+    {
+      title: "feat: retitle an internal change",
+      expectedLabel: "enhancement",
+    },
     {
       title: "docs: retitle an internal change",
       expectedLabel: "documentation",
@@ -3932,7 +4594,7 @@ describe("GitHub release workflow safeguards", () => {
         ],
       );
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(
         "Preserving existing skip-release-notes label.",
       );
@@ -3955,9 +4617,6 @@ describe("GitHub release workflow safeguards", () => {
 
   test("preserves the latest unattributed skip label after earlier automation", async () => {
     const result = await runReleaseLabels("feat: customer-visible change", [
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' 'feat: customer-visible change' | base64",
-      "      ;;",
       '    "GET repos/test/codex-security/issues/17/labels")',
       "      printf '%s\\n' skip-release-notes",
       "      ;;",
@@ -3974,7 +4633,7 @@ describe("GitHub release workflow safeguards", () => {
       "      ;;",
     ]);
 
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(
       "Preserving existing skip-release-notes label.",
     );
@@ -4005,7 +4664,7 @@ describe("GitHub release workflow safeguards", () => {
         "      ;;",
       ]);
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(
         "removed automatically applied skip-release-notes",
       );
@@ -4047,7 +4706,7 @@ describe("GitHub release workflow safeguards", () => {
       "      ;;",
     ]);
 
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(`labels[]=${label}`);
   });
 
@@ -4061,9 +4720,6 @@ describe("GitHub release workflow safeguards", () => {
       const result = await runReleaseLabels(
         title,
         [
-          '    "GET repos/test/codex-security/issues/17")',
-          "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-          "      ;;",
           '    "GET repos/test/codex-security/issues/17/labels")',
           "      return 0",
           "      ;;",
@@ -4081,10 +4737,9 @@ describe("GitHub release workflow safeguards", () => {
           "    *) return 66 ;;",
         ],
         ["skip_label_exists=0"],
-        false,
       );
 
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain("applied skip-release-notes");
     },
   );
@@ -4099,82 +4754,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stderr).toContain("published npm versions JSON from stdin");
     expect(result.stderr).toContain("package metadata JSON from stdin");
     expect(result.stderr).toContain("signature audit JSON from stdin");
-    expect(result.stderr).toContain("GitHub release JSON from stdin");
   });
-});
-
-test.skipIf(process.platform === "win32")(
-  "preserves manual release categories while replacing stale automated labels",
-  async () => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const fixture = `gh() {
-    case "$*" in
-      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' 'feat: synthetic feature' | base64 ;;
-      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' breaking-change bug ;;
-      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%b\\n' 'breaking-change\\tsynthetic-reviewer' 'bug\\tgithub-actions[bot]' ;;
-      "api --method DELETE repos/test/codex-security/issues/17/labels/bug --silent") echo removed-stale-bug ;;
-      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
-      "api --method POST repos/test/codex-security/issues/17/labels "*) printf '%s\\n' "$*" ;;
-      "api repos/test/codex-security/labels/enhancement --silent") return 0 ;;
-      *) echo "Unexpected request: $*" >&2; return 65 ;;
-    esac
-  }`;
-    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
-      env: {
-        ...process.env,
-        GITHUB_REPOSITORY: "test/codex-security",
-        PR_NUMBER: "17",
-      },
-      timeout: 10_000,
-    });
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain(
-      "Preserving existing breaking-change label.",
-    );
-    expect(result.stdout).toContain("removed-stale-bug");
-    expect(result.stdout).not.toContain("labels[]=enhancement");
-    expect(result.stdout).not.toContain("removed-manual-label");
-  },
-);
-
-test("imports maintainer utilities from Node stdin and eval modules", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "maintainer-stdin-"));
-  const packageRoot = resolve(import.meta.dir, "..");
-  try {
-    const build = await runCommand(
-      "node",
-      [
-        join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
-        "--project",
-        join(packageRoot, "tsconfig.ci.json"),
-        "--outDir",
-        workspace,
-      ],
-      { timeout: 30_000 },
-    );
-    expect(build.status, build.stdout + build.stderr).toBe(0);
-    const checker = pathToFileURL(
-      join(workspace, "plugins/codex-security/native/check.mjs"),
-    ).href;
-    const source = `import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from ${JSON.stringify(checker)}; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);`;
-    for (const args of [
-      ["--input-type=module", "-"],
-      ["--input-type=module", "--eval", source, "synthetic-virtual-entrypoint"],
-    ]) {
-      const result = spawnSync("node", args, {
-        cwd: packageRoot,
-        input: source,
-        encoding: "utf8",
-      });
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout.trim()).toBe("function function function function");
-    }
-  } finally {
-    rmSync(workspace, { recursive: true, force: true });
-  }
 });
 
 test.skipIf(process.platform === "win32").each([
@@ -4183,37 +4763,23 @@ test.skipIf(process.platform === "win32").each([
     manual: "documentation",
     stale: "enhancement",
   },
+  { title: "feat: synthetic feature", manual: "breaking-change", stale: "bug" },
   { title: "feat: synthetic feature", manual: "bug", stale: "documentation" },
   { title: "feat: synthetic feature", manual: "bug", stale: "enhancement" },
 ])(
   "uses the manual $manual release category over stale $stale after retitling to $title",
   async ({ title, manual, stale }) => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
+    const result = await runReleaseLabels(
+      title,
+      [
+        `    "GET repos/test/codex-security/issues/17/labels") printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;`,
+        `    "GET repos/test/codex-security/issues/17/timeline?per_page=100") printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;`,
+        '    "DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL") echo removed-stale-label ;;',
+        '    "DELETE "*) echo removed-manual-label; return 70 ;;',
+        '    "POST "*) echo added-automatic-category ;;',
+      ],
+      [`MANUAL_LABEL=${manual}`, `STALE_LABEL=${stale}`],
     );
-    const fixture = `gh() {
-    case "$*" in
-      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' "$MOCK_PR_TITLE" | base64 ;;
-      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;
-      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;
-      "api --method DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL --silent") echo removed-stale-label ;;
-      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
-      "api --method POST "*) echo added-automatic-category ;;
-      *) return 65 ;;
-    esac
-  }`;
-    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
-      env: {
-        ...process.env,
-        GITHUB_REPOSITORY: "test/codex-security",
-        PR_NUMBER: "17",
-        MOCK_PR_TITLE: title,
-        MANUAL_LABEL: manual,
-        STALE_LABEL: stale,
-      },
-      timeout: 10_000,
-    });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(`Preserving existing ${manual} label.`);
     expect(result.stdout).toContain("removed-stale-label");

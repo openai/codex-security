@@ -1,16 +1,19 @@
-// This exit status belongs only to the private MCP launcher, not the Python CLI.
-export const WORKBENCH_STATE_UNAVAILABLE_EXIT_CODE = 73;
 export const WORKBENCH_PYTHON = `
-import json, sys, traceback
+import json, sys
 from pathlib import Path
-sys.path.insert(0, str(Path(sys.argv.pop(1)).resolve().parent))
-import workbench_db
-sys.argv = [workbench_db.__file__, *json.loads(sys.stdin.buffer.readline())]
-try:
-    workbench_db.main()
-except Exception as error:
-    if not getattr(error, "_codex_security_state_unavailable", False):
-        raise
-    traceback.print_exc()
-    sys.exit(${WORKBENCH_STATE_UNAVAILABLE_EXIT_CODE})
+sys.stdout.reconfigure(encoding="utf-8", errors=sys.stdout.errors)
+sys.stderr.reconfigure(encoding="utf-8", errors=sys.stderr.errors)
+script = Path(sys.argv.pop(1)).resolve()
+sys.path.insert(0, str(script.parent))
+args = json.loads(sys.stdin.buffer.readline())
+sys.argv = [str(script), *args]
+if args and args[0] in {"inspect-target", "inspect-setup"}:
+    from workbench_setup import main
+    main()
+else:
+    import workbench_db
+    try:
+        workbench_db.main()
+    except workbench_db.ContractError as error:
+        raise SystemExit(str(error)) from None
 `;

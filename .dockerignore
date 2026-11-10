@@ -1,5 +1,7 @@
 .git
 .github
+plugins/codex-security/tests
+sdk/typescript/tests-ts/*.test.ts
 **/.DS_Store
 **/.env
 **/.env.*
@@ -13,3 +15,4 @@
 **/security-scans
 **/state
 **/*.log
+docker/wolfi/build

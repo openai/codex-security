@@ -1,3 +1,4 @@
+import type { ScanPricingContext } from "./cost-model.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -15,6 +16,9 @@ export interface TurnResultMetadata {
   id?: string;
   status?: string;
   model?: string;
+  pricingContext?: ScanPricingContext;
+  /** Source region recorded for Bedrock scans. */
+  bedrockRegion?: string | null;
   durationMs?: number;
   finalResponse?: string;
   usage?: unknown;
@@ -38,19 +42,26 @@ export interface RepositoryFinding extends Pick<
 export interface ScanResultOptions {
   manifest: ScanManifest;
   findings: FindingsDocument;
-  coverage: CoverageDocument;
+  review?: NonNullable<ScanManifest["scan"]["review"]>;
+  coverage?: CoverageDocument;
+  mode?: NonNullable<ScanManifest["scan"]["mode"]>;
   scanDir: string;
   threadId: string;
   turnResult: TurnResultMetadata;
+  /** Cost saved when this scan completed. */
+  recordedCost?: Readonly<ScanCost>;
   sarifPath?: string | null;
   threatModelPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
+  ownerSuggestionsPath?: string;
+  ownerSuggestionsError?: string;
 }
 
 export class ScanResult {
+  public readonly mode: NonNullable<ScanManifest["scan"]["mode"]>;
   public readonly manifest: ScanManifest;
   public readonly findings: FindingsDocument;
-  public readonly coverage: CoverageDocument;
+  public readonly review: NonNullable<ScanManifest["scan"]["review"]>;
   public readonly scanDir: string;
   public readonly threadId: string;
   public readonly turnResult: Readonly<TurnResultMetadata>;
@@ -58,20 +69,34 @@ export class ScanResult {
   public readonly sarifPath: string | null;
   public readonly threatModelPath: string | null;
   public repositoryFindings: readonly RepositoryFinding[] | undefined;
+  public ownerSuggestionsPath: string | undefined;
+  public ownerSuggestionsError: string | undefined;
 
   public constructor(options: ScanResultOptions) {
+    this.mode =
+      options.mode ?? options.manifest.scan.mode ?? options.coverage!.mode;
     this.manifest = options.manifest;
     this.findings = options.findings;
-    this.coverage = options.coverage;
+    this.review = options.review ??
+      options.manifest.scan.review ?? {
+        excludedPaths: options.coverage!.explicitExclusions.map(
+          (item) => item.pattern,
+        ),
+      };
     this.scanDir = options.scanDir;
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
     this.repositoryFindings = options.repositoryFindings;
+    this.ownerSuggestionsPath = options.ownerSuggestionsPath;
+    this.ownerSuggestionsError = options.ownerSuggestionsError;
     this.threatModelPath = options.threatModelPath ?? null;
-    this.cost = estimateScanCost(
-      options.turnResult.model,
-      options.turnResult.usage,
-    );
+    this.cost =
+      options.recordedCost ??
+      estimateScanCost(
+        options.turnResult.model,
+        options.turnResult.usage,
+        options.turnResult.pricingContext ?? options.turnResult.bedrockRegion,
+      );
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
     } else {
@@ -112,10 +137,6 @@ export class ScanResult {
     return join(this.scanDir, "findings.json");
   }
 
-  public get coveragePath(): string {
-    return join(this.scanDir, "coverage.json");
-  }
-
   public get artifactsDir(): string {
     return join(this.scanDir, "artifacts");
   }
@@ -131,8 +152,14 @@ export class ScanResult {
     return {
       manifest: this.manifest,
       repositoryFindings: this.repositoryFindings,
+      ...(this.ownerSuggestionsPath === undefined
+        ? {}
+        : { ownerSuggestionsPath: this.ownerSuggestionsPath }),
+      ...(this.ownerSuggestionsError === undefined
+        ? {}
+        : { ownerSuggestionsError: this.ownerSuggestionsError }),
       findings: this.findings,
-      coverage: this.coverage,
+      review: this.review,
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,

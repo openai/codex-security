@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
+  deepScanOptions,
   resolveDeepScanConfig,
   writeDeepScanConfig,
 } from "../src/deep-config.js";
@@ -28,6 +29,57 @@ test("resolves all six defaults without creating an ambient file", async () => {
   await expect(readFile(input.source)).rejects.toMatchObject({
     code: "ENOENT",
   });
+});
+
+test("converts minutes at the Deep boundary without changing legacy storage", async () => {
+  const input = await fixture("[deep_scan]\nmax_time_hours = 2\n");
+  const result = await resolveDeepScanConfig(
+    { maxTimeMinutes: 90 },
+    input.source,
+  );
+  expect(result.settings.maxTimeHours).toBe(1.5);
+  expect(result.sources.maxTimeHours).toBe("override");
+  const destination = join(input.root, "runtime", "config.toml");
+  await writeDeepScanConfig(destination, result);
+  const stored = parseToml(await readFile(destination, "utf8"));
+  expect(stored["deep_scan"]).toMatchObject({ max_time_hours: 1.5 });
+  expect(stored["deep_scan"]).not.toHaveProperty("max_time_minutes");
+});
+
+test("minute settings keep Standard advisory and preserve Deep limits and aliases", () => {
+  expect(deepScanOptions({ maxTimeMinutes: 6000 })).toEqual({});
+  expect(deepScanOptions({ mode: "deep", maxTimeMinutes: 5760 })).toEqual({
+    maxTimeHours: 96,
+  });
+  expect(
+    deepScanOptions({ mode: "deep", maxTimeMinutes: 7.2, maxTimeHours: 0.12 }),
+  ).toEqual({ maxTimeHours: 7.2 / 60 });
+  expect(() =>
+    deepScanOptions({ mode: "deep", maxTimeMinutes: 90, maxTimeHours: 2 }),
+  ).toThrow("Conflicting");
+  expect(() => deepScanOptions({ mode: "deep", maxTimeMinutes: 5761 })).toThrow(
+    "5760 minutes",
+  );
+  expect(() => deepScanOptions({ maxTimeHours: 1 })).toThrow(
+    "Deep scan settings require deep mode",
+  );
+});
+
+test.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+  "rejects invalid minute setting %d in both modes",
+  (maxTimeMinutes) => {
+    for (const mode of ["standard", "deep"] as const) {
+      expect(() => deepScanOptions({ mode, maxTimeMinutes })).toThrow(
+        "finite positive number",
+      );
+    }
+  },
+);
+
+test("Standard minutes accept fractions and large representable deadlines", () => {
+  for (const maxTimeMinutes of [0.5, 1e11]) {
+    expect(deepScanOptions({ maxTimeMinutes })).toEqual({});
+  }
 });
 
 test.each(["missing file", "missing directory"])(

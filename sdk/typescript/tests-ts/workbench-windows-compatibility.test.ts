@@ -2,14 +2,16 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
+const pythonExecutable = useTestPython();
 const directories = createTemporaryDirectories(true);
 
 afterEach(directories.cleanup);
 
 function probe(program: string, ...args: string[]): void {
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   if (python === null)
     throw new Error("Python is required for workbench tests.");
   const result = runPython(python, [
@@ -28,7 +30,7 @@ test("normalizes absolute Windows scopes without accepting escapes", () => {
       "from pathlib import PureWindowsPath",
       "from types import SimpleNamespace",
       "sys.path.insert(0, sys.argv[1])",
-      "import workbench_db as workbench",
+      "import workbench_setup as workbench",
       "class WindowsPath(PureWindowsPath):",
       "    def resolve(self): return self",
       "    def is_dir(self): return True",

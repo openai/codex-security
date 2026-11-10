@@ -1,10 +1,22 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import {
+  inspectWindowsCredentialAcl,
+  prepareCodexSecurityCredentialHome,
+  requireSecureCredentialHome,
+} from "../src/runtime.js";
+
+const testHostedWindows = test.skipIf(
+  process.platform !== "win32" ||
+    process.env["GITHUB_ACTIONS"] !== "true" ||
+    process.env["RUNNER_ENVIRONMENT"] !== "github-hosted" ||
+    process.env["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"] !== "true",
+);
 
 let temporaryRoot: string | undefined;
 afterEach(async () => {
@@ -14,12 +26,186 @@ afterEach(async () => {
 });
 
 describe("runtime directories and plugin Python boundary", () => {
-  test.skipIf(
-    process.platform !== "win32" ||
-      process.env["GITHUB_ACTIONS"] !== "true" ||
-      process.env["RUNNER_ENVIRONMENT"] !== "github-hosted" ||
-      process.env["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"] !== "true",
-  )(
+  testHostedWindows(
+    "diagnoses an Everyone-owned Windows ancestor before repairing credential ACLs",
+    async () => {
+      const root = await temporaryDirectory("codex-security-owner-", true);
+      temporaryRoot = root;
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const systemDirectory = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+      );
+      const windowsTestCommand = (
+        tool: string,
+        args: readonly string[],
+        environment?: NodeJS.ProcessEnv,
+      ) =>
+        spawnSync(join(systemDirectory, tool), args, {
+          encoding: "utf8",
+          windowsHide: true,
+          env: environment,
+        });
+      const inspectWindowsTestAcl = (
+        statements: string[],
+        environment: NodeJS.ProcessEnv,
+      ) =>
+        windowsTestCommand(
+          join("WindowsPowerShell", "v1.0", "powershell.exe"),
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            statements.join("; "),
+          ],
+          {
+            ...Object.fromEntries(
+              Object.entries(environment).filter(
+                ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+              ),
+            ),
+            PSModulePath: join(
+              systemDirectory,
+              "WindowsPowerShell",
+              "v1.0",
+              "Modules",
+            ),
+          },
+        );
+      const state = dirname(home);
+      const auth = join(home, "auth.json");
+      const contents = '{"token":"synthetic-credential"}\n';
+      await writeFile(auth, contents);
+      const grant = windowsTestCommand("icacls.exe", [
+        home,
+        "/grant",
+        "*S-1-1-0:(OI)(CI)R",
+      ]);
+      expect(grant.status, grant.stderr).toBe(0);
+
+      const ancestors: string[] = [];
+      for (let ancestor = state; ; ancestor = dirname(ancestor)) {
+        ancestors.push(ancestor);
+        if (ancestor === dirname(ancestor)) break;
+      }
+      const paths = [...ancestors, home, auth];
+      const snapshot = () => {
+        const result = inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            "$paths = ConvertFrom-Json -InputObject $env:CODEX_SECURITY_TEST_ACL_PATHS",
+            "@($paths | ForEach-Object { $acl = Get-Acl -LiteralPath $_; [pscustomobject]@{ owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; sddl = $acl.Sddl } }) | ConvertTo-Json -Compress",
+          ],
+          {
+            ...process.env,
+            CODEX_SECURITY_TEST_ACL_PATHS: JSON.stringify(paths),
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const descriptors = JSON.parse(result.stdout) as {
+          owner: string;
+          sddl: string;
+        }[];
+        expect(descriptors).toHaveLength(paths.length);
+        return descriptors;
+      };
+      const setOwner = (owner: string) => {
+        const result = inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            "$acl = Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH",
+            "$acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new($env:CODEX_SECURITY_TEST_OWNER))",
+            "Set-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH -AclObject $acl",
+          ],
+          {
+            ...process.env,
+            CODEX_SECURITY_TEST_ACL_PATH: state,
+            CODEX_SECURITY_TEST_OWNER: owner,
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+      };
+      const original = snapshot();
+      const identity = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
+      expect(identity.status, identity.stderr).toBe(0);
+      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
+      expect(sid).toBeDefined();
+      const administrator = inspectWindowsTestAcl(
+        [
+          "$ErrorActionPreference = 'Stop'",
+          "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LAG:SYD:(A;;GA;;;SY)' | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+        ],
+        process.env,
+      );
+      expect(administrator.status, administrator.stderr).toBe(0);
+      const localAdministrator = administrator.stdout.trim();
+      expect(localAdministrator).toMatch(/^S-1-(?:\d+-)*500$/u);
+      const resolvedAliases = { LA: localAdministrator };
+      expect(
+        inspectWindowsCredentialAcl(original[ancestors.length]!.sddl, sid!, {
+          resolvedAliases,
+        }).untrustedPrincipals,
+      ).toContain("S-1-1-0");
+
+      try {
+        setOwner("S-1-1-0");
+        const before = snapshot();
+        expect(before[0]!.owner).toBe("S-1-1-0");
+        const failure = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }).catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toContain(
+          `ancestor could not be trusted: ${state}.`,
+        );
+        expect((failure as Error).message).toContain(
+          "owner is not a trusted principal: S-1-1-0",
+        );
+        expect(snapshot()).toEqual(before);
+        expect(await readFile(auth, "utf8")).toBe(contents);
+      } finally {
+        setOwner(original[0]!.owner);
+      }
+
+      expect(snapshot()).toEqual(original);
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }),
+      ).toBe(home);
+      const repaired = snapshot();
+      expect(repaired.slice(0, ancestors.length)).toEqual(
+        original.slice(0, ancestors.length),
+      );
+      for (const [offset, scope] of [
+        [0, "directory"],
+        [1, "file"],
+      ] as const) {
+        expect(
+          inspectWindowsCredentialAcl(
+            repaired[ancestors.length + offset]!.sddl,
+            sid!,
+            { scope, resolvedAliases },
+          ),
+        ).toMatchObject({
+          grantsCurrentUserAccess: true,
+          untrustedPrincipals: [],
+        });
+      }
+      await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
+      expect(await readFile(auth, "utf8")).toBe(contents);
+    },
+  );
+
+  testHostedWindows(
     "prepares managed credential homes under constrained PowerShell",
     async () => {
       const root = await temporaryDirectory("codex-security-policy-", true);

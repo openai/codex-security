@@ -1,0 +1,686 @@
+import { execFile } from "node:child_process";
+import { symlinkSync } from "node:fs";
+import {
+  cp,
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { promisify } from "node:util";
+import { afterEach, expect, test } from "bun:test";
+import { runComponentScans } from "../src/component-scan.js";
+import { loadContract } from "../src/contract.js";
+import { runMultiscan } from "../src/multiscan.js";
+import * as runtime from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  client,
+  completeRun,
+  createMultiscanFixtures,
+  options,
+} from "./support/multiscan.js";
+
+const { temporaryDirectory, repositoryFixture, cleanup } =
+  createMultiscanFixtures();
+afterEach(cleanup);
+const exec = promisify(execFile);
+const windowsTest = test.skipIf(process.platform !== "win32");
+const example = join(PLUGIN_ROOT, "examples", "completed-scan");
+
+const system = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32");
+const powershell = join(system, "WindowsPowerShell", "v1.0");
+
+windowsTest(
+  "a selected registration script keeps its ordinary entrypoint and stdin",
+  async () => {
+    const pluginRoot = await temporaryDirectory();
+    const scripts = join(pluginRoot, "scripts");
+    await mkdir(scripts);
+    await writeFile(
+      join(scripts, "workbench_db.py"),
+      [
+        "import json, sys",
+        "if __name__ == '__main__':",
+        "    print(json.dumps({'args': sys.argv[1:], 'fd': sys.stdin.fileno(), 'input': sys.stdin.buffer.read().decode('utf-8')}))",
+      ].join("\n"),
+    );
+    const args = ["register-cli-scan", "--plugin-option", "出力\0line\ntwo"];
+    const input = "\ncafé\r\nlast";
+    expect(
+      await runtime.runWorkbench(
+        {
+          python: await runtime.resolvePluginPython(),
+          pluginRoot,
+          environment: { SystemRoot: process.env["SystemRoot"] },
+          signal: new AbortController().signal,
+        },
+        args,
+        input,
+      ),
+    ).toEqual({ args, fd: 0, input });
+  },
+);
+
+async function icacls(path: string, ...args: string[]): Promise<void> {
+  await exec(join(system, "icacls.exe"), [path, ...args]);
+}
+
+async function sharedRoot(): Promise<string> {
+  const root = await temporaryDirectory();
+  await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+  return root;
+}
+
+async function runPowerShell(script: string, environment: NodeJS.ProcessEnv) {
+  const { stdout } = await exec(
+    join(powershell, "powershell.exe"),
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    {
+      env: {
+        ...Object.fromEntries(
+          Object.entries({ ...process.env, ...environment }).filter(
+            ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+          ),
+        ),
+        PSModulePath: join(powershell, "Modules"),
+      },
+    },
+  );
+  return stdout.trim();
+}
+
+windowsTest(
+  "pins the system PowerShell modules for case-variant environment keys",
+  async () => {
+    const alternate = await temporaryDirectory();
+    const result = await runPowerShell(
+      [
+        "$ErrorActionPreference = 'Stop'",
+        "$null = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_MODULES",
+        "($env:PSModulePath -split ';') -notcontains $env:CODEX_SECURITY_TEST_MODULES",
+      ].join("; "),
+      { PSMODULEPATH: alternate, CODEX_SECURITY_TEST_MODULES: alternate },
+    );
+    expect(result).toBe("True");
+  },
+);
+
+function inspectAcl(path: string, expression: string): Promise<string> {
+  return runPowerShell(
+    `$ErrorActionPreference = 'Stop'; $acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH; ${expression}`,
+    { CODEX_SECURITY_TEST_ACL_PATH: path },
+  );
+}
+
+async function descriptor(path: string): Promise<string> {
+  return inspectAcl(path, "$acl.Sddl");
+}
+
+async function accessRules(path: string): Promise<string> {
+  return inspectAcl(
+    path,
+    "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; entries = @($acl.Access | Select-Object FileSystemRights, AccessControlType, IdentityReference, IsInherited, InheritanceFlags, PropagationFlags) } | ConvertTo-Json -Depth 4 -Compress",
+  );
+}
+
+async function createMultiscanCampaign(output: string): Promise<void> {
+  const { paths } = await repositoryFixture("campaign-source");
+  const result = await runMultiscan(
+    options({ ...paths, output }, client(completeRun), { maxAttempts: 1 }),
+  );
+  expect(result).toMatchObject({ completed: 1, failed: 0 });
+}
+
+async function createDirectPluginOutput(scanRoot: string): Promise<{
+  scanDir: string;
+  targetRoot: string;
+  targetRootAcl: string;
+  stateDir: string;
+}> {
+  const { source } = await repositoryFixture("direct-plugin-source");
+  const stateDir = join(await temporaryDirectory(), "state");
+  const targetRoot = join(scanRoot, basename(source.path));
+  await mkdir(targetRoot);
+  const targetRootAcl = await descriptor(targetRoot);
+  const result = await runtime.runWorkbench(
+    {
+      python: await runtime.resolvePluginPython(),
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_SECURITY_STATE_DIR: stateDir,
+      },
+    },
+    [
+      "start-headless-standard-scan",
+      "--thread-id",
+      "windows-acl-test-thread",
+      "--target-path",
+      source.path,
+      "--scope",
+      ".",
+      "--scan-root",
+      scanRoot,
+    ],
+  );
+  const scan = result["scan"] as { scanDir?: unknown } | undefined;
+  const scanDir = scan?.scanDir;
+  expect(typeof scanDir).toBe("string");
+  const resolvedScanDir = await realpath(scanDir as string);
+  expect(dirname(resolvedScanDir)).toBe(await realpath(targetRoot));
+  return { scanDir: resolvedScanDir, targetRoot, targetRootAcl, stateDir };
+}
+
+async function archiveSdkOutput(output: string, root: string): Promise<string> {
+  let archive: string | undefined;
+  await runtime.prepareOutputDir(
+    output,
+    "fixture",
+    root,
+    undefined,
+    true,
+    (path) => {
+      archive = path;
+    },
+  );
+  expect(archive).toBeDefined();
+  return archive!;
+}
+
+async function archiveWorkbenchOutput(
+  output: string,
+  root: string,
+): Promise<string> {
+  const python = await runtime.resolvePluginPython();
+  const result = await exec(
+    python,
+    [
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import argparse, json, sqlite3, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "from workbench_scan_start import archive_scan",
+        "connection = sqlite3.connect(':memory:')",
+        "connection.execute('CREATE TABLE scans (id TEXT, status TEXT, scan_dir TEXT)')",
+        "args = argparse.Namespace(archived_scan_dir=None, archive_existing=True)",
+        "with archive_scan(connection, args, Path(sys.argv[2]), '2026-10-08T00:00:00Z', lambda path: path.resolve()) as archive:",
+        "    print(json.dumps(str(archive)))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      output,
+    ],
+    {
+      env: {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+    },
+  );
+  return JSON.parse(result.stdout) as string;
+}
+
+windowsTest(
+  "new Windows scan roots start private beneath a shared parent",
+  async () => {
+    const root = await sharedRoot();
+    const before = await descriptor(root);
+    expect(before).toContain(";;;WD)");
+    const explicit = join(root, "new parent", "scan");
+    expect(await runtime.prepareOutputDir(explicit, "fixture")).toBe(
+      await realpath(explicit),
+    );
+    const generated = await runtime.prepareOutputDir(
+      undefined,
+      "fixture",
+      root,
+    );
+    const campaign = join(root, "campaign");
+    await createMultiscanCampaign(campaign);
+    const direct = await createDirectPluginOutput(root);
+    const home = await runtime.prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: direct.stateDir,
+    });
+    expect(home).toBe(await realpath(join(direct.stateDir, "codex-home")));
+    expect(direct.targetRootAcl).toContain(";;;WD)");
+    expect(await descriptor(direct.targetRoot)).toBe(direct.targetRootAcl);
+    for (const output of [
+      join(root, "new parent"),
+      explicit,
+      generated,
+      campaign,
+      join(campaign, "artifacts"),
+      join(campaign, "checkouts"),
+      direct.scanDir,
+    ]) {
+      const acl = await descriptor(output);
+      expect(acl).toContain("D:P");
+      expect(acl).not.toContain(";;;WD)");
+    }
+    expect(await descriptor(root)).toBe(before);
+  },
+);
+
+windowsTest.each([204, 233])(
+  "generated Windows output supports a %i-character repository name",
+  async (length) => {
+    const root = await sharedRoot();
+    const output = await runtime.prepareOutputDir(
+      undefined,
+      "r".repeat(length),
+      root,
+    );
+    expect((await lstat(output)).isDirectory()).toBe(true);
+    expect(basename(output).length).toBeLessThanOrEqual(255);
+    expect(basename(output)).toMatch(
+      /-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+    const acl = await descriptor(output);
+    expect(acl).toContain("D:P");
+    expect(acl).not.toContain(";;;WD)");
+  },
+);
+
+windowsTest(
+  "fresh SDK output keeps its private identity through workbench registration",
+  async () => {
+    const root = await sharedRoot();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await writeFile(join(repository, "source.txt"), "Synthetic repository");
+    const output = await runtime.prepareScanRegistrationOutput(
+      undefined,
+      "repository",
+      root,
+    );
+    const before = await lstat(output, { bigint: true });
+    const originalAcl = await descriptor(output);
+    const registered = await runtime.runWorkbench(
+      {
+        python: await runtime.resolvePluginPython(),
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+      },
+      [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        output,
+        "--registration-json-stdin",
+      ],
+      JSON.stringify({
+        recipe: {
+          config: {},
+          mode: "standard",
+          repository,
+          target: { kind: "repository", paths: [] },
+        },
+      }),
+    );
+    expect(registered["scanDir"]).toBe(await realpath(output));
+    const after = await lstat(output, { bigint: true });
+    expect([after.dev, after.ino]).toEqual([before.dev, before.ino]);
+    expect(originalAcl).not.toContain(";;;WD)");
+    expect(await descriptor(output)).toBe(originalAcl);
+  },
+);
+
+windowsTest.each(
+  [190, 204, 233].flatMap((length) =>
+    ["SDK", "workbench"].map((archiver) => [archiver, length] as const),
+  ),
+)(
+  "generated Windows output remains archivable through %s for a %i-character repository name",
+  async (archiver, length) => {
+    const root = await sharedRoot();
+    const output = await runtime.prepareOutputDir(
+      undefined,
+      "r".repeat(length),
+      root,
+    );
+    await writeFile(
+      join(output, "retained.txt"),
+      "Synthetic retained scan data",
+    );
+    const original = await descriptor(output);
+    const archive =
+      archiver === "SDK"
+        ? await archiveSdkOutput(output, root)
+        : await archiveWorkbenchOutput(output, root);
+    expect(await descriptor(output)).toBe(original);
+    expect(basename(archive).length).toBeLessThanOrEqual(255);
+    expect(await readFile(join(archive, "retained.txt"), "utf8")).toBe(
+      "Synthetic retained scan data",
+    );
+    expect(await descriptor(archive)).toBe(original);
+  },
+);
+
+windowsTest("existing Windows scan ACLs are preserved", async () => {
+  const root = await temporaryDirectory();
+  const output = join(root, "scan");
+  await mkdir(output);
+  // Built-in Users exists on every Windows host; only this fixture gets the grant.
+  await icacls(
+    output,
+    "/grant",
+    "*S-1-5-32-545:(AD)",
+    "*S-1-5-32-545:(OI)(CI)(IO)M",
+  );
+  const before = await descriptor(output);
+  const permissions = await accessRules(output);
+  expect(before).toContain(";;;BU)");
+  expect(await runtime.prepareOutputDir(output, "fixture")).toBe(
+    await realpath(output),
+  );
+  expect(await descriptor(output)).toBe(before);
+  await cp(example, output, { recursive: true });
+  expect(
+    await runtime.prepareScanRegistrationOutput(
+      output,
+      "fixture",
+      root,
+      undefined,
+      true,
+    ),
+  ).toBe(await realpath(output));
+  await loadContract(output, { pluginRoot: PLUGIN_ROOT });
+  expect(await descriptor(output)).toBe(before);
+  const archive = await archiveWorkbenchOutput(output, root);
+  expect(await descriptor(archive)).toBe(before);
+  // Creation can change the auto-inheritance marker without changing the rules.
+  expect(await accessRules(output)).toBe(permissions);
+  await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+  for (const path of [archive, output]) {
+    expect(await descriptor(path)).toContain(";;;WD)");
+  }
+  await icacls(root, "/remove:g", "*S-1-1-0");
+  for (const path of [archive, output]) {
+    expect(await accessRules(path)).toBe(permissions);
+  }
+});
+
+windowsTest(
+  "existing Windows multiscan campaign ACLs are preserved",
+  async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "campaign");
+    await mkdir(output);
+    await icacls(
+      output,
+      "/grant",
+      "*S-1-5-32-545:(AD)",
+      "*S-1-5-32-545:(OI)(CI)(IO)M",
+    );
+    const permissions = await accessRules(output);
+    await createMultiscanCampaign(output);
+    expect(await accessRules(output)).toBe(permissions);
+  },
+);
+
+windowsTest.each([
+  "(RD,RA,REA,RC,S,WA)",
+  "(RD,RA,REA,RC,S,WD)",
+  "(RD,RA,REA,RC,S,WA,WD)",
+  "M",
+])(
+  "rejects component planning on an empty retaggable output with peer rights %s",
+  async (right) => {
+    const repository = await temporaryDirectory();
+    await writeFile(join(repository, "source.txt"), "Synthetic component");
+    const outputDir = await runtime.prepareOutputDir(
+      join(await temporaryDirectory(), "output"),
+      "fixture",
+    );
+    await icacls(outputDir, "/grant", `*S-1-1-0:${right}`);
+    const before = await descriptor(outputDir);
+    await expect(
+      runComponentScans({
+        repository,
+        outputDir,
+        components: [{ name: "Source", paths: ["source.txt"] }],
+        planOnly: true,
+      }),
+    ).rejects.toThrow("could not be trusted");
+    await expect(
+      lstat(join(outputDir, "components.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await descriptor(outputDir)).toBe(before);
+    await cp(example, outputDir, { recursive: true });
+    await loadContract(outputDir, { pluginRoot: PLUGIN_ROOT });
+  },
+);
+
+windowsTest(
+  "resumes a campaign whose retained artifacts keep it nonempty",
+  async () => {
+    const { paths } = await repositoryFixture("retained-campaign-source");
+    const configured = options(paths, client(completeRun), { maxAttempts: 1 });
+    await expect(runMultiscan(configured)).resolves.toMatchObject({
+      completed: 1,
+    });
+    await icacls(paths.output, "/grant", "*S-1-1-0:(WA)");
+    const before = await descriptor(paths.output);
+    await expect(runMultiscan(configured)).resolves.toMatchObject({
+      skipped: 1,
+      failed: 0,
+    });
+    expect(await descriptor(paths.output)).toBe(before);
+    await icacls(join(paths.output, "artifacts"), "/grant", "*S-1-1-0:(DE)");
+    await expect(runMultiscan(configured)).rejects.toThrow();
+  },
+);
+
+windowsTest("rejects a parent that can be emptied and retagged", async () => {
+  const root = await temporaryDirectory();
+  const parent = join(root, "directory");
+  const output = join(parent, "scan");
+  await mkdir(parent);
+  await runtime.prepareOutputDir(output, "fixture");
+  await icacls(parent, "/grant", "*S-1-1-0:(DC,WA)");
+  await expect(runtime.prepareOutputDir(output, "fixture")).rejects.toThrow();
+});
+
+windowsTest(
+  "output admission distinguishes effective parent delete-child grants",
+  async () => {
+    const root = await sharedRoot();
+    await icacls(root, "/grant", "*S-1-1-0:(AD)", "*S-1-1-0:(OI)(CI)(IO)(DC)");
+    const output = await runtime.prepareOutputDir(
+      join(root, "scan"),
+      "fixture",
+    );
+    expect(await descriptor(output)).toContain("D:P");
+
+    await icacls(root, "/grant", "*S-1-1-0:(DC)");
+    await expect(runtime.prepareOutputDir(output, "fixture")).rejects.toThrow();
+    const fresh = join(root, "fresh");
+    await expect(runtime.prepareOutputDir(fresh, "fixture")).rejects.toThrow();
+    await expect(lstat(fresh)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
+
+windowsTest(
+  "archiving Windows output preserves old ACLs and privately creates the replacement",
+  async () => {
+    const root = await sharedRoot();
+    const output = join(root, "scan");
+    await mkdir(output);
+    await writeFile(join(output, "retained.txt"), "Synthetic retained data");
+    const original = await descriptor(output);
+    const archive = await archiveSdkOutput(output, root);
+    expect(await descriptor(archive)).toBe(original);
+    expect(await readFile(join(archive, "retained.txt"), "utf8")).toBe(
+      "Synthetic retained data",
+    );
+    expect(await descriptor(output)).not.toContain(";;;WD)");
+  },
+);
+
+windowsTest(
+  "new Windows output creation accepts parent aliases and leaves rejected locations absent",
+  async () => {
+    const root = await temporaryDirectory();
+    const destination = join(root, "destination");
+    const alias = join(root, "alias");
+    await mkdir(destination);
+    await symlink(destination, alias, "junction");
+    const prepared = await runtime.prepareOutputDir(
+      join(alias, "scan"),
+      "fixture",
+    );
+    expect(prepared).toBe(await realpath(join(destination, "scan")));
+    const rejected = join(alias, "rejected");
+    const failure = new Error("Synthetic rejected location");
+    await expect(
+      runtime.prepareOutputDir(rejected, "fixture", root, () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    await expect(lstat(rejected)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
+
+windowsTest(
+  "creation keeps the output location selected during preflight",
+  async () => {
+    const root = await temporaryDirectory();
+    const destination = join(root, "destination");
+    const missing = join(root, "parent");
+    await mkdir(destination);
+    let selected = false;
+    await expect(
+      runtime.prepareOutputDir(join(missing, "scan"), "fixture", root, () => {
+        if (!selected) {
+          symlinkSync(destination, missing, "junction");
+          selected = true;
+        }
+      }),
+    ).rejects.toThrow();
+    expect(selected).toBe(true);
+    await expect(lstat(join(destination, "scan"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  },
+);
+
+// Creating a separate local account requires administrator rights and belongs on
+// the disposable hosted Windows runners, not a developer's workstation.
+test.skipIf(
+  process.platform !== "win32" || process.env["GITHUB_ACTIONS"] !== "true",
+)(
+  "private scan output excludes a second user and rejects replaceable directories",
+  async () => {
+    const root = await sharedRoot();
+    const writableParent = join(root, "writable parent");
+    await mkdir(writableParent);
+    await icacls(writableParent, "/grant", "*S-1-1-0:(AD)");
+    const direct = await createDirectPluginOutput(writableParent);
+    expect(await descriptor(direct.targetRoot)).toBe(direct.targetRootAcl);
+    const shared = join(direct.targetRoot, "shared.txt");
+    await writeFile(shared, "synthetic shared data");
+    await icacls(shared, "/grant", "*S-1-1-0:M");
+    const explicit = await runtime.prepareOutputDir(
+      join(root, "explicit"),
+      "fixture",
+    );
+    const generated = await runtime.prepareOutputDir(
+      undefined,
+      "fixture",
+      root,
+    );
+    const campaign = join(writableParent, "campaign");
+    await createMultiscanCampaign(campaign);
+    for (const output of [explicit, generated, campaign, direct.scanDir]) {
+      await writeFile(join(output, "probe.txt"), "synthetic private data");
+    }
+    const archive = await archiveWorkbenchOutput(generated, root);
+    await writeFile(join(generated, "probe.txt"), "synthetic private data");
+    const privateProbes = [
+      explicit,
+      generated,
+      archive,
+      campaign,
+      direct.scanDir,
+    ].map((path) => join(path, "probe.txt"));
+
+    const selected = join(writableParent, "selected");
+    const replacement = selected + ".replacement";
+    const scan = join(selected, "scan");
+    await runtime.prepareOutputDir(scan, "fixture");
+    await cp(example, scan, { recursive: true });
+    await loadContract(scan, { pluginRoot: PLUGIN_ROOT });
+    await writeFile(join(selected, "marker.txt"), "original");
+    // Both trees contain a valid sealed scan. Grant the other user permission to
+    // rename these two directories within the create-only parent.
+    await mkdir(replacement);
+    await cp(example, join(replacement, "scan"), { recursive: true });
+    await writeFile(join(replacement, "marker.txt"), "");
+    await icacls(join(replacement, "marker.txt"), "/grant", "*S-1-1-0:M");
+    for (const path of [selected, replacement]) {
+      await icacls(path, "/grant", "*S-1-1-0:M");
+    }
+    await expect(
+      runtime.prepareOutputDir(join(selected, "new scan"), "fixture"),
+    ).rejects.toThrow();
+    await expect(lstat(join(selected, "new scan"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const script = await readFile(
+      new URL(
+        "../../../plugins/codex-security/tests/windows-other-user-access.ps1",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const denied = join(writableParent, "named-user grant");
+    await mkdir(denied);
+    const result = await runPowerShell(script, {
+      CODEX_SECURITY_TEST_BUN: process.execPath,
+      CODEX_SECURITY_TEST_RUNTIME: new URL("../src/runtime.ts", import.meta.url)
+        .href,
+      CODEX_SECURITY_TEST_DENIED_DIRECTORY: denied,
+      CODEX_SECURITY_TEST_REPLACE_DIRECTORY: selected,
+      CODEX_SECURITY_TEST_ACCESS_PATHS: JSON.stringify([
+        shared,
+        ...privateProbes,
+      ]),
+    });
+    expect(JSON.parse(result)).toEqual([
+      { read: true, write: true },
+      ...privateProbes.map(() => ({ read: false, write: false })),
+    ]);
+    expect(await readFile(join(selected, "marker.txt"), "utf8")).toBe(
+      "replacement",
+    );
+    expect(
+      await readFile(join(selected + ".retained", "marker.txt"), "utf8"),
+    ).toBe("original");
+    await expect(
+      loadContract(scan, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow();
+    for (const path of privateProbes) {
+      expect(await readFile(path, "utf8")).toBe("synthetic private data");
+    }
+  },
+  60_000,
+);

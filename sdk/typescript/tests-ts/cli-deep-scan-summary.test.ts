@@ -22,13 +22,13 @@ async function summary(
 ) {
   const { stdout, stderr, runCli } = createCliTest(main);
 
-  const result = options?.result ?? fakeResult(["high"], "partial");
+  const result = options?.result ?? fakeResult(["high"]);
   expect(
     await runCli(
       ["scan", ...args, "--json"],
       dependencies({ ...options, result }),
     ),
-  ).toBe(result.coverage.completeness === "complete" ? 0 : 2);
+  ).toBe(0);
   expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   return stderr.text();
 }
@@ -40,6 +40,33 @@ describe("deep scan completion summary", () => {
       {},
       "40 review rounds. The latest review still found new issues",
       "--max-discovery-runs greater than 40",
+    ],
+    [
+      "completed review limit even if finalization outlasts the deadline",
+      { completedAt: "2026-01-05T00:01:00Z" },
+      "40 review rounds. The latest review still found new issues",
+      "--max-discovery-runs greater than 40",
+    ],
+    [
+      "time limit before any dispatched review completed",
+      {
+        dispatchedCount: 1,
+        completionSequence: 0,
+        config: { maxDiscoveryRuns: 1, maxTimeHours: 5 / 60 },
+        completedAt: "2026-01-01T00:05:01Z",
+      },
+      "5-minute time limit. No source review completed.",
+      "--max-time greater than 5",
+    ],
+    [
+      "a one-round review limit",
+      {
+        dispatchedCount: 1,
+        completionSequence: 1,
+        config: { maxDiscoveryRuns: 1, maxTimeHours: 96 },
+      },
+      "limit of 1 review round. The latest review still found new issues",
+      "--max-discovery-runs greater than 1",
     ],
     [
       "quiet round",
@@ -54,18 +81,24 @@ describe("deep scan completion summary", () => {
       null,
     ],
     [
+      "one quiet review round",
+      { terminalReason: "saturated", noNewStreak: 1 },
+      "last 1 review round found no new issues",
+      null,
+    ],
+    [
       "time limit",
       {
         dispatchedCount: 3,
-        config: { maxDiscoveryRuns: 40, maxTimeHours: 0.5 },
+        config: { maxDiscoveryRuns: 40, maxTimeHours: 0.119 / 60 },
       },
-      "0.5-hour time limit",
-      "higher --max-time-hours",
+      "0.119-minute time limit",
+      "--max-time greater than 0.119",
     ],
     [
       "maximum time limit",
       { dispatchedCount: 3, completedAt: "2026-01-05T00:00:00Z" },
-      "96-hour time limit",
+      "5760-minute time limit",
       "rerun with --path",
     ],
     [

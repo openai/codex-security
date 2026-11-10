@@ -152,12 +152,9 @@ test("matches sealed scan history end to end without merging related findings", 
         findingCount: names.length,
       });
       artifacts.push(
-        ...[
-          "scan-manifest.json",
-          "findings.json",
-          "coverage.json",
-          "report.md",
-        ].map((name) => join(scanDir, name)),
+        ...["scan-manifest.json", "findings.json", "report.md"].map((name) =>
+          join(scanDir, name),
+        ),
       );
       const sealed = await readJson<FindingsDocument>(
         join(scanDir, "findings.json"),

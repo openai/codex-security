@@ -1,6 +1,3 @@
-import { pythonExecutable } from "./support/python.js";
-import { execFileSync } from "node:child_process";
-import { runNodePython } from "./support/python-probe.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,61 +7,145 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
-  FIREWORKS_CODEX_PROVIDER,
-  OPENROUTER_CODEX_PROVIDER,
+  mergedCodexConfig,
   scanModelProvider,
   writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import { TestClient } from "./support/api-client.js";
+import { EXTERNAL_PROVIDER_CASES, TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-preflight-",
 );
-const EXTERNAL_PROVIDER_CASES = [
-  [
-    "OpenRouter",
-    "openrouter",
-    "OPENROUTER_API_KEY",
-    "anthropic/claude-sonnet-4.5",
-    OPENROUTER_CODEX_PROVIDER,
-  ],
-  [
-    "Fireworks AI",
-    "fireworks",
-    "FIREWORKS_API_KEY",
-    "accounts/fireworks/models/qwen3-235b-a22b",
-    FIREWORKS_CODEX_PROVIDER,
-  ],
-] as const;
 
 afterEach(cleanup);
 
-function runPreflight(
-  config: string,
-  profile: string,
-  options: readonly string[] = [],
-): { status: number | null; payload: Record<string, unknown> } {
-  const interpreter = pythonExecutable(false);
-  expect(interpreter).not.toBeNull();
-  const result = runNodePython(interpreter!, [
-    join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-    "--profile",
-    profile,
-    "--config",
-    config,
-    ...options,
-  ]);
-  expect(result.error).toBeUndefined();
-  return {
-    status: result.status,
-    payload: JSON.parse(result.stdout) as Record<string, unknown>,
-  };
-}
-
 describe("CodexSecurity preflight configuration", () => {
+  test("retains only native skill path and enabled settings for fallback workers", () => {
+    const rootSkill = join(
+      tmpdir(),
+      "owned cache",
+      "security-scan",
+      "SKILL.md",
+    );
+    const selectedSkill = join(tmpdir(), "other skill", "SKILL.md");
+    const input: JsonObject = {
+      skills: {
+        config: [
+          { path: rootSkill, enabled: false, token: "SYNTHETIC_ENTRY_SECRET" },
+        ],
+        auth: "SYNTHETIC_ROOT_SECRET",
+      },
+      profile: "selected",
+      profiles: {
+        selected: {
+          skills: {
+            config: [
+              {
+                path: selectedSkill,
+                enabled: true,
+                extra: "SYNTHETIC_PROFILE_SECRET",
+              },
+            ],
+            private: "SYNTHETIC_TABLE_SECRET",
+          },
+        },
+      },
+    };
+    const before = structuredClone(input);
+    expect(scanPreflightCodexConfig(input)).toEqual({
+      skills: { config: [{ path: rootSkill, enabled: false }] },
+      profile: "selected",
+      profiles: {
+        selected: {
+          skills: { config: [{ path: selectedSkill, enabled: true }] },
+        },
+      },
+    });
+    expect(input).toEqual(before);
+    expect(scanPreflightCodexConfig({ skills: { config: [] } })).toEqual({
+      skills: { config: [] },
+    });
+  });
+
+  test.each([
+    ["approval-only", { approval_policy: "never" }],
+    ["windows-only", { windows: { sandbox: "unelevated" } }],
+  ])(
+    "preserves %s inline-profile identity in saved recipes",
+    async (_name, profile) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "selected.config.toml"),
+        'model_provider = "fireworks"\n',
+      );
+      const original = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "selected",
+            profiles: { selected: profile as JsonObject },
+          },
+        },
+        home,
+      );
+      const saved = scanPreflightCodexConfig(original);
+      const replayed = await mergedCodexConfig({ codexOverrides: saved }, home);
+      expect(scanModelProvider(replayed)).toBe(scanModelProvider(original));
+      expect(saved["profile"]).toBe("selected");
+      expect(saved["profiles"]).toEqual({ selected: {} });
+    },
+  );
+
+  test("preserves resolved file-profile model files and tool exclusions", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model_catalog_json = "catalog.json"\nexperimental_compact_prompt_file = "compact.md"\n[features.code_mode]\nenabled = true\nexcluded_tool_namespaces = ["synthetic_tools"]\n',
+    );
+    const config = await mergedCodexConfig(
+      { codexOverrides: { profile: "review" } },
+      home,
+    );
+    const requested = {
+      model_catalog_json: join(home, "catalog.json"),
+      experimental_compact_prompt_file: join(home, "compact.md"),
+      features: {
+        code_mode: {
+          enabled: true,
+          excluded_tool_namespaces: ["synthetic_tools"],
+        },
+      },
+    };
+    expect(config).toMatchObject(requested);
+    expect(scanPreflightCodexConfig(config)).toMatchObject(requested);
+  });
+
+  test.each([undefined, "low"])(
+    "preserves resolved file-profile worker settings and explicit verbosity: %s",
+    async (verbosity) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_instructions_file = "instructions.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      );
+      const config = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            ...(verbosity === undefined ? {} : { model_verbosity: verbosity }),
+          },
+        },
+        home,
+      );
+      expect(scanPreflightCodexConfig(config)).toMatchObject({
+        model_instructions_file: join(home, "instructions.md"),
+        model_verbosity: verbosity ?? "high",
+        web_search: "disabled",
+      });
+    },
+  );
+
   test.each([
     ["model", { model: null }, true],
     ["reasoning effort", { model_reasoning_effort: null }, true],
@@ -150,282 +231,7 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test.skipIf(process.platform !== "win32")(
-    "loads trusted project config through a Windows path alias",
-    async () => {
-      const root = await temporaryDirectory();
-      const codexHome = join(root, "codex-home");
-      const repository = join(root, "Repository");
-      const projectConfig = join(repository, ".codex", "config.toml");
-      await mkdir(join(repository, ".git"), { recursive: true });
-      await mkdir(join(repository, ".codex"), { recursive: true });
-      await mkdir(codexHome);
-      await writeFile(projectConfig, "[features]\ngoals = true\n");
-      await writeCodexConfig(join(codexHome, "config.toml"), {
-        projects: {
-          [repository.toUpperCase()]: { trust_level: "trusted" },
-        },
-      });
-
-      const interpreter = pythonExecutable();
-      expect(interpreter).not.toBeNull();
-      const result = runNodePython(
-        interpreter!,
-        [
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-          "--profile",
-          "security_scan",
-          "--cwd",
-          repository,
-        ],
-        { env: { PATH: process.env["PATH"], CODEX_HOME: codexHome } },
-      );
-      expect(result.error).toBeUndefined();
-      const payload = JSON.parse(result.stdout) as Record<string, unknown>;
-      expect(payload["config_resolution"]).toBe("cwd-discovery");
-      expect(payload["config_discovery"]).toMatchObject({
-        project_layers_loaded: true,
-      });
-      expect(payload["config_paths"]).toContain(projectConfig);
-    },
-  );
-
-  test("rejects invalid runtime settings only for relevant security profiles", async () => {
-    const root = await temporaryDirectory();
-    const config = join(root, "empty.toml");
-    await writeFile(config, "");
-    const settings = [
-      {
-        args: [
-          "--effective-config",
-          "features.multi_agent_v2.enabled=true",
-          "--effective-config",
-          "agents.max_threads=8",
-        ],
-        error: "agents.max_threads cannot be set",
-        profiles: ["deep_security_scan", "security_diff_scan", "security_scan"],
-      },
-      {
-        args: ["--effective-config", "multiagent_config.max_concurrency=8"],
-        error: "does not prove bridge ownership",
-        profiles: ["security_scan"],
-      },
-    ];
-
-    for (const { args, error, profiles } of settings) {
-      for (const profile of profiles) {
-        const result = runPreflight(config, profile, args);
-        expect(result.status).toBe(2);
-        expect(result.payload).toMatchObject({
-          error: expect.stringContaining(error),
-          status: "error",
-        });
-      }
-    }
-
-    for (const profile of ["deep_security_scan", "security_diff_scan"]) {
-      expect(
-        runPreflight(config, profile, [
-          "--effective-config",
-          "multiagent_config.max_concurrency=8",
-        ]),
-      ).toMatchObject({ status: 0, payload: { status: "ready" } });
-    }
-  });
-
-  test("keeps custom profile requirements and explicit runtime ownership strict", async () => {
-    const root = await temporaryDirectory();
-    const config = join(root, "empty.toml");
-    const registry = join(root, "registry.toml");
-    await writeFile(config, "");
-    await writeFile(
-      registry,
-      [
-        "version = 1",
-        "[capabilities.available]",
-        'kind = "runtime"',
-        'check = "available"',
-        "[capabilities.mode]",
-        'kind = "multi_agent_mode"',
-        'owner = "native"',
-        'version = "v2"',
-        "[capabilities.bridge]",
-        'kind = "config"',
-        'path = "multiagent_config.max_concurrency"',
-        'op = ">="',
-        "value = 1",
-        ...[
-          ["root_bridge", "multiagent_config"],
-          ["root_agents", "agents"],
-          ["root_features", "features"],
-          ["v2_feature", "features.multi_agent_v2"],
-        ].flatMap(([capability, path]) => [
-          `[capabilities.${capability}]`,
-          'kind = "config"',
-          `path = "${path}"`,
-          'op = "=="',
-          "value = {}",
-        ]),
-        ...[
-          ["similar_v20", "features.multi_agent_v20"],
-          ["similar_preview", "features.multi_agent_v2_preview"],
-        ].flatMap(([capability, path]) => [
-          `[capabilities.${capability}]`,
-          'kind = "config"',
-          `path = "${path}"`,
-          'op = "=="',
-          "value = true",
-        ]),
-        ...[
-          "available",
-          "mode",
-          "bridge",
-          "root_bridge",
-          "root_agents",
-          "root_features",
-          "v2_feature",
-          "similar_v20",
-          "similar_preview",
-        ].flatMap((profile) => [
-          `[profiles.${profile}]`,
-          `description = "${profile} capability"`,
-          `[[profiles.${profile}.requirements]]`,
-          `capability = "${profile}"`,
-          'severity = "block"',
-          'reason = "Required capability"',
-        ]),
-        "[profiles.root_patch]",
-        'description = "Root runtime remediation"',
-        "[[profiles.root_patch.requirements]]",
-        'capability = "available"',
-        'severity = "block"',
-        'reason = "Required capability"',
-        "[profiles.root_patch.remediation]",
-        "[[profiles.root_patch.remediation.patches]]",
-        'path = "multiagent_config"',
-        "value = {}",
-      ].join("\n"),
-    );
-    const conflictingNative = [
-      "--registry",
-      registry,
-      "--runtime-check",
-      "available=true",
-      "--effective-config",
-      "features.multi_agent_v2.enabled=true",
-      "--effective-config",
-      "agents.max_threads=8",
-    ];
-
-    expect(runPreflight(config, "available", conflictingNative)).toMatchObject({
-      status: 2,
-      payload: { error: expect.stringContaining("agents.max_threads") },
-    });
-    for (const profile of ["mode", "root_agents", "root_features"]) {
-      expect(runPreflight(config, profile, conflictingNative)).toMatchObject({
-        status: 2,
-        payload: { error: expect.stringContaining("agents.max_threads") },
-      });
-    }
-    for (const profile of [
-      "bridge",
-      "root_bridge",
-      "root_patch",
-      "v2_feature",
-    ]) {
-      expect(
-        runPreflight(config, profile, [
-          "--registry",
-          registry,
-          "--runtime-check",
-          "available=true",
-          "--effective-config",
-          "multiagent_config.max_concurrency=8",
-        ]),
-      ).toMatchObject({
-        status: 2,
-        payload: { error: expect.stringContaining("bridge ownership") },
-      });
-    }
-    for (const [profile, feature] of [
-      ["similar_v20", "features.multi_agent_v20"],
-      ["similar_preview", "features.multi_agent_v2_preview"],
-    ] as const) {
-      expect(
-        runPreflight(config, profile, [
-          "--registry",
-          registry,
-          "--effective-config",
-          `${feature}=true`,
-          "--effective-config",
-          "multiagent_config.max_concurrency=8",
-        ]),
-      ).toMatchObject({
-        status: 0,
-        payload: { status: "ready" },
-      });
-    }
-
-    for (const [version, additional] of [
-      ["v2", []],
-      ["v1", ["--effective-config", "features.multi_agent_v2.enabled=true"]],
-    ] as const) {
-      const conflictingNativeRuntime = runPreflight(
-        config,
-        "deep_security_scan",
-        [
-          "--multi-agent-runtime-owner",
-          "native",
-          "--multi-agent-runtime-version",
-          version,
-          "--multi-agent-runtime-provenance",
-          "tool-surface",
-          "--effective-config",
-          "agents.max_threads=8",
-          ...additional,
-        ],
-      );
-      if (version === "v2") {
-        expect(conflictingNativeRuntime).toMatchObject({
-          status: 0,
-          payload: { status: "ready" },
-        });
-      } else {
-        expect(conflictingNativeRuntime.status).toBe(2);
-        expect(conflictingNativeRuntime.payload["error"]).toContain(
-          "agents.max_threads",
-        );
-      }
-    }
-
-    const forged = runPreflight(config, "deep_security_scan", [
-      "--multi-agent-runtime-owner",
-      "codex-bridge",
-      "--multi-agent-runtime-provenance",
-      "tool-surface",
-    ]);
-    expect(forged.status).toBe(2);
-    expect(forged.payload["error"]).toContain("verified-bridge");
-
-    const conflictingBridge = runPreflight(config, "deep_security_scan", [
-      "--multi-agent-runtime-owner",
-      "codex-bridge",
-      "--multi-agent-runtime-version",
-      "v2",
-      "--multi-agent-runtime-provenance",
-      "verified-bridge",
-      "--multi-agent-session-cap",
-      "9",
-      "--effective-config",
-      "multiagent_config.max_concurrency=8",
-    ]);
-    expect(conflictingBridge.status).toBe(2);
-    expect(conflictingBridge.payload["error"]).toContain(
-      "conflicting bridge concurrency facts",
-    );
-  });
-
-  test("separates writable scans from repository-scoped policy reads", () => {
+  test("separates writable scans from read-only policy permissions", () => {
     const original = {
       approval_policy: "on-request",
       approvals_reviewer: "user",
@@ -456,7 +262,7 @@ describe("CodexSecurity preflight configuration", () => {
         },
         codex_security_policy: {
           filesystem: {
-            ":minimal": "read",
+            [process.platform === "win32" ? ":root" : ":minimal"]: "read",
             ":workspace_roots": "read",
           },
           network: { enabled: false },
@@ -487,19 +293,13 @@ describe("CodexSecurity preflight configuration", () => {
       },
       codex_security_policy: {
         filesystem: {
-          ":minimal": "read",
+          [process.platform === "win32" ? ":root" : ":minimal"]: "read",
           ":workspace_roots": "read",
+          [credentialHome]: { ".": "deny" },
         },
         network: { enabled: false },
       },
     });
-    const policyFilesystem = (
-      (config["permissions"] as JsonObject)[
-        "codex_security_policy"
-      ] as JsonObject
-    )["filesystem"] as JsonObject;
-    expect(policyFilesystem).not.toHaveProperty(":root");
-    expect(policyFilesystem).not.toHaveProperty(credentialHome);
   });
 
   test("preserves an explicitly requested strict approval policy", () => {
@@ -515,23 +315,30 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test("preserves a strict approval policy from the selected profile", () => {
-    const config = {
-      approval_policy: "on-request",
-      profile: "strict",
-      profiles: {
-        strict: { approval_policy: "never", model: "profile-model" },
-        other: { approval_policy: "on-request" },
-      },
-    };
+  test.each([
+    ["on-request", "never"],
+    ["never", "on-request"],
+  ] as const)(
+    "lets root %s use the selected profile's %s approval policy",
+    (rootPolicy, profilePolicy) => {
+      const config = {
+        approval_policy: rootPolicy,
+        profile: "selected",
+        profiles: {
+          selected: { approval_policy: profilePolicy, model: "profile-model" },
+          other: { approval_policy: rootPolicy },
+        },
+      };
 
-    expect(scanRuntimeCodexConfig(config)).toMatchObject({
-      approval_policy: "never",
-      approvals_reviewer: "auto_review",
-      profiles: { strict: { model: "profile-model" }, other: {} },
-    });
-    expect(config.profiles.strict.approval_policy).toBe("never");
-  });
+      expect(scanRuntimeCodexConfig(config)).toMatchObject({
+        approval_policy: profilePolicy,
+        approvals_reviewer: "auto_review",
+        profiles: { selected: { model: "profile-model" }, other: {} },
+      });
+      expect(config.approval_policy).toBe(rootPolicy);
+      expect(config.profiles.selected.approval_policy).toBe(profilePolicy);
+    },
+  );
 
   test("removes execution and permission overrides from every configured profile", () => {
     const original = {
@@ -607,6 +414,14 @@ describe("CodexSecurity preflight configuration", () => {
       model_reasoning_effort: "high",
       openai_base_url:
         "https://synthetic-user:synthetic-password@gateway.example.test/v1?token=synthetic-root-token",
+      otel: {
+        exporter: {
+          "otlp-http": {
+            endpoint: "https://otel.example.test/v1/logs",
+            headers: { Authorization: "Bearer SYNTHETIC_ROOT_OTEL_AUTH" },
+          },
+        },
+      },
       features: {
         plugins: true,
         goals: true,
@@ -620,6 +435,16 @@ describe("CodexSecurity preflight configuration", () => {
           model: "profile-model",
           openai_base_url:
             "https://synthetic-user:synthetic-password@profile.example.test/v1?token=synthetic-profile-token",
+          otel: {
+            exporter: {
+              "otlp-http": {
+                endpoint: "https://otel.example.test/v1/logs",
+                headers: {
+                  Authorization: "Bearer SYNTHETIC_PROFILE_OTEL_AUTH",
+                },
+              },
+            },
+          },
           features: { goals: true, secret: "PROFILE_SECRET" },
           agents: { max_threads: 4, token: "PROFILE_AGENT_TOKEN" },
           shell_environment_policy: { set: { SECRET: "PROFILE_ENV_SECRET" } },
@@ -700,47 +525,11 @@ describe("CodexSecurity preflight configuration", () => {
       "PROJECT_TOKEN",
       "MCP_TOKEN",
       "SHELL_SECRET",
+      "SYNTHETIC_ROOT_OTEL_AUTH",
+      "SYNTHETIC_PROFILE_OTEL_AUTH",
     ]) {
       expect(serialized).not.toContain(secret);
     }
-    const interpreter = pythonExecutable(false);
-    expect(interpreter).not.toBeNull();
-    const output = execFileSync(
-      interpreter!,
-      [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-        "--skill",
-        "security-scan",
-        "--config",
-        configPath,
-        "--cwd",
-        repository,
-        "--multi-agent-runtime-owner",
-        "native",
-        "--multi-agent-runtime-version",
-        "v1",
-        "--multi-agent-runtime-provenance",
-        "tool-surface",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
-        "--effective-config",
-        "features.goals=true",
-      ],
-      {
-        env: { PATH: process.env["PATH"], CODEX_HOME: join(root, "denied") },
-        encoding: "utf8",
-      },
-    );
-    const preflight = JSON.parse(output) as Record<string, unknown>;
-    expect(preflight["status"]).toBe("ready");
-    expect(preflight["config_resolution"]).toBe("manual-layers");
-    expect(preflight["config_paths"]).toEqual([configPath]);
-    expect(preflight["config_profile"]).toBe("review");
-    expect(JSON.stringify(preflight)).toContain("max_threads");
-    expect(JSON.stringify(preflight)).toContain("12");
-
     const bridgeConfigPath = join(root, "bridge-preflight.toml");
     const bridge = scanPreflightCodexConfig({
       features: { goals: true },
@@ -758,43 +547,6 @@ describe("CodexSecurity preflight configuration", () => {
     const bridgeSerialized = await readFile(bridgeConfigPath, "utf8");
     expect(bridgeSerialized).not.toContain("BRIDGE_TOKEN");
     expect(bridgeSerialized).not.toContain("BRIDGE_MCP_TOKEN");
-    const bridgeOutput = execFileSync(
-      interpreter!,
-      [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-        "--skill",
-        "security-scan",
-        "--config",
-        bridgeConfigPath,
-        "--cwd",
-        repository,
-        "--multi-agent-runtime-owner",
-        "codex-bridge",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-runtime-provenance",
-        "verified-bridge",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
-        "--effective-config",
-        "features.goals=true",
-      ],
-      {
-        env: { PATH: process.env["PATH"], CODEX_HOME: join(root, "denied") },
-        encoding: "utf8",
-      },
-    );
-    const bridgePreflight = JSON.parse(bridgeOutput) as Record<string, unknown>;
-    expect(bridgePreflight["status"]).toBe("ready");
-    expect(bridgePreflight["config_resolution"]).toBe("manual-layers");
-    expect(bridgePreflight["config_paths"]).toEqual([bridgeConfigPath]);
-    expect(bridgePreflight["multi_agent_mode"]).toBe("bridge-v2");
-    expect(JSON.stringify(bridgePreflight)).toContain(
-      "multiagent_config.max_concurrency",
-    );
-    expect(JSON.stringify(bridgePreflight)).toContain("12");
     const largeConfig = scanPreflightCodexConfig({
       projects: Object.fromEntries(
         Array.from({ length: 256 }, (_, index) => [
@@ -822,6 +574,35 @@ describe("CodexSecurity preflight configuration", () => {
     await expect(
       writeCodexConfig(join(root, "large-capacity.toml"), largeCapacity),
     ).resolves.toBeUndefined();
+  });
+
+  test("keeps resolved tool disables in isolated worker settings", () => {
+    expect(
+      scanPreflightCodexConfig({
+        profile: "review",
+        features: { shell_tool: true, unified_exec: true },
+        profiles: {
+          review: { features: { shell_tool: false, unified_exec: false } },
+        },
+      })["features"],
+    ).toEqual({ shell_tool: false, unified_exec: false });
+  });
+
+  test("uses resolved native file settings without a legacy profile selector", async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, "config-preflight.toml");
+    const snapshot = scanPreflightCodexConfig({
+      profile: "review",
+      model: "native-model",
+      model_reasoning_summary: "concise",
+      features: { goals: true },
+    });
+    expect(snapshot).toEqual({
+      model: "native-model",
+      model_reasoning_summary: "concise",
+      features: { goals: true },
+    });
+    await writeCodexConfig(path, snapshot);
   });
 
   test("keeps every valid profile, project, and root marker", () => {
@@ -960,21 +741,14 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("preserves safe Bedrock provider settings in profile-selected scan recipes", () => {
-    const config = scanPreflightCodexConfig({
-      model_provider: "openai",
-      profile: "bedrock",
-      profiles: {
-        bedrock: {
-          model: "openai.gpt-5.6-luna",
-          model_provider: "amazon-bedrock",
-        },
-      },
-      model_providers: {
+  test.each(["root", "profile", "merged"] as const)(
+    "preserves safe Bedrock provider settings from %s in scan recipes",
+    (source) => {
+      const providers = {
         "amazon-bedrock": {
           aws: {
             region: "us-east-2",
-            profile: "security-prod",
+            profile: "scan-profile",
             access_key_id: "synthetic-aws-access-key",
             secret_access_key: "synthetic-aws-secret-key",
             session_token: "synthetic-aws-session-token",
@@ -983,25 +757,46 @@ describe("CodexSecurity preflight configuration", () => {
           api_key: "synthetic-provider-key",
         },
         openrouter: { api_key: "synthetic-unrelated-key" },
-      },
-    });
+      };
+      const selectedProviders = structuredClone(providers);
+      if (source === "merged") {
+        providers["amazon-bedrock"].aws.region = "us-west-2";
+        delete (selectedProviders["amazon-bedrock"].aws as JsonObject)[
+          "profile"
+        ];
+      }
+      const config = scanPreflightCodexConfig({
+        model_provider: "openai",
+        profile: "bedrock",
+        profiles: {
+          bedrock: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+            ...(source === "root"
+              ? {}
+              : { model_providers: selectedProviders }),
+          },
+        },
+        ...(source === "profile" ? {} : { model_providers: providers }),
+      });
 
-    expect(config).toEqual({
-      model_provider: "openai",
-      profile: "bedrock",
-      profiles: {
-        bedrock: {
-          model: "openai.gpt-5.6-luna",
-          model_provider: "amazon-bedrock",
+      expect(config).toEqual({
+        model_provider: "openai",
+        profile: "bedrock",
+        profiles: {
+          bedrock: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+          },
         },
-      },
-      model_providers: {
-        "amazon-bedrock": {
-          aws: { region: "us-east-2", profile: "security-prod" },
+        model_providers: {
+          "amazon-bedrock": {
+            aws: { region: "us-east-2", profile: "scan-profile" },
+          },
         },
-      },
-    });
-    expect(scanModelProvider(config)).toBe("amazon-bedrock");
-    expect(JSON.stringify(config)).not.toContain("synthetic-");
-  });
+      });
+      expect(scanModelProvider(config)).toBe("amazon-bedrock");
+      expect(JSON.stringify(config)).not.toContain("synthetic-");
+    },
+  );
 });

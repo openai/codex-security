@@ -1,3 +1,6 @@
+import { after, before, test } from "node:test";
+import * as z from "zod/v4";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -41,7 +44,7 @@ const writerApi = await importSource(
   },
 );
 const schemas = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-schema-loader.ts"),
+  path.join(import.meta.dirname, "../src/artifact-contracts.ts"),
 );
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
@@ -54,59 +57,37 @@ const context = {
 };
 const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
 
-try {
-  await testSchemaSourceOfTruth();
-  await testScanContext();
-  await testWorkerStandardLayout();
-  await testSafeJsonAndJsonl();
-  await testAtomicReplacementAfterInterruptedWriter();
-  await testAtomicReplacement();
-  await testBoundedPagination();
-  await testUnsafeArtifacts();
-} finally {
-  await rm(fixture, { force: true, recursive: true });
-}
+after(() => rm(fixture, { force: true, recursive: true }));
+before(async () => {
+  await mkdir(context.root, { recursive: true });
+  await mkdir(context.repoRoot, { recursive: true });
+});
 
-console.log("Codex Security compact artifact foundation tests passed");
-
-async function testSchemaSourceOfTruth() {
-  const common = await readJson(
-    import.meta.dirname,
-    "../../schemas/definitions/artifact-common.schema.json",
+test(async function testSchemaSourceOfTruth() {
+  const common =
+    schemas.artifactSchemaDocuments["definitions/artifact-common"].$defs;
+  const validator = z.strictObject({
+    path: common.repositoryPath,
+    candidateId: common.candidateId,
+  });
+  const exported = await readJson(
+    path.join(
+      import.meta.dirname,
+      "../../schemas/definitions/artifact-common.schema.json",
+    ),
   );
-  const fixtureDocument = {
-    $id: "codex-security://schemas/tools/artifact-foundation-fixture.schema.json",
-    $defs: {
-      request: {
-        type: "object",
-        properties: {
-          path: { $ref: common.$id + "#/$defs/repositoryPath" },
-          candidateId: { $ref: common.$id + "#/$defs/candidateId" },
-        },
-        required: ["path", "candidateId"],
-        additionalProperties: false,
-      },
-    },
-  };
-  const bundled = schemas.bundleArtifactSchema(
-    [common, fixtureDocument],
-    fixtureDocument.$id,
-    "request",
-  );
-  assert.equal(JSON.stringify(bundled).includes("$ref"), false);
-  assert.equal(bundled.properties.path.type, "string");
-  assert.equal(bundled.properties.candidateId.type, "string");
-
-  const validator = schemas.loadArtifactZodSchema(
-    [common, fixtureDocument],
-    fixtureDocument.$id,
-    "request",
+  const validateExportedPath = new Ajv2020({ strict: false }).compile(
+    exported.$defs.repositoryPath,
   );
   for (const repositoryPath of [
     "src/index.ts",
     "./src/index.ts",
     "scope with spaces/café.ts",
     ".hidden/config.ts",
+    "\u2028",
+    "\u2029",
+    "src/a\u2028b.py",
+    "src/a\u2029b.py",
   ]) {
     assert.equal(
       validator.safeParse({ path: repositoryPath, candidateId: "candidate-1" })
@@ -114,6 +95,7 @@ async function testSchemaSourceOfTruth() {
       true,
       repositoryPath,
     );
+    assert.equal(validateExportedPath(repositoryPath), true, repositoryPath);
   }
   for (const repositoryPath of [
     "/etc/passwd",
@@ -123,6 +105,16 @@ async function testSchemaSourceOfTruth() {
     "src//outside.ts",
     "C:\\outside.ts",
     "src/\0outside.ts",
+    ...["\u2028", "\u2029"].flatMap((separator) => [
+      `${separator}/../outside.ts`,
+      `${separator}/./outside.ts`,
+      `${separator}\\outside.ts`,
+      `${separator}//outside.ts`,
+      `${separator}/`,
+      ...["\0", "\t", "\n", "\r", "\u007f"].map(
+        (control) => `${separator}${control}outside.ts`,
+      ),
+    ]),
   ]) {
     assert.equal(
       validator.safeParse({ path: repositoryPath, candidateId: "candidate-1" })
@@ -130,6 +122,7 @@ async function testSchemaSourceOfTruth() {
       false,
       repositoryPath,
     );
+    assert.equal(validateExportedPath(repositoryPath), false, repositoryPath);
   }
   for (const candidateId of [
     ".",
@@ -145,26 +138,11 @@ async function testSchemaSourceOfTruth() {
       candidateId,
     );
   }
-  assert.throws(
-    () => schemas.bundleArtifactSchema([common], "missing", "request"),
-    /Unknown Codex Security schema document/,
-  );
-  assert.throws(
-    () =>
-      schemas.bundleArtifactSchema(
-        [common, common],
-        common.$id,
-        "repositoryPath",
-      ),
-    /Duplicate Codex Security schema document/,
-  );
-}
+});
 
-async function testScanContext() {
+test(async function testScanContext() {
   const root = path.join(fixture, "scan");
   const repoRoot = path.join(fixture, "repository");
-  await mkdir(root, { recursive: true });
-  await mkdir(repoRoot, { recursive: true });
   const scanId = "61a20957-1be8-4ccf-8de8-eab4061e8cc3";
   const contract = {
     target: {
@@ -243,9 +221,9 @@ async function testScanContext() {
     })),
     /requested scan identity/,
   );
-}
+});
 
-async function testWorkerStandardLayout() {
+test(async function testWorkerStandardLayout() {
   const root = path.join(fixture, "worker", "output");
   const repoRoot = path.join(fixture, "repository");
   await mkdir(root, { recursive: true });
@@ -287,56 +265,9 @@ async function testWorkerStandardLayout() {
   );
   assert.equal(context.layout, "worker");
   assert.equal(context.scope, ".");
+});
 
-  await assert.rejects(
-    writerApi.createCodexSecurityArtifactWriterServer({
-      ...environment,
-      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-        scanRoot: root,
-        claimedWorkers: [],
-      }),
-    }),
-    /coordinator-bound reducer context/,
-  );
-  const { context: reducer } =
-    await writerApi.createCodexSecurityArtifactWriterServer({
-      ...environment,
-      CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
-      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-        scanRoot: root,
-        claimedWorkers: [
-          { id: "worker-1", resultPath: path.join(root, "worker-result.json") },
-        ],
-      }),
-    });
-  assert.equal(reducer.layout, "reducer");
-  assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
-}
-
-async function testAtomicReplacementAfterInterruptedWriter() {
-  const destination = await io.artifactDestination(
-    context,
-    ["interrupted.json"],
-    "interrupted artifact",
-  );
-  const child = spawn(process.execPath, [
-    "-e",
-    'require("node:fs").openSync(process.argv[1], "wx", 0o600); process.stdout.write("locked"); setInterval(() => {}, 1000);',
-    destination + ".lock",
-  ]);
-  await once(child.stdout, "data");
-  child.kill("SIGKILL");
-  await once(child, "close");
-  await io.replaceArtifactText(destination, "recovered\n");
-  assert.equal(await readFile(destination, "utf8"), "recovered\n");
-  const values = ["a", "b", "c"].map((value) => value.repeat(32_000));
-  await Promise.all(
-    values.map((value) => io.replaceArtifactText(destination, value)),
-  );
-  assert.ok(values.includes(await readFile(destination, "utf8")));
-}
-
-async function testSafeJsonAndJsonl() {
+test(async function testSafeJsonAndJsonl() {
   const destination = await io.artifactDestination(
     context,
     components,
@@ -430,9 +361,32 @@ async function testSafeJsonAndJsonl() {
       await chmod(destination, 0o600);
     }
   }
-}
+});
 
-async function testAtomicReplacement() {
+test(async function testAtomicReplacementAfterInterruptedWriter() {
+  const destination = await io.artifactDestination(
+    context,
+    ["interrupted.json"],
+    "interrupted artifact",
+  );
+  const child = spawn(process.execPath, [
+    "-e",
+    'require("node:fs").openSync(process.argv[1], "wx", 0o600); process.stdout.write("locked"); setInterval(() => {}, 1000);',
+    destination + ".lock",
+  ]);
+  await once(child.stdout, "data");
+  child.kill("SIGKILL");
+  await once(child, "close");
+  await io.replaceArtifactText(destination, "recovered\n");
+  assert.equal(await readFile(destination, "utf8"), "recovered\n");
+  const values = ["a", "b", "c"].map((value) => value.repeat(32_000));
+  await Promise.all(
+    values.map((value) => io.replaceArtifactText(destination, value)),
+  );
+  assert.ok(values.includes(await readFile(destination, "utf8")));
+});
+
+test(async function testAtomicReplacement() {
   const destination = await io.artifactDestination(
     context,
     components,
@@ -455,9 +409,9 @@ async function testAtomicReplacement() {
   assert.deepEqual(await readdir(path.dirname(destination)), [
     "candidate_ledger.jsonl",
   ]);
-}
+});
 
-async function testBoundedPagination() {
+test(async function testBoundedPagination() {
   const rows = [
     { path: "./src/first.ts" },
     { path: "scope with spaces/café.ts" },
@@ -478,9 +432,9 @@ async function testBoundedPagination() {
     () => io.paginateArtifactRows(rows, { cursor: "4" }, "review_items"),
     /outside the available rows/,
   );
-}
+});
 
-async function testUnsafeArtifacts() {
+test(async function testUnsafeArtifacts() {
   for (const components of [
     [],
     ["..", "outside.json"],
@@ -535,4 +489,4 @@ async function testUnsafeArtifacts() {
     ),
     /safe regular directory|escaped|context/i,
   );
-}
+});

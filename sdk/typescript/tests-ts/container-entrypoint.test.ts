@@ -17,19 +17,19 @@ const versionVerifier = dockerScript("verify-container-release-version.sh");
 async function runEntrypoint(
   args: readonly string[],
   overrides: Record<string, string> = {},
+  command = "printf '%s\\n' \"$@\"",
 ): Promise<SpawnSyncReturns<string>> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-container-entrypoint-")),
   );
 
   try {
-    await writeFile(
-      join(root, "codex-security"),
-      "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
-      { mode: 0o755 },
-    );
+    await writeFile(join(root, "codex-security"), `#!/bin/sh\n${command}\n`, {
+      mode: 0o755,
+    });
 
     return spawnSync("sh", [entrypoint, ...args], {
+      cwd: root,
       encoding: "utf8",
       env: {
         ...process.env,
@@ -49,6 +49,7 @@ async function runVersionVerifier(
   response: string,
   failure = false,
   expectedDigest?: string,
+  latestVersion: string | null = "0.1.3",
 ): Promise<SpawnSyncReturns<string> & { workflowOutput: string }> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-container-version-")),
@@ -74,6 +75,16 @@ async function runVersionVerifier(
       { mode: 0o755 },
     );
 
+    await writeFile(
+      join(root, "docker"),
+      `#!/bin/sh
+[ "$*" = "buildx imagetools inspect $IMAGE@$LATEST_DIGEST --raw" ] || exit 64
+[ -n "$LATEST_MANIFEST" ] || exit 1
+printf '%s\\n' "$LATEST_MANIFEST"
+`,
+      { mode: 0o755 },
+    );
+
     const endpoint = "orgs/openai/packages/container/codex-security";
     const output = join(root, "output");
     await writeFile(output, "");
@@ -90,8 +101,19 @@ async function runVersionVerifier(
         env: {
           ...process.env,
           EXPECTED_ENDPOINT: endpoint,
+          IMAGE: "ghcr.io/openai/codex-security",
+          LATEST_DIGEST: `sha256:${"b".repeat(64)}`,
+          LATEST_MANIFEST:
+            latestVersion === null
+              ? ""
+              : JSON.stringify({
+                  annotations: {
+                    "org.opencontainers.image.version": latestVersion,
+                  },
+                }),
           GH_FIXTURE_FAILURE: failure ? "1" : "0",
           GH_FIXTURE_RESPONSE: response,
+          RELEASE_SHA: "1".repeat(40),
           GITHUB_OUTPUT: output,
           PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
         },
@@ -232,6 +254,125 @@ describe("customer container entrypoint", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toBe("--version\n");
   });
+
+  testPosix(
+    "appends authentication settings after existing Git configuration",
+    async () => {
+      for (const count of [0, 128, 129, 256]) {
+        const entries = Array.from({ length: count }, (_, index) => [
+          `fixture.setting${index}`,
+          `synthetic-value-${index}`,
+        ]);
+        const configuration = Object.fromEntries(
+          entries.flatMap(([key, value], index) => [
+            [`GIT_CONFIG_KEY_${index}`, key],
+            [`GIT_CONFIG_VALUE_${index}`, value],
+          ]),
+        );
+        const result = await runEntrypoint(
+          ["--version"],
+          {
+            GH_TOKEN: "synthetic-token",
+            CODEX_SECURITY_GIT_HOST: "git.example.test",
+            GIT_CONFIG_COUNT: String(count),
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_CONFIG_PARAMETERS: "",
+            ...configuration,
+          },
+          "printf '%s\\n' \"$GIT_CONFIG_COUNT\"\nexec git config --get-regexp '^(fixture|credential|url)\\.'",
+        );
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout).toBe(
+          [
+            String(count + 2),
+            ...entries.map(([key, value]) => `${key} ${value}`),
+            "credential.https://git.example.test.helper /usr/local/bin/codex-security-git-credential",
+            "url.https://git.example.test/.insteadof git@git.example.test:",
+            "",
+          ].join("\n"),
+        );
+      }
+    },
+  );
+
+  testPosix(
+    "appends within Git's integer limit without wrapping existing indices",
+    async () => {
+      const result = await runEntrypoint(
+        [],
+        {
+          GITHUB_TOKEN: "synthetic-token",
+          CODEX_SECURITY_GIT_HOST: "git.example.test",
+          GIT_CONFIG_COUNT: "2147483645",
+          GIT_CONFIG_KEY_0: "fixture.original",
+          GIT_CONFIG_VALUE_0: "original-value",
+        },
+        'printf \'%s\\n\' "$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" "$GIT_CONFIG_KEY_2147483645" "$GIT_CONFIG_VALUE_2147483645" "$GIT_CONFIG_KEY_2147483646" "$GIT_CONFIG_VALUE_2147483646"',
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(
+        [
+          "2147483647",
+          "fixture.original",
+          "original-value",
+          "credential.https://git.example.test.helper",
+          "/usr/local/bin/codex-security-git-credential",
+          "url.https://git.example.test/.insteadOf",
+          "git@git.example.test:",
+          "",
+        ].join("\n"),
+      );
+    },
+  );
+
+  testPosix(
+    "rejects invalid or overflowing Git counts before starting the CLI",
+    async () => {
+      for (const count of [
+        "-1",
+        "+1",
+        "01",
+        "08",
+        "1.5",
+        "1+1",
+        " 1",
+        "1 ",
+        "2147483646",
+        "2147483647",
+        "2147483648",
+        "18446744073709551616",
+      ]) {
+        const result = await runEntrypoint(["--version"], {
+          GH_TOKEN: "synthetic-token",
+          GIT_CONFIG_COUNT: count,
+        });
+
+        expect(result.status).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain("GIT_CONFIG_COUNT");
+      }
+    },
+  );
+
+  testPosix(
+    "rejects invalid credential hosts with a large Git count",
+    async () => {
+      const result = await runEntrypoint(["--version"], {
+        GH_TOKEN: "synthetic-token",
+        CODEX_SECURITY_GIT_HOST: "git.example.test/path",
+        GIT_CONFIG_COUNT: "129",
+      });
+
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("must be a valid hostname");
+    },
+  );
 });
 
 describe("immutable customer container releases", () => {
@@ -255,9 +396,34 @@ describe("immutable customer container releases", () => {
     );
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Container version 0.1.4 already exists");
+    expect(result.stderr).toContain(
+      "retries require a matching verified digest",
+    );
     expect(result.workflowOutput).toBe("");
   });
+
+  testPosix(
+    "checks the immutable source tag before the version exists",
+    async () => {
+      const approved = `sha256:${"a".repeat(64)}`;
+      for (const tagDigest of [approved, `sha256:${"b".repeat(64)}`]) {
+        const result = await runVersionVerifier(
+          JSON.stringify([
+            {
+              name: tagDigest,
+              metadata: { container: { tags: [`sha-${"1".repeat(40)}`] } },
+            },
+          ]),
+          false,
+          approved,
+        );
+        expect(result.status).toBe(tagDigest === approved ? 0 : 1);
+        expect(result.workflowOutput).toBe(
+          tagDigest === approved ? "publish_latest=true\n" : "",
+        );
+      }
+    },
+  );
 
   testPosix(
     "retries the verified digest without moving latest backwards",
@@ -291,14 +457,51 @@ describe("immutable customer container releases", () => {
             false,
             digest,
           );
-          const allowed = newer || latest === "same";
-          expect(result.status, JSON.stringify({ newer, latest })).toBe(
-            allowed ? 0 : 1,
+          expect(result.status, JSON.stringify({ newer, latest })).toBe(0);
+          expect(result.workflowOutput).toBe(`publish_latest=${!newer}\n`);
+          expect(result.stderr).toBe("");
+        }
+      }
+    },
+  );
+
+  testPosix(
+    "checks the public index when latest has lost its numeric tag",
+    async () => {
+      const candidate = `sha256:${"a".repeat(64)}`;
+      for (const alreadyPublished of [false, true]) {
+        const versions = JSON.stringify([
+          {
+            name: candidate,
+            metadata: {
+              container: { tags: alreadyPublished ? ["0.1.4"] : [] },
+            },
+          },
+          {
+            name: `sha256:${"b".repeat(64)}`,
+            metadata: {
+              container: { tags: ["latest", `sha-${"2".repeat(40)}`] },
+            },
+          },
+        ]);
+        for (const [version, output] of [
+          ["0.1.3", "publish_latest=true\n"],
+          ["0.1.10", "publish_latest=false\n"],
+          ["0.1.4", ""],
+          ["invalid", ""],
+          [null, ""],
+        ] as const) {
+          const result = await runVersionVerifier(
+            versions,
+            false,
+            candidate,
+            version,
           );
-          expect(result.workflowOutput).toBe(
-            allowed ? `publish_latest=${!newer}\n` : "",
-          );
-          if (allowed) expect(result.stderr).toBe("");
+          expect(
+            result.status === 0,
+            JSON.stringify({ alreadyPublished, version }),
+          ).toBe(output !== "");
+          expect(result.workflowOutput).toBe(output);
         }
       }
     },
@@ -327,7 +530,7 @@ describe("immutable customer container releases", () => {
         );
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(
-          "Container version 0.1.4 already exists",
+          "retries require a matching verified digest",
         );
         expect(result.workflowOutput).toBe("");
       }

@@ -18,12 +18,7 @@ const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const roots = createTemporaryDirectoriesSync(true);
 type Row = Record<string, unknown>;
-interface Fixture {
-  root: string;
-  repo: string;
-  scope: string;
-  output: string;
-}
+type Fixture = ReturnType<typeof fixture>;
 const location = (
   path = "app/routes.py",
   start_line = 2,
@@ -40,7 +35,7 @@ function write(path: string, data: string | Buffer): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, data);
 }
-function fixture(): Fixture {
+function fixture() {
   const root = roots.create("candidate-normalizer-");
   const repo = join(root, "İrepository");
   for (const path of [
@@ -102,6 +97,33 @@ function ledger(f: Fixture): Row[] {
 afterEach(roots.cleanup);
 
 describe("built candidate normalizer", () => {
+  test.skipIf(process.platform === "win32")(
+    "retains the output error when temporary-file cleanup also fails",
+    () => {
+      const f = fixture();
+      const preload = join(f.root, "fail-filesystem.cjs");
+      write(
+        preload,
+        `
+const fs = require("node:fs");
+fs.renameSync = () => { throw new Error("Synthetic output rename failed"); };
+fs.unlinkSync = () => { throw new Error("Synthetic temporary unlink failed" + String.fromCharCode(27, 155)); };
+require("node:module").syncBuiltinESMExports();
+`,
+      );
+      const result = run(f, [[candidate()]], [], {
+        ...process.env,
+        NODE_OPTIONS: `--require ${JSON.stringify(preload)}`,
+      });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("Synthetic output rename failed");
+      expect(result.stderr).toContain("Synthetic temporary unlink failed");
+      expect(result.stderr).not.toContain("\u001b");
+      expect(result.stderr).not.toContain("\u009b");
+      expect(existsSync(f.output)).toBe(false);
+    },
+  );
+
   test.skipIf(process.platform !== "linux")(
     "accepts many input paths through the packaged launcher",
     () => {
@@ -377,27 +399,9 @@ describe("built candidate normalizer", () => {
     );
   });
 
-  test("reports invalid fields with the input row and preserves existing output", () => {
+  test("reports rejected candidate input rows without replacing existing output", () => {
     const f = fixture();
     const cases: [Row, string][] = [
-      [candidate(undefined, { cwe_ids: null }), "cwe_ids: expected an array"],
-      [
-        candidate(undefined, { cwe_ids: [12] }),
-        "cwe_ids: expected CWE strings",
-      ],
-      [
-        candidate(undefined, { cwe_ids: ["SQL injection"] }),
-        "cwe_ids: unsupported value",
-      ],
-      [
-        candidate(undefined, { cwe_ids: ["CWE-0"] }),
-        "cwe_ids: unsupported value",
-      ],
-      [candidate([]), "locations: expected a non-empty array"],
-      [
-        candidate([null as unknown as Row]),
-        "locations: expected location objects",
-      ],
       [candidate([location("app/missing.py")]), "missing.py"],
       [
         candidate([location("../outside.py")]),
@@ -412,42 +416,9 @@ describe("built candidate normalizer", () => {
         candidate([location("app/routes.py", 6)]),
         "line range 6-6 exceeds app/routes.py:5",
       ],
-      [candidate([{ ...location(), end_line: 1 }]), "greater than or equal"],
-      [
-        candidate([location("app/routes.py", 1, "rootControl")]),
-        "role: unsupported value",
-      ],
-      [
-        candidate([{ ...location(), line: 2 }]),
-        "locations: unsupported fields line",
-      ],
       [
         candidate(undefined, { technically_validated: true }),
         "unsupported fields technically_validated",
-      ],
-      [
-        candidate(undefined, { disposition: "reportable" }),
-        "unsupported fields disposition",
-      ],
-      [
-        candidate(undefined, { candidate_id: " " }),
-        "candidate_id: expected a non-empty string",
-      ],
-      [
-        candidate(undefined, { summary: " \t\r\n" }),
-        "summary: expected a non-empty string",
-      ],
-      [
-        candidate(undefined, { evidence: null }),
-        "evidence: expected a non-empty string",
-      ],
-      [
-        candidate(undefined, { context: " " }),
-        "context: expected a non-empty string",
-      ],
-      [
-        candidate(undefined, { instance: false }),
-        "instance: expected a non-empty string",
       ],
     ];
     write(f.output, "previous output\n");

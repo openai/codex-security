@@ -1,5 +1,5 @@
 import { nodeCommand } from "./support/shell.js";
-import { chmod, writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -13,7 +13,6 @@ import {
 } from "../src/auth.js";
 import { PluginBootstrapError } from "../src/index.js";
 import { runCodexCommand } from "../src/runtime.js";
-import type { CodexCommand } from "../src/index.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
@@ -24,10 +23,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 
 afterEach(cleanup);
 
-async function fakeCodex(): Promise<{
-  command: CodexCommand;
-  environment: NodeJS.ProcessEnv;
-}> {
+async function fakeCodex() {
   const root = await temporaryDirectory();
   const script = join(root, "codex.mjs");
   await writeFile(
@@ -136,14 +132,13 @@ describe("Codex authentication process boundary", () => {
     const root = await temporaryDirectory("codex-security-auth-epipe-");
     const script = join(root, "exit.mjs");
     await writeFile(script, "process.exit(1);\n");
-    await expect(
-      runCodexCommand(
-        { command: process.execPath },
-        [script],
-        process.env,
-        "x".repeat(16 * 1024 * 1024),
-      ),
-    ).resolves.toMatchObject({ success: false, exitCode: 1 });
+    const result = await runCodexCommand(
+      { command: process.execPath },
+      [script],
+      process.env,
+      "x".repeat(16 * 1024 * 1024),
+    );
+    expect(result).toMatchObject({ success: false, exitCode: 1 });
   });
 
   test("retains large noninteractive authentication output", async () => {
@@ -189,6 +184,41 @@ describe("Codex authentication process boundary", () => {
     expect(handle.userCode).toBe("8356-V2EGR");
     expect(observeSucceeded).toHaveBeenCalled();
   });
+
+  test.each([
+    ["Open https://[2001:db8::1].", "https://[2001:db8::1]"],
+    [
+      "Open [https://auth.example.test/device]",
+      "https://auth.example.test/device",
+    ],
+    ["Open [https://[2001:db8::]]", "https://[2001:db8::]"],
+    [
+      "Open [https://auth.example.test/device.]",
+      "https://auth.example.test/device",
+    ],
+    ["Open [https://[2001:db8::3].]", "https://[2001:db8::3]"],
+    [
+      "Open [https://[2001:db8::4]/device?challenge=ABCD.]",
+      "https://[2001:db8::4]/device?challenge=ABCD",
+    ],
+    ["Open [https://[2001:db8::5]:8443]", "https://[2001:db8::5]:8443"],
+    ["Open [https://[::1]]", null],
+    ["Open [https://[::ffff:127.0.0.1]]", null],
+    ["Open http://[2001:db8::1]", null],
+  ] as const)(
+    "distinguishes IPv6 host brackets from surrounding punctuation: %s",
+    async (output, expected) => {
+      const handle = new CodexLoginHandle(
+        nodeCommand(),
+        ["-e", "console.error(process.argv[1])", output],
+        {},
+        () => {},
+      );
+
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+      expect(handle.verificationUrl).toBe(expected);
+    },
+  );
 
   test.each(["sync", "async"])(
     "rejects wait when required login completion fails: %s",
@@ -259,6 +289,23 @@ describe("Codex authentication process boundary", () => {
       expect(handle.userCode).toBe("ABCD-EFGH");
     },
   );
+
+  test("reads login URLs from hyperlinks terminated with ST", async () => {
+    const url = "https://auth.example.test/device";
+    const st = "\u001b\\";
+    const link = `\u001b]8;;https://link.example.test/${st}${url}\u001b]8;;${st}`;
+    const output = `Open ${link}\nUser code: ABCD-EFGH\n`;
+    const handle = new CodexLoginHandle(
+      nodeCommand(),
+      ["-e", "process.stderr.write(process.argv[1])", output],
+      process.env,
+      () => {},
+    );
+
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
+    expect(handle.verificationUrl).toBe(url);
+    expect(handle.userCode).toBe("ABCD-EFGH");
+  });
 
   test("retains large interactive output and login instructions", async () => {
     const root = await temporaryDirectory("codex-security-auth-output-");
@@ -518,4 +565,21 @@ setInterval(() => {}, 1000);
     await expect(handle.wait()).resolves.toMatchObject({ success: false });
     expect(observeSucceeded).not.toHaveBeenCalled();
   });
+});
+
+test("retains the Codex configuration path and parsing error", async () => {
+  const root = join(
+    await temporaryDirectory(),
+    "configuration-\u009b-sk-proj-SYNTHETIC_SECRET",
+  );
+  await mkdir(root);
+  const path = join(root, "config.toml");
+  await writeFile(path, "invalid = [");
+  try {
+    await readCodexHomeConfig({ CODEX_HOME: root });
+    throw new Error("Expected invalid configuration to fail");
+  } catch (error) {
+    expect(String(error)).toContain(path);
+    expect(String(error)).toContain("Invalid TOML");
+  }
 });

@@ -1,14 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
+import { parse } from "smol-toml";
 import { configuredCodexHome } from "./auth.js";
+import { CodexSecurityError } from "./errors.js";
 import {
   resolveCodexProfile,
+  deepMerge,
   modelProviderConfigOverride,
   inlineToml,
   writeCodexConfig,
+  writePrivateConfig,
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
@@ -16,10 +20,13 @@ import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
+  codexSecurityCredentialHome,
   executablePathForSpawn,
   requirePrivateCredentialHome,
+  requireSecureCredentialHome,
   resolveCodexCommand,
   type CodexCommand,
+  type ProcessEnvironment,
 } from "./runtime.js";
 
 export interface ProviderProfile {
@@ -28,7 +35,7 @@ export interface ProviderProfile {
   cleanup(): Promise<void>;
 }
 
-/** Native no-turn commands need provider metadata when managed policy selects it. */
+/** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
 export async function providerPreflightCommand(
   command: CodexCommand,
   config: JsonObject,
@@ -47,6 +54,12 @@ export async function providerPreflightCommand(
   }
   if (resolved["model_provider"] !== undefined)
     overrides.push(`model_provider=${inlineToml(resolved["model_provider"])}`);
+  // These commands cannot load a private profile while preserving their auth
+  // home. Exporter headers stay in native configuration, never copied into argv.
+  for (const key of ["analytics", "responses_api_metadata"]) {
+    const value = resolved[key];
+    if (value !== undefined) overrides.push(`${key}=${inlineToml(value)}`);
+  }
   if (overrides.length === 0) return command;
   return {
     ...command,
@@ -57,15 +70,40 @@ export async function providerPreflightCommand(
   };
 }
 
+/** Retain explicit settings omitted from the readable recipe when its file reloads. */
+export function privateReplayOverrides(
+  config: JsonObject,
+  recipe: JsonObject,
+): JsonObject {
+  const result: JsonObject = {};
+  for (const [key, value] of Object.entries(config)) {
+    const saved = recipe[key];
+    if (value === null || saved === undefined) {
+      result[key] = structuredClone(value);
+    } else if (isRecord(value) && isRecord(saved)) {
+      const nested = privateReplayOverrides(
+        value as JsonObject,
+        saved as JsonObject,
+      );
+      if (Object.keys(nested).length > 0) result[key] = nested;
+    }
+  }
+  return result;
+}
+
 /** Provider definitions use a native file layer, never process arguments. */
 export async function createProviderProfile(
   codexHome: string,
   config: JsonObject,
-  options: Parameters<typeof requirePrivateCredentialHome>[2] = {},
+  options: Parameters<typeof requirePrivateCredentialHome>[2] & {
+    replay?: boolean;
+  } = {},
 ): Promise<ProviderProfile> {
-  const providers = resolveCodexProfile(config)["model_providers"];
   const name = `codex_security_${randomUUID()}`;
-  const path = join(codexHome, `${name}.config.toml`);
+  const path = join(
+    codexHome,
+    `${name}.config.${options.replay ? "json" : "toml"}`,
+  );
   if ((options.platform ?? process.platform) === "win32") {
     await mkdir(codexHome, { recursive: true, mode: 0o700 });
     await requirePrivateCredentialHome(
@@ -74,10 +112,71 @@ export async function createProviderProfile(
       options,
     );
   }
-  await writeCodexConfig(path, {
-    model_providers: isRecord(providers) ? providers : {},
-  });
+  if (options.replay) {
+    await writePrivateConfig(path, JSON.stringify(config));
+  } else {
+    const providers = resolveCodexProfile(config)["model_providers"];
+    await writeCodexConfig(path, {
+      model_providers: isRecord(providers) ? providers : {},
+    });
+  }
   return { name, path, cleanup: () => rm(path, { force: true }) };
+}
+
+/** Restore private replay settings from the credential home, never scan artifacts. */
+export async function restoreProviderProfile(
+  config: JsonObject,
+  profile: unknown,
+  environment: ProcessEnvironment,
+): Promise<JsonObject> {
+  if (profile === undefined) return config;
+  if (
+    !isRecord(profile) ||
+    typeof profile["name"] !== "string" ||
+    (profile["home"] !== "ambient" && profile["home"] !== "managed") ||
+    !/^codex_security_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+      profile["name"],
+    )
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan contains an invalid provider profile.",
+    );
+  }
+  const codexHome =
+    profile["home"] === "ambient"
+      ? configuredCodexHome(environment)
+      : codexSecurityCredentialHome(environment);
+  if (profile["home"] === "managed")
+    await requireSecureCredentialHome(codexHome);
+  let saved: unknown;
+  try {
+    saved = JSON.parse(
+      await readFile(join(codexHome, `${profile["name"]}.config.json`), "utf8"),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    saved = parse(
+      await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
+    );
+  }
+  if (
+    !isRecord(saved) ||
+    (saved["model_providers"] !== undefined &&
+      saved["model_providers"] !== null &&
+      !isRecord(saved["model_providers"]))
+  ) {
+    throw new CodexSecurityError(
+      "The saved provider profile contains no provider configuration.",
+    );
+  }
+  const { model_providers: providers, ...overrides } = saved;
+  return {
+    ...deepMerge({ ...config }, overrides as JsonObject),
+    ...(providers === null ||
+    (isRecord(providers) && Object.keys(providers).length > 0)
+      ? { model_providers: providers as JsonObject | null }
+      : {}),
+  };
 }
 
 /** The pinned SDK lacks the native CLI's private profile-file option. */
@@ -156,41 +255,7 @@ export async function preflightReadOnlyProfileCodex(
   return { permissionProfileId, configOverrides };
 }
 
-/** Older workers must inherit the same effective provider as the parent scan. */
-export async function legacyWorkerUsesScanProvider(
-  command: CodexCommand,
-  environment: Record<string, string>,
-  cwd: string,
-  modelProvider: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  const preflight = await nativePermissionPreflight();
-  const env = bundledCodexSdkEnvironment(command.command, environment);
-  return await withCodexPreflightLock(env, signal, async () => {
-    const options = {
-      codexPath: executablePathForSpawn(command.command),
-      commandArgs: command.args,
-      cwd,
-      env,
-      signal: signal ?? new AbortController().signal,
-      context: "helper",
-    };
-    const worker = await preflight.readDeepScanRuntimeConfig({
-      ...options,
-      configOverrides: [],
-    });
-    const parent = await preflight.readDeepScanRuntimeConfig({
-      ...options,
-      configOverrides: [`model_provider=${JSON.stringify(modelProvider)}`],
-    });
-    return (
-      (worker.model_provider ?? "openai") ===
-      (parent.model_provider ?? "openai")
-    );
-  });
-}
-
-async function withCodexPreflightLock<T>(
+export async function withCodexPreflightLock<T>(
   env: Record<string, string> | undefined,
   signal: AbortSignal | undefined,
   operation: () => Promise<T>,
@@ -213,7 +278,7 @@ async function withCodexPreflightLock<T>(
   }
 }
 
-async function nativePermissionPreflight() {
+export async function nativePermissionPreflight() {
   return await import(
     pathToFileURL(
       join(
@@ -225,7 +290,7 @@ async function nativePermissionPreflight() {
   );
 }
 
-async function nativeProfileClient() {
+export async function nativeProfileClient() {
   return await import(
     pathToFileURL(
       join(await bundledPluginRoot(), "scripts", "codex_profile.mjs"),

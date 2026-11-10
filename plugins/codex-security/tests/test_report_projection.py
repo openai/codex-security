@@ -1,6 +1,9 @@
+"""Check how structured scan records and legacy evidence become readable Markdown reports."""
+
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 from workbench_test_support import load_script
@@ -39,7 +42,6 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
     coverage = {
         "mode": "repository",
         "inventoryStrategy": "repository",
-        "completeness": "complete",
         "includePaths": ["src/"],
         "excludePaths": [],
         "surfaces": [],
@@ -47,6 +49,23 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
         "deferred": [],
     }
     return manifest, findings, coverage
+
+
+def test_report_points_to_distinct_worker_models_in_the_manifest(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(Path(PROJECTION.__file__).parent)
+    manifest, findings, coverage = canonical_documents()
+    manifest["scan"].update(
+        review={},
+        reviewState={"reviews": [{"workerId": "worker", "threatModel": {"summary": "Job state"}}]},
+    )
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "scan.reviewState.reviews" in markdown
+
+
+def report_with_finding(**fields: object) -> str:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0].update(fields)
+    return PROJECTION.build_report_markdown(manifest, findings, coverage)
 
 
 def test_projection_normalizes_structured_fields() -> None:
@@ -61,6 +80,23 @@ def test_projection_normalizes_structured_fields() -> None:
     assert "Text: \\`\\`\\` code fence \\`\\`\\`" in markdown
     assert "Parser \\| boundary ## Injected finding heading" in markdown
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
+
+
+def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = "~~~\ncode fence\n~~~"
+    instruction = (
+        "1) Retry 3–5 times, then 5 to 10. See https://example.test/~docs?version=~1. "
+        "Use chmod 0~777 or chmod 0~600 key.pem."
+    )
+    finding["remediation"] = instruction
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "\n~~~" not in markdown
+    assert "Text: ~~~ code fence ~~~" in markdown
+    assert f"Text: {instruction}" in markdown
 
 
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
@@ -165,68 +201,64 @@ def test_projection_renders_inline_code_and_section_code_evidence() -> None:
 
 @pytest.mark.parametrize("reference_key", ["evidenceRefs", "evidence_refs"])
 def test_projection_renders_nested_attack_path_code_evidence(reference_key: str) -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["codeEvidence"] = [
-        {
-            "id": "archive-source",
-            "label": "Attacker-controlled archive path",
-            "path": "src/archive.py",
-            "startLine": 20,
-            "code": "entry_path = archive_entry.name",
-            "explanation": "The archive controls the path.",
+    markdown = report_with_finding(
+        codeEvidence=[
+            {
+                "id": "archive-source",
+                "label": "Attacker-controlled archive path",
+                "path": "src/archive.py",
+                "startLine": 20,
+                "code": "entry_path = archive_entry.name",
+                "explanation": "The archive controls the path.",
+            },
+            {
+                "id": "archive-sink",
+                "label": "Unchecked filesystem write",
+                "path": "src/archive.py",
+                "startLine": 41,
+                "code": "destination.write_bytes(entry.read())",
+                "explanation": "The unchecked path reaches the write.",
+            },
+        ],
+        attackPath={
+            "dataflow": {
+                "summary": "An archive entry path reaches a filesystem write.",
+                "evidenceRefs": [],
+                "evidence_refs": ["archive-source"],
+            },
+            "reachability": {
+                "summary": "An authenticated uploader can trigger extraction.",
+                reference_key: ["archive-sink"],
+            },
         },
-        {
-            "id": "archive-sink",
-            "label": "Unchecked filesystem write",
-            "path": "src/archive.py",
-            "startLine": 41,
-            "code": "destination.write_bytes(entry.read())",
-            "explanation": "The unchecked path reaches the write.",
-        },
-    ]
-    finding["attackPath"] = {
-        "dataflow": {
-            "summary": "An archive entry path reaches a filesystem write.",
-            "evidenceRefs": [],
-            "evidence_refs": ["archive-source"],
-        },
-        "reachability": {
-            "summary": "An authenticated uploader can trigger extraction.",
-            reference_key: ["archive-sink"],
-        },
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert "entry_path = archive_entry.name" in markdown
     assert "destination.write_bytes(entry.read())" in markdown
 
 
 def test_projection_normalizes_scalar_evidence_references() -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["codeEvidence"] = [
-        {"id": "root-source", "code": "root_source()"},
-        {"id": "dataflow-source", "code": "dataflow_source()"},
-        {"id": "reachability-source", "code": "reachability_source()"},
-    ]
-    finding["root_cause"] = {
-        "summary": "The authorization check occurs after the write.",
-        "evidence_refs": "root-source",
-    }
-    finding["attackPath"] = {
-        "dataflow": {
-            "summary": "An attacker-controlled value reaches the write.",
-            "evidence_refs": "dataflow-source",
+    markdown = report_with_finding(
+        codeEvidence=[
+            {"id": "root-source", "code": "root_source()"},
+            {"id": "dataflow-source", "code": "dataflow_source()"},
+            {"id": "reachability-source", "code": "reachability_source()"},
+        ],
+        root_cause={
+            "summary": "The authorization check occurs after the write.",
+            "evidence_refs": "root-source",
         },
-        "reachability": {
-            "summary": "An authenticated caller can reach the handler.",
-            "evidence_refs": "reachability-source",
+        attackPath={
+            "dataflow": {
+                "summary": "An attacker-controlled value reaches the write.",
+                "evidence_refs": "dataflow-source",
+            },
+            "reachability": {
+                "summary": "An authenticated caller can reach the handler.",
+                "evidence_refs": "reachability-source",
+            },
         },
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert "root_source()" in markdown
     assert "dataflow_source()" in markdown
@@ -234,17 +266,16 @@ def test_projection_normalizes_scalar_evidence_references() -> None:
 
 
 def test_projection_merges_transformations_across_data_flow_aliases() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "dataFlow": {"transformations": ["decode archive entry", "parse *input*"]},
-        "dataflow": {
-            "summary": "request -> archive extraction -> filesystem write",
-            "transformations": ["dispatch extraction", "decode archive entry"],
+    markdown = report_with_finding(
+        attackPath={
+            "dataFlow": {"transformations": ["decode archive entry", "parse *input*"]},
+            "dataflow": {
+                "summary": "request -> archive extraction -> filesystem write",
+                "transformations": ["dispatch extraction", "decode archive entry"],
+            },
+            "data_flow": {"transformations": None},
         },
-        "data_flow": {"transformations": None},
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert markdown.count("- decode archive entry") == 1
     assert "- dispatch extraction" in markdown
@@ -252,22 +283,21 @@ def test_projection_merges_transformations_across_data_flow_aliases() -> None:
 
 
 def test_projection_merges_top_level_and_reachability_preconditions() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "preconditions": [
-            "The service processes uploaded archives.",
-            "The attacker can upload an archive.",
-        ],
-        "reachability": {
-            "summary": "An authenticated uploader can trigger extraction.",
+    markdown = report_with_finding(
+        attackPath={
             "preconditions": [
+                "The service processes uploaded archives.",
                 "The attacker can upload an archive.",
-                "Automatic extraction is enabled.",
             ],
+            "reachability": {
+                "summary": "An authenticated uploader can trigger extraction.",
+                "preconditions": [
+                    "The attacker can upload an archive.",
+                    "Automatic extraction is enabled.",
+                ],
+            },
         },
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert markdown.count("- The service processes uploaded archives.") == 1
     assert markdown.count("- The attacker can upload an archive.") == 1
@@ -275,12 +305,11 @@ def test_projection_merges_top_level_and_reachability_preconditions() -> None:
 
 
 def test_projection_uses_top_level_attack_path_summary_as_reachability_fallback() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "summary": "An authenticated uploader can trigger parse_file to extract an archive."
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        attackPath={
+            "summary": "An authenticated uploader can trigger parse_file to extract an archive."
+        },
+    )
 
     reachability = markdown.split("#### Reachability", 1)[1].split("#### Severity", 1)[0]
     assert (
@@ -291,15 +320,14 @@ def test_projection_uses_top_level_attack_path_summary_as_reachability_fallback(
 
 
 def test_projection_renders_typed_attack_path_steps() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "steps": [
-            "Upload an archive with a traversal entry.",
-            "Trigger automatic extraction.",
-        ]
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        attackPath={
+            "steps": [
+                "Upload an archive with a traversal entry.",
+                "Trigger automatic extraction.",
+            ]
+        },
+    )
 
     dataflow = markdown.split("#### Dataflow", 1)[1].split("#### Reachability", 1)[0]
     assert "Attack steps:" in dataflow
@@ -308,26 +336,25 @@ def test_projection_renders_typed_attack_path_steps() -> None:
 
 
 def test_projection_renders_typed_assessments_and_validation_outcomes() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["validation"] = {
-        "status": "validated",
-        "disposition": "reported",
-        "result": "The traversal write was confirmed.",
-    }
-    findings["findings"][0]["attackPath"] = {
-        "impact": {
-            "level": "high",
-            "rationale": "The write can overwrite application files.",
-            "why": "The destination escapes the extraction root.",
+    markdown = report_with_finding(
+        validation={
+            "status": "validated",
+            "disposition": "reported",
+            "result": "The traversal write was confirmed.",
         },
-        "likelihood": "Likely for authenticated uploaders.",
-        "reachability": {
-            "source": "Attacker-controlled archive entry.",
-            "sink": "Unchecked filesystem write.",
+        attackPath={
+            "impact": {
+                "level": "high",
+                "rationale": "The write can overwrite application files.",
+                "why": "The destination escapes the extraction root.",
+            },
+            "likelihood": "Likely for authenticated uploaders.",
+            "reachability": {
+                "source": "Attacker-controlled archive entry.",
+                "sink": "Unchecked filesystem write.",
+            },
         },
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert "- **Status:** validated" in markdown
     assert "- **Disposition:** reported" in markdown
@@ -342,15 +369,14 @@ def test_projection_renders_typed_assessments_and_validation_outcomes() -> None:
 
 
 def test_projection_renders_attack_path_context_lists() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "assumptions": ["Automatic extraction is enabled."],
-        "blindspots": ["A downstream sandbox was not exercised."],
-        "controls": ["Archive uploads require authentication."],
-        "limitations": ["The exploit was validated statically."],
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        attackPath={
+            "assumptions": ["Automatic extraction is enabled."],
+            "blindspots": ["A downstream sandbox was not exercised."],
+            "controls": ["Archive uploads require authentication."],
+            "limitations": ["The exploit was validated statically."],
+        },
+    )
 
     reachability = markdown.split("#### Reachability", 1)[1].split("#### Severity", 1)[0]
     assert "Assumptions:" in reachability
@@ -388,12 +414,9 @@ def test_projection_preserves_heading_like_source_evidence() -> None:
 
 
 def test_projection_renders_string_root_cause() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = (
-        "The authorization check runs after the privileged `write`."
+    markdown = report_with_finding(
+        rootCause="The authorization check runs after the privileged `write`.",
     )
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert (
         "#### Root Cause\n\nThe authorization check runs after the privileged `write`." in markdown
@@ -401,30 +424,28 @@ def test_projection_renders_string_root_cause() -> None:
 
 
 def test_projection_merges_root_cause_aliases() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {"summary": ""}
-    findings["findings"][0]["root_cause"] = {
-        "summary": "The destination is not contained before the write.",
-        "code": "destination.write_bytes(payload)",
-        "language": "python",
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={"summary": ""},
+        root_cause={
+            "summary": "The destination is not contained before the write.",
+            "code": "destination.write_bytes(payload)",
+            "language": "python",
+        },
+    )
 
     assert "The destination is not contained before the write." in markdown
     assert "```python\ndestination.write_bytes(payload)\n```" in markdown
 
 
 def test_projection_ignores_malformed_root_cause_alias_fields() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {"summary": 42}
-    findings["findings"][0]["root_cause"] = {
-        "summary": "The valid legacy root cause.",
-        "evidence_refs": ["legacy-root"],
-    }
-    findings["findings"][0]["code_evidence"] = [{"id": "legacy-root", "code": "legacy_root()"}]
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={"summary": 42},
+        root_cause={
+            "summary": "The valid legacy root cause.",
+            "evidence_refs": ["legacy-root"],
+        },
+        code_evidence=[{"id": "legacy-root", "code": "legacy_root()"}],
+    )
 
     assert "The valid legacy root cause." in markdown
     assert "legacy_root()" in markdown
@@ -432,68 +453,58 @@ def test_projection_ignores_malformed_root_cause_alias_fields() -> None:
 
 
 def test_projection_merges_scalar_and_list_root_cause_evidence_references() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {
-        "summary": "The source reaches the write.",
-        "evidenceRefs": ["canonical-root-source"],
-    }
-    findings["findings"][0]["root_cause"] = {"evidence_refs": "legacy-root-source"}
-    findings["findings"][0]["codeEvidence"] = [
-        {"id": "canonical-root-source", "code": "canonical_source()"}
-    ]
-    findings["findings"][0]["code_evidence"] = [
-        {"id": "legacy-root-source", "code": "legacy_source()"}
-    ]
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={
+            "summary": "The source reaches the write.",
+            "evidenceRefs": ["canonical-root-source"],
+        },
+        root_cause={"evidence_refs": "legacy-root-source"},
+        codeEvidence=[{"id": "canonical-root-source", "code": "canonical_source()"}],
+        code_evidence=[{"id": "legacy-root-source", "code": "legacy_source()"}],
+    )
 
     assert "canonical_source()" in markdown
     assert "legacy_source()" in markdown
 
 
 def test_projection_merges_embedded_evidence_across_root_cause_aliases() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {
-        "summary": "The canonical root cause.",
-        "codeEvidence": [{"id": "canonical-root", "code": "canonical_evidence()"}],
-    }
-    findings["findings"][0]["root_cause"] = {
-        "codeEvidence": [{"id": "legacy-root", "code": "legacy_evidence()"}]
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={
+            "summary": "The canonical root cause.",
+            "codeEvidence": [{"id": "canonical-root", "code": "canonical_evidence()"}],
+        },
+        root_cause={"codeEvidence": [{"id": "legacy-root", "code": "legacy_evidence()"}]},
+    )
 
     assert "canonical_evidence()" in markdown
     assert "legacy_evidence()" in markdown
 
 
 def test_projection_treats_whitespace_root_cause_fields_as_unpopulated() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {
-        "summary": "   ",
-        "code": "\t",
-        "language": "text",
-    }
-    findings["findings"][0]["root_cause"] = {
-        "summary": "The destination is not contained before the write.",
-        "code": "destination.write_bytes(payload)",
-        "language": "python",
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={
+            "summary": "   ",
+            "code": "\t",
+            "language": "text",
+        },
+        root_cause={
+            "summary": "The destination is not contained before the write.",
+            "code": "destination.write_bytes(payload)",
+            "language": "python",
+        },
+    )
 
     assert "The destination is not contained before the write." in markdown
     assert "```python\ndestination.write_bytes(payload)\n```" in markdown
 
 
 def test_projection_ignores_malformed_data_flow_alias_values() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "dataFlow": {"summary": ["invalid canonical value"]},
-        "dataflow": {"summary": "request -> validated sink"},
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        attackPath={
+            "dataFlow": {"summary": ["invalid canonical value"]},
+            "dataflow": {"summary": "request -> validated sink"},
+        },
+    )
 
     assert "request -\\> validated sink" in markdown
 
@@ -542,6 +553,7 @@ def test_projection_groups_deep_reports_by_candidate_id(coverage_mode: str) -> N
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "| Reportable DSS findings | 1 |" in markdown
+    assert "This report omits details" not in markdown
     assert "| Report instances | 2 |" in markdown
     assert "| Findings | Reports | Severity | Confidence | Detailed write-up |" in markdown
     assert (
@@ -670,16 +682,15 @@ def test_projection_rejects_unsafe_structural_hardening_portfolio() -> None:
 
 
 def test_projection_escapes_markdown_link_syntax_in_finding_title() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["title"] = "Parser ](https://example.com) [boundary"
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        title="Parser ](https://example.com) [boundary",
+    )
 
     assert "[Parser \\](https://example.com) \\[boundary](#finding-1)" in markdown
     assert "[Parser ](https://example.com) [boundary](" not in markdown
 
 
-def test_projection_normalizes_target_and_scope_paths() -> None:
+def test_projection_normalizes_target_and_quotes_scope_control_characters() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["target"]["displayName"] = "repo\n## Injected target heading"
     manifest["scan"]["scope"]["includePaths"] = ["src\n## Injected path heading"]
@@ -690,7 +701,55 @@ def test_projection_normalizes_target_and_scope_paths() -> None:
     assert "\n## Injected target heading" not in markdown
     assert "\n## Injected path heading" not in markdown
     assert "# Security Review: repo ## Injected target heading" in markdown
-    assert "- Included paths: src ## Injected path heading" in markdown
+    assert '- Included paths: `"src\\n## Injected path heading"`' in markdown
+
+
+@pytest.mark.parametrize(
+    ("path", "marker"),
+    [
+        (" ", "`"),
+        ("  ", "`"),
+        (" service ", "`"),
+        ("a,b.ts", "`"),
+        ("a  b", "`"),
+        (" a`b ", "``"),
+        ("a``b,c", "```"),
+    ],
+)
+def test_projection_preserves_ambiguous_literal_paths(path: str, marker: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = [path]
+    coverage["excludePaths"] = [path]
+    findings["findings"][0]["locations"] = [{"path": path, "startLine": 1}]
+    findings["findings"][0]["codeEvidence"] = [
+        {"id": "source", "label": "Source", "path": path, "startLine": 1, "code": "source()"}
+    ]
+    findings["findings"][0]["rootCause"] = {"evidenceRefs": ["source"]}
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert f'- Included paths: {marker}"{path}"{marker}' in markdown
+    assert f'- Excluded paths: {marker}"{path}"{marker}' in markdown
+    assert f'| Affected lines | {marker}"{path}"{marker}:1 |' in markdown
+    assert f'{marker}"{path}":1{marker}' in markdown
+
+
+def test_projection_distinguishes_repeated_spaces_from_ordinary_path_spacing() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = ["a  b", "a b", " ", "  "]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert '- Included paths: `"a  b"`, a b, `" "`, `"  "`' in markdown
+
+
+def test_projection_keeps_printable_non_ascii_in_quoted_paths() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = ["docs/Résumé, final.md", "docs/a\u202eb, c.md"]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert '- Included paths: `"docs/Résumé, final.md"`, `"docs/a\\u202eb, c.md"`' in markdown
 
 
 def test_projection_includes_exact_target_identity() -> None:
@@ -743,29 +802,139 @@ def test_projection_escapes_raw_html_in_markdown() -> None:
     assert r'\<img src="x" onerror="alert(1)"\>' in markdown_text
 
 
-def test_projection_omits_informational_findings() -> None:
+def test_projection_keeps_html_entities_literal_in_markdown() -> None:
     manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = "Sanitizer decodes &#x3C;script&#x3E; and &amp;lt;"
+    coverage["includePaths"] = ["docs/&lt;b&gt;.md"]
+
+    markdown_text = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert r"Sanitizer decodes \&#x3C;script\&#x3E; and \&amp;lt;" in markdown_text
+    assert "- Included paths: `docs/&lt;b&gt;.md`" in markdown_text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/?first=1&second=2",
+        "https://example.test/~docs?version=~1&retry=3",
+        "http://example.com/?payload=&#x3C;tag&#x3E;&mode=1",
+        "www.example.com/?payload=&lt;tag&gt;&mode=1",
+        "WWW.example.com/?first=1&second=2",
+        "WwW.example.com/?first=1&second=2",
+        "ftp://example.com/?first=1&second=2",
+        "https://example.com/`a`?first=1&second=2",
+        "www.example.com/`a`?first=1&second=2",
+        "example.com/?first=1&second=2",
+        "//example.com/?first=1&second=2",
+        '"example.com/?first=1&second=2"',
+        "éxample.com/?first=1&second=2",
+        "例子.com/?first=1&second=2",
+        "example.com/?payload=&lt;tag&gt;&mode=1",
+        "example.com/?first=1&word;=2",
+        "//example.com/?first=1&word;=2",
+        "user&tag@example.com",
+        "mailto:user&tag@example.com",
+        "//localhost:8080/?first=1&word;=2",
+        "{//example.com/?first=1&word;=2}",
+        "?example.com/?first=1&word;=2",
+        "mailto:user&tag@localhost",
+    ],
+)
+def test_projection_preserves_bare_url_ampersands_in_prose_and_tables(url: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = f"R&D decoded &#60;tag&#62;. Reproduce with {url} then compare &amp;."
+    finding["confidence"]["rationale"] = f"Request: {url}"
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert f"Reproduce with {url} then compare \\&amp;." in markdown
+    assert f"| Confidence rationale | Request: {url} |" in markdown
+    assert r"R&D decoded \&#60;tag\&#62;." in markdown
+
+
+def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = (
+        "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;` with "
+        "https://example.com/a_b?first=1&second=2 and &amp;. "
+        "Keep https://example.com/`a _b_` as written."
+    )
+    coverage["includePaths"] = [
+        "docs/www.example.com/&lt;tag&gt;.md",
+        "docs/`&lt;tag&gt;`.md",
+        "dir&lt;tag&gt;.example/file.md",
+        "dir.example/file&lt;tag&gt;.md",
+        "www.example.com/file&amp;.md",
+        "`&amp;`",
+        "`&amp;.md",
+        "file&amp;`",
+    ]
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;`" in markdown
+    assert r"https://example.com/a\_b?first=1&second=2 and \&amp;." in markdown
+    assert "Keep https://example.com/`a _b_` as written." in markdown
+    assert "- Included paths: `docs/www.example.com/&lt;tag&gt;.md`" in markdown
+    assert "``docs/`&lt;tag&gt;`.md``" in markdown
+    assert "`dir&lt;tag&gt;.example/file.md`" in markdown
+    assert "`dir.example/file&lt;tag&gt;.md`" in markdown
+    assert "`www.example.com/file&amp;.md`" in markdown
+    assert "`` `&amp;` ``" in markdown
+    assert "`` `&amp;.md ``" in markdown
+    assert "`` file&amp;` ``" in markdown
+
+
+@pytest.mark.parametrize("status", ["completed", "interrupted"])
+def test_projection_explains_informational_only_findings(status: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    manifest["scan"]["status"] = status
     findings["findings"][0]["severity"]["level"] = "informational"
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    section = markdown.split("## Findings", 1)[1]
 
     assert "| Reportable findings | 0 |" in markdown
-    assert "### No findings" in markdown
-    assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
-    ) in markdown
-    assert "Parser \\| boundary" not in markdown
+    assert "### No reportable findings" in section
+    assert "This report omits details for 1 informational finding." in section
+    assert "`findings.json`" in section and "SARIF" in section and "CSV" in section
+    assert "No findings" not in section
+    assert ("No vulnerability conclusion can be drawn." in section) == (status == "interrupted")
+    assert r"Parser \| boundary" not in markdown
+
+
+def test_deep_projection_counts_omitted_informational_findings() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = "deep_repository"
+    reportable = findings["findings"][0]
+    for index in range(2):
+        findings["findings"].append(
+            {
+                **reportable,
+                "occurrenceId": f"info-{index}",
+                "title": f"Informational detail {index}",
+                "severity": {"level": "informational"},
+            }
+        )
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "| Reportable DSS findings | 1 |" in markdown
+    assert "This report omits details for 2 informational findings." in markdown
+    assert r"Parser \| boundary" in markdown
+    assert "Informational detail" not in markdown
 
 
 def test_projection_does_not_claim_completed_gates_for_stopped_scan() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["status"] = "failed"
     findings["findings"] = []
-    coverage["completeness"] = "partial"
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
+    assert "No findings were retained before the scan stopped." in markdown
     assert "survived the canonical discovery, validation" not in markdown
     assert "No vulnerability conclusion can be drawn" in markdown
 
@@ -773,50 +942,17 @@ def test_projection_does_not_claim_completed_gates_for_stopped_scan() -> None:
 @pytest.mark.parametrize(
     "reason",
     [
-        (
-            "Validation was deferred because the scan reached its cost limit: "
-            "parser accepts untrusted input. Evidence: request data reaches a SQL query."
-        ),
         "Validation was deferred because the scan reached its cost limit.",
-    ],
-)
-def test_projection_explains_unvalidated_findings_after_cost_limit(reason: str) -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"] = []
-    coverage["completeness"] = "partial"
-    coverage["deferred"] = [
-        {"id": "candidate-parser", "reason": reason, "paths": ["src/parser.py"]}
-    ]
-
-    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
-
-    assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
-    assert (
-        "No findings were validated before the scan reached its cost limit. "
-        "Review the deferred candidates in Open Questions And Follow Up."
-    ) in markdown
-    assert "No reportable findings survived" not in markdown
-    assert "## Open Questions And Follow Up" in markdown
-    assert reason in markdown
-    assert "Review deferred unit candidate-parser" in markdown
-    assert "Paths: src/parser.py." in markdown
-
-
-@pytest.mark.parametrize(
-    "reason",
-    [
+        (
+            "The configured discovery time limit elapsed before any source review completed. "
+            "Saved findings and pending review were preserved without a completed reduction."
+        ),
         "The parser runtime could not be inspected in this environment.",
-        "The retry budget was exhausted before parser validation could finish.",
-        "The runtime resource budget prevented the optional check.",
-        "An upstream service reached its own cost limit during validation.",
-        "Validation was deferred because the scan reached its cost limit unexpectedly.",
     ],
 )
-def test_projection_preserves_no_findings_text_for_other_partial_coverage(reason: str) -> None:
+def test_projection_preserves_follow_up_without_classifying_its_reason(reason: str) -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"] = []
-    coverage["completeness"] = "partial"
     coverage["deferred"] = [
         {
             "id": "candidate-parser",
@@ -825,67 +961,15 @@ def test_projection_preserves_no_findings_text_for_other_partial_coverage(reason
         }
     ]
 
-    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
-
-    assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
-    ) in markdown
-    assert "No findings were validated before" not in markdown
-
-
-def test_projection_explains_timeout_before_source_review() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"] = []
-    coverage["completeness"] = "partial"
-    coverage["deferred"] = [
-        {
-            "id": "source-review",
-            "reason": (
-                "The configured discovery time limit elapsed before any source review completed."
-            ),
-        }
-    ]
-
-    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
-
-    assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
-    assert (
-        "No source review completed before the configured time limit. "
-        "No vulnerability conclusion can be drawn."
-    ) in markdown
-    assert "No reportable findings survived" not in markdown
-    assert "## Open Questions And Follow Up" in markdown
-
-
-@pytest.mark.parametrize(
-    ("completeness", "reason"),
-    [
-        (
-            "complete",
-            "The configured discovery time limit elapsed before any source review completed.",
-        ),
-        (
-            "partial",
-            "The configured discovery time limit elapsed during source review.",
-        ),
-        ("partial", "Validation was deferred because a separate cost limit was reached."),
-    ],
-)
-def test_projection_preserves_other_no_findings_results(completeness: str, reason: str) -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"] = []
-    coverage["completeness"] = completeness
-    coverage["deferred"] = [{"id": "source-review", "reason": reason}]
-
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
-    ) in markdown
-    assert "No source review completed" not in markdown
+    assert "No findings were reported." in markdown
+    assert "This report omits details" not in markdown
+    assert "## Deferred Requested Work" in markdown
+    assert "## Open Questions And Follow Up" not in markdown
+    assert reason in markdown
+    assert "Review deferred unit candidate-parser" in markdown
+    assert "Paths: src/parser.py." in markdown
 
 
 def test_finding_summary_link_uses_stable_markdown_anchor() -> None:
@@ -897,9 +981,9 @@ def test_finding_summary_link_uses_stable_markdown_anchor() -> None:
     assert '<a id="finding-1"></a>' in markdown
 
 
-def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
+def test_projection_separates_deferred_work_from_open_questions() -> None:
     manifest, findings, coverage = canonical_documents()
-    coverage["completeness"] = "partial"
+
     coverage["openQuestions"] = [{"question": "Is production authentication enabled?"}]
     coverage["deferred"] = [
         {
@@ -917,6 +1001,12 @@ def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
     assert "Review deferred unit parser-review" in markdown
     assert "Paths: src/parser.py." in markdown
     assert "Surfaces: parser-surface." in markdown
+    deferred_section, optional_section = markdown.split("## Open Questions And Follow Up")
+    assert "## Deferred Requested Work" in deferred_section
+    assert "Parser review incomplete." in deferred_section
+    assert "Is production authentication enabled?" not in deferred_section
+    assert "Is production authentication enabled?" in optional_section
+    assert "Parser review incomplete." not in optional_section
 
 
 def test_projection_includes_surface_evidence_receipts() -> None:
@@ -947,20 +1037,49 @@ def test_projection_includes_surface_evidence_receipts() -> None:
 def test_projection_preserves_identifier_text_and_code_path_spelling(
     source_path: str, rendered_location: str
 ) -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["title"] = "__proto__ pollution"
-    finding["validation"] = {"evidenceRefs": ["source"]}
-    finding["codeEvidence"] = [
-        {
-            "id": "source",
-            "label": "Source control",
-            "path": source_path,
-            "startLine": 7,
-            "code": "handle(request)",
-            "explanation": "A source-backed operation.",
-        }
-    ]
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        title="__proto__ pollution",
+        validation={"evidenceRefs": ["source"]},
+        codeEvidence=[
+            {
+                "id": "source",
+                "label": "Source control",
+                "path": source_path,
+                "startLine": 7,
+                "code": "handle(request)",
+                "explanation": "A source-backed operation.",
+            }
+        ],
+    )
     assert "\\_\\_proto\\_\\_ pollution" in markdown
+    assert rendered_location in markdown
+
+
+@pytest.mark.parametrize(
+    ("bounds", "rendered_location"),
+    [
+        ({"startLine": 37, "endLine": None}, "`src/evidence.py:37`"),
+        ({"startLine": 48, "endLine": 47}, "`src/evidence.py:48`"),
+        ({"startLine": 59, "endLine": "60"}, "`src/evidence.py:59`"),
+        ({"startLine": 37, "endLine": True}, "`src/evidence.py:37`"),
+        ({"startLine": True, "endLine": 4}, "`src/evidence.py`"),
+        ({"startLine": 0}, "`src/evidence.py`"),
+        ({"startLine": -1}, "`src/evidence.py`"),
+    ],
+)
+def test_projection_normalizes_invalid_legacy_code_evidence_bounds(
+    bounds: dict[str, object], rendered_location: str
+) -> None:
+    markdown = report_with_finding(
+        validation={"evidenceRefs": ["source"]},
+        code_evidence=[
+            {
+                "id": "source",
+                "label": "Source control",
+                "path": "src/evidence.py",
+                **bounds,
+                "code": "handle(request)",
+            }
+        ],
+    )
     assert rendered_location in markdown

@@ -14,14 +14,14 @@ export function bindRepoScopesCommand(
   args: string[],
   posixHome = process.env.HOME,
 ): number {
-  const required = ["scopes-file", "manifest", "coverage"];
+  const required = ["scopes-file", "manifest"];
   const usage =
-    "usage: launch_codex_security_mcp[.cmd] --helper bind-repo-scopes [-h] --scopes-file PATH --manifest PATH --coverage PATH";
+    "usage: launch_codex_security_mcp[.cmd] --helper bind-repo-scopes [-h] --scopes-file PATH --manifest PATH";
   try {
     const values = argumentsFor(args, required);
     if (values.help) {
       print(
-        `${usage}\n\nCopy SDK scoped-path targets into the unsealed manifest and coverage documents.\n\noptions:\n  -h, --help  show this help message and exit\n${required.map((name) => `  --${name} PATH`).join("\n")}`,
+        `${usage}\n\nCopy SDK scoped-path targets into the unsealed manifest.\n\noptions:\n  -h, --help  show this help message and exit\n${required.map((name) => `  --${name} PATH`).join("\n")}`,
       );
       return 0;
     }
@@ -41,14 +41,11 @@ export function bindRepoScopesCommand(
         `Scopes file must contain a non-empty JSON string array: ${scopesPath}`,
       );
     const manifestPath = worklistPath(values.manifest as string, posixHome);
-    const coveragePath = worklistPath(values.coverage as string, posixHome);
-    let manifest: unknown, coverage: unknown;
+    let manifest: unknown;
     try {
       manifest = read(manifestPath);
-      coverage = read(coveragePath);
       if (
         !object(manifest) ||
-        !object(coverage) ||
         !object(manifest.scan) ||
         !object(manifest.scan.scope)
       )
@@ -57,13 +54,7 @@ export function bindRepoScopesCommand(
       throw new Error("Unable to bind requested scopes into the scan contract");
     }
     manifest.scan.scope.includePaths = scopes;
-    coverage.includePaths = scopes;
-    for (const [path, value] of [
-      [manifestPath, manifest],
-      [coveragePath, coverage],
-    ] as const) {
-      writeFile(path, [Buffer.from(stringifyJson(value) + "\n")]);
-    }
+    writeFile(manifestPath, [Buffer.from(stringifyJson(manifest) + "\n")]);
     print(`Bound ${scopes.length} requested scopes into the scan contract`);
     return 0;
   } catch (error) {

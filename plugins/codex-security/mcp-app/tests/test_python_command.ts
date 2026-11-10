@@ -7,8 +7,10 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { syncBuiltinESMExports } from "node:module";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
+import { mock } from "node:test";
 import {
   isUsablePythonExecutable,
   missingPythonHelperMessage,
@@ -62,6 +64,27 @@ assert.equal(
 );
 
 const unixHome = "/home/fixture";
+const missingHome = mock.method(os, "homedir", () => {
+  throw Object.assign(new Error("No home directory for this UID"), {
+    code: "ERR_SYSTEM_ERROR",
+    info: { code: "ENOENT" },
+  });
+});
+try {
+  syncBuiltinESMExports();
+  assert.equal(
+    await resolvePythonCommand({
+      configuredPython: "",
+      cacheDirectory: "",
+      platform: "linux",
+    }),
+    "python3",
+  );
+} finally {
+  missingHome.mock.restore();
+  syncBuiltinESMExports();
+}
+
 const unixRoot = path.posix.join(
   unixHome,
   ".cache",
@@ -139,6 +162,8 @@ assert.equal(overrideProbeCount, 0);
 const executableFixtureRoot = await mkdtemp(
   path.join(tmpdir(), "codex-security-python-command-"),
 );
+const python =
+  process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
 const previousPython = process.env.PYTHON;
 const previousResolvedPython = process.env.CODEX_SECURITY_PYTHON_COMMAND;
 try {
@@ -152,8 +177,54 @@ try {
   );
   const resolvedPython =
     process.platform === "win32" ? process.execPath : `${fileCandidate} `;
-  if (process.platform !== "win32")
+  if (process.platform !== "win32") {
     await symlink(process.execPath, resolvedPython);
+    assert.equal(
+      await resolvePythonCommand({ configuredPython: resolvedPython }),
+      resolvedPython,
+    );
+    assert.equal(
+      await resolvePythonCommand({
+        configuredPython: "./python3 ",
+        workingDirectory: executableFixtureRoot,
+      }),
+      "./python3 ",
+    );
+    const paddedAbsolute = ` ${fileCandidate} `;
+    const shadow = path.join(executableFixtureRoot, paddedAbsolute);
+    await mkdir(path.dirname(shadow), { recursive: true });
+    await symlink(process.execPath, shadow);
+    assert.equal(
+      await resolvePythonCommand({
+        configuredPython: paddedAbsolute,
+        workingDirectory: executableFixtureRoot,
+      }),
+      fileCandidate,
+    );
+    const trusted = path.join(executableFixtureRoot, "tools");
+    await mkdir(trusted);
+    await writeFile(
+      path.join(trusted, "python3"),
+      "#!/bin/sh\n/bin/cat >/dev/null\nprintf trusted",
+      {
+        mode: 0o700,
+      },
+    );
+    const previousPath = process.env.PATH;
+    try {
+      process.env.PATH = [trusted, executableFixtureRoot].join(path.delimiter);
+      const command = await resolvePythonCommand({
+        configuredPython: "python3 ",
+      });
+      assert.equal(
+        await runPythonWithInput(command, [], "", "fixture"),
+        "trusted",
+      );
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  }
   process.env.PYTHON = ` ${fileCandidate} `;
   process.env.CODEX_SECURITY_PYTHON_COMMAND = resolvedPython;
   assert.equal(await resolvePythonCommand(), resolvedPython);
@@ -162,25 +233,30 @@ try {
     "/custom/python",
   );
   const input = "λ😀\n".repeat(250_000);
-  assert.equal(
-    await runPythonWithInput(
-      await resolvePythonCommand(),
-      ["-e", "process.stdin.pipe(process.stdout)"],
-      Buffer.from(input),
-      "Fixture helper",
-    ),
-    input,
-  );
+  for (const flags of [[], ["-I"]]) {
+    assert.equal(
+      await runPythonWithInput(
+        python,
+        [
+          ...flags,
+          "-c",
+          "import sys\nassert sys.dont_write_bytecode\nsys.stdout.buffer.write(sys.stdin.buffer.read())",
+        ],
+        Buffer.from(input),
+        "Fixture helper",
+      ),
+      input,
+    );
+  }
   delete process.env.CODEX_SECURITY_PYTHON_COMMAND;
   assert.equal(await resolvePythonCommand(), fileCandidate);
   const diagnostic = "--provider-error EACCES: λ😀\npermission denied";
   await assert.rejects(
     runPythonWithInput(
-      process.execPath,
+      python,
       [
-        "-e",
-        "process.stdin.resume(); process.stdin.on('end', () => { const text = Buffer.from(process.argv[1]); process.stderr.write(text.subarray(0, 26)); setTimeout(() => { process.stderr.write(text.subarray(26)); process.exitCode = 2; }, 1); });",
-        "--",
+        "-c",
+        "import sys\nsys.stdin.buffer.read()\nsys.stderr.buffer.write(sys.argv[1].encode('utf-8'))\nsys.exit(2)",
         diagnostic,
       ],
       "",
@@ -190,11 +266,10 @@ try {
   );
   await assert.rejects(
     runPythonWithInput(
-      process.execPath,
+      python,
       [
-        "-e",
-        "process.stderr.write(process.argv[1]); process.exit(1);",
-        "--",
+        "-c",
+        "import sys\nsys.stderr.buffer.write(sys.argv[1].encode('utf-8'))\nsys.exit(1)",
         diagnostic,
       ],
       input,
@@ -203,12 +278,7 @@ try {
     (error: Error) => error.message === diagnostic,
   );
   await assert.rejects(
-    runPythonWithInput(
-      process.execPath,
-      ["-e", "process.exit(0)"],
-      input,
-      "Fixture helper",
-    ),
+    runPythonWithInput(python, ["-c", "pass"], input, "Fixture helper"),
     (error: NodeJS.ErrnoException) => typeof error.code === "string",
   );
   await assert.rejects(

@@ -1,4 +1,5 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { nodeCommand } from "./support/shell.js";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
@@ -6,8 +7,11 @@ import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   type JsonObject,
   inlineToml,
+  quoteTomlString,
   modelProviderConfigOverride,
   resolveCodexProfile,
+  resolveCommandAuthConfig,
+  scanPricingContext,
   scanModelConfiguration,
   scanModelProvider,
 } from "../src/config.js";
@@ -19,6 +23,7 @@ import {
 } from "../src/index.js";
 import {
   prepareCodexSecurityCredentialHome,
+  prepareOutputDir,
   requireSecureCredentialHome,
   resolveCodexCommand,
 } from "../src/runtime.js";
@@ -30,7 +35,62 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   false,
 );
 
-afterEach(cleanup);
+let sandboxFixtureUsed = false;
+
+afterEach(async () => {
+  if (sandboxFixtureUsed) {
+    await waitForWindowsSandboxSetup();
+    sandboxFixtureUsed = false;
+  }
+  await cleanup();
+});
+
+test("inline Codex overrides preserve literal keys and string values", () => {
+  const metadata = {
+    "literal.key": "value.with.dots",
+    'quote"slash\\雪': 'quote"slash\\雪',
+    "control\u007fkey": "control\u0000\b\t\n\f\r\u007fvalue",
+  };
+  expect(parse(`responses_api_metadata=${inlineToml(metadata)}`)).toEqual({
+    responses_api_metadata: metadata,
+  });
+  expect(
+    parse(
+      `permissions=${inlineToml({
+        review: { filesystem: { "path.with.dots/雪\u007f": "deny" } },
+      })}`,
+    ),
+  ).toEqual({
+    permissions: {
+      review: { filesystem: { "path.with.dots/雪\u007f": "deny" } },
+    },
+  });
+  for (const value of ["\ud800", "\udc00"]) {
+    expect(() => parse(`model=${quoteTomlString(value)}`)).toThrow();
+    expect(() =>
+      parse(`metadata=${inlineToml({ [value]: "literal" })}`),
+    ).toThrow();
+  }
+});
+
+test.each([
+  ["absent", undefined],
+  ["null", null],
+])(
+  "omits an optional %s profile selector before native configuration",
+  async (_name, profile) => {
+    const config = await mergedCodexConfig({
+      codexOverrides: {
+        ...(profile === undefined ? {} : { profile }),
+        model: "synthetic-selected-model",
+      },
+    });
+    expect(resolveCodexProfile(config)).toMatchObject({
+      model: "synthetic-selected-model",
+    });
+    expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
+  },
+);
 
 test("inline Codex overrides omit optional null fields like the file writer", async () => {
   for (const value of [null, { args: ["fixture", null] }]) {
@@ -116,7 +176,127 @@ function macOsSandboxUnavailable(): boolean {
   );
 }
 
+function shouldScheduleNativeSandboxTests(
+  platform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv,
+): boolean {
+  if (platform !== "win32") return true;
+  const setting =
+    environment["CODEX_SECURITY_TEST_WINDOWS_SANDBOX"]?.toLowerCase();
+  if (setting === "1" || setting === "true") return true;
+  if (setting === "0" || setting === "false") return false;
+  return (
+    environment["GITHUB_ACTIONS"] === "true" &&
+    environment["RUNNER_ENVIRONMENT"] === "github-hosted"
+  );
+}
+
+const skipNativeSandboxTests =
+  !shouldScheduleNativeSandboxTests(process.platform, process.env) ||
+  macOsSandboxUnavailable();
+
+describe("native sandbox test scheduling", () => {
+  const local = { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false" };
+  const hosted = {
+    ...local,
+    GITHUB_ACTIONS: "true",
+    RUNNER_ENVIRONMENT: "github-hosted",
+  };
+  const setting = "CODEX_SECURITY_TEST_WINDOWS_SANDBOX";
+  const onWindows = (env: NodeJS.ProcessEnv) =>
+    shouldScheduleNativeSandboxTests("win32", env);
+
+  test("defaults Windows coverage to GitHub-hosted Actions runners", () => {
+    expect(onWindows(local)).toBe(false);
+    expect(onWindows(hosted)).toBe(true);
+    expect(onWindows({ ...hosted, [setting]: "" })).toBe(true);
+    expect(onWindows({ RUNNER_ENVIRONMENT: "github-hosted" })).toBe(false);
+    expect(onWindows({ ...hosted, RUNNER_ENVIRONMENT: "self-hosted" })).toBe(
+      false,
+    );
+  });
+
+  test.each(["1", "true", "True"])(
+    "opts into local Windows coverage with %s",
+    (value) => {
+      expect(onWindows({ ...local, [setting]: value })).toBe(true);
+    },
+  );
+
+  test.each(["0", "false"])(
+    "opts out of hosted Windows coverage with %s",
+    (value) => {
+      expect(onWindows({ ...hosted, [setting]: value })).toBe(false);
+    },
+  );
+
+  test.each(["darwin", "linux"] as const)(
+    "ignores the Windows setting on %s",
+    (platform) => {
+      expect(
+        shouldScheduleNativeSandboxTests(platform, { [setting]: "false" }),
+      ).toBe(true);
+    },
+  );
+});
+
+async function sandboxFailureDetails(codexHome: string, details: string) {
+  if (process.platform !== "win32") return details;
+  const directory = join(codexHome, ".sandbox");
+  try {
+    for (const name of (await readdir(directory)).sort()) {
+      if (/^sandbox\.\d{4}-\d{2}-\d{2}\.log$/u.test(name)) {
+        details += `\n${name}:\n${await readFile(join(directory, name), "utf8")}`;
+      }
+    }
+  } catch (error) {
+    details += `\nCould not read native sandbox logs: ${String(error)}`;
+  }
+  return details;
+}
+
+async function waitForWindowsSandboxSetup() {
+  if (process.platform !== "win32") return;
+
+  // Codex applies read ACLs in a background worker shared across Codex homes.
+  // Finish that work before deleting its fixture or creating another workspace.
+  const result = Bun.spawnSync(
+    [
+      join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      ),
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `
+$ErrorActionPreference = 'Stop'
+try {
+  $mutex = [System.Threading.Mutex]::OpenExisting('Local\\CodexSandboxReadAcl')
+} catch [System.Threading.WaitHandleCannotBeOpenedException] {
+  exit 0
+}
+try {
+  if (-not $mutex.WaitOne(30000)) {
+    throw 'Codex sandbox read ACL setup did not finish within 30 seconds'
+  }
+  $mutex.ReleaseMutex()
+} finally {
+  $mutex.Dispose()
+}`,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+}
+
 async function scanSandboxFixture() {
+  await waitForWindowsSandboxSetup();
+  sandboxFixtureUsed = true;
   const root = await temporaryDirectory();
   const stateDirectory = join(root, "state");
   const codexHome = await prepareCodexSecurityCredentialHome({
@@ -124,9 +304,10 @@ async function scanSandboxFixture() {
   });
   const workspace = join(stateDirectory, "scans", "workspace");
   const temporary = join(root, "temp");
-  await Promise.all(
-    [workspace, temporary].map((path) => mkdir(path, { recursive: true })),
-  );
+  await Promise.all([
+    prepareOutputDir(workspace, "sandbox-fixture"),
+    mkdir(temporary, { recursive: true }),
+  ]);
   await writeCodexConfig(
     join(codexHome, "config.toml"),
     scanRuntimeCodexConfig(await mergedCodexConfig({}), codexHome),
@@ -154,6 +335,36 @@ describe("Codex configuration", () => {
     expect((await mergedCodexConfig({}))["cli_auth_credentials_store"]).toBe(
       "auto",
     );
+  });
+
+  test("uses the sign-in settings from the user's Codex config below explicit overrides", async () => {
+    const home = await temporaryDirectory();
+    expect(
+      (await mergedCodexConfig({}, home))["cli_auth_credentials_store"],
+    ).toBe("auto");
+    await writeFile(
+      join(home, "config.toml"),
+      [
+        'cli_auth_credentials_store = "file"',
+        'forced_login_method = "chatgpt"',
+        'model = "ambient-model"',
+      ].join("\n"),
+    );
+
+    const config = await mergedCodexConfig({}, home);
+    expect(config).toMatchObject({
+      cli_auth_credentials_store: "file",
+      forced_login_method: "chatgpt",
+    });
+    expect(config["model"]).toBe(DEFAULT_CODEX_CONFIG["model"]);
+    expect(
+      (
+        await mergedCodexConfig(
+          { codexOverrides: { cli_auth_credentials_store: "keyring" } },
+          home,
+        )
+      )["cli_auth_credentials_store"],
+    ).toBe("keyring");
   });
 
   test("resolves selected profile model and effort before root settings", async () => {
@@ -196,6 +407,273 @@ describe("Codex configuration", () => {
       });
       expect(scanModelConfiguration(config)).toEqual(scenario.expected);
     }
+  });
+
+  test("loads a native profile below explicit scan overrides", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model = "profile-model"\nmodel_reasoning_effort = "high"\nmodel_provider = "synthetic"\n',
+    );
+    const config = await mergedCodexConfig(
+      {
+        codexOverrides: {
+          profile: "review",
+          model: "explicit-model",
+        },
+      },
+      home,
+    );
+
+    expect(scanModelConfiguration(config)).toEqual({
+      model: "explicit-model",
+      reasoningEffort: "high",
+    });
+    expect(scanModelProvider(config)).toBe("synthetic");
+    expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
+  });
+
+  test.each(
+    [
+      "model_instructions_file",
+      "experimental_compact_prompt_file",
+      "model_catalog_json",
+      "sqlite_home",
+      "log_dir",
+    ].flatMap((key) =>
+      [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
+    ),
+  )(
+    "resolves file-profile paths before explicit overrides: %j",
+    async ({ key, explicit }) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        `${key} = "instructions.md"\n`,
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined ? {} : { [key]: explicit }),
+      };
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config[key]).toBe(explicit ?? join(home, "instructions.md"));
+      expect(overrides).toEqual({
+        profile: "review",
+        ...(explicit === undefined ? {} : { [key]: explicit }),
+      });
+    },
+  );
+
+  test.each([undefined, "explicit.toml"])(
+    "resolves file-profile agent paths before explicit overrides: %j",
+    async (explicit) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        '[agents.reviewer]\ndescription = "Synthetic reviewer"\nconfig_file = "agents/reviewer.toml"\n',
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { agents: { reviewer: { config_file: explicit } } }),
+      };
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["agents"]).toMatchObject({
+        reviewer: {
+          description: "Synthetic reviewer",
+          config_file: explicit ?? join(home, "agents/reviewer.toml"),
+        },
+      });
+      expect(overrides).toEqual({
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { agents: { reviewer: { config_file: explicit } } }),
+      });
+    },
+  );
+
+  test.each([undefined, "explicit/SKILL.md", "~/native/SKILL.md"])(
+    "preserves native skill path origins before explicit overrides (%s)",
+    async (explicit) => {
+      const home = await temporaryDirectory("codex-security-skill-profile-");
+      await writeFile(
+        join(home, "review.config.toml"),
+        '[[skills.config]]\npath="skill/SKILL.md"\nenabled=false\n',
+      );
+      const config = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            ...(explicit === undefined
+              ? {}
+              : { skills: { config: [{ path: explicit, enabled: true }] } }),
+          },
+        },
+        home,
+      );
+      expect(config["skills"]).toEqual({
+        config: [
+          {
+            path: explicit ?? join(home, "skill/SKILL.md"),
+            enabled: explicit !== undefined,
+          },
+        ],
+      });
+    },
+  );
+
+  test("validates effective native multi-agent settings after file overrides", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      "[features.multi_agent_v2]\nenabled = false\n",
+    );
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "review" } }, home),
+    ).rejects.toThrow("cannot be disabled");
+    await expect(
+      mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            features: { multi_agent_v2: { enabled: true } },
+          },
+        },
+        home,
+      ),
+    ).resolves.toMatchObject({
+      features: { multi_agent_v2: { enabled: true } },
+    });
+  });
+
+  test.each(
+    ["exporter", "trace_exporter", "metrics_exporter"].flatMap((exporter) =>
+      ["otlp-http", "otlp-grpc"].flatMap((protocol) =>
+        [undefined, "explicit-client.key", "~/native/client.key"].map(
+          (explicit) => ({
+            exporter,
+            protocol,
+            explicit,
+          }),
+        ),
+      ),
+    ),
+  )(
+    "preserves OTEL file origins before explicit TLS overrides: %j",
+    async ({ exporter, protocol, explicit }) => {
+      const home = await temporaryDirectory();
+      const paths = {
+        "ca-certificate": "tls/ca.pem",
+        "client-certificate": "tls/client.pem",
+        "client-private-key": "tls/client.key",
+      };
+      await writeFile(
+        join(home, "review.config.toml"),
+        `[otel.${exporter}.${protocol}.tls]\n` +
+          Object.entries(paths)
+            .map(([key, value]) => `${key}=${JSON.stringify(value)}\n`)
+            .join(""),
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : {
+              otel: {
+                [exporter]: {
+                  [protocol]: { tls: { "client-private-key": explicit } },
+                },
+              },
+            }),
+      };
+      const original = structuredClone(overrides);
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["otel"]).toEqual({
+        [exporter]: {
+          [protocol]: {
+            tls: {
+              "ca-certificate": join(home, paths["ca-certificate"]),
+              "client-certificate": join(home, paths["client-certificate"]),
+              "client-private-key":
+                explicit ?? join(home, paths["client-private-key"]),
+            },
+          },
+        },
+      });
+      expect(overrides).toEqual(original);
+    },
+  );
+
+  test.each([undefined, "other helpers", "~/helpers"])(
+    "retains inherited command auth cwd unless the profile overrides it: %s",
+    async (cwd) => {
+      const home = await temporaryDirectory();
+      const config: JsonObject = {
+        profile: "review",
+        model_provider: "synthetic",
+        model_providers: {
+          synthetic: {
+            auth: {
+              command: "./token",
+              cwd: "helpers",
+              refresh_interval_ms: 1000,
+            },
+          },
+        },
+        profiles: {
+          review: {
+            model_providers: {
+              synthetic: {
+                auth: {
+                  refresh_interval_ms: 2000,
+                  ...(cwd === undefined ? {} : { cwd }),
+                },
+              },
+            },
+          },
+        },
+      };
+      const saved = structuredClone(config);
+      expect(
+        resolveCodexProfile(resolveCommandAuthConfig(config, home)),
+      ).toMatchObject({
+        model_providers: {
+          synthetic: {
+            auth: {
+              command: "./token",
+              cwd: cwd?.startsWith("~") ? cwd : join(home, cwd ?? "helpers"),
+              refresh_interval_ms: 2000,
+            },
+          },
+        },
+      });
+      expect(config).toEqual(saved);
+    },
+  );
+
+  test("rejects invalid native profile names and owned settings", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      "[features]\nplugins = false\n",
+    );
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "../review" } }, home),
+    ).rejects.toThrow("plain name");
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "review" } }, home),
+    ).rejects.toThrow("owns plugin loading configuration");
   });
 
   test("ignores model overrides from unselected Codex profiles", async () => {
@@ -252,6 +730,133 @@ describe("Codex configuration", () => {
       const config = await mergedCodexConfig({ codexOverrides: overrides });
       expect(scanModelProvider(config)).toBe(expected);
     }
+  });
+
+  test.each(["amazon-bedrock", "amazon-bedrock-runtime"])(
+    "uses the selected %s provider's AWS region before the environment",
+    (provider) => {
+      const config = {
+        profile: "gov",
+        model_provider: "openai",
+        model_providers: { [provider]: { aws: { region: "us-east-2" } } },
+        profiles: {
+          gov: {
+            model_provider: provider,
+            model_providers: {
+              [provider]: { aws: { region: " us-gov-east-1 " } },
+            },
+          },
+        },
+      };
+      expect(scanPricingContext(config, { AWS_REGION: "us-west-1" })).toEqual({
+        provider: "amazon-bedrock",
+        region: "us-gov-east-1",
+      });
+    },
+  );
+
+  test("resolves Bedrock environment regions and preserves an unknown region", () => {
+    const config = { model_provider: "amazon-bedrock" };
+    const environment = {
+      AWS_REGION: "us-gov-west-1",
+      AWS_DEFAULT_REGION: "us-east-1",
+    };
+    expect(scanPricingContext(config, environment)).toEqual({
+      provider: "amazon-bedrock",
+      region: "us-gov-west-1",
+    });
+    expect(
+      scanPricingContext(config, { ...environment, AWS_REGION: " " }),
+    ).toEqual({ provider: "amazon-bedrock", region: "us-east-1" });
+    expect(scanPricingContext(config, { AWS_PROFILE: "synthetic" })).toEqual({
+      provider: "amazon-bedrock",
+      region: null,
+    });
+    expect(
+      scanPricingContext({ model_provider: "openai" }, environment),
+    ).toBeUndefined();
+  });
+
+  test.each([
+    ["https://bedrock-mantle.us-gov-east-1.api.aws/openai/v1", "us-gov-east-1"],
+    [
+      "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+      "us-gov-west-1",
+    ],
+    ["https://gateway.example.test", null],
+  ])(
+    "uses the billing region from a Bedrock endpoint override %s",
+    (baseUrl, region) => {
+      const config = {
+        model_provider: "amazon-bedrock",
+        model_providers: {
+          "amazon-bedrock": { base_url: baseUrl, aws: { region: "us-east-1" } },
+        },
+      };
+      expect(scanPricingContext(config, { AWS_REGION: "us-west-2" })).toEqual({
+        provider: "amazon-bedrock",
+        region,
+      });
+    },
+  );
+
+  test("distinguishes managed Vertex APIs from dedicated endpoints and other gateways", () => {
+    const base =
+      "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/example/locations/us-central1";
+    const fromUrl = (baseUrl: string) =>
+      scanPricingContext({ openai_base_url: baseUrl }, {});
+    expect(fromUrl(`${base}/endpoints/openapi`)).toEqual({
+      provider: "gcp",
+      managedEndpoint: true,
+    });
+    expect(fromUrl(`${base}/endpoints/1234`)).toEqual({
+      provider: "gcp",
+      managedEndpoint: false,
+    });
+    expect(
+      fromUrl("https://123.us-central1-example.prediction.vertexai.goog"),
+    ).toEqual({ provider: "gcp", managedEndpoint: false });
+    expect(
+      fromUrl(
+        "https://aiplatform.mtls.googleapis.com./v1/projects/example/locations/global/endpoints/openapi",
+      ),
+    ).toEqual({ provider: "gcp", managedEndpoint: true });
+    expect(fromUrl("https://gateway.example.test")).toBeUndefined();
+    expect(
+      scanPricingContext(
+        { model_providers: { openai: { base_url: base } } },
+        { OPENAI_BASE_URL: base },
+      ),
+    ).toBeUndefined();
+    const config = {
+      profile: "review",
+      profiles: {
+        review: {
+          model_provider: "vertex",
+          model_providers: {
+            vertex: {
+              base_url:
+                "https://aiplatform.googleapis.com/v1/projects/example/locations/global/publishers/openai/v1/",
+            },
+          },
+        },
+      },
+    };
+    expect(scanPricingContext(config, {})).toEqual({
+      provider: "gcp",
+      managedEndpoint: true,
+    });
+    expect(
+      scanPricingContext(
+        {
+          model_provider: "gcp",
+          model_providers: {
+            gcp: { base_url: "https://gateway.example.test" },
+          },
+        },
+        {},
+      ),
+    ).toEqual({ provider: "gcp", managedEndpoint: false });
   });
 
   test("rejects invalid model settings from the selected Codex profile", async () => {
@@ -388,22 +993,20 @@ describe("Codex configuration", () => {
     expect(merged["windows"]).toEqual({ sandbox: "elevated" });
   });
 
-  test("preserves legacy elevated Windows sandbox overrides", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+  test.each<{ name: string; overrides: JsonObject; expected: object }>([
+    {
+      name: "preserves legacy elevated Windows sandbox overrides",
+      overrides: {
         features: { elevated_windows_sandbox: true },
       },
-    });
-
-    expect(merged).toMatchObject({
-      features: { elevated_windows_sandbox: true },
-      windows: { sandbox: "elevated" },
-    });
-  });
-
-  test("projects legacy elevated Windows overrides into selected profiles", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+      expected: {
+        features: { elevated_windows_sandbox: true },
+        windows: { sandbox: "elevated" },
+      },
+    },
+    {
+      name: "projects legacy elevated Windows overrides into selected profiles",
+      overrides: {
         profile: "elevated",
         profiles: {
           elevated: {
@@ -411,22 +1014,19 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      windows: { sandbox: "elevated" },
-      profiles: {
-        elevated: {
-          features: { elevated_windows_sandbox: true },
-          windows: { sandbox: "elevated" },
+      expected: {
+        windows: { sandbox: "elevated" },
+        profiles: {
+          elevated: {
+            features: { elevated_windows_sandbox: true },
+            windows: { sandbox: "elevated" },
+          },
         },
       },
-    });
-  });
-
-  test("allows selected profiles to override root elevated sandbox defaults", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "allows selected profiles to override root elevated sandbox defaults",
+      overrides: {
         features: { elevated_windows_sandbox: true },
         profile: "restricted",
         profiles: {
@@ -435,22 +1035,19 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      windows: { sandbox: "elevated" },
-      profiles: {
-        restricted: {
-          features: { elevated_windows_sandbox: false },
-          windows: { sandbox: "unelevated" },
+      expected: {
+        windows: { sandbox: "elevated" },
+        profiles: {
+          restricted: {
+            features: { elevated_windows_sandbox: false },
+            windows: { sandbox: "unelevated" },
+          },
         },
       },
-    });
-  });
-
-  test("gives profile-local Windows sandbox overrides precedence", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "gives profile-local Windows sandbox overrides precedence",
+      overrides: {
         profile: "restricted",
         profiles: {
           restricted: {
@@ -459,30 +1056,29 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      profiles: {
-        restricted: {
-          features: { elevated_windows_sandbox: true },
-          windows: { sandbox: "unelevated" },
+      expected: {
+        profiles: {
+          restricted: {
+            features: { elevated_windows_sandbox: true },
+            windows: { sandbox: "unelevated" },
+          },
         },
       },
-    });
-  });
-
-  test("gives explicit Windows sandbox overrides precedence", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "gives explicit Windows sandbox overrides precedence",
+      overrides: {
         features: { elevated_windows_sandbox: true },
         windows: { sandbox: "unelevated" },
       },
-    });
-
-    expect(merged).toMatchObject({
-      features: { elevated_windows_sandbox: true },
-      windows: { sandbox: "unelevated" },
-    });
+      expected: {
+        features: { elevated_windows_sandbox: true },
+        windows: { sandbox: "unelevated" },
+      },
+    },
+  ])("$name", async ({ overrides, expected }) => {
+    const merged = await mergedCodexConfig({ codexOverrides: overrides });
+    expect(merged).toMatchObject(expected);
   });
 
   test("retains the Windows sandbox in the hardened scan profile", async () => {
@@ -513,7 +1109,7 @@ describe("Codex configuration", () => {
     expect(result.stdout.length).toBeGreaterThan(0);
   });
 
-  test.skipIf(macOsSandboxUnavailable())(
+  test.skipIf(skipNativeSandboxTests)(
     "allows scan helpers to write workspace files without writable credential ancestry",
     async () => {
       const { root, codexHome, stateDirectory, workspace, environment } =
@@ -561,7 +1157,7 @@ describe("Codex configuration", () => {
           return;
         }
         throw new Error(
-          `The pinned Codex CLI rejected an allowed scan write: ${details}`,
+          `The pinned Codex CLI rejected an allowed scan write: ${await sandboxFailureDetails(codexHome, details)}`,
         );
       }
       expect(await readFile(allowed, "utf8")).toBe("probe");
@@ -570,9 +1166,6 @@ describe("Codex configuration", () => {
       await mkdir(repository);
       await writeFile(join(repository, "fixture.txt"), "synthetic source\n");
       const inventory = join(workspace, "in-scope-files.txt");
-      const python =
-        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-      expect(python).not.toBeNull();
       const helper = runPinnedCodex(
         codexHome,
         [
@@ -583,8 +1176,9 @@ describe("Codex configuration", () => {
           "codex_security_scan",
           "--cd",
           workspace,
-          python!,
-          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          nodeCommand().command,
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "generate-in-scope-files",
           "--repo",
           repository,
           "--scope",
@@ -609,38 +1203,107 @@ describe("Codex configuration", () => {
     },
   );
 
-  test.skipIf(macOsSandboxUnavailable())(
-    "reads scoped policy source without exposing sibling files or changing host files",
+  test.skipIf(skipNativeSandboxTests)(
+    "reads policy source without exposing credentials or changing host files",
     async () => {
       const { root, codexHome, workspace, stateDirectory, environment } =
         await scanSandboxFixture();
+      if (process.platform === "win32") {
+        // Native read ACLs are applied in the background. Initialize with the
+        // scan profile, whose workspace grants are synchronous, then wait
+        // before checking the read-only profile in this private fixture.
+        const setup = runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--permission-profile",
+            "codex_security_scan",
+            "--cd",
+            workspace,
+            join(
+              process.env["SystemRoot"] ?? "C:\\Windows",
+              "System32",
+              "cmd.exe",
+            ),
+            "/d",
+            "/c",
+            "exit",
+            "0",
+          ],
+          environment,
+        );
+        expect(setup.exitCode, new TextDecoder().decode(setup.stderr)).toBe(0);
+        await waitForWindowsSandboxSetup();
+      }
       const source = join(root, "repository", "component");
       await mkdir(source, { recursive: true });
       const sourceFile = join(source, "fixture.txt");
       await writeFile(sourceFile, "source");
+      const gitMetadata = join(source, ".git");
+      await mkdir(gitMetadata);
+      const privateConfig = join(stateDirectory, "worker-config.json");
+      await writeFile(privateConfig, "SYNTHETIC_PRIVATE");
+      const ambientHome = join(root, "ambient [home]{set}");
+      await mkdir(ambientHome);
+      const ambientCredentials = [
+        join(ambientHome, "auth.json"),
+        join(ambientHome, "config.toml"),
+        join(ambientHome, "codex_security_synthetic.config.toml"),
+        join(ambientHome, ".synthetic.config.toml.tmp"),
+      ];
+      const plugin = join(ambientHome, "plugins", "fixture");
+      await mkdir(plugin, { recursive: true });
+      const artifacts = join(ambientHome, "state", "policies");
+      await mkdir(artifacts, { recursive: true });
+      const guidance = join(plugin, "guidance.md");
+      await writeFile(guidance, "guidance");
       const config = scanRuntimeCodexConfig(
         await mergedCodexConfig({}),
         codexHome,
       );
       const permissions = config["permissions"] as Record<
         string,
-        { filesystem: Record<string, string> }
+        { filesystem: JsonObject }
       >;
-      permissions["codex_security_policy"]!.filesystem[source] = "read";
+      permissions["codex_security_policy"]!.filesystem[source] = {
+        ".": "read",
+      };
+      permissions["codex_security_policy"]!.filesystem[plugin] = {
+        ".": "read",
+      };
+      permissions["codex_security_policy"]!.filesystem[artifacts] = {
+        ".": "read",
+      };
+      permissions["codex_security_policy"]!.filesystem[gitMetadata] = {
+        ".": "deny",
+      };
+      permissions["codex_security_policy"]!.filesystem[privateConfig] = {
+        ".": "deny",
+      };
+      if (process.platform === "win32") {
+        permissions["codex_security_policy"]!.filesystem[
+          join(
+            ambientHome.replace(/[*?[\]{}]/gu, "[$&]"),
+            "{auth.json,config.toml,*.config.toml,.*.config.toml.tmp}",
+          )
+        ] = "deny";
+      }
       // The debug sandbox re-execs Codex, which may live outside OS read roots.
       permissions["codex_security_policy"]!.filesystem[
         resolveCodexCommand({}).command
       ] = "read";
       await writeCodexConfig(join(codexHome, "config.toml"), config);
-      const sandbox = (operation: "read" | "write", path: string) =>
+      const sandbox = (
+        operation: "read" | "write",
+        path: string,
+        permissionProfile = "codex_security_policy",
+      ) =>
         runPinnedCodex(
           codexHome,
           [
             "sandbox",
-            "--config",
-            "permissions.codex_security_policy.network.enabled=true",
             "--permission-profile",
-            "codex_security_policy",
+            permissionProfile,
             "--cd",
             workspace,
             ...(process.platform === "win32"
@@ -657,8 +1320,8 @@ describe("Codex configuration", () => {
                   "-NonInteractive",
                   "-Command",
                   operation === "read"
-                    ? "$ErrorActionPreference = 'Stop'; [Console]::Write((Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw))"
-                    : "$ErrorActionPreference = 'Stop'; [System.IO.File]::WriteAllText($env:POLICY_PROBE_PATH, 'probe')",
+                    ? "$ErrorActionPreference = 'Stop'; Write-Host -NoNewline (Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw)"
+                    : "$ErrorActionPreference = 'Stop'; Set-Content -LiteralPath $env:POLICY_PROBE_PATH -Value 'probe' -NoNewline",
                 ]
               : [
                   "/bin/sh",
@@ -670,23 +1333,16 @@ describe("Codex configuration", () => {
           ],
           { ...environment, POLICY_PROBE_PATH: path },
         );
-      const evidence = join(workspace, "previous-SECURITY.md");
+      const evidence = join(artifacts, "previous-SECURITY.md");
       await writeFile(evidence, "original");
       const read = sandbox("read", evidence);
       if (read.exitCode !== 0) {
         const details = new TextDecoder().decode(read.stderr);
         if (
-          (process.platform === "linux" &&
-            /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
-              details,
-            )) ||
-          (process.platform === "win32" &&
-            (details.includes(
-              "Restricted read-only access requires the elevated Windows sandbox backend",
-            ) ||
-              details.includes(
-                "elevated Windows sandbox requires effective `:root` read access",
-              )))
+          process.platform === "linux" &&
+          /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
+            details,
+          )
         ) {
           expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
             0,
@@ -694,24 +1350,51 @@ describe("Codex configuration", () => {
           return;
         }
         throw new Error(
-          `The pinned Codex CLI rejected an allowed policy read: ${details}`,
+          `The pinned Codex CLI rejected an allowed policy read: ${await sandboxFailureDetails(codexHome, details)}`,
         );
       }
       expect(new TextDecoder().decode(read.stdout)).toBe("original");
+      for (const path of ambientCredentials)
+        await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       const inspected = sandbox("read", sourceFile);
       expect(
         inspected.exitCode,
         new TextDecoder().decode(inspected.stderr),
       ).toBe(0);
       expect(new TextDecoder().decode(inspected.stdout)).toBe("source");
+      const pluginRead = sandbox("read", guidance);
+      expect(
+        pluginRead.exitCode,
+        new TextDecoder().decode(pluginRead.stderr),
+      ).toBe(0);
+      expect(new TextDecoder().decode(pluginRead.stdout)).toBe("guidance");
+      const sibling = join(root, "repository", "sibling.txt");
+      await writeFile(sibling, "sibling");
+      const siblingRead = sandbox("read", sibling);
+      if (process.platform === "win32") {
+        expect(
+          siblingRead.exitCode,
+          new TextDecoder().decode(siblingRead.stderr),
+        ).toBe(0);
+        expect(new TextDecoder().decode(siblingRead.stdout)).toBe("sibling");
+      } else {
+        expect(siblingRead.exitCode).not.toBe(0);
+        expect(new TextDecoder().decode(siblingRead.stdout)).not.toContain(
+          "sibling",
+        );
+      }
       for (const path of [
-        join(root, "repository", "sibling.txt"),
-        join(stateDirectory, "private.txt"),
         join(codexHome, "private.txt"),
+        join(gitMetadata, "config"),
+        privateConfig,
+        ...ambientCredentials,
       ]) {
         await writeFile(path, "SYNTHETIC_PRIVATE");
         const denied = sandbox("read", path);
-        expect(denied.exitCode).not.toBe(0);
+        expect(
+          denied.exitCode,
+          `${path}: ${new TextDecoder().decode(denied.stdout)} ${new TextDecoder().decode(denied.stderr)}`,
+        ).not.toBe(0);
         expect(new TextDecoder().decode(denied.stdout)).not.toContain(
           "SYNTHETIC_PRIVATE",
         );
@@ -724,13 +1407,30 @@ describe("Codex configuration", () => {
         join(codexHome, "policy.txt"),
         evidence,
       ]) {
-        sandbox("write", path);
+        const denied = sandbox("write", path);
+        if (process.platform === "win32") {
+          expect(
+            denied.exitCode,
+            new TextDecoder().decode(denied.stderr),
+          ).not.toBe(0);
+        }
         if (path === sourceFile)
           expect(await readFile(path, "utf8")).toBe("source");
         else if (path === evidence)
           expect(await readFile(path, "utf8")).toBe("original");
         else await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       }
+      if (process.platform === "win32") {
+        // The same cmdlet must write when the scan profile permits it.
+        const allowed = join(workspace, "inside.txt");
+        const permitted = sandbox("write", allowed, "codex_security_scan");
+        expect(
+          permitted.exitCode,
+          new TextDecoder().decode(permitted.stderr),
+        ).toBe(0);
+        expect(await readFile(allowed, "utf8")).toBe("probe");
+      }
+      await requireSecureCredentialHome(codexHome);
     },
   );
 

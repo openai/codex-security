@@ -1,17 +1,33 @@
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { zstdCompressSync } from "node:zlib";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, test } from "bun:test";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-scan-logs-node-",
 );
 
 afterEach(cleanup);
+
+let moduleSource: string;
+beforeAll(async () => {
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    [
+      "build",
+      fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
+      "--target=node",
+      "--format=esm",
+    ],
+    { encoding: "utf8" },
+  );
+  moduleSource = stdout;
+});
 
 test.each(["native", "without zstd"])(
   "reads saved logs with Node's %s capabilities",
@@ -37,16 +53,17 @@ test.each(["native", "without zstd"])(
       zstdCompressSync(`${JSON.stringify(worker)}\n`),
     );
 
-    const built = await Bun.build({
-      entrypoints: [
-        fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
-      ],
-      target: "node",
-      format: "esm",
-    });
-    expect(built.success).toBe(true);
-    const module = join(root, "scan-logs.mjs");
-    await writeFile(module, await built.outputs[0]!.text());
+    for (const relativePath of [
+      ".codex-plugin/plugin.json",
+      "mcp/session-decompression.mjs",
+    ]) {
+      const destination = join(root, "_bundled_plugin", relativePath);
+      await mkdir(dirname(destination), { recursive: true });
+      await copyFile(join(PLUGIN_ROOT, relativePath), destination);
+    }
+    const module = join(root, "dist", "scan-logs.mjs");
+    await mkdir(dirname(module), { recursive: true });
+    await writeFile(module, moduleSource);
     const { stdout } = await promisify(execFile)(
       "node",
       [
@@ -79,17 +96,13 @@ test.each(["native", "without zstd"])(
       threadId: "parent",
       workingDirectory: root,
     });
-    expect(result.worker).toEqual(
-      result.compressed
-        ? expect.objectContaining({
-            threadId: "worker",
-            workingDirectory: root,
-          })
-        : null,
-    );
+    expect(result.worker).toMatchObject({
+      threadId: "worker",
+      workingDirectory: root,
+    });
     expect(result.logs.events).toEqual([
       { threadId: "parent", event: parent },
-      ...(result.compressed ? [{ threadId: "worker", event: worker }] : []),
+      { threadId: "worker", event: worker },
     ]);
   },
 );

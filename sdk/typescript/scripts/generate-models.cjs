@@ -75,7 +75,6 @@ async function generate() {
       'export type AttackPathReachability = Extract<NonNullable<FindingAttackPath["reachability"]>, object>;',
       'export type FindingProvenance = Finding["provenance"];',
       'export type CoverageMode = CoverageDocument["mode"];',
-      'export type CoverageCompleteness = CoverageDocument["completeness"];',
       'export type InventoryStrategy = CoverageDocument["inventoryStrategy"];',
       'export type CoverageSurface = CoverageDocument["surfaces"][number];',
       'export type SurfaceDisposition = CoverageSurface["disposition"];',
@@ -88,15 +87,29 @@ async function generate() {
 }
 
 generate().then((models) => {
-  const output = join(packageRoot, "src", "models.ts");
-  if (process.argv.includes("--check")) {
-    if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {
-      console.error(
-        "src/models.ts is out of date. Run `pnpm generate:models`.",
-      );
-      process.exitCode = 1;
-    }
-    return;
+  const pluginSource = "../../plugins/codex-security/mcp-app/src";
+  const shared = [
+    "workbench-arguments",
+    "executable-path",
+    "contract-values",
+    "windows-path",
+  ].map((name) => [
+    `src/${name}.ts`,
+    `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
+      readFileSync(join(packageRoot, pluginSource, `${name}.ts`), "utf8"),
+  ]);
+  const outputs = [
+    [`${pluginSource}/models.ts`, models],
+    ["src/models.ts", models],
+    ...shared,
+  ];
+  for (const [name, content] of outputs) {
+    const output = join(packageRoot, name);
+    if (process.argv.includes("--check")) {
+      if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== content) {
+        console.error(`${name} is out of date. Run \`pnpm generate:models\`.`);
+        process.exitCode = 1;
+      }
+    } else writeFileSync(output, content);
   }
-  writeFileSync(output, models);
 });

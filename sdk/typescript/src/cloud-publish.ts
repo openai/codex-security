@@ -1,10 +1,14 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { z } from "incur";
+import { z } from "zod";
 import { parse as parseToml } from "smol-toml";
 import { loadContract, sha256Text as sha256 } from "./contract.js";
-import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  errorMessage,
+} from "./errors.js";
 import type { Finding, ScanManifest } from "./models.js";
 import {
   CSV_TARGET_ID,
@@ -17,14 +21,14 @@ import {
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
+  credentialHomeUsesFileStorage,
+  withCredentialHomeLock,
   expandHome,
 } from "./runtime.js";
 import { VERSION } from "./version.js";
-
-const CLOUD_PUBLISH_URL =
-  "https://chatgpt.com/backend-api/aardvark/cli/findings";
+import { cloudBaseUrl } from "./cloud-endpoint.js";
 const CHATGPT_LOGIN_REQUIRED =
-  "Cloud publication requires a ChatGPT login already available to Codex Security. Run a scan or sign in with ChatGPT using Codex file credential storage, then retry.";
+  "Cloud publication requires a ChatGPT login already available to Codex Security and saved to a file. Set cli_auth_credentials_store = \"file\" in ~/.codex/config.toml (or $CODEX_HOME/config.toml), run 'codex-security login', then retry.";
 
 const credentialsSchema = z.object({
   auth_mode: z.literal("chatgpt").optional(),
@@ -82,14 +86,22 @@ export async function publishFindingsCsvToCloud(
   dependencies.signal?.throwIfAborted();
   let source: string;
   try {
-    source = await readFile(csvPath, "utf8");
+    source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      await readFile(csvPath),
+    );
   } catch (error) {
-    throw new CodexSecurityError("Could not read findings CSV.", {
-      cause: error,
-    });
+    throw new CodexSecurityError(
+      `Could not read findings CSV. ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
   dependencies.signal?.throwIfAborted();
   const rows = parseFindingsCsv(source);
+  if (rows.length === 0) {
+    throw new CodexSecurityError(
+      "Findings CSV must contain at least one finding.",
+    );
+  }
   const digest = sha256(source);
   const scanId = `scan_csv_${sha256(
     ["codex-security-csv-import/v1", VERSION, source].join("\0"),
@@ -106,24 +118,6 @@ export async function publishFindingsCsvToCloud(
     schemaVersion: "1.0",
     scanId,
     findings,
-  });
-  const coverageDocument = JSON.stringify({
-    documentType: "codex-security.coverage",
-    schemaVersion: "1.0",
-    scanId,
-    mode: "repository",
-    completeness: "unknown",
-    inventoryStrategy: "custom",
-    includePaths: ["."],
-    excludePaths: [],
-    surfaces: findings.map((finding) => ({
-      id: finding.occurrenceId,
-      label: finding.title,
-      disposition: "reported",
-      receiptRefs: [],
-    })),
-    explicitExclusions: [],
-    deferred: [],
   });
   const scan: ScanManifest["scan"] = {
     id: scanId,
@@ -143,17 +137,13 @@ export async function publishFindingsCsvToCloud(
       excludePaths: [],
       summary: "Findings imported from a Codex Security CSV export.",
     },
-    coverageRef: "coverage.json",
+    mode: "repository",
+    review: { excludedPaths: [] },
     findingsRef: "findings.json",
     artifacts: [
       {
         path: "findings.json",
         sha256: sha256(findingsDocument),
-        mediaType: "application/json",
-      },
-      {
-        path: "coverage.json",
-        sha256: sha256(coverageDocument),
         mediaType: "application/json",
       },
       {
@@ -181,12 +171,14 @@ async function publishCloudPayload(
       findings,
     };
   }
-  const credentials = await readCloudCredentials(
-    dependencies.environment ?? process.env,
-  );
+  const environment = dependencies.environment ?? process.env;
   const publishUrl =
-    dependencies.environment?.["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
-    CLOUD_PUBLISH_URL;
+    environment["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
+    `${cloudBaseUrl(environment)}/cli/findings`;
+  const credentials = await readCloudCredentials(
+    environment,
+    dependencies.signal,
+  );
   const timeout = AbortSignal.timeout(30_000);
   const signal = dependencies.signal
     ? AbortSignal.any([dependencies.signal, timeout])
@@ -209,11 +201,12 @@ async function publishCloudPayload(
       redirect: "error",
       signal,
     });
-  } catch {
+  } catch (error) {
     dependencies.signal?.throwIfAborted();
     // A lost response does not establish whether the server accepted the POST.
     throw new CodexSecurityError(
-      "Cloud publication was not confirmed. The request was not retried; check whether it was accepted before submitting again.",
+      `Cloud publication was not confirmed: ${errorMessage(error)}. The request was not retried; check whether it was accepted before submitting again.`,
+      { cause: error },
     );
   }
   if (!response.ok) {
@@ -257,41 +250,55 @@ async function publishCloudPayload(
   };
 }
 
-async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+/** @internal Shared sign-in for local Cloud publishers. */
+export async function readCloudCredentials(
+  environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+) {
+  const dedicatedHome = codexSecurityCredentialHome(environment);
+  if (existsSync(dedicatedHome)) {
+    const dedicated = await withCredentialHomeLock(
+      dedicatedHome,
+      async () => {
+        if (
+          !(await codexSecurityCredentialAllowsAmbientImport(dedicatedHome))
+        ) {
+          throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+        }
+        if (await codexSecurityHasStoredFileCredentials(dedicatedHome)) {
+          if (await credentialHomeUsesFileStorage(dedicatedHome))
+            return readCloudLoginFile(dedicatedHome);
+          throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+        }
+        // A dedicated configuration may point to a different account in the keyring.
+        if (existsSync(join(dedicatedHome, "config.toml")))
+          throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+      },
+      signal,
+    );
+    if (dedicated) return dedicated;
+  }
   const configuredHome = environment["CODEX_HOME"];
-  let home = expandHome(
+  const home = expandHome(
     configuredHome?.trim() ? configuredHome : "~/.codex",
     environment,
   );
-  let requireFileStorage = true;
-  const dedicatedHome = codexSecurityCredentialHome(environment);
-  if (existsSync(dedicatedHome)) {
-    if (!(await codexSecurityCredentialAllowsAmbientImport(dedicatedHome))) {
-      throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
-    }
-    if (await codexSecurityHasStoredFileCredentials(dedicatedHome)) {
-      home = dedicatedHome;
-      requireFileStorage = false;
-    } else if (existsSync(join(dedicatedHome, "config.toml"))) {
-      // Do not silently switch accounts when the dedicated login may be in a keyring.
-      throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
-    }
+  let credentialStorage: unknown;
+  try {
+    credentialStorage = parseToml(
+      await readFile(join(home, "config.toml"), "utf8"),
+      { integersAsBigInt: "asNeeded" },
+    )["cli_auth_credentials_store"];
+  } catch {
+    throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
   }
-  if (requireFileStorage) {
-    let credentialStorage: unknown;
-    try {
-      credentialStorage = parseToml(
-        await readFile(join(home, "config.toml"), "utf8"),
-      )["cli_auth_credentials_store"];
-    } catch {
-      throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
-    }
-    // File presence is not proof that it is the active ambient login:
-    // automatic or keyring storage can leave auth.json for another account.
-    if (credentialStorage !== "file") {
-      throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
-    }
-  }
+  // Ambient auto storage can leave a file for another account.
+  if (credentialStorage !== "file")
+    throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+  return readCloudLoginFile(home);
+}
+
+async function readCloudLoginFile(home: string) {
   try {
     const credentials = credentialsSchema.safeParse(
       JSON.parse(await readFile(join(home, "auth.json"), "utf8")),

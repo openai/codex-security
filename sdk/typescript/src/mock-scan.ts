@@ -2,26 +2,15 @@ import { writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { JsonObject } from "./config.js";
-import type { Finding, SeverityLevel } from "./models.js";
-import type { NormalizedTarget } from "./targets.js";
+import type { Finding } from "./models.js";
 
 type DraftFinding = Omit<
   Finding,
   "findingId" | "occurrenceId" | "fingerprints"
 >;
 
-interface MockFinding {
-  id: string;
-  title: string;
-  severity: SeverityLevel;
-  cwe: string;
-  summary: string;
-  code: string;
-  remediation: string;
-}
-
 // Entirely synthetic examples; the paths and snippets do not come from the target.
-const EXAMPLES: readonly MockFinding[] = [
+const EXAMPLES = [
   {
     id: "command-injection",
     title: "Export filename reaches a shell command",
@@ -129,7 +118,7 @@ const EXAMPLES: readonly MockFinding[] = [
     code: 'response.cookie("session", sessionId, { secure: true });',
     remediation: "Set HttpOnly on the session cookie.",
   },
-];
+] as const;
 
 function mockFindings(scanId: string): DraftFinding[] {
   const findings = EXAMPLES.map((example, index): DraftFinding => {
@@ -205,7 +194,6 @@ function mockFindings(scanId: string): DraftFinding[] {
 export async function writeMockScanDraft(
   scanDir: string,
   scanId: string,
-  target: NormalizedTarget,
   registration: JsonObject,
   signal: AbortSignal,
 ): Promise<void> {
@@ -236,28 +224,21 @@ export async function writeMockScanDraft(
           runtimeStatus: "mock",
           limitations: [description],
         },
+        reviewState: {
+          surfaces: EXAMPLES.map((example) => ({
+            id: `mock-${example.id}`,
+            label: `[Mock] ${example.title}`,
+            disposition: "reported",
+            receiptRefs: [],
+            notes: description,
+          })),
+          explicitExclusions: [],
+          deferred: [],
+        },
         extensions: { mock: true },
       },
     },
     "findings.json": { findings: mockFindings(scanId) },
-    "coverage.json": {
-      completeness: "complete",
-      inventoryStrategy:
-        target.kind === "paths"
-          ? "scoped_path"
-          : target.kind === "repository"
-            ? "repository"
-            : "diff",
-      surfaces: EXAMPLES.map((example) => ({
-        id: `mock-${example.id}`,
-        label: `[Mock] ${example.title}`,
-        disposition: "reported",
-        receiptRefs: [],
-        notes: description,
-      })),
-      explicitExclusions: [],
-      deferred: [],
-    },
   };
   for (const [name, document] of Object.entries(documents)) {
     await writeFile(

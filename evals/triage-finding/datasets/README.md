@@ -2,7 +2,7 @@
 
 This directory contains OSS seed data for calibrating `$codex-security:triage-finding` beyond the synthetic fixture app used by the current eval harness.
 
-The dataset is intentionally small and reviewable. It is not a raw dump of every available advisory. Each case records:
+Each case records:
 
 - the repository and pinned commit or commit pair to inspect
 - the supplied finding text shape
@@ -11,14 +11,14 @@ The dataset is intentionally small and reviewable. It is not a raw dump of every
   checking a lockfile version, or comparing vulnerable and fixed commits
 - provenance for the gold label
 
-The important distinction is that GitHub advisory state is source material, not the answer key. The expected verdict asks whether the pinned repository state is `confirmed`, `not_actionable`, or `needs_review` under the `triage-finding/v0` contract.
+A public advisory identifies the reported vulnerability. The expected verdict describes whether the pinned repository state is `confirmed`, `not_actionable`, or `needs_review` under the `triage-finding/v0` contract.
 
 ## Files
 
-- `triage-calibration-seed.json` is the first OSS-only seed dataset. It contains public vulnerable/fixed commit pairs.
-- `../scripts/test-calibration-dataset.mts` performs deterministic structural validation so future additions do not silently break the dataset shape.
-- `../scripts/generate-calibration-tests.mts` converts the dataset into Promptfoo tests at `../tests/calibration-oss.yaml`.
-- `../scripts/hydrate-calibration-repos.mts` downloads the pinned OSS checkouts under `../artifacts/calibration-repos/` for local eval runs.
+- [`triage-calibration-seed.json`](triage-calibration-seed.json) contains the pinned vulnerable and fixed commits.
+- [`test-calibration-dataset.mts`](../scripts/test-calibration-dataset.mts) performs deterministic structural validation so future additions do not silently break the dataset shape.
+- [`generate-calibration-tests.mts`](../scripts/generate-calibration-tests.mts) supplies test objects directly to Promptfoo and can optionally export them as YAML.
+- [`hydrate-calibration-repos.mts`](../scripts/hydrate-calibration-repos.mts) downloads the pinned OSS checkouts under `../artifacts/calibration-repos/` for local eval runs.
 
 ## Case Families
 
@@ -35,4 +35,4 @@ Use this dataset to score more than final verdict accuracy:
 - `triage-finding/v0` JSON validity
 - static-only compliance: no tests, builds, PoCs, app launches, or file edits
 
-ELI5: the final label is the short answer, but the evidence obligations check that the agent got the answer for the right reason.
+Score the cited evidence and the verdict independently. A correct verdict can still be unsupported.

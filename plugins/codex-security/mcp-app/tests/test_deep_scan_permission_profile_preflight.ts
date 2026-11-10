@@ -1,3 +1,5 @@
+import { test } from "node:test";
+import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import { readJson, readJsonLines } from "./support/json.ts";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 interface PreflightFixture {
@@ -35,6 +37,8 @@ const {
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
   readDeepScanRuntimeConfig,
+  readDeepScanParentCyberAccessProgram,
+  prepareCliDeepScanSession,
 } = await importSource(
   path.join(
     import.meta.dirname,
@@ -47,42 +51,28 @@ const expectedProfile = {
   filesystem: {
     ":root": "read",
     "/repo/.env": "deny",
+    "/repo/temp[1]": { ".": "deny" },
+    "/": { "repo/temp[1]": "deny" },
   },
   network: { enabled: false },
 };
 const rawOverrides = [
   `default_permissions="${profileId}"`,
-  `permissions.${profileId}={filesystem={":root"="read","/repo/.env"="deny"},network={enabled=false}}`,
+  `permissions.${profileId}={filesystem={":root"="read","/repo/.env"="deny","/repo/temp[1]"={"."="deny"},"/"={"repo/temp[1]"="deny"}},network={enabled=false}}`,
 ];
 
 const unsupportedConfiguration = (error: Error) =>
   error?.name === "Error" &&
   error.message.includes("with this Codex configuration");
 
-await testAllowedProfileAndRawArgv();
-await testPreflightStartsInWorkerCwd();
-await testProvidedEnvForwardedWithoutMutation();
-await testOpenAiApiKeyFallbackPreservesNativeAuthentication();
-await testSequentialPaginatedResponsesAcrossChunks();
-await testMalformedStreamFailsClosed();
-await testRepeatedCatalogCursorFailsClosed();
-await testDisallowedProfileGivesAdminGuidance();
-await testOtherManagedPolicyRejectionIsGeneric();
-await testMergedProfileCollisionFailsClosed();
-await testLiteralProtoKeyCollisionFailsClosed();
-await testSelectedProfileClassificationRequiresVerifiedString();
-await testMalformedAndUnsupportedResponsesFailClosed();
-await testEarlyExecutableExitIsNotVersionError();
-await testUnexpectedTerminationRemainsRetryable();
-await testStdioFailuresRemainRetryable();
-await testUnknownJsonRpcFailuresPreserveNativeDiagnostics();
-await testRuntimeFallbackWarningClassification();
-await testSpawnErrorFailsClosed();
-await testMissingWorkerDirectoryRemainsRetryable();
-await testAbortKillsPreflightChild();
-await testAbortPreservesCallerReason();
+test(async function testAllowedProfileAndRawArgv() {
+  const codexHome = "/fixture/canonical-codex-home";
+  const env = Object.freeze({
+    ...process.env,
+    CODEX_HOME: codexHome,
+    DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
+  });
 
-async function testAllowedProfileAndRawArgv() {
   await withFakeCodex(
     {
       configResult: configReadResult({
@@ -111,8 +101,19 @@ async function testAllowedProfileAndRawArgv() {
         },
       ],
     },
-    async ({ codexPath, cwd, argvPath, callsPath }) => {
+    async ({
+      codexPath,
+      cwd,
+      argvPath,
+      callsPath,
+      envPath,
+      cwdPath,
+      children,
+      terminatedPath,
+    }) => {
+      assert.notEqual(cwd, process.cwd());
       await preflightDeepScanWorkerPermissionProfile({
+        env,
         codexPath,
         cwd,
         configOverrides: [
@@ -146,35 +147,21 @@ async function testAllowedProfileAndRawArgv() {
       assert.deepEqual(calls[0].params.capabilities, { experimentalApi: true });
       assert.deepEqual(calls[2].params, { cwd, includeLayers: false });
       assert.deepEqual(calls[3].params, { cwd });
-    },
-    { longExecutable: true },
-  );
-}
-
-async function testProvidedEnvForwardedWithoutMutation() {
-  const codexHome = "/fixture/canonical-codex-home";
-  const env = Object.freeze({
-    ...process.env,
-    CODEX_HOME: codexHome,
-    DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
-  });
-
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({ codexPath, cwd, envPath }) => {
-      await preflight(codexPath, cwd, env);
+      assert.equal(
+        await realpath(await readJson(cwdPath)),
+        await realpath(cwd),
+      );
       assert.deepEqual(await readJson(envPath), {
         codexHome,
         sentinel: "same-snapshot",
       });
+      await assertPreflightStopped(children, terminatedPath);
     },
+    { longExecutable: true },
   );
-}
+});
 
-async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
+test(async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
   for (const { account, requiresOpenaiAuth, forcedLoginMethod, expected } of [
     { account: null, requiresOpenaiAuth: true, expected: true },
     { account: { type: "apiKey" }, requiresOpenaiAuth: true, expected: false },
@@ -227,47 +214,9 @@ async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
       },
     );
   }
-}
+});
 
-async function testPreflightStartsInWorkerCwd() {
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({
-      codexPath,
-      cwd,
-      cwdPath,
-      callsPath,
-      terminatedPath,
-      children,
-    }) => {
-      assert.notEqual(cwd, process.cwd());
-      await preflight(codexPath, cwd);
-
-      const childCwd = await readJson(cwdPath);
-      assert.equal(await realpath(childCwd), await realpath(cwd));
-      const calls = await readJsonLines(callsPath);
-      assert.deepEqual(
-        calls.find((call) => call.method === "config/read").params,
-        {
-          cwd,
-          includeLayers: false,
-        },
-      );
-      assert.deepEqual(
-        calls.find((call) => call.method === "permissionProfile/list").params,
-        {
-          cwd,
-        },
-      );
-      await assertPreflightStopped(children, terminatedPath);
-    },
-  );
-}
-
-async function testSequentialPaginatedResponsesAcrossChunks() {
+test(async function testSequentialPaginatedResponsesAcrossChunks() {
   await withFakeCodex(
     {
       streamResponses: true,
@@ -296,9 +245,9 @@ async function testSequentialPaginatedResponsesAcrossChunks() {
       );
     },
   );
-}
+});
 
-async function testMalformedStreamFailsClosed() {
+test(async function testMalformedStreamFailsClosed() {
   for (const output of [
     "not JSON\n",
     "[]\n",
@@ -318,9 +267,9 @@ async function testMalformedStreamFailsClosed() {
       },
     );
   }
-}
+});
 
-async function testRepeatedCatalogCursorFailsClosed() {
+test(async function testRepeatedCatalogCursorFailsClosed() {
   await withFakeCodex(
     {
       configResult: configReadResult(expectedProfile),
@@ -338,9 +287,9 @@ async function testRepeatedCatalogCursorFailsClosed() {
       );
     },
   );
-}
+});
 
-async function testDisallowedProfileGivesAdminGuidance() {
+test(async function testDisallowedProfileGivesAdminGuidance() {
   await withFakeCodex(
     {
       stderr: "SECRET_REPOSITORY_PATH=/repo/private\n",
@@ -379,9 +328,9 @@ async function testDisallowedProfileGivesAdminGuidance() {
       assert.equal(Object.hasOwn(calls[4], "params"), false);
     },
   );
-}
+});
 
-async function testOtherManagedPolicyRejectionIsGeneric() {
+test(async function testOtherManagedPolicyRejectionIsGeneric() {
   await withFakeCodex(
     {
       configResult: configReadResult(expectedProfile, "enterprise-default"),
@@ -404,9 +353,9 @@ async function testOtherManagedPolicyRejectionIsGeneric() {
       );
     },
   );
-}
+});
 
-async function testMergedProfileCollisionFailsClosed() {
+test(async function testMergedProfileCollisionFailsClosed() {
   await withFakeCodex(
     {
       configResult: configReadResult({
@@ -426,9 +375,30 @@ async function testMergedProfileCollisionFailsClosed() {
       );
     },
   );
-}
+});
 
-async function testLiteralProtoKeyCollisionFailsClosed() {
+test(async function testDroppedLiteralOrGlobFailsClosed() {
+  for (const key of ["/repo/temp[1]", "/"] as const) {
+    const weakened = structuredClone(expectedProfile);
+    delete weakened.filesystem[key];
+    await withFakeCodex(
+      {
+        configResult: configReadResult(weakened),
+        catalogResults: [catalogResult(true)],
+      },
+      async ({ codexPath, cwd }) => {
+        await assert.rejects(
+          preflight(codexPath, cwd),
+          (error: Error) =>
+            error?.name === "DeepScanNonRetryableError" &&
+            error.message.includes("existing Codex configuration changes"),
+        );
+      },
+    );
+  }
+});
+
+test(async function testLiteralProtoKeyCollisionFailsClosed() {
   const profileWithLiteralProtoKey = Object.fromEntries([
     ...Object.entries(expectedProfile),
     ["__proto__", "write"],
@@ -449,9 +419,9 @@ async function testLiteralProtoKeyCollisionFailsClosed() {
       );
     },
   );
-}
+});
 
-async function testSelectedProfileClassificationRequiresVerifiedString() {
+test(async function testSelectedProfileClassificationRequiresVerifiedString() {
   for (const selected of [undefined, null, 17, ":read-only"]) {
     const configResult = configReadResult(expectedProfile);
     configResult.config.default_permissions = selected;
@@ -473,9 +443,9 @@ async function testSelectedProfileClassificationRequiresVerifiedString() {
       },
     );
   }
-}
+});
 
-async function testMalformedAndUnsupportedResponsesFailClosed() {
+test(async function testMalformedAndUnsupportedResponsesFailClosed() {
   await withFakeCodex(
     {
       configResult: configReadResult(expectedProfile),
@@ -532,9 +502,9 @@ async function testMalformedAndUnsupportedResponsesFailClosed() {
       );
     },
   );
-}
+});
 
-async function testEarlyExecutableExitIsNotVersionError() {
+test(async function testEarlyExecutableExitIsNotVersionError() {
   await withFakeCodex(
     {
       exitOnMethod: "initialize",
@@ -557,9 +527,9 @@ async function testEarlyExecutableExitIsNotVersionError() {
       );
     },
   );
-}
+});
 
-async function testUnexpectedTerminationRemainsRetryable() {
+test(async function testUnexpectedTerminationRemainsRetryable() {
   await withFakeCodex(
     {
       hangAt: "config/read",
@@ -580,36 +550,60 @@ async function testUnexpectedTerminationRemainsRetryable() {
       assert.equal(children[0].signalCode, "SIGKILL");
     },
   );
-}
+});
 
-async function testStdioFailuresRemainRetryable() {
-  for (const stream of ["stdin", "stdout"] as const) {
+test(async function testStdioFailuresRemainRetryable() {
+  for (const stream of ["stdin", "stdout", "write callback"] as const) {
     await withFakeCodex(
       { hangAt: "initialize" },
       async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
         const running = preflight(codexPath, cwd);
         await waitForFile(readyPath);
         assert.equal(children.length, 1);
-        children[0][stream]!.destroy(
-          new Error("SECRET_REPOSITORY_PATH=/repo/private"),
-        );
-        await assert.rejects(
-          running,
-          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-            error?.name === "Error" &&
-            error.message.includes(JSON.stringify(codexPath)) &&
-            error.message.includes(
-              "could not exchange app-server JSON-RPC over stdio",
-            ) &&
-            error.message.includes("SECRET_REPOSITORY_PATH"),
-        );
+        const stdin = children[0].stdin!;
+        const originalWrite = stdin.write;
+        try {
+          if (stream === "write callback") {
+            stdin.write = ((
+              _message: unknown,
+              callback: (error: Error) => void,
+            ) => {
+              queueMicrotask(() =>
+                callback(new Error("SECRET_REPOSITORY_PATH=/repo/private")),
+              );
+              return false;
+            }) as typeof stdin.write;
+            children[0].stdout!.emit(
+              "data",
+              Buffer.from('{"jsonrpc":"2.0","id":1,"result":{}}\n'),
+            );
+          } else {
+            children[0][stream]!.destroy(
+              new Error("SECRET_REPOSITORY_PATH=/repo/private"),
+            );
+          }
+          await assert.rejects(
+            running,
+            (
+              error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException },
+            ) =>
+              error?.name === "Error" &&
+              error.message.includes(JSON.stringify(codexPath)) &&
+              error.message.includes(
+                "could not exchange app-server JSON-RPC over stdio",
+              ) &&
+              error.message.includes("SECRET_REPOSITORY_PATH"),
+          );
+        } finally {
+          stdin.write = originalWrite;
+        }
         await assertPreflightStopped(children, terminatedPath);
       },
     );
   }
-}
+});
 
-async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
+test(async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
   for (const code of [-32603, -32602, -32000, undefined]) {
     await withFakeCodex(
       {
@@ -637,37 +631,9 @@ async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
       },
     );
   }
-}
+});
 
-async function testSpawnErrorFailsClosed() {
-  const missingCodex = path.join(tmpdir(), `missing-codex-${process.pid}`);
-  await assert.rejects(
-    preflight(missingCodex, tmpdir()),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      error.cause?.code === "ENOENT" &&
-      error.message.includes(JSON.stringify(missingCodex)) &&
-      error.message.includes("could not start") &&
-      error.message.includes("with --version") &&
-      error.message.includes("CODEX_CLI_PATH/PATH") &&
-      !error.message.includes("does not support"),
-  );
-}
-
-async function testMissingWorkerDirectoryRemainsRetryable() {
-  await withFakeCodex({}, async ({ codexPath, cwd, argvPath }) => {
-    await assert.rejects(
-      preflight(codexPath, path.join(cwd, "missing-worker-directory")),
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error" &&
-        error.cause?.code === "ENOENT" &&
-        error.message.includes("could not start"),
-    );
-    await assert.rejects(readFile(argvPath), { code: "ENOENT" });
-  });
-}
-
-async function testRuntimeFallbackWarningClassification() {
+test(async function testRuntimeFallbackWarningClassification() {
   const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
   const error = deepScanPermissionProfileFallbackError(warning);
   assert.equal(error?.name, "DeepScanNonRetryableError");
@@ -701,9 +667,37 @@ async function testRuntimeFallbackWarningClassification() {
     deepScanPermissionProfileFallbackError(emptyDestinationWarning)?.name,
     "DeepScanNonRetryableError",
   );
-}
+});
 
-async function testAbortKillsPreflightChild() {
+test(async function testSpawnErrorFailsClosed() {
+  const missingCodex = path.join(tmpdir(), `missing-codex-${process.pid}`);
+  await assert.rejects(
+    preflight(missingCodex, tmpdir()),
+    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+      error?.name === "Error" &&
+      error.cause?.code === "ENOENT" &&
+      error.message.includes(JSON.stringify(missingCodex)) &&
+      error.message.includes("could not start") &&
+      error.message.includes("with --version") &&
+      error.message.includes("CODEX_CLI_PATH/PATH") &&
+      !error.message.includes("does not support"),
+  );
+});
+
+test(async function testMissingWorkerDirectoryRemainsRetryable() {
+  await withFakeCodex({}, async ({ codexPath, cwd, argvPath }) => {
+    await assert.rejects(
+      preflight(codexPath, path.join(cwd, "missing-worker-directory")),
+      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+        error?.name === "Error" &&
+        error.cause?.code === "ENOENT" &&
+        error.message.includes("could not start"),
+    );
+    await assert.rejects(readFile(argvPath), { code: "ENOENT" });
+  });
+});
+
+test(async function testAbortKillsPreflightChild() {
   for (const [ignoreTermination, inheritStdio] of [
     [false, false],
     [true, false],
@@ -766,9 +760,9 @@ async function testAbortKillsPreflightChild() {
       },
     );
   }
-}
+});
 
-async function testAbortPreservesCallerReason() {
+test(async function testAbortPreservesCallerReason() {
   for (const run of [
     preflightDeepScanWorkerPermissionProfile,
     readDeepScanRuntimeConfig,
@@ -824,7 +818,176 @@ async function testAbortPreservesCallerReason() {
       }
     }
   }
-}
+});
+
+test(async function testDirectScanSession() {
+  const permissionProfile = {
+    type: "managed",
+    file_system: {
+      type: "restricted",
+      entries: [
+        { path: { type: "special", value: { kind: "root" } }, access: "read" },
+        {
+          path: {
+            type: "path",
+            path: path.resolve("synthetic", "private [home]"),
+          },
+          access: "deny",
+        },
+      ],
+    },
+    network: "restricted",
+  };
+  await withFakeCodex(
+    { parentPermissionProfile: permissionProfile },
+    async (fixture) => {
+      const result = await prepareCliDeepScanSession({
+        codexPath: fixture.codexPath,
+        commandArgs: ["--config", 'model_provider="synthetic_provider"'],
+        cwd: fixture.cwd,
+        configOverrides: ['model_reasoning_effort="high"'],
+        prompt: "Review the supplied synthetic repository.",
+        signal: new AbortController().signal,
+      });
+      assert.deepEqual(result, {
+        threadId: "new-scan-thread",
+        model: "synthetic-model",
+        reasoningEffort: "high",
+        permissionProfile,
+      });
+      const calls = await readJsonLines(fixture.callsPath);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["initialize", "initialized", "thread/start", "thread/inject_items"],
+      );
+      assert.deepEqual(calls[2].params, {
+        cwd: fixture.cwd,
+        threadSource: "security_scan",
+        ephemeral: false,
+      });
+      assert.equal(
+        calls[3].params.items[0].content[0].text,
+        "Review the supplied synthetic repository.",
+      );
+      const argv = await readJson(fixture.argvPath);
+      assert.equal(
+        argv[argv.indexOf("--config") + 1],
+        'model_provider="synthetic_provider"',
+      );
+      assert.equal(argv.includes("--profile"), false);
+    },
+  );
+  await withFakeCodex({ parentPermissionProfile: null }, async (fixture) => {
+    await assert.rejects(
+      prepareCliDeepScanSession({
+        codexPath: fixture.codexPath,
+        cwd: fixture.cwd,
+        configOverrides: [],
+        prompt: "Synthetic scan.",
+        signal: new AbortController().signal,
+      }),
+      /effective permissions/,
+    );
+  });
+});
+
+test(async function testParentTurnCyberAccessProgram() {
+  const parentTurn = {
+    threadId: "fixture-parent-thread",
+    turnId: "fixture-current-turn",
+  };
+  const context = (turnId: string, program: unknown) => ({
+    type: "turn_context",
+    payload: {
+      turn_id: turnId,
+      ...(program === undefined ? {} : { cyber_access_program: program }),
+    },
+  });
+  const read = (fixture: PreflightFixture) =>
+    readDeepScanParentCyberAccessProgram({
+      codexPath: fixture.codexPath,
+      cwd: fixture.cwd,
+      configOverrides: rawOverrides,
+      parentTurn,
+      signal: new AbortController().signal,
+    });
+  for (const program of [
+    "standard",
+    "daybreak_blue",
+    "daybreak_red",
+    "future_program",
+    null,
+    undefined,
+  ]) {
+    await withFakeCodex(
+      {
+        parentRollout: [
+          context("fixture-older-turn", "daybreak_blue"),
+          context(parentTurn.turnId, program),
+          context("fixture-newer-turn", "daybreak_red"),
+        ],
+      },
+      async (fixture) => {
+        assert.equal(await read(fixture), program ?? undefined);
+        const calls = await readJsonLines(fixture.callsPath);
+        assert.deepEqual(
+          calls.map((call) => call.method),
+          ["initialize", "initialized", "thread/read"],
+        );
+        assert.deepEqual(calls[2].params, {
+          threadId: parentTurn.threadId,
+          includeTurns: false,
+        });
+      },
+    );
+  }
+  for (const scenario of [
+    { parentRollout: [context("fixture-other-turn", "daybreak_blue")] },
+    { parentPathUnavailable: true },
+    {
+      returnedParentThreadId: "fixture-other-thread",
+      parentRollout: [context(parentTurn.turnId, "daybreak_blue")],
+    },
+  ]) {
+    await withFakeCodex(scenario, async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    });
+  }
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32600,
+          message: `thread not loaded: ${parentTurn.threadId}`,
+        },
+      },
+    },
+    async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    },
+  );
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32000,
+          message: "Synthetic native read failure",
+        },
+      },
+      stderr: "Synthetic native stderr detail",
+    },
+    async (fixture) => {
+      await assert.rejects(read(fixture), (error: Error) => {
+        assert.match(error.message, /Synthetic native read failure/);
+        assert.match(error.message, /Synthetic native stderr detail/);
+        return true;
+      });
+    },
+  );
+  await withFakeCodex({}, async (fixture) => {
+    await assert.rejects(read(fixture), { code: "ENOENT" });
+  });
+});
 
 async function assertPreflightStopped(
   children: ChildProcess[],
@@ -842,17 +1005,12 @@ async function assertPreflightStopped(
   }
 }
 
-function preflight(
-  codexPath: string,
-  cwd: string,
-  env?: Record<string, string>,
-) {
+function preflight(codexPath: string, cwd: string) {
   return preflightDeepScanWorkerPermissionProfile({
     codexPath,
     cwd,
     configOverrides: rawOverrides,
     expectedProfile,
-    ...(env === undefined ? {} : { env }),
     signal: new AbortController().signal,
   });
 }
@@ -980,7 +1138,13 @@ async function withFakeCodex(
     }
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
-    await rm(root, { recursive: true, force: true });
+    // On Windows a terminated fixture descendant may briefly retain its working directory.
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
   }
 }
 
@@ -1005,7 +1169,6 @@ if (scenario.inheritStdio) {
   writeFileSync(scenario.descendantPidPath, String(descendant.pid));
   descendant.unref();
 }
-let buffer = "";
 let catalogIndex = 0;
 if (scenario.ignoreTermination) setInterval(() => {}, 1_000);
 
@@ -1013,20 +1176,8 @@ process.on("SIGTERM", () => {
   writeFileSync(scenario.terminatedPath, "SIGTERM");
   if (!scenario.ignoreTermination) process.exit(0);
 });
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  while (true) {
-    const newline = buffer.indexOf("\\n");
-    if (newline < 0) return;
-    const line = buffer.slice(0, newline).trim();
-    buffer = buffer.slice(newline + 1);
-    if (!line) continue;
-    const message = JSON.parse(line);
-    appendFileSync(scenario.callsPath, JSON.stringify(message) + "\\n");
-    handle(message);
-  }
-});
+${jsonLineInputSource(`    appendFileSync(scenario.callsPath, JSON.stringify(message) + "\\n");
+    handle(message);`)}
 process.stdin.on("end", () => {
   writeFileSync(scenario.terminatedPath, "stdin-end");
   if (!scenario.ignoreTermination) process.exit(0);
@@ -1053,6 +1204,31 @@ function handle(message) {
   }
   if (message.method === "initialize") {
     send(message.id, { userAgent: "fixture", codexHome: "/fixture", platformFamily: "unix", platformOs: "macos" });
+    return;
+  }
+  if (message.method === "thread/start") {
+    send(message.id, {
+      thread: { id: 'new-scan-thread', path: scenario.callsPath + '.session.jsonl' },
+      model: 'synthetic-model', reasoningEffort: 'high',
+    });
+    return;
+  }
+  if (message.method === "thread/read") {
+    const path = scenario.callsPath + '.parent.jsonl';
+    if (scenario.parentRollout !== undefined) {
+      writeFileSync(path, scenario.parentRollout.map((item) => JSON.stringify(item)).join("\\n") + "\\n");
+    }
+    send(message.id, { thread: {
+      id: scenario.returnedParentThreadId ?? message.params.threadId,
+      path: scenario.parentPathUnavailable ? null : path,
+    } });
+    return;
+  }
+  if (message.method === "thread/inject_items") {
+    writeFileSync(scenario.callsPath + '.session.jsonl', JSON.stringify({
+      type: 'turn_context', payload: scenario.parentPermissionProfile ? { permission_profile: scenario.parentPermissionProfile } : {},
+    }) + "\\n");
+    send(message.id, {});
     return;
   }
   if (message.method === "config/read") {

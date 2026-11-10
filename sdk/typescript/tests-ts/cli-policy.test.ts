@@ -117,6 +117,52 @@ function policyDependencies(
 }
 
 describe("policy CLI", () => {
+  test.each(["openai", "openrouter", "amazon-bedrock", "command"] as const)(
+    "uses the file-profile %s provider before interactive policy authentication",
+    async (provider) => {
+      const f = await fixture();
+      const home = join(f.root, "profile-home");
+      await mkdir(home, { mode: 0o700 });
+      await writeFile(
+        join(home, "review.config.toml"),
+        provider === "command"
+          ? 'model_provider = "synthetic-command"\n[model_providers.synthetic-command]\nname = "Synthetic"\nwire_api = "responses"\n[model_providers.synthetic-command.auth]\ncommand = "synthetic-auth"\n'
+          : `model_provider = "${provider}"\n`,
+      );
+      const draft = await f.generate();
+      let authPrompts = 0;
+      const deps = {
+        ...policyDependencies(f, {
+          draft,
+          prompt: prompt({ isInteractive: () => true }),
+        }),
+        environment: {
+          CODEX_HOME: home,
+          OPENAI_API_KEY: "synthetic-openai-key",
+        },
+        hasStoredChatGPTSignIn: async () => true,
+        scanAuthenticationPrompt: {
+          isInteractive: () => true,
+          select: async <T>(
+            _message: string,
+            choices: readonly { value: T }[],
+          ) => {
+            authPrompts += 1;
+            return choices[0]!.value;
+          },
+        },
+      };
+      const code = await main(
+        ["policy", "--codex", 'profile="review"'],
+        capture().stream,
+        capture(true).stream,
+        deps,
+      );
+      expect(code).toBe(0);
+      expect(authPrompts).toBe(provider === "openai" ? 1 : 0);
+    },
+  );
+
   test("documents the policy workflow in help", async () => {
     const stdout = captureCli(main, "stdout");
     expect(await stdout.run(["policy", "--help"], dependencies())).toBe(0);
@@ -457,23 +503,6 @@ describe("policy CLI", () => {
     expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
   });
 
-  test.each(["json", "md", "toon"])(
-    "does not run a diff preview for %s output",
-    async (format) => {
-      const f = await fixture();
-      const stdout = captureCli(main, "stdout");
-      let previews = 0;
-      expect(
-        await stdout.run(
-          ["policy", "--format", format],
-          policyDependencies(f, { onPreview: () => previews++ }),
-        ),
-      ).toBe(0);
-      expect(previews).toBe(0);
-      expect(stdout.text().length).toBeGreaterThan(0);
-    },
-  );
-
   test("asks owner questions and previews the exact draft without writing source", async () => {
     const f = await fixture();
     const stderr = capture(true);
@@ -497,7 +526,7 @@ describe("policy CLI", () => {
     expect(input).toHaveBeenCalledTimes(1);
     expect(stderr.text()).toContain("--- /dev/null");
     expect(stderr.text()).toContain("+Requests must be authorized");
-    expect(stderr.text()).toContain("Owner review:");
+    expect(stderr.text()).toContain("Review notes:");
     expect(stderr.text()).toContain("No repository files changed");
     expect(await readFile(join(f.outputDir, "SECURITY.md"), "utf8")).toBe(
       POLICY,
@@ -678,7 +707,8 @@ describe("policy CLI", () => {
       path: scope,
       run: async (stage) => stageResult(stage, content, note),
     });
-    const deps = policyDependencies(f, { draft });
+    const onPreview = mock();
+    const deps = policyDependencies(f, { draft, onPreview });
     const create = deps.createPolicySecurity;
     deps.createPolicySecurity = (config) => {
       const security = create(config);
@@ -706,6 +736,7 @@ describe("policy CLI", () => {
     const markdown = captureCli(main, "stdout");
     expect(await markdown.run(["policy", "--format", "md"], deps)).toBe(0);
     expect(markdown.text()).toBe(content);
+    expect(onPreview).not.toHaveBeenCalled();
   });
 
   test("marks failed generation and cancellation envelopes as errors", async () => {

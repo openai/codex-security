@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cloud Findings"
+  short_description: "Read Cloud findings, evidence, and scan status"
+  default_prompt: "Use $cloud-findings to read findings, reports, recorded assignment and verification, and scan status for my selected Cloud repository without changing anything."

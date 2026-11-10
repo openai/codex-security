@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -14,7 +15,6 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { runCommand } from "./support/shell.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { windowsHelperFixture } from "./windows-helper-command.js";
@@ -32,13 +32,6 @@ const candidate = (path: string, area = "src") => ({
   path,
   area,
   preview: "source preview",
-});
-const ranked = (path: string, score = 5, include = true, area = "src") => ({
-  path,
-  area,
-  score,
-  include,
-  reason: "runtime surface",
 });
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "deep-review-input-")));
@@ -60,7 +53,6 @@ function read(path: string) {
 }
 function run(
   f: ReturnType<typeof fixture>,
-  selection: boolean,
   args: string[] = [],
   env = process.env,
 ) {
@@ -68,8 +60,8 @@ function run(
     node,
     [
       helper,
-      selection ? "select-deep-review-input" : "copy-deep-review-input",
-      selection ? "--rank-output" : "--rank-input",
+      "copy-deep-review-input",
+      "--rank-input",
       f.input,
       "--out",
       f.output,
@@ -83,113 +75,28 @@ afterEach(async () => {
 });
 
 describe("deep-review worklists", () => {
-  test("selects rows with long internal whitespace without rescanning suffixes", async () => {
+  test("copies every candidate in input order and preserves Unicode fields", () => {
     const f = fixture();
     write(f.input, [
-      { ...ranked("a.py"), reason: "a" + " ".repeat(128000) + "b" },
+      candidate("𐀀.py", "é"),
+      candidate("\ue000.py", "\udcff"),
+      candidate("b.py", "api"),
     ]);
-    const result = await runCommand(
-      node,
-      [
-        helper,
-        "select-deep-review-input",
-        "--rank-output",
-        f.input,
-        "--out",
-        f.output,
-      ],
-      { cwd: f.root, timeout: 5000 },
-    );
-    expect(result.status, result.stderr).toBe(0);
-    expect(read(f.output)).toEqual([{ path: "a.py", area: "src" }]);
-  });
-  test("copies all candidates in input order and selects included ranked rows", () => {
-    const f = fixture();
-    write(f.input, [candidate("a.py", "core"), candidate("b.py", "api")]);
-    expect(run(f, false).status).toBe(0);
-    expect(read(f.output)).toEqual([
-      { path: "a.py", area: "core" },
-      { path: "b.py", area: "api" },
-    ]);
-    write(f.input, [
-      ranked("c.py", 8, true, "api"),
-      ranked("a.py", 10, true, "core"),
-      ranked("b.py", 8, true, "api"),
-      ranked("d.py", 2, false, "core"),
-    ]);
-    const result = run(f, true, ["--top-percent", "67"]);
+    const result = run(f);
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe(
-      `Selected 2 of 3 rows into ${f.output}${newline}`,
-    );
+    expect(result.stdout).toBe(`Copied 3 rows into ${f.output}${newline}`);
     expect(read(f.output)).toEqual([
-      { path: "a.py", area: "core" },
-      { path: "b.py", area: "api" },
-    ]);
-  });
-  test("honors explicit 20 percent and defaults to 100 percent", () => {
-    const f = fixture();
-    write(
-      f.input,
-      Array.from({ length: 5 }, (_, index) =>
-        ranked(`src/file_${index}.py`, 10 - index),
-      ),
-    );
-    expect(run(f, true, ["--top-percent", "20"]).status).toBe(0);
-    expect(read(f.output)).toEqual([{ path: "src/file_0.py", area: "src" }]);
-    expect(run(f, true).status).toBe(0);
-    expect(read(f.output)).toHaveLength(5);
-  });
-  test("falls back to all rows when workers exclude everything", () => {
-    const f = fixture();
-    write(f.input, [
-      ranked("b.py", 2, false, "api"),
-      ranked("a.py", 9, false, "core"),
-    ]);
-    expect(run(f, true).status).toBe(0);
-    expect(read(f.output)).toEqual([
-      { path: "a.py", area: "core" },
-      { path: "b.py", area: "api" },
-    ]);
-  });
-  test.each([false, true])(
-    "closes an empty worklist with an empty output (selection=%j)",
-    (selection) => {
-      const f = fixture();
-      write(f.input, []);
-      writeFileSync(f.output, "previous contents");
-      expect(run(f, selection).status).toBe(0);
-      expect(readFileSync(f.output)).toHaveLength(0);
-    },
-  );
-  test.each([
-    ["0", 1],
-    ["-10", 1],
-    ["1", 1],
-    ["200", 3],
-    ["+20", 1],
-  ] as const)(
-    "selects the requested integer percentage %s",
-    (percent, count) => {
-      const f = fixture();
-      write(f.input, [ranked("a.py"), ranked("b.py"), ranked("c.py")]);
-      expect(run(f, true, [`--top-percent=${percent}`]).status).toBe(0);
-      expect(read(f.output)).toHaveLength(count);
-    },
-  );
-  test("orders tied Unicode paths and preserves their contents", () => {
-    const f = fixture();
-    write(f.input, [
-      ranked("𐀀.py", 5, true, "é"),
-      ranked("\ue000.py", 5, true, "\udcff"),
-      ranked("\u007f.py", 5, true, "\t"),
-    ]);
-    expect(run(f, true).status).toBe(0);
-    expect(read(f.output)).toEqual([
-      { path: "\u007f.py", area: "\t" },
-      { path: "\ue000.py", area: "\udcff" },
       { path: "𐀀.py", area: "é" },
+      { path: "\ue000.py", area: "\udcff" },
+      { path: "b.py", area: "api" },
     ]);
+  });
+  test("closes an empty worklist with an empty output", () => {
+    const f = fixture();
+    write(f.input, []);
+    writeFileSync(f.output, "previous contents");
+    expect(run(f).status).toBe(0);
+    expect(readFileSync(f.output)).toHaveLength(0);
   });
   test.each([
     ["\n", false],
@@ -209,7 +116,7 @@ describe("deep-review worklists", () => {
           JSON.stringify(candidate("b.py")) +
           (terminated ? separator : ""),
       );
-      expect(run(f, false).status).toBe(0);
+      expect(run(f).status).toBe(0);
       expect(read(f.output)).toEqual([
         { path: "é.py", area: "雪" },
         { path: "b.py", area: "src" },
@@ -232,7 +139,7 @@ describe("deep-review worklists", () => {
         JSON.stringify(candidate("c.py")) +
         "\r",
     );
-    expect(run(f, false).status).toBe(0);
+    expect(run(f).status).toBe(0);
     expect(read(f.output)).toEqual([
       { path: "a.py", area: "src" },
       { path: "b.py", area: "src" },
@@ -290,62 +197,32 @@ describe("deep-review worklists", () => {
       }
     },
   );
-  const invalid: Array<[boolean, string | Buffer, string]> = [
-    [false, "\n", "blank JSONL rows are not allowed"],
+  const invalid: Array<[string | Buffer, string]> = [
+    ["\n", "blank JSONL rows are not allowed"],
     [
-      false,
       JSON.stringify(candidate("a.py")) + "\r\n\r",
       ":2: blank JSONL rows are not allowed",
     ],
-    [false, "\u001c\n", "invalid JSON"],
-    [false, "{}\n\n", "missing fields"],
-    [false, "{not json}\n", "invalid JSON"],
-    [false, "[]\n", "expected a JSON object"],
+    ["\u001c\n", "invalid JSON"],
+    ["{}\n\n", "missing fields"],
+    ["{not json}\n", "invalid JSON"],
+    ["[]\n", "expected a JSON object"],
     [
-      false,
       JSON.stringify({ ...candidate("a.py"), extra: true }),
       'unexpected fields ["extra"]',
     ],
-    [false, JSON.stringify(candidate("  ")), "path must be a non-empty string"],
+    [JSON.stringify(candidate("  ")), "path must be a non-empty string"],
     [
-      false,
       JSON.stringify({ ...candidate("a.py"), preview: 1 }),
       "preview must be a string",
     ],
     [
-      false,
       JSON.stringify({ ...candidate("a.py"), area: null }),
       "area must be a string",
     ],
+    ["\ufeff" + JSON.stringify(candidate("a.py")), "invalid JSON"],
+    [Buffer.from([0xff]), "encoded data"],
     [
-      true,
-      JSON.stringify({ ...ranked("a.py"), score: true }),
-      "score must be an integer",
-    ],
-    [
-      true,
-      '{"path":"a.py","area":"src","score":5.5,"include":true,"reason":"x"}',
-      "score must be an integer",
-    ],
-    [
-      true,
-      JSON.stringify(ranked("a.py", 11)),
-      "score must be from 1 through 10",
-    ],
-    [
-      true,
-      JSON.stringify({ ...ranked("a.py"), include: 1 }),
-      "include must be a boolean",
-    ],
-    [
-      true,
-      JSON.stringify({ ...ranked("a.py"), reason: "\t" }),
-      "reason must be a non-empty string",
-    ],
-    [false, "\ufeff" + JSON.stringify(candidate("a.py")), "invalid JSON"],
-    [false, Buffer.from([0xff]), "encoded data"],
-    [
-      false,
       Buffer.concat([
         Buffer.from(JSON.stringify(candidate("é.py")) + "\r\n"),
         Buffer.from([0xc3]),
@@ -353,7 +230,6 @@ describe("deep-review worklists", () => {
       "encoded data",
     ],
     [
-      false,
       Buffer.concat([
         Buffer.from('{"path":"a.py","area":"src","preview":"'),
         Buffer.from([0xed, 0xa0, 0x80]),
@@ -362,50 +238,42 @@ describe("deep-review worklists", () => {
       "encoded data",
     ],
   ];
-  test.each(invalid)(
-    "rejects invalid worklist data (selection=%j, data=%j)",
-    (selection, text, message) => {
-      const f = fixture();
-      writeFileSync(f.input, text);
-      writeFileSync(f.output, "preserve existing output");
-      const result = run(f, selection);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(message);
-      expect(readFileSync(f.output, "utf8")).toBe("preserve existing output");
-    },
-  );
-  test.each([false, true])(
-    "rejects repeated paths before output (selection=%j)",
-    (selection) => {
-      const f = fixture();
-      write(
-        f.input,
-        selection
-          ? [ranked("a-\u007f\u009b.py"), ranked("a-\u007f\u009b.py")]
-          : [candidate("a-\u007f\u009b.py"), candidate("a-\u007f\u009b.py")],
-      );
-      const result = run(f, selection);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
-        'contains duplicate paths: ["a-\\u007f\\u009b.py"]',
-      );
-      expect(result.stderr).not.toMatch(/[\u007f-\u009f]/u);
-      expect(existsSync(f.output)).toBe(false);
-    },
-  );
+  test.each(invalid)("rejects invalid worklist data %j", (text, message) => {
+    const f = fixture();
+    writeFileSync(f.input, text);
+    writeFileSync(f.output, "preserve existing output");
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+    expect(readFileSync(f.output, "utf8")).toBe("preserve existing output");
+  });
+  test("rejects repeated paths before output", () => {
+    const f = fixture();
+    write(f.input, [
+      candidate("a-\u007f\u009b.py"),
+      candidate("a-\u007f\u009b.py"),
+    ]);
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'contains duplicate paths: ["a-\\u007f\\u009b.py"]',
+    );
+    expect(result.stderr).not.toMatch(/[\u007f-\u009f]/u);
+    expect(existsSync(f.output)).toBe(false);
+  });
   test("accepts duplicate JSON object keys and empty area/preview as before", () => {
     const f = fixture();
     writeFileSync(
       f.input,
       '{"path":"unused.py","path":"a.py","area":"","preview":""}',
     );
-    expect(run(f, false).status).toBe(0);
+    expect(run(f).status).toBe(0);
     expect(read(f.output)).toEqual([{ path: "a.py", area: "" }]);
   });
   test("allows replacing the input after all rows have been read", () => {
     const f = fixture();
     write(f.input, [candidate("b.py"), candidate("a.py")]);
-    expect(run({ ...f, output: f.input }, false).status).toBe(0);
+    expect(run({ ...f, output: f.input }).status).toBe(0);
     expect(read(f.input)).toEqual([
       { path: "b.py", area: "src" },
       { path: "a.py", area: "src" },
@@ -417,7 +285,6 @@ describe("deep-review worklists", () => {
     const env = { ...process.env, HOME: f.root, USERPROFILE: f.root };
     const result = run(
       { ...f, input: "~/input.jsonl", output: "./nested/./output.jsonl" },
-      false,
       [],
       env,
     );
@@ -427,24 +294,20 @@ describe("deep-review worklists", () => {
     );
     expect(read(join(f.root, "nested", "output.jsonl"))).toHaveLength(1);
   });
-  test.each([false, true])(
-    "removes pathlib dot and empty components from input and output (selection=%j)",
-    (selection) => {
-      const f = fixture();
-      write(f.input, [selection ? ranked("a.py") : candidate("a.py")]);
-      for (const suffix of ["/.", "///", "/./."]) {
-        const result = run(
-          { ...f, input: f.input + suffix, output: f.output + suffix },
-          selection,
-        );
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout).toBe(
-          `${selection ? "Selected 1 of 1" : "Copied 1"} rows into ${f.output}${newline}`,
-        );
-        expect(read(f.output)).toEqual([{ path: "a.py", area: "src" }]);
-      }
-    },
-  );
+  test("removes pathlib dot and empty components from input and output", () => {
+    const f = fixture();
+    write(f.input, [candidate("a.py")]);
+    for (const suffix of ["/.", "///", "/./."]) {
+      const result = run({
+        ...f,
+        input: f.input + suffix,
+        output: f.output + suffix,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(`Copied 1 rows into ${f.output}${newline}`);
+      expect(read(f.output)).toEqual([{ path: "a.py", area: "src" }]);
+    }
+  });
   test("reports missing input and preserves argument parsing status", () => {
     const f = fixture();
     writeFileSync(f.output, "previous output\n");
@@ -454,29 +317,15 @@ describe("deep-review worklists", () => {
       symlinkSync(loop, loop);
       inputs.push(loop);
     }
-    for (const selection of [false, true]) {
-      for (const input of inputs) {
-        const result = run({ ...f, input }, selection);
-        expect(result.status).toBe(1);
-        expect(result.stderr).toBe(
-          `Rank ${selection ? "output" : "input"} missing: ${input}${newline}`,
-        );
-      }
-      expect(readFileSync(f.output, "utf8")).toBe("previous output\n");
+    for (const input of inputs) {
+      const result = run({ ...f, input });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(`Rank input missing: ${input}${newline}`);
     }
-    write(f.input, [ranked("a.py")]);
-    expect(run(f, true, ["--top-percent=20"]).status).toBe(0);
-    expect(run(f, true, ["--top-percent", "20"]).status).toBe(0);
-    for (const args of [
-      ["--top-percent", "1.0"],
-      ["--top-percent"],
-      ["--unknown"],
-      ["extra"],
-      ["--top-percent", "1__0"],
-      ["--top-percent", "\u001c20"],
-    ])
-      expect(run(f, true, args).status).toBe(2);
-    expect(run(f, true, ["--help"]).stdout).toContain("Defaults to 100");
+    expect(readFileSync(f.output, "utf8")).toBe("previous output\n");
+    for (const args of [["--unknown"], ["extra"], ["--rank-input"]])
+      expect(run(f, args).status).toBe(2);
+    expect(run(f, ["--help"]).stdout).toContain("copy-deep-review-input");
   });
   test.skipIf(process.platform === "win32")(
     "escapes controls in filesystem errors but preserves other command text",
@@ -484,31 +333,25 @@ describe("deep-review worklists", () => {
       const f = fixture();
       f.input = join(f.root, "input-\x1b[2J.jsonl");
       f.output = join(f.root, "output-\x1b[2J.jsonl");
-      for (const selection of [false, true]) {
-        const missing = run(f, selection);
-        expect(missing.status).toBe(1);
-        expect(missing.stderr).toBe(
-          `Rank ${selection ? "output" : "input"} missing: ${f.input}\n`,
-        );
-        writeFileSync(f.input, "{}\n");
-        const invalid = run(f, selection);
-        expect(invalid.status).toBe(1);
-        expect(invalid.stderr).toStartWith(`${f.input}:1: missing fields`);
-        write(f.input, [selection ? ranked("a.py") : candidate("a.py")]);
-        mkdirSync(f.output);
-        const collision = run(f, selection);
-        expect(collision.status).toBe(1);
-        expect(collision.stderr).toMatch(/\\(?:x1b|u001b)\[2J/);
-        expect(collision.stderr).not.toContain("\x1b");
-        rmSync(f.output, { recursive: true });
-        const success = run(f, selection);
-        expect(success.status).toBe(0);
-        expect(success.stdout).toBe(
-          `${selection ? "Selected 1 of 1" : "Copied 1"} rows into ${f.output}\n`,
-        );
-        rmSync(f.input);
-        rmSync(f.output);
-      }
+      const missing = run(f);
+      expect(missing.status).toBe(1);
+      expect(missing.stderr).toBe(`Rank input missing: ${f.input}\n`);
+      writeFileSync(f.input, "{}\n");
+      const invalid = run(f);
+      expect(invalid.status).toBe(1);
+      expect(invalid.stderr).toStartWith(`${f.input}:1: missing fields`);
+      write(f.input, [candidate("a.py")]);
+      mkdirSync(f.output);
+      const collision = run(f);
+      expect(collision.status).toBe(1);
+      expect(collision.stderr).toMatch(/\\(?:x1b|u001b)\[2J/);
+      expect(collision.stderr).not.toContain("\x1b");
+      rmSync(f.output, { recursive: true });
+      const success = run(f);
+      expect(success.status).toBe(0);
+      expect(success.stdout).toBe(`Copied 1 rows into ${f.output}\n`);
+      rmSync(f.input);
+      rmSync(f.output);
     },
   );
   test.skipIf(process.platform === "win32")(
@@ -517,11 +360,12 @@ describe("deep-review worklists", () => {
       const f = fixture();
       const target = join(f.root, "target.jsonl");
       writeFileSync(target, "existing", { mode: 0o640 });
+      chmodSync(target, 0o640);
       symlinkSync(target, f.output);
       write(f.input, [candidate("a.py")]);
       const inputLink = join(f.root, "input-link");
       symlinkSync(f.input, inputLink);
-      expect(run({ ...f, input: inputLink }, false).status).toBe(0);
+      expect(run({ ...f, input: inputLink }).status).toBe(0);
       expect(read(target)).toHaveLength(1);
       expect(statSync(target).mode & 0o777).toBe(0o640);
     },
@@ -536,22 +380,17 @@ describe("deep-review worklists", () => {
       write(f.input, [candidate("wrong.py")]);
       writeFileSync(f.output, "output sentinel");
       const input = join(child, "input.jsonl");
-      for (const selection of [false, true]) {
-        write(input, [selection ? ranked("right.py") : candidate("right.py")]);
-        const result = run(
-          {
-            ...f,
-            input: "link/../input.jsonl/.",
-            output: "link/../output.jsonl/.",
-          },
-          selection,
-        );
-        expect(result.status, result.stderr).toBe(0);
-        expect(read(join(child, "output.jsonl"))).toEqual([
-          { path: "right.py", area: "src" },
-        ]);
-        expect(readFileSync(f.output, "utf8")).toBe("output sentinel");
-      }
+      write(input, [candidate("right.py")]);
+      const result = run({
+        ...f,
+        input: "link/../input.jsonl/.",
+        output: "link/../output.jsonl/.",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(read(join(child, "output.jsonl"))).toEqual([
+        { path: "right.py", area: "src" },
+      ]);
+      expect(readFileSync(f.output, "utf8")).toBe("output sentinel");
     },
   );
   test.skipIf(process.platform === "win32")(

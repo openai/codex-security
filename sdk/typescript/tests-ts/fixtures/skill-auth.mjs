@@ -1,10 +1,10 @@
+import { send, completeTurn } from "./app-server-messages.mjs";
 import assert from "node:assert/strict";
 import { appendFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { createInterface } from "node:readline";
 
-const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 let loggedIn = false;
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
@@ -32,6 +32,20 @@ for await (const line of createInterface({ input: process.stdin })) {
       loggedIn = true;
       send({ id: request.id, result: { type: "apiKey" } });
     }
+  } else if (request.method === "config/read") {
+    send({ id: request.id, result: { config: {} } });
+  } else if (request.method === "experimentalFeature/list") {
+    assert.deepEqual(request.params, { threadId: "synthetic-thread" });
+    send({
+      id: request.id,
+      result: {
+        data: [
+          { name: "cli_daybreak", enabled: true },
+          { name: "api_key_cyber_access_programs", enabled: true },
+        ],
+        nextCursor: null,
+      },
+    });
   } else if (request.method === "thread/start") {
     if (process.env.SYNTHETIC_CHECK_STARTUP_LOCK) {
       assert.equal(
@@ -103,21 +117,6 @@ for await (const line of createInterface({ input: process.stdin })) {
         false,
       );
     }
-    send({ id: request.id, result: { turn: { id: "synthetic-turn" } } });
-    send({
-      method: "item/completed",
-      params: {
-        threadId: "synthetic-thread",
-        turnId: "synthetic-turn",
-        item: { type: "agentMessage", text: "Synthetic patch complete" },
-      },
-    });
-    send({
-      method: "turn/completed",
-      params: {
-        threadId: "synthetic-thread",
-        turn: { id: "synthetic-turn", status: "completed" },
-      },
-    });
+    completeTurn(request, () => "Synthetic patch complete", "synthetic-thread");
   }
 }

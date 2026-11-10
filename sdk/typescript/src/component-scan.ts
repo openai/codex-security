@@ -1,12 +1,17 @@
+import { randomUUID } from "node:crypto";
 import { notify } from "./value.js";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, relative, sep } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import {
   CodexSecurity,
+  DEFAULT_DEPENDENCIES,
   scanAuthentication,
+  scanCodexHome,
   selectedScanEnvironment,
   type CodexSecuritySurface,
+  type ScanAuthentication,
+  type ScanLifecycle,
   type ScanOptions,
 } from "./api.js";
 import {
@@ -19,14 +24,22 @@ import {
   hasCommandAuth,
   mergedCodexConfig,
   scanModelProvider,
+  scanProviderEnvKey,
   type CodexSecurityConfig,
 } from "./config.js";
-import type { ScanCost, ScanSessionEvent } from "./cost.js";
+import type {
+  ScanCost,
+  ScanSessionEvent,
+  ScanUsageMeasurement,
+  ScanUsageObservation,
+} from "./cost.js";
+import type { ScanTokenUsage } from "./cost-model.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import { errorMessage } from "./errors.js";
-import type { CoverageCompleteness, Finding } from "./models.js";
+import type { Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { DeepScanProgress } from "./scan-progress.js";
 import type { ScanSettings } from "./scan-settings.js";
 import type { ScanProgress, ScanWorkerStatus } from "./worker-progress.js";
 import {
@@ -46,7 +59,8 @@ export interface ComponentScanOptions {
   planOnly?: boolean;
   workers?: number;
   config?: CodexSecurityConfig;
-  scanOptions?: Omit<ScanSettings, "target" | "outputDir">;
+  scanOptions?: Omit<ScanSettings, "target" | "outputDir"> &
+    Pick<ScanOptions, "onMeasurement">;
   signal?: AbortSignal;
   createSecurity?: (
     config: CodexSecurityConfig,
@@ -69,21 +83,29 @@ export interface ComponentReceipt {
   id: string;
   name: string;
   paths: string[];
-  status: "pending" | "started" | "completed" | "incomplete" | "failed";
+  status: "pending" | "started" | "completed" | "failed";
   outputDir: string;
   scanId?: string;
+  operationId?: string;
   threatModelPath?: string;
-  coverage?: CoverageCompleteness;
   findingCount?: number;
   cost?: Readonly<ScanCost>;
+  measurement?: Readonly<ScanUsageMeasurement>;
+  outcome?: "completed" | "failed" | "canceled";
   error?: string;
 }
 
 type ComponentScanUpdate =
+  | { type: "authentication"; value: ScanAuthentication }
+  | { type: "lifecycle"; value: ScanLifecycle }
   | { type: "progress"; value: ScanProgress }
+  | { type: "deep-progress"; value: DeepScanProgress }
   | { type: "activity"; value: ScanActivity }
   | { type: "session"; value: ScanSessionEvent }
   | { type: "cost"; value: Readonly<ScanCost> }
+  | { type: "usage"; value: Readonly<ScanTokenUsage> }
+  | { type: "measurement"; value: Readonly<ScanUsageMeasurement> }
+  | { type: "usage-observation"; value: Readonly<ScanUsageObservation> }
   | { type: "workers"; value: ScanWorkerStatus }
   | { type: "warning"; value: string };
 
@@ -102,7 +124,7 @@ interface CombinedFinding {
 }
 
 export interface ComponentDeduplicationSummary {
-  status: "completed" | "incomplete";
+  status: "completed" | "failed";
   confirmedGroups: number;
   uncertainPairs: number;
   error?: string;
@@ -111,7 +133,6 @@ export interface ComponentDeduplicationSummary {
 export interface ComponentScanResult {
   total: number;
   completed: number;
-  incomplete: number;
   failed: number;
   planPath: string;
   summaryPath?: string;
@@ -131,15 +152,32 @@ export async function runComponentScans(
   if (!Number.isSafeInteger(workers) || workers < 1)
     throw new Error("Component workers must be a positive integer.");
   if (Boolean(options.auto) === (options.components !== undefined))
-    throw new Error("Choose components or automatic planning, not both.");
+    throw new Error("Choose exactly one of components or automatic planning.");
   const auth = options.scanOptions?.auth;
   let environment = options.environment;
   if (auth !== undefined && auth !== "auto") {
     const source = environment ?? process.env;
-    const configuration = await mergedCodexConfig(options.config ?? {});
+    const configuration = await mergedCodexConfig(
+      options.config ?? {},
+      scanCodexHome(source),
+    );
     const provider = scanModelProvider(configuration);
-    scanAuthentication(source, auth, provider, hasCommandAuth(configuration));
-    environment = selectedScanEnvironment(source, auth, provider);
+    const providerEnvKey = scanProviderEnvKey(configuration);
+    scanAuthentication(
+      source,
+      auth,
+      provider,
+      hasCommandAuth(configuration),
+      false,
+      providerEnvKey,
+    );
+    environment = selectedScanEnvironment(
+      source,
+      auth,
+      provider,
+      providerEnvKey,
+      configuration,
+    );
   }
   const repository = await normalizeRepository(
     options.repository,
@@ -172,7 +210,6 @@ export async function runComponentScans(
   const base = {
     total: plan.components.length,
     completed: 0,
-    incomplete: 0,
     failed: 0,
     planPath,
   };
@@ -182,21 +219,28 @@ export async function runComponentScans(
     (component, index) => ({
       ...component,
       id: `component-${index + 1}`,
+      operationId: randomUUID(),
       status: "pending",
       outputDir: join(output, `component-${index + 1}`),
     }),
   );
   notify(() => options.onPlan?.(receipts.map(copyReceipt)));
   const results = new Map<string, ScanResult>();
+  const parentAttemptId = randomUUID();
   let next = 0;
   const settled = await Promise.allSettled(
     Array.from({ length: Math.min(workers, receipts.length) }, async () => {
       const security = (
         options.createSecurity ??
         ((config) =>
-          new CodexSecurity(config, undefined, {
-            surface: options.surface ?? "sdk",
-          }))
+          new CodexSecurity(
+            config,
+            {
+              ...DEFAULT_DEPENDENCIES,
+              environment: options.environment ?? process.env,
+            },
+            { surface: options.surface ?? "sdk" },
+          ))
       )(options.config ?? {});
       try {
         while (!options.signal?.aborted) {
@@ -212,10 +256,18 @@ export async function runComponentScans(
             options.onScanEvent === undefined
               ? {}
               : {
+                  onAuthentication: (value) =>
+                    emit({ type: "authentication", value }),
+                  onLifecycle: (value) => emit({ type: "lifecycle", value }),
                   onProgress: (value) => emit({ type: "progress", value }),
+                  onDeepProgress: (value) =>
+                    emit({ type: "deep-progress", value }),
                   onActivity: (value) => emit({ type: "activity", value }),
                   onSessionEvent: (value) => emit({ type: "session", value }),
                   onCost: (value) => emit({ type: "cost", value }),
+                  onUsage: (value) => emit({ type: "usage", value }),
+                  onUsageObservation: (value) =>
+                    emit({ type: "usage-observation", value }),
                   onWorkerStatus: (value) => emit({ type: "workers", value }),
                   onWarning: (value) => emit({ type: "warning", value }),
                 };
@@ -223,22 +275,38 @@ export async function runComponentScans(
             const result = await security.run(repository, {
               ...options.scanOptions,
               ...observers,
+              onScanRegistered: ({ scanId }) => {
+                receipt.scanId = scanId;
+              },
               mode: options.scanOptions?.mode ?? "standard",
-              target: receipt.paths,
+              target: receipt.paths.map((path) => resolve(repository, path)),
               outputDir: receipt.outputDir,
               signal: options.signal,
+              telemetryContext: {
+                operationId: receipt.operationId!,
+                parentAttemptId,
+              },
+              onMeasurement: (measurement) => {
+                receipt.measurement = measurement;
+                if (measurement.cost !== null) receipt.cost = measurement.cost;
+                else delete receipt.cost;
+                notify(() => options.scanOptions?.onMeasurement?.(measurement));
+                emit({ type: "measurement", value: measurement });
+              },
             });
+            if (result.manifest.scan.status !== "completed")
+              throw new Error(`Component scan ${result.manifest.scan.status}.`);
             results.set(receipt.id, result);
             receipt.scanId = result.manifest.scan.id;
-            receipt.coverage = result.coverage.completeness;
             receipt.findingCount = result.findings.findings.length;
             if (result.cost !== null) receipt.cost = result.cost;
-            receipt.status =
-              receipt.coverage === "complete" ? "completed" : "incomplete";
+            receipt.status = "completed";
+            receipt.outcome = "completed";
             if (result.threatModelPath !== null)
               receipt.threatModelPath = result.threatModelPath;
           } catch (error) {
             receipt.status = "failed";
+            receipt.outcome = options.signal?.aborted ? "canceled" : "failed";
             receipt.error = errorMessage(error);
             if (!options.signal?.aborted) {
               const path = await readThreatModelPath(receipt.outputDir, {
@@ -260,6 +328,7 @@ export async function runComponentScans(
   for (const receipt of receipts) {
     if (receipt.status === "pending" || receipt.status === "started") {
       receipt.status = "failed";
+      receipt.outcome = options.signal?.aborted ? "canceled" : "failed";
       receipt.error = options.signal?.aborted
         ? "Scan canceled."
         : "Component scan did not finish.";
@@ -269,13 +338,13 @@ export async function runComponentScans(
   const { findings, matches, uncertain, related, error } =
     await deduplicateFindings(receipts, results, { ...options, environment });
   const deduplication: ComponentDeduplicationSummary = {
-    status: error === undefined ? "completed" : "incomplete",
+    status: error === undefined ? "completed" : "failed",
     confirmedGroups: matches.length,
     uncertainPairs: uncertain.length,
     ...(error === undefined ? {} : { error }),
   };
   const retryComponents = receipts
-    .filter(({ status }) => status === "failed" || status === "incomplete")
+    .filter(({ status }) => status === "failed")
     .map(({ name, paths }) => ({ name, paths }));
   const retryPlanPath =
     retryComponents.length === 0
@@ -287,7 +356,6 @@ export async function runComponentScans(
   const summary = {
     ...base,
     completed: receipts.filter(({ status }) => status === "completed").length,
-    incomplete: receipts.filter(({ status }) => status === "incomplete").length,
     failed: receipts.filter(({ status }) => status === "failed").length,
     summaryPath: join(output, "summary.json"),
     findingsPath: join(output, "findings.json"),
@@ -316,13 +384,8 @@ export async function runComponentScans(
   await writeJson(summary.summaryPath, {
     ...summary,
     repository,
+    attemptId: parentAttemptId,
     components: receipts,
-    completeness:
-      summary.failed ||
-      summary.incomplete ||
-      deduplication.status === "incomplete"
-        ? "partial"
-        : "complete",
   });
   await writeFile(
     summary.reportPath,
@@ -461,12 +524,9 @@ function renderReport(
   return [
     "# Component scan report",
     "",
-    `${summary.completed} complete, ${summary.incomplete} incomplete, ${summary.failed} failed. ${findings.length} finding groups.`,
-    ...(summary.deduplication?.status === "incomplete"
-      ? [
-          "",
-          `Cross-component matching is incomplete: ${summary.deduplication.error}`,
-        ]
+    `${summary.completed} complete, ${summary.failed} failed. ${findings.length} finding groups.`,
+    ...(summary.deduplication?.status === "failed"
+      ? ["", `Cross-component matching failed: ${summary.deduplication.error}`]
       : []),
     ...(summary.deduplication?.uncertainPairs
       ? [
@@ -478,10 +538,7 @@ function renderReport(
     "Coverage applies only to the selected components. See each scan for exclusions and deferred work.",
     ...(summary.retryPlanPath === undefined
       ? []
-      : [
-          "",
-          "[Retry plan for failed or incomplete components](./retry-components.json)",
-        ]),
+      : ["", "[Retry plan for failed components](./retry-components.json)"]),
     "",
     "## Components",
     "",

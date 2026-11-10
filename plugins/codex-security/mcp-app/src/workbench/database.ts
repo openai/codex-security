@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { sqliteFilename } from "../windows-path";
 import { setTimeout } from "node:timers/promises";
 import { applyMigrations } from "./migrations";
 import { decodePosixBytes, encodePosixPath } from "../helpers/posix-path";
@@ -19,28 +20,6 @@ export function requireSqliteText(
 ): void {
   if (values.some((value) => value != null && !value.isWellFormed()))
     throw new TypeError("SQLite text keys must contain valid Unicode.");
-}
-
-export function timestampOrder(
-  database: DatabaseSync,
-  column: string,
-  direction: "ASC" | "DESC" = "ASC",
-): string {
-  database.function("timestamp_seconds", { deterministic: true }, (value) => {
-    const timestamp = value as string;
-    const zone = timestamp.slice(-6);
-    const minutes = /[Zz]$/u.test(timestamp)
-      ? 0
-      : (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4))) *
-        (zone[0] === "-" ? -1 : 1);
-    // Keep Python's accepted offset arithmetic separate from date parsing.
-    return Date.parse(timestamp.slice(0, 19) + "Z") - minutes * 60_000;
-  });
-  // Fractional digits retain their precision; trailing zeros denote the same instant.
-  database.function("timestamp_fraction", { deterministic: true }, (value) =>
-    ((value as string).match(/\.(\d+)/u)?.[1] ?? "").replace(/0+$/u, ""),
-  );
-  return `timestamp_seconds(${column}) ${direction}, timestamp_fraction(${column}) ${direction}`;
 }
 
 function createStateDirectory(path: string): void {
@@ -80,7 +59,7 @@ export async function openWorkbenchDatabase(
   try {
     createStateDirectory(dirname(databasePath));
     for (let attempt = 0; ; attempt++) {
-      const database = new DatabaseSync(databasePath);
+      const database = new DatabaseSync(sqliteFilename(databasePath));
       try {
         database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
         applyMigrations(database, undefined, !deferred || attempt > 0);

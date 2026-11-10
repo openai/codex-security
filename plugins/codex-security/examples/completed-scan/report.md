@@ -9,22 +9,21 @@ The scan was configured for the include paths and exclusions listed below.
 - Target ID: target\_sha256\_example
 - Revision: deadbeef
 - Snapshot digest: codex-security-snapshot/v1:sha256:ed88f96a4c1a06603a41b3f261f59c3de2555c367ef6ad3bb8b9e483495d34eb
-- Inventory strategy: repository
 - Included paths: .
 - Excluded paths: none
+- Scan context: Illustrative scan of a synthetic archive importer.
 
 ### Scan Summary
 
-| Field               | Value        |
-| ------------------- | ------------ |
-| Scan outcome        | completed    |
-| Reportable findings | 1            |
-| Severity mix        | high: 1      |
-| Confidence mix      | high: 1      |
-| Coverage            | complete     |
-| Validation mode     | not recorded |
+| Field | Value |
+| --- | --- |
+| Scan outcome | completed |
+| Reportable findings | 1 |
+| Severity mix | high: 1 |
+| Confidence mix | high: 1 |
+| Validation mode | Static source review |
 
-Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.
+Canonical artifacts: `scan-manifest.json` and `findings.json`. This report is a deterministic projection of those files.
 
 ## Threat Model
 
@@ -32,67 +31,61 @@ No explicit canonical threat-model summary was recorded.
 
 ## Findings
 
-| Finding                                                                 | Severity | Confidence | Detailed write-up |
-| ----------------------------------------------------------------------- | -------- | ---------- | ----------------- |
-| [Unsafe archive extraction can escape the output directory](#finding-1) | high     | high       | inline below      |
+| Finding | Severity | Confidence | Detailed write-up |
+| --- | --- | --- | --- |
+| [Unsafe archive extraction can escape the output directory](#finding-1) | high | high | inline below |
 
 ### Confidence Scale
 
-| Label  | Meaning                                                                                  |
-| ------ | ---------------------------------------------------------------------------------------- |
-| high   | Direct evidence supports the finding with no material unresolved blocker.                |
+| Label | Meaning |
+| --- | --- |
+| high | Direct evidence supports the finding with no material unresolved blocker. |
 | medium | Evidence supports a plausible issue, but material runtime or reachability proof remains. |
-| low    | Evidence is incomplete and the item is retained only for explicit follow-up.             |
+| low | Evidence is incomplete and the item is retained only for explicit follow-up. |
 
 <a id="finding-1"></a>
 
 ### [1] Unsafe archive extraction can escape the output directory
 
-| Field                | Value                                                                         |
-| -------------------- | ----------------------------------------------------------------------------- |
-| Severity             | high                                                                          |
-| Confidence           | high                                                                          |
-| Confidence rationale | Direct source trace reaches the filesystem write without a containment check. |
-| Category             | path-traversal                                                                |
-| CWE                  | CWE-22                                                                        |
-| Affected lines       | src/extract.py:41-44                                                          |
+| Field | Value |
+| --- | --- |
+| Severity | high |
+| Confidence | high |
+| Confidence rationale | The destination passed to the file writer is visible in the reviewed code. |
+| Category | path-traversal |
+| CWE | CWE-22 |
+| Affected lines | src/extract.py:41-44 |
 
 #### Summary
 
-An attacker-controlled path reaches a filesystem write without containment validation.
+Archive extraction can overwrite files outside the directory chosen for the import.
 
 #### Validation
 
-Direct source trace reaches the filesystem write without a containment check. Validation details were not recorded separately.
+The extractor combines the output directory with the entry name and passes the resulting path to the writer. It never checks that the destination stays inside the output directory.
+
+Validation method: Static source review
 
 #### Dataflow
 
-The canonical finding records the affected path at src/extract.py:41-44, but no expanded source-to-sink narrative was recorded.
+The archive supplies an entry name. The extractor uses that name to select the file it writes.
 
 #### Reachability
 
-Reachability was not recorded beyond the canonical finding summary and affected locations.
+The caller must be able to supply an archive for extraction. The service account must have write access to the destination.
 
 #### Severity
 
-**High** — The scan assigned high severity; no separate canonical severity rationale was recorded.
+**High** — The caller can alter files outside the import area with the permissions of the extraction service.
 
-Additional runtime or deployment evidence could raise or lower this severity.
+A filesystem policy that confines writes to a disposable import directory would limit the impact.
 
 #### Remediation
 
 Normalize destinations and reject entries that escape the extraction root.
 
 Tests:
-
 - Assert that extracting an archive entry named `../escape.txt` fails without writing outside the extraction root.
 
 Preventive controls:
-
 - Route all archive extraction through one helper that normalizes and validates destination paths.
-
-## Reviewed Surfaces
-
-| Surface            | Risk Area    | Outcome  | Notes                                        |
-| ------------------ | ------------ | -------- | -------------------------------------------- |
-| Archive extraction | not recorded | Reported | No additional canonical notes were recorded. |

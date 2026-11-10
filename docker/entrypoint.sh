@@ -76,13 +76,17 @@ if [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
     git_config_count=${GIT_CONFIG_COUNT:-0}
 
     case "$git_config_count" in
-        0|[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])
-            ;;
-        *)
-            printf '%s\n' 'codex-security: GIT_CONFIG_COUNT must be an integer from 0 to 128.' >&2
+        *[!0-9]*|0?*)
+            printf '%s\n' 'codex-security: GIT_CONFIG_COUNT must be a nonnegative decimal integer.' >&2
             exit 2
             ;;
     esac
+
+    # Git accepts at most INT_MAX entries; leave room for the two appended below.
+    if [ "${#git_config_count}" -gt 10 ] || [ "$git_config_count" -gt 2147483645 ]; then
+        printf '%s\n' 'codex-security: GIT_CONFIG_COUNT leaves no room for two entries within the Git integer limit.' >&2
+        exit 2
+    fi
 
     export "GIT_CONFIG_KEY_${git_config_count}=credential.https://${git_host}.helper"
     export "GIT_CONFIG_VALUE_${git_config_count}=/usr/local/bin/codex-security-git-credential"

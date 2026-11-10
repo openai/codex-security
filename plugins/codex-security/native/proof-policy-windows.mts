@@ -19,11 +19,12 @@ import {
 const testDirectory = join(output, "policy-proof");
 const helper = join(testDirectory, "helpers.cjs");
 if (process.argv[2] === "build") {
+  const mcpApp = join(root, "../mcp-app");
   execFileSync(
     process.execPath,
     [
-      join(root, "../../../sdk/typescript/node_modules/esbuild/bin/esbuild"),
-      join(root, "../mcp-app/helpers-main.ts"),
+      join(mcpApp, "node_modules/esbuild/bin/esbuild"),
+      join(mcpApp, "helpers-main.ts"),
       "--bundle",
       "--platform=node",
       "--format=cjs",

@@ -3,12 +3,19 @@ import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export function bashCommand(): string {
-  if (process.platform !== "win32") return "bash";
-  const git = Bun.which("git");
+export function bashCommand(
+  git = process.platform === "win32" ? Bun.which("git") : null,
+): string {
   if (git === null) return "bash";
-  const gitBash = join(dirname(dirname(git)), "bin", "bash.exe");
-  return existsSync(gitBash) ? gitBash : "bash";
+  const parent = dirname(dirname(git));
+  const nestedGit =
+    /[\\/](?:mingw32|mingw64|ucrt64|clangarm64)[\\/]bin[\\/]git\.exe$/iu;
+  const roots = nestedGit.test(git) ? [parent, dirname(parent)] : [parent];
+  for (const root of roots) {
+    const gitBash = join(root, "bin", "bash.exe");
+    if (existsSync(gitBash)) return gitBash;
+  }
+  return "bash";
 }
 
 export function workflowBashCommand(): string {
@@ -62,8 +69,6 @@ export function runCommand(
   });
 }
 
-export { pythonExecutable } from "./python.js";
-
 export function writeSource(
   repository: string,
   path: string,
@@ -83,7 +88,7 @@ export function nodeCommand() {
 }
 
 export async function readSubprocess(
-  child: Bun.Subprocess<"ignore", "pipe" | "ignore", "pipe">,
+  child: Bun.Subprocess<Bun.Spawn.Writable, "pipe" | "ignore", "pipe">,
 ) {
   const [status, stdout, stderr] = await Promise.all([
     child.exited,

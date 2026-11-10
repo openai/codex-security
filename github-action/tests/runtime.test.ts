@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { captureRunnerPath, checkPython, cleanupRuntime, resolveTool, runtimeEnvironment, setupRuntime, writeRuntimeLauncher } from '../src/runtime.js';
-import { runProcess } from '../src/process.js';
+import { captureRunnerPath, checkPython, checkSandbox, ensureSandbox, cleanupRuntime, resolveTool, runtimeEnvironment, SandboxUnavailableError, scanCredentials, setupRuntime, writeRuntimeLauncher } from '../src/runtime.ts';
+import { runProcess } from '../src/process.ts';
 
 test('tool discovery preserves the selected PATH launcher spelling', async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-tools-')));
@@ -49,6 +50,7 @@ test('runtime installation accepts npm shell shims and uses the Action Node exec
   const previousPath = process.env.PATH;
   const previousTrackingId = process.env.RUNNER_TRACKING_ID;
   const previousLibraryPath = process.env.LD_LIBRARY_PATH;
+  const previousRunnerEnvironment = process.env.RUNNER_ENVIRONMENT;
   t.after(async () => {
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
@@ -56,9 +58,13 @@ test('runtime installation accepts npm shell shims and uses the Action Node exec
     else process.env.RUNNER_TRACKING_ID = previousTrackingId;
     if (previousLibraryPath === undefined) delete process.env.LD_LIBRARY_PATH;
     else process.env.LD_LIBRARY_PATH = previousLibraryPath;
+    if (previousRunnerEnvironment === undefined) delete process.env.RUNNER_ENVIRONMENT;
+    else process.env.RUNNER_ENVIRONMENT = previousRunnerEnvironment;
     await rm(root, { recursive: true, force: true });
   });
   const bin = join(root, 'tools');
+  const repository = join(root, 'checkout');
+  await mkdir(repository);
   await mkdir(bin);
   await symlink(python, join(bin, 'python3'));
   await writeFile(join(bin, 'node'), '#!/bin/sh\nexit 72\n', {mode:0o755});
@@ -72,14 +78,26 @@ fs.writeFileSync('npm-invocation.json', JSON.stringify({
 const bin = path.join('node_modules', '@openai', 'codex-security', 'bin');
 fs.mkdirSync(bin, {recursive:true});
 fs.writeFileSync(path.join(bin, 'codex-security.mjs'), '// Synthetic installed CLI entrypoint.\n');
+const packageRoot = path.dirname(bin);
+fs.writeFileSync(path.join(packageRoot, 'package.json'), '{"type":"module"}');
+fs.mkdirSync(path.join(packageRoot, 'dist'));
+fs.writeFileSync(path.join(packageRoot, 'dist/cli.js'), 'export const parseCodexOverrides = (overrides, model, effort, provider) => ({overrides, model, provider});');
+fs.writeFileSync(path.join(packageRoot, 'dist/api.js'), 'export const scanRuntimeCodexConfig = config => config;');
+fs.writeFileSync(path.join(packageRoot, 'dist/config.js'), "export const writeCodexConfig = (file, config) => { process.env.PROBE_CONFIG = JSON.stringify(config); };");
+fs.writeFileSync(path.join(packageRoot, 'dist/runtime.js'), [
+  "import { writeFileSync } from 'node:fs';",
+  "export function resolveCodexCommand(env) { return {command: env.CODEX_HOME + '/synthetic-codex'}; }",
+  "export async function probeCodexSandbox(command, env) { writeFileSync('sandbox-invocation.json', JSON.stringify({command, env})); }",
+].join('\n'));
 NODE
 `, {mode:0o755});
+  process.env.RUNNER_ENVIRONMENT = 'self-hosted';
   process.env.PATH = `${relative(process.cwd(), bin)}:`;
   process.env.RUNNER_TRACKING_ID = 'synthetic-first-job';
   const libraryPath = (previousLibraryPath === undefined ? '' : previousLibraryPath + ':') + '/synthetic-first-library';
   process.env.LD_LIBRARY_PATH = libraryPath;
   const captured = captureRunnerPath();
-  const runtime = await setupRuntime({actionRoot:fileURLToPath(new URL('../', import.meta.url)), tempRoot:root});
+  const runtime = await setupRuntime({actionRoot:fileURLToPath(new URL('../', import.meta.url)), tempRoot:root, repository, provider:'openrouter', model:'example/model'});
   const invocation = JSON.parse(await readFile(join(runtime.root, 'install', 'npm-invocation.json'), 'utf8'));
   assert.equal(invocation.nodePath, process.execPath);
   assert.equal(invocation.cwd, join(runtime.root, 'install'));
@@ -92,17 +110,102 @@ NODE
   assert.equal(invocation.env.LD_LIBRARY_PATH, libraryPath);
   assert.equal(invocation.env.OPENAI_API_KEY, undefined);
   assert.equal(invocation.env.ACTIONS_RUNTIME_TOKEN, undefined);
-  assert.equal(runtime.env('synthetic-scan-key').PYTHON, 'python3');
-  assert.equal(runtime.env('synthetic-scan-key').CODEX_MCP_NODE_PATH, join(runtime.root, 'bin', 'node'));
+  const credentials = scanCredentials('openai', {OPENAI_API_KEY:'synthetic-scan-key'});
+  assert.equal(runtime.env(credentials).PYTHON, 'python3');
+  assert.equal(runtime.env(credentials).CODEX_MCP_NODE_PATH, join(runtime.root, 'bin', 'node'));
+  const sandboxInvocation = JSON.parse(await readFile(join(repository, 'sandbox-invocation.json'), 'utf8'));
+  assert.equal(sandboxInvocation.command.command, join(runtime.root, 'probe-home', 'synthetic-codex'));
+  assert.equal(sandboxInvocation.env.CODEX_HOME, join(runtime.root, 'probe-home'));
+  assert.deepEqual(JSON.parse(sandboxInvocation.env.PROBE_CONFIG), {overrides:['analytics.enabled=false'], model:'example/model', provider:'openrouter'});
+  assert.equal(sandboxInvocation.env.PATH, invocation.env.PATH);
+  assert.equal(sandboxInvocation.env.OPENAI_API_KEY, undefined);
+  assert.equal(sandboxInvocation.env.ACTIONS_RUNTIME_TOKEN, undefined);
   process.env.RUNNER_TRACKING_ID = 'synthetic-later-job';
   process.env.LD_LIBRARY_PATH = '/synthetic-later-library';
-  assert.equal(runtime.env('synthetic-scan-key').RUNNER_TRACKING_ID, 'synthetic-first-job');
-  assert.equal(runtime.env('synthetic-scan-key').LD_LIBRARY_PATH, libraryPath);
+  assert.equal(runtime.env(credentials).RUNNER_TRACKING_ID, 'synthetic-first-job');
+  assert.equal(runtime.env(credentials).LD_LIBRARY_PATH, libraryPath);
   const child = await runProcess(join(runtime.root, 'bin', 'node'), ['-e', 'console.log(process.env.RUNNER_TRACKING_ID)'],
-    {cwd:root, env:{...runtime.env('synthetic-scan-key'), RUNNER_TRACKING_ID:undefined}});
+    {cwd:root, env:{...runtime.env(credentials), RUNNER_TRACKING_ID:undefined}});
   assert.equal(child.exitCode, 0, child.stderr);
   assert.equal(child.stdout.trim(), 'synthetic-first-job');
   await cleanupRuntime(runtime.root, root);
+});
+
+test('hosted Ubuntu sandbox setup uses system commands despite checkout PATH shadows', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-hosted-sandbox-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const existsSync = fs.existsSync;
+  t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? false : existsSync(path));
+  const checkout = join(root, 'checkout');
+  await mkdir(checkout);
+  for (const command of ['sudo', 'apt-get', 'apparmor_parser']) {
+    await writeFile(join(checkout, command), `#!${process.execPath}
+      require('node:fs').writeFileSync('checkout-command-ran', 'unexpected');
+      process.exit(70);
+    `, {mode:0o755});
+  }
+  const sudo = join(root, 'synthetic-system-sudo');
+  await writeFile(sudo, `#!${process.execPath}
+    require('node:fs').appendFileSync('setup.jsonl', JSON.stringify({args:process.argv.slice(2),env:process.env}) + '\\n');
+    console.log('Synthetic sandbox setup output.');
+  `, {mode:0o755});
+  const execute: typeof runProcess = async (executable, args, options) => {
+    assert.equal(executable, '/usr/bin/sudo');
+    return runProcess(sudo, args, options);
+  };
+  const env = runtimeEnvironment({root, home:root, codexHome:root, stateDirectory:root, runnerPath:`${checkout}:/usr/bin:/bin`});
+  let probes = 0;
+  const probe = async () => { if (++probes === 1) throw new SandboxUnavailableError('Synthetic unavailable sandbox'); };
+  await ensureSandbox({cwd:root, env, runnerEnvironment:'github-hosted', imageOS:'ubuntu24', log:() => {throw new Error('synthetic log failure');}}, probe, execute);
+  assert.equal(probes, 2);
+  await ensureSandbox({cwd:root, env, runnerEnvironment:'github-hosted', imageOS:'ubuntu24'}, probe, execute);
+  const calls = (await readFile(join(root, 'setup.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(calls.map(call => call.args), [
+    ['-n','/usr/bin/apt-get','update'],
+    ['-n','/bin/sh','-eu','-c',calls[1].args[4]],
+    ['-n','/usr/sbin/apparmor_parser','-r','/usr/share/apparmor/extra-profiles/bwrap-userns-restrict'],
+  ]);
+  assert.match(calls[1].args[4], /php8\\\.3-fpm/);
+  assert.match(calls[1].args[4], /\/usr\/bin\/apt-get install --yes bubblewrap apparmor-profiles/);
+  for (const call of calls) {
+    assert.equal(call.env.OPENAI_API_KEY, undefined);
+    assert.equal(call.env.ACTIONS_RUNTIME_TOKEN, undefined);
+    assert.equal(call.env.CODEX_HOME, root);
+    assert.equal(call.env.PATH, env.PATH);
+  }
+  assert.equal(fs.existsSync(join(root, 'checkout-command-ran')), false);
+  await writeFile(sudo, `#!${process.execPath}\nconsole.error('synthetic apt diagnostic'); console.log('dpkg: synthetic package configuration failed'); process.exitCode = 17;\n`, {mode:0o755});
+  await assert.rejects(ensureSandbox({cwd:root,env,runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new SandboxUnavailableError('Sandbox unavailable'); }, execute),
+    /Ubuntu sandbox setup failed: sudo -n \/usr\/bin\/apt-get update \(exit 17\)\.\n\[codex-security\] synthetic apt diagnostic\n\[codex-security\] dpkg: synthetic package configuration failed/);
+});
+
+test('sandbox setup leaves self-hosted runners and other images unchanged', async t => {
+  const execute = t.mock.fn<typeof runProcess>(async () => { throw new Error('Sandbox provisioning must not run.'); });
+  for (const [runnerEnvironment,imageOS] of [['self-hosted','ubuntu24'],['github-hosted','ubuntu22'],[undefined,undefined]])
+    await assert.rejects(ensureSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment,imageOS}, async () => { throw new SandboxUnavailableError('Runner sandbox unavailable'); }, execute), /Runner sandbox unavailable/);
+  assert.equal(execute.mock.callCount(), 0);
+});
+
+test('sandbox setup skips Docker job containers with inherited hosted Ubuntu labels', async t => {
+  const existsSync = fs.existsSync;
+  t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? true : existsSync(path));
+  const execute = t.mock.fn<typeof runProcess>(async () => { throw new Error('Container provisioning must not run.'); });
+  await assert.rejects(ensureSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new SandboxUnavailableError('Container sandbox unavailable'); }, execute), /Container sandbox unavailable/);
+  assert.equal(execute.mock.callCount(), 0);
+});
+
+test('hosted setup propagates provider errors without provisioning', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-sandbox-failure-')));
+  t.after(() => rm(root, {recursive:true,force:true}));
+  const existsSync = fs.existsSync;
+  t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? false : existsSync(path));
+  const probe = join(root, 'probe');
+  const execute = t.mock.fn<typeof runProcess>(async () => { throw new Error('Unexpected host setup'); });
+  const check = () => checkSandbox(probe, join(root, 'cli.mjs'), {repository:root,provider:'openrouter',model:''}, {});
+  const host = {cwd:root, env:{}, runnerEnvironment:'github-hosted', imageOS:'ubuntu24'};
+  await writeFile(probe, `#!${process.execPath}\nconsole.error('synthetic provider diagnostic'); process.exitCode = 1;\n`, {mode:0o755});
+  await assert.rejects(ensureSandbox(host, check, execute), /Codex Security sandbox preflight failed.*synthetic provider diagnostic/s);
+  assert.equal(execute.mock.callCount(), 0);
 });
 
 test('Python launcher selection and preflight preserve virtualenv context', async (t) => {
@@ -208,7 +311,7 @@ test('scan environment excludes all inherited credential/config channels', () =>
   try {
     const paths = { root: '/tmp/owned', home: '/tmp/owned/home', codexHome: '/tmp/owned/codex', stateDirectory: '/tmp/owned/state' };
     const installer = runtimeEnvironment(paths);
-    const scanner = runtimeEnvironment(paths, 'scan-only-key');
+    const scanner = runtimeEnvironment(paths, scanCredentials('openai', {OPENAI_API_KEY:'scan-only-key'}));
     for (const key of Object.keys(poison)) { assert.equal(installer[key], undefined); assert.equal(scanner[key], undefined); }
     assert.equal(installer.OPENAI_API_KEY, undefined);
     assert.equal(scanner.OPENAI_API_KEY, 'scan-only-key');
@@ -225,8 +328,8 @@ test('each scan retains its runner tool path while keeping its environment isola
   const tool = join(tools, 'synthetic-tool');
   await writeFile(tool, '#!/bin/sh\nprintf selected-runner-tool\n', { mode: 0o755 });
   const paths = { root, home: root, codexHome: root, stateDirectory: root, runnerPath: tools, runnerTrackingId:'synthetic-first-job', runnerLibraryPath:'/synthetic-first-library' };
-  const first = runtimeEnvironment(paths, 'first-scan-key');
-  const second = runtimeEnvironment({...paths, runnerPath:'/other/tools', runnerTrackingId:'synthetic-second-job', runnerLibraryPath:'/synthetic-second-library'}, 'second-scan-key');
+  const first = runtimeEnvironment(paths, scanCredentials('openai', {OPENAI_API_KEY:'first-scan-key'}));
+  const second = runtimeEnvironment({...paths, runnerPath:'/other/tools', runnerTrackingId:'synthetic-second-job', runnerLibraryPath:'/synthetic-second-library'}, scanCredentials('openai', {OPENAI_API_KEY:'second-scan-key'}));
   const result = await runProcess('/bin/sh', ['-c', 'synthetic-tool'], {cwd:root, env:first});
   assert.equal(result.stdout, 'selected-runner-tool');
   assert.equal(first.PATH, `${join(root, 'bin')}:${tools}`);
@@ -242,6 +345,71 @@ test('each scan retains its runner tool path while keeping its environment isola
   assert.equal(runtimeEnvironment({...paths, runnerLibraryPath:''}).LD_LIBRARY_PATH, '');
   assert.equal(runtimeEnvironment({...paths, runnerTrackingId:undefined}).RUNNER_TRACKING_ID, undefined);
   assert.equal(runtimeEnvironment({...paths, runnerTrackingId:undefined}).CODEX_MCP_NODE_PATH, undefined);
+});
+
+test('Bedrock credentials reach child processes without unrelated runner credentials', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-bedrock-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const paths = {root, home:join(root, 'home'), codexHome:join(root, 'codex'), stateDirectory:join(root, 'state')};
+  const sources = [
+    {AWS_ACCESS_KEY_ID:'synthetic-access-key', AWS_SECRET_ACCESS_KEY:'synthetic-secret-key', AWS_SESSION_TOKEN:'synthetic-session-token', AWS_REGION:'us-east-2'},
+    {AWS_BEARER_TOKEN_BEDROCK:'synthetic-bearer-token', AWS_DEFAULT_REGION:'us-west-2'},
+    {AWS_PROFILE:'synthetic-profile', AWS_CONFIG_FILE:'/synthetic/config', AWS_SHARED_CREDENTIALS_FILE:'/synthetic/credentials'},
+    {AWS_ROLE_ARN:'arn:aws:iam::123456789012:role/synthetic-role', AWS_ROLE_SESSION_NAME:'synthetic-session', AWS_WEB_IDENTITY_TOKEN_FILE:'/synthetic/token'},
+    {AWS_CONTAINER_CREDENTIALS_FULL_URI:'http://127.0.0.1/synthetic', AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE:'/synthetic/token'},
+  ];
+  for (const aws of sources) {
+    const source = {...aws, OPENAI_API_KEY:'must-not-forward', CODEX_API_KEY:'must-not-forward',
+      GITHUB_TOKEN:'must-not-forward', ACTIONS_RUNTIME_TOKEN:'must-not-forward',
+      NODE_OPTIONS:'--require=unrelated', CODEX_CLI_PATH:'/unrelated/codex', AWS_UNRELATED_SECRET:'must-not-forward'};
+    const credentials = scanCredentials('amazon-bedrock', source);
+    const env = runtimeEnvironment(paths, credentials);
+    const child = await runProcess(process.execPath, ['-e', 'console.log(JSON.stringify(process.env))'], {cwd:root, env});
+    assert.equal(child.exitCode, 0, child.stderr);
+    const actual = JSON.parse(child.stdout);
+    assert.deepEqual(Object.fromEntries(Object.entries(actual).filter(([name]) => name.startsWith('AWS_'))), aws);
+    for (const name of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'NODE_OPTIONS', 'CODEX_CLI_PATH'])
+      assert.equal(actual[name], undefined);
+    assert.equal(actual.HOME, paths.home); assert.equal(actual.CODEX_HOME, paths.codexHome);
+    const installer = runtimeEnvironment(paths);
+    for (const name of Object.keys(aws)) assert.equal(installer[name], undefined);
+  }
+});
+
+test('API providers forward only their own captured key to child processes', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-provider-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const paths = {root, home:root, codexHome:root, stateDirectory:root};
+  const source = {OPENAI_API_KEY:'synthetic-openai', CODEX_API_KEY:'synthetic-alias',
+    OPENROUTER_API_KEY:'synthetic-openrouter', FIREWORKS_API_KEY:'synthetic-fireworks',
+    AWS_SESSION_TOKEN:'unrelated-aws', GITHUB_TOKEN:'unrelated-github'};
+  const cases = [['openai', 'OPENAI_API_KEY'], ['openrouter', 'OPENROUTER_API_KEY'], ['fireworks', 'FIREWORKS_API_KEY']] as const;
+  const captured = cases.map(([provider, key]) => ({credentials:scanCredentials(provider, source), key, value:source[key]}));
+  source.OPENROUTER_API_KEY = source.FIREWORKS_API_KEY = 'changed-after-capture';
+  await Promise.all(captured.map(async ({credentials, key, value}) => {
+    const child = await runProcess(process.execPath, ['-e', 'console.log(JSON.stringify(process.env))'],
+      {cwd:root, env:runtimeEnvironment(paths, credentials)});
+    assert.equal(child.exitCode, 0, child.stderr);
+    const actual = JSON.parse(child.stdout);
+    for (const name of Object.keys(source)) assert.equal(actual[name], name === key ? value : undefined);
+    for (const name of Object.keys(source)) assert.equal(runtimeEnvironment(paths)[name], undefined);
+  }));
+});
+
+test('Bedrock credential snapshots stay isolated when the caller changes credentials', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-bedrock-snapshot-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const paths = {root, home:root, codexHome:root, stateDirectory:root};
+  const source = {AWS_BEARER_TOKEN_BEDROCK:'synthetic-first-token', AWS_REGION:'us-east-2'};
+  const first = scanCredentials('amazon-bedrock', source);
+  source.AWS_BEARER_TOKEN_BEDROCK = 'synthetic-second-token'; source.AWS_REGION = 'us-west-2';
+  const second = scanCredentials('amazon-bedrock', source);
+  const results = await Promise.all([first, second].map(credentials => runProcess(process.execPath,
+    ['-e', 'console.log(JSON.stringify([process.env.AWS_BEARER_TOKEN_BEDROCK,process.env.AWS_REGION]))'],
+    {cwd:root, env:runtimeEnvironment(paths, credentials)})));
+  assert.deepEqual(results.map(result => JSON.parse(result.stdout)), [
+    ['synthetic-first-token', 'us-east-2'], ['synthetic-second-token', 'us-west-2'],
+  ]);
 });
 
 test('shipped runtime lock matches the manifest and records dependency integrity', async () => {
@@ -271,4 +439,57 @@ test('cleanup preserves reports and rejects arbitrary or symlink roots', async (
     assert.ok((await stat(join(reports, 'report.sarif'))).isFile());
     await cleanupRuntime(owned, base);
   } finally { await rm(base, { recursive: true, force: true }); }
+});
+
+
+for (const hasNeedrestart of [true, false])
+for (const aptExit of [0, 17]) test(`hosted install with needrestart=${hasNeedrestart} cleans its PHP override after exit ${aptExit}`, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-needrestart-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const existsSync = fs.existsSync;
+  t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? false : existsSync(path));
+  const conf = join(root, 'conf.d');
+  if (hasNeedrestart) {
+    await mkdir(conf);
+    await writeFile(join(conf, 'existing.conf'), 'existing configuration');
+  }
+  const apt = join(root, 'apt');
+  await writeFile(apt, `#!${process.execPath}
+    const fs = require('node:fs'); const path = require('node:path'); const assert = require('node:assert/strict');
+    const directory = ${JSON.stringify(conf)};
+    let value = '';
+    if (${hasNeedrestart}) {
+      const overrides = fs.readdirSync(directory).filter(name => name.startsWith('codex-security-'));
+      assert.equal(overrides.length, 1);
+      value = fs.readFileSync(path.join(directory, overrides[0]), 'utf8');
+      assert.equal(value, ${JSON.stringify('$nrconf{override_rc}{qr(^php8\\.3-fpm\\.service$)} = 0;\n')});
+    } else assert.equal(fs.existsSync(directory), false);
+    assert.deepEqual(process.argv.slice(2), ['install', '--yes', 'bubblewrap', 'apparmor-profiles']);
+    fs.writeFileSync(${JSON.stringify(join(root, 'apt-ran'))}, value);
+    console.error('synthetic apt diagnostic'); process.exitCode = ${aptExit};
+  `, {mode:0o700});
+  const env = runtimeEnvironment({root,home:root,codexHome:root,stateDirectory:root});
+  const success = {exitCode:0,signal:null,stdout:'',stderr:'',timedOut:false,interrupted:false} as const;
+  const calls: readonly string[][] = [];
+  const execute: typeof runProcess = async (command, args, options) => {
+    assert.equal(command, '/usr/bin/sudo');
+    (calls as string[][]).push([...args]);
+    if (args[1] !== '/bin/sh') return success;
+    const script = args[4].replaceAll('/etc/needrestart/conf.d', conf).replaceAll('/usr/bin/apt-get', apt);
+    return runProcess('/bin/sh', ['-eu', '-c', script], options);
+  };
+  let probes = 0;
+  const original = new SandboxUnavailableError('original synthetic preflight detail sk-example-secret');
+  const result = ensureSandbox({cwd:root,env,runnerEnvironment:'github-hosted',imageOS:'ubuntu24'},
+    async () => { if (++probes === 1) throw original; }, execute);
+  if (aptExit === 0) await result;
+  else await assert.rejects(result, error => error instanceof Error && error.cause === original
+    && error.message.includes(original.message) && error.message.includes('synthetic apt diagnostic'));
+  assert.equal(fs.existsSync(join(root, 'apt-ran')), true);
+  if (hasNeedrestart) {
+    assert.deepEqual(fs.readdirSync(conf), ['existing.conf']);
+    assert.equal(await readFile(join(conf, 'existing.conf'), 'utf8'), 'existing configuration');
+  } else assert.equal(fs.existsSync(conf), false);
+  assert.equal(probes, aptExit === 0 ? 2 : 1);
+  assert.equal(calls.length, aptExit === 0 ? 3 : 2);
 });

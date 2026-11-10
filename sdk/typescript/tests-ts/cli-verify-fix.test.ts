@@ -1,14 +1,28 @@
-import { describe, expect, test, mock } from "bun:test";
+import { requestMetadata } from "./support/request-metadata.js";
+import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
-import { main } from "../src/cli.js";
+import { writeArtifactOutput } from "../src/artifact-export.js";
+import { main, runCodexSkillCommand } from "../src/cli.js";
+import { remediationPrompt, verificationBatches } from "../src/remediation.js";
+import * as runtime from "../src/runtime.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import { dependencies, fakeResult } from "./cli-fixtures.js";
+import {
+  capture,
+  dependencies,
+  FakeSignals,
+  fakeResult,
+} from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const { temporaryDirectory, cleanup } = createApiTestFixtures("verify-fix-");
+afterEach(cleanup);
 
 async function linearIssue(identifier: string) {
   return {
@@ -49,12 +63,10 @@ describe("read-only finding verification", () => {
           },
           linearClient,
           onCodex: (args, output, processEnvironment, input) => {
-            expect(args).toContain(
-              'responses_api_metadata.codex_security_command="verify-fix"',
-            );
-            expect(args).toContain(
-              `responses_api_metadata.codex_security_package_version=${JSON.stringify(VERSION)}`,
-            );
+            expect(requestMetadata(args)).toMatchObject({
+              codex_security_command: "verify-fix",
+              codex_security_package_version: VERSION,
+            });
             expect(args[0]).toBe("app-server");
             expect(input).toBeUndefined();
             expect(args).toContain('approval_policy="on-request"');
@@ -308,7 +320,9 @@ describe("read-only finding verification", () => {
     });
   });
 
-  test("verifies saved findings in their original repository", async () => {
+  test("verifies saved findings in their original repository with static mode", async () => {
+    const evidence =
+      "Source review confirms the guard; runtime checks were not performed.";
     const result = fakeResult(["high", "medium"]);
     result.findings.findings.forEach((finding, index) => {
       Object.assign(finding, {
@@ -327,6 +341,8 @@ describe("read-only finding verification", () => {
           "scan-1",
           "--severity",
           "high",
+          "--verification-mode",
+          "static",
           "--model",
           "gpt-6-astra",
           "--effort",
@@ -334,6 +350,7 @@ describe("read-only finding verification", () => {
           "--json",
         ],
         dependencies({
+          result,
           onWorkbench: (args) => {
             expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
             return {
@@ -349,6 +366,9 @@ describe("read-only finding verification", () => {
             expect(args).toContain('model_reasoning_effort="max"');
             expect(output?.appServer?.directory).toBe("/saved/repository");
             expect(output?.appServer?.sandbox).toBe("read-only");
+            expect(output?.appServer?.prompt).toContain(
+              "Verification mode: static",
+            );
             const findings = JSON.parse(
               output!.appServer!.prompt.split("\n").at(-1)!,
             ) as Finding[];
@@ -361,8 +381,7 @@ describe("read-only finding verification", () => {
                   {
                     id: "occ_1",
                     status: "fixed",
-                    evidence:
-                      "The original exploit fails and regression checks pass.",
+                    evidence,
                   },
                 ],
               }),
@@ -376,8 +395,345 @@ describe("read-only finding verification", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({
       repository: "/saved/repository",
       scanId: "scan-1",
-      results: [{ id: "occ_1", status: "fixed" }],
+      results: [{ id: "occ_1", status: "fixed", evidence }],
     });
+  });
+
+  test("reports missing verification instructions on stderr for a small saved finding", async () => {
+    const pluginRoot = await temporaryDirectory();
+    using plugin = spyOn(runtime, "bundledPluginRoot").mockResolvedValue(
+      pluginRoot,
+    );
+    const result = fakeResult(["high"]);
+    result.findings.findings[0]!.occurrenceId = "occ_0";
+    const onCodex = mock(() => 0);
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["verify-fix", "--scan", "scan", "--json"],
+        dependencies({
+          result,
+          onWorkbench: () => ({
+            scan: {
+              scanId: "scan",
+              targetPath: "/saved/repository",
+              findings: result.findings.findings as unknown as JsonObject[],
+            },
+          }),
+          onCodex,
+        }),
+      ),
+    ).toBe(2);
+    const failure = JSON.parse(stdout.text());
+    expect(failure.code).toBe("VERIFICATION_FAILED");
+    expect(failure.message).toContain("SKILL.md");
+    expect(stderr.text()).toBe(`codex-security: ${failure.message}\n`);
+    expect(plugin).toHaveBeenCalled();
+    expect(onCodex).not.toHaveBeenCalled();
+  });
+
+  test.each([530_000, 1 << 20])(
+    "retains a saved verification worker failure with %i-character findings and token-limited stdout",
+    async (size) => {
+      const result = fakeResult(["high", "high"]);
+      for (const [index, finding] of result.findings.findings.entries()) {
+        finding.occurrenceId = `occ_${index}`;
+        finding.title = "x".repeat(size);
+      }
+      const workerMessage = "Synthetic verification worker failed.";
+      const message = workerMessage;
+      const deps = dependencies({
+        result,
+        onWorkbench: () => ({
+          scan: {
+            scanId: "scan",
+            targetPath: "/saved/repository",
+            findings: result.findings.findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex: (_args, output) => {
+          output!.stderr.write(`${workerMessage}\n`);
+          return 1;
+        },
+      });
+      for (const flags of [
+        ["--json", "--token-count"],
+        ["--format=jsonl", "--full-output", "--token-count"],
+        ["--format", "jsonl", "--token-limit=1"],
+        [
+          "--json",
+          "--filter-output=results",
+          "--token-offset",
+          "20",
+          "--token-limit",
+          "1",
+        ],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(["verify-fix", "--scan", "scan", ...flags], deps),
+        ).toBe(2);
+        if (flags.includes("--token-count"))
+          expect(stdout.text()).toMatch(/^\d+\n$/u);
+        else expect(stdout.text()).toContain("[truncated:");
+        expect(stdout.text()).not.toContain(message);
+        expect(stderr.text().split(message)).toHaveLength(2);
+      }
+    },
+  );
+
+  test.each([
+    ["complete", 1],
+    ["redirected output", 1],
+    ["wrong ID", 2],
+    ["missing result", 2],
+    ["transport failure", 2],
+    ["closed stderr", 2],
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+    ["repeated signal", 130],
+    ["interrupted worker", 143],
+    ["oversized finding", 1],
+  ] as const)(
+    "handles %s across saved verification batches",
+    async (scenario, expectedExit) => {
+      const result = fakeResult(["high", "high", "high", "low"]);
+      const evidence = '"quoted"\n'.repeat(60_000);
+      result.findings.findings.forEach((finding, i) => {
+        Object.assign(finding, {
+          occurrenceId: `occ_${i}`,
+          findingId: `csf_${i}`,
+          codeEvidence: [
+            {
+              path: "src/check.ts",
+              code:
+                scenario === "oversized finding" && i === 1
+                  ? evidence.repeat(2)
+                  : evidence,
+            },
+          ],
+        });
+      });
+      const signals = new FakeSignals();
+      const { stdout, stderr } = createCliTest(main, {
+        stdout: scenario !== "redirected output",
+        stderr: true,
+      });
+      const seen: string[] = [];
+      const forceExit = mock(() => {});
+      const deps = dependencies({
+        result,
+        signals,
+        onWorkbench: () => ({
+          scan: {
+            scanId: "scan",
+            targetPath: "/saved/repository",
+            findings: result.findings.findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex: async (_args, output) => {
+          const prompt = output!.appServer!.prompt;
+          expect([...prompt].length).toBeLessThanOrEqual(1 << 20);
+          const file = prompt.match(/^".*finding\.json"$/m)?.[0];
+          const batch = JSON.parse(
+            file === undefined
+              ? prompt.split("\n").at(-1)!
+              : await readFile(JSON.parse(file), "utf8"),
+          ) as Finding[];
+          expect(batch).toHaveLength(1);
+          expect(batch[0]!.codeEvidence![0]!.code).toBe(
+            scenario === "oversized finding" && seen.length === 1
+              ? evidence.repeat(2)
+              : evidence,
+          );
+          const id = batch[0]!.occurrenceId;
+          seen.push(id);
+          expect(output!.appServer!.onEvent).toBeUndefined();
+          output!.appServer!.onEvent?.({
+            method: "item/reasoning/summaryTextDelta",
+            params: { itemId: "reason_0", delta: `Checked ${id}.` },
+          });
+          output!.appServer!.onEvent?.({
+            method: "item/completed",
+            params: {
+              item: {
+                type: "reasoning",
+                id: "reason_0",
+                summary: [`Checked ${id}.`],
+              },
+            },
+          });
+          if (seen.length === 2 && scenario === "missing result") {
+            output!.stdout.write(JSON.stringify({ results: [] }));
+            return 0;
+          }
+          if (seen.length === 1 && scenario === "transport failure")
+            output!.stderr.write("First batch diagnostic.\n");
+          if (seen.length === 2 && scenario === "transport failure") return 1;
+          if (seen.length === 2 && scenario === "interrupted worker") {
+            signals.emit("SIGINT");
+            signals.emit("SIGTERM");
+            return 143;
+          }
+          if (seen.length === 2 && scenario === "closed stderr") {
+            output!.stderr.write("Second worker failed.\n");
+            return 1;
+          }
+          if (
+            seen.length === 1 &&
+            (scenario === "SIGINT" || scenario === "SIGTERM")
+          )
+            queueMicrotask(() => signals.emit(scenario));
+          if (seen.length === 1 && scenario === "repeated signal")
+            queueMicrotask(() => {
+              signals.emit("SIGINT");
+              signals.emit("SIGTERM");
+            });
+          output!.stdout.write(
+            JSON.stringify({
+              results: [
+                {
+                  id:
+                    seen.length === 2 && scenario === "wrong ID" ? "occ_0" : id,
+                  status: seen.length === 1 ? "still_vulnerable" : "fixed",
+                  evidence: "Verified against source.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      });
+      const errorOutput =
+        scenario === "closed stderr"
+          ? new Writable({
+              write(chunk, _encoding, done) {
+                done(
+                  chunk.includes("Second worker")
+                    ? new Error("EPIPE")
+                    : undefined,
+                );
+              },
+            })
+          : stderr.stream;
+      const exit = await main(
+        ["verify-fix", "--scan", "scan", "--severity", "high", "--json"],
+        stdout.stream,
+        errorOutput,
+        { ...deps, forceExit },
+      );
+      expect(forceExit).not.toHaveBeenCalled();
+      expect(exit).toBe(expectedExit);
+      expect(
+        [...signals.listeners.values()].every(
+          (listeners) => listeners.size === 0,
+        ),
+      ).toBe(true);
+      if (scenario === "closed stderr")
+        expect((errorOutput as Writable).listenerCount("error")).toBe(0);
+      if (
+        scenario === "complete" ||
+        scenario === "redirected output" ||
+        scenario === "oversized finding"
+      ) {
+        expect(seen).toEqual(["occ_0", "occ_1", "occ_2"]);
+        expect(stderr.text()).toBe("");
+        expect(
+          JSON.parse(stdout.text()).results.map(({ id }: { id: string }) => id),
+        ).toEqual(seen);
+      } else if (
+        scenario === "SIGINT" ||
+        scenario === "SIGTERM" ||
+        scenario === "repeated signal" ||
+        scenario === "interrupted worker"
+      ) {
+        expect(seen).toEqual(
+          scenario === "interrupted worker" ? ["occ_0", "occ_1"] : ["occ_0"],
+        );
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toBe("");
+      } else {
+        expect(seen).toEqual(["occ_0", "occ_1"]);
+        const failure = JSON.parse(stdout.text());
+        expect(failure.code).toBe("VERIFICATION_FAILED");
+        expect(failure.results).toBeUndefined();
+        if (scenario === "transport failure")
+          expect(failure.message).toBe(
+            "Codex verification failed with exit code 1.",
+          );
+        if (scenario === "closed stderr")
+          expect(failure.message).toBe("Second worker failed.");
+      }
+    },
+  );
+
+  test("verifies a historical occurrence directly in the selected scan", async () => {
+    const result = fakeResult(["high"]);
+    Object.assign(result.findings.findings[0]!, {
+      occurrenceId: "occ_earlier",
+      findingId: "csf_guard",
+    });
+    const verdict = {
+      id: "occ_earlier",
+      status: "fixed",
+      evidence: "The guard rejects the original input.",
+    };
+    const stdout = captureCli(main, "stdout");
+    const status = await stdout.run(
+      ["verify-fix", "--scan", "earlier", "occ_earlier", "--json"],
+      dependencies({
+        result,
+        onWorkbench: (args) => {
+          expect(args).toEqual([
+            "get-scan",
+            "--scan-id",
+            "earlier",
+            "--occurrence-id",
+            "occ_earlier",
+          ]);
+          return {
+            scan: {
+              scanId: "earlier",
+              targetPath: "/saved/repository",
+              findings: result.findings.findings as unknown as JsonObject[],
+            },
+          };
+        },
+        onCodex: (_args, output) => {
+          output!.stdout.write(JSON.stringify({ results: [verdict] }));
+          return 0;
+        },
+      }),
+    );
+    expect(status).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      scanId: "earlier",
+      results: [verdict],
+    });
+  });
+
+  test("batches at the exact decoded prompt limit and isolates an oversized finding", async () => {
+    const findings = fakeResult(["high", "high"]).findings.findings.map(
+      (finding, i) => ({
+        ...finding,
+        occurrenceId: `occ_${i}`,
+        title: "",
+      }),
+    );
+    const prompt = await remediationPrompt({
+      operation: "verify",
+      contents: findings,
+      verificationIds: findings.map(({ occurrenceId }) => occurrenceId),
+      pluginRoot: PLUGIN_ROOT,
+      verificationMode: "static",
+    });
+    const batches = () => verificationBatches(findings, PLUGIN_ROOT, "static");
+    findings[1]!.title = "🚀".repeat((1 << 20) - [...prompt].length);
+    expect((await batches()).map((batch) => batch.length)).toEqual([2]);
+    findings[1]!.title += "x";
+    expect((await batches()).map((batch) => batch.length)).toEqual([1, 1]);
+    findings[1]!.title += "x".repeat(1024);
+    expect(await batches()).toEqual([[findings[0]!], [findings[1]!]]);
   });
 
   test("reports inconclusive findings without treating them as fixed", async () => {
@@ -417,19 +773,165 @@ describe("read-only finding verification", () => {
   ] as const)(
     "maps Codex exit %i to verification exit %i",
     async (codexStatus, expectedStatus) => {
-      const stdout = captureCli(main, "stdout");
+      for (const flags of [
+        ["--json"],
+        ["--json", "--full-output"],
+        ["--format", "yaml", "--full-output"],
+        ["--token-count"],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            ["verify-fix", "Synthetic finding", ...flags],
+            dependencies({ onCodex: () => codexStatus }),
+          ),
+        ).toBe(expectedStatus);
+        const message = `Codex verification failed with exit code ${codexStatus}.`;
+        if (expectedStatus === 2) {
+          expect(stderr.text()).toContain(`codex-security: ${message}\n`);
+          expect(stderr.text().split(message)).toHaveLength(2);
+        } else expect(stderr.text()).not.toContain(message);
+        if (expectedStatus === 2 && flags[0] === "--json") {
+          const failure = JSON.parse(stdout.text());
+          if (flags.includes("--full-output")) {
+            expect(failure.ok).toBe(false);
+            expect(failure.error).toMatchObject({
+              code: "VERIFICATION_FAILED",
+              message,
+            });
+          } else {
+            expect(failure).toMatchObject({
+              status: "failed",
+              code: "VERIFICATION_FAILED",
+              message,
+            });
+          }
+        } else expect(stdout.text()).toBe("");
+      }
+    },
+  );
 
+  test.each(["exit", "throw"] as const)(
+    "reports ChatGPT authentication diagnostics after a Codex %s failure",
+    async (transport) => {
+      const message =
+        "401 Unauthorized: stored ChatGPT credentials expired. Run codex-security login --auth chatgpt.";
+      for (const flags of [
+        [],
+        ["--json"],
+        ["--json", "--full-output"],
+        ["--format", "jsonl"],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            ["verify-fix", "Synthetic finding", "--auth", "chatgpt", ...flags],
+            dependencies({
+              onCodex: (_args, output) => {
+                if (transport === "throw") throw new Error(message);
+                output!.stderr.write(`${message}\n`);
+                return 1;
+              },
+            }),
+          ),
+        ).toBe(2);
+        if (flags.length === 0) expect(stdout.text()).toBe("");
+        else {
+          const failure = JSON.parse(stdout.text());
+          const details = flags.includes("--full-output")
+            ? failure.error
+            : failure;
+          expect(details).toMatchObject({
+            code: "VERIFICATION_FAILED",
+            message,
+          });
+          expect(failure.results).toBeUndefined();
+        }
+        expect(stderr.text()).toContain(message);
+        expect(stderr.text().split(message)).toHaveLength(2);
+      }
+    },
+  );
+
+  test("reports an authentication protocol error from a successfully exited Codex child", async () => {
+    const directory = await temporaryDirectory();
+    const message = "401 Unauthorized: synthetic ChatGPT token expired";
+    const source = `
+const lines = require("node:readline").createInterface({ input: process.stdin });
+lines.once("line", () => process.stdout.write(JSON.stringify({
+  id: 1, error: { code: -32001, message: ${JSON.stringify(message)} }
+}) + "\\n"));
+`;
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["verify-fix", "Synthetic finding", "--auth", "chatgpt", "--json"],
+        dependencies({
+          currentDirectory: directory,
+          onCodex: (_args, output) =>
+            runCodexSkillCommand(
+              ["-e", source],
+              { ...output!, auth: undefined },
+              { command: process.execPath },
+              {},
+            ),
+        }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "VERIFICATION_FAILED",
+      message: expect.stringContaining(message),
+    });
+    expect(stderr.text()).toContain(message);
+  });
+
+  test.each([
+    ["fixed", 0],
+    ["still_vulnerable", 1],
+    ["inconclusive", 2],
+  ] as const)(
+    "retains completed %s results with full output",
+    async (status, code) => {
+      const { stdout, runCli } = createCliTest(main);
+      const results = [
+        {
+          id: "finding-1",
+          status,
+          evidence: "Synthetic verification evidence.",
+        },
+      ];
       expect(
-        await stdout.run(
-          [
-            "verify-fix",
-            "A previously reported authorization bypass",
-            "--json",
-          ],
-          dependencies({ onCodex: () => codexStatus }),
+        await runCli(
+          ["verify-fix", "Synthetic finding", "--json", "--full-output"],
+          dependencies({
+            onCodex: (_args, output) => {
+              output?.stdout.write(JSON.stringify({ results }));
+              return 0;
+            },
+          }),
         ),
-      ).toBe(expectedStatus);
-      expect(stdout.text()).toBe("");
+      ).toBe(code);
+      expect(JSON.parse(stdout.text()).data.results).toEqual(results);
+    },
+  );
+
+  test.each([130, 143])(
+    "preserves interrupted status %i without writing a success envelope",
+    async (status) => {
+      const { stderr } = createCliTest(main);
+      const write = mock(() => {
+        throw new Error("Unexpected stdout write.");
+      });
+      expect(
+        await main(
+          ["verify-fix", "Synthetic finding", "--json", "--full-output"],
+          { write },
+          stderr.stream,
+          dependencies({ onCodex: () => status }),
+        ),
+      ).toBe(status);
+      expect(write).not.toHaveBeenCalled();
     },
   );
 
@@ -462,6 +964,105 @@ describe("read-only finding verification", () => {
     expect(stdout.text()).toBe(
       "FIXED finding-1: Original exploit rejected. Forged result.\n",
     );
+  });
+
+  test.each(["fixed", "still_vulnerable", "inconclusive"])(
+    "reports required output failure for a %s verification",
+    async (status) => {
+      const failure = new Error("Synthetic verification output failure");
+      const stdout = new Writable({
+        write(_chunk, _encoding, callback) {
+          queueMicrotask(() => callback(failure));
+        },
+      });
+      const emitted = new Promise<Error>((resolve) =>
+        stdout.once("error", resolve),
+      );
+      const stderr = capture();
+      const [exitCode, error] = await Promise.all([
+        main(
+          ["verify-fix", "Synthetic finding"],
+          stdout,
+          stderr.stream,
+          dependencies({
+            onCodex: (_args, output) => {
+              output?.stdout.write(
+                JSON.stringify({
+                  results: [
+                    {
+                      id: "finding-1",
+                      status,
+                      evidence: "Synthetic evidence.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          }),
+        ),
+        emitted,
+      ]);
+      expect(error).toBe(failure);
+      expect(exitCode).toBe(2);
+      expect(stderr.text()).toContain(failure.message);
+      expect(stdout.listenerCount("error")).toBe(0);
+    },
+  );
+
+  test("waits for each verification result before writing the next", async () => {
+    const writes = [
+      Promise.withResolvers<() => void>(),
+      Promise.withResolvers<() => void>(),
+    ];
+    const chunks: string[] = [];
+    const stdout = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        writes[chunks.length - 1]!.resolve(callback);
+      },
+    });
+    const operation = main(
+      ["verify-fix", "First finding", "Second finding"],
+      stdout,
+      capture().stream,
+      dependencies({
+        onCodex: (_args, output) => {
+          output?.stdout.write(
+            JSON.stringify({
+              results: [
+                {
+                  id: "finding-1",
+                  status: "fixed",
+                  evidence: "Café evidence.",
+                },
+                {
+                  id: "finding-2",
+                  status: "still_vulnerable",
+                  evidence: "Exploit still succeeds.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      }),
+    );
+    const first = await writes[0]!.promise;
+    const firstBufferedBytes = stdout.writableLength;
+    first();
+    const second = await writes[1]!.promise;
+    second();
+    expect(await operation).toBe(1);
+    expect(chunks).toEqual([
+      "FIXED finding-1: Café evidence.\n",
+      "STILL_VULNERABLE finding-2: Exploit still succeeds.\n",
+    ]);
+    expect(firstBufferedBytes).toBe(Buffer.byteLength(chunks[0]!));
+    expect(stdout.writableEnded).toBe(false);
+    expect(stdout.listenerCount("error")).toBe(0);
+    stdout.destroy();
   });
 
   test.each([
@@ -501,7 +1102,10 @@ describe("read-only finding verification", () => {
         ),
       ).toBe(2);
 
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "VERIFICATION_FAILED",
+      });
       expect(stderr.text()).toContain(
         "an evidence-backed verification result for every finding",
       );
@@ -533,4 +1137,164 @@ describe("read-only finding verification", () => {
       expect(onCodex).not.toHaveBeenCalled();
     },
   );
+
+  test.each(["JSON", "token count", "failed stderr"])(
+    "writes a structured selection failure before stderr drains (%s)",
+    async (scenario) => {
+      const tokenCount = scenario === "token count";
+      const stdout = capture();
+      const output = new Writable({
+        write(chunk, _encoding, callback) {
+          stdout.stream.write(chunk);
+          setImmediate(callback);
+        },
+      });
+      const writeStarted = Promise.withResolvers<(error?: Error) => void>();
+      let diagnostic = "";
+      const stderr = new Writable({
+        highWaterMark: 1,
+        write(chunk, _encoding, callback) {
+          const first = diagnostic.length === 0;
+          diagnostic += chunk.toString();
+          if (first) writeStarted.resolve(callback);
+          else callback();
+        },
+      });
+      let finished = false;
+      const operation = main(
+        [
+          "verify-fix",
+          "--scan",
+          "latest",
+          "--json",
+          ...(tokenCount ? ["--token-count"] : []),
+        ],
+        output,
+        stderr,
+        dependencies({ onWorkbench: () => ({ scans: [] }) }),
+      ).then((code) => {
+        finished = true;
+        return code;
+      });
+
+      const finishWrite = await writeStarted.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const beforeDrain = stdout.text();
+      const finishedBeforeDrain = finished;
+      if (scenario === "JSON") {
+        const repeated = await main(
+          ["verify-fix", "--scan", "missing", "--json"],
+          output,
+          stderr,
+          dependencies({ onWorkbench: () => ({ scans: [] }) }),
+        );
+        expect(repeated).toBe(2);
+        expect(stderr.listenerCount("error")).toBe(0);
+        expect(
+          JSON.parse(stdout.text().slice(beforeDrain.length)).message,
+        ).toBe("Could not read the selected scan and repository.");
+      }
+      finishWrite(
+        scenario === "failed stderr"
+          ? new Error("Synthetic stderr failure.")
+          : undefined,
+      );
+      expect(await operation).toBe(2);
+      if (scenario === "JSON") {
+        await new Promise<void>((resolve) => stderr.end(resolve));
+        expect(diagnostic).toBe(
+          "codex-security: No saved scan was found for this repository.\n" +
+            "codex-security: Could not read the selected scan and repository.\n",
+        );
+      }
+      expect(finishedBeforeDrain).toBe(!tokenCount);
+      expect(diagnostic).toContain("No saved scan was found");
+      if (tokenCount) expect(beforeDrain).toMatch(/^\d+\n$/u);
+      else
+        expect(JSON.parse(beforeDrain).message).toContain(
+          "No saved scan was found",
+        );
+    },
+  );
+
+  test("releases batch signal listeners before waiting for a worker's text diagnostic", async () => {
+    const result = fakeResult(["high", "high"]);
+    for (const [index, finding] of result.findings.findings.entries()) {
+      finding.occurrenceId = `occ_${index}`;
+      finding.title = "x".repeat(530_000);
+    }
+    const signals = new FakeSignals();
+    const message = "Synthetic worker failure.\n";
+    let diagnostic = "";
+    let listenerCounts: number[] = [];
+    const stderr = new Writable({
+      write(chunk, _encoding, callback) {
+        diagnostic += chunk.toString();
+        setImmediate(() => {
+          listenerCounts = Array.from(
+            signals.listeners.values(),
+            (listeners) => listeners.size,
+          );
+          signals.emit("SIGTERM");
+          signals.emit("SIGINT");
+          callback();
+        });
+      },
+    });
+    const exit = await main(
+      ["verify-fix", "--scan", "scan"],
+      capture().stream,
+      stderr,
+      dependencies({
+        result,
+        signals,
+        onWorkbench: () => ({
+          scan: {
+            scanId: "scan",
+            targetPath: "/saved/repository",
+            findings: result.findings.findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex: (_args, output) => {
+          output!.stderr.write(message);
+          return 1;
+        },
+      }),
+    );
+    expect(listenerCounts).toEqual([0, 0]);
+    expect(exit).toBe(2);
+    expect(diagnostic).toBe(message);
+  });
+
+  test("waits for a single worker's stderr diagnostic", async () => {
+    const message = "One worker failed.\n";
+    const writeStarted = Promise.withResolvers<() => void>();
+    const stderr = new Writable({
+      write(chunk, _encoding, callback) {
+        if (chunk.toString() === message) writeStarted.resolve(callback);
+        else callback();
+      },
+    });
+    let workerFinished = false;
+    const operation = main(
+      ["verify-fix", "Finding"],
+      capture().stream,
+      stderr,
+      dependencies({
+        onCodex: async (_args, output) => {
+          await writeArtifactOutput(output!.stderr, message);
+          workerFinished = true;
+          return 1;
+        },
+      }),
+    );
+    const finishWrite = await writeStarted.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const finishedBeforeWrite = workerFinished;
+    finishWrite();
+    expect(await operation).toBe(2);
+    expect(finishedBeforeWrite).toBe(false);
+    expect(workerFinished).toBe(true);
+    expect(stderr.writableEnded).toBe(false);
+  });
 });

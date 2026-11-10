@@ -2,77 +2,81 @@
 
 This Promptfoo suite verifies that `$codex-security:triage-finding` accepts the current supported input source types and returns the expected `triage-finding/v0`
 JSON result shape. It also covers bare skill invocation with no supplied finding,
-which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub intake cases cover repository-source selection, REST endpoints, and explicit Connector requests without querying live GitHub during the eval.
+which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub intake cases cover repository-source selection, app, CLI and REST routing, and source-specific endpoints without querying live GitHub during the eval.
 
 The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The common runner stages the checkout's triage skill and policy helper in a throwaway directory, with ambient plugins and memory disabled. The default suite can also read the synthetic fixtures; calibration cases can read their own hydrated checkout. Dataset labels, assertions, and calibration Git history stay outside those readable roots. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
-Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the repository root to install dependencies under this eval directory.
+## Set up the runner
 
-The eval directory has its own `pnpm-workspace.yaml` for its Promptfoo dependencies. Tooling type checks use the SDK’s TypeScript dependencies.
-
-Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner and check the TypeScript tooling:
+Use Node.js 22.22.0 or newer and install the [native build prerequisites](../../plugins/codex-security/native/README.md). From the repository root, install the SDK dependencies and set up the eval. Setup installs the eval and MCP app dependencies, type-checks the eval sources, and builds the host policy helper.
 
 ```bash
+pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir evals/triage-finding run setup
 ```
 
-After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals`. It prepares the SDK and type-checks the eval sources. Node and Promptfoo execute the TypeScript sources directly; package commands enable type stripping for Node 22.13.
+The eval lockfile omits unused provider SDKs, document and image readers, and packages for SQL and natural-language assertions. To enable one for a new case, check how Promptfoo declares the package.
 
-Before running the eval commands, prepare the native policy helper (requires the [native build prerequisites](../../plugins/codex-security/native/README.md)):
+- For an excluded optional dependency such as `sharp`, remove its matching exclusion from `ignoredOptionalDependencies` in `pnpm-workspace.yaml`.
+- For an optional peer dependency such as `playwright`, add a pinned version to `dependencies` in this eval workspace’s `package.json`.
+
+After either change, run `pnpm install` in this directory to update the lockfile.
+
+## Check the harness
+
+From the repository root, run the same deterministic checks as CI. They use fixtures to exercise intake assertions, calibration, SastBench, and the Promptfoo provider without model calls.
 
 ```bash
-pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
-node plugins/codex-security/mcp-app/scripts/build_native.mjs
+(cd evals/triage-finding && node --run test:deterministic)
 ```
 
-The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. The runtime extension runs after Promptfoo loads the native Codex provider, preserving its authentication precedence. A pinned Promptfoo patch runs saved `:beforeAll` startup hooks during viewer replay. Replay does not restore grading metadata, so grading hooks remain disabled.
+After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals` to prepare the SDK and type-check the eval sources. Node and Promptfoo execute the TypeScript sources directly.
 
-Saved runs whose provider ID is `file://.../triage-provider.mts` need to be rerun with the current configuration before retry, resume, or replay. Their saved results remain intact. Native Codex provider IDs are unchanged.
-
-Validate the config:
+Check that Promptfoo can load the synthetic configuration:
 
 ```bash
 pnpm --dir evals/triage-finding run validate
 ```
 
-Run the full eval:
+## Run a model evaluation
 
-```bash
-pnpm --dir evals/triage-finding run eval
-```
-
-Run the first case as a quick smoke test:
+Start with the first synthetic case. This and the other `eval` commands use your configured Codex account and consume model usage.
 
 ```bash
 pnpm --dir evals/triage-finding run eval:smoke
 ```
 
-Run one case while iterating:
+To run one named case:
 
 ```bash
 pnpm --dir evals/triage-finding run eval --filter-metadata case_id=sarif-redirects
+```
+
+To run the full synthetic suite:
+
+```bash
+pnpm --dir evals/triage-finding run eval
 ```
 
 The eval target is `fixtures/repo`, a small synthetic Express app with both true positive and false positive/review cases. Assertions are deterministic:
 
 - `contains-json` validates the fenced `triage-finding/v0` JSON block against `schemas/triage-result-v0.schema.json`.
 - `assertions/triage-io.mts` checks input order, `input_id`, `source_type`,
-  verdicts, array fields, and `$fix-finding` handoff behavior.
+  verdicts, array fields, and `$fix-finding` handoff behavior. Its shared triage parser accepts complete JSON or multiline JSON code fences, including indented and CRLF fences. Inline fences and JSON embedded in prose are not accepted.
 - `tests/invocation-behavior.yaml` opts out of those default JSON assertions for the no-finding case with `options.disableDefaultAsserts: true`.
 - `assertions/missing-input.mts` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.
-- `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases.
-- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, explicit Connector requests and approved REST fallback, and explicit-only GitHub Issue handling.
+- `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases. Start a fresh GitHub intake evaluation when updating the routing fixtures. Saved runs retain their old prompts and expected transports.
+- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, transport and authentication selection, explicit Connector requests and approved fallback, and explicit-only GitHub Issue handling.
 
-The explicit Connector case returns a three-field JSON decision for transport,
-fallback, and account/repository scope. The code-scanning case returns request
-paths and query parameters as JSON. Other intake cases use freeform answers.
+The code-scanning case checks endpoint paths and query parameters. Routing cases
+check the selected transport and credential for a capable app, a saved GitHub CLI
+login, a direct credential, an unavailable credential, and user-selected app or CLI transports
+that cannot enforce the requested scope. Other intake cases use freeform answers.
 
 ## Calibration Dataset
 
-`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`. Case IDs, finding IDs, and checkout directories use stable opaque names. Variant labels, fix references, and checkout commit IDs remain in harness metadata rather than the model prompt. Hydration keeps Git metadata in opaque sibling directories outside the model-readable checkout. Re-run `calibration:hydrate` to update older checkout layouts.
-
-ELI5: the dataset says "this exact old commit should be affected" and "this exact fixed commit should not be affected." The generator turns those rows into Promptfoo test prompts. The hydrator downloads the exact repo commits so Codex can inspect real code instead of synthetic snippets.
+The [calibration dataset](datasets/README.md) pairs vulnerable and fixed commits from public repositories. The generator creates one Promptfoo case per variant. Each model sees the supplied finding and a checkout pinned to that variant. Expected labels, fix references and Git metadata stay outside the model-readable checkout.
 
 Validate the dataset structure:
 
@@ -86,13 +90,19 @@ Run all deterministic calibration checks:
 pnpm --dir evals/triage-finding run test:calibration
 ```
 
-Regenerate the Promptfoo calibration tests:
+Validation and evaluation load calibration tests directly from the dataset. To export a YAML copy for inspection:
 
 ```bash
-pnpm --dir evals/triage-finding run calibration:generate
+pnpm --dir evals/triage-finding run calibration:generate --output artifacts/calibration-oss.yaml
 ```
 
-Hydrate the local OSS checkouts:
+The optional exporter retains `--dataset`, `--output`, `--repo-root`, `--case`, and `--variant`. Its default output remains `tests/calibration-oss.yaml`; generated YAML is not needed to run the suite.
+
+The exporter and hydrator accept UTF-8 JSON datasets with or without a leading byte-order mark.
+
+### Download the pinned source
+
+To fetch all public repository revisions into `artifacts/calibration-repos/` before evaluation:
 
 ```bash
 pnpm --dir evals/triage-finding run calibration:hydrate
@@ -104,7 +114,9 @@ Validate the calibration Promptfoo config:
 pnpm --dir evals/triage-finding run validate:calibration
 ```
 
-Run one OSS variant as a smoke eval:
+### Evaluate the pinned commits
+
+Both model commands also hydrate their inputs. To fetch and evaluate just the smoke variant:
 
 ```bash
 pnpm --dir evals/triage-finding run eval:calibration:smoke
@@ -120,7 +132,7 @@ The calibration config is separate from the default synthetic eval:
 
 - `promptfooconfig.yaml` covers the small fixture app and GitHub intake routing.
 - `promptfooconfig.calibration.yaml` covers the OSS vulnerable/fixed commit pairs and adds `assertions/calibration-evidence.mts` to check that required paths or fix commits are cited in the response.
-- `promptfooconfig.calibration-smoke.yaml` covers a generated one-row smoke file under `artifacts/calibration-smoke.yaml`.
+- `promptfooconfig.calibration-smoke.yaml` passes case and variant filters to the native generator to load one smoke case.
 
 The calibration eval uses the Codex SDK provider, which shells out to `codex exec`. Run it from a normal shell or an unsandboxed command runner so the Codex CLI can write its normal `$CODEX_HOME` state.
 
@@ -129,6 +141,14 @@ Generated local state is ignored:
 - `node_modules/` contains the pinned Promptfoo/Codex SDK runner.
 - `.promptfoo/` contains Promptfoo's local state.
 - `artifacts/` contains hydrated OSS checkouts and eval result exports such as `artifacts/triage-finding-calibration-eval.json`.
+
+## Provider and replay
+
+The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. Separate YAML files under `providers/` retain the native Codex provider IDs and each suite's settings. The suite's `$ref` entries expand these settings into saved evaluation snapshots, so later edits to the provider files do not change an existing run's retry, resume, or replay settings. The runner uses Node's `--import` to preload the runtime adapter into the Promptfoo child process, so it can bind the staged runtime during evaluation, retry, resume, and viewer replay without a Promptfoo patch. Native provider loading preserves authentication precedence.
+
+The adapter depends on bundled Codex classes and internal methods in the pinned Promptfoo provider. The provider tests cover those methods, executable selection, authentication, and per-case settings. Replay does not restore grading metadata, so grading hooks remain disabled.
+
+Saved runs whose provider ID is `file://.../triage-provider.mts` need to be rerun with the current configuration before retry, resume, or replay. Their saved results remain intact. Native Codex provider IDs are unchanged.
 
 ## SastBench
 

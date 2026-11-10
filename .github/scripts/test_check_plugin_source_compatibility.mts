@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
   copyFileSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -10,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -75,27 +76,32 @@ test("accepts valid source and ignores untracked files", () => {
   assert.equal(result.stderr, "");
 });
 
-test("checkout preserves source size with autocrlf", () => {
+test("checkout preserves LF source and launcher bytes with autocrlf", () => {
   const root = fixture();
   copyFileSync(
     new URL("../../.gitattributes", import.meta.url),
     join(root, ".gitattributes"),
   );
   git(root, "config", "--local", "core.autocrlf", "true");
-  for (const [name, line] of [
-    ["module.py", "pass\n"],
-    ["module.mts", "null\n"],
+  for (const [name, contents] of [
+    ["module.py", "pass\n".repeat(30_000)],
+    ["module.mts", "null\n".repeat(30_000)],
+    [
+      "plugins/codex-security/scripts/launch_codex_security_mcp",
+      "#!/bin/sh\nexit 0\n",
+    ],
   ] as const) {
     const source = join(root, name);
-    const content = Buffer.from(line.repeat(30_000));
+    const content = Buffer.from(contents);
+    mkdirSync(dirname(source), { recursive: true });
     writeFileSync(source, content);
     git(root, "add", "--", ".gitattributes", name);
     unlinkSync(source);
     git(root, "checkout-index", "--", name);
-    const result = runChecker("--plugin-root", root);
-    assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(readFileSync(source), content);
   }
+  const result = runChecker("--plugin-root", root);
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("accepts Markdown structures, natural line endings, and inline markup", () => {

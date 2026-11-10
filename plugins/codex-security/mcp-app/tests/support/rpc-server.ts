@@ -1,6 +1,6 @@
+import { assertNoError } from "../assertions.ts";
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { setTimeout as delay } from "node:timers/promises";
 import { consumeStreamLines, writeMessage } from "./streams.ts";
 
 export function startRpcServer(
@@ -87,6 +87,8 @@ export function startRpcServer(
     send({ id, method, params });
     return waitForResponse(id);
   };
+  const callTool = (id: number, params: Record<string, unknown>) =>
+    request(id, "tools/call", params);
   return {
     pid: child.pid,
     notify: (method: string, params = {}) => send({ method, params }),
@@ -99,15 +101,21 @@ export function startRpcServer(
     waitForMessage,
     waitForResponse,
     response,
-    initialize(name: string, capabilities: Record<string, unknown> = {}) {
-      return request(1, "initialize", {
+    async initialize(name: string, capabilities: Record<string, unknown> = {}) {
+      const response = await request(1, "initialize", {
         protocolVersion: "2025-11-25",
         capabilities,
         clientInfo: { name, version: "0.1.0" },
       });
+      assertNoError(response);
+      return response;
     },
-    callTool: (id: number, params: Record<string, unknown>) =>
-      request(id, "tools/call", params),
+    callTool,
+    async callSuccessfulTool(id: number, params: Record<string, unknown>) {
+      const response = await callTool(id, params);
+      assertNoError(response);
+      return response.result;
+    },
     stderrEvents: () => [...stderrEvents],
     stderrText: () => stderrLines.join("\n"),
     async stop() {
@@ -118,8 +126,8 @@ export function startRpcServer(
       child.stdin!.end();
       if (options.terminateOnStop) child.kill();
       else {
-        await Promise.race([exited, delay(2_000)]);
-        child.kill("SIGKILL");
+        const timer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+        child.once("exit", () => clearTimeout(timer));
       }
       await exited;
     },

@@ -14,8 +14,8 @@ COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 export COREPACK_ENABLE_DOWNLOAD_PROMPT
 corepack install
 
-# Keep bun aligned with the version pinned in .github/workflows/node-ci.yml.
-npm install --global bun@1.3.14 --no-audit --no-fund
+bun_version=$(tr -d '\r' < .bun-version)
+npm install --global "bun@${bun_version:?empty .bun-version}" --no-audit --no-fund
 
 if ! command -v rg >/dev/null 2>&1; then
     # Refresh only the Ubuntu sources. Dev container features add APT sources of
@@ -29,4 +29,4 @@ fi
 
 pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
-python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
+python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt

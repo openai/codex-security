@@ -12,18 +12,29 @@ describe("npm package smoke timeouts", () => {
   test("extends the Windows install budget without slowing other command failures", () => {
     const { installTimeoutMs, commandTimeoutMs } =
       packageSmokeTimeouts("win32");
-    expect(installTimeoutMs).toBe(300_000);
+    expect(installTimeoutMs).toBe(600_000);
     expect(commandTimeoutMs).toBe(180_000);
   });
 
   test.each(["linux", "darwin", "win32"] as const)(
-    "allows installation and verification to each use their budget on %s",
+    "allows verification and the deliberate Deep Scan retry on %s",
     (platform) => {
-      const { commandTimeoutMs, installTimeoutMs, processTimeoutMs } =
-        packageSmokeTimeouts(platform);
+      const {
+        commandTimeoutMs,
+        installTimeoutMs,
+        deepScanTimeoutMs,
+        processTimeoutMs,
+      } = packageSmokeTimeouts(platform);
 
-      const remainingAfterInstallation = processTimeoutMs - installTimeoutMs;
-      expect(remainingAfterInstallation).toBeGreaterThan(commandTimeoutMs);
+      expect(deepScanTimeoutMs).toBeGreaterThanOrEqual(
+        commandTimeoutMs + 60_000 * 1.3,
+      );
+      const remainingForCleanup =
+        processTimeoutMs -
+        installTimeoutMs -
+        commandTimeoutMs -
+        deepScanTimeoutMs;
+      expect(remainingForCleanup).toBeGreaterThan(0);
     },
   );
 

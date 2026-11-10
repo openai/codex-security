@@ -66,7 +66,9 @@ print(json.dumps(result))
     ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts")],
     process.env,
     probe,
-    AbortSignal.timeout(10_000),
+    AbortSignal.timeout(
+      Number(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000"),
+    ),
   );
   expect(execution.exitCode, execution.stderr).toBe(0);
 

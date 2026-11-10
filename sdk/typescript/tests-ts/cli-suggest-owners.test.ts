@@ -26,7 +26,7 @@ afterEach(cleanup);
 async function input() {
   const directory = await temporaryDirectory();
   const contents = await readFile(
-    join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+    join(PLUGIN_ROOT, "examples", "legacy-completed-scan", "findings.json"),
     "utf8",
   );
   await writeFile(join(directory, "findings.json"), contents);
@@ -38,7 +38,7 @@ async function input() {
 }
 
 const report: OwnerSuggestions = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   revision: "a".repeat(40),
   model: "synthetic-model",
   reasoningEffort: "high",

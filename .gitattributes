@@ -11,5 +11,10 @@
 *.yaml text eol=lf
 *.yml text eol=lf
 
+plugins/codex-security/scripts/launch_codex_security_mcp text eol=lf
+
 # Bundled dependencies contain intentional whitespace in strings and comments.
 github-action/dist/*.cjs linguist-generated=true -whitespace
+
+# This checksum-pinned upstream license contains its original whitespace.
+docker/wolfi/payload/notices/BUBBLEWRAP-COPYING -text -whitespace

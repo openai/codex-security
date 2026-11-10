@@ -1,7 +1,8 @@
+import { isRecord } from "./record.js";
+import { compareTimestamps } from "./timestamps.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   gitHistoryIdentity,
@@ -16,21 +17,14 @@ import {
   runWorkbench,
   workbenchEnvironment,
   type ProcessEnvironment,
+  sqliteDatabaseOpener,
+  type RuntimeDatabase,
 } from "./runtime.js";
 
 interface ScanTarget {
   id: string;
   target_path: string;
   target_id?: string | null;
-}
-
-interface BootstrapDatabase {
-  exec(sql: string): unknown;
-  prepare(sql: string): {
-    all(...parameters: (string | number)[]): unknown[];
-    finalize?(): void;
-  };
-  close(): void;
 }
 
 /** Read only enough history to protect Python discovery; the workbench still validates the scan. */
@@ -43,7 +37,10 @@ export async function savedScanWorkbench(
     signal?: AbortSignal;
   },
 ): Promise<
-  SavedScanDependencies["runWorkbench"] & { environment: ProcessEnvironment }
+  SavedScanDependencies["runWorkbench"] & {
+    environment: ProcessEnvironment;
+    readonly protectedRoots: readonly string[];
+  }
 > {
   options.signal?.throwIfAborted();
   const environment: ProcessEnvironment = workbenchEnvironment(
@@ -137,12 +134,7 @@ export async function savedScanWorkbench(
     );
     if (typeof requestedId !== "string" && args[0] === "finding-workflow") {
       const workflow = result["workflow"];
-      if (
-        typeof workflow !== "object" ||
-        workflow === null ||
-        Array.isArray(workflow) ||
-        workflow["scanId"] !== targets[0]!.id
-      )
+      if (!isRecord(workflow) || workflow["scanId"] !== targets[0]!.id)
         throw new CodexSecurityError(
           "Saved workflow changed during lookup. Retry the command.",
         );
@@ -150,9 +142,7 @@ export async function savedScanWorkbench(
     if (target) {
       const scan = result["scan"];
       if (
-        typeof scan !== "object" ||
-        scan === null ||
-        Array.isArray(scan) ||
+        !isRecord(scan) ||
         scan["scanId"] !== target.id ||
         typeof scan["targetPath"] !== "string" ||
         resolve(scan["targetPath"]) !== resolve(target.target_path)
@@ -163,7 +153,38 @@ export async function savedScanWorkbench(
     }
     return result;
   };
-  return Object.assign(workbench, { environment });
+  return Object.assign(workbench, {
+    environment,
+    protectedRoots: [options.currentDirectory, ...protectedRoots],
+  });
+}
+
+function openSavedScanDatabase(
+  environment: ProcessEnvironment,
+): RuntimeDatabase {
+  const openDatabase = sqliteDatabaseOpener("read-existing");
+  return openDatabase(
+    join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
+  );
+}
+
+export function readSavedScanLifecycle(
+  environment: ProcessEnvironment,
+  scanId: string,
+): unknown {
+  const database = openSavedScanDatabase(environment);
+  try {
+    database.exec("PRAGMA busy_timeout = 0");
+    database.exec("PRAGMA query_only = ON");
+    const [row] = readRows<{ snapshot: string }>(
+      database,
+      "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?",
+      scanId,
+    );
+    return row && JSON.parse(row.snapshot);
+  } finally {
+    database.close();
+  }
 }
 
 async function readTargets(
@@ -172,33 +193,9 @@ async function readTargets(
   currentDirectory: string,
   signal?: AbortSignal,
 ): Promise<ScanTarget[]> {
-  const require = createRequire(import.meta.url);
-  const bun = process.versions["bun"] !== undefined;
-  const Database = (
-    bun ? require("bun:sqlite").Database : require("node:sqlite").DatabaseSync
-  ) as new (
-    path: string,
-    options: {
-      readonly?: boolean;
-      readOnly?: boolean;
-      readwrite?: boolean;
-      create?: boolean;
-    },
-  ) => BootstrapDatabase;
-  let database: BootstrapDatabase | undefined;
+  let database: RuntimeDatabase | undefined;
   try {
-    database = new Database(
-      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
-      // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
-      // Open only an existing file there; query_only still prevents SQL data/schema writes.
-      bun
-        ? {
-            readonly: process.platform !== "darwin",
-            readwrite: process.platform === "darwin",
-            create: false,
-          }
-        : { readOnly: true },
-    );
+    database = openSavedScanDatabase(environment);
     database.exec("PRAGMA busy_timeout = 5000");
     database.exec("PRAGMA query_only = ON");
     if (typeof requestedId !== "string") {
@@ -262,7 +259,7 @@ async function readTargets(
 }
 
 function readRows<T>(
-  database: BootstrapDatabase,
+  database: RuntimeDatabase,
   sql: string,
   ...parameters: (string | number)[]
 ): T[] {
@@ -277,7 +274,7 @@ function readRows<T>(
 }
 
 async function latestTargets(
-  database: BootstrapDatabase,
+  database: RuntimeDatabase,
   directory: string,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
@@ -362,15 +359,33 @@ async function latestTargets(
         related.add(target.id);
     }
   }
-  const scans = readRows<ScanTarget>(
+  const scans = readRows<
+    ScanTarget & {
+      updated_at: string;
+      progress_updated_at: string;
+      started_at: string;
+    }
+  >(
     database,
-    `SELECT scans.id, scans.target_path,
+    `SELECT scans.id, scans.target_path, scans.updated_at, scans.started_at,
+        progress.updated_at AS progress_updated_at,
         ${columns.has("target_id") ? "scans.target_id" : "scans.target_path"} AS target_id
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
       WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
-      ORDER BY MAX(scans.updated_at, progress.updated_at) DESC,
-        scans.started_at DESC, scans.id`,
-  );
+      ORDER BY scans.id`,
+  )
+    .map((scan) => ({
+      ...scan,
+      updatedAt:
+        compareTimestamps(scan.updated_at, scan.progress_updated_at) > 0
+          ? scan.updated_at
+          : scan.progress_updated_at,
+    }))
+    .sort(
+      (a, b) =>
+        compareTimestamps(b.updatedAt, a.updatedAt) ||
+        compareTimestamps(b.started_at, a.started_at),
+    );
   for (const scan of scans) {
     signal?.throwIfAborted();
     if (

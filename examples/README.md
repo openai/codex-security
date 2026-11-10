@@ -1,45 +1,43 @@
 # Examples
 
-Examples and templates for using Codex Security:
+| Task | Example |
+| --- | --- |
+| Scan an app, inspect a finding, patch it and verify the repair | [Invoice Desk walkthrough](invoice-desk/walkthrough.md). Copy only the synthetic app into the scan target. |
+| Supply your own validation test | [Custom validation demo](custom-validation/README.md). Run the local HTTP test on its own or let a model-backed scan invoke it. |
+| Scan pull requests and repositories with GitHub Actions | [GitHub Actions with Amazon Bedrock](github-actions/README.md) uses AWS OIDC and saves SARIF and readable reports. |
+| Scan Azure Repos from a central pipeline | [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md) runs manual full or committed-diff scans. |
+| Import Tenable One findings locally | [Tenable One export guide](../docs/scanner-imports/tenable.md) shows how to select code repository findings. |
+| Prepare a ServiceNow AVIT export | [AVIT template](servicenow-avit-template.csv). Replace the synthetic application and assignment values before using it as input to [export findings for ServiceNow](../sdk/typescript/docs/cli.md#export-findings-for-servicenow). |
+| Preview a Codex Security findings CSV for Cloud | [Findings CSV template](findings.csv). Add one row per finding and preview the file as shown below. |
 
-- [GitHub Actions with Amazon Bedrock](github-actions/README.md): a copyable
-  workflow for PR-diff and full-repository scans with AWS OIDC authentication,
-  SARIF uploads, and downloadable reports.
+## Preview a findings CSV
 
-- [Findings CSV template](findings.csv): a header-only template for
-  `codex-security publish scan --to cloud --csv PATH`. Copy it, add one finding
-  per row, and validate the file before publishing:
+Use this CSV format with `publish scan --to cloud`. For reports exported by a scanner,
+follow its [provider guide](../docs/scanner-imports/README.md). To try the Cloud CSV
+preview, copy the header-only [template](findings.csv) and append this synthetic row.
 
-  ```bash
-  npx @openai/codex-security publish scan --to cloud \
-    --csv /path/to/findings.csv --dry-run --json
-  ```
+```csv
+occ_e79cb19591e696572a1c22be,csf_852f90d6e1177502ff113d4a,Archive entry can escape the output directory,The archive writer uses the entry path without checking containment.,high,high,open,,,Validate each destination before writing.,src/extract.py,41,44
+```
 
-  See [Publish findings to Cloud](../sdk/typescript/README.md#publish-findings-to-cloud)
-  for the required columns and input rules.
+Keep every column in the template. Leave `close_reason` empty for an open finding.
+For a closed finding, use `already_fixed`, `wont_fix`, or `false_positive`. A
+`note` is required for the last two reasons and optional otherwise. Leave
+`end_line` empty if the location has only a start line.
 
-- [Custom validation demo](custom-validation/README.md): run a scan with a custom
-  validation script against a deliberately vulnerable API using synthetic data.
-  Follow the demo's setup instructions, and do not deploy the example app.
+Replace the path below with your populated copy. The dry run validates the file
+and previews the findings without uploading them.
 
-- [Invoice Desk sample](invoice-desk/README.md): a Node.js invoice app with ten
-  seeded finding scenarios, synthetic data, and no dependencies or external
-  services. Its [CI workflow](invoice-desk/README.md#ci-and-openai-scans) runs
-  behavior tests on PRs to `main` and queues OpenAI scans with environment
-  approval. Sample guides and expected findings stay outside the scan input.
-  Results include finding metrics and downloadable reports.
+```bash
+codex-security publish scan --to cloud --csv /path/to/findings.csv --dry-run --json
+```
 
-- [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md): centrally run
-  manual full or committed-diff scans against Azure Repos, with OIDC credentials,
-  report artifacts, and optional native SARIF publishing.
+See [Publish completed scans](../sdk/typescript/docs/cli.md#publish-completed-scans)
+when you are ready to upload.
 
 ## npm package
 
-This top-level `examples/` directory is available in the repository only; it is
-not included in the `@openai/codex-security` npm package. The package is built
-from [`sdk/typescript`](../sdk/typescript/package.json), whose `files` list
-includes only the CLI launcher, compiled SDK, bundled plugin, license, and
-package README. The package check rejects files outside its expected contents.
-
-The bundled plugin's own example artifacts are separate and remain part of the
-package.
+The examples above live in the source repository. The npm package includes the
+plugin's sample scan bundles. Use the [current report and manifest](../plugins/codex-security/examples/completed-scan/)
+to see what a scan produces. The [legacy bundle](../plugins/codex-security/examples/legacy-completed-scan/)
+illustrates how to read older scans that reference a separate coverage file.

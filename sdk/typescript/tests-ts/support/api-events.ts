@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
 import { CodexSecurity, runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
@@ -19,6 +20,7 @@ export function preparedRuntime(
 ): PreparedRuntime {
   return {
     codexHome,
+    deepScanConfigPath: join(codexHome, "deep-scan.toml"),
     plugin: {
       pluginRoot: PLUGIN_ROOT,
       marketplaceRoot,
@@ -114,15 +116,11 @@ export async function* failedEvents(): AsyncGenerator<ThreadEvent> {
 }
 
 export function completedCodex(root: string, threadId: string | null = null) {
-  return (_options: CodexOptions) => ({
-    startThread: () => ({
-      id: threadId,
-      async runStreamed() {
-        await copyCompletedScan(root);
-        return { events: completedEvents() };
-      },
-    }),
-  });
+  return (_options: CodexOptions) =>
+    codexFactory(async () => {
+      await copyCompletedScan(root);
+      return { events: completedEvents() };
+    }, threadId)();
 }
 
 export function collectObserverErrors(errors: [ScanObserverName, string][]) {

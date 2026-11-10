@@ -43,4 +43,4 @@ Use the main skill's preview and approval flow, including package metadata, the 
 
 Write the approved JSON to a mode-`0600` temporary file outside the repository and scan directory. Review it for sensitive content and send it once with `gh api --hostname github.com --input`; remove it on every exit. Reconcile uncertain creates by exact bindings before considering another mutation.
 
-Read the returned `ghsa_id` through the allowed endpoint. Compare normalized structured readback with the approved payload and require `state: draft` before reporting success.
+Record the accepted create with the returned `ghsa_id` using the main skill's shared issue history, then read it through the allowed endpoint. Compare normalized structured readback with the approved payload and require `state: draft` before reporting success. Record that readback separately from the accepted create.

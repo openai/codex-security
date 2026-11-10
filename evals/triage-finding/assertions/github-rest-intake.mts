@@ -1,4 +1,8 @@
-import { outputText as textFor, hasTriageJson } from "./output.mts";
+import {
+  gradeFailures,
+  outputText as textFor,
+  hasTriageJson,
+} from "./output.mts";
 import type { AssertionContext } from "../types.ts";
 
 function repositoryName(value: string) {
@@ -25,6 +29,15 @@ function endpointPattern(path: string, queryParts: string[] = []) {
 
 function escapedLiteralPattern(value: unknown) {
   return new RegExp(String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+}
+
+function matchesRef(actual: unknown, expected: unknown) {
+  return (
+    typeof expected === "string" &&
+    (actual === expected ||
+      (expected.startsWith("refs/heads/") &&
+        actual === expected.slice("refs/heads/".length)))
+  );
 }
 
 function structuredAnswer(text: string) {
@@ -129,24 +142,40 @@ const checks: Record<
     ];
     const requestMatches = (
       request:
-        | { path?: unknown; parameters?: { per_page?: unknown } }
+        | { path?: unknown; parameters?: Record<string, unknown> }
         | null
         | undefined,
       suffix: string,
-    ) =>
-      request &&
-      repositories.some(
-        (repository) =>
-          request.path === `/repos/${repository}/code-scanning/alerts${suffix}`,
-      ) &&
-      [100, "100"].some((value) => value === request.parameters?.per_page);
+    ) => {
+      const { ref, per_page, page = 1, ...options } = request?.parameters ?? {};
+      if (
+        (per_page !== 100 && per_page !== "100") ||
+        (page !== 1 && page !== "1") ||
+        !matchesRef(ref, context.vars.expected_default_ref) ||
+        !repositories.some(
+          (repository) =>
+            request?.path ===
+            `/repos/${repository}/code-scanning/alerts${suffix}`,
+        )
+      )
+        return false;
+      if (suffix) return Object.keys(options).length === 0;
+      const { state, sort = "created", direction = "desc", ...rest } = options;
+      return (
+        state === "open" &&
+        (sort === "created" || sort === "updated") &&
+        (direction === "asc" || direction === "desc") &&
+        Object.keys(rest).length === 0
+      );
+    };
     return [
-      ...(!requestMatches(answer?.alerts, "") ||
-      answer?.alerts?.parameters?.state !== "open"
-        ? ["must describe open code scanning alerts with per_page=100"]
+      ...(!requestMatches(answer?.alerts, "")
+        ? ["must describe open default-branch alerts with per_page=100"]
         : []),
       ...(!requestMatches(answer?.instances, "/{alert_number}/instances")
-        ? ["must describe per-alert instances with per_page=100"]
+        ? [
+            "must scope per-alert instances to the default ref with per_page=100",
+          ]
         : []),
       ...(answer?.source_type !== "sarif"
         ? ["must normalize code scanning as sarif"]
@@ -192,35 +221,27 @@ const checks: Record<
     ];
   },
 
-  explicit_connector: (text, context) => {
-    const repository = repositoryName(context.vars.target_repo as string);
+  transport: (text, { vars }) => {
     const decision = structuredAnswer(text);
-    if (!decision)
-      return ["must return the connector decision as a JSON object"];
-    const failures = [];
+    const fields = Object.entries(vars.expected_decision ?? {});
     if (
-      Object.keys(decision ?? {}).length !== 3 ||
-      Object.keys(decision?.scope ?? {}).length !== 2
+      !decision ||
+      !fields.length ||
+      Object.keys(decision).length !== fields.length
     )
-      failures.push(
-        "must return only transport, fallback, and scope with only account and repository",
-      );
-    if (decision?.transport !== "github_connector_read_only")
-      failures.push(
-        "must retrieve findings through the requested read-only GitHub Connector",
-      );
-    if (decision?.fallback !== "explain_and_request_rest_approval")
-      failures.push(
-        "must explain the limitation and request approval before REST fallback",
-      );
-    if (
-      decision?.scope?.account !== "user_specified_or_approved" ||
-      decision?.scope?.repository !== repository
-    )
-      failures.push(
-        "must scope the REST fallback to the specified account and exact repository",
-      );
-    return failures;
+      return ["must return only the requested GitHub decision fields"];
+    return fields
+      .filter(([key, value]) => {
+        if (key === "alerts_ref" || key === "instances_ref")
+          return !matchesRef(decision[key], value);
+        if (key === "account" && typeof value === "string")
+          return (
+            typeof decision[key] !== "string" ||
+            decision[key].toLowerCase() !== value.toLowerCase()
+          );
+        return decision[key] !== value;
+      })
+      .map(([key, value]) => `expected ${key} to be ${value}`);
   },
 
   explicit_issue: (text) => {
@@ -252,12 +273,5 @@ export default (output: unknown, context: AssertionContext) => {
     ? check(text, context)
     : [`unknown expected_github_rest_behavior: ${behavior}`];
 
-  return {
-    pass: failures.length === 0,
-    score: failures.length === 0 ? 1 : 0,
-    reason:
-      failures.length === 0
-        ? "GitHub REST intake behavior matched."
-        : failures.join("; "),
-  };
+  return gradeFailures(failures, "GitHub intake behavior matched.");
 };

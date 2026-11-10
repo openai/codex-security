@@ -47,7 +47,208 @@ function sessionEvent(
   return { type: "response_item", payload };
 }
 
+function expectCommandPaths(
+  cmd: string,
+  shell: string | undefined,
+  paths: readonly string[],
+  repository = "/repo",
+) {
+  const args = { cmd, shell };
+  const live = {
+    type: "item.started",
+    item: { id: "live", type: "command_execution", command: cmd, shell },
+  };
+  const saved = sessionEvent({
+    type: "function_call",
+    name: "exec_command",
+    call_id: "saved",
+    arguments: JSON.stringify(args),
+  });
+  for (const activity of [
+    scanActivityFromEvent(live, repository),
+    scanActivityFromEvent(toolEvent("exec", args), repository),
+    scanActivityFromSessionEvent(saved, repository),
+  ])
+    expect(activity?.paths).toEqual([...paths]);
+}
+
+function commandActivityCase(
+  _name: string,
+  command: string,
+  repository: string,
+  expected: object,
+) {
+  expect(
+    scanActivityFromEvent(commandEvent("item.started", command), repository),
+  ).toMatchObject(expected);
+}
+
 describe("scan activity", () => {
+  test.each([
+    [
+      '/bin/sh -c "cat \\"/repo/src/O\'Brien.ts\\""',
+      undefined,
+      ["src/O'Brien.ts"],
+    ],
+    [
+      '/bin/sh -c \'cat "$CODEX_SECURITY_REPOSITORY/src/O\'"\'Brien.ts\\""',
+      undefined,
+      ["src/O'Brien.ts"],
+    ],
+    ['cat "/repo/src/O\'Brien.ts"', undefined, ["src/O'Brien.ts"]],
+    ['cat "/repo/src/O\'Brien.ts"', "sh", ["src/O'Brien.ts"]],
+    [`cat '/repo/src/O'"'"'Brien.ts'`, "sh", ["src/O'Brien.ts"]],
+    ["cat /repo/src/O\\'Brien.ts", "sh", ["src/O'Brien.ts"]],
+    [`cat '/repo/src/say "hello".ts'`, "sh", ['src/say "hello".ts']],
+    ['cat "/repo/ leading.ts "', "/bin/bash", [" leading.ts "]],
+    [
+      'cat "$CODEX_SECURITY_REPOSITORY/src/O\'Brien.ts"',
+      "/bin/zsh",
+      ["src/O'Brien.ts"],
+    ],
+    ["sh -c \"cat '\\$CODEX_SECURITY_REPOSITORY/src/file.ts'\"", undefined, []],
+    ["ls '/repo/src/'", "sh", ["src"]],
+    ['cat "/repo/src/result:42:7"', "sh", ["src/result:42:7"]],
+    [
+      "/bin/sh -c \"cat '/repo/logs\\\\annual.txt'\"",
+      undefined,
+      ["logs\\annual.txt"],
+    ],
+    ["cat /repo/src/result:42:7", "sh", ["src/result"]],
+    ['cat "/repo/src/result:42:7"', undefined, ["src/result"]],
+    ['cat "/repo/src/result:42:7"', "/usr/bin/pwsh", ["src/result"]],
+  ] as const)(
+    "attributes quoted filenames in live and saved commands: %s (%p)",
+    (cmd, shell, paths) => expectCommandPaths(cmd, shell, paths),
+  );
+
+  test.each([
+    [
+      "cat $CODEX_SECURITY_REPOSITORY/src/my\\ file.ts",
+      "/repo",
+      ["src/my file.ts"],
+    ],
+    [
+      "cat /code/project\\ files/\\ leading\\ file.ts\\ ",
+      "/code/project files",
+      [" leading file.ts "],
+    ],
+    [
+      "cat \"/repo/two words\\ with.txt\" '/repo/quoted path.ts' /repo/my\\\tfile.ts",
+      "/repo",
+      ["two words\\ with.txt", "quoted path.ts", "my\tfile.ts"],
+    ],
+    [
+      "cat /repo/my\\ file.ts\\\\sibling /repo/safe.ts",
+      "/repo",
+      ["my file.ts\\sibling", "safe.ts"],
+    ],
+    [
+      "cat '/work\\tree/logs\\annual.txt' '/work\\tree/logs/annual.txt' '/work/tree/other.txt'",
+      "/work\\tree",
+      ["logs\\annual.txt", "logs/annual.txt"],
+    ],
+  ] as const)(
+    "decodes literal paths in recorded POSIX commands: %s",
+    (cmd, repository, paths) => {
+      for (const shell of ["sh", "/bin/bash", "/bin/zsh"])
+        expectCommandPaths(cmd, shell, paths, repository);
+    },
+  );
+
+  test("keeps distinct POSIX filenames in structured tool paths", () => {
+    const repository = "/work\\tree";
+    const args = {
+      paths: [
+        repository + "/logs\\annual.txt",
+        repository + "/logs/annual.txt",
+        "/work/tree/other.txt",
+      ],
+    };
+    for (const activity of [
+      scanActivityFromEvent(toolEvent("read_file", args), repository),
+      scanActivityFromSessionEvent(
+        sessionEvent({
+          type: "function_call",
+          call_id: "read",
+          name: "read_file",
+          arguments: JSON.stringify(args),
+        }),
+        repository,
+      ),
+    ])
+      expect(activity?.paths).toEqual(["logs\\annual.txt", "logs/annual.txt"]);
+  });
+
+  test.each([undefined, "/usr/bin/pwsh", "unknown"])(
+    "preserves ordinary token boundaries for shell %p",
+    (shell) => {
+      expect(
+        scanActivityFromEvent(
+          toolEvent("exec", {
+            cmd: "Get-ChildItem /repo/src\\ -File /repo/one.ts",
+            shell,
+          }),
+          "/repo",
+        )?.paths,
+      ).toEqual(["src", "one.ts"]);
+    },
+  );
+
+  test.each([
+    [
+      [
+        "grep",
+        "-F",
+        "foo\\",
+        "/repo/my file.ts",
+        "/repo/one\\two.ts",
+        "$CODEX_SECURITY_REPOSITORY/other.ts",
+      ],
+      "/repo",
+      ["my file.ts", "one\\two.ts"],
+    ],
+    [
+      ["sh", "-e", "-c", "/repo/inside.ts /repo/fake.ts", "/repo/direct.ts"],
+      "/repo",
+      ["direct.ts"],
+    ],
+    [
+      ["sh", "/repo/run.sh", "-c", "/repo/options.conf"],
+      "/repo",
+      ["run.sh", "options.conf"],
+    ],
+    [
+      ["pwsh", "-Command", "/repo/script.ps1", "/repo/script text"],
+      "/repo",
+      [],
+    ],
+    [
+      ["pwsh", "-File", "C:\\repo\\run.ps1", "-Command", "c:\\repo\\settings"],
+      "C:\\repo",
+      ["run.ps1", "settings"],
+    ],
+    [
+      ["cat", "//server/Share/Repo/my file.ts"],
+      "//Server/Share/Repo",
+      ["my file.ts"],
+    ],
+  ] as const)(
+    "uses the recorded argv boundaries for %p",
+    (command, repository, paths) => {
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "local_shell_call",
+            call_id: "argv",
+            action: { type: "exec", command },
+          }),
+          repository,
+        ),
+      ).toMatchObject({ description: command.join(" "), paths: [...paths] });
+    },
+  );
+
   test("reports repository files as soon as a read command starts", () => {
     expect(
       scanActivityFromEvent(
@@ -222,48 +423,72 @@ describe("scan activity", () => {
     }
   });
 
-  test("shows exact targeted file listing commands", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
-        ),
-        "/code/juice-shop",
-      ),
-    ).toMatchObject({
-      description: 'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
-      paths: ["SECURITY.md"],
-    });
-  });
-
-  test("does not present plugin instructions as repository files", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
+  test.each([
+    [
+      "shows exact targeted file listing commands",
+      'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
+      "/code/juice-shop",
+      {
+        description: 'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
+        paths: ["SECURITY.md"],
+      },
+    ],
+    [
+      "does not present plugin instructions as repository files",
+      'sed -n 1,160p "$CODEX_SECURITY_PLUGIN_ROOT/skills/security-scan/SKILL.md"',
+      "/code/juice-shop",
+      {
+        description:
           'sed -n 1,160p "$CODEX_SECURITY_PLUGIN_ROOT/skills/security-scan/SKILL.md"',
-        ),
-        "/code/juice-shop",
-      ),
-    ).toMatchObject({
-      description:
-        'sed -n 1,160p "$CODEX_SECURITY_PLUGIN_ROOT/skills/security-scan/SKILL.md"',
-      paths: [],
-    });
-  });
+        paths: [],
+      },
+    ],
+    [
+      "preserves spaces in quoted repository file paths",
+      'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login page.ts"',
+      "/code/juice shop",
+      { paths: ["routes/login page.ts"] },
+    ],
+  ] as const)("%s", commandActivityCase);
 
-  test("preserves spaces in quoted repository file paths", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login page.ts"',
-        ),
-        "/code/juice shop",
-      ),
-    ).toMatchObject({ paths: ["routes/login page.ts"] });
-  });
+  test.each(["  ", "\u00a0"])(
+    "attributes literal whitespace in paths before formatting descriptions (%j)",
+    (whitespace) => {
+      const repository = `/code/scan${whitespace}project`;
+      const script = `cat  "${repository}/src/a${whitespace}b.ts"\n  "$CODEX_SECURITY_REPOSITORY/src/a b.ts"`;
+      const commands = [script, `/bin/sh -lc '${script}'`];
+      if (process.platform === "win32") {
+        commands.push(`pwsh -NoProfile -Command '${script}'`);
+      }
+      for (const command of commands) {
+        for (const activity of [
+          scanActivityFromEvent(
+            commandEvent("item.started", command),
+            repository,
+          ),
+          scanActivityFromEvent(
+            toolEvent("exec", { cmd: command }),
+            repository,
+          ),
+          scanActivityFromSessionEvent(
+            sessionEvent({
+              type: "function_call",
+              name: "exec_command",
+              call_id: "worker-command-1",
+              arguments: JSON.stringify({ cmd: command }),
+            }),
+            repository,
+          ),
+        ]) {
+          expect(activity).toMatchObject({
+            description:
+              'cat "/code/scan project/src/a b.ts" "$CODEX_SECURITY_REPOSITORY/src/a b.ts"',
+            paths: [`src/a${whitespace}b.ts`, "src/a b.ts"],
+          });
+        }
+      }
+    },
+  );
 
   test("recognizes repository paths generated for the current shell", () => {
     const command = `${process.platform === "win32" ? "Get-Content -LiteralPath" : "cat"} ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY", "/src/app.ts")}`;
@@ -326,72 +551,102 @@ describe("scan activity", () => {
     }
   });
 
-  test("keeps POSIX environment names case-sensitive", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'cat "$codex_security_repository/src/app.ts" "${Codex_Security_Repository}/src/app.ts"',
-        ),
-        "/code/project",
-      ),
-    ).toMatchObject({ paths: [] });
-  });
+  test.each([
+    [
+      "keeps POSIX environment names case-sensitive",
+      'cat "$codex_security_repository/src/app.ts" "${Codex_Security_Repository}/src/app.ts"',
+      "/code/project",
+      { paths: [] },
+    ],
+    [
+      "keeps POSIX environment names case-sensitive for Windows repositories",
+      'cat "$CODEX_SECURITY_REPOSITORY/Src/App.ts" "${CODEX_SECURITY_REPOSITORY}/Src/Other.ts" "$codex_security_repository/src/app.ts" "${Codex_Security_Repository}/src/app.ts"',
+      "C:\\code\\project",
+      { paths: ["Src/App.ts", "Src/Other.ts"] },
+    ],
+    [
+      "cleans escaped quotes from real wrapped scan commands",
+      'nl -ba "$CODEX_SECURITY_REPOSITORY/commands.py\\" printf "next" "$CODEX_SECURITY_REPOSITORY/server.py\\"',
+      "/code/juice-shop",
+      { paths: ["commands.py", "server.py"] },
+    ],
+    [
+      "never reports paths escaping the scan repository",
+      'cat "$CODEX_SECURITY_REPOSITORY/../credentials.json"',
+      "/code/juice-shop",
+      { paths: [] },
+    ],
+  ] as const)("%s", commandActivityCase);
 
-  test("cleans escaped quotes from real wrapped scan commands", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'nl -ba "$CODEX_SECURITY_REPOSITORY/commands.py\\" printf "next" "$CODEX_SECURITY_REPOSITORY/server.py\\"',
-        ),
-        "/code/juice-shop",
-      ),
-    ).toMatchObject({ paths: ["commands.py", "server.py"] });
-  });
-
-  test("never reports paths escaping the scan repository", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'cat "$CODEX_SECURITY_REPOSITORY/../credentials.json"',
-        ),
-        "/code/juice-shop",
-      ),
-    ).toMatchObject({ paths: [] });
-  });
-
-  test("keeps Unix and Windows tool paths inside the repository", () => {
-    for (const [repository, path, paths] of [
-      ["/code/juice-shop", "/code/juice-shop/../credentials.json", []],
-      [
-        "C:\\code\\juice-shop",
-        "C:\\code\\juice-shop\\..\\credentials.json",
-        [],
-      ],
-      [
-        "C:\\code\\juice-shop",
-        "C:\\code\\juice-shop\\routes\\login.ts",
-        ["routes/login.ts"],
-      ],
-    ] as const) {
-      expect(
-        scanActivityFromEvent(toolEvent("read_file", { path }), repository),
-      ).toMatchObject({ paths: [...paths] });
+  test.each([
+    ["C:\\Work\\Repo", "C:\\Work\\Repo\\Src\\A.ts", true],
+    ["C:\\Work\\Repo", "c:\\Work\\Repo\\Src\\A.ts", true],
+    ["C:/", "c:/Src/A.ts", true],
+    ["//Server/Share/Repo", "//server/Share/Repo/Src/A.ts", true],
+    ["\\\\Server\\Share", "\\\\server\\Share\\Src\\A.ts", true],
+    ["//?/UNC/Server/Share/Repo", "//?/UNC/server/Share/Repo/Src/A.ts", true],
+    ["//?/C:/Repo", "//?/c:/Repo/Src/A.ts", true],
+    ["//Server/Docs/Repo", "//server/docs/Repo/Src/A.ts", false],
+    ["//?/UNC/Srv/Docs", "//?/UNC/srv/docs/Src/A.ts", false],
+    ["/\\Foo/Repo", "/\\Foo/Repo/Src/A.ts", true],
+    ["/\\Foo/Repo", "/\\foo/Repo/Src/A.ts", false],
+    ["//Foo/Repo", "/\\foo/Repo/Src/A.ts", false],
+    ["/work/Repo", "/work/Repo/Src/A.ts", true],
+    ["C:/Work/Repo", "c:/Work/repo/Src/A.ts", false],
+    ["C:/Work/Repo", "c:/work/Repo/Src/A.ts", false],
+    ["//Server/Share/Repo", "//server/Share/repo/Src/A.ts", false],
+    ["//?/UNC/Srv/Share/Repo", "//?/UNC/srv/Share/repo/Src/A.ts", false],
+    ["//Server/Share", "//server/share-other/Src/A.ts", false],
+    ["//host/K/Repo", "//host/K/Repo/Src/A.ts", false],
+    ["//HOST/K/Repo", "//host/K/Repo/Src/A.ts", true],
+    ["//Host@SSL/Docs", "//HOST@ssl/Docs/Src/A.ts", true],
+    ["//Host@SSL/Docs", "//host@SSL/docs/Src/A.ts", false],
+    ["//Host@8080/Docs", "//host@8080/docs/Src/A.ts", false],
+    ["//?/UNC/Host@SSL@443/Docs", "//?/UNC/host@SSL@443/docs/Src/A.ts", false],
+    ["C:/Work/Repo", "c:/Work/Repo-other/Src/A.ts", false],
+    ["C:/", "D:/Src/A.ts", false],
+    ["C:Repo", "c:Repo/Src/A.ts", false],
+    ["/work/Repo", "/work/repo/Src/A.ts", false],
+    ["/work/Repo", "/work/Repo/../Src/A.ts", false],
+    ["C:/Work/Repo", "c:\\Work\\Repo\\..\\Src\\A.ts", false],
+  ] as const)(
+    "%s extracts live and saved activity paths from %s",
+    (repository, path, inside) => {
+      const paths = inside ? ["Src/A.ts"] : [];
+      const cmd = `type "${path}"`;
       expect(
         scanActivityFromSessionEvent(
           sessionEvent({
-            type: "function_call",
-            name: "read_file",
-            call_id: "worker-tool-1",
-            arguments: JSON.stringify({ path }),
+            type: "local_shell_call",
+            call_id: "worker-argv",
+            action: { type: "exec", command: ["cat", path] },
           }),
           repository,
         ),
-      ).toMatchObject({ paths: [...paths] });
-    }
-  });
+      ).toMatchObject({ paths });
+      expect(
+        scanActivityFromEvent(toolEvent("read_file", { path }), repository),
+      ).toMatchObject({ paths });
+      expect(
+        scanActivityFromEvent(commandEvent("item.started", cmd), repository),
+      ).toMatchObject({ paths, description: cmd });
+
+      for (const [name, args] of [
+        ["read_file", { path }],
+        ["exec_command", { cmd }],
+      ] as const) {
+        const event = sessionEvent({
+          type: "function_call",
+          call_id: "worker-call",
+          name,
+          arguments: JSON.stringify(args),
+        });
+        expect(scanActivityFromSessionEvent(event, repository)).toMatchObject({
+          paths,
+        });
+      }
+    },
+  );
 
   test("reports tool reads and completed reasoning", () => {
     expect(
@@ -553,6 +808,23 @@ describe("scan activity", () => {
     ]) {
       expect(activity).toMatchObject({ description });
     }
+  });
+
+  test("preserves a backtick run followed by a bare carriage return", () => {
+    const run = "`".repeat(16_000);
+    expect(
+      scanActivityFromEvent(
+        {
+          type: "item.completed",
+          item: {
+            id: "backtick-run",
+            type: "agent_message",
+            text: `${run}\rAfter the run.`,
+          },
+        },
+        "/synthetic/repository",
+      ),
+    ).toMatchObject({ description: `${run} After the run.` });
   });
 
   test("removes internal progress markers from fenced assistant examples", () => {

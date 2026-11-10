@@ -645,13 +645,27 @@ describe("finding catalogue", () => {
     const identity = (prefix: string) => `${prefix}🙂${"x".repeat(360_000)}`;
     const beforeIds = [identity("before-a"), identity("before-b")];
     const afterIds = [identity("after")];
+    const crossModeOccurrenceIds = [beforeIds[0]!, afterIds[0]!];
     const rootCause = "🙂".repeat(700_000);
     const selected = new Set<string>();
     const selections = new Set<string>();
     const observed = conversation((prompt) => {
       expect(characters(prompt)).toBeLessThanOrEqual(1 << 20);
       const payload = data<CatalogueData | EvidenceData>(prompt);
-      if (!("content" in payload)) return empty;
+      if (!("content" in payload)) {
+        for (const card of [
+          ...payload.findings.before,
+          ...payload.findings.after,
+        ]) {
+          expect(card["detailsOmitted"]).toBe(true);
+          expect(card["crossModeSite"]).toBe(
+            crossModeOccurrenceIds.includes(card.occurrenceId)
+              ? true
+              : undefined,
+          );
+        }
+        return empty;
+      }
 
       for (const identity of [
         ...payload.beforeOccurrenceIds,
@@ -669,12 +683,16 @@ describe("finding catalogue", () => {
     });
 
     expect(
-      await matchScanFindings(
+      await matchScanFindingsInternal(
         {
-          before: beforeIds.map((id) => finding(id, { rootCause })),
+          before: beforeIds.map((id) =>
+            finding(id, { rootCause, crossModeSite: true }),
+          ),
+          crossModeOccurrenceIds,
           after: afterIds.map((id) => finding(id, { rootCause })),
         },
         { codex: observed.codex },
+        { surface: "cli" },
       ),
     ).toEqual(empty);
     expect(selected).toEqual(new Set([...beforeIds, ...afterIds]));

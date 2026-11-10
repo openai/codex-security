@@ -115,6 +115,7 @@ export function windowsFileSystem(native: WindowsBinding) {
           isSymbolicLink: () => link,
           isReparsePoint: () =>
             (info.attributes & flags.FILE_ATTRIBUTE_REPARSE_POINT) !== 0,
+          isNameSurrogate: () => (info.reparseTag & 0x20000000) !== 0,
         };
       },
       flags.OPEN_EXISTING,
@@ -128,6 +129,28 @@ export function windowsFileSystem(native: WindowsBinding) {
       check(result.error, path);
       return { volume: result.volume, fileId: result.fileId };
     });
+  }
+
+  function directoryIdentity(path: Buffer) {
+    return withFile(
+      path,
+      flags.FILE_READ_ATTRIBUTES,
+      (handle) => {
+        const info = handle.attributes();
+        check(info.error, path);
+        if (
+          (info.attributes & flags.FILE_ATTRIBUTE_DIRECTORY) === 0 ||
+          (info.attributes & flags.FILE_ATTRIBUTE_REPARSE_POINT) !== 0
+        ) {
+          throw new Error("not a non-symlink directory");
+        }
+        const result = handle.identity();
+        check(result.error, path);
+        return { volume: result.volume, fileId: result.fileId };
+      },
+      flags.OPEN_EXISTING,
+      false,
+    );
   }
 
   function entriesWithTypes(path: Buffer) {
@@ -165,17 +188,25 @@ export function windowsFileSystem(native: WindowsBinding) {
     });
   }
 
-  function readFile(path: Buffer): Buffer {
-    return withFile(path, flags.GENERIC_READ, (handle) => {
-      const chunks: Buffer[] = [];
+  function readChunks(path: Buffer, consume: (chunk: Buffer) => boolean): void {
+    withFile(path, flags.GENERIC_READ, (handle) => {
       while (true) {
         const chunk = Buffer.alloc(64 * 1024);
         const result = handle.read(chunk, 0, chunk.length);
         check(result.error, path);
-        if (result.value === 0) return Buffer.concat(chunks);
-        chunks.push(chunk.subarray(0, result.value));
+        if (result.value === 0 || !consume(chunk.subarray(0, result.value)))
+          return;
       }
     });
+  }
+
+  function readFile(path: Buffer): Buffer {
+    const chunks: Buffer[] = [];
+    readChunks(path, (chunk) => {
+      chunks.push(chunk);
+      return true;
+    });
+    return Buffer.concat(chunks);
   }
 
   function writeFile(
@@ -237,10 +268,12 @@ export function windowsFileSystem(native: WindowsBinding) {
     realpath,
     stat,
     identity,
+    directoryIdentity,
     entriesWithTypes,
     mkdir,
     mkdirPrivate,
     readInto,
+    readChunks,
     readFile,
     writeFile,
     rename,

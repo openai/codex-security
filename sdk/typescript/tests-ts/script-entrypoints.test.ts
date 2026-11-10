@@ -10,12 +10,23 @@ let root: string;
 let linkedRepository: string;
 let compiled: string;
 let preload: string;
+let environment: NodeJS.ProcessEnv;
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "script entrypoints "));
   linkedRepository = join(root, "linked checkout");
   compiled = join(root, "compiled");
   preload = join(root, "stop-main.mjs");
+  environment = {
+    ...process.env,
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_EVENT_PATH: join(root, "event.json"),
+    GITHUB_REPOSITORY: "example/project",
+    GITHUB_SHA: "1".repeat(40),
+    GITHUB_OUTPUT: join(root, "output"),
+    GITHUB_STEP_SUMMARY: "",
+    PR_NUMBER: undefined,
+  };
   await mkdir(compiled);
   await symlink(repository, linkedRepository, "junction");
   await writeFile(
@@ -76,30 +87,67 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-test.each([
-  "sdk/typescript/scripts/release-automation.mjs",
-  "sdk/typescript/scripts/release-pr.mjs",
-  "sdk/typescript/scripts/check-plugin-source.mjs",
-  "sdk/typescript/scripts/build-plugin.mjs",
-  "sdk/typescript/scripts/smoke-published-package.mjs",
-  "plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs",
-  "plugins/codex-security/native/check.mjs",
-  ".github/scripts/invoice-desk-source.mjs",
-  ".github/scripts/invoice-desk-target.mjs",
-  "app.mjs",
-])("runs %s through symlinks and stays inert when imported", async (script) => {
+const scripts = {
+  "sdk/typescript/scripts/release-automation.mjs": "releaseVersion",
+  "sdk/typescript/scripts/release-pr.mjs": null,
+  "sdk/typescript/scripts/check-plugin-source.mjs": null,
+  "sdk/typescript/scripts/build-plugin.mjs": "buildBundledPlugin",
+  "sdk/typescript/scripts/smoke-published-package.mjs": null,
+  "plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs": "buildMcpApp",
+  "plugins/codex-security/native/check.mjs": "checkPrivatePaths",
+  ".github/scripts/invoice-desk-source.mjs": null,
+  ".github/scripts/invoice-desk-target.mjs": null,
+  "app.mjs": null,
+};
+
+function linkedScript(script: string) {
+  if (script === "app.mjs") return join(root, "linked app.mjs");
+  if (script === "plugins/codex-security/native/check.mjs")
+    return join(root, "linked compiled", script);
+  return join(linkedRepository, script);
+}
+
+test("imports maintainer scripts and their exports from Node stdin and eval", async () => {
+  const modules = Object.entries(scripts).map(([script, exported]) => [
+    pathToFileURL(linkedScript(script)).href,
+    exported,
+  ]);
+  const source = `
+    for (const [url, name] of ${JSON.stringify(modules)}) {
+      const module = await import(url);
+      if (name && typeof module[name] !== "function")
+        throw new Error(url + " must export " + name);
+    }
+    console.log("Imported all scripts");
+  `;
+  for (const mode of [
+    ["-"],
+    ["--eval", source],
+    ["--eval", source, "unrelated argument"],
+  ]) {
+    const result = await runCommand(
+      "node",
+      ["--import", pathToFileURL(preload).href, "--input-type=module", ...mode],
+      {
+        input: mode[0] === "-" ? source : undefined,
+        env: environment,
+        timeout: 30_000,
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe("Imported all scripts\n");
+    expect(result.stderr).toBe("");
+  }
+});
+
+test.each(Object.keys(scripts))("runs %s through symlinks", async (script) => {
   const native = script === "plugins/codex-security/native/check.mjs";
   const pluginScript = native || script.endsWith("build_mcp_app.mjs");
   const direct =
     script === "app.mjs" || native
       ? join(compiled, script)
       : join(repository, script);
-  const linked =
-    script === "app.mjs"
-      ? join(root, "linked app.mjs")
-      : native
-        ? join(root, "linked compiled", script)
-        : join(linkedRepository, script);
+  const linked = linkedScript(script);
   const version = script.endsWith("release-automation.mjs");
   const target = script.endsWith("invoice-desk-target.mjs");
   const args = version
@@ -107,16 +155,7 @@ test.each([
     : script.endsWith("build_mcp_app.mjs")
       ? ["--output", join(root, "mcp")]
       : [];
-  const environment = {
-    ...process.env,
-    GITHUB_EVENT_NAME: "workflow_dispatch",
-    GITHUB_EVENT_PATH: join(root, "event.json"),
-    GITHUB_REPOSITORY: "example/project",
-    GITHUB_SHA: "1".repeat(40),
-    GITHUB_OUTPUT: join(root, "output"),
-    GITHUB_STEP_SUMMARY: "",
-    PR_NUMBER: undefined,
-  };
+
   for (const invocation of [
     [direct],
     [linked],
@@ -140,36 +179,24 @@ test.each([
     if (version) expect(result.stdout).toBe("99.1.2\n");
     else if (target)
       expect(result.stdout).toContain(
-        `Main baseline at ${environment.GITHUB_SHA}`,
+        `Main baseline at ${environment["GITHUB_SHA"]}`,
       );
     else expect(result.stderr).toContain("SCRIPT_MAIN_REACHED");
   }
-  for (const argument of [
-    [],
-    ["unrelated argument"],
-    ...(pluginScript ? [[direct], [linked]] : []),
-  ]) {
-    const result = await runCommand(
-      "node",
-      [
-        "--import",
-        pathToFileURL(preload).href,
-        "--input-type=module",
-        "--eval",
-        `await import(${JSON.stringify(pathToFileURL(linked).href)})`,
-        ...argument,
-      ],
-      { env: environment, timeout: 30_000 },
-    );
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout + result.stderr).toBe("");
-  }
   if (pluginScript) {
-    const expression = `void import(${JSON.stringify(pathToFileURL(linked).href)})`;
-    for (const [command, mode, stdout] of [
-      ["node", ["-pe", expression], "undefined\n"],
-      [process.execPath, [`-e${expression}`], ""],
-      [process.execPath, [`-p${expression}`], "undefined\n"],
+    const url = JSON.stringify(pathToFileURL(linked).href);
+    const evalModule = [
+      "--input-type=module",
+      "--eval",
+      `await import(${url})`,
+    ];
+    const expression = `void import(${url})`;
+    for (const [command, mode, argument, stdout] of [
+      ["node", evalModule, direct, ""],
+      ["node", evalModule, linked, ""],
+      ["node", ["-pe", expression], direct, "undefined\n"],
+      [process.execPath, [`-e${expression}`], direct, ""],
+      [process.execPath, [`-p${expression}`], direct, "undefined\n"],
     ] as const) {
       const result = await runCommand(
         command,
@@ -177,7 +204,7 @@ test.each([
           "--import",
           command === "node" ? pathToFileURL(preload).href : preload,
           ...mode,
-          direct,
+          argument,
         ],
         { env: environment, timeout: 30_000 },
       );

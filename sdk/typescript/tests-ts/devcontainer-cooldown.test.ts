@@ -363,15 +363,12 @@ test("runs the guard with package metadata access inside the existing required c
   expect(job.steps[index]!.env).toEqual({ GH_TOKEN: "${{ github.token }}" });
   expect(job.permissions).toEqual({ contents: "read", packages: "read" });
   expect(job.steps[0]!.with?.["fetch-depth"]).toBe(2);
-  for (const name of ["required-test", "windows"]) {
-    const required = workflow.jobs[name]!;
-    expect(required.needs).toContain("static-checks");
-    expect(
-      required.steps.some(
-        (step) =>
-          step.run === "exit 1" &&
-          step.if?.includes("needs.static-checks.result != 'success'"),
-      ),
-    ).toBe(true);
-  }
+  const gate = workflow.jobs["ci"]!;
+  expect(gate.needs).toContain("static-checks");
+  expect(gate.steps).toContainEqual(
+    expect.objectContaining({
+      run: "node .github/scripts/check-ci-results.mjs",
+      env: { CI_RESULTS: "${{ toJSON(needs) }}" },
+    }),
+  );
 });

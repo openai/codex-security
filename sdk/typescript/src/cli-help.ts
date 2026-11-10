@@ -37,7 +37,9 @@ const SCAN_GROUPS: readonly Group[] = [
     [
       "output-dir",
       "archive-existing",
+      "owner-suggestions",
       "max-cost",
+      "max-time",
       "show-cost",
       "fail-on-severity",
       "headless",
@@ -64,6 +66,9 @@ const PUBLISH_GROUPS: readonly Group[] = [
 ];
 
 const VALUE_LABELS: Record<string, string> = {
+  context: "text",
+  "context-file": "file",
+  "output-schema": "file",
   config: "file",
   path: "path",
   "knowledge-base": "path",
@@ -78,9 +83,11 @@ const VALUE_LABELS: Record<string, string> = {
   "scan-dir": "path",
   "plugin-path": "path",
   "source-root": "path",
+  "avit-template": "file",
   python: "path",
   codex: "key=value",
   "max-cost": "usd",
+  "max-time": "minutes",
   "max-time-hours": "hours",
   "fail-on-severity": "level",
   "patch-severity": "level",
@@ -268,30 +275,33 @@ export function formatCliHelp(text: string, columns = 80): string {
       );
       if (command === "") {
         sections.push(
-          "Get started:\n" +
-            "  codex-security login\n\n" +
+          [
+            "Get started:",
+            "  codex-security login",
+            "",
             wrap(
-              "In your repository, optionally draft SECURITY.md:",
+              "In your repository, draft SECURITY.md (optional):",
               width,
               "  ",
               "  ",
-            ) +
-            "\n  codex-security policy .\n" +
+            ),
+            "  codex-security policy .",
             wrap(
-              "Review and edit the draft, then copy it to the displayed Policy target.",
+              "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.",
               width,
               "  ",
               "  ",
-            ) +
-            "\n" +
+            ),
             wrap(
-              "Skip this step to keep an existing policy or scan without one.",
+              "Skip this step to keep your existing policy or scan without one.",
               width,
               "  ",
               "  ",
-            ) +
-            "\n\n  codex-security scan .\n" +
+            ),
+            "",
+            "  codex-security scan .",
             "  codex-security findings",
+          ].join("\n"),
         );
       } else if (examples) {
         sections.push(examples);

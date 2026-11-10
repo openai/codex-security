@@ -1,6 +1,5 @@
 import { X509Certificate, hash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
 import { isMain } from "./is-main.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 
@@ -9,7 +8,7 @@ import { assertExpectedGitHead } from "./package-provenance.mjs";
  * @typedef {{ version: string, gitHead: string }} PublishedRelease
  * @typedef {PublishedRelease & { repository: string }} RepositoryRelease
  * @typedef {RepositoryRelease & { runId: string }} WorkflowRelease
- * @typedef {WorkflowRelease & { sha512: string }} ReleaseProvenance
+ * @typedef {WorkflowRelease & { runAttempt: string, sha512: string }} ReleaseProvenance
  */
 
 const packageName = "@openai/codex-security";
@@ -139,26 +138,13 @@ export function composeReleaseNotes(generatedNotes, releaseSummary) {
     releaseSummary,
     releaseSummaryEnd,
     "",
+    "<details>",
+    "<summary>All changes</summary>",
+    "",
     generatedNotes,
+    "",
+    "</details>",
   ].join("\n");
-}
-
-function releaseNoteFileArguments(args) {
-  const files = {};
-  for (let index = 0; index < args.length; index += 2) {
-    const option = args[index];
-    const file = args[index + 1];
-    if (
-      file === undefined ||
-      (option !== "--tagged-notes-file" &&
-        option !== "--existing-notes-file") ||
-      files[option] !== undefined
-    ) {
-      throw new Error("Invalid release note file arguments.");
-    }
-    files[option] = file;
-  }
-  return files;
 }
 
 /**
@@ -210,19 +196,6 @@ export function requireReleaseIncrease(version, previousVersion) {
     );
   }
   return version;
-}
-
-/**
- * @param {string} version
- * @param {unknown} registryError
- * @returns {string[]}
- */
-export function initialPublishedVersions(version, registryError) {
-  releaseVersion({ name: packageName, version });
-  if (version !== "0.1.0" || registryError?.error?.code !== "E404") {
-    throw new Error("Unable to verify published npm release history.");
-  }
-  return [];
 }
 
 /**
@@ -461,13 +434,7 @@ function verifySigningCertificate(bundle, expected) {
     );
   }
 
-  const runPrefix = `${expected.repository}/actions/runs/${expected.runId}/attempts/`;
-  const certificateRun = extensions.get(21);
-  if (
-    typeof certificateRun !== "string" ||
-    !certificateRun.startsWith(runPrefix) ||
-    !/^[1-9][0-9]*$/u.test(certificateRun.slice(runPrefix.length))
-  ) {
+  if (extensions.get(21) !== expected.invocation) {
     throw new Error(
       "The Fulcio certificate must identify the exact release run.",
     );
@@ -634,6 +601,25 @@ function readProvenance(verified) {
  * @param {WorkflowRelease} expected
  */
 export function verifySignatureAudit(report, archive, expected) {
+  return verifyAuditForRun(report, archive, expected, String(expected.runId));
+}
+
+/**
+ * @param {ReleaseMetadata} report
+ * @param {Uint8Array} archive
+ * @param {RepositoryRelease} expected
+ */
+export function verifyRecoveredSignatureAudit(report, archive, expected) {
+  return verifyAuditForRun(report, archive, expected, null);
+}
+
+/**
+ * @param {ReleaseMetadata} report
+ * @param {Uint8Array} archive
+ * @param {RepositoryRelease} expected
+ * @param {string | null} expectedRunId Null recovers the original signed run.
+ */
+function verifyAuditForRun(report, archive, expected, expectedRunId) {
   if (
     !Array.isArray(report?.invalid) ||
     !Array.isArray(report.missing) ||
@@ -734,21 +720,24 @@ export function verifySignatureAudit(report, archive, expected) {
     expected.gitHead,
   );
 
-  const runId = String(expected.runId);
-  if (!/^[1-9][0-9]*$/u.test(runId)) {
+  if (expectedRunId !== null && !/^[1-9][0-9]*$/u.test(expectedRunId)) {
     throw new Error(
       "Verified provenance requires a valid release workflow run.",
     );
   }
   const invocation = statement.predicate?.runDetails?.metadata?.invocationId;
-  const invocationPrefix = `${repository}/actions/runs/${runId}/attempts/`;
-  if (
-    typeof invocation !== "string" ||
-    !invocation.startsWith(invocationPrefix) ||
-    !/^[1-9][0-9]*$/u.test(invocation.slice(invocationPrefix.length))
-  ) {
+  const prefix = `${repository}/actions/runs/`;
+  const match =
+    typeof invocation === "string" && invocation.startsWith(prefix)
+      ? /^([1-9][0-9]*)\/attempts\/([1-9][0-9]*)$/u.exec(
+          invocation.slice(prefix.length),
+        )
+      : null;
+  if (!match || (expectedRunId !== null && match[1] !== expectedRunId)) {
     throw new Error(
-      "Verified SLSA provenance must identify the successful release run.",
+      expectedRunId === null
+        ? "Verified SLSA provenance must identify the protected release run."
+        : "Verified SLSA provenance must identify the successful release run.",
     );
   }
 
@@ -765,70 +754,17 @@ export function verifySignatureAudit(report, archive, expected) {
     repository,
     releaseRef,
     gitHead: expected.gitHead,
-    runId,
+    invocation,
   });
 
   return {
     version,
     gitHead: expected.gitHead,
     repository: expected.repository,
-    runId,
+    runId: match[1],
+    runAttempt: match[2],
     sha512,
   };
-}
-
-/**
- * @param {ReleaseMetadata} report
- * @param {Uint8Array} archive
- * @param {RepositoryRelease} expected
- */
-export function verifyRecoveredSignatureAudit(report, archive, expected) {
-  const version = releaseVersion({
-    name: packageName,
-    version: expected.version,
-  });
-  if (
-    typeof expected.repository !== "string" ||
-    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(expected.repository)
-  ) {
-    throw new Error("Verified provenance requires an exact GitHub repository.");
-  }
-
-  const verified = Array.isArray(report?.verified)
-    ? report.verified.find(
-        (candidate) =>
-          candidate?.name === packageName && candidate.version === version,
-      )
-    : undefined;
-  if (verified === undefined) {
-    throw new Error(
-      "The published package must have a cryptographically verified attestation.",
-    );
-  }
-
-  const { statement } = readProvenance(verified);
-
-  const prefix = `https://github.com/${expected.repository}/actions/runs/`;
-  const invocation = statement?.predicate?.runDetails?.metadata?.invocationId;
-  if (typeof invocation !== "string" || !invocation.startsWith(prefix)) {
-    throw new Error(
-      "Verified SLSA provenance must identify the protected release run.",
-    );
-  }
-  const match = /^([1-9][0-9]*)\/attempts\/([1-9][0-9]*)$/u.exec(
-    invocation.slice(prefix.length),
-  );
-  if (match === null) {
-    throw new Error(
-      "Verified SLSA provenance must identify the protected release run.",
-    );
-  }
-
-  return verifySignatureAudit(report, archive, {
-    ...expected,
-    version,
-    runId: match[1],
-  });
 }
 
 /**
@@ -906,80 +842,20 @@ function main() {
     return;
   }
 
-  if (command === "initial-published-versions" && process.argv.length === 4) {
-    const registryError = JSON.parse(readFileSync(0, "utf8"));
-    console.log(
-      JSON.stringify(initialPublishedVersions(process.argv[3], registryError)),
-    );
-    return;
-  }
-
-  if (command === "require-published-increase" && process.argv.length === 4) {
-    const publishedVersions = JSON.parse(readFileSync(0, "utf8"));
-    console.log(
-      requirePublishedReleaseIncrease(process.argv[3], publishedVersions),
-    );
-    return;
-  }
-
-  if (command === "release-mode" && process.argv.length === 4) {
-    const publishedVersions = JSON.parse(readFileSync(0, "utf8"));
-    console.log(publishedReleaseMode(process.argv[3], publishedVersions));
+  const historyCommands = {
+    "require-published-increase": requirePublishedReleaseIncrease,
+    "release-mode": publishedReleaseMode,
+  };
+  if (process.argv.length === 4 && Object.hasOwn(historyCommands, command)) {
+    const input = JSON.parse(readFileSync(0, "utf8"));
+    const result = historyCommands[command](process.argv[3], input);
+    console.log(result);
     return;
   }
 
   if (command === "validate-release-notes" && process.argv.length === 5) {
     const notes = readFileSync(process.argv[4], "utf8");
     process.stdout.write(parseReviewedReleaseNotes(process.argv[3], notes));
-    return;
-  }
-
-  if (command === "compose-release-notes" && process.argv.length >= 5) {
-    const version = process.argv[3];
-    const generatedNotes = readFileSync(process.argv[4], "utf8");
-    const normalizedGeneratedNotes = generatedNotes.replace(/(?:\r?\n)+$/u, "");
-    if (normalizedGeneratedNotes.length === 0) {
-      throw new Error("Generated GitHub release notes must not be empty.");
-    }
-    const files = releaseNoteFileArguments(process.argv.slice(5));
-    const taggedNotes =
-      files["--tagged-notes-file"] === undefined
-        ? undefined
-        : readFileSync(files["--tagged-notes-file"], "utf8");
-    const existingNotes =
-      files["--existing-notes-file"] === undefined
-        ? undefined
-        : readFileSync(files["--existing-notes-file"], "utf8");
-    const summary = resolveReleaseSummary(version, taggedNotes, existingNotes);
-    process.stdout.write(
-      composeReleaseNotes(normalizedGeneratedNotes, summary),
-    );
-    return;
-  }
-
-  if (command === "release-history" && process.argv.length === 4) {
-    const registryVersions = JSON.parse(
-      process.env.CODEX_SECURITY_PUBLISHED_NPM_VERSIONS ?? "[]",
-    );
-    const githubReleaseTags = (
-      process.env.CODEX_SECURITY_PUBLISHED_GITHUB_TAGS ?? ""
-    )
-      .split("\n")
-      .filter(Boolean);
-    const reachableTags = (
-      process.env.CODEX_SECURITY_REACHABLE_RELEASE_TAGS ?? ""
-    )
-      .split("\n")
-      .filter(Boolean);
-    console.log(
-      JSON.stringify(
-        releaseHistory(process.argv[3], {
-          registryVersions,
-          githubReleaseTags,
-          reachableTags,
-        }),
-      ),
-    );
     return;
   }
 
@@ -1016,49 +892,23 @@ function main() {
     return;
   }
 
-  if (
-    command === "verify-github-release" &&
-    (process.argv.length === 5 || process.argv.length === 6)
-  ) {
-    const release = JSON.parse(readFileSync(0, "utf8"));
-    const archivePath = process.argv[3];
-    const archive = readFileSync(archivePath);
-    const verified = verifyGitHubRelease(
-      release,
-      archive,
-      process.argv[4],
-      basename(archivePath),
-      process.argv[5] === undefined ? undefined : readFileSync(process.argv[5]),
-    );
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
   throw new Error(
     "Usage: release-automation.mjs version <package.json>, " +
       "release-tag <ref-type> <ref> <ref-name> <package.json>, " +
       "require-increase <version> <previous-version>, " +
-      "initial-published-versions <version> " +
-      "(npm registry error JSON from stdin), " +
       "require-published-increase <version> " +
       "(published npm versions JSON from stdin), " +
       "release-mode <version> (published npm versions JSON from stdin), " +
       "validate-release-notes <version> <release-notes-file>, " +
-      "compose-release-notes <version> <generated-notes-file> " +
-      "[--tagged-notes-file <file>] " +
-      "[--existing-notes-file <file>], " +
-      "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +
       "verify-github-publication <archive> <version> <git-head> " +
       "<repository> <run-id> (package metadata JSON from stdin and " +
       "verified provenance from CODEX_SECURITY_VERIFIED_PROVENANCE), " +
       "verify-provenance <archive> <version> <git-head> <repository> <run-id> " +
-      "(signature audit JSON from stdin), " +
+      "(signature audit JSON from stdin), or " +
       "verify-recovered-provenance <archive> <version> <git-head> " +
-      "<repository> (signature audit JSON from stdin), or " +
-      "verify-github-release <archive> <tag> [downloaded-asset] " +
-      "(GitHub release JSON from stdin).",
+      "<repository> (signature audit JSON from stdin).",
   );
 }
 

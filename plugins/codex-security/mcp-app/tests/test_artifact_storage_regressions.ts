@@ -1,3 +1,4 @@
+import { fixturePython as python } from "./support/python.ts";
 interface ArtifactToolResults {
   save_codex_security_artifact: {
     directory: string;
@@ -26,7 +27,6 @@ import { importModule } from "./import-module.ts";
 import { applicationRoot, buildServer } from "./build-server.ts";
 
 const pluginRoot = path.dirname(applicationRoot);
-const python = process.env.PYTHON || "python3";
 const exec = promisify(execFile);
 const fixture = await fs.realpath(
   await fs.mkdtemp(path.join(tmpdir(), "codex-security-storage-regressions-")),
@@ -101,11 +101,12 @@ async function connect(overrides: Record<string, string | undefined> = {}) {
   return async <Name extends keyof ArtifactToolResults>(
     name: Name,
     args: Record<string, unknown>,
+    threadId = "artifact-regression-owner",
   ): Promise<ArtifactToolResults[Name]> => {
     const result = await client.callTool({
       name,
       arguments: args,
-      _meta: { "openai/threadId": "artifact-regression-owner" },
+      _meta: { "openai/threadId": threadId },
     });
     assert.notEqual(result.isError, true, JSON.stringify(result));
     return result.structuredContent as ArtifactToolResults[Name];
@@ -113,6 +114,187 @@ async function connect(overrides: Record<string, string | undefined> = {}) {
 }
 
 try {
+  await test("standalone persistent storage rejects filesystem-root and contained targets", async () => {
+    const scanRoot = path.join(repository, "root-target-scans");
+    const entries = await fs.readdir(repository);
+    for (const [targetPath, selectedRoot] of [
+      [path.parse(repository).root, scanRoot],
+      [repository, repository],
+      [repository, scanRoot],
+    ]) {
+      for (const create of [true, false]) {
+        await assert.rejects(
+          standaloneArtifactContext(
+            targetPath,
+            workbench,
+            create,
+            selectedRoot,
+            "persistent",
+          ),
+          /Artifact storage must be outside the target repository/,
+        );
+      }
+    }
+    await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
+    assert.deepEqual(await fs.readdir(repository), entries);
+  });
+
+  await test("filesystem-root targets retain temporary artifact storage", async () => {
+    const scanRoot = path.join(fixture, "root-temporary-scans");
+    const context = await standaloneArtifactContext(
+      path.parse(repository).root,
+      workbench,
+      true,
+      scanRoot,
+      "temporary",
+    );
+    const saved = await saveCodexSecurityArtifact(
+      context,
+      { storage: "temporary", path: "notes.md", content: "temporary evidence" },
+      workbench,
+    );
+    temporaryDirectories.push(saved.directory);
+    const read = await readCodexSecurityArtifact(
+      context,
+      { storage: "temporary", path: "notes.md", encoding: "utf8" },
+      workbench,
+    );
+    assert.equal(read.content, "temporary evidence");
+    await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
+  });
+
+  await test("archived and replacement scans keep their own temporary evidence", async () => {
+    const call = await connect();
+    const output = path.join(fixture, "reused-output");
+    await fs.mkdir(output);
+    const recipe = {
+      config: {},
+      mode: "standard",
+      repository,
+      target: { kind: "repository", paths: [] },
+    };
+    const register = async (owner: string, ...options: string[]) => {
+      const { scanId } = await workbench([
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        output,
+        "--recipe-json",
+        JSON.stringify(recipe),
+        ...options,
+      ]);
+      await workbench([
+        "set-scan-thread",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        owner,
+      ]);
+      return { scanId, storage: "temporary", path: "evidence.txt" };
+    };
+
+    const first = await register("first-owner");
+    const evidence = await call(
+      "save_codex_security_artifact",
+      { ...first, content: "first scan" },
+      "first-owner",
+    );
+    temporaryDirectories.push(evidence.directory);
+    await workbench([
+      "fail-scan",
+      "--scan-id",
+      first.scanId,
+      "--message",
+      "scan stopped",
+    ]);
+    const next = await register("next-owner", "--archive-existing");
+    const replacement = await call(
+      "save_codex_security_artifact",
+      { ...next, content: "next scan" },
+      "next-owner",
+    );
+    temporaryDirectories.push(replacement.directory);
+    assert.equal(await fs.readFile(evidence.path, "utf8"), "first scan");
+    assert.equal(
+      (await call("read_codex_security_artifact", first, "first-owner"))
+        .content,
+      "first scan",
+    );
+    assert.equal(
+      (await call("read_codex_security_artifact", next, "next-owner")).content,
+      "next scan",
+    );
+  });
+
+  await test("option-shaped temporary artifact names survive save, read and import", async () => {
+    const context = await standaloneArtifactContext(
+      repository,
+      workbench,
+      true,
+      path.join(fixture, "literal-name-scans"),
+      "persistent",
+    );
+    for (const name of ["--help", "-evidence=λ.txt"]) {
+      const saved = await saveCodexSecurityArtifact(
+        context,
+        { storage: "temporary", path: name, content: "literal evidence\n" },
+        workbench,
+      );
+      temporaryDirectories.push(saved.directory);
+      const read = await readCodexSecurityArtifact(
+        context,
+        { storage: "temporary", path: name, encoding: "utf8" },
+        workbench,
+      );
+      assert.equal(read.content, "literal evidence\n");
+      const retained = await saveCodexSecurityArtifact(
+        context,
+        {
+          storage: "persistent",
+          path: `artifacts/${name}`,
+          sourcePath: saved.path,
+        },
+        workbench,
+      );
+      assert.equal(await fs.readFile(retained.path, "utf8"), read.content);
+    }
+  });
+
+  await test("standalone persistent storage allows sibling-prefix directories", async () => {
+    const scanRoot = repository + "-scans";
+    const context = await standaloneArtifactContext(
+      repository,
+      workbench,
+      true,
+      scanRoot,
+      "persistent",
+    );
+    const saved = await saveCodexSecurityArtifact(
+      context,
+      {
+        storage: "persistent",
+        path: "threatmodel.md",
+        content: "retained evidence",
+      },
+      workbench,
+    );
+    assert.equal(path.dirname(path.dirname(saved.directory)), scanRoot);
+    const readContext = await standaloneArtifactContext(
+      repository,
+      workbench,
+      false,
+      scanRoot,
+      "persistent",
+    );
+    const read = await readCodexSecurityArtifact(
+      readContext,
+      { storage: "persistent", path: "threatmodel.md", encoding: "utf8" },
+      workbench,
+    );
+    assert.equal(read.content, "retained evidence");
+  });
+
   await test(
     "temporary artifact operations reject a collection owned by another user",
     { skip: typeof process.geteuid !== "function" },
@@ -402,8 +584,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]).parent))
 import finalize_scan_contract as finalizer
 original_open = finalizer._open_scan_local_directory
-def open_then_replace(root_fd, parts, *, create):
-    descriptor = original_open(root_fd, parts, create=create)
+def open_then_replace(root_fd, parts, *, create, **options):
+    descriptor = original_open(root_fd, parts, create=create, **options)
     if not create and parts == ("artifacts", "nested"):
         if ${JSON.stringify(replacement)} == "parent":
             os.rename(${JSON.stringify(parent)}, ${JSON.stringify(moved)})
@@ -673,8 +855,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       ...identity,
       findings: [],
       threatModel: { summary: "Synthetic test target" },
-      coverage: {
-        completeness: "complete",
+      reviewState: {
         surfaces: [
           {
             id: "source",
@@ -753,8 +934,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]).parent))
 import finalize_scan_contract as finalizer
 original_open = finalizer._open_scan_local_directory
-def open_then_replace(root_fd, parts, *, create):
-    descriptor = original_open(root_fd, parts, create=create)
+def open_then_replace(root_fd, parts, **options):
+    descriptor = original_open(root_fd, parts, **options)
     if parts == ("artifacts", "nested"):
         os.rename(${JSON.stringify(parent)}, ${JSON.stringify(moved)})
         os.symlink(${JSON.stringify(outside)}, ${JSON.stringify(parent)})

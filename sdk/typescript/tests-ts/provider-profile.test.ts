@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join, sep } from "node:path";
@@ -18,11 +19,13 @@ import {
   createProfileCodex,
   createProviderProfile,
   providerPreflightCommand,
+  restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
-import { structuredCodexConfig } from "../src/config.js";
+import { mergeCodexOverrides, structuredCodexConfig } from "../src/config.js";
 import {
   bundledPluginRoot,
+  codexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
 } from "../src/runtime.js";
@@ -57,6 +60,216 @@ const startupProviders = {
   omitted: null,
   "synthetic.gateway": startupProvider,
 };
+
+test("native preflight preserves consent and attribution while reading exporters from its private home", async () => {
+  const home = await temporaryDirectory();
+  const sharedConfig =
+    '[analytics]\nenabled = false\n[otel]\nexporter = "none"\nenvironment = "synthetic-shared"\n';
+  await writeFile(join(home, "config.toml"), sharedConfig);
+  const { readDeepScanRuntimeConfig } = await import(
+    pathToFileURL(
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
+    ).href
+  );
+  const native = await providerPreflightCommand(resolveCodexCommand({}), {
+    analytics: { enabled: false },
+    otel: { exporter: "none", environment: "synthetic-root" },
+    profile: "selected",
+    profiles: {
+      selected: {
+        otel: { environment: "synthetic-selected", log_user_prompt: false },
+        responses_api_metadata: { "synthetic.tag": "selected" },
+      },
+    },
+  });
+  const read = async (args: readonly string[] | undefined) =>
+    await readDeepScanRuntimeConfig({
+      codexPath: native.command,
+      commandArgs: args,
+      cwd: home,
+      configOverrides: [],
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        ...(process.env["SystemRoot"] === undefined
+          ? {}
+          : { SystemRoot: process.env["SystemRoot"] }),
+        ...(process.env["TMPDIR"] === undefined
+          ? {}
+          : { TMPDIR: process.env["TMPDIR"] }),
+        HOME: home,
+        CODEX_HOME: home,
+      },
+      signal: new AbortController().signal,
+      context: "helper",
+    });
+  const effective = await read(native.args);
+  expect(effective.analytics).toEqual({ enabled: false });
+  expect(effective.otel).toMatchObject({
+    exporter: "none",
+    environment: "synthetic-shared",
+  });
+  expect(effective.responses_api_metadata).toEqual({
+    "synthetic.tag": "selected",
+  });
+  expect(await readFile(join(home, "config.toml"), "utf8")).toBe(sharedConfig);
+  const next = await read(
+    (await providerPreflightCommand(resolveCodexCommand({}), {})).args,
+  );
+  expect(next.otel.environment).toBe("synthetic-shared");
+  expect(next.responses_api_metadata ?? null).toBeNull();
+});
+
+test.each(["root", "selected profile"] as const)(
+  "native helper children keep %s exporter headers out of argv without moving their home",
+  async (source) => {
+    const home = await temporaryDirectory();
+    const sharedConfig =
+      '[analytics]\nenabled = false\n[otel]\nexporter = "none"\nenvironment = "synthetic-shared"\n';
+    await writeFile(join(home, "config.toml"), sharedConfig);
+    const script = join(home, "native telemetry.mjs");
+    await writeFile(
+      script,
+      `import { readFileSync } from "node:fs";
+      import { join } from "node:path";
+      console.log(JSON.stringify({
+        args: process.argv.slice(2),
+        home: process.env.CODEX_HOME,
+        config: readFileSync(join(process.env.CODEX_HOME, "config.toml"), "utf8"),
+      }));`,
+    );
+    const telemetry = {
+      analytics: { enabled: false },
+      responses_api_metadata: { "synthetic.tag": source },
+      otel: {
+        exporter: {
+          "otlp-http": {
+            endpoint: "https://telemetry.example.test/v1/logs",
+            protocol: "json",
+            headers: { Authorization: "Bearer synthetic-helper-exporter" },
+          },
+        },
+      },
+    };
+    const settings =
+      source === "root"
+        ? telemetry
+        : { profile: "selected", profiles: { selected: telemetry } };
+    const command = await providerPreflightCommand(
+      { command: process.execPath, args: [script] },
+      settings,
+    );
+    for (const args of [
+      ["login", "status"],
+      ["plugin", "marketplace", "list"],
+      ["app-server", "--stdio"],
+    ]) {
+      const result = await runCodexCommand(command, args, {
+        ...process.env,
+        CODEX_HOME: home,
+      });
+      expect(result.success, result.stderr).toBe(true);
+      const observed = JSON.parse(result.stdout);
+      expect(observed.home).toBe(home);
+      expect(observed.config).toBe(sharedConfig);
+      expect(JSON.stringify(observed.args)).not.toContain(
+        "synthetic-helper-exporter",
+      );
+      const forwarded = Object.assign(
+        {},
+        ...observed.args
+          .slice(0, -args.length)
+          .filter((_: string, index: number) => index % 2 === 1)
+          .map((value: string) => parse(value)),
+      );
+      expect(forwarded).toEqual({
+        analytics: telemetry.analytics,
+        responses_api_metadata: telemetry.responses_api_metadata,
+      });
+    }
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+      sharedConfig,
+    );
+  },
+);
+
+test.each([false, true])(
+  "saved managed provider profiles remain isolated across concurrent scans (replay: %p)",
+  async (replay) => {
+    const root = await temporaryDirectory();
+    const environment = {
+      CODEX_HOME: join(root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const home = codexSecurityCredentialHome(environment);
+    const providers = ["first", "second"].map((name) => ({
+      openrouter: {
+        base_url: `https://${name}.example.invalid/`,
+        http_headers: { "X-Synthetic-Token": `synthetic-${name}-value` },
+        ...(replay ? { auth: null } : {}),
+      },
+    }));
+    const profiles = await Promise.all(
+      providers.map((model_providers) =>
+        createProviderProfile(home, { model_providers }, { replay }),
+      ),
+    );
+    expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
+    const restore = (index: number) =>
+      restoreProviderProfile(
+        { model_provider: "openrouter" },
+        { name: profiles[index]!.name, home: "managed" },
+        environment,
+      );
+    const restored = await Promise.all([restore(0), restore(1)]);
+    for (const [index, profile] of profiles.entries()) {
+      expect(restored[index]).toEqual({
+        model_provider: "openrouter",
+        model_providers: providers[index]!,
+      });
+      if (process.platform !== "win32")
+        expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
+    }
+    await profiles[0]!.cleanup();
+    expect(await restore(1)).toEqual(restored[1]);
+    await expect(
+      restoreProviderProfile(
+        {},
+        { name: "../outside", home: "managed" },
+        environment,
+      ),
+    ).rejects.toThrow("invalid provider profile");
+  },
+);
+
+test("saved provider reads preserve JSON parse and permission failures", async () => {
+  const root = await temporaryDirectory();
+  const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
+  const home = codexSecurityCredentialHome(environment);
+  const profile = await createProviderProfile(home, config);
+  const reference = { name: profile.name, home: "managed" };
+  const jsonPath = join(home, `${profile.name}.config.json`);
+  expect(await restoreProviderProfile({}, reference, environment)).toEqual({
+    model_providers: config.model_providers,
+  });
+  await writeFile(jsonPath, "{", { mode: 0o600 });
+  await expect(
+    restoreProviderProfile({}, reference, environment),
+  ).rejects.toBeInstanceOf(SyntaxError);
+  if (process.platform !== "win32" && process.geteuid?.() !== 0) {
+    await chmod(jsonPath, 0o000);
+    try {
+      await expect(
+        restoreProviderProfile({}, reference, environment),
+      ).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      await chmod(jsonPath, 0o600);
+    }
+  }
+});
 
 test.each([
   [
@@ -225,13 +438,47 @@ test.each([
 
 test("native profile turns omit optional null fields and retain array errors", async () => {
   const home = await temporaryDirectory();
+  const saved = await createProviderProfile(
+    home,
+    {
+      model_providers: {
+        "synthetic.gateway": { http_headers: null, auth: null },
+      },
+    },
+    { replay: true },
+  );
+  const replay = await restoreProviderProfile(
+    {},
+    { name: saved.name, home: "ambient" },
+    { CODEX_HOME: home },
+  );
+  const native = await createProviderProfile(
+    home,
+    mergeCodexOverrides(
+      {
+        model_providers: {
+          "synthetic.gateway": {
+            name: "Synthetic",
+            wire_api: "responses",
+            http_headers: { "X-Synthetic": "synthetic-inherited-header" },
+            auth: { command: "synthetic-inherited-auth" },
+          },
+        },
+      },
+      replay,
+    ),
+  );
   const script = join(home, "profile child.mjs");
   await writeFile(
     script,
-    `for await (const chunk of process.stdin) {}
+    `import { readFile } from "node:fs/promises";
+    import { join } from "node:path";
+    for await (const chunk of process.stdin) {}
+    const args = process.argv.slice(1);
+    const profile = await readFile(join(process.env.CODEX_HOME, args[args.indexOf("--profile") + 1] + ".config.toml"), "utf8");
     console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
     console.log(JSON.stringify({ type: "item.completed", item: {
-      type: "agent_message", id: "answer", text: JSON.stringify(process.argv.slice(1)),
+      type: "agent_message", id: "answer", text: JSON.stringify({ args, profile }),
     } }));
     console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
     process.exit(0);`,
@@ -258,14 +505,21 @@ test("native profile turns omit optional null fields and retain array errors", a
         nested: [{ enabled: true, optional: null }],
       }) as CodexOptions["config"],
     },
-    "synthetic-profile",
+    native.name,
   );
   for (const resumed of [false, true]) {
     const thread = resumed
       ? codex.resumeThread("synthetic-thread")
       : codex.startThread();
     const result = await thread.run("synthetic prompt");
-    const args: string[] = JSON.parse(result.finalResponse);
+    const observed = JSON.parse(result.finalResponse);
+    const args: string[] = observed.args;
+    expect(parse(observed.profile)).toEqual({
+      model_providers: {
+        "synthetic.gateway": { name: "Synthetic", wire_api: "responses" },
+      },
+    });
+    expect(args.join(" ")).not.toContain("synthetic-inherited");
     const overrides = args.flatMap((arg, index) =>
       arg === "--config" ? [args[index + 1]!] : [],
     );
@@ -347,34 +601,41 @@ console.log(JSON.stringify({ type: "item.completed", item: {
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
 process.exit(0);`,
   );
-  const configured = `${bin}${sep}.${sep}${executable}`;
-  const environment = {
-    ...(process.env["SystemRoot"] === undefined
-      ? {}
-      : { SystemRoot: process.env["SystemRoot"] }),
-    PATH: "",
-    CODEX_HOME: root,
-    CODEX_CLI_PATH: configured,
-    NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
-  };
-  const original = { ...environment };
-  const client = await createProfileCodex(
-    { env: environment },
-    "synthetic-profile",
-  );
-  for (const resumed of [false, true]) {
-    const thread = resumed
-      ? client.resumeThread("synthetic-thread")
-      : client.startThread();
-    const result = await thread.run("synthetic prompt");
-    expect(JSON.parse(result.finalResponse)).toEqual({
-      path: tools,
-      configured,
-      search: "synthetic bundled search",
-      resumed,
-    });
+  const aliases = [`${bin}${sep}.${sep}${executable}`];
+  if (process.platform !== "win32") {
+    const alias = join(root, "codex-alias");
+    await symlink(join(bin, executable), alias);
+    aliases.push(alias);
   }
-  expect(environment).toEqual(original);
+  for (const configured of aliases) {
+    const environment = {
+      ...(process.env["SystemRoot"] === undefined
+        ? {}
+        : { SystemRoot: process.env["SystemRoot"] }),
+      PATH: "",
+      CODEX_HOME: root,
+      CODEX_CLI_PATH: configured,
+      NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+    };
+    const original = { ...environment };
+    const client = await createProfileCodex(
+      { env: environment },
+      "synthetic-profile",
+    );
+    for (const resumed of [false, true]) {
+      const thread = resumed
+        ? client.resumeThread("synthetic-thread")
+        : client.startThread();
+      const result = await thread.run("synthetic prompt");
+      expect(JSON.parse(result.finalResponse)).toEqual({
+        path: tools,
+        configured,
+        search: "synthetic bundled search",
+        resumed,
+      });
+    }
+    expect(environment).toEqual(original);
+  }
 });
 
 test("private profiles retain providers for native required and inherited selection", async () => {

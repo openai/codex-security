@@ -35,6 +35,8 @@ export interface OwnerEvidence {
   kind: "source" | "blame" | "history" | "codeowners";
   path: string;
   commit: string;
+  /** Original blamed commit; blame citations keep commit at the checkout revision. */
+  blameCommit?: string;
   startLine?: number;
   endLine?: number;
   rule?: string;
@@ -128,7 +130,28 @@ export async function ownerRepository(
   // Latin-1 keys preserve Git's filename bytes, including unrelated non-UTF-8 names.
   const hasFile = (path: string) =>
     path.isWellFormed() && files.has(Buffer.from(path).toString("latin1"));
-  return { git, revision, hasFile, shallow };
+  const loadCodeowners = async () => {
+    const path = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"].find(
+      hasFile,
+    );
+    if (path === undefined) return null;
+    const source = await git("cat-file", "blob", `${revision}:${path}`);
+    // GitHub requires CODEOWNERS to be under 3 MB.
+    return {
+      path,
+      rules:
+        Buffer.byteLength(source) >= 3_000_000 ? null : parseCodeowners(source),
+    };
+  };
+  let codeowners: ReturnType<typeof loadCodeowners> | undefined;
+  return {
+    git,
+    revision,
+    hasFile,
+    shallow,
+    // Keep the load lazy so failures remain inside per-finding error handling.
+    codeowners: () => (codeowners ??= loadCodeowners()),
+  };
 }
 
 /** Neither references nor objects may link into another checkout. */
@@ -173,8 +196,9 @@ async function requireBoundMetadata(
 export async function collectOwnerEvidence(
   finding: OwnerFinding,
   repository: Awaited<ReturnType<typeof ownerRepository>>,
+  declaredOwnersFirst = false,
 ): Promise<OwnerContext> {
-  const { git, revision, hasFile, shallow } = repository;
+  const { revision, hasFile, shallow } = repository;
   const context: OwnerContext = {
     identities: [],
     evidence: [],
@@ -195,32 +219,21 @@ export async function collectOwnerEvidence(
     );
   if (finding.locations.length === 0)
     context.limitations.push("No source locations were supplied.");
-  const codeownersPath = [
-    ".github/CODEOWNERS",
-    "CODEOWNERS",
-    "docs/CODEOWNERS",
-  ].find(hasFile);
-  if (codeownersPath !== undefined) {
-    const source = await git(
-      "cat-file",
-      "blob",
-      `${revision}:${codeownersPath}`,
-    );
-    // GitHub requires CODEOWNERS to be under 3 MB.
-    if (Buffer.byteLength(source) >= 3_000_000) {
+  const codeowners = await repository.codeowners();
+  if (codeowners !== null) {
+    if (codeowners.rules === null) {
       context.limitations.push(
         "CODEOWNERS meets or exceeds GitHub's 3 MB file-size limit and was ignored.",
       );
     } else {
-      const rules = parseCodeowners(source);
       for (const { path } of finding.locations) {
         if (!hasFile(path)) continue;
-        const rule = codeownersForPath(rules, path);
+        const rule = codeownersForPath(codeowners.rules, path);
         if (rule === undefined) continue;
         if (rule.owners.length === 0) continue;
         const citation = addOwnerEvidence(context, {
           kind: "codeowners",
-          path: codeownersPath,
+          path: codeowners.path,
           commit: revision,
           startLine: rule.line,
           endLine: rule.line,
@@ -238,6 +251,7 @@ export async function collectOwnerEvidence(
     context.limitations.push(
       "CODEOWNERS identities are declarations; their existence and repository access are not verified.",
     );
+  if (declaredOwnersFirst && context.declaredOwners.length) return context;
   try {
     await collectGitOwnerEvidence(finding, repository, context, stale);
   } catch (error) {
@@ -342,7 +356,7 @@ async function collectGitOwnerEvidence(
           const previous = context.evidence.at(-1);
           if (
             previous?.kind === "blame" &&
-            previous.content === `Authored in ${commit}.` &&
+            previous.blameCommit === commit &&
             previous.identityIndex === index &&
             previous.endLine === line - 1
           ) {
@@ -352,6 +366,7 @@ async function collectGitOwnerEvidence(
               kind: "blame",
               path,
               commit: revision,
+              blameCommit: commit,
               startLine: line,
               endLine: line,
               content: `Authored in ${commit}.`,

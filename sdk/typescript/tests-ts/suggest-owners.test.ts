@@ -13,6 +13,7 @@ import {
 } from "../src/owner-evidence.js";
 import {
   suggestOwners,
+  suggestOwnersFromScan,
   type OwnerFinding,
   type SuggestOwnersOptions,
 } from "../src/suggest-owners.js";
@@ -146,6 +147,7 @@ test.each(["ISO-8859-1", "UTF-16LE"])(
         };
       });
       const report = await suggestOwners(repo.path, [finding], { codex });
+      expect(report.schemaVersion).toBe(2);
       expect(report.results[0]).toMatchObject({
         status: "identified",
         owner: { name, email },
@@ -498,41 +500,159 @@ exec "$SYNTHETIC_REAL_GIT" "$@"
   );
 }
 
-test("keeps renamed-file blame citations at HEAD and inherits SDK model settings", async () => {
-  const repo = await repository();
-  const path = "record [1].ts";
-  await repo.git("mv", "handler.ts", path);
-  await repo.git("commit", "-qm", "Rename record handler");
-  const { codex, calls } = fakeCodex();
-  const report = await suggestOwners(
-    repo.path,
-    [{ ...finding, locations: [{ path, startLine: 2, endLine: 3 }] }],
-    {
-      codex,
-      config: {
-        codexOverrides: {
-          model: "configured-model",
-          model_reasoning_effort: "low",
+test.each(["inline", "CODEX_HOME", "codex_home"])(
+  "keeps renamed-file blame citations at HEAD and inherits SDK model settings via %s",
+  async (homeKey) => {
+    const repo = await repository();
+    const path = "record [1].ts";
+    await repo.git("mv", "handler.ts", path);
+    await repo.git("commit", "-qm", "Rename record handler");
+    const { codex, calls } = fakeCodex();
+    const sourceHome =
+      homeKey === "inline" ? undefined : await temporaryDirectory();
+    if (sourceHome !== undefined)
+      await writeFile(
+        join(sourceHome, "review.config.toml"),
+        'model = "configured-model"\nmodel_reasoning_effort = "low"\n',
+      );
+    const report = await suggestOwners(
+      repo.path,
+      [{ ...finding, locations: [{ path, startLine: 2, endLine: 3 }] }],
+      {
+        codex,
+        ...(sourceHome === undefined
+          ? {}
+          : {
+              environment: {
+                ...process.env,
+                CODEX_HOME: undefined,
+                codex_home: undefined,
+                [homeKey]: sourceHome,
+              },
+            }),
+        config: {
+          codexOverrides:
+            sourceHome === undefined
+              ? {
+                  model: "configured-model",
+                  model_reasoning_effort: "low",
+                }
+              : { profile: "review" },
         },
       },
-    },
+    );
+    expect(report.results[0]!.status).toBe("identified");
+    expect(
+      report.results[0]!.evidence.find(({ kind }) => kind === "blame"),
+    ).toMatchObject({
+      path,
+      commit: await repo.git("rev-parse", "HEAD"),
+      startLine: 2,
+      endLine: 3,
+    });
+    expect(calls[0]!.thread).toMatchObject({
+      model: "configured-model",
+      modelReasoningEffort: "low",
+    });
+    expect(report).toMatchObject({
+      model: "configured-model",
+      reasoningEffort: "low",
+    });
+  },
+);
+
+test.each(["author", "checkout"] as const)(
+  "scan hints after a rename validate the %s commit against blame",
+  async (supportingCommit) => {
+    const repo = await repository();
+    const path = "record [1].ts";
+    await repo.git("mv", "handler.ts", path);
+    await repo.git(
+      "-c",
+      "user.name=Blair Example",
+      "-c",
+      "user.email=blair@example.test",
+      "commit",
+      "-qm",
+      "Rename record handler",
+    );
+    const revision = await repo.git("rev-parse", "HEAD");
+    const { codex, calls } = fakeCodex();
+    const report = await suggestOwnersFromScan(
+      repo.path,
+      [
+        {
+          ...finding,
+          sourceRevision: revision,
+          locations: [{ path, startLine: 2, endLine: 3 }],
+          extensions: {
+            ownerSuggestion: {
+              email: "alex@example.test",
+              commit: supportingCommit === "author" ? repo.original : revision,
+              reason: "Alex authored the affected lines before the rename.",
+            },
+          },
+        },
+      ],
+      { codex },
+    );
+    expect(calls).toHaveLength(0);
+    const result = report.results[0]!;
+    if (supportingCommit === "author") {
+      expect(result).toMatchObject({
+        status: "identified",
+        owner: { name: "Alex Example", email: "alex@example.test" },
+      });
+      expect(result.evidence.find(({ kind }) => kind === "blame")).toEqual({
+        id: expect.any(String),
+        kind: "blame",
+        path,
+        commit: revision,
+        startLine: 2,
+        endLine: 3,
+      });
+    } else {
+      expect(result).toMatchObject({ status: "error", owner: null });
+    }
+  },
+);
+
+test("scan hints match the cited commit when Git emails differ in case", async () => {
+  const repo = await repository();
+  await writeFile(
+    join(repo.path, "handler.ts"),
+    "// Record access\nexport function readRecord(id) {\n  return records.get(id);\n}\n",
   );
-  expect(report.results[0]!.status).toBe("identified");
-  expect(
-    report.results[0]!.evidence.find(({ kind }) => kind === "blame"),
-  ).toMatchObject({
-    path,
-    commit: await repo.git("rev-parse", "HEAD"),
-    startLine: 2,
-    endLine: 3,
-  });
-  expect(calls[0]!.thread).toMatchObject({
-    model: "configured-model",
-    modelReasoningEffort: "low",
-  });
-  expect(report).toMatchObject({
-    model: "configured-model",
-    reasoningEffort: "low",
+  await repo.git(
+    "-c",
+    "user.email=Alex@Example.test",
+    "commit",
+    "-qam",
+    "Use a record map",
+  );
+  const revision = await repo.git("rev-parse", "HEAD");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwnersFromScan(
+    repo.path,
+    [
+      {
+        ...finding,
+        sourceRevision: revision,
+        extensions: {
+          ownerSuggestion: {
+            email: "Alex@Example.test",
+            commit: revision,
+            reason: "Alex changed the affected record lookup.",
+          },
+        },
+      },
+    ],
+    { codex },
+  );
+  expect(calls).toHaveLength(0);
+  expect(report.results[0]).toMatchObject({
+    status: "identified",
+    owner: { name: "Alex Example", email: "Alex@Example.test" },
   });
 });
 
@@ -656,7 +776,7 @@ test("ranks committed CODEOWNERS declarations first and merges matching Git iden
   await mkdir(join(repo.path, "docs"));
   await writeFile(
     join(repo.path, ".github", "CODEOWNERS"),
-    "* @default\n/handler.ts @example/maintainers @reviewer alex@example.test\n",
+    "* @default\n/hand*.ts @example/maintainers @reviewer alex@example.test\n",
   );
   await writeFile(join(repo.path, "CODEOWNERS"), "* @wrong-root\n");
   await writeFile(join(repo.path, "docs", "CODEOWNERS"), "* @wrong-docs\n");
@@ -668,6 +788,7 @@ test("ranks committed CODEOWNERS declarations first and merges matching Git iden
   const report = await suggestOwners(repo.path, [finding], { codex });
   expect(calls).toHaveLength(1);
   expect(report.revision).toBe(revision);
+  expect(report.schemaVersion).toBe(2);
   expect(report.results[0]).toMatchObject({
     findingId: finding.findingId,
     status: "identified",
@@ -683,7 +804,7 @@ test("ranks committed CODEOWNERS declarations first and merges matching Git iden
         commit: revision,
         startLine: 2,
         endLine: 2,
-        rule: "/handler.ts @example/maintainers @reviewer alex@example.test",
+        rule: "/hand*.ts @example/maintainers @reviewer alex@example.test",
         matchedPath: "handler.ts",
       },
     ],
@@ -700,6 +821,125 @@ test("ranks committed CODEOWNERS declarations first and merges matching Git iden
   expect(new Set(calls[0]!.context.evidence.map(({ kind }) => kind))).toEqual(
     new Set(["codeowners", "source", "blame", "history"]),
   );
+});
+
+test("scan owner results keep every declared owner ahead of a conflicting Git hint", async () => {
+  const repo = await repository();
+  await writeFile(
+    join(repo.path, "CODEOWNERS"),
+    "/handler.ts @first @second\n",
+  );
+  await repo.git("add", "CODEOWNERS");
+  await repo.git("commit", "-qm", "Declare two owners");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwnersFromScan(
+    repo.path,
+    [
+      {
+        ...finding,
+        extensions: {
+          ownerSuggestion: {
+            email: "invalid@example.test",
+            commit: "0".repeat(40),
+            reason: "Unsupported hint",
+          },
+        },
+      },
+    ],
+    { codex },
+  );
+  expect(
+    report.results[0]?.suggestions.map(({ owner, evidence }) => ({
+      owner,
+      rule: evidence[0]?.rule,
+    })),
+  ).toEqual(
+    ["first", "second"].map((handle) => ({
+      owner: { kind: "person", provider: "github", handle },
+      rule: "/handler.ts @first @second",
+    })),
+  );
+  expect(calls).toHaveLength(0);
+});
+
+test("loads CODEOWNERS once per invocation while matching each finding separately", async () => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "other.ts"), "// Another owned file\n");
+  await writeFile(
+    join(repo.path, "CODEOWNERS"),
+    "/handler.ts @handler-owner\n/other.ts @other-owner\n",
+  );
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owners");
+  const trace = join(await temporaryDirectory("owner-trace-"), "git.jsonl");
+  const { codex, calls } = fakeCodex();
+  const options = {
+    codex,
+    environment: { ...process.env, GIT_TRACE2_EVENT: trace },
+  };
+  const findings = [
+    finding,
+    {
+      ...finding,
+      findingId: "finding-two",
+      locations: [{ path: "other.ts" }],
+    },
+  ];
+  const first = await suggestOwnersFromScan(repo.path, findings, options);
+  expect(first.results).toMatchObject([
+    {
+      owner: { handle: "handler-owner" },
+      evidence: [{ matchedPath: "handler.ts", startLine: 1 }],
+    },
+    {
+      owner: { handle: "other-owner" },
+      evidence: [{ matchedPath: "other.ts", startLine: 2 }],
+    },
+  ]);
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @new-owner\n");
+  await repo.git("commit", "-qam", "Update owners");
+  const second = await suggestOwnersFromScan(repo.path, findings, options);
+  expect(second.revision).not.toBe(first.revision);
+  expect(second.results.map(({ owner }) => owner)).toEqual([
+    { kind: "person", provider: "github", handle: "new-owner" },
+    { kind: "person", provider: "github", handle: "new-owner" },
+  ]);
+  const reads = (await readFile(trace, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { event: string; argv?: string[] })
+    .filter(
+      ({ event, argv }) => event === "start" && argv?.includes("cat-file"),
+    );
+  expect(reads.map(({ argv }) => argv!.at(-1))).toEqual([
+    `${first.revision}:CODEOWNERS`,
+    `${second.revision}:CODEOWNERS`,
+  ]);
+  expect(calls).toHaveLength(0);
+});
+
+test("reports a lazy CODEOWNERS load failure for each finding", async () => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @owner\n");
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owner");
+  const blob = await repo.git("rev-parse", "HEAD:CODEOWNERS");
+  await rm(join(repo.path, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+  const { codex, calls } = fakeCodex();
+  expect((await suggestOwners(repo.path, [], { codex })).results).toEqual([]);
+  const report = await suggestOwners(
+    repo.path,
+    [finding, { ...finding, findingId: "finding-two" }],
+    { codex },
+  );
+  expect(
+    report.results.map(({ findingId, status }) => ({ findingId, status })),
+  ).toEqual([
+    { findingId: finding.findingId, status: "error" },
+    { findingId: "finding-two", status: "error" },
+  ]);
+  expect(report.results[0]!.reason).toContain("cat-file");
+  expect(calls).toHaveLength(0);
 });
 
 test.each([

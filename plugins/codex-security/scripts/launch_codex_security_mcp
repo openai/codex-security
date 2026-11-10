@@ -1,4 +1,5 @@
 #!/bin/sh
+# Use LF line endings so POSIX can execute this script directly from Windows-built packages.
 set -eu
 
 PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -15,10 +16,10 @@ launch_node() {
   if [ "${1:-}" = "--helper" ]; then
     shift
     # Preserve POSIX argv and HOME bytes without temporary files or consuming stdin.
-    helper_stdin=-
+    helper_stdin_open=false
     if (exec 4<&0) 2>&-; then
       exec 4<&0
-      helper_stdin=4
+      helper_stdin_open=true
     fi
     wait_helper() {
       if wait "$!" 2>&-; then exit 0; else exit $?; fi
@@ -33,8 +34,15 @@ launch_node() {
     trap 'forward_signal HUP 129' HUP
     trap 'forward_signal INT 130' INT
     trap 'forward_signal TERM 143' TERM
-    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n' |
-      "$node_command" "$server_path" --helper 3<&0 0<&"$helper_stdin" 4<&- &
+    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n' | {
+      # BusyBox ash requires a literal close redirection for a closed stdin.
+      if [ "$helper_stdin_open" = true ]; then
+        exec 0<&4
+      else
+        exec 0<&-
+      fi
+      exec "$node_command" "$server_path" --helper 4<&-
+    } 3<&0 &
     exec 4<&-
     wait_helper
   fi
@@ -47,20 +55,73 @@ case "${CODEX_CLI_PATH:-}" in
   */*) codex_resources=${CODEX_CLI_PATH%/*} ;;
 esac
 
+# An explicitly selected runtime remains authoritative.
+if [ -n "${CODEX_MCP_NODE_PATH:-}" ] && [ -x "$CODEX_MCP_NODE_PATH" ]; then
+  launch_node "$CODEX_MCP_NODE_PATH" "$@"
+fi
+
+first_node=
+can_load_native() {
+  selected_node=$1
+  if [ -z "$first_node" ]; then
+    first_node=$1
+  fi
+  # Database helpers need SQLite. On macOS, library validation can also
+  # prevent a managed runtime from loading the plugin's addon.
+  # Capture output without opening a writable file for read-only callers.
+  if _native_probe_output=$("$1" -e '
+    if (process.platform === "linux") {
+      try { require("node:sqlite"); } catch { process.exitCode = 78; }
+    } else if (process.platform === "darwin") {
+      require("node:sqlite");
+      require(require("node:path").join(process.argv[1], "native",
+        `${process.platform}-${process.arch}`, "unix.node"));
+    }
+  ' "$launcher_dir/../mcp" </dev/null 2>&1); then
+    return 0
+  elif [ "$?" -ne 78 ]; then
+    return 1
+  fi
+
+  # This Linux runtime can still run helpers without SQLite. Prefer a system
+  # installation if available, without expanding discovery into the caller's PATH.
+  for system_candidate in /usr/local/bin/node /usr/bin/node /bin/node; do
+    if [ -x "$system_candidate" ] &&
+      _native_probe_output=$("$system_candidate" -e 'require("node:sqlite")' </dev/null 2>&1); then
+      selected_node=$system_candidate
+      break
+    fi
+  done
+  return 0
+}
+
 for candidate in \
-  "${CODEX_MCP_NODE_PATH:-}" \
   "${CODEX_BROWSER_USE_NODE_PATH:-}" \
   "${CODEX_ELECTRON_RESOURCES_PATH:-}/cua_node/bin/node" \
   "$codex_resources/cua_node/bin/node" \
   "$cache_root/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
 do
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    launch_node "$candidate" "$@"
+  if [ -n "$candidate" ] && [ -x "$candidate" ] && can_load_native "$candidate"; then
+    launch_node "$selected_node" "$@"
   fi
 done
 
-if node_path=$(command -v node); then
-  launch_node "$node_path" "$@"
+remaining_path=$PATH
+while :; do
+  path_entry=${remaining_path%%:*}
+  node_path=${path_entry:-.}/node
+  if [ -x "$node_path" ] && can_load_native "$node_path"; then
+    launch_node "$selected_node" "$@"
+  fi
+  case "$remaining_path" in
+    *:*) remaining_path=${remaining_path#*:} ;;
+    *) break ;;
+  esac
+done
+
+if [ -n "$first_node" ]; then
+  # Helpers that do not use the addon can still run with the original default.
+  launch_node "$first_node" "$@"
 fi
 
 printf '%s\n' 'Codex Security could not find a Node runtime. Reinstall or update Codex, or set CODEX_MCP_NODE_PATH to an executable Node runtime.' >&2

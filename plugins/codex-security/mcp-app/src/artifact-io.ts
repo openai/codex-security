@@ -1,18 +1,13 @@
 import { canonicalDirectory } from "./artifact-context.js";
-import { isRecord } from "./record.js";
+import type { ZodType, ZodError } from "zod/v4";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
-export interface DeepReducerWorkerContext {
-  id: string;
-  resultPath: string;
-}
-
-export interface DeepReducerContext {
-  scanRoot: string;
-  claimedWorkers: DeepReducerWorkerContext[];
-  previousReducerResultPath?: string;
+export interface DiscoveryBoardContext {
+  root: string;
+  author: string;
 }
 
 /**
@@ -21,33 +16,25 @@ export interface DeepReducerContext {
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
-  layout: "scan" | "worker" | "reducer";
+  layout: "scan" | "worker";
+  discoveryBoard?: DiscoveryBoardContext;
   scanId?: string;
   scope?: string;
+  includePaths?: readonly string[];
+  filePaths?: readonly string[];
   pluginRoot?: string;
   pythonCommand?: string;
   targetContract?: Readonly<Record<string, unknown>>;
   targetRevision?: string;
   handoffClaimToken?: string;
+  modelThreadId?: string;
   status?: string;
   mode?: string;
-  deepReducer?: DeepReducerContext;
 }
 
 export interface ArtifactPage {
   cursor?: string;
   limit?: number;
-}
-
-export interface ArtifactPageResult<Row> {
-  rows: Row[];
-  nextCursor?: string;
-}
-
-export interface ArtifactRowSchema<Row> {
-  safeParse(
-    value: unknown,
-  ): { success: true; data: Row } | { success: false; error?: unknown };
 }
 
 /**
@@ -146,7 +133,7 @@ export async function readArtifactJsonl<Row>(
   context: ArtifactContext,
   components: readonly string[],
   label: string,
-  rowSchema: ArtifactRowSchema<Row>,
+  rowSchema: ZodType<Row>,
 ): Promise<Row[]> {
   const source = await readArtifactText(context, components, label);
   const rows: Row[] = [];
@@ -183,7 +170,7 @@ export function paginateArtifactRows<Row>(
   rows: readonly Row[],
   page: ArtifactPage,
   label: string,
-): ArtifactPageResult<Row> {
+) {
   // The MCP tool schemas validate cursor syntax and limit bounds.
   const start = Number(page.cursor ?? "0");
   if (!Number.isSafeInteger(start) || start > rows.length) {
@@ -244,20 +231,58 @@ export async function artifactDestination(
   return destination;
 }
 
+const WINDOWS_RENAME_RETRY_MS = [10, 25, 50, 100, 200, 400];
+
+async function publishArtifact(
+  temporary: string,
+  destination: string,
+): Promise<void> {
+  // Windows can deny replacement while a reader or another publisher still
+  // holds the previous file. Retry the same rename, keeping the old file visible.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(temporary, destination);
+      return;
+    } catch (error) {
+      const delay = WINDOWS_RENAME_RETRY_MS[attempt];
+      if (
+        process.platform !== "win32" ||
+        delay === undefined ||
+        !isNodeError(error) ||
+        !["EPERM", "EBUSY", "EACCES"].includes(error.code ?? "")
+      ) {
+        throw error;
+      }
+      await sleep(delay);
+    }
+  }
+}
+
 export async function replaceArtifactText(
   path: string,
   content: string,
 ): Promise<void> {
   const temporary = join(dirname(path), "." + randomUUID() + ".tmp");
+  const handle = await fs.open(temporary, "wx", 0o600);
   try {
-    await fs.writeFile(temporary, content, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    await fs.rename(temporary, path);
-  } finally {
+    await handle.writeFile(content, "utf8").then(
+      () => handle.close(),
+      async (writeError: NodeJS.ErrnoException) => {
+        try {
+          await handle.close();
+        } catch (closeError) {
+          throw Object.assign(
+            new AggregateError([writeError, closeError], writeError.message),
+            { code: writeError.code },
+          );
+        }
+        throw writeError;
+      },
+    );
+    await publishArtifact(temporary, path);
+  } catch (error) {
     await fs.rm(temporary, { force: true });
+    throw error;
   }
 }
 
@@ -326,16 +351,12 @@ async function inspectOptionalPath(
   }
 }
 
-function formatRowSchemaError(error: unknown): string {
-  if (!isRecord(error) || !Array.isArray(error.issues)) return ".";
-  const issue: unknown = error.issues[0];
-  if (!isRecord(issue)) return ".";
-  const issuePath = Array.isArray(issue.path)
-    ? issue.path.map(String).join(".")
-    : "";
-  const message = typeof issue.message === "string" ? issue.message : "";
-  if (!issuePath && !message) return ".";
-  return ": " + (issuePath ? issuePath + ": " : "") + message;
+function formatRowSchemaError(error: ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return ".";
+  const issuePath = issue.path.map(String).join(".");
+  if (!issuePath && !issue.message) return ".";
+  return ": " + (issuePath ? issuePath + ": " : "") + issue.message;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

@@ -7,16 +7,18 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, win32 } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { privateDirectoryProof } from "./proof-windows-acl.mjs";
+import { processProof } from "./proof-process-windows.mjs";
 import { wideProcessProof } from "./proof-windows-wide.mjs";
 import { windowsFileSystem } from "./windows-files.mjs";
+import { scanReadProof } from "./proof-scan-read.mjs";
 import {
   loadWindowsBinding,
   windowsFlags as flags,
@@ -107,10 +109,9 @@ function handleProof(root: string) {
       payload.length,
     );
     assert.equal(checked(file.fileType()).value, 1);
-    assert.equal(
-      checked(file.attributes()).attributes & flags.FILE_ATTRIBUTE_DIRECTORY,
-      0,
-    );
+    const fileAttributes = checked(file.attributes());
+    assert.equal(fileAttributes.attributes & flags.FILE_ATTRIBUTE_DIRECTORY, 0);
+    assert.equal(fileAttributes.reparseTag, 0);
     const reader = keep(open(path, flags.GENERIC_READ));
     const buffer = Buffer.alloc(payload.length + 6, 0x7e);
     assert.equal(
@@ -189,6 +190,8 @@ function handleProof(root: string) {
     success(file.close());
     assert.equal(file.read(buffer, 0, 1).error, 6);
     assert.equal(file.write(buffer, 0, 1).error, 6);
+    assert.equal(file.identity().error, 6);
+    assert.equal(file.attributes().error, 6);
 
     const ancestor = join(root, "ancestor");
     const scan = join(ancestor, "scan");
@@ -250,10 +253,12 @@ function handleProof(root: string) {
     const junctionStat = files.stat(pathBytes(ancestor), false);
     assert(junctionStat.isDirectory());
     assert(junctionStat.isReparsePoint());
+    assert(junctionStat.isNameSurrogate());
     assert(!junctionStat.isSymbolicLink());
     const targetStat = files.stat(pathBytes(ancestor));
     assert(targetStat.isDirectory());
     assert(!targetStat.isReparsePoint());
+    assert(!targetStat.isNameSurrogate());
     samePath(
       checked(junction.finalPath(flags.FILE_NAME_OPENED)).path,
       ancestor,
@@ -322,6 +327,10 @@ function handleProof(root: string) {
     const replacement = join(longDirectory, "directory-\ufffd");
     mkdirSync(replacement);
     writeFileSync(join(replacement, "file-\ufffd"), "replacement sentinel");
+    assert.notDeepEqual(
+      files.directoryIdentity(pathBytes(rawDirectory)),
+      files.directoryIdentity(pathBytes(replacement)),
+    );
     const raw = keep(open(rawPath, undefined, undefined, flags.CREATE_NEW));
     rawPaths.push(rawPath);
     assert.equal(
@@ -380,7 +389,11 @@ async function ownershipProof(root: string): Promise<boolean> {
 const root = realpathSync.native(
   mkdtempSync(join(tmpdir(), "codex-security-windows-")),
 );
+let proofError: unknown;
 try {
+  const handles = handleProof(root);
+  const privateDirectories = privateDirectoryProof(root, native);
+  const wideProcessAndPaths = wideProcessProof(root);
   console.log(
     JSON.stringify(
       {
@@ -388,9 +401,16 @@ try {
         platform: process.platform,
         architecture: process.arch,
         nodeApi: 8,
-        handles: handleProof(root),
-        privateDirectories: privateDirectoryProof(root, native),
-        wideProcessAndPaths: wideProcessProof(root),
+        handles,
+        scanReads: scanReadProof(),
+        privateDirectories,
+        wideProcessAndPaths,
+        childProcesses: await processProof(
+          root,
+          wideProcessAndPaths[
+            "cachedSymlinkTagsIncludingDanglingDirectories"
+          ] === true,
+        ),
         garbageCollectionClosesHandle: await ownershipProof(root),
         fixture: basename(root),
       },
@@ -398,6 +418,23 @@ try {
       2,
     ),
   );
+} catch (error) {
+  proofError = error;
+  throw error;
 } finally {
-  rmSync(root, { recursive: true, force: true });
+  try {
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
+  } catch (error) {
+    if (proofError !== undefined)
+      throw new AggregateError(
+        [proofError, error],
+        "Windows proof and cleanup failed",
+      );
+    throw error;
+  }
 }

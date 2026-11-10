@@ -1,7 +1,7 @@
-import { Tiktoken } from "js-tiktoken/lite";
-import cl100kBase from "js-tiktoken/ranks/cl100k_base";
 import { errorMessage } from "../errors.js";
 import type { Finding } from "../models.js";
+import { VERSION } from "../version.js";
+import { createEmbeddingEncoder } from "./embedding-tokenizer.js";
 import { FindingsError } from "./errors.js";
 import type { FindingEmbedding } from "./storage.js";
 
@@ -16,13 +16,29 @@ export interface FindingEmbedder {
   embed(findings: readonly Finding[]): Promise<FindingEmbedding[]>;
 }
 
+/** One embedding batch, separate from scan model-token accounting. */
+export interface EmbeddingUsageObservation {
+  model: string;
+  /** Number of tokenized inputs in this batch, including chunks of long findings. */
+  inputCount: number;
+  /** Provider-reported input tokens; null means the response did not supply them. */
+  inputTokens: number | null;
+  /** Batch request and decoding outcome; final vector pooling belongs to embed(). */
+  outcome: "completed" | "failed" | "canceled";
+  durationMs: number;
+}
+
+export type EmbeddingUsageObserver = (
+  observation: Readonly<EmbeddingUsageObservation>,
+) => void;
+
 interface Chunk {
   findingIndex: number;
   tokens: number[];
 }
 
 export class OpenAiFindingEmbedder implements FindingEmbedder {
-  private readonly encoding = new Tiktoken(cl100kBase);
+  private readonly encode = createEmbeddingEncoder();
 
   constructor(
     private readonly apiKey:
@@ -33,6 +49,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
     ) => Promise<Response> = fetch,
     private readonly url: string = EMBEDDINGS_URL,
     private readonly signal?: AbortSignal,
+    private readonly onUsage?: EmbeddingUsageObserver,
   ) {}
 
   async embed(findings: readonly Finding[]): Promise<FindingEmbedding[]> {
@@ -50,7 +67,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
     let chunks: Chunk[] = [];
     let requestTokens = 0;
     for (const [findingIndex, finding] of findings.entries()) {
-      const tokens = this.encoding.encode(JSON.stringify(finding), [], []);
+      const tokens = this.encode(JSON.stringify(finding));
       for (let start = 0; start < tokens.length; start += MAX_INPUT_TOKENS) {
         const chunk = tokens.slice(start, start + MAX_INPUT_TOKENS);
         if (
@@ -82,10 +99,40 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
     chunks: Chunk[],
     vectors: number[][],
   ): Promise<void> {
+    const started = performance.now();
+    let inputTokens: number | null = null;
+    let outcome: EmbeddingUsageObservation["outcome"] = "failed";
+    try {
+      await this.requestChunks(chunks, vectors, (tokens) => {
+        inputTokens = tokens;
+      });
+      outcome = "completed";
+    } finally {
+      const observation = Object.freeze({
+        model: EMBEDDING_MODEL,
+        inputCount: chunks.length,
+        inputTokens,
+        outcome: this.signal?.aborted ? ("canceled" as const) : outcome,
+        durationMs: Math.max(0, performance.now() - started),
+      });
+      // Optional observers must neither reject nor delay embedding work.
+      void Promise.resolve()
+        .then(() => this.onUsage?.(observation))
+        .catch(() => {});
+    }
+  }
+
+  private async requestChunks(
+    chunks: Chunk[],
+    vectors: number[][],
+    onUsage: (inputTokens: number) => void,
+  ): Promise<void> {
     let response: Response;
     try {
+      this.signal?.throwIfAborted();
       const apiKey =
         typeof this.apiKey === "function" ? await this.apiKey() : this.apiKey;
+      this.signal?.throwIfAborted();
       if (!apiKey) throw new Error("Missing embedding credentials");
       response = await this.request(this.url, {
         method: "POST",
@@ -93,6 +140,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          "User-Agent": `codex-security/${VERSION}`,
         },
         body: JSON.stringify({
           model: EMBEDDING_MODEL,
@@ -116,13 +164,24 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       );
     }
 
-    let payload: { model?: unknown; data?: unknown } | null;
+    let payload: {
+      model?: unknown;
+      data?: unknown;
+      usage?: { prompt_tokens?: unknown };
+    } | null;
     try {
       payload = (await response.json()) as typeof payload;
     } catch {
       this.signal?.throwIfAborted();
       throw invalidEmbeddingResponse();
     }
+    const inputTokens = payload?.usage?.prompt_tokens;
+    if (
+      typeof inputTokens === "number" &&
+      Number.isSafeInteger(inputTokens) &&
+      inputTokens >= 0
+    )
+      onUsage(inputTokens);
     if (
       payload?.model !== EMBEDDING_MODEL ||
       !Array.isArray(payload.data) ||

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { discoveryLocationRoles } from "../discovery-location-roles.js";
 
 const nonEmptyString = z
   .string()
@@ -9,15 +10,7 @@ const candidateLocationSchemaV1 = z
     path: nonEmptyString,
     start_line: z.number().int().positive(),
     end_line: z.number().int().positive(),
-    role: z.enum([
-      "entrypoint",
-      "entrypoint/wrapper",
-      "source",
-      "root_control",
-      "sink",
-      "concrete_implementation",
-      "evidence",
-    ]),
+    role: z.enum(discoveryLocationRoles),
   })
   .refine((location) => location.end_line >= location.start_line, {
     message: "end_line must be greater than or equal to start_line",

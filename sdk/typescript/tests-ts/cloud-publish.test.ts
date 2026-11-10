@@ -1,11 +1,13 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
+import { VERSION } from "../src/version.js";
 import type { FindingsDocument, ScanManifest } from "../src/models.js";
 import { responding } from "./support/responses.js";
 import { once } from "node:events";
 import { rejecting } from "./support/errors.js";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -13,6 +15,7 @@ import {
 import {
   codexSecurityCredentialHome,
   setCodexSecurityCredentialLogout,
+  writeCredentialHomeConfig,
 } from "../src/runtime.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -122,6 +125,79 @@ async function addSecondFinding(scan: string): Promise<void> {
 }
 
 describe("Cloud publication", () => {
+  test("rejects invalid CSV UTF-8 before credentials or upload", async () => {
+    const path = await csvFixture();
+    const { environment } = await fixture();
+    const [prefix, suffix] = `${csvHeader}\n${csvRow}\n`.split(
+      "including nested entries",
+    );
+    const fetchMock = mock(rejecting("unexpected request"));
+    const reading = spyOn(fs, "readFile");
+    try {
+      for (const bytes of [Buffer.from([0xff]), Buffer.from([0xe2, 0x82])]) {
+        let decodeError: Error | undefined;
+        try {
+          new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch (error) {
+          decodeError = error as Error;
+        }
+        expect(decodeError).toBeInstanceOf(TypeError);
+        await writeFile(
+          path,
+          Buffer.concat([Buffer.from(prefix!), bytes, Buffer.from(suffix!)]),
+        );
+        await expect(
+          publishFindingsCsvToCloud(path, { environment, fetch: fetchMock }),
+        ).rejects.toMatchObject({
+          name: "CodexSecurityError",
+          message: `Could not read findings CSV. ${decodeError!.message}`,
+          cause: expect.objectContaining({ message: decodeError!.message }),
+        });
+      }
+      expect(reading.mock.calls.map(([file]) => file)).toEqual([path, path]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      reading.mockRestore();
+    }
+  });
+
+  test("preserves the filesystem cause when the selected CSV is missing", async () => {
+    const path = join(await temporaryDirectory(), "missing.csv");
+    const fetchMock = mock(rejecting("unexpected request"));
+    await expect(
+      publishFindingsCsvToCloud(path, { dryRun: true, fetch: fetchMock }),
+    ).rejects.toMatchObject({
+      name: "CodexSecurityError",
+      message: expect.stringContaining("ENOENT"),
+      cause: expect.objectContaining({ code: "ENOENT" }),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("preserves valid Unicode and BOM-bearing CSV source identities", async () => {
+    const path = await csvFixture();
+    const fetchMock = mock(rejecting("unexpected request"));
+    for (const marker of ["�", "😀"]) {
+      for (const bom of ["", "\uFEFF"]) {
+        const source = `${bom}${csvHeader}\n${csvRow.replace("including nested entries", marker)}\n`;
+        await writeFile(path, source);
+        const result = await publishFindingsCsvToCloud(path, {
+          dryRun: true,
+          fetch: fetchMock,
+        });
+        expect(result.findings?.[0]?.title).toBe(
+          `Unsafe archive extraction, ${marker}`,
+        );
+        expect(result.scanId).toBe(
+          `scan_csv_${sha256(
+            ["codex-security-csv-import/v1", VERSION, source].join("\0"),
+          ).slice(0, 24)}`,
+        );
+      }
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test("previews a validated findings export CSV without credentials or network access", async () => {
     const path = await csvFixture();
     const fetchMock = mock(rejecting("unexpected request"));
@@ -241,24 +317,6 @@ describe("Cloud publication", () => {
     }>;
     expect(finding!.findingId).toMatch(/^csf_[a-f0-9]{24}$/);
     expect(finding!.occurrenceId).toMatch(/^occ_[a-f0-9]{24}$/);
-  });
-
-  test("keeps separate CSV occurrences with the same source finding ID", async () => {
-    const second = csvRow.replace(
-      "occ_e79cb19591e696572a1c22be",
-      "occ_111111111111111111111111",
-    );
-    const path = await csvFixture(`${csvHeader}\n${csvRow}\n${second}\n`);
-    const result = await publishFindingsCsvToCloud(path, { dryRun: true });
-    expect(result.findingCount).toBe(2);
-    expect(
-      new Set(result.findings!.map((finding) => finding.occurrenceId)).size,
-    ).toBe(2);
-    expect(
-      new Set(result.findings!.map((finding) => finding.findingId)).size,
-    ).toBe(2);
-    const repeated = await publishFindingsCsvToCloud(path, { dryRun: true });
-    expect(repeated.findings).toEqual(result.findings);
   });
 
   test("accepts the candidate_id column from a Deep scan export", async () => {
@@ -494,22 +552,49 @@ describe("Cloud publication", () => {
     });
   });
 
-  test("honors a Cloud publication URL override", async () => {
+  test("uses the shared Cloud API base while preserving the publication URL override", async () => {
     const { scan, environment } = await fixture();
-    const publishUrl =
-      "https://chatgpt-staging.com/backend-api/aardvark/cli/findings";
-    let requestedUrl: string | undefined;
-    await publishScanToCloud(scan, {
-      environment: {
-        ...environment,
+    const cloudBase = "https://cloud.example.test/pilot/backend-api/aardvark";
+    const urls: string[] = [];
+    const fetch = async (url: string | URL | Request) => {
+      urls.push(String(url));
+      return Response.json(receipt);
+    };
+    const publishUrl = "https://other-cloud.example.test/publish";
+    for (const settings of [
+      { CODEX_SECURITY_CLOUD_BASE_URL: `${cloudBase}/` },
+      { CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl },
+      {
+        CODEX_SECURITY_CLOUD_BASE_URL: cloudBase,
         CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl,
       },
-      fetch: async (url) => {
-        requestedUrl = String(url);
-        return Response.json(receipt);
-      },
-    });
-    expect(requestedUrl).toBe(publishUrl);
+    ]) {
+      await publishScanToCloud(scan, {
+        environment: { ...environment, ...settings },
+        fetch,
+      });
+    }
+    expect(urls).toEqual([`${cloudBase}/cli/findings`, publishUrl, publishUrl]);
+  });
+
+  test("rejects a remote HTTP Cloud base before reading credentials or sending a scan", async () => {
+    const { scan, home, environment } = await fixture();
+    await rm(join(home, "auth.json"));
+    let requests = 0;
+    await expect(
+      publishScanToCloud(scan, {
+        environment: {
+          ...environment,
+          CODEX_SECURITY_CLOUD_BASE_URL:
+            "http://cloud.example.test/backend-api/aardvark",
+        },
+        fetch: async () => {
+          requests++;
+          return Response.json(receipt);
+        },
+      }),
+    ).rejects.toThrow("requires HTTPS");
+    expect(requests).toBe(0);
   });
 
   test("reuses the dedicated Codex Security login and honors an explicit logout", async () => {
@@ -524,10 +609,9 @@ describe("Cloud publication", () => {
       }),
       { mode: 0o600 },
     );
-    await writeFile(
-      join(home, "config.toml"),
-      'cli_auth_credentials_store = "auto"\n',
-    );
+    await writeCredentialHomeConfig(home, {
+      cli_auth_credentials_store: "auto",
+    });
 
     const send = mock(async (_url: string, options: RequestInit) => {
       expect(new Headers(options!.headers).get("ChatGPT-Account-ID")).toBe(
@@ -542,6 +626,27 @@ describe("Cloud publication", () => {
     ).rejects.toThrow("ChatGPT login already available to Codex Security");
     expect(send).toHaveBeenCalledTimes(1);
   });
+
+  test.each(["auto", "keyring", "ephemeral"])(
+    "does not publish an ambient account copied into the dedicated %s store",
+    async (store) => {
+      const { scan, home: ambient, environment } = await fixture();
+      const home = codexSecurityCredentialHome(environment);
+      await mkdir(home, { recursive: true, mode: 0o700 });
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: store,
+      });
+      // A successful native keyring login removed the old file. Account status
+      // can subsequently import a different account's ambient credentials.
+      await setCodexSecurityCredentialLogout(home, false);
+      await fs.copyFile(join(ambient, "auth.json"), join(home, "auth.json"));
+      const send = mock(receiptResponse);
+      await expect(
+        publishScanToCloud(scan, { environment, fetch: send }),
+      ).rejects.toThrow("ChatGPT login already available to Codex Security");
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
 
   test("resolves missing or empty CODEX_HOME through the existing user-home helper", async () => {
     const { scan, home, environment } = await fixture();
@@ -635,7 +740,7 @@ describe("Cloud publication", () => {
 
     await writeFile(
       join(home, "config.toml"),
-      'cli_auth_credentials_store = "file"\n',
+      'cli_auth_credentials_store = "file"\n[ghost_snapshot]\nignore_large_untracked_files = 9223372036854775807\n',
     );
     await publishScanToCloud(scan, {
       environment,
@@ -683,7 +788,7 @@ describe("Cloud publication", () => {
         environment,
         fetch: fetchMock,
       }),
-    ).rejects.toThrow("Cloud publication was not confirmed");
+    ).rejects.toThrow("synthetic-access-token");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

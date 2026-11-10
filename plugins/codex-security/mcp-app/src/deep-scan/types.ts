@@ -1,54 +1,32 @@
-import type { DeepReducerContext } from "../artifact-io.js";
+import type { DiscoveryBoardContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
-
-export type DeepScanTerminalReason = "saturated" | "capped";
-
-export type DeepScanRunStatus =
-  "running" | "succeeded" | "canceled" | "failed" | "interrupted";
-
-export type DeepScanWorkerKind = "setup" | "discovery" | "dedup";
-
-export type DeepScanWorkerStatus =
-  "queued" | "running" | "succeeded" | "failed" | "canceled";
-
-export type DeepScanMergeState = "none" | "buffered" | "merging" | "merged";
+import type { z } from "zod";
+import type { WorkerTokenUsage } from "./usage-receipt.js";
+import type {
+  configSchema,
+  dedupInputSchema,
+  runSchema,
+  workerSchema,
+} from "./response.js";
 
 /** Effective configuration and durable run state returned by the workbench. */
-export interface DeepScanConfig {
-  workers: number;
-  subagents: number;
-  stopAfterNoNew: number;
-  stopAfterConsecutiveErrors: number;
-  maxDiscoveryRuns: number;
-  maxTimeHours?: number;
-}
-
-export interface DeepScanRunState {
-  scanId: string;
-  status: DeepScanRunStatus;
-  coordinatorGeneration?: number;
-  createdAt?: string;
-  updatedAt?: string;
-  targetPath: string;
-  scope: string;
-  userContext?: string;
-  scanDir: string;
-  config: DeepScanConfig;
-  dispatchedCount: number;
-  noNewStreak: number;
-  consecutiveErrors: number;
-  manifestPath?: string;
-  terminalReason?: DeepScanTerminalReason;
-  error?: string;
+export type DeepScanConfig = z.output<typeof configSchema>;
+export type DeepScanRunState = Omit<
+  z.output<typeof runSchema>,
+  "persistedWorkers" | "persistedDedupInputs"
+> & {
   persistedWorkers?: PersistedDeepScanWorker[];
   persistedDedupInputs?: PersistedDeepScanDedupInput[];
-}
-
-export interface PersistedDeepScanDedupInput {
-  dedupWorkerId: string;
-  discoveryWorkerId: string;
-  inputOrder: number;
-}
+};
+export type DeepScanTerminalReason = NonNullable<
+  DeepScanRunState["terminalReason"]
+>;
+export type PersistedDeepScanDedupInput = z.output<typeof dedupInputSchema>;
+/** The authoritative worker record returned after SQLite commits the change. */
+export type PersistedDeepScanWorker = z.output<typeof workerSchema> & {
+  consecutiveErrors?: number;
+};
+export type DeepScanWorkerKind = PersistedDeepScanWorker["kind"];
 
 export interface DeepScanCoordinatorClaim {
   run: DeepScanRunState;
@@ -62,58 +40,34 @@ export interface DeepScanCoordinatorLeaseInput {
 }
 
 /** Fields supplied when the coordinator changes one worker. */
-export interface DeepScanWorkerMutation {
-  id: string;
+export type DeepScanWorkerMutation = Omit<
+  PersistedDeepScanWorker,
+  "completionSequence" | "consecutiveErrors" | "mergeState"
+> & {
   scanId: string;
-  kind: DeepScanWorkerKind;
-  status: DeepScanWorkerStatus;
-  promptPath: string;
-  artifactDir: string;
-  attempt: number;
-  threadId?: string;
-  resultManifestPath?: string;
-  error?: string;
+  terminalFailure?: boolean;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
-}
+};
 
 export type DeepScanReplaceableFailureKind =
   "policy_refusal" | "transient_error" | "invalid_discovery_artifacts";
 
-/** The authoritative worker record returned after SQLite commits the change. */
-export interface PersistedDeepScanWorker extends Omit<
-  DeepScanWorkerMutation,
-  "scanId" | "replaceableFailureKind"
-> {
-  completionSequence?: number;
-  consecutiveErrors?: number;
-  mergeState: DeepScanMergeState;
-}
-
-/** Inputs committed atomically when a reducer finishes. */
-export interface DedupCommit {
-  id: string;
-  scanId: string;
-  newFindings: number;
-  resultManifestPath: string;
-  candidateLedgerPath?: string;
-}
-
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
   WorkbenchDeepScanStore,
-  "begin" | "coordinatorLeaseArgs"
+  "begin" | "coordinatorGeneration"
 >;
 
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {
   root: string;
-  layout: "worker" | "reducer";
-  deepReducer?: DeepReducerContext;
+  layout: "worker";
+  discoveryBoard?: DiscoveryBoardContext;
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
-export interface CodexWorkerRequest {
-  kind: DeepScanWorkerKind;
+export interface CodexWorkerRequest extends WorkerTelemetryOptions {
+  kind: "discovery";
   promptPath: string;
   workingDirectory: string;
   subagents: number;
@@ -121,11 +75,31 @@ export interface CodexWorkerRequest {
   resumeThreadId?: string;
   continuationPrompt?: string;
   artifactContext?: CodexWorkerArtifactContext;
+  onNonRetryableError?: (error: Error) => void;
+}
+
+export interface WorkerTelemetryOptions {
+  attemptId?: string;
+  /** Host-bound receipt storage, excluded from model filesystem access. */
+  workerUsageDirectory?: string;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
+  onAttribution?: (attribution: WorkerAttribution) => void;
+  onUsage?: (
+    usage: WorkerTokenUsage | null,
+    turnId?: string,
+  ) => Promise<void> | void;
+}
+
+export interface WorkerAttribution {
+  operationId?: string;
+  attemptId: string;
+  parentAttemptId?: string;
 }
 
 export interface CodexWorkerResult {
   threadId?: string;
+  turnId?: string;
+  usage?: WorkerTokenUsage | null;
   diagnostics?: CodexWorkerDiagnostic[];
 }
 
@@ -141,6 +115,13 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
+  compareFindings?(
+    prompt: string,
+    workingDirectory: string,
+    signal: AbortSignal,
+    schema: Record<string, unknown>,
+    telemetry?: WorkerTelemetryOptions,
+  ): Promise<string>;
 }
 
 export interface DeepScanClock {
@@ -158,9 +139,18 @@ export interface DeepScanLogEvent {
   count?: number;
   completed?: number;
   newFindings?: number;
+  retainedFindings?: number;
   pass?: number;
   reason?: string;
   total?: number;
+  timestamp?: string;
+  durationMs?: number;
+  outcome?: "succeeded" | "failed" | "canceled";
+  retry?: boolean;
+  resumed?: boolean;
+  attemptId?: string;
+  operationId?: string;
+  parentAttemptId?: string;
 }
 
 export type DeepScanLogger = (event: DeepScanLogEvent) => void;

@@ -1,0 +1,23 @@
+{
+  "models": [
+    {
+      "slug": "gpt-test",
+      "display_name": "Synthetic",
+      "base_instructions": "Synthetic instructions",
+      "supported_reasoning_levels": [],
+      "shell_type": "disabled",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 0,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "available_access_programs": {
+        "cyber": ["standard", "daybreak_red", "daybreak_blue"]
+      }
+    }
+  ]
+}

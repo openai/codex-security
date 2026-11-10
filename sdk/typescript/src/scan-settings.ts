@@ -23,30 +23,7 @@ export const SCAN_SEVERITIES = [
 export const FailureSeveritySchema = z.enum(REPORTABLE_SEVERITIES);
 export type FailureSeverity = z.infer<typeof FailureSeveritySchema>;
 
-// SDK name, legacy TOML key, project key, and CLI flag (when exposed).
-export const DEEP_SCAN_SETTINGS = [
-  ["workers", "workers", "workers", "--workers"],
-  ["subagents", "subagents", "subagents_per_worker", "--subagents"],
-  [
-    "stopAfterNoNew",
-    "stop_after_no_new",
-    "stop_after_no_new",
-    "--stop-after-no-new",
-  ],
-  [
-    "stopAfterConsecutiveErrors",
-    "stop_after_consecutive_errors",
-    "stop_after_consecutive_errors",
-    null,
-  ],
-  [
-    "maxDiscoveryRuns",
-    "max_discovery_runs",
-    "max_discovery_runs",
-    "--max-discovery-runs",
-  ],
-  ["maxTimeHours", "max_time_hours", "max_time_hours", "--max-time-hours"],
-] as const;
+export { DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 
 const positiveIntegerError = "must be a positive integer";
 const positiveInteger = z
@@ -89,8 +66,9 @@ export const DeepScanSettingsSchema = z.strictObject({
     .optional()
     .meta({
       default: DEFAULT_DEEP_SCAN_SETTINGS.maxTimeHours,
+      deprecated: true,
       description:
-        "Maximum deep-scan discovery hours (default: 96; maximum: 96).",
+        "Deprecated Deep-only alias for maxTimeMinutes / --max-time, in hours (default: 96; maximum: 96).",
     }),
 });
 
@@ -107,6 +85,13 @@ export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
       "Experimental Cyber access program for scan turns (OpenAI provider only). Omit to preserve Codex defaults.",
     ),
   mode: z.enum(SCAN_MODES).optional().meta({ default: DEFAULT_SCAN_MODE }),
+  maxTimeMinutes: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      "Investigation minutes: advisory in Standard (default: unset); enforced Deep discovery limit (default and maximum: 5760). Scans may finish early; reporting may run longer.",
+    ),
   knowledgeBasePaths: z.array(inputPath).optional(),
   scanPrompt: z.string().optional(),
   scanPromptFile: inputPath.optional(),
@@ -117,6 +102,12 @@ export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
   outputDir: inputPath.optional(),
   failureSeverity: z.enum(SCAN_SEVERITIES).optional(),
   maxCostUsd: z.number().positive().optional(),
+  ownerSuggestions: z
+    .boolean()
+    .optional()
+    .describe(
+      "Generate optional owner-suggestions.json after a committed scan (default: false).",
+    ),
 });
 
 /** Scan settings shared by SDK calls, CLI flags, and project files. */

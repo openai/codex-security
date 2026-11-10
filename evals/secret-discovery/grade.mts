@@ -1,4 +1,3 @@
-import { posix, win32 } from "node:path";
 import type { createFixture } from "./fixtures.mts";
 type Fixture = ReturnType<typeof createFixture>;
 type Expected = Fixture["positives"][number];
@@ -20,16 +19,8 @@ export interface Finding {
   codeEvidence?: CodeEvidence[];
   [key: string]: unknown;
 }
-export interface Coverage {
-  completeness?: string;
-  deferred?: unknown[];
-  surfaces?: { disposition?: string; [key: string]: unknown }[];
-  explicitExclusions?: { pattern: string; reason?: string }[];
-  openQuestions?: unknown[];
-}
 export interface Result {
   findings?: Finding[];
-  coverage?: Coverage;
   [key: string]: unknown;
 }
 
@@ -49,50 +40,6 @@ const supportingLocation = (location: SourceLocation) =>
   /^(?:supporting|support|context|consumer|expected_control)$/.test(
     location.role ?? "",
   );
-
-function matchesExclusion(path: string, pattern: string, repo?: string) {
-  const paths = [repo, pattern].some(
-    (value) => value && win32.parse(value).root.length > 1,
-  )
-    ? win32
-    : posix;
-  let normalized = paths.normalize(pattern);
-  if (
-    normalized.endsWith(paths.sep) &&
-    normalized !== paths.parse(normalized).root
-  ) {
-    normalized = normalized.slice(0, -1);
-  }
-  let entry = path;
-  if (paths.isAbsolute(pattern) && repo) {
-    const relative = paths.relative(repo, normalized);
-    if (
-      !paths.isAbsolute(relative) &&
-      relative !== ".." &&
-      !relative.startsWith(`..${paths.sep}`)
-    ) {
-      // The repository prefix is a literal path, not part of the exclusion glob.
-      normalized = relative || ".";
-    } else {
-      entry = paths.join(repo, path);
-    }
-  }
-  if (paths === win32) {
-    entry = entry.toLowerCase();
-    normalized = normalized.toLowerCase();
-  }
-  // A directory exclusion also excludes the fixture files beneath it.
-  while (true) {
-    if (
-      paths.relative(entry, normalized) === "" ||
-      paths.matchesGlob(entry, normalized)
-    )
-      return true;
-    const parent = paths.dirname(entry);
-    if (parent === entry) return false;
-    entry = parent;
-  }
-}
 
 function normalizeSourcePath(path: string | undefined) {
   const normalized = path?.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
@@ -200,11 +147,7 @@ function validEvidence(finding: Finding, fixture: Fixture) {
 }
 
 /** Grade retained final findings, never keyword mentions or deferred candidates. */
-export function gradeResult(
-  result: Result | undefined,
-  fixture: Fixture,
-  repo?: string,
-) {
+export function gradeResult(result: Result | undefined, fixture: Fixture) {
   const errors = [];
   const findings = Array.isArray(result?.findings) ? result.findings : [];
   if (!Array.isArray(result?.findings)) errors.push("missing findings array");
@@ -257,19 +200,6 @@ export function gradeResult(
     errors.push("false positives or incorrect taxonomy/locations");
   if (findings.some((finding) => !validEvidence(finding, fixture)))
     errors.push("missing or invalid code evidence");
-  if (
-    result?.coverage?.completeness !== "complete" ||
-    result.coverage.deferred?.length ||
-    result.coverage.surfaces?.some(
-      (surface) => surface.disposition === "needs_follow_up",
-    ) ||
-    result.coverage.explicitExclusions?.some(({ pattern }) =>
-      Object.keys(fixture.files).some((path) =>
-        matchesExclusion(path, pattern, repo),
-      ),
-    )
-  )
-    errors.push("incomplete coverage");
   return {
     passed: errors.length === 0,
     cases,

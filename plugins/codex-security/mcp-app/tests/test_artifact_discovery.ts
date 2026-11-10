@@ -17,6 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { syncBuiltinESMExports } from "node:module";
 import { mock } from "node:test";
 import { importSource } from "./import-module.ts";
@@ -113,6 +114,7 @@ try {
   await verifyReaderPreservesSharedPhaseRecords(scan);
   await verifyNormalizerFailuresPreserveOutput(scan);
   await verifyDiffInventoryAllowsDeletedFiles();
+  await verifyNormalizerDiagnostics(scan);
   await verifyEmptyReplacement(scan);
   await verifyWorkerContext();
   await verifyMalformedLedgerIsNotModified();
@@ -364,9 +366,8 @@ async function verifyNormalizerFailuresPreserveOutput(
     ),
     (error) =>
       error instanceof Error &&
-      /line range/u.test(error.message) &&
-      !error.message.includes(context.root) &&
-      !error.message.includes(context.repoRoot),
+      error.message ===
+        "discovery candidates: candidate input row 1: line range 9-9 exceeds src/routes.ts:3",
   );
   assert.equal(await readFile(destination, "utf8"), original);
 
@@ -407,7 +408,9 @@ async function verifyNormalizerFailuresPreserveOutput(
   await writeFile(inventory, Buffer.from([0xff]));
   await assert.rejects(
     recordCodexSecurityDiscoveryCandidates({ candidates: [] }, context),
-    /UTF-8|encoded data/,
+    process.platform === "win32"
+      ? /UTF-8|encoded data/
+      : /in-scope file row 1:.*ENOENT/,
   );
   assert.equal(await readFile(destination, "utf8"), original);
   await writeFile(inventory, scope);
@@ -486,6 +489,11 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
     return git("rev-parse", "HEAD");
   };
   git("init", "-q");
+  const metadata = [".svn/entries", "nested/.svn/entries"];
+  for (const name of [...metadata, ".svn-backup/support.ts"]) {
+    await mkdir(path.dirname(path.join(repository, name)), { recursive: true });
+    await writeFile(path.join(repository, name), "synthetic saved source\n");
+  }
   await writeFile(
     path.join(repository, "deleted.ts"),
     "one\rtwo\r\nthree\nfour",
@@ -552,6 +560,9 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
       git("reset", "--hard", baseRevision);
       await rm(path.join(repository, "deleted.ts"));
       await writeFile(path.join(repository, "changed.ts"), "current\n");
+      git("rm", "--", metadata[0]!);
+      await rm(path.join(repository, metadata[1]!));
+      await rm(path.join(repository, ".svn-backup/support.ts"));
     }
     const scan: ArtifactContext = {
       ...context,
@@ -590,6 +601,23 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
       path.dirname(inventory),
       "candidate_ledger.jsonl",
     );
+    if (kind === "working_tree") {
+      await record(scan, [
+        ["changed.ts", 1],
+        [".svn-backup/support.ts", 1],
+      ]);
+      for (const name of metadata) {
+        const accepted = await readFile(destination, "utf8");
+        await assert.rejects(
+          record(scan, [
+            ["changed.ts", 1],
+            [name, 1],
+          ]),
+        );
+        assert.equal(await readFile(destination, "utf8"), accepted);
+      }
+      await record(scan, sources);
+    }
     const accepted = await readFile(destination, "utf8");
     await assert.rejects(
       record(
@@ -851,4 +879,32 @@ function rawCandidate(overrides = {}) {
     evidence: "The request parameter is interpolated into the query",
     ...overrides,
   };
+}
+
+async function verifyNormalizerDiagnostics(context: ArtifactContext) {
+  const workerRoot = path.join(root, "diagnostic-worker");
+  await mkdir(workerRoot);
+  const detail = `Cannot normalize ${context.repoRoot}; unrelated services${context.repoRoot}/main.py`;
+  await writeFile(
+    path.join(workerRoot, "helpers.mjs"),
+    `throw new Error(${JSON.stringify(detail)});`,
+  );
+  const { recordCodexSecurityDiscoveryCandidates: record } = await importSource(
+    path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
+    {
+      define: {
+        "import.meta.url": JSON.stringify(
+          pathToFileURL(path.join(workerRoot, "server.mjs")).href,
+        ),
+      },
+    },
+  );
+  await assert.rejects(
+    record({ candidates: [rawCandidate()] }, context),
+    (error) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, detail);
+      return true;
+    },
+  );
 }

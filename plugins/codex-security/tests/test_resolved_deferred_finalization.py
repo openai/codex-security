@@ -1,3 +1,5 @@
+"""Check how finalization reconciles completed deferred work with the remaining coverage record."""
+
 from __future__ import annotations
 
 import json
@@ -15,7 +17,6 @@ def test_resolved_deferred_finalization(tmp_path: Path, workbench_api, still_act
     closure = {"id": "review-closeout", "reason": "All review decisions are recorded."}
     coverage["resolvedDeferred"] = [closure]
     if still_active:
-        coverage["completeness"] = "partial"
         coverage["deferred"] = [{"id": closure["id"], "reason": "Still pending."}]
     coverage_path.write_text(json.dumps(coverage))
 

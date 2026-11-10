@@ -1,9 +1,12 @@
+import { hash } from "node:crypto";
+import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
+import { workflowDigest } from "../src/finding-workflow.js";
 import { modelResponseText } from "./support/model-response-text.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import Ajv2020 from "ajv/dist/2020.js";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   classifySeverity,
   validateSeverityClassification,
@@ -45,6 +48,12 @@ const assessed = {
   reviewTrigger: "Protected content in the response would increase severity.",
 };
 
+const optInEnvironment = { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" };
+const remoteConfig = {
+  name: "codex_security_default_severity_rubric",
+  value: { markdown: "Apply this updated severity rubric.", revision: 2 },
+};
+
 function fakeCodex(response: unknown) {
   const calls: { prompt: string; thread: ThreadOptions; turn: TurnOptions }[] =
     [];
@@ -53,7 +62,13 @@ function fakeCodex(response: unknown) {
       return {
         async run(prompt, turn) {
           calls.push({ prompt, thread, turn });
-          return { finalResponse: modelResponseText(response) };
+          return {
+            finalResponse: modelResponseText(
+              typeof response === "function"
+                ? response(calls.length)
+                : response,
+            ),
+          };
         },
       };
     },
@@ -61,29 +76,125 @@ function fakeCodex(response: unknown) {
   return { codex, calls };
 }
 
-test("without a rubric reuses severity without authentication or a model call", async () => {
-  const { codex, calls } = fakeCodex("must not run");
-  const original = structuredClone(finding);
-  const result = await classifySeverity([finding], { codex, environment: {} });
-  expect(calls).toHaveLength(0);
-  expect(result.rubricSha256).toBeNull();
-  expect(result.assessments[0]).toMatchObject({
-    findingId: finding.findingId,
-    occurrenceId: finding.occurrenceId,
-    decision: "assessed",
-    level: "high",
-    source: "existing-severity",
-    rationale: "Original assessment",
+test.each([undefined, "0", "true", " 1"])(
+  "uses the bundled rubric without contacting Statsig when the flag is %j",
+  async (value) => {
+    using request = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json(remoteConfig),
+    );
+    const { codex, calls } = fakeCodex(assessed);
+    const original = structuredClone(finding);
+    const result = await classifySeverity([finding], {
+      codex,
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: value },
+    });
+    expect(request).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls.map((call) => call.thread)).size).toBe(3);
+    expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
+      defaultSeverityRubric,
+    ]);
+    expect(result.rubricSha256).toBe(hash("sha256", defaultSeverityRubric));
+    expect(result.rubricRevision).toBe(1);
+    expect(result.assessments[0]).toMatchObject({
+      findingId: finding.findingId,
+      occurrenceId: finding.occurrenceId,
+      decision: "assessed",
+      level: "medium",
+      source: "rubric",
+      rationale: assessed.rationale,
+    });
+    expect(finding).toEqual(original);
+    expect(
+      validateSeverityClassification(JSON.parse(JSON.stringify(result)), [
+        finding,
+      ]),
+    ).toEqual(result);
+  },
+);
+
+test("opt-in fetches only the named config once for all reviews", async () => {
+  using request = spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json(remoteConfig),
+  );
+  const { codex, calls } = fakeCodex(assessed);
+  const result = await classifySeverity([finding], {
+    codex,
+    environment: optInEnvironment,
   });
-  expect(finding).toEqual(original);
-  expect(
-    validateSeverityClassification(JSON.parse(JSON.stringify(result)), [
-      finding,
-    ]),
-  ).toEqual(result);
+  expect(request).toHaveBeenCalledTimes(1);
+  const configRequest = new Request(...request.mock.calls[0]!);
+  expect(configRequest.url).toBe("https://ab.chatgpt.com/v1/get_config");
+  expect(configRequest.method).toBe("POST");
+  expect(configRequest.headers.has("authorization")).toBe(false);
+  expect(await configRequest.json()).toEqual({
+    configName: remoteConfig.name,
+    statsigMetadata: { exposureLoggingDisabled: true },
+  });
+  expect(calls).toHaveLength(3);
+  for (const { prompt } of calls) {
+    expect(JSON.parse(prompt.split("\n\n").at(-1)!).rubric).toEqual([
+      remoteConfig.value.markdown,
+    ]);
+  }
+  expect(result.rubricSha256).toBe(hash("sha256", remoteConfig.value.markdown));
+  expect(result.rubricRevision).toBe(remoteConfig.value.revision);
+});
+
+test.each([
+  ["an unavailable service", new Response(null, { status: 503 })],
+  [
+    "a blank policy",
+    Response.json({ ...remoteConfig, value: { markdown: " ", revision: 2 } }),
+  ],
+  ["a network error", new TypeError("Offline")],
+] as const)(
+  "falls back to the bundled rubric on %s",
+  async (_scenario, failure) => {
+    using request = spyOn(globalThis, "fetch");
+    if (failure instanceof Error) request.mockRejectedValue(failure);
+    else request.mockResolvedValue(failure);
+    const { codex, calls } = fakeCodex(assessed);
+    const result = await classifySeverity([finding], {
+      codex,
+      environment: optInEnvironment,
+      classificationRuns: 1,
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
+      defaultSeverityRubric,
+    ]);
+    expect(result.rubricSha256).toBe(hash("sha256", defaultSeverityRubric));
+    expect(result.rubricRevision).toBe(1);
+  },
+);
+
+test("cancellation while reading the remote rubric stops the reviews", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Canceled reclassification");
+  const response = Response.json(remoteConfig);
+  using read = spyOn(response, "json").mockImplementation(async () => {
+    controller.abort(reason);
+    return remoteConfig;
+  });
+  using request = spyOn(globalThis, "fetch").mockResolvedValue(response);
+  const { codex, calls } = fakeCodex(assessed);
+  await expect(
+    classifySeverity([finding], {
+      codex,
+      signal: controller.signal,
+      environment: optInEnvironment,
+    }),
+  ).rejects.toBe(reason);
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(calls).toHaveLength(0);
 });
 
 test("supplies complete evidence and separate policy/context to a restricted structured Codex turn", async () => {
+  using request = spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json(remoteConfig),
+  );
   const rubricPath = await document(
     "Assign MEDIUM to bounded unauthorized metadata reads.",
   );
@@ -91,6 +202,7 @@ test("supplies complete evidence and separate policy/context to a restricted str
   const { codex, calls } = fakeCodex(assessed);
   const signal = new AbortController().signal;
   const result = await classifySeverity([finding], {
+    environment: optInEnvironment,
     rubricPath,
     knowledgeBasePaths: [knowledge],
     codex,
@@ -98,13 +210,23 @@ test("supplies complete evidence and separate policy/context to a restricted str
     model: "synthetic-model",
     reasoningEffort: "future-effort",
   });
+  expect(request).not.toHaveBeenCalled();
   expect(result.assessments[0]).toMatchObject({
     ...assessed,
     source: "rubric",
   });
-  expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
+  expect(result.rubricSha256).toBe(
+    hash("sha256", "Assign MEDIUM to bounded unauthorized metadata reads."),
+  );
+  expect(result.rubricRevision).toBeUndefined();
   expect(result.knowledgeBaseSha256).toMatch(/^[a-f0-9]{64}$/u);
-  expect(calls).toHaveLength(1);
+  expect(calls).toHaveLength(3);
+  expect(new Set(calls.map((call) => call.thread)).size).toBe(3);
+  expect(new Set(calls.map((call) => call.prompt)).size).toBe(1);
+  expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
+    "Assign MEDIUM to bounded unauthorized metadata reads.",
+  ]);
+  expect(calls[0]!.prompt).not.toContain(defaultSeverityRubric);
   expect(calls[0]!.prompt).toContain(String(finding["evidence"]));
   expect(calls[0]!.prompt).toContain("The counters contain no customer data.");
   expect(calls[0]!.thread).toMatchObject({
@@ -151,19 +273,26 @@ test("represents policy exclusions independently from Low", async () => {
   expect(validateSeverityClassification(result, [finding])).toEqual(result);
 });
 
-test("classifies imported reports without severity when a rubric is supplied", async () => {
+test("rubric directories retain the ordered document digest without a revision", async () => {
+  const directory = await temporaryDirectory();
+  await writeFile(join(directory, "01.md"), "First policy");
+  await writeFile(join(directory, "02.md"), "Second policy");
+  const result = await classifySeverity([], { rubricPath: directory });
+  expect(result.rubricSha256).toBe(
+    workflowDigest(["First policy", "Second policy"]),
+  );
+  expect(result.rubricRevision).toBeUndefined();
+});
+
+test("classifies imported reports without severity using the default rubric", async () => {
   const {
     severity: _severity,
     occurrenceId: _occurrenceId,
     ...imported
   } = finding;
-  await expect(classifySeverity([imported])).rejects.toThrow("supply a rubric");
-  const rubricPath = await document(
-    "Classify bounded metadata reads as medium.",
-  );
   const { codex } = fakeCodex(assessed);
   expect(
-    (await classifySeverity([imported], { rubricPath, codex })).assessments[0]!
+    (await classifySeverity([imported], { codex })).assessments[0]!
       .occurrenceId,
   ).toBeNull();
 });
@@ -230,3 +359,104 @@ test("cancellation and invalid inputs cannot produce a successful classification
   );
   expect((await classifySeverity([])).assessments).toEqual([]);
 });
+
+test("votes independently for each imported report and retains the winning answer", async () => {
+  const rubricPath = await document("Classify using the supplied evidence.");
+  const second = { ...finding, findingId: "second-finding" };
+  const responses = [
+    { ...assessed, level: "low", rationale: "First low answer" },
+    { ...assessed, level: "high" },
+    { ...assessed, level: "low", rationale: "Second low answer" },
+    ...["medium", "critical", "high"].map((level) => ({
+      ...assessed,
+      findingId: second.findingId,
+      level,
+    })),
+  ];
+  const { codex, calls } = fakeCodex((call: number) => responses[call - 1]);
+  const result = await classifySeverity([finding, second], {
+    rubricPath,
+    codex,
+  });
+  expect(calls).toHaveLength(6);
+  expect(result.assessments).toMatchObject([
+    { level: "low", rationale: "First low answer" },
+    { level: "critical", findingId: second.findingId },
+  ]);
+  expect(
+    calls.map(
+      ({ prompt }) =>
+        JSON.parse(prompt.split("\n\n").at(-1)!).finding.findingId,
+    ),
+  ).toEqual([
+    finding.findingId,
+    finding.findingId,
+    finding.findingId,
+    second.findingId,
+    second.findingId,
+    second.findingId,
+  ]);
+});
+
+test.each([2, 3, 10])(
+  "does not return a partial vote when review %p fails or is invalid",
+  async (failedRun) => {
+    for (const invalid of [false, true]) {
+      const { codex, calls } = fakeCodex((call: number) => {
+        if (call !== failedRun) return assessed;
+        if (invalid) return { ...assessed, findingId: "wrong-finding" };
+        throw new Error("Review failed");
+      });
+      await expect(
+        classifySeverity([finding], {
+          codex,
+          classificationRuns: Math.max(3, failedRun),
+        }),
+      ).rejects.toThrow(invalid ? "invalid assessment" : "Review failed");
+      expect(calls).toHaveLength(failedRun);
+    }
+  },
+);
+
+test.each([1, 2, 3])(
+  "cancellation after review %p stops classification",
+  async (canceledRun) => {
+    const controller = new AbortController();
+    const { codex, calls } = fakeCodex((call: number) => {
+      if (call === canceledRun) controller.abort(new Error("Stopped"));
+      return assessed;
+    });
+    await expect(
+      classifySeverity([finding], {
+        codex,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("Stopped");
+    expect(calls).toHaveLength(canceledRun);
+  },
+);
+
+test.each([1, 2, 4, 10])(
+  "runs %i independent local reviews",
+  async (classificationRuns) => {
+    const { codex, calls } = fakeCodex(assessed);
+    const result = await classifySeverity([finding], {
+      codex,
+      classificationRuns,
+    });
+    expect(calls).toHaveLength(classificationRuns);
+    expect(result.classificationRuns).toBe(classificationRuns);
+    expect(result.assessments[0]!.level).toBe("medium");
+  },
+);
+
+test.each([0, -1, 11, 1.5, NaN, Infinity])(
+  "rejects invalid local run count %p before model work",
+  async (classificationRuns) => {
+    const { codex, calls } = fakeCodex(assessed);
+    await expect(
+      classifySeverity([finding], { codex, classificationRuns }),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  },
+);

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { isMain } from "../../../sdk/typescript/scripts/is-main.mjs";
 import childProcess, { type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const EVAL_ROOT = path.resolve(import.meta.dirname, "..");
 const PLUGIN_ROOT = path.resolve(
@@ -25,12 +27,9 @@ const PROMPTFOO_ENTRYPOINT = path.join(
 function copyDirectory(
   sourceRoot: string,
   targetRoot: string,
-  excludedNames = new Set<string>(),
+  filter?: (source: string) => boolean,
 ) {
-  fs.cpSync(sourceRoot, targetRoot, {
-    recursive: true,
-    filter: (source) => !excludedNames.has(path.basename(source)),
-  });
+  fs.cpSync(sourceRoot, targetRoot, { recursive: true, filter });
 }
 
 /**
@@ -45,12 +44,14 @@ function stageSkillRuntime() {
   copyDirectory(
     TRIAGE_SKILL_ROOT,
     path.join(stagedPluginRoot, "skills", "triage-finding"),
-    new Set(["evals"]),
+    (source) => path.basename(source) !== "evals",
   );
   for (const sharedDirectory of ["references", "schemas"]) {
     copyDirectory(
       path.join(PLUGIN_ROOT, sharedDirectory),
       path.join(stagedPluginRoot, sharedDirectory),
+      // Schema generation atomically renames temporary files in this directory.
+      (source) => sharedDirectory !== "schemas" || !source.endsWith(".tmp"),
     );
   }
   fs.mkdirSync(path.join(stagedPluginRoot, "scripts"));
@@ -73,6 +74,7 @@ function stageSkillRuntime() {
 async function runPromptfoo(
   promptfooArgs: string[],
   environment: NodeJS.ProcessEnv = {},
+  builtMcp?: string,
 ) {
   const runtimeRoot = stageSkillRuntime();
   const artifacts = path.join(EVAL_ROOT, "artifacts");
@@ -130,42 +132,45 @@ async function runPromptfoo(
     });
   }
   try {
-    const built = await runChild(
+    const mcp = path.join(runtimeRoot, "plugins", "codex-security", "mcp");
+    if (builtMcp) {
+      copyDirectory(builtMcp, mcp);
+    } else {
+      const built = await runChild(
+        [
+          path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
+          "--output",
+          mcp,
+          "--native",
+          "host",
+        ],
+        path.join(PLUGIN_ROOT, "mcp-app"),
+      );
+      if (built !== 0) return built;
+    }
+    return await runChild(
       [
-        path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
-        "--output",
-        path.join(runtimeRoot, "plugins", "codex-security", "mcp"),
-        "--native",
-        "host",
+        "--import",
+        pathToFileURL(path.join(import.meta.dirname, "initialize-provider.mts"))
+          .href,
+        PROMPTFOO_ENTRYPOINT,
+        ...promptfooArgs,
       ],
-      path.join(PLUGIN_ROOT, "mcp-app"),
+      EVAL_ROOT,
     );
-    if (built !== 0) return built;
-    return await runChild([PROMPTFOO_ENTRYPOINT, ...promptfooArgs], EVAL_ROOT);
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
     fs.rmSync(runtimeRoot, { recursive: true, force: true });
   }
 }
 
-function runMain(filename: string, environment: NodeJS.ProcessEnv = {}) {
+if (isMain(import.meta.url)) {
   try {
-    if (!process.argv[1] || fs.realpathSync(process.argv[1]) !== filename)
-      return;
-  } catch {
-    // A virtual entry point imports this module without invoking the runner.
-    return;
+    process.exitCode = await runPromptfoo(process.argv.slice(2));
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
   }
-  runPromptfoo(process.argv.slice(2), environment)
-    .then((code) => {
-      process.exitCode = code;
-    })
-    .catch((error) => {
-      console.error(error);
-      process.exitCode = 1;
-    });
 }
 
-runMain(import.meta.filename);
-
-export { runMain, runPromptfoo, stageSkillRuntime };
+export { runPromptfoo, stageSkillRuntime };

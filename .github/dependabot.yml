@@ -5,6 +5,7 @@ updates:
     directories:
       - /github-action
       - /sdk/typescript
+      - /sdk/mutation
       - /plugins/codex-security/mcp-app
       - /evals/triage-finding
     schedule:
@@ -32,6 +33,8 @@ updates:
       third-party:
         patterns:
           - "*"
+        exclude-patterns:
+          - promptfoo
         update-types:
           - minor
           - patch
@@ -55,7 +58,9 @@ updates:
 
   - package-ecosystem: github-actions
     labels: [dependencies]
-    directory: /
+    directories:
+      - /
+      - "/.github/actions/*"
     schedule:
       interval: cron
       cronjob: "0 9 * * *"
@@ -63,6 +68,11 @@ updates:
       default-days: 7
       exclude:
         - "openai/*"
+    groups:
+      install-action:
+        group-by: dependency-name
+        patterns:
+          - taiki-e/install-action
     commit-message:
       prefix: ci
 

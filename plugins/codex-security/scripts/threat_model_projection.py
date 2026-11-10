@@ -6,21 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 # Keep sibling helpers importable when Python starts in isolated mode.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection as report
-
-_STRUCTURED_SECTIONS = (
-    ("Assets", "assets"),
-    ("Trust Boundaries", "trustBoundaries"),
-    ("Attacker Capabilities", "attackerCapabilities"),
-    ("Security Objectives", "securityObjectives"),
-    ("Assumptions", "assumptions"),
-)
 
 
 def _is_structured_model(model: dict[str, Any]) -> bool:
@@ -31,21 +22,18 @@ def _is_structured_model(model: dict[str, Any]) -> bool:
         and all(
             isinstance(values := model.get(key, []), list)
             and all(isinstance(value, str) and value for value in values)
-            for _, key in _STRUCTURED_SECTIONS
+            for _, key in report.THREAT_MODEL_SECTIONS
         )
     )
 
 
-def _markdown_content(model: dict[str, Any]) -> str | None:
-    content = model.get("content")
-    if model.get("format") == "markdown" and isinstance(content, str) and content.strip():
-        return content
-    return None
-
-
 def threat_model_body(model: dict[str, Any]) -> str:
-    """Keep authored Markdown intact, including summaries from older scans."""
-    content = _markdown_content(model)
+    """Return the authored Markdown body verbatim or render a legacy summary and its sections.
+
+    Raises:
+        ValueError: Required content is absent or the saved model has invalid metadata or sections.
+    """
+    content = report.markdown_threat_model_content(model)
     if content is not None:
         # The structured schema permits legacy metadata as extension fields.
         if _is_structured_model(model):
@@ -82,7 +70,7 @@ def threat_model_body(model: dict[str, Any]) -> str:
     sections = [
         summary if summary.strip() else "No explicit canonical threat-model summary was recorded."
     ]
-    for heading, key in _STRUCTURED_SECTIONS:
+    for heading, key in report.THREAT_MODEL_SECTIONS:
         values = model.get(key, [])
         if not isinstance(values, list):
             raise ValueError(f"threatModel.{key}: expected an array")
@@ -96,25 +84,32 @@ def threat_model_body(model: dict[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
-def _scope_lines(scope: Any, label: str, text: Callable[[Any, str], str]) -> list[str]:
+def _scope_lines(scope: Any, label: str) -> list[str]:
     # Older structured models may use these extension names for unrelated data.
     included = scope.get("includePaths") if isinstance(scope, dict) else None
     if not isinstance(included, list) or not all(isinstance(path, str) for path in included):
         return [f"- {label}: not recorded"]
-    lines = [f"- {label}: {text(', '.join(included), 'none')}"]
+    included_text = ", ".join(report._path_text(path, ensure_ascii=True) for path in included)
+    lines = [f"- {label}: {included_text or 'none'}"]
     excluded = scope.get("excludePaths")
     if isinstance(excluded, list) and excluded and all(isinstance(path, str) for path in excluded):
-        lines.append(f"- {label} exclusions: {text(', '.join(excluded), 'none')}")
+        excluded_text = ", ".join(report._path_text(path, ensure_ascii=True) for path in excluded)
+        lines.append(f"- {label} exclusions: {excluded_text or 'none'}")
     summary = scope.get("summary")
     if isinstance(summary, str) and summary:
-        lines.append(f"- {label} description: {text(summary, 'not recorded')}")
+        lines.append(f"- {label} description: {report._text(summary, 'not recorded')}")
     return lines
 
 
 def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None = None) -> bytes:
-    """Render a portable document with authored content and recorded provenance."""
+    """Return the saved threat model as UTF-8 Markdown, including its provenance footer.
+
+    Args:
+        model (dict): Authored Markdown or a legacy structured model from a scan.
+        provenance (dict | None): Optional saved scan identifiers, scope, and provisional status.
+    """
     body = threat_model_body(model)
-    if _markdown_content(model) is None:
+    if report.markdown_threat_model_content(model) is None:
         body = "# Threat Model\n\n" + body
     text = report._text
     provenance = provenance or {}
@@ -129,13 +124,11 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
     ):
         if provenance.get(key):
             footer.append(f"- {label}: {text(str(provenance[key]), 'not recorded')}")
-    footer.append(
-        f"- Model origin: {text(str(model.get('origin', 'not recorded')), 'not recorded')}"
-    )
-    footer.extend(_scope_lines(model.get("scope"), "Model scope", text))
+    footer.append(f"- Model origin: {text(model.get('origin'), 'not recorded')}")
+    footer.extend(_scope_lines(model.get("scope"), "Model scope"))
     scan_scope = provenance.get("scanScope")
     if isinstance(scan_scope, dict):
-        footer.extend(_scope_lines(scan_scope, "Scan scope", text))
+        footer.extend(_scope_lines(scan_scope, "Scan scope"))
     if provenance.get("provisional"):
         footer.extend(["", "This is a provisional model saved before successful completion."])
     return (body + ("\n" if body.endswith("\n") else "\n\n") + "\n".join(footer) + "\n").encode(
@@ -144,11 +137,14 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
 
 
 def main() -> int:
+    """Render a JSON payload from stdin to UTF-8 Markdown on stdout and return zero on success."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-json-stdin", action="store_true", required=True)
     parser.parse_args()
     try:
         payload = json.load(sys.stdin)
+        if not isinstance(payload["threatModel"], dict):
+            raise ValueError("threatModel must be an object")
         sys.stdout.buffer.write(
             render_threat_model(payload["threatModel"], payload.get("provenance"))
         )

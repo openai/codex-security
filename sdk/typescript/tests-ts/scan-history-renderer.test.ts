@@ -3,6 +3,127 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("shows canonical scope separately from the saved recipe without changing execution status", () => {
+    const scan = {
+      targetPath: "/synthetic/repository",
+      scanId: "synthetic-scan",
+      mode: "standard",
+      progress: { status: "complete" },
+      findings: [],
+      recipe: { target: { kind: "paths", paths: ["src"] } },
+    };
+    const text = renderScanHistory(
+      {
+        ...scan,
+        coverage: {
+          mode: "scoped_path",
+          includePaths: ["src/a  b.ts", "src/trailing "],
+          excludePaths: ["generated/**"],
+          explicitExclusions: [{ pattern: "fixtures", reason: "Fixtures" }],
+        },
+      },
+      "show",
+      { color: false, columns: 120 },
+    );
+    expect(text).toContain("COMPLETE");
+    expect(text).toContain('scoped paths: "src/a  b.ts", "src/trailing ";');
+    expect(text).toContain("excluding generated/**, fixtures");
+    expect(text).toContain("SAVED SCOPE");
+    const historical = renderScanHistory(scan, "show", { color: false });
+    expect(historical).toContain("COMPLETE");
+    expect(historical).not.toContain("scoped paths:");
+  });
+
+  test("counts singleton sides when the other side is grouped", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/synthetic/repository",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { persisting: 2 },
+        findings: [
+          {
+            title: "Merged group",
+            severity: "high",
+            status: "persisting",
+            path: "merged.ts",
+            beforeOccurrenceIds: ["before-one", "before-two"],
+            afterOccurrenceId: "after-one",
+          },
+          {
+            title: "Expanded group",
+            severity: "high",
+            status: "persisting",
+            path: "expanded.ts",
+            beforeOccurrenceId: "before-one",
+            afterOccurrenceIds: ["after-one", "after-two"],
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(text).toContain("2 → 1");
+    expect(text).toContain("1 → 2");
+  });
+
+  test("shows zero findings on the absent side of grouped comparisons", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/synthetic/repository",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { resolved: 2, new: 2 },
+        findings: [
+          {
+            title: "Resolved group",
+            severity: "high",
+            status: "resolved",
+            path: "before.ts",
+            beforeOccurrenceIds: ["before-one", "before-two"],
+          },
+          {
+            title: "Added group",
+            severity: "medium",
+            status: "new",
+            path: "after.ts",
+            afterOccurrenceIds: ["after-one", "after-two"],
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(text).toContain("2 → 0");
+    expect(text).toContain("0 → 2");
+  });
+
+  test("orders severity totals and escapes labels in saved history", () => {
+    const text = renderScanHistory(
+      {
+        scanId: "synthetic-scan",
+        targetPath: "/synthetic/repository",
+        progress: { status: "complete" },
+        findings: [],
+        severityCounts: {
+          ["fu\u001b[2Jture"]: 6,
+          low: 4,
+          informational: 5,
+          medium: 3,
+          critical: 1,
+          high: 2,
+        },
+      },
+      "show",
+      { color: false },
+    );
+    expect(text).not.toContain("\u001b[2J");
+    expect(text).toContain("6 FUTURE");
+    expect(text).toMatch(
+      /1 CRITICAL.*2 HIGH.*3 MEDIUM.*4 LOW.*5 INFORMATIONAL/,
+    );
+  });
+
   test.each([
     [
       "spaced Chinese",
@@ -30,25 +151,42 @@ describe("scan history renderer", () => {
   ] as const)(
     "wraps %s titles at terminal columns",
     (_name, title, expected) => {
+      const badges = [
+        ["critical", "CRITICAL", 31],
+        ["high", "HIGH", 31],
+        ["medium", "MEDIUM", 33],
+        ["low", "LOW", 36],
+        ["informational", "INFO", 37],
+      ] as const;
       for (const color of [false, true]) {
         const output = renderScanHistory(
           {
             repository: "/repo",
-            findings: [{ title, severity: "high", path: "source.ts" }],
+            findings: badges.map(([severity]) => ({
+              title,
+              severity,
+              path: `${severity}.ts`,
+            })),
           },
           "findings",
           { columns: 48, color },
         );
         const lines = stripVTControlCharacters(output).split("\n");
-        const start = lines.findIndex((line) => line.startsWith("    HIGH"));
-        const end = lines.indexOf("              source.ts");
-        expect(lines.slice(start, end)).toEqual(
-          expected.map(
-            (line, index) =>
-              `${index === 0 ? "    HIGH      " : "              "}${line}`,
-          ),
-        );
-        if (color) expect(output).toContain("\u001B[31mHIGH    \u001B[0m");
+        for (const [severity, label, ansiColor] of badges) {
+          const badge = label.padEnd(8);
+          const start = lines.findIndex((line) =>
+            line.startsWith(`    ${badge}  `),
+          );
+          expect(lines.slice(start, start + expected.length + 1)).toEqual([
+            ...expected.map(
+              (line, index) =>
+                `${index === 0 ? `    ${badge}  ` : "              "}${line}`,
+            ),
+            `              ${severity}.ts`,
+          ]);
+          if (color)
+            expect(output).toContain(`\u001B[${ansiColor}m${badge}\u001B[0m`);
+        }
       }
     },
   );
@@ -79,8 +217,6 @@ describe("scan history renderer", () => {
           repository: "/demo/juice-shop",
           beforeScanId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           afterScanId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-          comparable: true,
-          coverage: { afterCompleteness: "complete" },
           summary: {
             new: 1,
             persisting: 2,
@@ -201,67 +337,100 @@ describe("scan history renderer", () => {
         ([, value]) => value,
       ),
     ).toEqual(["/demo/threat-model.md", "routes/login.ts"]);
-    for (const coverage of ["partial", "unknown", "complete"]) {
-      const comparison = renderScanHistory(
-        {
-          beforeScanId: "before-scan",
-          afterScanId: "after-scan",
-          coverage: { afterCompleteness: coverage },
-          summary: {},
-          findings: [],
-        },
-        "compare",
-        { color: false },
-      );
-      if (coverage === "complete") {
-        expect(comparison).not.toContain("Follow-up coverage");
-      } else {
-        expect(comparison).toContain(
-          `⚠ Follow-up coverage is ${coverage}; resolved findings cannot be confirmed.`,
-        );
-      }
-    }
   });
 
-  test("keeps repositories visible at narrow and wide terminal widths", () => {
-    const scans = [
+  test("shows absent findings without claiming they were fixed", () => {
+    const output = renderScanHistory(
       {
-        scanId: "11111111-1111-4111-8111-111111111111",
-        targetPath: "/demo/juice-shop",
-        mode: "standard",
-        progress: { status: "complete" },
-        findingCount: 8,
-        startedAt: "2026-07-24T12:00:00Z",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { not_observed: 1 },
+        findings: [
+          {
+            status: "not_observed",
+            severity: "high",
+            title: "Missing authorization",
+            path: "src/handler.ts",
+            reason:
+              "Not observed in the later scan; remediation has not been verified.",
+          },
+        ],
       },
+      "compare",
+      { color: false },
+    );
+    expect(output).toContain("Not observed");
+    expect(output).not.toContain("Resolved");
+  });
+
+  test("fits repository names when multi-repository history switches to the wide table", () => {
+    const combining = "e\u0301".repeat(17);
+    const joined = "界".repeat(8) + "👩‍💻";
+    const repositories = [
+      { name: "service", cell: "service".padEnd(18) },
+      { name: `${combining}🚀-tail`, cell: `${combining} ` },
+      { name: `${joined}-tail`, cell: joined },
+      { name: "中", cell: "中" + " ".repeat(16) },
       {
-        scanId: "22222222-2222-4222-8222-222222222222",
-        targetPath: "/demo/payment-service",
-        mode: "deep",
-        progress: { status: "complete" },
-        findingCount: 2,
-        startedAt: "2026-07-23T12:00:00Z",
+        name: "界".repeat(45) + joined,
+        cell: "界".repeat(9),
+        compact: `7 findings  ·  ✓ COMPLETE\n    ${"界".repeat(45)}\n    ${joined}`,
       },
     ];
-
-    for (const columns of [72, 100]) {
-      const output = stripVTControlCharacters(
+    const scans = repositories.map(({ name }, index) => ({
+      scanId: String(index + 1).repeat(36),
+      targetPath: `/demo/${name}`,
+      mode: "standard",
+      progress: { status: "complete" },
+      findingCount: 7,
+      startedAt: "2026-07-24T12:00:00Z",
+    }));
+    const render = (columns: number) =>
+      stripVTControlCharacters(
         renderScanHistory({ scans }, "list", {
           columns,
           scanRoot: "/demo/results",
         }),
       );
-      expect(output).toContain("results");
-      expect(output).toContain("juice-shop");
-      expect(output).toContain("payment-service");
-      expect(output).toContain(scans[0]!.scanId);
-      expect(output).toContain(scans[1]!.scanId);
-      if (columns >= 96) expect(output).toContain("REPOSITORY");
+    const narrow = render(96);
+    const wide = render(97);
+    expect(narrow).toContain("results");
+    expect(narrow).not.toContain("REPOSITORY");
+    expect(wide).toContain("REPOSITORY         FINDINGS STATUS");
+    for (const [index, { name, cell, compact }] of repositories.entries()) {
+      const id = scans[index]!.scanId;
+      expect(narrow).toContain(id);
+      expect(narrow).toContain(compact ?? name);
+      expect(wide).toContain(
+        `${id} 2026-07-24 standard ${cell} 7        ✓ COMPLETE`,
+      );
     }
+  });
+
+  test("uses the singular for one finding or reviewed file", () => {
+    const scan = {
+      scanId: "12345678-abcd-4567-abcd-1234567890ab",
+      targetPath: "/demo/service",
+      mode: "standard",
+      progress: { status: "complete", coverage: { filesTotal: 1 } },
+      findingCount: 1,
+      startedAt: "2026-07-24T12:00:00Z",
+    };
+    const list = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", { columns: 60 }),
+    );
+    expect(list).toMatch(/1 scan {2}· {2}latest: 1 finding$/mu);
+    expect(list).toContain("1 finding  ·  ✓ COMPLETE");
+    const show = stripVTControlCharacters(
+      renderScanHistory({ ...scan, findings: [] }, "show"),
+    );
+    expect(show).toMatch(/REVIEW {2}1 file$/mu);
   });
 
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
+      updatedAt: "2026-01-01T12:00:00Z",
       parentScanId: "87654321-abcd-4567-abcd-1234567890ab",
       targetPath: "/demo/juice-shop",
       mode: "standard",
@@ -273,6 +442,17 @@ describe("scan history renderer", () => {
       findingsTruncated: true,
       artifacts: { markdownReport: "/demo/results/report.md" },
       recipe: {
+        target: { kind: "paths", paths: ["src"] },
+        deepScan: { workers: 2, subagents: 0 },
+        scanInputs: {
+          scanPromptSha256: "a".repeat(64),
+          knowledgeBase: {
+            sha256: "b".repeat(64),
+            documents: [
+              { name: "0-architecture.md.txt", sha256: "c".repeat(64) },
+            ],
+          },
+        },
         config: {
           model: "gpt-5.6-sol",
           model_reasoning_effort: "high",
@@ -288,13 +468,22 @@ describe("scan history renderer", () => {
     };
     const output = stripVTControlCharacters(renderScanHistory(scan, "show"));
     for (const expected of [
+      `UPDATED  ${scan.updatedAt}`,
       "FINDINGS  20 of 75",
       "PARENT SCAN  87654321",
       "CONFIGURATION",
+      "SCOPE",
+      '"paths":["src"]',
+      "DEEP SCAN",
+      '"workers":2',
+      `SCAN INSTRUCTIONS  sha256:${"a".repeat(64)}`,
+      `KNOWLEDGE SNAPSHOT  sha256:${"b".repeat(64)}`,
+      "0-architecture.md.txt",
+      `sha256:${"c".repeat(64)}`,
       "model=gpt-5.6-sol",
       'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
       'trusted_paths=["src","packages/core"]',
-      "COVERAGE",
+      "REVIEW",
       "12 of 15 reviewed",
       "9 files",
       "ARTIFACTS",
@@ -383,7 +572,6 @@ describe("scan history renderer", () => {
       {
         beforeScanId: "before",
         afterScanId: "after",
-        coverage: { afterCompleteness: "complete" },
         summary: {},
         findings: [],
         related: [relation],
@@ -405,20 +593,27 @@ describe("scan history renderer", () => {
       targetPath: "/synthetic/repository",
       progress: { status: "complete" },
       findings: [
-        { title: relation.beforeTitle, severity: "high", related: [relation] },
+        {
+          title: relation.beforeTitle,
+          severity: "informational",
+          related: [relation],
+        },
       ],
     };
     const compact = renderScanHistory(scan, "show", { color: false });
-    expect(compact).toContain("1 related finding, kept separate");
+    expect(compact).toContain(`\n    INFO      ${relation.beforeTitle}\n`);
+    expect(compact).toContain(
+      "\n              ↔ 1 related finding, kept separate",
+    );
     expect(compact).not.toContain(relation.reason);
     const expanded = renderScanHistory(scan, "show", {
       color: false,
       showLinkedFindings: true,
     });
     for (const value of [
-      relation.afterTitle,
-      relation.scanId.slice(0, 8),
-      relation.reason,
+      `\n                RELATED SCAN ${relation.scanId.slice(0, 8)}`,
+      `\n                  ↳ ${relation.afterTitle}`,
+      `\n                    ${relation.reason}`,
     ]) {
       expect(expanded).toContain(value);
     }

@@ -1,5 +1,5 @@
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -9,7 +9,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { userInfo } from "node:os";
 import { dirname, join, relative, sep, win32 } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -17,6 +16,19 @@ import { writeSource as write } from "./support/shell.js";
 
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const temporaryDirectories = createTemporaryDirectoriesSync();
+
+function posixAccount(): { username: string; homedir: string } {
+  // Bun's userInfo can reflect USER and HOME instead of the account database.
+  return JSON.parse(
+    execFileSync(
+      "node",
+      ["-p", "JSON.stringify(require('node:os').userInfo())"],
+      {
+        encoding: "utf8",
+      },
+    ),
+  );
+}
 
 function fixture(name = "repository") {
   const directory = temporaryDirectories.create("security-policy-helper-");
@@ -708,7 +720,10 @@ binding.readdir = function (...args) {
       const project = join(root, "project");
       for (const [home, path] of [
         [root, "~/project"],
-        [undefined, `~/${relative(userInfo().homedir, project)}`],
+        [`${root}/`, "~/project"],
+        [`${root}///`, "~/project"],
+        ["/", `~${project}`],
+        [undefined, `~/${relative(posixAccount().homedir, project)}`],
         ["", `~${project}`],
       ] as const) {
         const result = spawnSync(
@@ -726,7 +741,7 @@ binding.readdir = function (...args) {
     "expands named homes with quoted and control characters in the remaining path",
     () => {
       const { root } = fixture();
-      const info = userInfo();
+      const info = posixAccount();
       const directory = 'space "quote" back\\slash\nline\ttab\b';
       write(root, `${directory}/SECURITY.md`, "named-home policy\n");
       const path = `~${info.username}/${relative(info.homedir, join(root, directory))}`;
@@ -754,7 +769,7 @@ binding.readdir = function (...args) {
         );
         chmodSync(join(tools, name), 0o755);
       }
-      const info = userInfo();
+      const info = posixAccount();
       const path = `~${info.username}/${relative(info.homedir, root)}`;
       const result = spawnSync(
         "/bin/sh",
@@ -914,32 +929,44 @@ binding.readdir = function (...args) {
     }
   });
 
-  test("rejects non-UTF-8 and oversized regular or linked policies", () => {
-    for (const kind of ["non-utf8", "oversized", "linked"]) {
+  test("rejects non-UTF-8 regular or linked policies", () => {
+    for (const kind of ["regular", "linked"]) {
       const { root } = fixture();
-      const content =
-        kind === "non-utf8"
-          ? Buffer.from([0xff])
-          : Buffer.alloc(1024 * 1024 + 1, "a");
-      write(root, kind === "linked" ? "large.md" : "SECURITY.md", content);
+      write(
+        root,
+        kind === "linked" ? "policy.md" : "SECURITY.md",
+        Buffer.from([0xff]),
+      );
       if (kind === "linked")
-        symlinkSync(join(root, "large.md"), join(root, "SECURITY.md"), "file");
+        symlinkSync(join(root, "policy.md"), join(root, "SECURITY.md"), "file");
       const result = resolve(root, ".");
       expect(result.status, result.stderr).toBe(2);
-      expect(result.stderr).toContain(
-        kind === "non-utf8" ? "not valid UTF-8" : "exceeds 1 MiB",
-      );
+      expect(result.stderr).toContain("not valid UTF-8");
       expect(result.stdout).toBe("");
     }
   });
 
-  test("accepts a policy exactly at the byte limit", () => {
+  test("resolves complete root and linked nested policies larger than 1 MiB", () => {
     const { root } = fixture();
-    const content = "a".repeat(1024 * 1024);
-    write(root, "SECURITY.md", content);
-    const result = resolve(root, ".");
+    const rootContent = `${"root policy é\n".repeat(100_000)}root policy end\n`;
+    const nestedContent = `${"nested policy 文\n".repeat(100_000)}nested policy end\n`;
+    expect(Buffer.byteLength(rootContent)).toBeGreaterThan(1024 * 1024);
+    expect(Buffer.byteLength(nestedContent)).toBeGreaterThan(1024 * 1024);
+    write(root, "SECURITY.md", rootContent);
+    write(root, "policies/component.md", nestedContent);
+    mkdirSync(join(root, "component"));
+    symlinkSync(
+      join(root, "policies/component.md"),
+      join(root, "component/SECURITY.md"),
+      "file",
+    );
+
+    const result = resolve(root, "component");
     expect(result.status, result.stderr).toBe(0);
-    expectGuidance(result.stdout, [["SECURITY.md", content]]);
+    expectGuidance(result.stdout, [
+      ["SECURITY.md", rootContent],
+      ["component/SECURITY.md", nestedContent],
+    ]);
   });
 
   test("preserves required and mutually exclusive helper arguments", () => {

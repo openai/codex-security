@@ -14,4 +14,7 @@ Case id:
 Finding input:
 {{finding_input}}
 
-{{eval_instructions}}
+{{eval_instructions}}{% if github_tool_observations %}
+
+Simulated environment and completed tool observations for this offline exercise:
+{{github_tool_observations}}{% endif %}

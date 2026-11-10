@@ -1,20 +1,20 @@
 # Layer 1 Deterministic CI Coverage
 
-This file is the source of truth for portable deterministic, no-model Codex Security plugin CI coverage. Future pull requests that extend Layer 1 should update this checklist and link back here in their PR description.
+Maintainers use this backlog to track deterministic plugin test coverage. The [CI workflow](../../../.github/workflows/node-ci.yml) defines the active jobs, and the [CI guide](../../../docs/ci.md) explains when they run. Update this list when adding coverage or completing a deferred item.
 
 ## Covered
 
-- **Python utilities:** unit and CLI tests cover capability preflight, scan contract finalization, rank-input generation and selection, and report format validation.
+- **Python utilities:** unit and CLI tests cover scan contract finalization, diff and scoped-file worklist generation, and report format validation.
 - **Schema validation:** Draft 2020-12 validators and checked-in completed-scan examples are validated with `jsonschema`, including RFC 3339 formats.
 - **Plugin metadata:** the plugin manifest, referenced assets, skill frontmatter, and agent interface YAML are parsed and checked for required fields and file consistency.
 - **Prompt linting:** agent default prompts are required to be non-empty.
-- **CLI and harness dry runs:** every Python script supports `--help`; major command paths run against temporary repositories and scan bundles without a model call.
-- **Static checks:** Ruff checks the plugin scripts and tests; the `--help` smoke test exercises top-level Python script imports.
-- **Golden files:** deterministic repository ranking JSONL output is compared against a checked-in golden file.
-
+- **CLI and harness dry runs:** Python command entry points support `--help`; major command paths run against temporary repositories and scan bundles without a model call.
+- **Static checks:** Ruff checks the plugin scripts and tests. An isolated Python interpreter imports every module in `scripts/`.
 - **MCP dependencies and templates:** CI installs the MCP package with its frozen lockfile; its deterministic tests exercise Deep Scan prompt-template rendering.
 
 ## Deferred
+
+These proposals are open. Each entry describes how to verify completion.
 
 - **Strict mypy hard gate:** the current scripts and tests have pre-existing strict-mypy errors. Enable the gate after reducing that baseline to zero; completion means `mypy scripts tests --strict` passes without suppressing real contract errors.
 - **Full documentation reference validation:** add a checker for internal file paths, Markdown anchors, and documented command invocations. Completion means every plugin-local reference resolves and every documented command has a deterministic smoke test.

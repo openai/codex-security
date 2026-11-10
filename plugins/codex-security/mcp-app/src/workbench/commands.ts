@@ -1,5 +1,6 @@
 import { parseJson } from "../helpers/json";
 import { openWorkbenchDatabase, workbenchDatabasePath } from "./database";
+import { localDedupe, type LocalDedupeRequest } from "./local-dedupe";
 import {
   listStoredFindings,
   storeFindings,
@@ -10,16 +11,37 @@ import {
   listDedupeGroups,
   storeDedupeGroups,
 } from "./duplicates";
+import {
+  listExternalFindings,
+  storeExternalFindings,
+  type ExternalFindingsImport,
+} from "./external-findings";
 
-export async function findingsCommand(
+import {
+  readSeverityClassification,
+  severityCheckpoint,
+  type SeverityCheckpoint,
+} from "./severity";
+
+export async function workbenchCommand(
   command: string,
   input: string,
+  scanId?: string,
 ): Promise<unknown> {
   const request = parseJson(input) as {
     stateDirectory: string;
     payload: unknown;
   };
   const { stateDirectory, payload } = request;
+  if (command === "read-severity-classification") {
+    const selectedScanId = scanId ?? (payload as { scanId?: unknown })?.scanId;
+    if (typeof selectedScanId !== "string")
+      throw new Error("read-severity-classification requires --scan-id.");
+    return readSeverityClassification(
+      workbenchDatabasePath(stateDirectory),
+      selectedScanId,
+    );
+  }
   const page = payload as { limit: number; offset: number };
   if (
     command === "list-stored-findings" &&
@@ -59,10 +81,37 @@ export async function findingsCommand(
     workbenchDatabasePath(stateDirectory),
     {
       deferred:
-        command !== "store-findings" && command !== "store-dedupe-groups",
+        command !== "local-dedupe" &&
+        command !== "store-findings" &&
+        command !== "store-external-findings" &&
+        command !== "store-dedupe-groups" &&
+        command !== "severity-classification",
     },
   );
   try {
+    if (command === "local-dedupe")
+      return localDedupe(
+        database,
+        payload as LocalDedupeRequest,
+        new Date().toISOString(),
+      );
+    if (command === "store-external-findings")
+      return storeExternalFindings(
+        database,
+        payload as ExternalFindingsImport,
+        new Date().toISOString(),
+      );
+    if (command === "list-external-findings")
+      return listExternalFindings(
+        database,
+        payload as { repository: string; id?: string },
+      );
+    if (command === "severity-classification")
+      return severityCheckpoint(
+        database,
+        payload as SeverityCheckpoint,
+        new Date().toISOString(),
+      );
     if (command === "store-findings") {
       const { entries, repositoryId } = payload as {
         entries: EmbeddedFinding[];

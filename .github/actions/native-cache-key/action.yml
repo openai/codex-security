@@ -1,0 +1,12 @@
+name: Native cache key
+description: Fingerprint the checked-out native build and proof inputs.
+outputs:
+  key:
+    description: Exact key for this source and UTC week.
+    value: ${{ steps.key.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/key.sh" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Check Agent Skills"
+  short_description: "Review agent skills before installation or use"
+  default_prompt: "Use $check-skills to review this skill file or folder before installation and report the verdict, source evidence, and coverage gaps."

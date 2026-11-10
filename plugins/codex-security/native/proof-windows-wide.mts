@@ -332,6 +332,29 @@ function worker(root: string): Record<string, boolean> {
     ["file-\udc80"],
   );
 
+  const chunked = widePath(win32.join(cwd, "chunked"));
+  files.writeFile(chunked, [Buffer.alloc(64 * 1024 + 5, 17)]);
+  const sizes: number[] = [];
+  files.readChunks(chunked, (chunk) => {
+    sizes.push(chunk.length);
+    return true;
+  });
+  assert.deepEqual(sizes, [64 * 1024, 5]);
+  let reads = 0;
+  files.readChunks(chunked, () => {
+    reads++;
+    return false;
+  });
+  assert.equal(reads, 1);
+  assert.throws(
+    () =>
+      files.readChunks(chunked, () => {
+        throw new Error("consumer stopped");
+      }),
+    /consumer stopped/u,
+  );
+  files.unlink(chunked);
+
   for (const malformed of [Buffer.from([0x61]), widePath("bad\0value")]) {
     assert.throws(() => native.windowsEnvironment(malformed));
     assert.throws(() => native.windowsAbsolutePath(malformed));

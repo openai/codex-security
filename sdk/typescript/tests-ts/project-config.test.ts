@@ -1,5 +1,6 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import assert from "node:assert/strict";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import {
@@ -12,6 +13,8 @@ import {
   type ProjectConfigInput,
 } from "../src/project-config-schema.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { mergedCodexConfig, type JsonValue } from "../src/config.js";
+import { ConfigurationError } from "../src/errors.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } =
@@ -20,6 +23,25 @@ afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
+  ["owner artifact enabled", { scan: { owner_suggestions: true } }, true],
+  ["owner artifact disabled", { scan: { owner_suggestions: false } }, true],
+  [
+    "owner artifact requires a boolean",
+    { scan: { owner_suggestions: "true" } },
+    false,
+  ],
+  [
+    "fractional investigation minutes",
+    { scan: { max_time_minutes: 0.5 } },
+    true,
+  ],
+  ["unset Standard cap", { scan: { max_time_minutes: 6000 } }, true],
+  [
+    "nonpositive investigation minutes",
+    { scan: { max_time_minutes: 0 } },
+    false,
+  ],
+  ["minute strings", { scan: { max_time_minutes: "15" } }, false],
   [
     "Cyber selection",
     { scan: { cyber_access_program: "daybreak_blue" } },
@@ -129,6 +151,65 @@ const cases: [string, unknown, boolean][] = [
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
 
+test("minute and deprecated hour settings follow source precedence", () => {
+  const directory = process.cwd();
+  for (const [scan, overrides, expected, sourceKey, source] of [
+    [
+      { mode: "standard", max_time_minutes: 15 },
+      {},
+      { maxTimeMinutes: 15 },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 30, deep: { max_time_hours: 2 } },
+      { maxTimeMinutes: 15 },
+      { maxTimeMinutes: 15, maxTimeHours: undefined },
+      "scan.max_time_minutes",
+      "cli",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 15, deep: { max_time_hours: 1 } },
+      { maxTimeHours: 2 },
+      { maxTimeMinutes: undefined, maxTimeHours: 2 },
+      "scan.deep.max_time_hours",
+      "cli",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 90, deep: { max_time_hours: 1.5 } },
+      {},
+      { maxTimeMinutes: 90, maxTimeHours: 1.5 },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "standard", max_time_minutes: 15, deep: { max_time_hours: 2 } },
+      {},
+      { maxTimeMinutes: 15, maxTimeHours: undefined },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "standard", max_time_minutes: 6000 },
+      { mode: "deep", maxTimeMinutes: 15 },
+      { maxTimeMinutes: 15 },
+      "scan.max_time_minutes",
+      "cli",
+    ],
+  ] as const) {
+    const resolved = resolveScanSettings(
+      { input: { scan }, directory },
+      overrides,
+      directory,
+    );
+    expect({
+      maxTimeMinutes: resolved.options.maxTimeMinutes,
+      maxTimeHours: resolved.options.maxTimeHours,
+    }).toMatchObject(expected);
+    expect(resolved.sources[sourceKey]).toBe(source);
+  }
+});
+
 describe("project configuration input contract", () => {
   const validate = new Ajv({ strict: true, allErrors: true }).compile(
     projectConfigJsonSchema(),
@@ -168,7 +249,7 @@ describe("project configuration input contract", () => {
     ).toEqual(DEFAULT_DEEP_SCAN_SETTINGS);
   });
 
-  test("YAML and JSON load the same literal data without adding defaults", async () => {
+  test("YAML, JSON, and BOM-prefixed JSON load literal data without adding defaults", async () => {
     const root = await temporaryDirectory();
     const yaml = join(root, "scan.yaml");
     const json = join(root, "scan.json");
@@ -183,6 +264,10 @@ describe("project configuration input contract", () => {
     await writeFile(json, JSON.stringify(input));
     expect((await readProjectConfig(yaml)).input).toEqual(input);
     expect((await readProjectConfig(json)).input).toEqual(input);
+
+    const marked = { codex: { synthetic_setting: "preserve\uFEFFthis" } };
+    await writeFile(json, `\uFEFF${JSON.stringify(marked)}`);
+    expect((await readProjectConfig(json)).input).toEqual(marked);
   });
 
   test.each([
@@ -248,10 +333,8 @@ describe("project configuration input contract", () => {
   });
 
   test.each([
-    ["invalid.yaml", "scan: [\n"],
     ["duplicate.yaml", "scan: {}\nscan: {}\n"],
     ["stream.yaml", "scan: {}\n---\nscan: {}\n"],
-    ["invalid.json", '{"scan":'],
     ["invalid.ts", "export default {};"],
     ["unknown.yaml", "scan:\n  workres: 2\n"],
   ])("rejects an invalid selected file: %s", async (name, contents) => {
@@ -261,14 +344,103 @@ describe("project configuration input contract", () => {
     await expect(readProjectConfig(path)).rejects.toThrow();
   });
 
-  test("reports a missing selected file", async () => {
-    await expect(
-      readProjectConfig("missing.yaml", await temporaryDirectory()),
-    ).rejects.toThrow("Cannot read project configuration");
+  test.each([
+    ["scan.yaml", "scan: [\n"],
+    ["scan.json", '{"scan":'],
+  ])(
+    "includes the parser message when %s cannot be parsed",
+    async (name, contents) => {
+      const path = join(await temporaryDirectory(), name);
+      await writeFile(path, contents);
+      const error = await readProjectConfig(path).catch(
+        (cause: unknown) => cause,
+      );
+      assert(error instanceof ConfigurationError);
+      assert(error.cause instanceof Error);
+      expect(error.message).toBe(
+        `Cannot parse project configuration at ${path}: ${error.cause.message}`,
+      );
+    },
+  );
+
+  test.each([
+    ["missing.yaml", "ENOENT"],
+    ["directory.yaml", "EISDIR"],
+  ])("includes the system error for %s", async (name, code) => {
+    const path = join(await temporaryDirectory(), name);
+    if (code === "EISDIR") await mkdir(path);
+    await expect(readProjectConfig(path)).rejects.toMatchObject({
+      message: expect.stringContaining(`${path}: ${code}`),
+      cause: expect.objectContaining({ code }),
+    });
   });
 });
 
 describe("project configuration resolution", () => {
+  test.skipIf(process.platform === "win32")(
+    "follows a directory link before a parent component in the selected file",
+    async () => {
+      const root = await temporaryDirectory();
+      const selected = join(root, "selected");
+      const child = join(selected, "child");
+      await mkdir(child, { recursive: true });
+      await symlink(child, join(root, "link"));
+      for (const [directory, minutes] of [
+        [root, 2],
+        [selected, 7],
+      ] as const) {
+        await writeFile(
+          join(directory, "scan.json"),
+          JSON.stringify({
+            scan: { max_time_minutes: minutes },
+            output: { directory: "reports" },
+          }),
+        );
+      }
+      for (const [file, directory] of [
+        ["link/../scan.json", root],
+        [`${root}/link/../scan.json`, root],
+        ["scan.json", `${root}/link/..`],
+        [`${relative(process.cwd(), root)}/link/../scan.json`, ""],
+      ] as const) {
+        const project = await readProjectConfig(file, directory);
+        expect(project.path).toBe(join(selected, "scan.json"));
+        expect(resolveScanSettings(project, {}, root).options).toMatchObject({
+          maxTimeMinutes: 7,
+          outputDir: join(selected, "reports"),
+        });
+      }
+      await expect(
+        readProjectConfig("missing/../scan.json", root),
+      ).rejects.toMatchObject({
+        cause: { code: "ENOENT" },
+      });
+      const alias = join(root, "alias.json");
+      await symlink(join(selected, "scan.json"), alias);
+      expect((await readProjectConfig(alias)).directory).toBe(root);
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "does not select a replacement-character directory for a non-UTF-8 parent",
+    async () => {
+      const root = await temporaryDirectory();
+      const parent = Buffer.concat([
+        Buffer.from(`${root}/`),
+        Buffer.from([0xff]),
+      ]);
+      const child = Buffer.concat([parent, Buffer.from("/child")]);
+      await mkdir(child, { recursive: true });
+      await symlink(child, join(root, "link"));
+      await writeFile(Buffer.concat([parent, Buffer.from("/scan.json")]), "{}");
+      await mkdir(join(root, "\uFFFD"));
+      await writeFile(join(root, "\uFFFD", "scan.json"), "{}");
+      await expect(
+        readProjectConfig("link/../scan.json", root),
+      ).rejects.toThrow("valid UTF-8 path");
+    },
+  );
+
   test("resolves paths according to their layer and replaces lists", async () => {
     const root = await temporaryDirectory();
     const project = {
@@ -362,6 +534,98 @@ describe("project configuration resolution", () => {
       "codex.profiles.reviewCase.model": "project",
       "codex.synthetic_setting.itemCount": "cli",
     });
+  });
+
+  test.each<{ value: JsonValue; source: "default" | "project" }>([
+    { value: null, source: "default" },
+    { value: false, source: "default" },
+    { value: [], source: "default" },
+    { value: {}, source: "default" },
+    { value: { enabled: true }, source: "project" },
+  ])(
+    "tracks restored native defaults after replacing $value with a CLI table",
+    async ({ value, source }) => {
+      const root = await temporaryDirectory();
+      const input = { codex: { features: { multi_agent_v2: value } } };
+      const original = structuredClone(input);
+      const resolved = resolveScanSettings(
+        { input, directory: root },
+        {
+          codexOverrides: {
+            features: {
+              multi_agent_v2: { max_concurrent_threads_per_session: 2 },
+            },
+          },
+        },
+        root,
+      );
+      expect(
+        (await mergedCodexConfig(resolved.config))["features"],
+      ).toMatchObject({
+        multi_agent_v2: {
+          enabled: true,
+          max_concurrent_threads_per_session: 2,
+        },
+      });
+      expect(resolved.sources).toMatchObject({
+        "codex.features.multi_agent_v2.enabled": source,
+        "codex.features.multi_agent_v2.max_concurrent_threads_per_session":
+          "cli",
+      });
+      expect(
+        Object.hasOwn(resolved.sources, "codex.features.multi_agent_v2"),
+      ).toBe(false);
+      expect(Object.isFrozen(resolved.sources)).toBe(true);
+      expect(input).toEqual(original);
+    },
+  );
+
+  test("preserves literal native keys and profile sources across empty-table and list replacements", async () => {
+    const root = await temporaryDirectory();
+    const { config, sources } = resolveScanSettings(
+      {
+        directory: root,
+        input: {
+          codex: {
+            "setting.with.dot": { keep: true, retained: null, replace: [] },
+            setting: { with: { dot: { keep: true } } },
+            "literal.branch": { leaf: true },
+            synthetic: { old: true },
+            profile: "review",
+            profiles: { review: { model: "gpt-5.6-terra" } },
+          },
+        },
+      },
+      {
+        codexOverrides: {
+          "setting.with.dot": { keep: false, replace: {} },
+          literal: { branch: false },
+          synthetic: [],
+        },
+      },
+      root,
+    );
+    expect(config.codexOverrides["setting.with.dot"]).toEqual({
+      keep: false,
+      retained: null,
+      replace: {},
+    });
+    expect(config.codexOverrides["synthetic"]).toEqual([]);
+    expect(config.codexOverrides["literal.branch"]).toEqual({ leaf: true });
+    expect(config.codexOverrides["literal"]).toEqual({ branch: false });
+    expect(sources).toMatchObject({
+      "codex.setting.with.dot.keep": "cli",
+      "codex.setting.with.dot.retained": "project",
+      "codex.literal.branch.leaf": "project",
+      "codex.literal.branch": "cli",
+      "codex.synthetic": "cli",
+      "codex.profile": "project",
+      "codex.profiles.review.model": "project",
+    });
+    expect(Object.hasOwn(sources, "codex.setting.with.dot.replace")).toBe(
+      false,
+    );
+    expect(Object.hasOwn(sources, "codex.synthetic.old")).toBe(false);
   });
 
   test("ignores valid inactive deep defaults but rejects explicit deep CLI options in standard mode", async () => {

@@ -1,13 +1,15 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, spyOn } from "bun:test";
 import { SandboxUnavailableError } from "../src/index.js";
 import { probeCodexSandbox } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const SANDBOX_DENIAL =
-  "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted";
+  process.platform === "darwin"
+    ? "sandbox-exec: sandbox_apply: Operation not permitted"
+    : "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-sandbox-",
@@ -45,6 +47,31 @@ async function syntheticCodex(root: string, exitCode: number): Promise<string> {
 
 describe("Codex sandbox probe", () => {
   test.skipIf(process.platform === "win32")(
+    "reports its timeout without sandbox-denial advice",
+    async () => {
+      const timeout = spyOn(AbortSignal, "timeout").mockReturnValue(
+        AbortSignal.abort(
+          new DOMException("Synthetic timeout", "TimeoutError"),
+        ),
+      );
+      try {
+        const root = await temporaryDirectory();
+        const command = await syntheticCodex(root, 0);
+        const failure = await probeCodexSandbox({ command }, {}).then(
+          () => null,
+          (error: Error) => error,
+        );
+        expect(failure).toBeInstanceOf(SandboxUnavailableError);
+        expect(failure?.cause).toBeDefined();
+        expect(failure?.message).toContain("timed out");
+        expect(failure?.message).not.toContain("user namespaces");
+      } finally {
+        timeout.mockRestore();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "reports what the sandbox said and how to reproduce it",
     async () => {
       const root = await temporaryDirectory();
@@ -57,6 +84,15 @@ describe("Codex sandbox probe", () => {
       expect(failure?.message).toContain(SANDBOX_DENIAL);
       expect(failure?.message).toContain(
         `${command} sandbox -- ${command} --version`,
+      );
+      expect(failure?.message.indexOf(SANDBOX_DENIAL)).toBeLessThan(
+        failure?.message.indexOf("reproduce") ?? -1,
+      );
+      expect(failure?.message.includes("AppArmor")).toBe(
+        process.platform === "linux",
+      );
+      expect(failure?.message.includes("user namespaces")).toBe(
+        process.platform === "linux",
       );
     },
   );

@@ -19,7 +19,6 @@ FINDING_CLOSE_REASONS = ("already_fixed", "wont_fix", "false_positive")
 REMEDIATION_UPDATE_STATES = ("generated", "applied", "verifying", "verified", "failed")
 EXPORT_FORMATS = ("csv", "json", "sarif")
 ARTIFACTS = {
-    "coverage": "coverage.json",
     "findings": "findings.json",
     "manifest": "scan-manifest.json",
     "markdownReport": "report.md",
@@ -37,6 +36,14 @@ FINDING_ATTACK_PATH_PREVIEW_BYTES = 4_000
 FINDING_CODE_EVIDENCE_LIMIT = 4
 FINDING_CODE_EVIDENCE_SNIPPET_BYTES = 1_500
 FINDING_EVIDENCE_EXCERPT_BYTES = 8_000
+FINDING_LOCATION_ORDER_SQL = "CASE WHEN role = 'root_control' THEN 0 ELSE 1 END, sort_order"
+# The outer query binds finding_occurrences as occurrences.
+PRIMARY_FINDING_LOCATION_SQL = f"""
+    FROM finding_locations
+    WHERE occurrence_id = occurrences.id
+    ORDER BY {FINDING_LOCATION_ORDER_SQL}
+    LIMIT 1
+"""
 FINDING_LOCATIONS_LIMIT = 8
 FINDING_TITLE_BYTES = 512
 FINDING_SUMMARY_BYTES = 2_000
@@ -51,15 +58,32 @@ GIT_REPOSITORY_ENVIRONMENT = (
     "GIT_COMMON_DIR",
     "GIT_DIR",
     "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
     "GIT_INDEX_FILE",
     "GIT_NAMESPACE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_WORK_TREE",
 )
 EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+EMPTY_GIT_TREES = {
+    "sha1": EMPTY_GIT_TREE,
+    "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+}
+
+
+def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
+    """Strip surrounding whitespace, return None for blank text, and enforce the character limit."""
+    if value is None:
+        return None
+    normalized = value.strip()
+    if maximum is not None and len(normalized) > maximum:
+        raise SystemExit(f"Text value must be no longer than {maximum} characters.")
+    return normalized or None
 
 
 def positive_int(value: str) -> int:
+    """Parse a CLI count and reject values below one with an argparse validation error."""
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("expected a positive integer")

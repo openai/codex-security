@@ -66,7 +66,7 @@ async function writeCompletedScan(env) {
     displayName: env.CODEX_SECURITY_TARGET_DISPLAY_NAME,
     snapshotDigest: env.CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST,
   };
-  for (const name of ["findings.json", "coverage.json"]) {
+  for (const name of ["findings.json"]) {
     const path = join(directory, name);
     const document = JSON.parse(await readFile(path, "utf8"));
     document.scanId = manifest.scan.id;
@@ -183,7 +183,7 @@ try {
     }),
     sdk.ScanInterruptedError,
   );
-  assert.equal((await savedScan(1)).progress.status, "failed");
+  assert.equal((await savedScan(1)).progress.status, "canceled");
   assert.equal(finished.has(1), true);
 
   let closing;
@@ -198,7 +198,7 @@ try {
   );
   assert.ok(closing);
   await closing;
-  assert.equal((await savedScan(2)).progress.status, "failed");
+  assert.equal((await savedScan(2)).progress.status, "canceled");
   assert.equal(finished.has(2), true);
   assert.equal(turns.length, 3);
   await assert.rejects(client.run(repository), /CodexSecurity is closed/u);

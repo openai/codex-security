@@ -97,6 +97,8 @@ test("runs a report-only full scan outside the target checkout", () => {
     "standard",
     "--effort",
     "high",
+    "--codex",
+    'responses_api_metadata.codex_security_integration="azure_pipelines"',
     "--output-dir",
     `${result.root}/scan`,
     "--json",
@@ -161,7 +163,7 @@ test("exports fingerprints and only signals readiness after a successful export"
 
 test("retains selected reports without copying raw state or credentials", () => {
   const collect = steps.find((step) => step.name === "stageReports")!;
-  const reports = ["coverage.json", "findings.json", "report.md"];
+  const reports = ["findings.json", "report.md", "scan-manifest.json"];
   const result = runStep(collect, {}, [
     ...reports,
     "auth.json",

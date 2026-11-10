@@ -1,24 +1,53 @@
 import { basename, isAbsolute } from "node:path";
+import { emitKeypressEvents } from "node:readline";
+import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
-import { stripVTControlCharacters } from "node:util";
+import stripAnsi from "strip-ansi";
+import stringWidth from "string-width";
+import {
+  TerminalErrorListener,
+  type TerminalStream,
+} from "./terminal-stream.js";
+import { fitCell, fitLine, graphemes } from "./terminal-columns.js";
 import { isRecord } from "./record.js";
-import type { ScanBudget } from "./api.js";
+import type { ScanAuthMode, ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
 import type {
   ComponentReceipt,
   ComponentScanEvent,
   ComponentScanResult,
 } from "./component-scan.js";
-import { formatUsd, type ScanCost, type ScanSessionEvent } from "./cost.js";
+import {
+  formatUsd,
+  type ScanCost,
+  type ScanSessionEvent,
+  type ScanUsageMeasurement,
+  type ScanUsageObservation,
+} from "./cost.js";
 import {
   estimateScanCost,
   formatScanCost,
   formatScanCosts,
   formatScanCostTokens,
+  formatTokenUsage,
+  type ScanPricingContext,
+  type ScanTokenUsage,
 } from "./cost-model.js";
+import { formatDeepScanReviews } from "./scan-progress.js";
 import type { ScanActivity } from "./scan-activity.js";
+import {
+  ACCOUNT_LIMITS_UNAVAILABLE,
+  USAGE_TIME_UNAVAILABLE,
+  formatAccountLimits,
+  formatUsageFreshness,
+  isChatGptAuthentication,
+} from "./scan-usage-display.js";
 import type { ScanMode } from "./targets.js";
-import { scanPhaseLabel, type ScanProgress } from "./worker-progress.js";
+import {
+  scanPhaseLabel,
+  scanProgressCount,
+  type ScanProgress,
+} from "./worker-progress.js";
 
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
@@ -29,18 +58,22 @@ const DISABLE_ALTERNATE_SCROLL = "\u001B[?1007l";
 const CURSOR_HOME = "\u001B[H";
 const ERASE_LINE = "\u001B[2K";
 const MAX_HISTORY_ENTRIES = 2_000;
-const FIXED_SCREEN_ROWS = 8;
+const FIXED_SCREEN_ROWS = 4; // Title, two dividers and elapsed time.
+const COMPONENT_STATUS = {
+  pending: "Queued",
+  completed: "Complete",
+  failed: "Failed",
+} as const;
 
-interface DashboardStream {
-  write(chunk: string, callback?: (error?: Error | null) => void): unknown;
-  on?(event: "error", listener: (error: Error) => void): unknown;
-  off?(event: "error", listener: (error: Error) => void): unknown;
+interface DashboardStream extends TerminalStream {
+  readonly writableNeedDrain?: boolean;
   readonly columns?: number;
   readonly rows?: number;
 }
 
 interface DashboardClock {
   now(): number;
+  queueMicrotask?(callback: () => void): void;
   setInterval(callback: () => void, milliseconds: number): NodeJS.Timeout;
   clearInterval(timer: NodeJS.Timeout): void;
 }
@@ -61,6 +94,7 @@ interface ScanDashboardOptions {
   componentName?: string;
   mode?: ScanMode;
   model?: ScanModelConfiguration;
+  pricingContext?: ScanPricingContext;
   maxCostUsd?: number;
   showCost?: boolean;
   clock: DashboardClock;
@@ -83,6 +117,7 @@ type DashboardActivityKind = ScanActivity["kind"] | "status" | "warning";
 interface DashboardActivityLine {
   text: string;
   kind: DashboardActivityKind | "path" | "code";
+  contentStart?: number;
   links?: readonly DashboardActivityLink[];
   code?: readonly string[];
   bold?: readonly string[];
@@ -124,6 +159,10 @@ export class ScanDashboard {
   #showComponent = false;
   #componentResult: ComponentScanResult | null = null;
   readonly #activities: TimedScanActivity[] = [];
+  readonly #activityCache = new WeakMap<
+    TimedScanActivity,
+    { width: number; icon: string | undefined; lines: DashboardActivityLine[] }
+  >();
   readonly #details: (ScanSessionEvent & { recordedAt: number })[] = [];
   #detailsCache: {
     width: number;
@@ -134,35 +173,154 @@ export class ScanDashboard {
   } | null = null;
   #stage = "Preparing scan";
   #files: ScanProgress | null = null;
+  #componentReviews: string | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
+  #tokens: string | null = null;
+  #usageCoverage: ScanUsageMeasurement["coverage"] | null = null;
+  #usageFreshness: string | null = null;
+  #accountLimits: string | null = null;
+  #chatGptAuth = false;
   #budget: {
     request: ScanBudget;
     input: string;
     error: string;
-    finish: (limit?: number) => void;
+    finish: (limit?: number, preserveInput?: boolean) => void;
   } | null = null;
   #timer: NodeJS.Timeout | null = null;
+  #refreshPending = false;
   #scrollOffset = 0;
   #view: "activity" | "details" = "activity";
   #source: "all" | "main" | number = "all";
   #inputWasRaw = false;
   #noteCount = 0;
-  #observingStreamErrors = false;
-  readonly #onStreamError = (): void => {};
+  readonly #terminalErrors: TerminalErrorListener;
+  #keyInput: PassThrough | null = null;
+  #ss3Parameters = false;
+  #inputKeys: {
+    keys: string[];
+    continued: boolean;
+    replay: boolean | string;
+    text: string;
+  } | null = null;
   readonly #onInput = (chunk: string | Uint8Array): void => {
-    const input =
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    const batch = {
+      keys: [] as string[],
+      continued: false,
+      replay: false as boolean | string,
+      text: "",
+    };
+    let current = chunk;
+    do {
+      batch.replay = false;
+      this.#inputKeys = batch;
+      try {
+        this.#keyInput?.write(current);
+      } finally {
+        this.#inputKeys = null;
+      }
+      if (typeof batch.replay === "string") current = batch.replay;
+    } while (batch.replay);
+    this.#handleKeys(batch.keys);
+  };
+
+  #setKeyInput(input: PassThrough | null): void {
+    const previous = this.#keyInput;
+    if (previous !== null) {
+      previous.removeAllListeners("keypress");
+      previous.on("keypress", () => {});
+      // Readline clears its Escape timer on input, after the active keypress returns.
+      queueMicrotask(() => {
+        previous.write(" ");
+        previous.removeAllListeners();
+        previous.destroy();
+      });
+    }
+    this.#keyInput = input;
+    if (input === null) return;
+    let pending = 0;
+    this.#ss3Parameters = false;
+    input.setEncoding("utf8");
+    input.on("data", (text: string) => {
+      if (this.#inputKeys !== null) {
+        this.#inputKeys.continued = pending > 0;
+        this.#inputKeys.text = text;
+      }
+      pending += text.length;
+    });
+    emitKeypressEvents(input);
+    input.on(
+      "keypress",
+      (
+        _text: unknown,
+        key: { sequence: string; meta?: boolean; code?: string },
+      ) => {
+        pending -= key.sequence.length;
+        if (this.#ss3Parameters) {
+          if (/^[ -?]+$/u.test(key.sequence)) return;
+          this.#ss3Parameters = false;
+          if (/^[@-~]$/u.test(key.sequence)) return;
+        }
+        const escapes =
+          key.code === undefined
+            ? undefined
+            : key.sequence.match(/^\u001B+(?=\u001B)/u)?.[0];
+        // Readline ends modified SS3 keys at the parameter separator.
+        const modifiedSs3 =
+          key.code !== undefined &&
+          /^\u001BO[0-?]+$/u.test(key.sequence.slice(escapes?.length ?? 0));
+        if (modifiedSs3) this.#ss3Parameters = true;
+        const keys = modifiedSs3
+          ? [...(escapes ?? ""), key.sequence.slice(escapes?.length ?? 0)]
+          : key.code !== undefined && key.sequence.endsWith("\u001B")
+            ? ["\u001B"]
+            : (key.meta && key.code === undefined) ||
+                key.sequence.includes("\u0003")
+              ? Array.from(key.sequence)
+              : escapes !== undefined
+                ? [...escapes, key.sequence.slice(escapes.length)]
+                : [key.sequence];
+        const batch = this.#inputKeys;
+        const continued = batch?.continued === true;
+        if (batch !== null) batch.continued = false;
+        if (batch === null) this.#handleKeys(keys);
+        else if (
+          this.#budget !== null &&
+          batch.keys.length === 0 &&
+          keys.length > 1 &&
+          keys[0] === "\u001B" &&
+          continued
+        ) {
+          // The buffered Escape belongs to the prior chunk's budget dismissal.
+          // Replay the complete remaining key, including a prefix from prior chunks.
+          this.#handleKeys(["\u001B"]);
+          this.#setKeyInput(new PassThrough());
+          batch.replay =
+            key.sequence.slice(1) + (pending ? batch.text.slice(-pending) : "");
+        } else if (keys.length > 1 && keys.every((key) => key === "\u001B")) {
+          // Readline can consume a following key's Escape as a repeated Escape.
+          // Keep that introducer with the remaining decoded text for replay.
+          const remaining =
+            key.sequence + (pending ? batch.text.slice(-pending) : "");
+          const prefix = remaining.match(/^\u001B+/u)![0];
+          for (const escape of prefix.slice(0, -1)) batch.keys.push(escape);
+          this.#setKeyInput(new PassThrough());
+          batch.replay = remaining.slice(prefix.length - 1);
+        } else batch.keys.push(...keys);
+      },
+    );
+  }
+
+  #handleKeys(keys: string[]): void {
     if (this.#budget !== null) {
-      for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
-        []) {
+      for (const key of keys) {
         const budget = this.#budget;
         if (budget === null) break;
         if (key === "\u0003" || key === "\u0004") {
           budget.finish();
           this.#options.onInterrupt?.();
         } else if (key === "\u001B") {
-          budget.finish();
+          budget.finish(undefined, true);
         } else if (key === "\r" || key === "\n") {
           const value = budget.input.trim();
           const limit = Number(value);
@@ -187,13 +345,11 @@ export class ScanDashboard {
       return;
     }
     if (this.#options.presentation === "components") {
-      this.#componentInput(input);
+      this.#componentInput(keys);
       return;
     }
     let lines = 0;
-    for (const key of input.match(
-      /[\u0003\u0004\u0015dam1-9]|\u001B\[(?:[ABHF]|[1456]~)/gu,
-    ) ?? []) {
+    for (const key of keys) {
       if (key === "\u0003") {
         if (lines !== 0) this.scroll(lines);
         this.#options.onInterrupt?.();
@@ -227,7 +383,9 @@ export class ScanDashboard {
         lines += this.#activityRows();
       } else if (key === "\u001B[6~") {
         lines -= this.#activityRows();
-      } else {
+      } else if (
+        ["\u001B[H", "\u001B[F", "\u001B[1~", "\u001B[4~"].includes(key)
+      ) {
         if (lines !== 0) this.scroll(lines);
         this.scroll(
           key === "\u001B[H" || key === "\u001B[1~"
@@ -238,10 +396,11 @@ export class ScanDashboard {
       }
     }
     if (lines !== 0) this.scroll(lines);
-  };
+  }
 
   public constructor(stream: DashboardStream, options: ScanDashboardOptions) {
     this.#stream = stream;
+    this.#terminalErrors = new TerminalErrorListener(stream);
     this.#options = options;
     this.#startedAt = options.clock.now();
   }
@@ -254,12 +413,10 @@ export class ScanDashboard {
     }
     this.#timer = this.#options.clock.setInterval(() => this.#refresh(), 1_000);
     try {
-      if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
-        this.#stream.on("error", this.#onStreamError);
-        this.#observingStreamErrors = true;
-      }
+      this.#terminalErrors.start();
       this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
       if (input?.isTTY === true) {
+        this.#setKeyInput(new PassThrough());
         input.setRawMode?.(true);
         input.resume?.();
         input.on("data", this.#onInput);
@@ -282,6 +439,7 @@ export class ScanDashboard {
 
   public stop(): void {
     if (this.#timer === null) return;
+    if (this.#refreshPending) this.#refresh();
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
     this.#budget?.finish();
@@ -289,6 +447,7 @@ export class ScanDashboard {
     try {
       if (input?.isTTY === true) {
         input.off("data", this.#onInput);
+        this.#setKeyInput(null);
         input.setRawMode?.(this.#inputWasRaw);
         input.pause?.();
       }
@@ -296,21 +455,7 @@ export class ScanDashboard {
         `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
       );
     } finally {
-      if (this.#observingStreamErrors) {
-        try {
-          this.#stream.write("", () => {
-            queueMicrotask(() => {
-              if (this.#timer === null && this.#observingStreamErrors) {
-                this.#stream.off?.("error", this.#onStreamError);
-                this.#observingStreamErrors = false;
-              }
-            });
-          });
-        } catch {
-          this.#stream.off?.("error", this.#onStreamError);
-          this.#observingStreamErrors = false;
-        }
-      }
+      this.#terminalErrors.stop();
     }
   }
 
@@ -324,10 +469,9 @@ export class ScanDashboard {
       const dashboard = new ScanDashboard(this.#stream, {
         ...this.#options,
         presentation: "scan",
-        mode: "standard",
         componentName: receipt.name,
       });
-      dashboard.setStage("Queued");
+      dashboard.setStage(COMPONENT_STATUS.pending);
       dashboard.note(`Scope: ${receipt.paths.join(", ")}`);
       return { receipt: { ...receipt }, dashboard };
     });
@@ -345,20 +489,27 @@ export class ScanDashboard {
         dashboard.#startedAt = this.#options.clock.now();
         dashboard.setStage("Preparing scan");
       } else if (receipt.status !== "pending") {
+        const status = COMPONENT_STATUS[receipt.status];
+        dashboard.#componentReviews = null;
         dashboard.#finishedAt = this.#options.clock.now();
-        dashboard.setStage(componentStatus(receipt));
+        dashboard.setStage(status);
         dashboard.note(
           receipt.error ??
-            `${componentStatus(receipt)} · ${receipt.findingCount ?? 0} findings before deduplication`,
+            `${status} · ${receipt.findingCount ?? 0} findings before deduplication`,
         );
       }
     }
-    if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
+    if (receipt.measurement !== undefined)
+      dashboard.setMeasurement(receipt.measurement);
+    else if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
     component.receipt = { ...receipt };
     this.#refresh();
   }
 
-  public recordComponentEvent(event: ComponentScanEvent): void {
+  public recordComponentEvent(
+    event: ComponentScanEvent,
+    requestedAuth?: ScanAuthMode,
+  ): void {
     const dashboard = this.#components.find(
       ({ receipt }) => receipt.id === event.componentId,
     )?.dashboard;
@@ -368,8 +519,20 @@ export class ScanDashboard {
         dashboard.setFiles(event.value);
         dashboard.setStage(scanPhaseLabel(event.value.phase));
         break;
+      case "deep-progress":
+        dashboard.#componentReviews = `${event.value.completed} done, ${event.value.active} active`;
+        dashboard.setStage(
+          event.value.consolidating ? "consolidating results" : "discovery",
+        );
+        dashboard.note(formatDeepScanReviews(event.value));
+        break;
       case "activity":
         dashboard.record(event.value);
+        break;
+      case "authentication":
+        dashboard.setChatGptAuth(
+          isChatGptAuthentication(event.value, requestedAuth),
+        );
         break;
       case "session":
         dashboard.recordDetails(event.value);
@@ -377,15 +540,23 @@ export class ScanDashboard {
       case "cost":
         dashboard.setCost(event.value);
         break;
+      case "usage":
+        dashboard.setUsage(event.value);
+        break;
+      case "measurement":
+        dashboard.setMeasurement(event.value);
+        break;
+      case "usage-observation":
+        dashboard.setUsageObservation(event.value);
+        break;
       case "workers":
-        if (event.value.kind === "dispatch")
-          dashboard.setStage(scanPhaseLabel(event.value.phase));
+        dashboard.setStage(scanPhaseLabel(event.value.phase));
         break;
       case "warning":
         dashboard.note(event.value);
         break;
     }
-    this.#refresh();
+    this.#scheduleRefresh();
   }
 
   public showComponents(stage: string): void {
@@ -396,10 +567,8 @@ export class ScanDashboard {
   public finishComponents(result: ComponentScanResult): void {
     this.#componentResult = result;
     this.showComponents(
-      result.failed ||
-        result.incomplete ||
-        result.deduplication?.status === "incomplete"
-        ? "Finished with partial results"
+      result.failed || result.deduplication?.status === "failed"
+        ? "Finished with errors"
         : "Complete",
     );
   }
@@ -418,8 +587,37 @@ export class ScanDashboard {
     cost: Readonly<ScanCost>,
     maxCostUsd = this.#options.maxCostUsd,
   ): void {
+    this.#usageCoverage = "complete";
     this.#cost = cost;
+    this.#tokens = formatScanCostTokens(cost);
     this.#options.maxCostUsd = maxCostUsd;
+    this.#refresh();
+  }
+
+  public setMeasurement(measurement: Readonly<ScanUsageMeasurement>): void {
+    this.#usageCoverage = measurement.coverage;
+    this.#cost = measurement.cost;
+    this.#tokens =
+      measurement.usage === null ? null : formatTokenUsage(measurement.usage);
+    this.#refresh();
+  }
+
+  public setUsage(usage: Readonly<ScanTokenUsage>): void {
+    this.#usageCoverage = "complete";
+    this.#tokens = formatTokenUsage(usage);
+    this.#refresh();
+  }
+
+  public setUsageObservation(
+    observation: Readonly<ScanUsageObservation>,
+  ): void {
+    this.#usageFreshness = formatUsageFreshness(observation);
+    this.#accountLimits = formatAccountLimits(observation);
+    this.#refresh();
+  }
+
+  public setChatGptAuth(enabled: boolean): void {
+    this.#chatGptAuth = enabled;
     this.#refresh();
   }
 
@@ -434,11 +632,14 @@ export class ScanDashboard {
     ) {
       return Promise.resolve(undefined);
     }
+    this.#setKeyInput(new PassThrough());
     return new Promise((resolve) => {
       const abort = () => finish();
-      const finish = (limit?: number) => {
+      const finish = (limit?: number, preserveInput = false) => {
         request.signal.removeEventListener("abort", abort);
         this.#budget = null;
+        if (this.#timer !== null && !preserveInput)
+          this.#setKeyInput(new PassThrough());
         this.#refresh();
         resolve(limit);
       };
@@ -466,13 +667,40 @@ export class ScanDashboard {
           isFileInventory(entry) &&
           isFileInventory(activity)),
     );
-    const previousRows =
-      this.#scrollOffset === 0 ? 0 : this.#activityLines(this.#width()).length;
     const recordedAt =
       existing < 0
         ? this.#options.clock.now()
         : this.#activities[existing]!.recordedAt;
     const entry = { ...activity, recordedAt };
+    if (this.#view === "activity" && this.#scrollOffset !== 0) {
+      const width = this.#width();
+      const newRows = this.#summaryLines(width, [entry]).length;
+      if (existing < 0) {
+        // Count the append before evicting the oldest entry.
+        this.#scrollOffset += newRows;
+      } else {
+        const oldRows = this.#summaryLines(width, [
+          this.#activities[existing]!,
+        ]).length;
+        if (newRows !== oldRows) {
+          const rowsAfter = this.#summaryLines(
+            width,
+            this.#activities.slice(existing + 1),
+          ).length;
+          const topFromEnd =
+            this.#scrollOffset +
+            this.#activityRows(this.#usageLayout().footer.length);
+          if (rowsAfter < topFromEnd) {
+            // Changes above the viewport move its index but not its distance from the end.
+            this.#scrollOffset = Math.max(
+              0,
+              this.#scrollOffset +
+                Math.max(newRows - oldRows, rowsAfter - topFromEnd),
+            );
+          }
+        }
+      }
+    }
     if (existing < 0) {
       this.#activities.push(entry);
     } else {
@@ -481,13 +709,7 @@ export class ScanDashboard {
     if (this.#activities.length > MAX_HISTORY_ENTRIES) {
       this.#activities.splice(0, this.#activities.length - MAX_HISTORY_ENTRIES);
     }
-    if (this.#scrollOffset !== 0) {
-      this.#scrollOffset += Math.max(
-        0,
-        this.#activityLines(this.#width()).length - previousRows,
-      );
-    }
-    this.#refresh();
+    this.#scheduleRefresh();
   }
 
   public recordDetails(session: ScanSessionEvent): void {
@@ -518,14 +740,17 @@ export class ScanDashboard {
           this.#activityLines(this.#width()).length - previousRows,
         );
       }
-      this.#refresh();
+      this.#scheduleRefresh();
     }
   }
 
   public scroll(lines: number): void {
+    const { footer, details } = this.#usageLayout();
     const maximum = Math.max(
       0,
-      this.#activityLines(this.#width()).length - this.#activityRows(),
+      this.#activityLines(this.#width()).length +
+        details.length -
+        this.#activityRows(footer.length),
     );
     this.#scrollOffset = Math.max(
       0,
@@ -535,10 +760,19 @@ export class ScanDashboard {
   }
 
   #refresh(): void {
-    if (this.#timer === null) return;
+    if (this.#timer === null || this.#stream.writableNeedDrain) return;
     try {
       this.#stream.write(this.#frame());
     } catch {}
+  }
+
+  #scheduleRefresh(): void {
+    if (this.#timer === null || this.#refreshPending) return;
+    this.#refreshPending = true;
+    (this.#options.clock.queueMicrotask ?? queueMicrotask)(() => {
+      this.#refreshPending = false;
+      this.#refresh();
+    });
   }
 
   #frame(): string {
@@ -551,7 +785,9 @@ export class ScanDashboard {
     const verification = this.#options.presentation === "verification";
     const findingProgress = publication || verification;
     const width = this.#width();
-    const activityRows = this.#activityRows();
+    const { footer, details } = this.#usageLayout();
+    const availableRows = this.#availableActivityRows(footer.length);
+    const activityRows = Math.max(1, availableRows);
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     const elapsed = Math.max(
       0,
@@ -561,13 +797,17 @@ export class ScanDashboard {
       ),
     );
     const time = formatElapsed(elapsed);
+    const count = this.#files === null ? null : scanProgressCount(this.#files);
     const files =
-      this.#files === null
+      count === null
         ? "waiting for inventory"
-        : this.#files.filesCompleted > 0
-          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
-          : `${formatCount(this.#files.filesTotal)} in scope`;
-    const history = this.#activityLines(width);
+        : count.label === "reviews"
+          ? `${formatCount(count.completed)} / ${formatCount(count.total)} completed`
+          : count.completed > 0
+            ? `${formatCount(count.completed)} / ${formatCount(count.total)} reviewed`
+            : `${formatCount(count.total)} in scope`;
+    let history = this.#activityLines(width);
+    if (details.length > 0) history = history.concat(details);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
     const first = Math.max(
@@ -600,9 +840,9 @@ export class ScanDashboard {
 
     return this.#formatFrame([
       `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
-      divider,
+      ...(availableRows > 0 ? [divider] : []),
       ...activity,
-      divider,
+      ...(availableRows >= 0 ? [divider] : []),
       ...(findingProgress
         ? [
             `  STAGE     ${this.#stage}`,
@@ -611,9 +851,11 @@ export class ScanDashboard {
         : [
             ...(this.#options.mode === "deep"
               ? []
-              : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
-            ...this.#tokenLines(),
-            ...this.#costLines(),
+              : [
+                  `  STAGE    ${this.#stage}`,
+                  `  ${count?.label === "reviews" ? "REVIEWS" : "FILES  "}  ${files}`,
+                ]),
+            ...footer,
             ...(this.#budget === null
               ? []
               : [
@@ -632,7 +874,7 @@ export class ScanDashboard {
       lines
         .map((line, index) => {
           const text = typeof line === "string" ? line : line.text;
-          const clean = fitLine(text, width);
+          const clean = fitLine(terminalText(text), width);
           const colored =
             this.#options.color === true
               ? styleLine(
@@ -653,6 +895,7 @@ export class ScanDashboard {
                     ? styleInlineCode(colored, line)
                     : colored,
                   line.links,
+                  line.contentStart,
                 );
           return `${ERASE_LINE}${formatted}`;
         })
@@ -660,15 +903,16 @@ export class ScanDashboard {
     );
   }
 
-  #componentInput(input: string): void {
-    for (const key of input.match(
-      /\u001B\[(?:[ABHF]|[1456]~)|[\u0003\u0004\u0015\r\n\u001Bbdam1-9]/gu,
-    ) ?? []) {
+  #componentInput(keys: readonly string[]): void {
+    for (const key of keys) {
       if (key === "\u0003") {
         this.#options.onInterrupt?.();
       } else if (this.#showComponent) {
         if (key === "\u001B" || key === "b") this.#showComponent = false;
-        else this.#components[this.#selectedComponent]!.dashboard.#onInput(key);
+        else
+          this.#components[this.#selectedComponent]!.dashboard.#handleKeys([
+            key,
+          ]);
       } else if (
         (key === "\r" || key === "\n") &&
         this.#components.length > 0
@@ -718,44 +962,68 @@ export class ScanDashboard {
         this.#components.length - rows,
       ),
     );
+    const visible = this.#components
+      .slice(first, first + rows)
+      .map(({ receipt, dashboard }) => {
+        const count =
+          dashboard.#files === null
+            ? null
+            : scanProgressCount(dashboard.#files);
+        const progress =
+          dashboard.#componentReviews ??
+          (count === null
+            ? "—"
+            : `${formatCount(count.completed)}/${formatCount(count.total)} ${count.label}`);
+        const status =
+          receipt.status === "started"
+            ? dashboard.#stage
+            : COMPONENT_STATUS[receipt.status];
+        return { receipt, dashboard, status, progress };
+      });
+    const progressWidth = Math.max(
+      "Progress".length,
+      ...visible.map(({ progress }) => progress.length),
+    );
     const costWidth = Math.max(
       8,
-      ...this.#components.map(({ dashboard }) =>
-        dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
+      ...this.#components.map(
+        ({ dashboard }) => dashboard.#componentCostLabel().length,
       ),
     );
-    const nameWidth = Math.max(
-      10,
-      width - 52 - (this.#showCost ? costWidth + 1 : 0),
+    const nameAndStatusWidth =
+      width - 17 - progressWidth - (this.#showCost ? costWidth + 1 : 0);
+    // When space is tight, share the original 35 status and progress columns
+    // so adding the unit doesn't push the cost amount offscreen.
+    const statusWidth = Math.min(
+      Math.max(
+        "Status".length,
+        ...visible.map(({ status }) => stringWidth(status)),
+      ),
+      Math.max("Status".length, 35 - progressWidth, nameAndStatusWidth - 10),
     );
+    const nameWidth = Math.max(10, nameAndStatusWidth - statusWidth);
     const row = (
       marker: string,
       name: string,
       status: string,
-      files: string,
+      progress: string,
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitLine(name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
-    const table = this.#components
-      .slice(first, first + rows)
-      .map(({ receipt, dashboard }, index) => {
-        const files = dashboard.#files;
-        return row(
+      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost}` : ""}`;
+    const table = visible.map(
+      ({ receipt, dashboard, status, progress }, index) =>
+        row(
           first + index === this.#selectedComponent ? "›" : " ",
           receipt.name,
-          receipt.status === "started"
-            ? dashboard.#stage
-            : componentStatus(receipt),
-          files === null
-            ? "—"
-            : `${formatCount(files.filesCompleted)}/${formatCount(files.filesTotal)}`,
+          status,
+          progress,
           receipt.findingCount === undefined
             ? "—"
             : formatCount(receipt.findingCount),
-          dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost),
-        );
-      });
+          dashboard.#componentCostLabel(),
+        ),
+    );
     if (table.length === 0) table.push(`  ${this.#stage}…`);
     while (table.length < rows) table.push("");
     const count = (status: ComponentReceipt["status"]) =>
@@ -769,14 +1037,14 @@ export class ScanDashboard {
     const findings =
       this.#componentResult === null
         ? `${rawFindings} findings before deduplication`
-        : `${this.#componentResult.sourceFindingCount} findings → ${this.#componentResult.findingCount} groups${this.#componentResult.deduplication?.status === "incomplete" ? " · matching incomplete" : ""}`;
+        : `${this.#componentResult.sourceFindingCount} findings → ${this.#componentResult.findingCount} groups${this.#componentResult.deduplication?.status === "failed" ? " · matching failed" : ""}`;
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     return this.#formatFrame([
       `  CODEX SECURITY  ·  COMPONENTS  ·  ${basename(this.#options.repository)}`,
       divider,
-      `  ${count("completed")} complete · ${count("started")} running · ${count("pending")} queued · ${count("incomplete")} incomplete · ${count("failed")} failed`,
+      `  ${count("completed")} complete · ${count("started")} running · ${count("pending")} queued · ${count("failed")} failed`,
       "",
-      row(" ", "Component", "Status", "Files", "Findings", "Cost"),
+      row(" ", "Component", "Status", "Progress", "Findings", "Cost"),
       ...table,
       divider,
       `  SCOPE    ${selected?.paths.join(", ") ?? "waiting for component plan"}`,
@@ -793,6 +1061,12 @@ export class ScanDashboard {
     );
   }
 
+  #componentCostLabel(): string {
+    return this.#cost === null
+      ? "—"
+      : `${formatScanCost(this.#cost)}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
+  }
+
   #componentCostLines(): string[] {
     if (!this.#showCost) return [];
     const costs = this.#components.flatMap(({ dashboard }) =>
@@ -800,7 +1074,7 @@ export class ScanDashboard {
     );
     return wrapActivity(
       "  COST     ",
-      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)} · component scans only`,
+      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)}${this.#components.some(({ dashboard }) => dashboard.#usageCoverage !== "complete") ? " (partial)" : ""} · component scans only`,
       this.#width(),
     );
   }
@@ -809,30 +1083,67 @@ export class ScanDashboard {
     return Math.max(1, Math.min(this.#stream.columns ?? 88, 160));
   }
 
-  #activityRows(): number {
-    return Math.max(
-      1,
+  #activityRows(usageRows = this.#usageLayout().footer.length): number {
+    return Math.max(1, this.#availableActivityRows(usageRows));
+  }
+
+  #availableActivityRows(usageRows: number): number {
+    const findingProgress =
+      this.#options.presentation === "publication" ||
+      this.#options.presentation === "verification";
+    const stageRows = this.#options.mode === "deep" && !findingProgress ? 0 : 2;
+    return (
       (this.#stream.rows ?? 24) -
-        FIXED_SCREEN_ROWS -
-        (this.#budget === null ? 0 : 2) -
-        (this.#options.presentation === "publication" ||
-        this.#options.presentation === "verification"
-          ? 0
-          : this.#tokenLines().length - 1 + this.#costLines().length - 1) +
-        (this.#options.presentation === "publication"
-          ? 2
-          : this.#options.mode === "deep"
-            ? 2
-            : 0),
+      FIXED_SCREEN_ROWS -
+      stageRows -
+      usageRows -
+      (this.#budget === null ? 0 : 2)
     );
   }
 
-  #tokenLines(): string[] {
+  #usageLayout(): { footer: string[]; details: DashboardActivityLine[] } {
+    if (
+      this.#options.presentation === "publication" ||
+      this.#options.presentation === "verification"
+    ) {
+      return { footer: [], details: [] };
+    }
+    const width = this.#width();
     const tokens =
-      this.#cost === null
-        ? "waiting for usage"
-        : formatScanCostTokens(this.#cost);
-    return wrapActivity("  TOKENS   ", tokens, this.#width());
+      this.#usageCoverage === "unavailable"
+        ? "usage unavailable"
+        : `${this.#tokens ?? "waiting for usage"}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
+    const limits =
+      this.#accountLimits ??
+      (this.#chatGptAuth ? ACCOUNT_LIMITS_UNAVAILABLE : null);
+    const lines = [
+      ...wrapActivity("  TOKENS   ", tokens, width),
+      ...this.#costLines(),
+      ...(this.#tokens === null
+        ? []
+        : wrapActivity(
+            "  USAGE    ",
+            this.#usageFreshness ?? USAGE_TIME_UNAVAILABLE,
+            width,
+          )),
+      ...(limits === null ? [] : wrapActivity("  LIMITS   ", limits, width)),
+    ];
+    // Both dividers can give way, but one activity row must remain.
+    const capacity = Math.max(0, this.#availableActivityRows(0) + 1);
+    if (lines.length <= capacity) return { footer: lines, details: [] };
+    if (this.#view === "details") {
+      return {
+        footer: [],
+        details: lines.map((text) => ({ text, kind: "path" })),
+      };
+    }
+    const footer = lines.slice(0, capacity);
+    if (footer.length > 0)
+      footer[footer.length - 1] =
+        this.#options.input?.isTTY === true
+          ? "  … Full readings in details"
+          : "  … Resize for full readings";
+    return { footer, details: [] };
   }
 
   #costLines(): string[] {
@@ -840,10 +1151,11 @@ export class ScanDashboard {
     if (
       this.#cost === null &&
       this.#options.maxCostUsd === undefined &&
-      estimateScanCost(this.#options.model?.model, {
-        input_tokens: 0,
-        output_tokens: 0,
-      }) === null
+      estimateScanCost(
+        this.#options.model?.model,
+        { input_tokens: 0, output_tokens: 0 },
+        this.#options.pricingContext,
+      ) === null
     ) {
       return [];
     }
@@ -853,7 +1165,11 @@ export class ScanDashboard {
           ? "waiting for usage"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
-    return wrapActivity("  COST     ", cost, this.#width());
+    return wrapActivity(
+      "  COST     ",
+      `${cost}${this.#usageCoverage === "partial" ? " (partial)" : this.#usageCoverage === "unavailable" ? " (usage unavailable)" : ""}`,
+      this.#width(),
+    );
   }
 
   #activityLines(width: number): DashboardActivityLine[] {
@@ -917,7 +1233,10 @@ export class ScanDashboard {
         }
 
         const source = worker === undefined ? "main" : `worker ${worker}`;
-        const prefix = `  [${formatLocalTime(recordedAt)}] ${source} · `;
+        const prefix = fitActivityPrefix(
+          `  [${formatLocalTime(recordedAt)}] ${source} · `,
+          width,
+        );
         const code: string[] = [];
         const bold: string[] = [];
         if (prose) {
@@ -942,11 +1261,24 @@ export class ScanDashboard {
                 ),
               );
         for (const text of lines) {
-          cache.lines.push({ text, kind: "path", code, bold });
+          cache.lines.push({
+            text,
+            kind: "path",
+            code,
+            bold,
+            contentStart: prefix.length,
+          });
         }
       }
       return cache.lines;
     }
+    return this.#summaryLines(width, this.#activities);
+  }
+
+  #summaryLines(
+    width: number,
+    activities: readonly TimedScanActivity[],
+  ): DashboardActivityLine[] {
     const elapsed = Math.max(
       0,
       Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000),
@@ -957,7 +1289,9 @@ export class ScanDashboard {
       prefix: string,
       value: string,
       kind: DashboardActivityLine["kind"],
+      generatedPrefix = "",
     ): void => {
+      prefix = fitActivityPrefix(prefix, width);
       if (kind !== "message" && kind !== "reasoning") {
         for (const text of wrapActivity(prefix, value, width)) {
           lines.push({ text, kind });
@@ -997,12 +1331,21 @@ export class ScanDashboard {
           ? wrapCode(started ? continuation : prefix, description, width)
           : wrapActivity(started ? continuation : prefix, description, width);
         for (const text of wrapped) {
-          lines.push({ text, kind: fenced ? "code" : kind, links, code });
+          lines.push({
+            text,
+            kind: fenced ? "code" : kind,
+            links,
+            code,
+            contentStart: prefix.length + generatedPrefix.length,
+          });
+          generatedPrefix = generatedPrefix
+            .slice(text.length - prefix.length)
+            .trimStart();
           started = true;
         }
       }
     };
-    for (const entry of this.#activities) {
+    for (const entry of activities) {
       const kind: DashboardActivityKind = entry.id.startsWith("scan-note-")
         ? /\b(?:warning|unavailable|interrupted|retrying)\b|could not be confirmed|capacity changed/iu.test(
             entry.description,
@@ -1016,14 +1359,25 @@ export class ScanDashboard {
           : entry.status === "running"
             ? runningIcon
             : ACTIVITY_MARKERS[kind];
+      const cached = this.#activityCache.get(entry);
+      if (cached?.width === width && cached.icon === icon) {
+        for (const line of cached.lines) lines.push(line);
+        continue;
+      }
+      const first = lines.length;
       const timestamp = `[${formatLocalTime(entry.recordedAt)}]`;
       const worker =
         entry.worker === undefined ? "" : `worker ${entry.worker} · `;
       const prefix = `  ${timestamp} ${icon} `;
-      append(prefix, `${worker}${entry.description}`, kind);
+      append(prefix, `${worker}${entry.description}`, kind, worker);
       for (const path of entry.paths) {
         append(" ".repeat(prefix.length), path, "path");
       }
+      this.#activityCache.set(entry, {
+        width,
+        icon,
+        lines: lines.slice(first),
+      });
     }
     return lines;
   }
@@ -1093,14 +1447,47 @@ function detailsText(value: unknown): string {
     .join("\n");
 }
 
+function replaceVisibleText(
+  value: string,
+  search: string,
+  replacement: string,
+  contentStart = 0,
+): string {
+  let replaced = false;
+  let offset = 0;
+  return value
+    .split(/(\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][\s\S]*?(?:\u0007|\u001B\\))/gu)
+    .map((part, index) => {
+      if (index % 2 === 1) return part;
+      const start = Math.max(0, contentStart - offset);
+      offset += part.length;
+      if (replaced || start >= part.length) return part;
+      return (
+        part.slice(0, start) +
+        part.slice(start).replace(search, () => {
+          replaced = true;
+          return replacement;
+        })
+      );
+    })
+    .join("");
+}
+
 function styleInlineCode(value: string, line: DashboardActivityLine): string {
   for (const text of line.bold ?? []) {
-    value = value.replace(text, `\u001B[1m${text}\u001B[22m`);
+    value = replaceVisibleText(
+      value,
+      text,
+      `\u001B[1m${text}\u001B[22m`,
+      line.contentStart,
+    );
   }
   for (const text of line.code ?? []) {
-    value = value.replace(
+    value = replaceVisibleText(
+      value,
       text,
       `\u001B[2m${text}\u001B[22m${line.kind === "message" ? "\u001B[1m" : ""}`,
+      line.contentStart,
     );
   }
   return value;
@@ -1109,13 +1496,16 @@ function styleInlineCode(value: string, line: DashboardActivityLine): string {
 function linkActivity(
   value: string,
   links: readonly DashboardActivityLink[] | undefined,
+  contentStart?: number,
 ): string {
   for (const { label, target } of links ?? []) {
     const safe = safeHyperlinkTarget(target);
     if (safe !== undefined) {
-      value = value.replace(
+      value = replaceVisibleText(
+        value,
         label,
         `\u001B]8;;${safe}\u0007${label}\u001B]8;;\u0007`,
+        contentStart,
       );
     }
   }
@@ -1144,16 +1534,6 @@ function formatElapsed(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-function componentStatus(receipt: ComponentReceipt): string {
-  return {
-    pending: "Queued",
-    started: "Running",
-    completed: "Complete",
-    incomplete: "Incomplete",
-    failed: "Failed",
-  }[receipt.status];
-}
-
 function formatLocalTime(timestamp: number): string {
   const date = new Date(timestamp);
   return [date.getHours(), date.getMinutes(), date.getSeconds()]
@@ -1161,8 +1541,13 @@ function formatLocalTime(timestamp: number): string {
     .join(":");
 }
 
+function fitActivityPrefix(prefix: string, width: number): string {
+  return width <= 2 ? "" : fitLine(terminalText(prefix), width - 2);
+}
+
 function wrapActivity(prefix: string, value: string, width: number): string[] {
-  const available = Math.max(1, width - prefix.length);
+  prefix = fitActivityPrefix(prefix, width);
+  const available = Math.max(1, width - stringWidth(prefix));
   const continuation = " ".repeat(prefix.length);
   const lines: string[] = [];
   const append = (text: string): void => {
@@ -1170,35 +1555,51 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
   };
   let current = "";
   let separator = "";
-  for (const word of value.split(/(\s+)/u)) {
+  let currentWidth = 0;
+  const widths = new Map<string, number>();
+  const wrappedWords = new Map<string, ReturnType<typeof columnChunks>>();
+  const text = terminalText(value);
+  const segments = graphemes.segment(text);
+  let offset = 0;
+  for (const word of text.split(/(\s+)/u)) {
+    const start = offset;
+    offset += word.length;
     if (/^\s+$/u.test(word)) {
       separator = word;
       continue;
     }
-    const characters = Array.from(word);
-    if (characters.length > available) {
+    const ascii = /^[\u0020-\u007E]*$/u.test(word);
+    let parts = ascii ? undefined : wrappedWords.get(word);
+    if (!ascii && parts === undefined) {
+      parts = columnChunks(word, available, widths, segments, start);
+      wrappedWords.set(word, parts);
+    }
+    const wordWidth = ascii
+      ? word.length
+      : parts!.length > 1
+        ? available + 1
+        : parts![0]!.columns;
+    if (wordWidth > available) {
       if (current !== "") {
         append(current);
         current = "";
       }
-      for (let start = 0; start < characters.length; start += available) {
-        const part = characters.slice(start, start + available).join("");
-        if (start + available < characters.length) {
-          append(part);
-        } else {
-          current = part;
-        }
-      }
+      const chunks =
+        parts ?? columnChunks(word, available, widths, segments, start);
+      const last = chunks.at(-1)!;
+      current = last.text;
+      currentWidth = last.columns;
+      for (let index = 0; index < chunks.length - 1; index++)
+        append(chunks[index]!.text);
     } else if (
       current !== "" &&
-      Array.from(current).length +
-        Array.from(separator).length +
-        characters.length >
-        available
+      currentWidth + stringWidth(separator) + wordWidth > available
     ) {
       append(current);
       current = word;
+      currentWidth = wordWidth;
     } else {
+      currentWidth += (current === "" ? 0 : stringWidth(separator)) + wordWidth;
       current = current === "" ? word : `${current}${separator}${word}`;
     }
     separator = "";
@@ -1207,16 +1608,71 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
   return lines;
 }
 
+function columnChunks(
+  value: string,
+  width: number,
+  widths = new Map<string, number>(),
+  segments = graphemes.segment(value),
+  offset = 0,
+): { text: string; columns: number }[] {
+  const parts: { text: string; columns: number }[] = [];
+  let current = "";
+  let columns = 0;
+  const append = (text: string, size: number): void => {
+    if (current !== "" && columns + size > width) {
+      parts.push({ text: current, columns });
+      current = "";
+      columns = 0;
+    }
+    current += text;
+    columns += size;
+  };
+  const appendGraphemes = (start: number, end: number): void => {
+    while (start < end) {
+      const next = segments.containing(offset + start)!;
+      const boundary = Math.min(end, next.index + next.segment.length - offset);
+      const segment = value.slice(start, boundary);
+      let size = widths.get(segment);
+      if (size === undefined) {
+        size = stringWidth(segment);
+        widths.set(segment, size);
+      }
+      append(segment, size);
+      start = boundary;
+    }
+  };
+  let cursor = 0;
+  for (const match of value.matchAll(/[\u0020-\u007E]{2,}/gu)) {
+    // Keep edge characters with Unicode that can attach to their grapheme.
+    appendGraphemes(cursor, match.index + 1);
+    let start = match.index + 1;
+    const end = match.index + match[0].length - 1;
+    while (start < end) {
+      if (columns >= width) {
+        parts.push({ text: current, columns });
+        current = "";
+        columns = 0;
+      }
+      const size = Math.min(width - columns, end - start);
+      append(value.slice(start, start + size), size);
+      start += size;
+    }
+    cursor = end;
+  }
+  appendGraphemes(cursor, value.length);
+  if (current !== "" || parts.length === 0)
+    parts.push({ text: current, columns });
+  return parts;
+}
+
 function wrapCode(prefix: string, value: string, width: number): string[] {
-  const characters = Array.from(value);
-  const available = Math.max(1, width - prefix.length);
-  return Array.from(
-    { length: Math.max(1, Math.ceil(characters.length / available)) },
-    (_, index) =>
-      `${index === 0 ? prefix : " ".repeat(prefix.length)}${characters
-        .slice(index * available, (index + 1) * available)
-        .join("")}`,
-  );
+  prefix = fitActivityPrefix(prefix, width);
+  const prefixWidth = stringWidth(prefix);
+  const continuation = " ".repeat(prefixWidth);
+  return columnChunks(
+    terminalText(value),
+    Math.max(1, width - prefixWidth),
+  ).map((part, index) => `${index === 0 ? prefix : continuation}${part.text}`);
 }
 
 function styleLine(
@@ -1283,13 +1739,9 @@ function budgetBar(cost: number, limit: number): string {
   return `[${"█".repeat(filled)}${"░".repeat(12 - filled)}] ${Math.round(proportion * 100)}%`;
 }
 
-function fitLine(value: string, width: number): string {
-  const clean = stripVTControlCharacters(value).replaceAll(
-    /[\u0000-\u001F\u007F]/gu,
+function terminalText(value: string): string {
+  return stripAnsi(value).replaceAll(
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
     " ",
   );
-  const characters = Array.from(clean);
-  return characters.length <= width
-    ? clean
-    : `${characters.slice(0, Math.max(0, width - 1)).join("")}…`;
 }

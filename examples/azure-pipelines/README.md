@@ -1,15 +1,11 @@
 # Azure Pipelines with Amazon Bedrock
 
-This example runs Codex Security from a centrally owned Azure Pipelines YAML
-file against a configured Azure Repos Git repository. It supports manual full
-and committed-diff scans, short-lived AWS credentials through OIDC, report
-artifacts, and optional SARIF publishing to the target repository's Advanced
-Security view. No Codex Security runtime changes or custom extension are needed.
-
-It targets Azure DevOps Services and Microsoft-hosted Linux agents. It does not
-enroll repositories, create branch policies, or automatically validate PRs.
-Use a trusted tooling repository for the pipeline definition; the target
-repository does not need its own pipeline file.
+Keep the [pipeline definition](azure-pipelines.yml) in a trusted tooling
+repository. It installs the CLI, checks out a separate Azure Repos Git
+repository, and assumes an AWS role through OIDC to scan that checkout.
+On Azure DevOps Services, queue either a full scan or a diff between commits
+on a Microsoft-hosted Linux agent. The pipeline retains reports and can
+publish SARIF to the target repository's Advanced Security view.
 
 ## Setup
 
@@ -17,7 +13,7 @@ repository does not need its own pipeline file.
    Set `resources.repositories.target.name` to the approved `Project/Repository`
    and adjust the default `targetRef`. Keep the repository name fixed in reviewed
    YAML instead of accepting arbitrary scan targets at queue time.
-2. Install the current [AWS Toolkit for Azure DevOps](https://github.com/aws/aws-toolkit-azure-devops/releases)
+2. Install the [AWS Toolkit for Azure DevOps](https://github.com/aws/aws-toolkit-azure-devops/releases)
    extension in your organization. Create an AWS service connection named
    `codex-security-bedrock` with **Use OIDC** and an AWS role ARN; leave access
    keys unset. Follow the [AWS OIDC setup guide](https://aws.amazon.com/blogs/modernizing-with-aws/how-to-federate-into-aws-from-azure-devops-using-openid-connect/).
@@ -38,9 +34,14 @@ repository does not need its own pipeline file.
    identity permission to publish its results. Then opt in when queuing a run.
    See [third-party SARIF publishing](https://learn.microsoft.com/en-us/azure/devops/repos/security/github-advanced-security-code-scanning-third-party?view=azure-devops).
 
-The YAML pins the CLI, Node, and Python versions and uses current task majors.
-Azure Pipelines resolves compatible task updates within those majors. Review
-the pinned versions when adopting or upgrading the example.
+The template pins the CLI, Node, and Python. Azure Pipelines resolves task
+updates within the selected major versions. To update `codexSecurityVersion`,
+choose a reviewed CLI release with native Bedrock authentication, committed-diff
+scans, and SARIF export. On the selected hosted agent, check
+[Bubblewrap startup](../../docs/bedrock.md#check-the-sandbox-on-an-ubuntu-ci-runner)
+before checkout and AWS authentication. Then run a baseline and a diff against
+a known commit. Verify both artifacts and the target commit for any published
+SARIF before adopting the new pin.
 
 ## Run a scan
 
@@ -57,28 +58,29 @@ Choose **Run pipeline** from the trusted tooling branch, then set:
 Start with a full scan. For a later committed-diff scan, select the target branch
 and a base revision present in that repository's history. The checkout fetches
 full history; Codex Security resolves the diff against the checked-out commit.
-This scans committed changes, not an automatically discovered PR.
+For PR validation, see [trust and rollout boundaries](#trust-and-rollout-boundaries).
 
 The optional publisher uses the `target` repository resource metadata, not the
 tooling repository's build metadata. Keep its alias and
 `advancedsecurity.publish.repository` in sync when adapting the YAML. This is
 Microsoft's [explicit multi-repository publishing mechanism](https://learn.microsoft.com/en-us/azure/devops/release-notes/2025/sprint-253-update#multi-repository-publishing-scenarios-supported-for-github-advanced-security-for-azure-devops).
-Full and diff results use separate categories so a partial diff does not replace
+Full and diff results use separate categories so a diff does not replace
 the full-scan baseline. A diff result is still a snapshot of that diff, not a
 complete repository inventory; use full scans to track the baseline over time.
 
 ## Results and failures
 
 The `codex-security` pipeline artifact contains `result.json`, available
-`report.md`, `coverage.json`, and `findings.json`, plus `results.sarif` after a
-successful export. Check the JSON/report for findings, coverage, runtime, and
-usage; missing or incomplete coverage is not a clean scan.
+`report.md`, `scan-manifest.json`, and `findings.json`, plus `results.sarif` after a
+successful export. Check the JSON/report for findings, scope, runtime, and
+usage. Scope exclusions and deferred investigations do not fail the scan or
+bypass the findings policy; exit `2` indicates an execution error.
 
 | Scan exit     | Pipeline behavior                                                                              |
 | ------------- | ---------------------------------------------------------------------------------------------- |
 | `0`           | Completed scan; export SARIF and retain reports.                                               |
 | `1`           | Severity policy failed; still export SARIF and retain reports, but keep the job failed.        |
-| Other nonzero | Scan failed or was incomplete; retain available reports without exporting or publishing SARIF. |
+| Other nonzero | Execution failed or was interrupted; retain available reports without exporting or publishing SARIF. |
 
 An export or publishing failure also fails the job. Cancellation skips the
 post-scan steps, so artifacts are not guaranteed for canceled runs. Native
