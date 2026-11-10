@@ -2701,9 +2701,9 @@ scan, triage, patch, and verification workflows, see the
 For local findings storage, deduplication, and custom endpoints, see the
 [findings guide](findings-service.md).
 
-### Hosted Standard scan
+### Hosted Standard and Deep scans
 
-`codex-security scan --host` runs one versioned JSON-RPC invocation with an explicit host executor. Use it alone; it never performs local inference. See [the hosted scan protocol](hosted-scans.md) for input, filesystem, artifact, usage, and cancellation requirements.
+`codex-security scan --host` runs one versioned JSON-RPC invocation with an explicit host executor: Standard scans use v2, and Deep scans use v3. Use the flag alone; scan mode comes from the versioned input, and the CLI never performs local inference. See [the hosted scan protocol](hosted-scans.md) for input, filesystem, artifact, usage, and cancellation requirements.
 
 ## Containerized bulk scans
 

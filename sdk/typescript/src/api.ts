@@ -1,5 +1,6 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 import { workbenchArgs } from "./workbench-arguments.js";
+import { runHostedDeepScan } from "./hosted-deep-scan.js";
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
@@ -7,7 +8,7 @@ import {
   hostedScanFailureStatus,
   ScanExecutionError,
   ScanExecutionResultSchema,
-  type ScanExecutor,
+  type HostedScanExecutor,
   type ScanExecutionEvent,
   type ScanExecutionRequest,
 } from "./scan-executor.js";
@@ -738,7 +739,10 @@ interface ClientDependencies {
   ) => OperationTelemetry | null;
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
-    executor: ScanExecutor;
+    executor: HostedScanExecutor;
+    deep?: {
+      onCoordinatorStatus(status: "succeeded" | "failed" | "canceled"): void;
+    };
     context: Pick<
       ScanExecutionRequest,
       "repository" | "revision" | "scope" | "identity" | "severityRubric"
@@ -2768,7 +2772,10 @@ export class CodexSecurity {
       }
       const scanKnowledge =
         knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;
-      let severityRubric: SeverityRubricSnapshot | undefined;
+      let severityRubric: SeverityRubricSnapshot | undefined =
+        this.#dependencies.hostedScan?.deep === undefined
+          ? undefined
+          : this.#dependencies.hostedScan.context.severityRubric;
       if (
         this.#dependencies.hostedScan === undefined &&
         options.resumeScanId === undefined
@@ -4666,7 +4673,7 @@ export class CodexSecurity {
       const model = scanModelConfiguration(session.effectiveConfig);
       return {
         environment,
-        // Hosted Standard scans do not launch a local Codex process.
+        // Hosted scans delegate model execution to their executor.
         codexOptions: {},
         codex: {
           startThread: () => {
@@ -4700,6 +4707,20 @@ export class CodexSecurity {
                     requestMetadata: requestContext.metadata,
                   },
                 };
+                if (hosted.deep !== undefined) {
+                  return {
+                    events: runHostedDeepScan({
+                      context: request,
+                      executor: hosted.executor,
+                      signal: signal ?? new AbortController().signal,
+                      onCoordinatorStarted(coordinatorId) {
+                        id = coordinatorId;
+                      },
+                      onEvent: hosted.onEvent,
+                      onCoordinatorStatus: hosted.deep.onCoordinatorStatus,
+                    }),
+                  };
+                }
                 // A transport failure is terminal; only the host can reconcile
                 // whether remote execution was accepted.
                 let result;
@@ -4707,7 +4728,10 @@ export class CodexSecurity {
                   result = ScanExecutionResultSchema.parse(
                     await hosted.executor.run(request, {
                       signal: signal ?? new AbortController().signal,
-                      onEvent: hosted.onEvent,
+                      onEvent(event) {
+                        if (event.type !== "session.started")
+                          hosted.onEvent(event);
+                      },
                     }),
                   );
                 } catch (error) {
@@ -4908,6 +4932,11 @@ export class CodexSecurity {
         configPath,
         credentialsAvailable: false,
         environment: definedEnvironment(environment),
+        ...(deepScan
+          ? {
+              deepScanConfigPath: join(runtimeHome, "deep-scan-config.toml"),
+            }
+          : {}),
         plugin: {
           ...metadata,
           pluginRoot,

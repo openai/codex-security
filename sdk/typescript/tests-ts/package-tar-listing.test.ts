@@ -85,6 +85,7 @@ function packageTar({
       .filter((path) => path.startsWith("docs/"))
       .map((path) => `package/${path}`),
     "package/schemas/hosted-scan-v2.fixture.json",
+    "package/schemas/hosted-scan-v3.fixture.json",
     "package/schemas/project-config.schema.json",
     "package/schemas/external-findings.schema.json",
     "package/LICENSE",

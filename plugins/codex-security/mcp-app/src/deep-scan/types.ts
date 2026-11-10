@@ -115,6 +115,8 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
+  /** Release a hosted session once its worker no longer needs continuations. */
+  releaseSession?(threadId: string): Promise<void>;
   compareFindings?(
     prompt: string,
     workingDirectory: string,

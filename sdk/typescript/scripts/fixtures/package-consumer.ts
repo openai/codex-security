@@ -29,6 +29,8 @@ import {
   type HostedScanOptions,
   type HostedScanResult,
   type ScanExecutor,
+  type HostedScanExecutor,
+  type DeepScanExecutionRequest,
   type DeduplicateRecordsInput,
   type DeduplicateRecordsResult,
   type DeduplicationReviewRequest,
@@ -410,6 +412,20 @@ export async function hostedScan(
     },
   };
   return await runHostedScan({ ...input, ownerSuggestions: true }, options);
+}
+
+export async function hostedDeepTurn(
+  executor: HostedScanExecutor,
+  request: DeepScanExecutionRequest,
+  signal: AbortSignal,
+) {
+  return await executor.run(request, {
+    signal,
+    onEvent(event) {
+      if (event.type === "session.started") event.sessionId satisfies string;
+      else event.type satisfies "progress" | "activity";
+    },
+  });
 }
 
 const localOptions: ScanOptions = {

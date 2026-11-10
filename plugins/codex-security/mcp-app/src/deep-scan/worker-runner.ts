@@ -226,301 +226,326 @@ export class DeepScanWorkerRunner {
     let continuationPrompt: string | undefined;
     let lastThreadId: string | undefined;
     let executionPromptPath = input.promptPath;
-    for (let attempt = 1; ; attempt += 1) {
-      if (signal.aborted) {
-        return await this.cancelAttempt(input, attempt, lastThreadId);
+    const retainedThreads = new Set<string>();
+    const release = async (threadId: string) => {
+      if (!this.options.executor.releaseSession) return;
+      try {
+        await this.options.executor.releaseSession(threadId);
+        retainedThreads.delete(threadId);
+      } catch (error) {
+        const failure =
+          error instanceof DeepScanNonRetryableError
+            ? error
+            : new DeepScanNonRetryableError(
+                "Deep Scan worker session cleanup was not confirmed.",
+                { cause: error },
+              );
+        this.options.onNonRetryableError?.(failure);
+        throw failure;
       }
-      let validationStarted = false;
-      let validationCompleted = false;
-      let activeThreadId = resumableThreadId;
-      let terminalFailure: Promise<WorkerAttemptOutcome> | undefined;
-      const baseMutation: DeepScanWorkerMutation = {
-        id: input.workerId,
-        scanId: run.scanId,
-        kind: "discovery",
-        status: "running",
-        promptPath: input.promptPath,
-        artifactDir: input.artifactDir,
-        attempt,
-        threadId: resumableThreadId,
-      };
-      await this.options.store.updateWorker(baseMutation);
-      const started = this.options.clock.now();
-      const attemptId = randomUUID();
-      let attribution: WorkerAttribution = { attemptId };
-      let startLogged = false;
-      let finishedAt: number | undefined;
-      let outcome: "validated" | "failed" | "canceled" = "failed";
-      const receipt: WorkerUsageReceipt = {
-        schemaVersion: 1,
-        source: "codex_sdk",
-        usageScope: "thread_cumulative",
-        scanId: run.scanId,
-        workerId: input.workerId,
-        kind: "discovery",
-        attemptId,
-        attempt,
-        resumed: resumableThreadId !== undefined,
-        ...(resumableThreadId ? { threadId: resumableThreadId } : {}),
-        startedAt: new Date(started).toISOString(),
-        observedAt: new Date(started).toISOString(),
-        outcome: "running",
-        usage: null,
-      };
-      const logStarted = () => {
-        if (startLogged) return;
-        startLogged = true;
-        this.log({
-          event: "worker_started",
+    };
+    try {
+      for (let attempt = 1; ; attempt += 1) {
+        if (signal.aborted) {
+          return await this.cancelAttempt(input, attempt, lastThreadId);
+        }
+        let validationStarted = false;
+        let validationCompleted = false;
+        let activeThreadId = resumableThreadId;
+        let terminalFailure: Promise<WorkerAttemptOutcome> | undefined;
+        const baseMutation: DeepScanWorkerMutation = {
+          id: input.workerId,
+          scanId: run.scanId,
+          kind: "discovery",
+          status: "running",
+          promptPath: input.promptPath,
+          artifactDir: input.artifactDir,
+          attempt,
+          threadId: resumableThreadId,
+        };
+        await this.options.store.updateWorker(baseMutation);
+        const started = this.options.clock.now();
+        const attemptId = randomUUID();
+        let attribution: WorkerAttribution = { attemptId };
+        let startLogged = false;
+        let finishedAt: number | undefined;
+        let outcome: "validated" | "failed" | "canceled" = "failed";
+        const receipt: WorkerUsageReceipt = {
+          schemaVersion: 1,
+          source: "codex_sdk",
+          usageScope: "thread_cumulative",
           scanId: run.scanId,
           workerId: input.workerId,
           kind: "discovery",
+          attemptId,
           attempt,
-          ...attribution,
-          timestamp: receipt.startedAt,
-          retry: attempt > 1,
-          resumed: receipt.resumed,
+          resumed: resumableThreadId !== undefined,
           ...(resumableThreadId ? { threadId: resumableThreadId } : {}),
-        });
-      };
-      const persistUsage = async () => {
-        receipt.observedAt = new Date(this.options.clock.now()).toISOString();
-        try {
-          if (!run.workerUsageDirectory) {
-            throw new Error(
-              "The host did not provide a worker usage directory.",
-            );
-          }
-          await writeWorkerUsageReceipt(run.workerUsageDirectory, receipt);
-        } catch (error) {
+          startedAt: new Date(started).toISOString(),
+          observedAt: new Date(started).toISOString(),
+          outcome: "running",
+          usage: null,
+        };
+        const logStarted = () => {
+          if (startLogged) return;
+          startLogged = true;
           this.log({
-            event: "worker_usage_unavailable",
+            event: "worker_started",
             scanId: run.scanId,
             workerId: input.workerId,
             kind: "discovery",
             attempt,
             ...attribution,
-            reason: `Could not retain worker usage: ${error instanceof Error ? error.message : String(error)}`,
+            timestamp: receipt.startedAt,
+            retry: attempt > 1,
+            resumed: receipt.resumed,
+            ...(resumableThreadId ? { threadId: resumableThreadId } : {}),
           });
-        }
-      };
-      let finishRecorded = false;
-      const finishAttempt = async (status: FinalAttemptStatus) => {
-        if (finishRecorded) return;
-        finishRecorded = true;
-        logStarted();
-        receipt.outcome = status;
-        await persistUsage();
-        const finished = finishedAt ?? this.options.clock.now();
-        this.log({
-          event: "worker_finished",
-          scanId: run.scanId,
-          workerId: input.workerId,
-          kind: "discovery",
-          attempt,
-          ...attribution,
-          ...(activeThreadId ? { threadId: activeThreadId } : {}),
-          timestamp: new Date(finished).toISOString(),
-          durationMs: finished - started,
-          outcome: status,
-          retry: attempt > 1,
-          resumed: receipt.resumed,
-        });
-      };
-      await persistUsage();
-      try {
-        const resumePrompt = resumableThreadId
-          ? (continuationPrompt ?? transientExecutionContinuation(attempt))
-          : undefined;
-        const result = await this.options.executor.run({
-          attemptId,
-          workerUsageDirectory: run.workerUsageDirectory,
-          kind: "discovery",
-          promptPath: executionPromptPath,
-          workingDirectory: input.artifactDir,
-          subagents: run.config.subagents,
-          signal,
-          onNonRetryableError: (error) => {
-            if (signal.aborted || terminalFailure) return;
-            terminalFailure = this.options.store
-              .updateWorker({
-                ...baseMutation,
-                threadId: activeThreadId,
-                status: "failed",
-                error: deepScanErrorMessage(error),
-                terminalFailure: true,
-              })
-              .then(() => ({ status: "failed", error }));
-            // Await this write after executor cleanup, even if it rejects first.
-            void terminalFailure.catch(() => {});
-            this.options.onNonRetryableError?.(error);
-          },
-          resumeThreadId: resumableThreadId,
-          continuationPrompt:
-            resumePrompt && run.severityRubric
-              ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
-              : resumePrompt,
-          artifactContext: {
-            root: input.artifactDir,
-            layout: "worker",
-            discoveryBoard: {
-              root: this.options.artifacts.peerNotesRoot,
-              author: input.workerLabel,
-            },
-          },
-          onAttribution: (value) => {
-            attribution = value;
-            logStarted();
-          },
-          onUsage: async (usage, turnId) => {
-            receipt.usage = usage;
-            receipt.turnId = turnId;
-            await persistUsage();
-          },
-          onThreadStarted: async (threadId) => {
-            logStarted();
-            activeThreadId = threadId;
-            lastThreadId = threadId;
-            receipt.threadId = threadId;
-            await this.options.store.updateWorker({
-              ...baseMutation,
-              threadId,
-            });
-            await persistUsage();
+        };
+        const persistUsage = async () => {
+          receipt.observedAt = new Date(this.options.clock.now()).toISOString();
+          try {
+            if (!run.workerUsageDirectory) {
+              throw new Error(
+                "The host did not provide a worker usage directory.",
+              );
+            }
+            await writeWorkerUsageReceipt(run.workerUsageDirectory, receipt);
+          } catch (error) {
             this.log({
-              event: "worker_thread_started",
+              event: "worker_usage_unavailable",
               scanId: run.scanId,
               workerId: input.workerId,
               kind: "discovery",
               attempt,
-              threadId,
-            });
-          },
-        });
-        logStarted();
-        activeThreadId = result.threadId ?? activeThreadId;
-        receipt.threadId = activeThreadId;
-        receipt.turnId = result.turnId ?? receipt.turnId;
-        if (result.usage !== undefined) receipt.usage = result.usage;
-        if (terminalFailure) return terminalFailure;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
-        await persistUsage();
-        validationStarted = true;
-        try {
-          await input.validate();
-        } catch (validationError) {
-          throw withWorkerDiagnostics(validationError, result.diagnostics);
-        }
-        validationCompleted = true;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
-        outcome = "validated";
-        return {
-          status: "validated",
-          finish: finishAttempt,
-          attempt,
-          threadId: result.threadId ?? activeThreadId,
-        };
-      } catch (error) {
-        finishedAt = this.options.clock.now();
-        if (confirmedOwnershipChange(error, run.scanId)) throw error;
-        if (terminalFailure) return terminalFailure;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
-        const normalized = asError(error);
-        const retryable = !(normalized instanceof DeepScanNonRetryableError);
-        if (!retryable || attempt === maximumAttempts) {
-          const replaceableFailureKind = retryable
-            ? validationStarted
-              ? "invalid_discovery_artifacts"
-              : "transient_error"
-            : undefined;
-          await this.options.store.updateWorker({
-            ...baseMutation,
-            status: replaceableFailureKind ? "canceled" : "failed",
-            error: deepScanErrorMessage(
-              replaceableFailureKind
-                ? new Error(
-                    `${replaceableFailureKind}: ${normalized.message}`,
-                    {
-                      cause: normalized,
-                    },
-                  )
-                : normalized,
-            ),
-            ...(replaceableFailureKind ? { replaceableFailureKind } : {}),
-          });
-          return {
-            status: "failed",
-            error: normalized,
-            ...(replaceableFailureKind ? { replaceableFailureKind } : {}),
-          };
-        }
-        await this.options.store.updateWorker({
-          ...baseMutation,
-          error: deepScanErrorMessage(normalized),
-        });
-        if (
-          validationStarted &&
-          !validationCompleted &&
-          activeThreadId &&
-          isMissingWorkerResult(normalized, input.artifactDir)
-        ) {
-          // A missing result does not establish whether source review finished.
-          // Resume the conversation to finish review or save blocked progress.
-          resumableThreadId = activeThreadId;
-          continuationPrompt = standardScanCompletionContinuation(attempt);
-        } else if (!validationStarted && activeThreadId) {
-          resumableThreadId = activeThreadId;
-          continuationPrompt = undefined;
-        } else {
-          resumableThreadId = undefined;
-          continuationPrompt = undefined;
-          await this.archiveWorkerAttempt(input.artifactDir, attempt);
-          if (validationStarted && !validationCompleted) {
-            executionPromptPath = await writeValidationRetryPrompt({
-              basePromptPath: input.promptPath,
-              destinationPath: join(
-                input.promptRoot,
-                `attempt-${String(attempt + 1).padStart(2, "0")}.md`,
-              ),
-              failedAttempt: attempt,
-              error: normalized,
+              ...attribution,
+              reason: `Could not retain worker usage: ${error instanceof Error ? error.message : String(error)}`,
             });
           }
-        }
-        await finishAttempt("failed");
-        const delayMs = Math.ceil(
-          this.options.retryDelaysMs[attempt - 1] *
-            (1 + 0.3 * this.options.random()),
-        );
-        this.log({
-          event: "worker_retry_scheduled",
-          scanId: run.scanId,
-          workerId: input.workerId,
-          kind: "discovery",
-          attempt,
-          count: delayMs,
-          reason: deepScanErrorMessage(normalized),
-        });
+        };
+        let finishRecorded = false;
+        const finishAttempt = async (status: FinalAttemptStatus) => {
+          if (finishRecorded) return;
+          finishRecorded = true;
+          logStarted();
+          receipt.outcome = status;
+          await persistUsage();
+          const finished = finishedAt ?? this.options.clock.now();
+          this.log({
+            event: "worker_finished",
+            scanId: run.scanId,
+            workerId: input.workerId,
+            kind: "discovery",
+            attempt,
+            ...attribution,
+            ...(activeThreadId ? { threadId: activeThreadId } : {}),
+            timestamp: new Date(finished).toISOString(),
+            durationMs: finished - started,
+            outcome: status,
+            retry: attempt > 1,
+            resumed: receipt.resumed,
+          });
+        };
+        await persistUsage();
         try {
-          await this.options.clock.sleep(delayMs, signal);
-        } catch (sleepError) {
+          const resumePrompt = resumableThreadId
+            ? (continuationPrompt ?? transientExecutionContinuation(attempt))
+            : undefined;
+          const result = await this.options.executor.run({
+            attemptId,
+            workerUsageDirectory: run.workerUsageDirectory,
+            kind: "discovery",
+            promptPath: executionPromptPath,
+            workingDirectory: input.artifactDir,
+            subagents: run.config.subagents,
+            signal,
+            onNonRetryableError: (error) => {
+              if (signal.aborted || terminalFailure) return;
+              terminalFailure = this.options.store
+                .updateWorker({
+                  ...baseMutation,
+                  threadId: activeThreadId,
+                  status: "failed",
+                  error: deepScanErrorMessage(error),
+                  terminalFailure: true,
+                })
+                .then(() => ({ status: "failed", error }));
+              // Await this write after executor cleanup, even if it rejects first.
+              void terminalFailure.catch(() => {});
+              this.options.onNonRetryableError?.(error);
+            },
+            resumeThreadId: resumableThreadId,
+            continuationPrompt:
+              resumePrompt && run.severityRubric
+                ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
+                : resumePrompt,
+            artifactContext: {
+              root: input.artifactDir,
+              layout: "worker",
+              discoveryBoard: {
+                root: this.options.artifacts.peerNotesRoot,
+                author: input.workerLabel,
+              },
+            },
+            onAttribution: (value) => {
+              attribution = value;
+              logStarted();
+            },
+            onUsage: async (usage, turnId) => {
+              receipt.usage = usage;
+              receipt.turnId = turnId;
+              await persistUsage();
+            },
+            onThreadStarted: async (threadId) => {
+              retainedThreads.add(threadId);
+              logStarted();
+              activeThreadId = threadId;
+              lastThreadId = threadId;
+              receipt.threadId = threadId;
+              await this.options.store.updateWorker({
+                ...baseMutation,
+                threadId,
+              });
+              await persistUsage();
+              this.log({
+                event: "worker_thread_started",
+                scanId: run.scanId,
+                workerId: input.workerId,
+                kind: "discovery",
+                attempt,
+                threadId,
+              });
+            },
+          });
+          logStarted();
+          activeThreadId = result.threadId ?? activeThreadId;
+          if (activeThreadId) retainedThreads.add(activeThreadId);
+          receipt.threadId = activeThreadId;
+          receipt.turnId = result.turnId ?? receipt.turnId;
+          if (result.usage !== undefined) receipt.usage = result.usage;
+          if (terminalFailure) return terminalFailure;
           if (signal.aborted) {
+            outcome = "canceled";
             return await this.cancelAttempt(input, attempt, activeThreadId);
           }
-          throw sleepError;
+          await persistUsage();
+          validationStarted = true;
+          try {
+            await input.validate();
+          } catch (validationError) {
+            throw withWorkerDiagnostics(validationError, result.diagnostics);
+          }
+          validationCompleted = true;
+          if (signal.aborted) {
+            outcome = "canceled";
+            return await this.cancelAttempt(input, attempt, activeThreadId);
+          }
+          outcome = "validated";
+          return {
+            status: "validated",
+            finish: finishAttempt,
+            attempt,
+            threadId: result.threadId ?? activeThreadId,
+          };
+        } catch (error) {
+          finishedAt = this.options.clock.now();
+          if (confirmedOwnershipChange(error, run.scanId)) throw error;
+          if (terminalFailure) return terminalFailure;
+          if (signal.aborted) {
+            outcome = "canceled";
+            return await this.cancelAttempt(input, attempt, activeThreadId);
+          }
+          const normalized = asError(error);
+          const retryable = !(normalized instanceof DeepScanNonRetryableError);
+          if (!retryable || attempt === maximumAttempts) {
+            const replaceableFailureKind = retryable
+              ? validationStarted
+                ? "invalid_discovery_artifacts"
+                : "transient_error"
+              : undefined;
+            await this.options.store.updateWorker({
+              ...baseMutation,
+              status: replaceableFailureKind ? "canceled" : "failed",
+              error: deepScanErrorMessage(
+                replaceableFailureKind
+                  ? new Error(
+                      `${replaceableFailureKind}: ${normalized.message}`,
+                      {
+                        cause: normalized,
+                      },
+                    )
+                  : normalized,
+              ),
+              ...(replaceableFailureKind ? { replaceableFailureKind } : {}),
+            });
+            return {
+              status: "failed",
+              error: normalized,
+              ...(replaceableFailureKind ? { replaceableFailureKind } : {}),
+            };
+          }
+          await this.options.store.updateWorker({
+            ...baseMutation,
+            error: deepScanErrorMessage(normalized),
+          });
+          if (
+            validationStarted &&
+            !validationCompleted &&
+            activeThreadId &&
+            isMissingWorkerResult(normalized, input.artifactDir)
+          ) {
+            // A missing result does not establish whether source review finished.
+            // Resume the conversation to finish review or save blocked progress.
+            resumableThreadId = activeThreadId;
+            continuationPrompt = standardScanCompletionContinuation(attempt);
+          } else if (!validationStarted && activeThreadId) {
+            resumableThreadId = activeThreadId;
+            continuationPrompt = undefined;
+          } else {
+            if (activeThreadId) await release(activeThreadId);
+            resumableThreadId = undefined;
+            continuationPrompt = undefined;
+            await this.archiveWorkerAttempt(input.artifactDir, attempt);
+            if (validationStarted && !validationCompleted) {
+              executionPromptPath = await writeValidationRetryPrompt({
+                basePromptPath: input.promptPath,
+                destinationPath: join(
+                  input.promptRoot,
+                  `attempt-${String(attempt + 1).padStart(2, "0")}.md`,
+                ),
+                failedAttempt: attempt,
+                error: normalized,
+              });
+            }
+          }
+          await finishAttempt("failed");
+          const delayMs = Math.ceil(
+            this.options.retryDelaysMs[attempt - 1] *
+              (1 + 0.3 * this.options.random()),
+          );
+          this.log({
+            event: "worker_retry_scheduled",
+            scanId: run.scanId,
+            workerId: input.workerId,
+            kind: "discovery",
+            attempt,
+            count: delayMs,
+            reason: deepScanErrorMessage(normalized),
+          });
+          try {
+            await this.options.clock.sleep(delayMs, signal);
+          } catch (sleepError) {
+            if (signal.aborted) {
+              return await this.cancelAttempt(input, attempt, activeThreadId);
+            }
+            throw sleepError;
+          }
+        } finally {
+          if (outcome !== "validated") await finishAttempt(outcome);
         }
-      } finally {
-        if (outcome !== "validated") await finishAttempt(outcome);
       }
+    } finally {
+      for (const threadId of retainedThreads) await release(threadId);
     }
   }
 

@@ -46,6 +46,7 @@ export type HostExecute = (
   request: unknown,
   onProgress?: (event: unknown) => void,
   method?: string,
+  signal?: AbortSignal,
 ) => Promise<unknown>;
 
 /** One bidirectional run, shared with dedupe. This transport never replays. */
@@ -58,6 +59,8 @@ export async function runHostProtocol(
     progressMethod?: string;
     /** Scan cancellation must retain the host's eventual receipt and usage. */
     awaitCancellationReceipt?: boolean;
+    /** Deep runs can overlap execution requests and workspace cleanup. */
+    allowConcurrentExecutions?: boolean | ((params: unknown) => boolean);
     errorData?: (error: unknown) => object | undefined;
     run(
       params: unknown,
@@ -72,15 +75,18 @@ export async function runHostProtocol(
   let runId: string | number | undefined;
   let terminalCode: number | undefined;
   let completed = false;
-  let pending:
-    | {
-        id: string;
-        acceptsPendingReview: boolean;
-        resolve(value: unknown): void;
-        reject(error: Error): void;
-        onProgress?: (event: unknown) => void;
-      }
-    | undefined;
+  const pending = new Map<
+    string,
+    {
+      method: string;
+      acceptsPendingReview: boolean;
+      resolve(value: unknown): void;
+      reject(error: Error): void;
+      onProgress?: (event: unknown) => void;
+      cancel(): void;
+      cleanup(): void;
+    }
+  >();
   const { promise: completion, resolve: resolveCompletion } =
     Promise.withResolvers<number>();
   const complete = (code: number) => {
@@ -142,8 +148,11 @@ export async function runHostProtocol(
     }
     terminalCode = 2;
     controller.abort(new Error(message));
-    pending?.reject(new Error(message));
-    pending = undefined;
+    for (const execution of pending.values()) {
+      execution.cleanup();
+      execution.reject(new Error(message));
+    }
+    pending.clear();
     // A peer that stopped reading cannot receive an error. Unblock both the
     // request write and completion instead of waiting for a write callback.
     if (
@@ -187,12 +196,7 @@ export async function runHostProtocol(
     }
     if (controller.signal.aborted) return;
     controller.abort(new Error(`${operation.label} canceled.`));
-    if (pending)
-      void send({
-        jsonrpc: "2.0",
-        method: "execution.cancel",
-        params: { requestId: pending.id },
-      }).catch(outputError);
+    for (const execution of pending.values()) execution.cancel();
   };
   input.on("error", inputError);
   input.on("close", disconnected);
@@ -224,24 +228,71 @@ export async function runHostProtocol(
         return;
       }
       runId = run.data.id;
+      const allowConcurrent =
+        typeof operation.allowConcurrentExecutions === "function"
+          ? operation.allowConcurrentExecutions(run.data.params)
+          : operation.allowConcurrentExecutions === true;
+      const concurrentMethod = (method: string) =>
+        method === "execution.run" || method === "execution.release";
       void operation
         .run(
           run.data.params,
-          (id, params, onProgress, method = operation.requestMethod) => {
-            if (terminalCode !== undefined || controller.signal.aborted)
+          (
+            id,
+            params,
+            onProgress,
+            method = operation.requestMethod,
+            requestSignal,
+          ) => {
+            if (
+              terminalCode !== undefined ||
+              (controller.signal.aborted && method !== "execution.release")
+            )
               return Promise.reject(controller.signal.reason);
-            if (pending)
+            if (requestSignal?.aborted && method !== "execution.release")
+              return Promise.reject(requestSignal.reason);
+            if (pending.has(id))
+              return Promise.reject(
+                new Error("Execution request ID is already pending."),
+              );
+            if (
+              pending.size > 0 &&
+              (!allowConcurrent ||
+                !concurrentMethod(method) ||
+                [...pending.values()].some(
+                  (execution) => !concurrentMethod(execution.method),
+                ))
+            )
               return Promise.reject(new Error("Execution is already pending."));
             return new Promise((resolve, reject) => {
-              pending = {
-                id,
+              let cancellationSent = false;
+              const cancel = () => {
+                if (
+                  cancellationSent ||
+                  method !== "execution.run" ||
+                  terminalCode !== undefined
+                )
+                  return;
+                cancellationSent = true;
+                void send({
+                  jsonrpc: "2.0",
+                  method: "execution.cancel",
+                  params: { requestId: id },
+                }).catch(outputError);
+              };
+              pending.set(id, {
+                method,
                 resolve,
                 reject,
                 onProgress,
+                cancel,
+                cleanup: () =>
+                  requestSignal?.removeEventListener("abort", cancel),
                 acceptsPendingReview:
                   method === "review.run" &&
                   acceptsPendingReview.safeParse(params).success,
-              };
+              });
+              requestSignal?.addEventListener("abort", cancel, { once: true });
               void send({
                 jsonrpc: "2.0",
                 id,
@@ -286,25 +337,30 @@ export async function runHostProtocol(
       return;
     }
     const event = progress.safeParse(message);
+    const progressExecution = event.success
+      ? pending.get(event.data.params.requestId)
+      : undefined;
     if (
       event.success &&
       operation.awaitCancellationReceipt &&
-      pending &&
-      event.data.params.requestId === pending.id
+      progressExecution
     ) {
       // Optional progress must never interrupt execution, including bad events
       // or host observer exceptions. Correlation still rejects stale messages.
       try {
-        pending.onProgress?.(event.data.params.event);
+        progressExecution.onProgress?.(event.data.params.event);
       } catch {}
       return;
     }
     const reply = response.safeParse(message);
+    const execution =
+      reply.success && typeof reply.data.id === "string"
+        ? pending.get(reply.data.id)
+        : undefined;
     if (
       !reply.success ||
-      !pending ||
-      reply.data.id !== pending.id ||
-      ("reviewPending" in reply.data && !pending.acceptsPendingReview)
+      !execution ||
+      ("reviewPending" in reply.data && !execution.acceptsPendingReview)
     ) {
       fail(
         -32600,
@@ -312,8 +368,8 @@ export async function runHostProtocol(
       );
       return;
     }
-    const execution = pending;
-    pending = undefined;
+    pending.delete(String(reply.data.id));
+    execution.cleanup();
     if ("error" in reply.data)
       execution.reject(new Error(reply.data.error.message));
     else if ("reviewPending" in reply.data)
@@ -325,6 +381,7 @@ export async function runHostProtocol(
   try {
     return await completion;
   } finally {
+    for (const execution of pending.values()) execution.cleanup();
     lines.removeAllListeners("line");
     lines.removeListener("close", disconnected);
     lines.removeListener("error", inputError);

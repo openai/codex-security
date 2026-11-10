@@ -1,4 +1,6 @@
 import type { Readable } from "node:stream";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { runHostProtocol } from "./host-protocol.js";
 import {
   type HostedScanInput,
@@ -7,6 +9,7 @@ import {
 } from "./hosted-scan.js";
 import {
   ScanExecutionEventSchema,
+  HostedScanExecutionEventSchema,
   ScanExecutionResultSchema,
 } from "./scan-executor.js";
 
@@ -22,6 +25,11 @@ export async function runHostedScanProtocol(
       label: "Scan",
       requestMethod: "execution.run",
       awaitCancellationReceipt: true,
+      allowConcurrentExecutions: (params) =>
+        typeof params === "object" &&
+        params !== null &&
+        "version" in params &&
+        params.version === 3,
       errorData: (error) =>
         error instanceof HostedScanPreparationError
           ? { reason: error.reason }
@@ -33,11 +41,35 @@ export async function runHostedScanProtocol(
           executor: {
             run: async (request, options) =>
               ScanExecutionResultSchema.parse(
-                await execute(request.requestId, request, (event) => {
-                  const parsed = ScanExecutionEventSchema.safeParse(event);
-                  if (parsed.success) options.onEvent?.(parsed.data);
-                }),
+                await execute(
+                  request.requestId,
+                  request,
+                  (event) => {
+                    const schema =
+                      request.version === 3
+                        ? HostedScanExecutionEventSchema
+                        : ScanExecutionEventSchema;
+                    const parsed = schema.safeParse(event);
+                    if (parsed.success) options.onEvent?.(parsed.data);
+                  },
+                  undefined,
+                  options.signal,
+                ),
               ),
+            release: async (sessionId) => {
+              const released = z.strictObject({
+                status: z.literal("completed"),
+                sessionId: z.literal(sessionId),
+              });
+              released.parse(
+                await execute(
+                  randomUUID(),
+                  { version: 3, sessionId },
+                  undefined,
+                  "execution.release",
+                ),
+              );
+            },
           },
         }),
     },
