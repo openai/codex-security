@@ -77,9 +77,19 @@ function tar(args, encoding = "buffer") {
     ...tarOptions,
     encoding,
   });
+  const stderr = result.stderr?.toString().trim() ?? "";
+  if (
+    result.status !== 0 &&
+    stderr.startsWith("tar: unrecognized option: ignore-zeros\nBusyBox ")
+  ) {
+    // BusyBox can exit before Node finishes writing a larger archive to stdin.
+    throw new Error(
+      `Package validation requires tar with --ignore-zeros. On Alpine Linux, install GNU tar with 'apk add tar'.\n${stderr}`,
+      { cause: result.error },
+    );
+  }
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0 || result.stderr.length !== 0) {
-    const stderr = result.stderr.toString().trim();
     throw new Error(
       `npm tarball contains an invalid tar entry${stderr === "" ? "." : `: ${stderr}`}`,
     );
