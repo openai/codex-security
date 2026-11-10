@@ -40,6 +40,7 @@
 - honor literal POSIX executable override paths ([#2551](https://github.com/openai/codex-security/pull/2551))
 - preserve explicit usage database paths ([#2556](https://github.com/openai/codex-security/pull/2556))
 - grant scan workers explicit source read access ([#2545](https://github.com/openai/codex-security/pull/2545))
+- verify assumed-unchanged files for committed diffs ([#2554](https://github.com/openai/codex-security/pull/2554))
 
 </details>
 
