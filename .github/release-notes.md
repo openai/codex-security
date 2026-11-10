@@ -17,6 +17,7 @@
 - preserve Linux install path case in update notices ([#2521](https://github.com/openai/codex-security/pull/2521))
 - resume Deep Scans interrupted before their first artifact ([#2515](https://github.com/openai/codex-security/pull/2515))
 - create scan output for long POSIX repository names ([#2527](https://github.com/openai/codex-security/pull/2527))
+- retry rolled-back plugin cache activation ([#2528](https://github.com/openai/codex-security/pull/2528))
 
 </details>
 
