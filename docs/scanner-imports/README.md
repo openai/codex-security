@@ -93,7 +93,8 @@ To inspect published findings in Codex, [connect the Cloud app](../../sdk/typesc
 and ask for imported findings in the destination repository. The v4 findings
 view covers all the scanners above. If your Cloud app offers an older view
 that omits your scanner, use the CLI receipt and its readback counts to verify
-publication. For a private import, ask for your private import history.
+publication. For a private import, check the `privateJob` receipt and open your
+private imported-findings inbox in Cloud to inspect the saved evidence.
 
 If the repository publisher requires a reported severity, the preview excludes
 findings whose severity the scanner left unknown. You can keep those findings
