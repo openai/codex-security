@@ -53,6 +53,7 @@
 - stage validated plugin ZIPs for scan workers ([#2507](https://github.com/openai/codex-security/pull/2507))
 - tolerate executable metadata changes on first launch ([#2555](https://github.com/openai/codex-security/pull/2555))
 - discover Python for targets when launched from filesystem root ([#2569](https://github.com/openai/codex-security/pull/2569))
+- update the Linear SDK to 101.0.0 ([#2563](https://github.com/openai/codex-security/pull/2563))
 
 </details>
 
