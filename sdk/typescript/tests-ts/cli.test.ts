@@ -1202,7 +1202,8 @@ describe("CLI", () => {
     for (const args of [
       ["scan", ".", "--working-tree=1", "--dry-run"],
       ["scan", ".", "--workingTree=treu", "--dry-run"],
-      ["scan", ".", "--mock", "--dry-run=1"],
+      ["scan", "--mock", "--dry-run=1"],
+      ["scan", "--working-tree=1", "--schema"],
       ["scan", "import", "--csv", "unread.csv", "--dry-run=TRUE"],
       ["publish", "findings", "unread.sarif", "--yes=maybe"],
     ]) {

@@ -7586,7 +7586,11 @@ export async function main(
     }
     const entry = commands.get(command)!;
     const selected =
-      "_group" in entry ? entry.commands.get(subcommand ?? "") : entry;
+      "_group" in entry
+        ? subcommand === undefined
+          ? entry.root
+          : entry.commands.get(subcommand)
+        : entry;
     let lastPositionalIndex = -1;
     for (
       let index = commandIndex + (nestedCommand ? 2 : 1);
