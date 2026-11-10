@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from deep_scan_workbench import require_current_coordinator
+from deep_scan_workbench import independent_review_progress, require_current_coordinator
 from finalize_scan_contract import open_scan_local_file_descriptor
-from workbench.handoff import require_current_continuation
+from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench_constants import PHASES
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
@@ -19,6 +19,7 @@ from workbench_validation import optional_text, require_uuid, user_context_argum
 def reportable_count(
     current_phase: str, requested_phase: str | None, count: int | None
 ) -> int | None:
+    """Default a missing count to zero on entering validation or a later phase from an earlier phase."""
     if count is None and requested_phase in PHASES[3:] and current_phase in PHASES[:3]:
         return 0
     return count
@@ -29,6 +30,7 @@ def update_context(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    """Update user context on a running scan and return the refreshed scan context in the same workbench."""
     scan_id = require_uuid(args.scan_id, "scan-id")
     context = user_context_argument(args)
     connection.execute("BEGIN IMMEDIATE")
@@ -70,8 +72,48 @@ def update_context(
     return wb.scan_context(connection, scan_id)
 
 
-def model_progress(wb: Any, connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
-    progress, _ = wb.scan_progress(connection, scan)
+def scan_progress_result(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> tuple[dict[str, Any], str]:
+    independent_reviews = (
+        independent_review_progress(
+            connection, scan["id"], parent_running=scan["status"] == "running"
+        )
+        if scan["mode"] == "deep"
+        else None
+    )
+    progress_result = {
+        "candidates": {"reportable": scan["reportable_findings_count"]},
+        "coverage": {
+            "closedRows": scan["review_items_completed"],
+            "filesTotal": scan["scope_file_count"],
+            "worklistRows": scan["review_items_total"],
+        },
+        "phase": scan["phase"],
+        "phaseProgress": {
+            "completed": scan["phase_items_completed"],
+            "total": scan["phase_items_total"],
+            "unit": scan["phase_progress_unit"],
+        },
+        "preflightProgress": {
+            "completed": scan["preflight_checks_completed"],
+            "total": scan["preflight_checks_total"],
+        },
+        "preflightIssues": json.loads(scan["preflight_issues_json"]),
+        "reviewPass": scan["deep_review_pass"],
+        "status": "canceled" if scan["canceled_at"] else scan["status"],
+        "updatedAt": scan["progress_updated_at"],
+    }
+    review_updated_at = ""
+    if independent_reviews is not None:
+        review_updated_at = str(independent_reviews.pop("updatedAt"))
+        progress_result["independentReviews"] = independent_reviews
+    return progress_result, review_updated_at
+
+
+def model_progress(wb: Any, connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
+    scan = wb.scan_history.scan_with_progress(connection, scan_id)
+    progress, _ = scan_progress_result(connection, scan)
     result = {"scanId": scan["id"], "progress": progress, "userContext": scan["user_context"]}
     if warnings := json.loads(scan["completion_warnings_json"]):
         result["warnings"] = warnings
@@ -167,6 +209,12 @@ def update_progress(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    """Record phase and review counters for a running scan and return its updated context.
+
+    Check continuation and coordinator ownership where applicable. A new phase
+    starts with fresh phase counters. A new Deep Scan review pass must start
+    with zero completed items. Invalid progress raises SystemExit.
+    """
     scan_id = require_uuid(args.scan_id, "scan-id")
     if args.refresh_scope_file_count:
         return refresh_scope_file_count(wb, connection, scan_id, args.claim_token)
@@ -185,6 +233,7 @@ def update_progress(
             wb.begin_immediate_with_retry(connection)
             scan = wb.require_scan(connection, scan_id)
         timestamp = wb.now()
+        require_tokenless_scan_owner(connection, scan, getattr(args, "model_thread_id", None))
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can update progress.")
         if args.model_update and deep_preflight(scan):
@@ -194,7 +243,7 @@ def update_progress(
                     args.claim_token,
                     error_message="Scan updates are owned by another continuation.",
                 )
-            return {"scan": model_progress(wb, connection, scan), "deepPreflight": True}
+            return {"scan": model_progress(wb, connection, scan_id), "deepPreflight": True}
         if scan["mode"] == "deep":
             coordinator = connection.execute(
                 "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
@@ -310,7 +359,7 @@ def update_progress(
             (*values, timestamp, scan["id"]),
         )
         if args.model_update:
-            return {"scan": model_progress(wb, connection, wb.require_scan(connection, scan_id))}
+            return {"scan": model_progress(wb, connection, scan_id)}
     return wb.scan_context(connection, scan["id"])
 
 

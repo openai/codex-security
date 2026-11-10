@@ -1,7 +1,7 @@
 import { isDeepStrictEqual as sameArray } from "node:util";
 import { createHash, hash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setImmediate } from "node:timers/promises";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
@@ -755,7 +755,18 @@ async function verifyScanRoot(
 }
 
 async function requireOwnedScanRoot(path: string): Promise<void> {
-  if (process.platform === "win32") return;
+  if (process.platform === "win32") {
+    const error = windowsBinding().validateWindowsOutputPath(
+      widePath(win32.toNamespacedPath(path)),
+      false,
+    );
+    if (error !== 0) {
+      throw new ContractValidationError(
+        `Scan output directory or its parent could not be trusted (Windows error ${error}): ${path}`,
+      );
+    }
+    return;
+  }
   const effectiveUid = process.geteuid?.();
   const metadata = await lstat(encodePosixPath(path));
   if (effectiveUid !== undefined && metadata.uid !== effectiveUid)
@@ -807,7 +818,7 @@ function openHeldFile(
       error instanceof Error
     )
       throw new ContractValidationError(
-        `${context}: unable to open the checked regular file.`,
+        `${context}: unable to open the checked regular file. ${filesystemErrorMessage(error)}`,
         {
           cause: Object.assign(error, { path: join(root.path, normalized) }),
         },

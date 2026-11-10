@@ -112,6 +112,30 @@ test("reimporting two selected IDs from a non-default branch leaves both SQLite 
   );
 });
 
+test("a fully excluded SDK selection still verifies the checkout against the selected project", async () => {
+  const selected = normalizeSelectedSemgrepPlatformFindings({
+    ...source,
+    findingIds: ["8"],
+    findingsResponses: [
+      JSON.stringify({ findings: [{ id: 8, ref, repository: { url } }] }),
+    ],
+  });
+  expect(selected.findings).toHaveLength(0);
+  expect(selected.excluded).toHaveLength(1);
+  await using fixture = await localFindingsFixture({ remote: url + "-other" });
+  await expect(
+    prepareNormalizedLocalImport(
+      selected,
+      {
+        provider: "semgrep",
+        sourceKey: "demo/topic",
+        repository: fixture.repository,
+      },
+      { environment: fixture.environment },
+    ),
+  ).rejects.toThrow("configured remote");
+});
+
 test("each selected finding must match the independently named project, ref, and SAST product", () => {
   const first = page(ids[0]!);
   const second = page(ids[1]!);

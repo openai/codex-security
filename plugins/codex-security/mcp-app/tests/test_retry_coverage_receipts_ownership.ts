@@ -100,7 +100,7 @@ for (const resume of [false, true]) {
 }
 
 for (const resume of [false, true]) {
-  for (const outcome of ["completion", "recovery", "no parent"]) {
+  for (const outcome of ["completion", "recovery", "no parent"] as const) {
     for (const [name, firstCheckpointReceipt, receiptCollision] of [
       ["shared same-name collision", "shared", true],
       ["shared distinct-name control", "shared", false],
@@ -111,8 +111,7 @@ for (const resume of [false, true]) {
           firstCheckpointReceipt,
           receiptCollision,
           resume,
-          stopAfterDraft: outcome === "recovery",
-          stopBeforeDraft: outcome === "no parent",
+          outcome,
         }));
     }
   }

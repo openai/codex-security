@@ -715,6 +715,25 @@ test("a selection checks every caller-supplied source before saving API findings
   }
 });
 
+test("a valid reader hint cannot hide a URL object with the same JSON spelling", async () => {
+  await using fixture = await localReportFixture(url);
+  await fixture.writeJson(selectedRepository(url, url));
+  await expect(
+    prepareLocalExternalImport(
+      fixture.file,
+      { ...platformSource, repository: fixture.repository },
+      {
+        environment: fixture.environment,
+        sourceRepositories: [
+          { url },
+          // @ts-expect-error JavaScript callers can supply a URL instead of its string.
+          { url: new URL(url) },
+        ],
+      },
+    ),
+  ).rejects.toThrow();
+});
+
 test("each named Git remote contributes only its active fetch URL", async () => {
   await using fixture = await localReportFixture(
     "https://github.com/example/other",

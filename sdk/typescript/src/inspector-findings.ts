@@ -1,6 +1,5 @@
 import { posix } from "node:path";
 import { z } from "zod";
-import validSemver from "semver/functions/valid.js";
 import type {
   ExternalFinding,
   ExternalFindings,
@@ -9,7 +8,7 @@ import type {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
-  validateExternalEvidence,
+  validateEnrichedExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
 import { isGitHubCloudHost } from "./git-remote.js";
@@ -17,11 +16,15 @@ import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
+  awsTimestampSeconds,
+  concreteVersion,
   normalizeRecords,
   readScannerJson,
   record,
   repositoryFilePath,
   requiredText,
+  scannerSeverity,
+  strings,
   text,
 } from "./scanner-import.js";
 
@@ -330,6 +333,7 @@ const repositoryFinding = z.object({
         fileName: optionalValue,
         filePath: optionalValue,
         startLine: optionalValue,
+        endLine: optionalValue,
       }),
       sourceLambdaLayerArn: absent,
     })
@@ -445,15 +449,7 @@ export function inspectorReportRepository(
 }
 
 function timestamp(value: unknown): number {
-  const seconds =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" &&
-          /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/u.test(
-            value,
-          )
-        ? Date.parse(value) / 1000
-        : NaN;
+  const seconds = awsTimestampSeconds(value);
   if (!Number.isFinite(seconds))
     throw new Error("Invalid Inspector timestamp.");
   return Math.floor(seconds);
@@ -518,46 +514,12 @@ function manifestPath(path: string | null): string | null {
     : null;
 }
 
-function concreteVersion(
-  value: unknown,
-  ecosystem: string | null,
-  osPackage: boolean,
-): string | null {
-  const version = text(value);
-  if (!version) return null;
-  // Debian versions use internal tildes for prereleases and backports.
-  if (osPackage && version.includes("~"))
-    return /^(?:\d+:)?\d[a-z\d.+~]*(?:-[a-z\d.+~]+)*$/iu.test(version)
-      ? version
-      : null;
-  if (validSemver(version)) return version;
-  if (ecosystem === "npm" || ecosystem === "cargo") return null;
-  if (ecosystem === "java" || ecosystem === "maven") {
-    if (
-      version === "LATEST" ||
-      version === "RELEASE" ||
-      version.startsWith("latest.")
-    )
-      return null;
-    return /^[a-z\d][\w.+-]*$/iu.test(version) && !version.endsWith("+")
-      ? version
-      : null;
-  }
-  if (!ecosystem && version.endsWith("+")) return null;
-  const publicVersion =
-    ecosystem === "pypi" ? version.split("+", 1)[0]! : version;
-  return /\d/u.test(version) &&
-    /^(?:\d+:)?[a-z\d][\w.+!-]*$/iu.test(version) &&
-    !/(?:^|\.)x(?:\.|$)/iu.test(publicVersion)
-    ? version
-    : null;
-}
-
 function evidence(
   { native: finding, pkg, code }: ReturnType<typeof selectedFinding>,
   id: string,
   source: string,
   target: ExternalImportTarget,
+  previousProjection: boolean,
 ) {
   const {
     description,
@@ -596,53 +558,63 @@ function evidence(
   const locations: { path: string; line: number | null }[] = [...paths].map(
     (path) => ({ path, line: null }),
   );
+  let endLine: number | null = null;
   if (code) {
-    const { fileName, filePath, startLine } = code.filePath;
+    const { fileName, filePath, startLine, endLine: end } = code.filePath;
     const path = repositoryFilePath(filePath);
-    if (path && posix.basename(path) === fileName)
-      locations.push({
-        path,
-        line:
-          typeof startLine === "number" &&
-          Number.isSafeInteger(startLine) &&
-          startLine > 0
-            ? startLine
-            : null,
-      });
-  }
-  return validateExternalEvidence(
-    {
-      title:
-        text(finding["title"]) ??
-        pkg?.vulnerabilityId ??
-        code?.detectorName ??
-        id,
-      description: requiredText(description, "Inspector description"),
-      severity: ["critical", "high", "medium", "low", "informational"].includes(
-        level,
+    if (path && posix.basename(path) === fileName) {
+      const line =
+        typeof startLine === "number" &&
+        Number.isSafeInteger(startLine) &&
+        startLine > 0
+          ? startLine
+          : null;
+      locations.push({ path, line });
+      if (
+        line !== null &&
+        typeof end === "number" &&
+        Number.isSafeInteger(end) &&
+        end >= line
       )
-        ? level
-        : "unknown",
-      url: text(pkg?.sourceUrl),
-      advisory_ids: pkg
-        ? [
-            ...new Set([
-              pkg.vulnerabilityId,
-              ...(pkg.relatedVulnerabilities ?? []),
-            ]),
-          ]
-        : [],
-      packages,
-      locations,
-      source_updated_at: updatedAt === undefined ? null : timestamp(updatedAt),
-      source_data: {
-        format,
-        sourceRepositoryUrl: source,
-        finding: structuredClone(finding),
-      },
+        endLine = end;
+    }
+  }
+  const advisoryIds = pkg ? [pkg.vulnerabilityId] : [];
+  const base = {
+    title:
+      text(finding["title"]) ??
+      pkg?.vulnerabilityId ??
+      code?.detectorName ??
+      id,
+    description: requiredText(description, "Inspector description"),
+    severity: scannerSeverity(level),
+    url: text(pkg?.sourceUrl),
+    advisory_ids:
+      previousProjection && pkg?.relatedVulnerabilities
+        ? [...new Set(advisoryIds.concat(pkg.relatedVulnerabilities))]
+        : advisoryIds,
+    packages,
+    locations,
+    source_updated_at: updatedAt === undefined ? null : timestamp(updatedAt),
+    source_data: {
+      format,
+      sourceRepositoryUrl: source,
+      finding: structuredClone(finding),
     },
-    target,
-  );
+  };
+  const enrichment =
+    code && !previousProjection
+      ? {
+          details: {
+            kind: "sast",
+            repository: { url: source },
+            rule: { id: code.detectorId, name: code.detectorName },
+            weakness_ids: strings(code.cwes),
+            code: endLine === null ? null : { end_line: endLine },
+          },
+        }
+      : undefined;
+  return validateEnrichedExternalEvidence(base, target, enrichment);
 }
 
 export function normalizeInspectorFindings(
@@ -650,6 +622,26 @@ export function normalizeInspectorFindings(
   sourceRepositoryUrl: string,
   target: ExternalImportTarget = "cloud",
   projectMap?: ReadonlyMap<string, string>,
+): ExternalFindings {
+  return normalizeReport(input, sourceRepositoryUrl, target, projectMap, false);
+}
+
+/** @internal Reconstruct the prior evidence when matching a pending publication. */
+export function normalizePreviousInspectorFindings(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+  projectMap?: ReadonlyMap<string, string>,
+): ExternalFindings {
+  return normalizeReport(input, sourceRepositoryUrl, target, projectMap, true);
+}
+
+function normalizeReport(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget,
+  projectMap: ReadonlyMap<string, string> | undefined,
+  previousProjection: boolean,
 ): ExternalFindings {
   const source = repositoryUrl(sourceRepositoryUrl);
   if (
@@ -697,7 +689,14 @@ export function normalizeInspectorFindings(
   }
   return normalizeRecords(
     rows,
-    ({ finding }, id) => evidence(selectedFinding(finding), id, source, target),
+    ({ finding }, id) =>
+      evidence(
+        selectedFinding(finding),
+        id,
+        source,
+        target,
+        previousProjection,
+      ),
     ({ finding }) => identity(record(finding, "Inspector finding")).arn,
     target,
     { filter: checkRetainedScope },

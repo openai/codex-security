@@ -12,7 +12,14 @@ to its recorded base. The API does not apply a patch or infer a branch from the
 finding. It checks HEAD before and after execution; the host owns checking the
 candidate's bytes/digest and verifying that verification did not change them.
 
+In this TypeScript host integration, `executor` is your application's
+`RemediationExecutor`. It runs the request in the prepared checkout and returns
+an execution receipt. Substitute the frozen revision, finding evidence, model
+and attempt identity from your host.
+
 ```ts
+import { runHostedRemediation } from "@openai/codex-security";
+
 const result = await runHostedRemediation(
   {
     version: 1,
@@ -39,6 +46,9 @@ const result = await runHostedRemediation(
 );
 ```
 
+Read `result.verification?.status` and its evidence before marking a finding
+fixed. A completed request can return `still_vulnerable` or `inconclusive`.
+
 Both instruction fields are optional and are distinct from finding data.
 Reasoning effort is passed through unchanged so the selected model and provider
 determine which values they support.
@@ -50,8 +60,7 @@ verification are separate operations.
 Set `verificationMode: "static"` to review attack paths, bypasses, and legitimate
 behavior from source and diffs, without installing dependencies or executing
 builds, tests, reproducers, or the application. Select it for both `patch` and
-`verify` requests when both stages should be static. Omitted or `"standard"`
-retains the existing behavior.
+`verify` requests when both stages should be static. Use `"standard"` (the default) when runtime checks are appropriate.
 
 Static mode treats validation instructions as source-review questions. Missing
 runtime tooling alone is not a blocker; material proof gaps still produce
@@ -110,14 +119,12 @@ codex-security verify-fix --host
 
 Use `--host` alone with either command. The `run` request supplies all settings,
 and its `operation` must match the command: `patch` or `verify`, respectively.
-Neither command falls back to local inference. Ordinary patching and verification
-remain unchanged when `--host` is omitted.
+The host executes the model request for either command.
 
 The SDK also exports `runHostedRemediationProtocol` for in-process hosts.
 
-Use the existing newline-delimited host transport: send one `run` request whose
-`params` are the input above; respond to `execution.run` with the executor
-receipt. `execution.progress` notifications use `{ requestId, event }` and are
+Use one JSON object per line. Send one `run` request whose `params` are the
+input above. Respond to `execution.run` with the executor receipt. `execution.progress` notifications use `{ requestId, event }` and are
 forwarded as `remediation.progress` with `{ id: originalRunId, event }`. Send
 `cancel` with `{ id: originalRunId }` to receive `execution.cancel`; then return
 the final execution receipt so usage and session identity survive cancellation.

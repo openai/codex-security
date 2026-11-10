@@ -1,4 +1,8 @@
-"""Control the workbench clock while retaining its real commands and database writes."""
+"""Run a workbench command at TEST_WORKBENCH_NOW against its real database.
+
+The first argument selects the workbench script. When TEST_WORKBENCH_RECEIPT_IO_FAILURE
+is set, replacing an acceptance receipt raises ENOSPC so tests can observe recovery.
+"""
 
 import errno
 import os

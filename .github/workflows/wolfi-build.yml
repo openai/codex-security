@@ -63,6 +63,8 @@ jobs:
         with:
           node-version: "24.15.0"
           package-manager-cache: false
+      - name: Test Wolfi dependency inventories
+        run: python3 -m unittest discover -s docker/wolfi/tests
       - name: Exercise release staging on a known published scanner
         id: known
         shell: bash

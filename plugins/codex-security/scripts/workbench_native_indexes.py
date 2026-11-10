@@ -12,7 +12,12 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
-from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
+from workbench_constants import (
+    FINDING_SUMMARY_BYTES,
+    FINDING_TITLE_BYTES,
+    FINDINGS_PAGE_MAX,
+    PRIMARY_FINDING_LOCATION_SQL,
+)
 from workbench_validation import bounded_output_text, timestamp_key
 
 
@@ -20,6 +25,7 @@ def list_global_findings(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    """Return a page of indexed findings after applying the requested filters, with nextOffset for continuation."""
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     query = args.query.strip().casefold() if args.query else ""
     findings = (
@@ -107,7 +113,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
-        """
+        f"""
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
@@ -124,15 +130,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
             triage.updated_at AS decision_updated_at,
             occurrences.title,
             occurrences.summary,
-            (
-                SELECT locations.relative_path
-                FROM finding_locations AS locations
-                WHERE locations.occurrence_id = occurrences.id
-                ORDER BY
-                    CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
-                    locations.sort_order
-                LIMIT 1
-            ) AS location_path
+            (SELECT relative_path {PRIMARY_FINDING_LOCATION_SQL}) AS location_path
         FROM finding_occurrences AS occurrences
         JOIN scans ON scans.id = occurrences.scan_id
         JOIN security_targets AS targets ON targets.id = scans.target_id
@@ -203,6 +201,7 @@ def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
+    """Return tracked targets with scan summaries, finding counts, and current checkout availability."""
     by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(
         f"""
@@ -253,7 +252,7 @@ def list_repositories(
             )
         ]
         if args.limit is not None or args.offset:
-            limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+            limit = args.limit or FINDINGS_PAGE_MAX
             end = args.offset + limit
             pagination = {
                 "limit": limit,

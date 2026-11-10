@@ -1,0 +1,10 @@
+{
+  "name": "codex-security-sdk-mutation-tests",
+  "private": true,
+  "scripts": {
+    "test:sdk": "cd ../typescript && stryker run"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "10.1.1"
+  }
+}

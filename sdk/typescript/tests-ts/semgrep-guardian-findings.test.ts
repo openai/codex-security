@@ -1,6 +1,8 @@
 import { expect, mock, test } from "bun:test";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { collectSelectedSemgrepGuardianFindings } from "../src/semgrep-guardian-findings.js";
+import { stableId } from "../src/scanner-import.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
 import { collectSemgrepPlatformFindings } from "../src/semgrep-platform-collector.js";
 import { isolatedGitReportFixture } from "./external-findings-local-helpers.js";
@@ -35,7 +37,6 @@ const row = {
   filePath: "src/main.ts",
   line: 3,
 };
-const environment = { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" };
 const capture = {
   format: "semgrep-guardian-selection/v1",
   ...selection,
@@ -48,7 +49,6 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   }));
   const selected = await collectSelectedSemgrepGuardianFindings(selection, {
     callTool,
-    environment,
   });
   expect(callTool.mock.calls).toEqual([[selection.request]]);
   expect(selected).toEqual(capture);
@@ -78,7 +78,7 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   const web = await collectSemgrepPlatformFindings(
     { deployment, project, ref },
     {
-      environment: { ...environment, SEMGREP_APP_TOKEN: "synthetic" },
+      environment: { SEMGREP_APP_TOKEN: "synthetic" },
       fetch: async (url) =>
         Response.json(
           url.pathname.endsWith("/findings")
@@ -158,27 +158,46 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
     },
   };
   const normalized = normalizeSemgrepFindings(sca, {}, "local");
-  expect(() => normalizeSemgrepFindings(sca)).toThrow(/local workbench/);
-  await expect(
-    prepareNormalizedExternalPublication(
-      {
-        ...normalized,
-        report: {},
-        findings: [{ ...normalized.findings[0]!, source_finding_id: "custom" }],
-      },
-      { repository: project, provider: "semgrep", sourceKey: "example/topic" },
-      {
-        environment,
-        credentials: async () => {
-          throw new Error("Unexpected credential lookup");
-        },
-      },
-    ),
-  ).rejects.toThrow(/local import/);
+  expect(normalizeSemgrepFindings(sca).findings).toEqual(normalized.findings);
   expect(normalized.findings[0]!.evidence).toMatchObject({
     locations: [],
     source_data: { finding: sca.structuredContent.findings[0] },
   });
+  await using wrongProvider = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "wiz", sourceKey: "test" },
+    { remote: "https://github.com/other/service" },
+  );
+  for (const input of [normalized, { ...normalized, report: undefined }]) {
+    await expect(wrongProvider.prepareNormalized(input)).rejects.toThrow(
+      /semgrep provider/,
+    );
+  }
+  const original = normalized.findings[0]!;
+  await using source = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const otherUrl = "https://github.com/other/service";
+  source.git("remote", "add", "upstream", otherUrl);
+  await expect(
+    source.prepareNormalized({
+      ...normalized,
+      report: { ...normalized.report, repositoryUrl: otherUrl },
+    }),
+  ).rejects.toThrow(/recorded selection/);
+  await expect(
+    source.prepareNormalized({
+      ...normalized,
+      findings: [
+        {
+          ...original,
+          source_finding_id: "semgrep-guardian:" + "0".repeat(64),
+        },
+      ],
+    }),
+  ).rejects.toThrow(/original Guardian finding/);
   expect(normalized.findings[0]!.evidence.packages ?? []).toEqual([]);
   expect(normalized.findings[0]!.source_finding_id).not.toBe(
     normalizeSemgrepFindings(capture, {}, "local").findings[0]!
@@ -198,7 +217,109 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
   expect(await fixture.read()).toHaveLength(0);
 });
 
-test("SDK exports containing Guardian findings fail before Cloud credential lookup", async () => {
+test("normalized Guardian imports verify the original finding against the selected scope", async () => {
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const normalized = normalizeSemgrepFindings(capture, {}, "local");
+  const original = normalized.findings[0]!;
+  await expect(
+    fixture.prepareNormalized({
+      ...normalized,
+      findings: [{ ...original, source_finding_id: "another-source-id" }],
+    }),
+  ).rejects.toThrow(/original Guardian finding/);
+  for (const changed of [
+    { ...row, repository: { name: "other/service" } },
+    { ...row, ref: "refs/heads/other" },
+    { ...row, issueType: "ISSUE_TYPE_SCA" },
+  ]) {
+    await expect(
+      fixture.prepareNormalized({
+        ...normalized,
+        findings: [
+          {
+            ...original,
+            evidence: {
+              ...original.evidence,
+              source_data: {
+                ...original.evidence.source_data,
+                finding: changed,
+              },
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow(/does not match the selected/);
+  }
+});
+
+test("normalized Guardian rows require a real selection scope even with a matching hash", async () => {
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const normalized = normalizeSemgrepFindings(capture, {}, "local");
+  for (const [override, nativeId, error] of [
+    [{ tool: "list_findings" }, id, /Guardian SAST or Supply Chain/],
+    [{ deployment: null }, id, /Guardian deployment/],
+    [{ repository: "" }, id, /Guardian repository/],
+    [{ ref: "main" }, id, /fully qualified Semgrep ref/],
+    [{}, 12, /Guardian finding ID/],
+    [{}, "  ", /Guardian finding ID/],
+  ] as const) {
+    const input = structuredClone(normalized);
+    const finding = input.findings[0]!;
+    const data = finding.evidence.source_data!;
+    Object.assign(data, override);
+    // Each malformed row agrees with its stored scope and ID. A matching hash alone is insufficient.
+    data["finding"] = {
+      id: nativeId,
+      repository: { name: data["repository"] },
+      ref: data["ref"],
+    };
+    finding.evidence.branch = String(data["ref"]);
+    finding.source_finding_id = stableId("semgrep-guardian", [
+      data["deployment"],
+      data["repository"],
+      data["tool"],
+      data["ref"],
+      nativeId,
+    ]);
+    await expect(fixture.prepareNormalized(input)).rejects.toThrow(error);
+  }
+});
+
+test("normalized Guardian repository claims use the checkout's HTTP port identity", async () => {
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const normalized = normalizeSemgrepFindings(capture, {}, "local");
+  const withReportPort = (port: number) => ({
+    ...normalized,
+    report: {
+      ...normalized.report,
+      repositoryUrl: sourceRepositoryUrl.replace(
+        "github.com/",
+        `github.com:${port}/`,
+      ),
+    },
+  });
+  expect(
+    (await (await fixture.prepareNormalized(withReportPort(443))).import())
+      .counts.created,
+  ).toBe(1);
+  await expect(fixture.prepareNormalized(withReportPort(8443))).rejects.toThrow(
+    /recorded selection/,
+  );
+});
+
+test("SDK exports containing Guardian findings require their original provider", async () => {
   const guardian = normalizeSemgrepFindings(capture, {}, "local");
   const normalized = {
     read: 1,
@@ -227,17 +348,17 @@ test("SDK exports containing Guardian findings fail before Cloud credential look
         input,
         {
           repository: project,
-          provider: "semgrep",
+          provider: "wiz",
           sourceKey: "example/topic",
         },
-        { environment, credentials },
+        { credentials },
       ),
-    ).rejects.toThrow(/local import/);
+    ).rejects.toThrow(/semgrep provider/);
   }
   expect(credentials).not.toHaveBeenCalled();
 });
 
-test("empty selections and disabled imports do not call Guardian; tool errors retain their message", async () => {
+test("Guardian validates the selection before calling the tool and preserves tool errors", async () => {
   const callTool = mock(async () => ({
     isError: true,
     content: [{ type: "text", text: "Guardian login expired" }],
@@ -245,20 +366,89 @@ test("empty selections and disabled imports do not call Guardian; tool errors re
   await expect(
     collectSelectedSemgrepGuardianFindings(
       { ...selection, findingIds: [] },
-      { callTool, environment },
+      { callTool },
     ),
   ).rejects.toThrow(/at least one/);
-  await expect(
-    collectSelectedSemgrepGuardianFindings(selection, {
-      callTool,
-      environment: {},
-    }),
-  ).rejects.toThrow(/disabled/);
   expect(callTool).not.toHaveBeenCalled();
   await expect(
     collectSelectedSemgrepGuardianFindings(selection, {
       callTool,
-      environment,
     }),
   ).rejects.toThrow("Guardian login expired");
+});
+
+test("Guardian binds the collection, saved selection and normalized replay to the same custom Git repository", async () => {
+  const url = "https://git.example.test/example/service";
+  const collected = await collectSelectedSemgrepGuardianFindings(
+    { ...selection, sourceRepositoryUrl: url },
+    {
+      callTool: async () => ({ structuredContent: { findings: [row] } }),
+    },
+  );
+  const other = url + ".git";
+  for (const options of [
+    { sourceRepositoryUrl: other },
+    { sourceRepositories: [{ url: other }] },
+  ]) {
+    expect(() => normalizeSemgrepFindings(collected, options, "local")).toThrow(
+      /does not match/,
+    );
+  }
+  const normalized = normalizeSemgrepFindings(collected, {}, "local");
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "example/topic" },
+    { remote: other },
+  );
+  await fixture.writeJson(collected);
+  await expect(fixture.prepare()).rejects.toThrow(/configured remote/);
+  await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
+    /configured remote/,
+  );
+  expect(await fixture.read()).toEqual([]);
+  fixture.git("remote", "set-url", "origin", url);
+  expect((await (await fixture.prepare()).import()).counts.created).toBe(1);
+  expect(
+    (await (await fixture.prepareNormalized(normalized)).import()).counts
+      .unchanged,
+  ).toBe(1);
+
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized,
+      {
+        repository: fixture.repository,
+        sourceKey: fixture.sourceKey,
+        provider: "github",
+      },
+      { environment: fixture.environment },
+    ),
+  ).rejects.toThrow(/semgrep provider/);
+
+  // Multiple configured remotes cannot justify substituting a different retained mapping.
+  fixture.git("remote", "add", "second", other);
+  const changed = structuredClone(normalized);
+  changed.findings[0]!.evidence.source_data!["sourceRepositoryUrl"] = other;
+  await expect(fixture.prepareNormalized(changed)).rejects.toThrow(
+    /recorded selection/,
+  );
+  const wrongProjection = structuredClone(normalized);
+  wrongProjection.findings[0]!.evidence.details!.repository!.url = other;
+  await expect(fixture.prepareNormalized(wrongProjection)).rejects.toThrow(
+    /recorded selection/,
+  );
+});
+
+test("Guardian accepts the clone URL of an independently identified self-managed GitLab project", () => {
+  const url = "https://git.example.test/example/service";
+  const result = normalizeSemgrepFindings(
+    { ...capture, sourceRepositoryUrl: url },
+    {
+      sourceRepositoryUrl: url + ".git",
+      sourceRepositories: [{ url, platform: "gitlab" }],
+    },
+    "local",
+  );
+  expect(result.excluded).toEqual([]);
+  expect(result.findings[0]!.evidence.details?.repository?.url).toBe(url);
 });

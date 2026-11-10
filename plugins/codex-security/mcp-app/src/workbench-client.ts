@@ -10,7 +10,13 @@ import {
 import { WORKBENCH_PYTHON } from "./server/workbench-process.js";
 
 const execFileAsync = promisify(execFile);
-const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
+const configuredScanRoot = process.env.CODEX_SECURITY_SCAN_ROOT;
+// A padded absolute or home-relative override must keep its original base.
+const CONFIGURED_SCAN_ROOT =
+  process.platform !== "win32" &&
+  configuredScanRoot?.trimStart() === configuredScanRoot
+    ? configuredScanRoot
+    : configuredScanRoot?.trim();
 export const PLUGIN_ROOT =
   process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
 
@@ -35,7 +41,9 @@ export async function runWorkbench(
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
-    pythonCommand = await resolvePythonCommand();
+    pythonCommand = await resolvePythonCommand({
+      workingDirectory: PLUGIN_ROOT,
+    });
     return await executeWorkbench(pythonCommand, args, input, options);
   } catch (error) {
     const launchError = pythonCommand
@@ -107,7 +115,11 @@ async function executeWorkbench(
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,
-      env: process.env,
+      env: {
+        ...process.env,
+        CODEX_MCP_NODE_PATH:
+          process.env.CODEX_MCP_NODE_PATH || process.execPath,
+      },
       encoding: "utf8" as const,
       maxBuffer: Infinity,
       timeout,

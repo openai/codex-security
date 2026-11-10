@@ -54,6 +54,8 @@ const repositoryEnvironment = [
   "GIT_COMMON_DIR",
   "GIT_DIR",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_GLOB_PATHSPECS",
+  "GIT_ICASE_PATHSPECS",
   "GIT_INDEX_FILE",
   "GIT_LITERAL_PATHSPECS",
   "GIT_NAMESPACE",
@@ -427,6 +429,13 @@ async function collect({
   };
 }
 
+const unavailableGit: ToolResult = {
+  status: 127,
+  signal: null,
+  stdout: Buffer.alloc(0),
+  stderr: "",
+};
+
 export async function git(repo: string, args: string[]) {
   try {
     const execution = gitProcess(repo, args);
@@ -437,7 +446,7 @@ export async function git(repo: string, args: string[]) {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  return { status: 127, signal: null, stdout: Buffer.alloc(0), stderr: "" };
+  return unavailableGit;
 }
 
 export function decodeGitPath(data: Buffer): string {
@@ -489,6 +498,26 @@ function requireSuccess(result: ToolResult): Buffer {
           : `Git exited with status ${result.status}`),
     );
   return result.stdout;
+}
+
+export async function ignoredTrackedPaths(repo: string, scope: string) {
+  try {
+    const result = await git(repo, [
+      "ls-files",
+      "--cached",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+      "--",
+      scope,
+    ]);
+    return result === unavailableGit ? [] : paths(requireSuccess(result));
+  } catch (error) {
+    throw new Error(
+      `git ls-files: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 export async function directoryPaths(
@@ -568,31 +597,42 @@ export async function directoryPaths(
 export interface Change {
   path: string;
   status: string;
+  renameSource?: string;
 }
 async function changed(repo: string, args: string[]): Promise<Change[]> {
-  const fields = paths(
-    requireSuccess(
-      await git(repo, [
-        "diff",
-        "--ignore-submodules=all",
-        "--raw",
-        "-z",
-        "--diff-filter=ACMRDT",
-        ...args,
-        "--",
-      ]),
-    ),
-  );
+  const result = await git(repo, [
+    "diff",
+    "--ignore-submodules=all",
+    "--raw",
+    "-z",
+    "--diff-filter=ACMRDT",
+    ...args,
+    "--",
+  ]);
+  if (result.status !== 0 && result.stderr.trim()) {
+    const detail = result.stderr
+      .trim()
+      .replace(
+        /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu,
+        (control) =>
+          `\\u${control.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      );
+    throw new Error(
+      `Git diff failed with ${result.signal ?? `exit code ${result.status}`}: ${detail}`,
+    );
+  }
+  const fields = paths(requireSuccess(result));
   const changes: Change[] = [];
   for (let index = 0; index < fields.length;) {
     const metadata = fields[index++]!.split(" "),
       status = metadata.at(-1)![0]!;
+    const renameSource = status === "R" ? fields[index] : undefined;
     if (status === "C" || status === "R") index++;
     const path = fields[index++]!;
     if (
       (status === "D" ? metadata[0]!.slice(1) : metadata[1]!).startsWith("100")
     )
-      changes.push({ path, status });
+      changes.push({ path, status, renameSource });
   }
   return changes;
 }
@@ -607,26 +647,37 @@ export async function changedPaths(
     staged = await changed(repo, ["--cached", base]);
   const result = new Map(staged.map((change) => [change.path, change]));
   for (const change of unstaged) result.set(change.path, change);
+  function localStatus(path: string, status: string): string | undefined {
+    if (path.split("/").some((part) => sourceMetadata.has(part))) return;
+    if (status === "D") return status;
+    const absolute = append(repo, path);
+    try {
+      if ((status === "M" || status === "R") && linkedParent(repo, absolute))
+        return status === "M" ? "D" : undefined;
+      return regular(absolute) ? status : undefined;
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+
+  const selected = new Map<string, string>();
+  for (const { path, status, renameSource } of result.values()) {
+    const chosen = localStatus(path, status);
+    if (chosen) selected.set(path, chosen);
+    else if (
+      renameSource !== undefined &&
+      !selected.has(renameSource) &&
+      localStatus(renameSource, "D")
+    )
+      selected.set(renameSource, "D");
+  }
   for (const path of paths(
     requireSuccess(
       await git(repo, ["ls-files", "--others", "--exclude-standard", "-z"]),
     ),
   ))
-    if (!path.endsWith("/")) result.set(path, { path, status: "A" });
-  const selected: Change[] = [];
-  for (const change of result.values()) {
-    const { path, status } = change;
-    if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
-    const absolute = append(repo, path);
-    try {
-      if (status === "M" && linkedParent(repo, absolute))
-        selected.push({ path, status: "D" });
-      else if (status === "D" || regular(absolute)) selected.push(change);
-    } catch (error) {
-      if (!isMissingPathError(error)) throw error;
-    }
-  }
-  return selected;
+    if (!path.endsWith("/") && localStatus(path, "A")) selected.set(path, "A");
+  return [...selected].map(([path, status]) => ({ path, status }));
 }
 
 /** Consume each complete blob while retaining at most the preview prefix. */

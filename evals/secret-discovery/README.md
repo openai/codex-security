@@ -38,22 +38,29 @@ Credential values remain part of the source evidence.
 
 ## Run
 
-Install dependencies and build the TypeScript SDK using the repository's normal
-setup, including the MCP app dependencies. `build:evals` type-checks the eval
-sources; Node runs them directly with `--experimental-strip-types`. The eval
-reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
-creating private homes. It bundles the MCP app's permission-profile preflight
-locally with esbuild and adds no dependencies.
+[Build the evaluation tools](../README.md#build-the-evaluation-tools), then run the commands below from the repository root.
+
+## Deterministic checks
+
+To exercise the harness without a model, run:
 
 ```sh
-pnpm --dir sdk/typescript run build:evals
+node --experimental-strip-types --test evals/secret-discovery/test_*.mts
+```
+
+CI uses these tests for fixture staging, production-prompt loading, grading, source-evidence preservation, and SDK isolation.
+
+## Run a model evaluation
+
+The next command uses your file-based Codex login or authentication environment and consumes model usage. An optional positional argument selects a model. If you omit it, Codex chooses its default and the SDK turn result does not identify the resolved model.
+
+```sh
 node --experimental-strip-types evals/secret-discovery/run.mts
 ```
 
-An optional positional argument selects a model. When omitted, Codex selects
-its default. The report cannot name that model because the SDK's turn result
-does not expose it. Runs consume model usage and use the caller's existing
-file-based Codex login or authentication environment.
+Read the grading results and token usage in the terminal, or open `report.json` and `result.json` in the run directory under `evals/secret-discovery/reports/`. A failing grade produces a nonzero exit status. Reports can contain synthetic fixture values.
+
+### Runtime and isolation
 
 The eval creates a temporary private Codex home without importing the caller's
 configuration. For a saved file login, it creates the home beside the canonical
@@ -93,21 +100,3 @@ audit reference, including the baseline and validation instructions. The eval us
 exercise the core workflow's sequential fallback. It does not test SDK artifact
 publication or Deep Scan scheduling, inspect Git history, or check whether
 credentials work against a service.
-
-The script prints grading results and token usage, saves `report.json` and
-`result.json` beneath ignored `reports/`, and exits nonzero when grading fails.
-The source fixture and temporary model state are removed on exit. Reports may
-contain generated fixture values; no real service credentials are supplied to
-the model.
-
-## Deterministic checks
-
-```sh
-pnpm --dir sdk/typescript run build:evals
-node --experimental-strip-types --test evals/secret-discovery/test_*.mts
-```
-
-CI runs these Node-only checks for fixture staging, production-prompt loading,
-final-response grading, missed findings, false positives, paths, lines, CWEs,
-source-evidence preservation, and SDK isolation. The optional model run is not
-part of CI.

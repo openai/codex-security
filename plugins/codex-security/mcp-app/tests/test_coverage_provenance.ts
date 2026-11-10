@@ -10,27 +10,25 @@ import {
 } from "./deep_scan_coverage_fixture.ts";
 
 for (const resume of [false, true]) {
-  for (const outcome of ["recovery", "no parent"]) {
+  for (const outcome of ["recovery", "no parent"] as const) {
     test(`worker-local same-attempt closeout survives ${resume ? "resumed" : "live"} ${outcome}`, () =>
       publishReceiptFixture({
         resume,
         firstCheckpointReceipt: "worker",
         sameAttemptCloseout: true,
-        stopAfterDraft: outcome === "recovery",
-        stopBeforeDraft: outcome === "no parent",
+        outcome,
       }));
   }
 }
 
 for (const resume of [false, true]) {
-  for (const outcome of ["completion", "recovery", "no parent"]) {
+  for (const outcome of ["completion", "recovery", "no parent"] as const) {
     test(`coverage provenance survives ${resume ? "reconstructed" : "live"} reduction and ${outcome}`, async () => {
       const root = await mkdtemp(path.join(tmpdir(), "coverage-provenance-"));
       try {
         const { scanDir } = await publishCoverageFixture(root, "partial", {
           resume,
-          stopAfterDraft: outcome === "recovery",
-          stopBeforeDraft: outcome === "no parent",
+          outcome,
         });
         const coverage = await readFixtureCoverage(scanDir);
         assert.equal("completeness" in coverage, false);
@@ -119,13 +117,12 @@ for (const resume of [false, true]) {
   });
 }
 
-for (const outcome of ["completion", "recovery", "frozen recovery"]) {
+for (const outcome of ["completion", "recovery", "frozen recovery"] as const) {
   test(`open questions are retained once through ${outcome}`, async () => {
     const root = await mkdtemp(path.join(tmpdir(), "question-coverage-"));
     try {
       const { scanDir } = await publishCoverageFixture(root, "complete", {
-        stopAfterDraft: outcome !== "completion",
-        interruptPublication: outcome === "frozen recovery",
+        outcome,
         questionRows: [
           "  Which deployment controls apply?  ",
           {

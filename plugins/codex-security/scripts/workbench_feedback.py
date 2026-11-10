@@ -15,13 +15,19 @@ from workbench_constants import (
     FINDING_LOCATION_PATH_BYTES,
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
+    PRIMARY_FINDING_LOCATION_SQL,
 )
 from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
+    """Return reviewed false-positive decisions from other completed scans of the same target.
+
+    For each finding, include the latest decision only if it closes the finding as a
+    false positive with a nonblank reason. Prefer the root-control location in its preview.
+    """
     rows = connection.execute(
-        """
+        f"""
         WITH ranked_decisions AS (
             SELECT findings.id AS finding_id, findings.fingerprint, findings.rule_id,
                 findings.identity_anchor, findings.identity_instance, occurrences.title,
@@ -43,12 +49,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             JOIN scans AS source_scans ON source_scans.id = occurrences.scan_id
             LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
             JOIN finding_locations AS locations ON locations.id = (
-                SELECT candidate.id
-                FROM finding_locations AS candidate
-                WHERE candidate.occurrence_id = occurrences.id
-                ORDER BY CASE WHEN candidate.role = 'root_control' THEN 0 ELSE 1 END,
-                    candidate.sort_order
-                LIMIT 1
+                SELECT id {PRIMARY_FINDING_LOCATION_SQL}
             )
             WHERE source_scans.target_id = ?
                 AND source_scans.id != ?

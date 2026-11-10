@@ -4,13 +4,12 @@ import { basename, dirname, join } from "node:path";
 import { resolveConfigPath } from "./config-path.js";
 import { collectSonarIssues } from "./sonar-collector.js";
 import { normalizeSonarFindings, parseSonarCapture } from "./sonar-findings.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 import {
   configuredFetchRemotes,
   type ConfiguredFetchRemote,
   prepareLocalImport,
 } from "./external-findings-local.js";
-import { importGitProtectionRoots } from "./local-git-metadata.js";
+import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import {
   ExternalPublicationError,
   externalPublicationStateDirectory,
@@ -137,7 +136,6 @@ export async function prepareSonarImport(
   },
 ) {
   const { signal, environment = process.env } = dependencies;
-  requireExternalImports(environment);
   signal?.throwIfAborted();
   if (
     options.capture &&
@@ -177,7 +175,7 @@ export async function prepareSonarImport(
   const configuredState = codexSecurityStateDirectory(environment);
   const protectedRoots = [
     repository,
-    ...(await importGitProtectionRoots(options.cwd, environment, signal)),
+    ...(await commandGitProtectionRoots(options.cwd, environment, signal)),
   ];
   requireOutputOutsideRepositories(protectedRoots, configuredState, "runtime");
   const state = await canonicalConfigPath(configuredState);

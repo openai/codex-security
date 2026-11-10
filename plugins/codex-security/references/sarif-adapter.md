@@ -1,6 +1,6 @@
 # SARIF Adapter
 
-SARIF is a deterministic export, not the Codex Security source of truth.
+Use SARIF to send saved findings to a code scanning tool. Keep the [sealed scan bundle](scan-contract.md#canonical-documents) for complete finding records.
 
 The adapter:
 
@@ -23,7 +23,13 @@ Lifecycle, rich validation evidence, attack-path context, and coverage are lossy
 
 SARIF `executionSuccessful` reflects whether the scan reached a successful terminal status. Stopped scans retain findings and include their concrete limitations as warnings. Coverage describes scope and follow-up work; neither successful execution nor an empty finding set certifies exhaustive review.
 
-Automatic SARIF export during finalization is best-effort so projection errors cannot invalidate a canonical seal. Use the strict adapter entry point when a consumer requires SARIF and should surface export errors.
+When your pipeline requires SARIF, export it explicitly and check the exit status. The command writes the file on success and exits with code `2` on an export error. The scan remains available if automatic SARIF generation failed during finalization.
+
+```bash
+codex-security export /path/to/scan-results --export-format sarif --output results.sarif
+```
+
+See [Export findings](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#export-findings) for the scan selector and source-root options.
 
 References:
 

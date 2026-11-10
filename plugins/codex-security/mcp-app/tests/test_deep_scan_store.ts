@@ -3,7 +3,7 @@ import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { availableParallelism, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importSource } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
@@ -55,6 +55,7 @@ async function testBeginProtocolAndParsing() {
     scanRoot: "/fixture/scans",
   });
   assert.equal(result.scanId, scanId);
+  assert.equal(result.discoveryStarted, false);
   assert.equal(result.serviceTier, "default");
   assert.deepEqual(result.config, {
     workers: 6,
@@ -79,10 +80,7 @@ async function testBeginProtocolAndParsing() {
   assert.equal(calls[0].args.includes("--user-context-stdin"), true);
   assert.equal(calls[0].input, "focus on archive parsing");
   assert.equal(flagValue(calls[0].args, "--scan-root"), "/fixture/scans");
-  assert.equal(
-    flagValue(calls[0].args, "--available-parallelism"),
-    String(availableParallelism()),
-  );
+  assert.equal(calls[0].args.includes("--available-parallelism"), false);
   assert.equal(
     flagValue(calls[0].args, "--workflow-version"),
     "deep-scan-mcp/v1",
@@ -343,10 +341,7 @@ async function testOwnershipReadClearsStaleLease() {
       owned.updateProgress({ scanId, phase: "discovery" }),
       (error: unknown) => error === original,
     );
-    assert.deepEqual(owned.coordinatorLeaseArgs(scanId), [
-      "--coordinator-generation",
-      "2",
-    ]);
+    assert.equal(owned.coordinatorGeneration(scanId), 2);
   }
 }
 
@@ -1061,6 +1056,7 @@ function stateResult(
     deepScan: {
       scanId,
       status: "running",
+      discoveryStarted: false,
       targetPath: "/fixture/repository",
       scope: ".",
       userContext: null,

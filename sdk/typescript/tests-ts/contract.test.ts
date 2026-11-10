@@ -24,10 +24,13 @@ import {
 } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { useTestPython } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
 import { createContractTestFixtures } from "./support/contract-fixture.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+
+const pythonExecutable = useTestPython();
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { temporaryDirectory, cleanup, copyExample } =
@@ -50,7 +53,7 @@ async function reseal(scanDir: string): Promise<void> {
 }
 
 function pythonExport(scanDir: string) {
-  return runPython(process.env["PYTHON"] ?? Bun.which("python3") ?? "python", [
+  return runPython(pythonExecutable() ?? "python", [
     join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
     "--scan-dir",
     scanDir,
@@ -89,14 +92,11 @@ describe("canonical scan contract", () => {
     }
     await writeJson(manifestPath, manifest);
     await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-    const result = runPython(
-      process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
-      [
-        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-        "--scan-dir",
-        scanDir,
-      ],
-    );
+    const result = runPython(pythonExecutable() ?? "python", [
+      join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+      "--scan-dir",
+      scanDir,
+    ]);
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     for (const path of projections)
       expect(await readFile(join(scanDir, path), "utf8")).toBe(path);
@@ -127,15 +127,12 @@ describe("canonical scan contract", () => {
     await writeJson(findingsPath, findings);
     await writeJson(manifestPath, manifest);
     await reseal(scanDir);
-    const result = runPython(
-      process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
-      [
-        "-c",
-        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import _prepare_scan_finalization; _prepare_scan_finalization(Path(sys.argv[2]))",
-        join(PLUGIN_ROOT, "scripts"),
-        scanDir,
-      ],
-    );
+    const result = runPython(pythonExecutable() ?? "python", [
+      "-c",
+      "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import _prepare_scan_finalization; _prepare_scan_finalization(Path(sys.argv[2]))",
+      join(PLUGIN_ROOT, "scripts"),
+      scanDir,
+    ]);
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).not.toBe(
       0,
     );
@@ -279,7 +276,9 @@ describe("canonical scan contract", () => {
       const reading = readScanFile(scanDir, "report.md", "scan report");
       await expect(reading).rejects.toBeInstanceOf(ContractValidationError);
       await expect(reading).rejects.toMatchObject({
-        message: "scan report: unable to open the checked regular file.",
+        message: expect.stringContaining(
+          "scan report: unable to open the checked regular file.",
+        ),
         cause: expect.objectContaining({ code: "EACCES", path }),
       });
     },
@@ -510,14 +509,11 @@ describe("canonical scan contract", () => {
       manifest["scan"]["target"]["kind"] = kind;
       manifest["scan"]["target"]["revision"] = "";
       await writeJson(manifestPath, manifest);
-      const result = runPython(
-        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
-        [
-          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-          "--scan-dir",
-          scanDir,
-        ],
-      );
+      const result = runPython(pythonExecutable() ?? "python", [
+        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+        "--scan-dir",
+        scanDir,
+      ]);
       expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
       await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
     },
@@ -893,8 +889,7 @@ describe("canonical scan contract", () => {
   });
 
   test("keeps bundled finalizer paths portable to Windows", () => {
-    const python =
-      process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+    const python = pythonExecutable();
     expect(python).not.toBeNull();
     const program = [
       "import json, sys",
@@ -1107,8 +1102,7 @@ describe("canonical scan contract", () => {
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).rejects.toThrow("duplicate artifact path");
 
-    const python =
-      process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+    const python = pythonExecutable();
     expect(python).not.toBeNull();
     const result = runPython(python!, [
       join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),

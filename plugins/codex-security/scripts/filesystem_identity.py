@@ -19,6 +19,7 @@ def serialize_filesystem_identity(value: int) -> int | str:
 
 
 def stored_filesystem_identity_matches(stored: object, current: int) -> bool:
+    """Compare a stored SQLite value with the platform file ID in its database representation."""
     return stored == serialize_filesystem_identity(current)
 
 

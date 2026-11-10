@@ -97,8 +97,16 @@ try {
       JSON.stringify({
         threadId,
         resumed: workerArgs.includes("resume"),
+        ...(request.kind === "compare" && {
+          tools: requests.at(-1)?.tools ?? [],
+        }),
         program: requests.at(-1)?.access_programs?.cyber,
         daybreak: config.daybreak ?? null,
+        telemetry: {
+          analyticsEnabled: config.analytics?.enabled ?? null,
+          environment: config.otel?.environment ?? null,
+          metadataTag: config.responses_api_metadata?.["synthetic.tag"] ?? null,
+        },
         daybreakFeatures: Object.fromEntries(
           [
             "cli_daybreak",

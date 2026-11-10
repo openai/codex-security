@@ -7,13 +7,14 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -30,8 +31,10 @@ import {
   gitMarkerRoot,
   isGitMetadataDirectory,
   gitProtectionRoots,
+  validateCommittedDiffCheckout,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runCommand } from "./support/shell.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -159,7 +162,10 @@ function git(repo: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 }
 
-function validateCommittedDiffWithCredentialConfig(repo: string) {
+function validateCommittedDiffWithCredentialConfig(
+  repo: string,
+  environment: NodeJS.ProcessEnv = {},
+) {
   return spawnSync(
     process.execPath,
     [
@@ -172,6 +178,7 @@ function validateCommittedDiffWithCredentialConfig(repo: string) {
       encoding: "utf8",
       env: {
         ...process.env,
+        ...environment,
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.extraHeader",
         GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
@@ -308,6 +315,58 @@ describe("scan target normalization", () => {
     },
   );
 
+  test("keeps repository and target paths distinct from their UTF-8 replacements", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repo-\uFFFD");
+    const file = "sibling-\uFFFD.ts";
+    await mkdir(repository);
+    await writeFile(join(repository, file), "");
+    await expect(
+      normalizeTarget(join(root, "repo-") + "\uD800", [file]),
+    ).rejects.toThrow("Repository path cannot be represented as UTF-8");
+    await expect(
+      normalizeTarget(repository, ["sibling-\uDC00.ts"]),
+    ).rejects.toThrow("Path target cannot be represented as UTF-8");
+    expect((await normalizeTarget(repository, [file])).paths).toEqual([file]);
+    if (process.platform === "linux") {
+      const raw = Buffer.concat([
+        Buffer.from(join(root, "repo-")),
+        Buffer.from([0xff]),
+      ]);
+      const alias = join(root, "selected");
+      await mkdir(raw);
+      try {
+        await symlink(raw, alias);
+        await expect(normalizeTarget(alias, [file])).rejects.toThrow(
+          "Repository path cannot be represented as UTF-8",
+        );
+      } finally {
+        await rm(raw, { recursive: true });
+      }
+    }
+  });
+
+  test.skipIf(process.platform === "win32").each(["node", "bun"])(
+    "identifies special file targets and their links in %s",
+    async (runtime) => {
+      const root = await temporaryDirectory("cs-target-");
+      const build = await Bun.build({
+        entrypoints: [
+          fileURLToPath(
+            new URL("./fixtures/socket-target.ts", import.meta.url),
+          ),
+        ],
+        outdir: root,
+        naming: "socket-target.mjs",
+        target: "node",
+      });
+      const result = await runCommand(runtime, [build.outputs[0]!.path, root], {
+        cwd: root,
+      });
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+    },
+  );
+
   test.skipIf(process.platform !== "win32")(
     "rejects NTFS alternate streams before runtime initialization",
     async () => {
@@ -335,19 +394,44 @@ describe("scan target normalization", () => {
     },
   );
 
-  test("reports a path that disappears during normalization as invalid", async () => {
+  test.each(
+    process.platform === "win32"
+      ? ["removed"]
+      : ["removed", "retargeted", "replaced after resolution"],
+  )("rejects a path %s during canonical resolution", async (change) => {
     const repo = await repository();
+    const target = join(repo, "src", "app.ts");
+    if (change === "retargeted") {
+      const pending = join(repo, "pending");
+      execFileSync("mkfifo", [pending]);
+      if (process.platform === "linux") {
+        const raw = Buffer.concat([Buffer.from(pending), Buffer.from([0xff])]);
+        await rename(pending, raw);
+        await symlink(raw, pending);
+        await writeFile(raw.toString(), "regular sibling");
+      }
+    }
+    if (change === "replaced after resolution")
+      await writeFile(join(repo, "..", "outside-file"), "outside");
     const script = `
       import { mockFs } from ${JSON.stringify(fileURLToPath(new URL("./support/module-mocks.ts", import.meta.url)))};
-      import { rmSync } from "node:fs";
+      import { rmSync, symlinkSync } from "node:fs";
       import * as original from "node:fs/promises";
       import { join } from "node:path";
-      const [repo, targets] = process.argv.slice(1);
-      const target = join(repo, "src", "app.ts");
+      const [repo, targets, target, change] = process.argv.slice(1);
       const actualRealpath = original.realpath;
       mockFs(() => ({
         realpath: async (path, ...args) => {
-          if (path === target) rmSync(target);
+          if (path === target && change === "replaced after resolution") {
+            const canonical = await actualRealpath(path, ...args);
+            rmSync(target);
+            symlinkSync(join(repo, "..", "outside-file"), target);
+            return canonical;
+          }
+          if (path === target) {
+            rmSync(target);
+            if (change === "retargeted") symlinkSync(join(repo, "pending"), target);
+          }
           return await actualRealpath(path, ...args);
         },
       }));
@@ -371,11 +455,17 @@ describe("scan target normalization", () => {
         script,
         repo,
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        target,
+        change,
       ],
       { encoding: "utf8" },
     );
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("REJECTED true Path target does not exist");
+    expect(result.stdout).toContain(
+      change === "removed"
+        ? "REJECTED true Path target does not exist"
+        : "REJECTED true Path target is not a regular file or directory",
+    );
   });
 
   test("binds ref and working-tree targets to commit IDs", async () => {
@@ -482,6 +572,42 @@ describe("scan target normalization", () => {
     for (const name of Object.keys(repositoryOverrides)) {
       expect(events.some(({ param }) => param === name)).toBe(false);
     }
+  });
+
+  test("checks assumed-unchanged files against a committed diff without changing index flags", async () => {
+    const repo = await repository();
+    const name = "src/app.ts";
+    const file = join(repo, name);
+    const original = await readFile(file);
+    const target = await normalizeTarget(
+      repo,
+      DiffTarget.refs({ base: "HEAD" }),
+    );
+    git(repo, "update-index", "--assume-unchanged", "--", name);
+    const hook = join(repo, ".git", "hooks", "post-index-change");
+    await writeFile(
+      hook,
+      '#!/bin/sh\nif test -n "$GIT_INDEX_FILE"; then echo ran >.git/refresh-hook-ran; fi\n',
+      { mode: 0o755 },
+    );
+    await validateCommittedDiffCheckout(repo, target);
+
+    await writeFile(file, "export const changed = true;\n");
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    await expect(validateCommittedDiffCheckout(repo, target)).rejects.toThrow(
+      "clean repository checkout",
+    );
+    if (process.platform !== "win32") {
+      const child = validateCommittedDiffWithCredentialConfig(repo, {
+        TMPDIR: relative(process.cwd(), join(repo, "..")),
+      });
+      expect(child.status).toBe(1);
+      expect(child.stderr).toContain("clean repository checkout");
+    }
+    expect(git(repo, "ls-files", "-v", "--", name)).toBe(`h ${name}`);
+    await writeFile(file, original);
+    await validateCommittedDiffCheckout(repo, target);
+    expect(existsSync(join(repo, ".git", "refresh-hook-ran"))).toBe(false);
   });
 
   test("does not expose Git configuration to repository fsmonitor hooks", async () => {
@@ -789,14 +915,19 @@ describe("scan target normalization", () => {
     );
   });
 
-  test("keeps repeated home separators anchored under the home directory", async () => {
+  test("resolves home-relative scan paths using native separators", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-home-"));
     temporaryDirectories.track(root);
-    const project = join(await realpath(root), "project");
-    await mkdir(project);
+    const home = await realpath(root);
+    const names = ["project"];
+    if (process.platform !== "win32") names.push("\\project");
+    for (const name of names) await mkdir(join(home, name));
+    const inputs = names.flatMap((name) =>
+      ["~/", "~//", "~///"].map((prefix) => prefix + name),
+    );
     const script = `
       const { normalizeRepository } = await import(process.argv[1]);
-      for (const value of ["~/project", "~//project", "~///project"]) {
+      for (const value of process.argv.slice(2)) {
         console.log(await normalizeRepository(value));
       }
     `;
@@ -806,6 +937,7 @@ describe("scan target normalization", () => {
         "-e",
         script,
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        ...inputs,
       ],
       {
         encoding: "utf8",
@@ -813,12 +945,9 @@ describe("scan target normalization", () => {
       },
     );
     expect(result.status).toBe(0);
-    const canonicalProject = await realpath(project);
-    expect(result.stdout.trim().split(/\r?\n/)).toEqual([
-      canonicalProject,
-      canonicalProject,
-      canonicalProject,
-    ]);
+    expect(result.stdout.trim().split(/\r?\n/)).toEqual(
+      inputs.map((value) => join(home, value.slice(2))),
+    );
   });
 });
 

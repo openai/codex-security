@@ -1,6 +1,5 @@
 import { workbenchArgs } from "../workbench-arguments.js";
 import { readDeepScanProjectConfig } from "./project-config.js";
-import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
@@ -138,11 +137,13 @@ export class WorkbenchDeepScanStore {
     reasoningEffort?: string;
     serviceTier?: string;
     threadId: string;
+    modelThreadId?: string;
     scanRoot: string;
   }): Promise<DeepScanRunState> {
     const userContext = input.userContext;
     const args = {
       threadId: input.threadId,
+      modelThreadId: input.modelThreadId,
       scanId: input.scanId || undefined,
       targetPath: input.targetPath || undefined,
       projectConfigPath: input.projectConfigPath,
@@ -153,7 +154,6 @@ export class WorkbenchDeepScanStore {
       reasoningEffort: input.reasoningEffort || undefined,
       serviceTier: input.serviceTier,
       scanRoot: input.scanRoot,
-      availableParallelism: availableParallelism(),
       workflowVersion: WORKFLOW_VERSION,
     };
     let result = await this.enqueueWrite(
@@ -290,6 +290,7 @@ export class WorkbenchDeepScanStore {
         sdkThreadId: update.threadId || undefined,
       }),
       ...(update.error ? [`--error-message=${update.error}`] : []),
+      ...(update.terminalFailure ? ["--terminal-failure"] : []),
       ...(update.replaceableFailureKind
         ? ["--replaceable-failure-kind", update.replaceableFailureKind]
         : []),
@@ -404,7 +405,7 @@ export class WorkbenchDeepScanStore {
     );
   }
 
-  private coordinatorGeneration(scanId: string): number | undefined {
+  coordinatorGeneration(scanId: string): number | undefined {
     return this.coordinatorLeases.get(scanId)?.run.coordinatorGeneration;
   }
 
@@ -417,13 +418,6 @@ export class WorkbenchDeepScanStore {
    * other workbench processes. Reads remain concurrent and observe a committed
    * state before or after each mutation.
    */
-  coordinatorLeaseArgs(scanId: string): string[] {
-    const generation = this.coordinatorGeneration(scanId);
-    return generation === undefined
-      ? []
-      : ["--coordinator-generation", String(generation)];
-  }
-
   private enqueueWrite(args: string[], input?: string): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {

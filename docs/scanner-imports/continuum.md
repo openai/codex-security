@@ -1,70 +1,111 @@
 # Import AWS Continuum code findings
 
-Import a saved JSON response from AWS Continuum for Code Vulnerabilities.
-Use a detailed finding for investigation or a list of summaries for an
-overview of one repository.
+Use `GetCodeFinding` JSON to import selected findings with their locations
+and mitigation. When AWS has run validation, the export also includes the
+validation result. Use `ListCodeFindings` JSON for summaries from an
+environment dedicated to one repository.
 
-## Export findings for one repository
+## Quick start
 
-Use an AWS CLI with the `continuum` commands, signed in to the account and
-Region where the environment lives. Set `ENVIRONMENT_ID` to that environment.
-Check its code sources against the repository you intend to import into. For
-an S3 source, verify which repository supplied the scanned archive.
-[AWS Continuum code sources](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html)
+Open the matching checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which
+repository supplied the scanned code, including the archive for an S3 source.
+For a finding from another scanner, you can also check its repository in that
+scanner. [AWS Continuum code sources](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html)
 
-**One finding.** Check the finding against its scanned code source, then set
-`FINDING_ID` to its Continuum finding ID. For a finding from another scanner,
-you can also verify the repository in the originating scanner. The detail
-response can include code locations, descriptions, mitigation and AWS
-validation evidence.
-[AWS CLI get-code-finding](https://docs.aws.amazon.com/cli/latest/reference/continuum/get-code-finding.html)
+**Saved report.** Set `report` to a native detail response, an array of detail responses, or a complete list response with its `items` array. Then [preview the report](#preview-and-import).
 
 ```sh
-out=$(mktemp -d) &&
+report=/private/path/continuum.json
+```
+
+### Export findings for one repository
+
+To create a report, sign in to the environment's AWS account and Region with
+AWS CLI v2.38.5 or later, the first release with `aws continuum`. Choose one
+export.
+
+**One finding.** Set `FINDING_ID` to the Continuum ID of the finding you
+verified. In an environment with several repositories, use this command to
+export one verified finding at a time. [AWS CLI get-code-finding](https://docs.aws.amazon.com/cli/latest/reference/continuum/get-code-finding.html)
+
+```sh
+report=
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   aws continuum get-code-finding --environment-id "$ENVIRONMENT_ID" \
     --finding-id "$FINDING_ID" --output json > "$out/continuum.tmp" &&
-  mv "$out/continuum.tmp" "$out/continuum.json"
+  mv "$out/continuum.tmp" "$out/continuum.json" &&
+  report="$out/continuum.json"
 ```
 
-**All summaries.** For bulk import, use an environment dedicated to one
-repository and verify that the export belongs to that repository. Start on
-the first page with automatic pagination enabled. Keep the JSON object with
-its `items` array. In a mixed environment, export verified findings with
-`get-code-finding`.
-[AWS CLI list-code-findings](https://docs.aws.amazon.com/cli/latest/reference/continuum/list-code-findings.html)
+**Selected findings.** Fetch one detail response per finding ID. Verify each
+belongs to the same environment and Git repository. To publish them together,
+combine the saved objects into a JSON array with `jq`.
 
 ```sh
-out=$(mktemp -d) &&
+report=
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
+  jq -s '.' first-detail.json second-detail.json > "$out/selected.json" &&
+  report="$out/selected.json"
+```
+
+**All summaries.** Verify that the environment contains findings from just
+this repository. Start on the first page and let the AWS CLI fetch every
+page. [AWS CLI list-code-findings](https://docs.aws.amazon.com/cli/latest/reference/continuum/list-code-findings.html)
+
+```sh
+report=
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   aws continuum list-code-findings --environment-id "$ENVIRONMENT_ID" \
     --output json > "$out/continuum.tmp" &&
-  mv "$out/continuum.tmp" "$out/continuum.json"
+  mv "$out/continuum.tmp" "$out/continuum.json" &&
+  report="$out/continuum.json"
 ```
 
-## Preview and import
+### Preview and import
 
-[Enable external imports](README.md#preview-a-report). From the matching
-checkout, preview the export with the verified Git URL and a stable source key
-for the environment and repository.
+Preview the report with the verified Git URL and a source key for this
+environment and repository.
 
 ```sh
-codex-security publish findings "$out/continuum.json" \
-  --to local --repository . --provider continuum \
-  --source-repository-url https://github.com/example/project \
+codex-security publish findings "$report" --to local --repository . \
+  --provider continuum --source-repository-url https://github.com/example/project \
   --source-key "continuum/$ENVIRONMENT_ID/example/project" \
   --dry-run --format json
 ```
 
-Check the destination, finding ARNs, reported paths and exclusions. In
-multi-repository environments, customer-supplied paths can start with a
-repository name. The reader preserves that prefix. Follow
-the shared steps to save locally or publish to a Cloud deployment that
-accepts the `continuum` provider. [Save or publish and verify](README.md#save-or-publish-and-verify)
+Check the repository, finding ARNs, paths, and exclusions. In a
+multi-repository environment, a customer-supplied path can begin with a
+repository name. The reader keeps that prefix. For local repeat imports, a summary replaces richer evidence already saved for the same ARN and source key. Use the detail export to keep locations, mitigation and validation evidence. To save locally, remove `--dry-run` and confirm.
 
-The finding ARN identifies the same occurrence in either export. With the
-same source key, importing a detail response after its summary updates the
-existing record. A subsequent summary replaces that richer evidence. Reuse
-`get-code-finding` for updates when you need the details.
-Both scanner-generated and customer-supplied code findings retain their AWS
-fields in `evidence.source_data.finding`. Continuum status and validation
-are vendor evidence. New findings start with a Codex assessment of
-`not_assessed`.
+<a id="publish-to-your-cloud-inbox"></a>
+
+### Publish to Cloud
+
+If you need locations, mitigation, or validation evidence, publish the detailed
+`get-code-finding` export first. For private inbox imports, a later upload
+with changed evidence for the same ARN can return `source_order_unknown`.
+Preview the file and source key using your connected repository URL.
+
+```sh
+repo=https://github.com/example/project
+codex-security publish findings "$report" --to cloud --repository "$repo" \
+  --provider continuum --source-repository-url "$repo" \
+  --source-key "continuum/$ENVIRONMENT_ID/example/project" \
+  --dry-run --format json
+```
+
+Check the account, repository and finding ARNs. The preview identifies the inbox
+(`privateImport`) or repository environments (`requests`) that will receive them.
+Remove `--dry-run` and confirm. Match the resulting source IDs to the Continuum ARNs. [Verify the import](README.md#verify-the-import)
+
+## Detail, summaries, and repeat imports
+
+Both formats use the finding ARN. In the local workbench, importing a detail
+response under the same source key updates the existing summary. In a private Cloud inbox,
+retrying identical evidence under the same source key preserves the finding.
+
+The importer uses `statusUpdatedAt` for the source update time when available.
+Dependency findings expose affected package names and concrete versions.
+Cloud can show up to 100 structured packages per finding. The full list,
+including version ranges, remains in `evidence.source_data.finding` alongside
+the AWS status and validation results. [AWS detail fields](https://docs.aws.amazon.com/continuum/latest/APIReference/API_GetCodeFinding.html)

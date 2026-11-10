@@ -1,3 +1,5 @@
+"""Export saved findings from stopped scans while retaining newer drafts across recovery."""
+
 from __future__ import annotations
 
 import copy
@@ -813,6 +815,7 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     assert closed_rows == {closed_occurrence: "wont_fix"}
 
 
+@pytest.mark.cross_platform
 def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
@@ -826,7 +829,7 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
 
     scan_command(state_dir, "complete-scan", scan_id)
     exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
-    with Path(exported["path"]).open(newline="") as source:
+    with Path(exported["path"]).open(encoding="utf-8", newline="") as source:
         row = next(csv.DictReader(source))
 
     assert row["title"] == "'\n=1+1"
@@ -858,9 +861,9 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
         state_dir, "list-findings", scan_id, "--offset", "20", "--limit", "50"
     )["findingsPage"]
     assert second_page["offset"] == 20
-    assert second_page["nextOffset"] == 40
+    assert second_page["nextOffset"] == 70
     assert second_page["total"] == 75
-    assert len(second_page["findings"]) == 20
+    assert len(second_page["findings"]) == 50
     assert embedded_occurrence_ids.isdisjoint(
         finding["occurrenceId"] for finding in second_page["findings"]
     )
@@ -1080,6 +1083,7 @@ def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     assert row["path"] == "root.py"
 
 
+@pytest.mark.cross_platform
 def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
@@ -1099,7 +1103,9 @@ def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> 
         }
     )
     manifest_path = scan_dir / "scan-manifest.json"
-    manifest_path.write_text(json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n")
+    manifest_path.write_bytes(
+        (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
     run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     sealed_manifest = manifest_path.read_bytes()
 

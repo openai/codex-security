@@ -6,7 +6,7 @@ import { abortable } from "./targets.js";
 import {
   parseSeverityDecision,
   reviewSeverity,
-  classificationRunsSchema,
+  reviewRunsOption,
   severityDecisionSchema,
   severityReviewInstructions,
   type SeverityDecision,
@@ -46,15 +46,7 @@ export const classifySeverityRecordsInputSchema = z
     version: z.literal(1),
     rubric: severityRubricSnapshotSchema.optional(),
     model: text,
-    effort: z.enum([
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra",
-    ]),
+    effort: z.string(),
     records: z.array(
       z
         .object({
@@ -136,9 +128,7 @@ export async function classifySeverityRecords(
   options: ClassifySeverityRecordsOptions,
 ): Promise<ClassifySeverityRecordsResult> {
   options.signal?.throwIfAborted();
-  const classificationRuns = classificationRunsSchema
-    .default(3)
-    .parse(options.classificationRuns);
+  const classificationRuns = reviewRunsOption.parse(options.classificationRuns);
   const data = classifySeverityRecordsInputSchema.parse(structuredClone(input));
   const rubric = data.rubric ?? {
     revision: 1,

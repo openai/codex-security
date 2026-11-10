@@ -1,6 +1,9 @@
+"""Test scan ownership and coherent workbench responses when cancellation or replacement races a request."""
+
 from __future__ import annotations
 
 import argparse
+import json
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -37,7 +40,9 @@ def test_get_scan_returns_consistent_progress_when_canceled_during_read(tmp_path
 
     monkeypatch.setattr(workbench, "backfill_legacy_finding_details", cancel_after_backfill)
     with closing(workbench.connect(deferred=True)) as connection:
-        result = workbench.get_scan(connection, scan_id)
+        result = workbench.get_scan(
+            connection, argparse.Namespace(scan_id=scan_id, occurrence_id=None)
+        )
     scan = result["scan"]
     assert scan["progress"]["status"] == scan["lifecycle"]["status"] == "canceled"
     assert scan["canceledAt"] == scan["lifecycle"]["finishedAt"]
@@ -76,8 +81,9 @@ def test_start_scan_returns_selected_scan_when_replaced_before_response(
     assert result["results"]["progress"]["status"] == "canceled"
 
 
+@pytest.mark.parametrize("app", [False, True])
 def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, app
 ):
     workbench = load_script("workbench_db")
     state_dir, target = empty_target_paths(tmp_path)
@@ -101,14 +107,18 @@ def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
         canceled = workbench.saved_results.cancel_scan(
             workbench._WORKBENCH_DB_CONTEXT,
             connection,
-            argparse.Namespace(scan_id=scan_id, thread_id=thread_id),
+            argparse.Namespace(scan_id=scan_id, thread_id=None if app else thread_id),
         )
-    replay = cancel_scan(state_dir, scan_id, thread_id)
+    replay = (
+        scan_command(state_dir, "cancel-scan", scan_id)
+        if app
+        else cancel_scan(state_dir, scan_id, thread_id)
+    )
     assert replacement_id and replacement_id != scan_id
     for response in (canceled, replay):
         assert response["canceledScanId"] == scan_id
-        assert response["results"]["scanId"] == replacement_id
-        assert response["results"]["progress"]["status"] == "running"
+        assert response["results"]["scanId"] == (replacement_id if app else scan_id)
+        assert response["results"]["progress"]["status"] == ("running" if app else "canceled")
 
 
 def test_workbench_records_scan_failure(tmp_path: Path) -> None:
@@ -125,6 +135,11 @@ def test_workbench_records_scan_failure(tmp_path: Path) -> None:
     )
     assert failed["scan"]["progress"]["status"] == "failed"
     assert failed["scan"]["failureMessage"] == "Repository checkout became unavailable."
+    assert failed["scan"]["logCompletedAt"] is not None
+    repeated = fail_scan(
+        state_dir, scan_id, "Ignored repeated failure.", "--claim-token", claim_token
+    )
+    assert repeated["scan"]["logCompletedAt"] == failed["scan"]["logCompletedAt"]
 
     delivered = mark_handoff_delivered(state_dir, scan_id, claim_token)
     assert delivered["results"]["handoffStatus"] == "delivered"
@@ -146,13 +161,27 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     assert wrong_thread["returncode"] != 0
     assert "owning Codex thread" in str(wrong_thread["stderr"])
 
-    canceled = cancel_scan(state_dir, scan_id, thread_id)
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 25,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 1,
+        "estimatedUsd": 0.001,
+    }
+    canceled = scan_command(
+        state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, "--cost-json", json.dumps(cost)
+    )
+    assert canceled["results"]["cost"] == cost
     assert canceled["results"]["progress"]["status"] == "canceled"
     assert canceled["results"]["canceledAt"]
+    assert canceled["results"]["logCompletedAt"] == canceled["results"]["canceledAt"]
     assert canceled["results"]["handoffClaimToken"] == claim_token
 
     replayed = cancel_scan(state_dir, scan_id, thread_id)
+    assert replayed["results"]["cost"] == cost
     assert replayed["results"]["canceledAt"] == canceled["results"]["canceledAt"]
+    assert replayed["results"]["logCompletedAt"] == canceled["results"]["logCompletedAt"]
 
     for command in (
         ("update-progress", "--phase", "discovery"),
@@ -169,6 +198,7 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     restarted_scan_id = str(restarted["scanId"])
     assert restarted_scan_id != scan_id
     assert restarted["progress"]["status"] == "running"
+    assert restarted["logCompletedAt"] is None
     previous_scan = get_scan(state_dir, scan_id)
     lifecycle = previous_scan["scan"]["lifecycle"]
     assert lifecycle["status"] == "canceled"

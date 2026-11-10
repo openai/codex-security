@@ -1,3 +1,5 @@
+"""Project false-positive decisions into later scans and preserve the reasons behind triage changes."""
+
 from __future__ import annotations
 
 import json
@@ -101,8 +103,6 @@ def test_native_scan_materializes_false_positive_feedback(tmp_path: Path, mode: 
             "begin-deep-scan",
             "--thread-id",
             "feedback-parent",
-            "--available-parallelism",
-            "4",
             "--target-path",
             str(target),
             "--scan-root",

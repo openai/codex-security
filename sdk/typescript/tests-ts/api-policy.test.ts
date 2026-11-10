@@ -24,12 +24,17 @@ import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
+  CodexSecurityError,
   InvalidTargetError,
   OutputDirectoryNotEmptyError,
   securityPolicyDiff,
   writeCodexConfig,
   type SecurityPolicyStage,
 } from "../src/index.js";
+import {
+  readOperationTelemetry,
+  type OperationTelemetryEvent,
+} from "../src/operation-telemetry.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { InternalSecurity } from "./support/internal-security.js";
 import type { PluginPythonOptions } from "../src/runtime.js";
@@ -297,6 +302,14 @@ describe("CodexSecurity policy API", () => {
           filesystem: {
             [process.platform === "win32" ? ":root" : ":minimal"]: "read",
             ":workspace_roots": "read",
+            ...(process.platform === "win32"
+              ? Object.fromEntries(
+                  f.threads[0]!.additionalDirectories!.map((path) => [
+                    path,
+                    { ".": "read" },
+                  ]),
+                )
+              : {}),
             ...Object.fromEntries(
               readPaths.map((path) => [path, { ".": "read" }]),
             ),
@@ -784,9 +797,9 @@ describe("CodexSecurity policy API", () => {
           {},
           { environment: { CODEX_SECURITY_STATE_DIR: outputDir } },
         );
-        await expect(state.preflightPolicy(repository)).rejects.toThrow(
-          "outside the protected scan root",
-        );
+        await expect(state.preflightPolicy(repository)).rejects.toMatchObject({
+          pathKind: "state",
+        });
         if (kind === "linked" && metadata === gitDirectory) {
           await expect(state.generatePolicy(repository)).rejects.toThrow(
             "outside the protected scan root",
@@ -1828,18 +1841,41 @@ describe("CodexSecurity policy API", () => {
 
   test("enforces one cost budget across stages and preserves completed evidence", async () => {
     const f = await setup();
-    await expect(
-      f.security.generatePolicy(f.repository, {
+    const observed: OperationTelemetryEvent[] = [];
+    try {
+      const result = f.security.generatePolicy(f.repository, {
         outputDir: f.outputDir,
         maxCostUsd: 0.001,
-      }),
-    ).rejects.toThrow("cost limit");
-    expect(f.threads).toHaveLength(2);
-    expect(
-      await readFile(join(f.outputDir, "project-spec.md"), "utf8"),
-    ).toContain("src/service.ts:1");
-    expect(await readdir(f.repository)).toEqual([]);
-    await f.security.close();
+        onTelemetry: (event) => observed.push(event),
+      });
+      await expect(result).rejects.toBeInstanceOf(CodexSecurityError);
+      await expect(result).rejects.toMatchObject({
+        name: CodexSecurityError.name,
+        message: `Security-policy generation exceeded its $0.001 cost limit; partial output remains at ${f.outputDir}.`,
+      });
+      expect(f.threads).toHaveLength(2);
+      expect(
+        await readFile(join(f.outputDir, "project-spec.md"), "utf8"),
+      ).toContain("src/service.ts:1");
+      expect(await readdir(f.repository)).toEqual([]);
+      const saved = await readOperationTelemetry(join(f.root, "state"));
+      expect(saved.parseFailures).toBe(0);
+      expect(observed.map((event) => event.type)).toEqual([
+        "attempt_started",
+        "attempt_finished",
+      ]);
+      expect(observed[1]).toMatchObject({
+        command: "policy",
+        outcome: "failed",
+        failureCategory: "budget",
+      });
+      expect(saved.events.map((event) => event.eventId)).toEqual(
+        observed.map((event) => event.eventId),
+      );
+      expect(saved.events.at(-1)).toEqual(observed.at(-1));
+    } finally {
+      await f.security.close();
+    }
   });
 
   test("stops a policy stage at its measured budget while worker usage is missing", async () => {
@@ -1864,6 +1900,7 @@ describe("CodexSecurity policy API", () => {
       { parent: "policy-architecture" },
     );
     const costs = mock();
+    const observed: OperationTelemetryEvent[] = [];
     const cancellation = new AbortController();
     const timeout = setTimeout(
       () => cancellation.abort(new Error("Policy budget was not enforced.")),
@@ -1876,11 +1913,17 @@ describe("CodexSecurity policy API", () => {
           maxCostUsd: 0.004,
           signal: cancellation.signal,
           onCost: costs,
+          onTelemetry: (event) => observed.push(event),
         }),
       ).rejects.toThrow("exceeded its $0.004 cost limit");
       expect(interruptedStage).toBe("architecture");
       expect(f.threads).toHaveLength(1);
       expect(costs).not.toHaveBeenCalled();
+      expect(observed.at(-1)).toMatchObject({
+        command: "policy",
+        outcome: "failed",
+        failureCategory: "budget",
+      });
       await expect(
         readFile(join(f.outputDir, "project-spec.md")),
       ).rejects.toMatchObject({ code: "ENOENT" });
@@ -1925,6 +1968,7 @@ describe("CodexSecurity policy API", () => {
 
   test("allows unavailable usage unless an explicit cost limit needs verification", async () => {
     for (const limited of [false, true]) {
+      const observed: OperationTelemetryEvent[] = [];
       const f = await setup({
         stream: async function* (stage) {
           for await (const event of events(stage)) {
@@ -1940,9 +1984,15 @@ describe("CodexSecurity policy API", () => {
       const result = f.security.generatePolicy(f.repository, {
         outputDir: f.outputDir,
         ...(limited ? { maxCostUsd: 1 } : {}),
+        onTelemetry: (event) => observed.push(event),
       });
       if (limited) await expect(result).rejects.toThrow("cost limit");
       else expect((await result).cost).toBeNull();
+      expect(observed.at(-1)).toMatchObject({
+        command: "policy",
+        outcome: limited ? "failed" : "completed",
+        ...(limited ? { failureCategory: "execution" } : {}),
+      });
       await f.security.close();
     }
   });

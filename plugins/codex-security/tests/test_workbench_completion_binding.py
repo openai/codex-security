@@ -1,3 +1,5 @@
+"""Bind CLI scan counts, final artifacts, and recovered coverage to the registered target."""
+
 from __future__ import annotations
 
 import copy
@@ -1524,17 +1526,24 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
 
     stopped = get_scan(state_dir, scan_id)["scan"]
     assert stopped["progress"]["status"] == "failed"
-    assert stopped["findingCount"] == 1
+    assert stopped["findingCount"] == 2
     retained = json.loads((scan_dir / "findings.json").read_text())["findings"]
-    assert len(retained) == 1
-    assert retained[0]["summary"] == valid["summary"]
+    by_anchor = {row["identity"]["anchor"]: row for row in retained}
+    assert set(by_anchor) == {valid["identity"]["anchor"], "invalid-evidence-id"}
+    clean = by_anchor[valid["identity"]["anchor"]]
+    assert clean["summary"] == valid["summary"]
+    assert clean["codeEvidence"] == valid["codeEvidence"]
+    repaired = by_anchor["invalid-evidence-id"]
+    assert "codeEvidence" not in repaired
+    assert repaired["locations"] == valid["locations"]
+    assert repaired["rootCause"] == {**invalid_evidence_id["rootCause"], "evidenceRefs": []}
 
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "failed"
     assert (scan_dir / "report.md").is_file()
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
     assert sarif["runs"][0]["invocations"][0]["executionSuccessful"] is False
     warnings = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
-    assert warnings
+    assert any("Skipped malformed codeEvidence" in warning for warning in warnings)
     notifications = sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"]
     assert all(
         {"level": "warning", "message": {"text": warning}} in notifications for warning in warnings

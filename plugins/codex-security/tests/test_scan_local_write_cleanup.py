@@ -1,3 +1,5 @@
+"""Exercise cleanup and file-identity checks when scan-local writes race or fail partway."""
+
 from __future__ import annotations
 
 import ctypes
@@ -141,7 +143,7 @@ def test_atomic_write_closes_directories_after_cleanup_failures(
             assert destination.read_bytes() == b"original"
         else:
             assert destination.read_bytes() == b"replacement"
-        staging = list(tmp_path.glob(".report.md.*.tmp"))
+        staging = list(tmp_path.glob(".*.tmp"))
         assert len(staging) == (1 if failure == "write_and_unlink" else 0)
     finally:
         # Keep a failed regression assertion from leaking descriptors in the test runner.
@@ -243,7 +245,7 @@ def test_new_patch_rejects_same_size_edit_during_publication(tmp_path, monkeypat
 
 def test_existing_temporary_file_survives_a_name_collision(tmp_path, monkeypatch):
     monkeypatch.setattr(secrets, "token_hex", lambda _: "collision")
-    existing = tmp_path / ".generated.patch.collision.tmp"
+    existing = tmp_path / ".collision.tmp"
     existing.write_bytes(b"another writer")
     with pytest.raises(FileExistsError):
         FINALIZER.write_scan_local_bytes(
@@ -251,3 +253,16 @@ def test_existing_temporary_file_survives_a_name_collision(tmp_path, monkeypatch
         )
     assert existing.read_bytes() == b"another writer"
     assert not (tmp_path / "generated.patch").exists()
+
+
+@pytest.mark.parametrize("name", ["a" * 251 + ".txt", "é" * 125 + "x.txt", ".0123456789abcdef.tmp"])
+def test_stage_and_replace_valid_artifact_names(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(secrets, "token_hex", lambda _: "0123456789abcdef")
+    destination = tmp_path / name
+    with FINALIZER.stage_scan_local_bytes(tmp_path, name, b"first") as publish:
+        assert not destination.exists()
+        publish()
+    assert destination.read_bytes() == b"first"
+    FINALIZER.write_scan_local_bytes(tmp_path, name, b"updated")
+    assert destination.read_bytes() == b"updated"
+    assert list(tmp_path.iterdir()) == [destination]
