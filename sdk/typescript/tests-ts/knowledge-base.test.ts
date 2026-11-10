@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { ConfigurationError } from "../src/errors.js";
@@ -533,6 +533,18 @@ describe("scan knowledge bases", () => {
       ),
     );
     await writeFile(
+      join(root, "content-controls.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Owner: </w:t></w:r>' +
+          "<w:sdt><w:sdtPr><w:showingPlcHdr/></w:sdtPr><w:sdtContent>" +
+          "<w:r><w:t>Click here to enter text.</w:t></w:r></w:sdtContent></w:sdt></w:p>" +
+          '<w:p><w:r><w:t xml:space="preserve">Data: </w:t></w:r>' +
+          '<w:sdt><w:sdtPr><w:showingPlcHdr w:val="0"/></w:sdtPr><w:sdtContent>' +
+          "<w:r><w:t>Confidential</w:t></w:r>" +
+          "</w:sdtContent></w:sdt></w:p>",
+      ),
+    );
+    await writeFile(
       join(root, "field-code.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
@@ -555,6 +567,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
+    expect(documents).toContain("Owner: \nData: Confidential\n");
   });
 
   test.each([
@@ -882,6 +895,37 @@ describe("scan knowledge bases", () => {
       "Named document",
     ]);
   });
+
+  test.each(["relative", "linked parent"])(
+    "stages knowledge in the worker-readable temporary directory: %s",
+    async (spelling) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "policy.md");
+      await writeFile(source, "Synthetic policy.");
+      const staging = join(root, "staging");
+      await mkdir(staging);
+      let temporary = relative(process.cwd(), staging);
+      if (spelling === "linked parent") {
+        const child = join(staging, "child");
+        const link = join(root, "alias");
+        await mkdir(child);
+        await symlink(
+          child,
+          link,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        temporary = link + sep + "..";
+      }
+      const expected = await filesystem.realpath(temporary);
+      using _temporary = spyOn(os, "tmpdir").mockReturnValue(temporary);
+      const prepared = await prepareKnowledgeBase([source]);
+      temporaryDirectories.track(prepared.path);
+      expect(dirname(prepared.path)).toBe(expected);
+      expect(await extractedDocuments(prepared.path)).toEqual([
+        "Synthetic policy.",
+      ]);
+    },
+  );
 
   test("skips macOS metadata files copied next to documents", async () => {
     const root = await temporaryDirectory();

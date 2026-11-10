@@ -63,10 +63,12 @@ async function nativeRequest(
   // Keep the child deadline inside the CI runner's per-test budget.
   const probeTimeoutMs = nativeTestTimeoutMs / 2;
   let timedOut = false;
+  let reply;
   const timer = setTimeout(() => {
     timedOut = true;
     // A descendant may retain stdout, so EOF cannot be the signal to stop reading.
     lines.close();
+    child.kill("SIGKILL");
   }, probeTimeoutMs);
   const send = (message: unknown) =>
     child.stdin.write(JSON.stringify(message) + "\n");
@@ -86,21 +88,33 @@ async function nativeRequest(
         send({ method: "initialized", params: {} });
         send({ id: 2, method, params });
       }
-      if (response.id === 2) return response.result;
+      if (response.id === 2) {
+        reply = response;
+        break;
+      }
     }
-    const reason = timedOut
-      ? `timed out after ${probeTimeoutMs}ms`
-      : "closed before replying";
-    throw new Error(`Native ${method} probe ${reason}: ${stderr}`);
   } finally {
-    clearTimeout(timer);
     lines.close();
+    // EOF lets the app-server shut down its workers before fixture cleanup.
+    child.stdin.end();
     // Bun on Windows can keep these pipes open after the app-server process exits.
     child.stdout.destroy();
     child.stderr.destroy();
-    child.kill();
-    await closed;
+    try {
+      await closed;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  if (timedOut) {
+    const phase = reply ? "shutdown" : "response";
+    throw new Error(
+      `Native ${method} probe timed out after ${probeTimeoutMs}ms waiting for ${phase}: ${stderr}`,
+    );
+  }
+  if (!reply)
+    throw new Error(`Native ${method} probe closed before replying: ${stderr}`);
+  return reply.result;
 }
 
 async function readProviderProfile(home: string, name: string) {

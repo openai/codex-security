@@ -97,7 +97,10 @@ try {
   const diagnostic = direct.stderr.trim().split("\n").at(-1)!;
   assert.match(diagnostic, /FileExistsError/);
   assert.equal(wrapped.stderr.trim().split("\n").at(-1), diagnostic);
-  const failure = await openWorkspace(environment);
+  const failure = await openWorkspace({
+    ...environment,
+    PYTHONIOENCODING: "utf-16-le",
+  });
   assert.equal(failure.error, undefined);
   assert.equal(failure.result.isError, true);
   assert.ok(
@@ -111,7 +114,12 @@ try {
     ...environment,
     CODEX_SECURITY_STATE_DIR: explicitState,
   };
-  assertNoError(await openWorkspace(explicitEnvironment));
+  assertNoError(
+    await openWorkspace({
+      ...explicitEnvironment,
+      PYTHONIOENCODING: "utf-8-sig",
+    }),
+  );
   assert.equal(
     (await stat(path.join(explicitState, "workbench.sqlite3"))).isFile(),
     true,

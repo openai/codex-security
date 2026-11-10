@@ -103,7 +103,8 @@ import {
 } from "./api.js";
 import {
   accountStatus,
-  CODEX_AUTH_CONFIG_KEYS,
+  nativeLogoutArgs,
+  prepareLoginConfig,
   NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
   environmentEntry,
@@ -186,6 +187,7 @@ import {
   type BulkScanPrompt,
 } from "./bulk-scan-discovery.js";
 import {
+  CODEX_AUTH_CONFIG_KEYS,
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
@@ -198,6 +200,7 @@ import {
   resolveCommandAuthConfig,
   resolveCodexProfile,
   mergedCodexConfig,
+  readCodexAuthConfig,
   readCodexFileProfile,
   scanPricingContext,
   scanModel,
@@ -296,6 +299,7 @@ import {
   resolvePluginPath,
   acquireCodexSecurityCredentialHomeLock,
   withCredentialHomeLock,
+  writeCredentialHomeConfig,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialAllowsAmbientImport,
@@ -397,6 +401,7 @@ import {
   CODEX_EXECUTABLE_VERSION,
   CODEX_SDK_VERSION,
   formatUpdateNotice,
+  invokedWithNpx,
   updateNoticeEnabled,
   type UpdateNotice,
   VERSION,
@@ -1779,10 +1784,7 @@ async function runCodexSkillProcess(
           credentialConfig["model_providers"] = {
             [provider]: providerConfiguration,
           };
-        await writeCodexConfig(
-          join(codexHome, "config.toml"),
-          credentialConfig,
-        );
+        await writeCredentialHomeConfig(codexHome, credentialConfig);
         credentialsAvailable = await initialCredentialsAvailable(
           selected,
           configuredCodexHome(selected),
@@ -1898,9 +1900,7 @@ async function runCodexSkillProcess(
         cwd: output?.appServer?.directory ?? parse(process.execPath).root,
         stdio:
           output === undefined
-            ? input === undefined
-              ? "inherit"
-              : ["pipe", "inherit", "inherit"]
+            ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
             : [
                 output.appServer !== undefined || input !== undefined
                   ? "pipe"
@@ -1958,29 +1958,33 @@ async function runCodexSkillProcess(
     process.on("SIGTERM", onTerminate);
     try {
       let diagnostic = "";
-      invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
-        diagnostic += chunk;
-      });
-      const captured =
+      let forwarded: Promise<void> | undefined;
+      if (output === undefined && invocation.stderr) {
+        forwarded = forwardSignInHints(invocation.stderr, processEnvironment);
+      } else {
+        invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+          diagnostic += chunk;
+        });
+      }
+      const captured = Promise.race([
         output === undefined || invocation.stdout === null
-          ? Promise.resolve(undefined)
-          : Promise.race([
-              readSkillCommandOutput(
-                invocation.stdout,
-                output.appServer === undefined
-                  ? undefined
-                  : {
-                      ...output.appServer,
-                      apiKey,
-                      modelProvider,
-                      onThreadStarted: releaseCredentialHome,
-                      input: invocation.stdin!,
-                    },
-              ),
-              new Promise<undefined>((resolve) => {
-                forceCaptureCompletion = () => resolve(undefined);
-              }),
-            ]);
+          ? forwarded?.then(() => undefined)
+          : readSkillCommandOutput(
+              invocation.stdout,
+              output.appServer === undefined
+                ? undefined
+                : {
+                    ...output.appServer,
+                    apiKey,
+                    modelProvider,
+                    onThreadStarted: releaseCredentialHome,
+                    input: invocation.stdin!,
+                  },
+            ),
+        new Promise<undefined>((resolve) => {
+          forceCaptureCompletion = () => resolve(undefined);
+        }),
+      ]);
       invocationStatus = new Promise<number>((resolve, reject) => {
         const complete = (
           code: number | null,
@@ -2051,6 +2055,12 @@ async function runCodexSkillProcess(
       invocation.stderr?.destroy();
       requestTermination("SIGTERM");
       await invocationStatus?.catch(() => undefined);
+      // The sign-in diagnostic stream is closed; a second diagnostic cannot be delivered.
+      if (
+        output === undefined &&
+        (error as NodeJS.ErrnoException)?.code === "EPIPE"
+      )
+        return 1;
       throw error;
     } finally {
       if (forcedTermination !== undefined) clearTimeout(forcedTermination);
@@ -2063,6 +2073,37 @@ async function runCodexSkillProcess(
   } finally {
     await releaseCredentialHome?.();
   }
+}
+
+/** Forward native prompts immediately, including commands split across stderr writes. */
+async function forwardSignInHints(
+  stderr: Readable,
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  const cli = invokedWithNpx(environment)
+    ? "npx @openai/codex-security"
+    : "codex-security";
+  const hints = ["`codex login", "| codex login"];
+  const rewrite = (text: string) =>
+    text.replace(/(`|\| )codex login(?=[\s`]|$)/gu, `$1${cli} login`);
+  let pending = "";
+  for await (const chunk of stderr.setEncoding(
+    "utf8",
+  ) as AsyncIterable<string>) {
+    let text = pending + chunk;
+    pending = "";
+    // Hold only a partial command at the end of this chunk.
+    const start = Math.max(text.lastIndexOf("`"), text.lastIndexOf("|"));
+    if (start >= 0) {
+      const tail = text.slice(start);
+      if (hints.some((hint) => hint.startsWith(tail))) {
+        pending = tail;
+        text = text.slice(0, start);
+      }
+    }
+    if (text) await writeCliOutput(process.stderr, rewrite(text));
+  }
+  if (pending) await writeCliOutput(process.stderr, rewrite(pending));
 }
 
 /**
@@ -2245,11 +2286,30 @@ function handleDisconnectedResize(error: NodeJS.ErrnoException): void {
   }
 }
 
+/** Run the standalone CLI, which owns the process and its stdio. */
+export async function runCli(): Promise<number> {
+  let signInInterrupted = false;
+  const exitCode = await main(
+    process.argv.slice(2),
+    process.stdout,
+    process.stderr,
+    DEFAULT_DEPENDENCIES,
+    () => {
+      signInInterrupted = true;
+    },
+  );
+  // Managed output and child cleanup are complete. An interrupted prompt may
+  // still have a write pending on stderr if its reader stopped draining.
+  if (signInInterrupted) process.exit(exitCode);
+  return exitCode;
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   output: Writable = process.stdout,
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
+  onInterruptedSignIn?: () => void,
 ): Promise<number> {
   const remediationOperation =
     argv[0] === "patch"
@@ -7109,34 +7169,38 @@ export async function main(
           dependencies.environment,
         );
         const authentication = scanAuthentication(dependencies.environment);
-        if (args.action === "status" && authentication.method !== "api_key") {
-          const ambientHome = scanCodexHome(dependencies.environment);
-          await withCredentialHomeLock(credentialHome, () =>
-            initialCredentialsAvailable(
-              dependencies.environment,
-              ambientHome,
+        exitCode = await withCredentialHomeLock(credentialHome, async () => {
+          if (args.action === undefined) {
+            await prepareLoginConfig(
               credentialHome,
-            ),
+              await readCodexAuthConfig(
+                scanCodexHome(dependencies.environment),
+                true,
+              ),
+            );
+          } else if (authentication.method !== "api_key") {
+            await initialCredentialsAvailable(
+              dependencies.environment,
+              scanCodexHome(dependencies.environment),
+              credentialHome,
+            );
+          }
+          const status = await dependencies.runCodex(
+            [
+              "login",
+              ...(args.action === undefined ? [] : [args.action]),
+              ...(options.deviceAuth ? ["--device-auth"] : []),
+              ...(options.withApiKey ? ["--with-api-key"] : []),
+              ...(options.withAccessToken ? ["--with-access-token"] : []),
+            ],
+            undefined,
+            { ...dependencies.environment, CODEX_HOME: credentialHome },
           );
-        }
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await dependencies.runCodex(
-          [
-            "login",
-            ...(args.action === undefined ? [] : [args.action]),
-            ...(options.deviceAuth ? ["--device-auth"] : []),
-            ...(options.withApiKey ? ["--with-api-key"] : []),
-            ...(options.withAccessToken ? ["--with-access-token"] : []),
-          ],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (args.action === undefined && exitCode === 0) {
-          await setCodexSecurityCredentialLogout(credentialHome, false);
-        }
+          if (args.action === undefined && status === 0) {
+            await setCodexSecurityCredentialLogout(credentialHome, false);
+          }
+          return status;
+        });
         if (args.action === "status") {
           if (
             authentication.method === "api_key" &&
@@ -7184,16 +7248,20 @@ export async function main(
         const credentialHome = await prepareCodexSecurityCredentialHome(
           dependencies.environment,
         );
-        const runLogout = () =>
-          dependencies.runCodex(["logout"], undefined, {
-            ...dependencies.environment,
-            CODEX_HOME: credentialHome,
-          });
+        const environment = {
+          ...dependencies.environment,
+          CODEX_HOME: credentialHome,
+        };
         exitCode = await withCredentialHomeLock(credentialHome, () =>
           logoutCredentialHome(
             credentialHome,
             scanCodexHome(dependencies.environment),
-            runLogout,
+            (store) =>
+              dependencies.runCodex(
+                nativeLogoutArgs(store),
+                undefined,
+                environment,
+              ),
           ),
         );
       },
@@ -7691,6 +7759,11 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  if (
+    (command === "login" || command === "logout") &&
+    (exitCode === 130 || exitCode === 143)
+  )
+    onInterruptedSignIn?.();
   let frameworkOutput = frameworkCapture.text();
   if (filteredScanFailure !== undefined) {
     // Success-field filters do not apply to diagnostics. Reuse Incur's format
@@ -9024,7 +9097,9 @@ async function assessPatchRisk(
     request.files === undefined
       ? []
       : ["--", ...request.files.map((file) => file)];
-  const root = await mkdtemp(join(tmpdir(), "codex-security-patch-risk-"));
+  const root = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-risk-"),
+  );
   const patchPath = join(root, "patch.diff");
   try {
     const head =
@@ -9097,7 +9172,9 @@ async function withPatchIndex<T>(
     git: (args: string[], input?: string) => Promise<string>,
   ) => Promise<T>,
 ): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
+  const root = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-tree-"),
+  );
   try {
     return await operation((args, input) =>
       dependencies.runRepositoryCommand("git", args, repository, {
@@ -10395,6 +10472,7 @@ async function executeScan(
   let patchDaybreakFeatures: JsonObject = {};
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
+  let runningMockScan = false;
   let failed = false;
   let failure: unknown;
   try {
@@ -11038,7 +11116,9 @@ async function executeScan(
     if (arguments_.dryRun) {
       preflight = await security.preflight(repository, options);
     } else {
+      runningMockScan = arguments_.mock === true;
       result = await security.run(repository, options);
+      runningMockScan = false;
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
       if (arguments_.validate) {
@@ -11236,7 +11316,9 @@ async function executeScan(
   if (failed) {
     const costLimitFailure =
       failure instanceof ScanCostLimitExceededError ? failure : undefined;
-    const classification = classifyScanFailure(failure);
+    const classification = runningMockScan
+      ? "local"
+      : classifyScanFailure(failure);
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
@@ -11780,7 +11862,7 @@ async function readDeepScanStop(
     | undefined;
   if (state?.terminalReason === "saturated") {
     return {
-      reason: `The last ${state.noNewStreak} review rounds found no new issues. More issues may remain.`,
+      reason: `The last ${state.noNewStreak} review round${state.noNewStreak === 1 ? "" : "s"} found no new issues. More issues may remain.`,
     };
   }
   if (state?.terminalReason !== "capped") return undefined;
@@ -11791,7 +11873,7 @@ async function readDeepScanStop(
     state.dispatchedCount >= maxDiscoveryRuns
   ) {
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review round${maxDiscoveryRuns === 1 ? "" : "s"}. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
@@ -12032,6 +12114,7 @@ function componentScanEventLine(
 function protectedRootErrorMessage(
   error: OutputInsideProtectedRootError,
 ): string {
+  if (error.pathKind === "state") return error.message;
   const description =
     error.pathKind === "output"
       ? "Scan output directory"
@@ -12476,7 +12559,7 @@ const interruptedExitCode = (signal: AbortSignal): number | undefined =>
       : undefined;
 
 if (invokedAsMain()) {
-  void main().then(
+  void runCli().then(
     (exitCode) => {
       process.exitCode = exitCode;
     },

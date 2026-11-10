@@ -56,6 +56,7 @@ async function testDeepScanStdioLifecycle() {
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const expiredTargetPath = path.join(fixtureRoot, "expired-target");
   const stateDir = path.join(fixtureRoot, "state]");
+  const scanRoot = path.join(await realpath(fixtureRoot), "scans ");
   const codexHome = path.join(fixtureRoot, "codex [home]");
   const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
@@ -192,7 +193,7 @@ service_tier = "ultrafast"
     CODEX_HOME: codexHome,
     CODEX_SECURITY_CONFIG_PATH: runtimeConfigPath,
     CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
-    CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
+    CODEX_SECURITY_SCAN_ROOT: scanRoot,
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
     CODEX_SECURITY_PYTHON_COMMAND: pythonWrapperPath,
@@ -343,6 +344,7 @@ service_tier = "ultrafast"
     assert.match(startedWorker.stdin, /record_codex_security_scan_draft/);
     const startedState = await getDeepScan({ environment, scanId, threadId });
     assert.equal(startedState.config.maxTimeHours, 0.5);
+    assert.ok(startedState.scanDir.startsWith(scanRoot + path.sep));
     await rm(projectConfigPath);
     const startedArtifactRoot = startedState.workers.find(
       (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
@@ -774,6 +776,7 @@ service_tier = "ultrafast"
     );
     const resumedScan = started.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
+    assert.ok(resumedScan.scanDir.startsWith(scanRoot + path.sep));
     await chmod(resumedScan.scanDir, 0o755);
     const handoffClaimToken = randomUUID();
     for (const [id, name, arguments_] of [

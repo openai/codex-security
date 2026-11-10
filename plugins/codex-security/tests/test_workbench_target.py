@@ -132,15 +132,37 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     return create
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory component errors")
+def test_recorded_checkout_distinguishes_a_replaced_parent_from_a_missing_path(
+    tmp_path: Path,
+) -> None:
+    from workbench_target import require_remediation_target
+
+    parent = tmp_path / "projects"
+    checkout = parent / "repository"
+    checkout.mkdir(parents=True)
+    assert require_remediation_target(str(checkout)) == checkout
+
+    checkout.rmdir()
+    with pytest.raises(SystemExit, match="no longer accessible"):
+        require_remediation_target(str(checkout))
+    parent.rmdir()
+    parent.write_text("ordinary file")
+    with pytest.raises(SystemExit, match="checkout path was replaced"):
+        require_remediation_target(str(checkout))
+
+
 def write_reviewed_patch(
     tmp_path: Path, source: Path, patch: bytes, revision: str = "unversioned"
 ) -> dict[str, object]:
+    from filesystem_identity import serialize_filesystem_identity
+
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
     (scan_dir / "reviewed.patch").write_bytes(patch)
     return {
         "target_path": str(source),
-        "target_inode": source.stat().st_ino,
+        "target_inode": serialize_filesystem_identity(source.stat().st_ino),
         "target_revision": revision,
         "scan_dir": str(scan_dir),
     }
@@ -152,6 +174,218 @@ def reviewed_remediation(patch: bytes, revision: str, digest: str) -> dict[str, 
         "base_content_digest": digest,
         "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
     }
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("layout", ["separate", "linked", "unborn", "unborn-root"])
+def test_reviewed_patch_uses_long_source_metadata_in_its_private_replay(
+    tmp_path: Path, layout: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_db
+
+    # The metadata argument is long in UTF-8 even on hosts with short temporary paths.
+    padding = max(1, (230 - len((tmp_path / "metadata-").as_posix().encode("utf-8")) + 2) // 3)
+    metadata = tmp_path / ("metadata-" + "界" * padding)
+    source = tmp_path / "source"
+    if layout == "unborn-root":
+        source, metadata = metadata, metadata / ".git"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+    else:
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(metadata), str(source)], check=True
+        )
+    subprocess.run(["git", "-C", str(source), "config", "core.autocrlf", "false"], check=True)
+    (source / "file.txt").write_bytes(b"before\n")
+    revision = "unversioned"
+    if layout in {"separate", "linked"}:
+        subprocess.run(["git", "-C", str(source), "add", "file.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=f@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        if layout == "linked":
+            linked = tmp_path / "linked"
+            subprocess.run(
+                ["git", "-C", str(source), "worktree", "add", "--detach", str(linked)], check=True
+            )
+            source = linked
+        revision = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+        ).strip()
+    marker = source / ".git/HEAD" if layout == "unborn-root" else source / ".git"
+    original_marker = marker.read_bytes()
+    (metadata / "info/exclude").write_bytes(b"ignored.fixture\n")
+    (source / "ignored.fixture").write_bytes(b"outside the recorded content\n")
+    if os.name == "nt" and revision == "unversioned":
+        # The private copy keeps the original gitdir-conditional visibility when using the retry.
+        global_config, included, excludes = (
+            tmp_path / name for name in ("global", "include", "excludes")
+        )
+        excludes.write_bytes(b"conditional.fixture\n")
+        subprocess.run(
+            ["git", "config", "--file", included, "core.excludesFile", excludes.as_posix()],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--file",
+                global_config,
+                f"includeIf.gitdir:{metadata.as_posix()}.path",
+                included.as_posix(),
+            ],
+            check=True,
+        )
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        (source / "conditional.fixture").write_bytes(b"excluded by the selected Git directory\n")
+        ignored = subprocess.check_output(
+            ["git", "-C", source, "check-ignore", "conditional.fixture"]
+        )
+        assert ignored.strip()
+    patch = b"diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    scan = write_reviewed_patch(tmp_path, source, patch, revision)
+    _, digest = workbench_db.remediation_checkout_snapshot(scan)
+    remediation = reviewed_remediation(patch, revision, digest)
+    selected_file = source / "file.txt"
+    selected_file.write_bytes(b"after\n")
+    _, applied_digest = workbench_db.remediation_checkout_snapshot(scan)
+    verify = workbench_db.require_reviewed_patch_applied
+    assert verify(scan, remediation, "reviewed.patch") == applied_digest
+    assert selected_file.read_bytes() == b"after\n"
+    selected_file.write_bytes(b"other\n")
+    with pytest.raises(SystemExit, match="does not contain the reviewed remediation patch"):
+        verify(scan, remediation, "reviewed.patch")
+    assert selected_file.read_bytes() == b"other\n"
+    selected_file.write_bytes(b"after\n")
+    (source / "unrelated.txt").write_bytes(b"keep me\n")
+    with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+        verify(scan, remediation, "reviewed.patch")
+    assert (source / "unrelated.txt").read_bytes() == b"keep me\n"
+    (source / "unrelated.txt").unlink()
+    malformed = b"not a patch\n"
+    (tmp_path / "scan/reviewed.patch").write_bytes(malformed)
+    with pytest.raises(SystemExit, match="does not contain the reviewed remediation patch"):
+        verify(scan, reviewed_remediation(malformed, revision, digest), "reviewed.patch")
+    assert marker.read_bytes() == original_marker
+    assert selected_file.read_bytes() == b"after\n"
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory and file sharing")
+def test_replay_gitfile_remains_bound_until_the_private_replay_is_removed(tmp_path: Path) -> None:
+    import tempfile
+    from contextlib import ExitStack
+
+    import windows_scan_local_files as windows
+    import workbench_target
+
+    source = tmp_path / "source"
+    foreign = tmp_path / "foreign"
+    initialize_git_repository(source)
+    initialize_git_repository(foreign)
+    metadata = source / ".git"
+    stages = tmp_path / "replays"
+    stages.mkdir()
+
+    def interrupt_replay():
+        with tempfile.TemporaryDirectory(dir=stages) as temporary, ExitStack() as pins:
+            scratch = Path(temporary)
+            checkout = scratch / "checkout"
+            checkout.mkdir()
+            (checkout / ".git").write_bytes(f"gitdir: {(foreign / '.git').as_posix()}\n".encode())
+            assert windows.pin_replay_metadata(pins, metadata, scratch) == metadata
+            with pytest.raises(PermissionError):
+                scratch.rename(stages / "elsewhere")
+            short = pins.enter_context(windows.pinned_replay_gitfile(checkout, metadata))
+            assert (
+                Path(
+                    workbench_target.git_output(
+                        checkout,
+                        "rev-parse",
+                        "--absolute-git-dir",
+                        git_dir=short,
+                        work_tree=checkout,
+                    )
+                )
+                == metadata
+            )
+            with pytest.raises(PermissionError):
+                (checkout / short).write_bytes(b"other")
+            for path in (metadata, checkout, scratch, checkout / short):
+                with pytest.raises(PermissionError):
+                    path.rename(path.with_name("replaced"))
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupt_replay()
+    assert not list(stages.iterdir())
+    assert metadata.is_dir() and (foreign / ".git").is_dir()
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows regular-file and junction checks")
+@pytest.mark.parametrize(
+    "change", ["foreign-pointer", "changed-patch", "replaced-parent", "writable-scratch"]
+)
+def test_short_git_reference_refuses_changed_replay_inputs(
+    tmp_path: Path, change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import ExitStack
+
+    import windows_scan_local_files as windows
+    import workbench_remediation
+
+    metadata, scratch = tmp_path / "metadata", tmp_path / "scratch"
+    metadata.mkdir()
+    scratch.mkdir()
+    worktree = scratch / "checkout"
+    worktree.mkdir()
+    patch = scratch / "reviewed.patch"
+    patch.write_bytes(b"expected")
+    expected = "sha256:" + hashlib.sha256(patch.read_bytes()).hexdigest()
+    marker = scratch / "reviewed.git"
+    if change == "foreign-pointer":
+        marker.write_bytes(b"gitdir: foreign\n")
+    elif change == "changed-patch":
+        patch.write_bytes(b"changed")
+    elif change == "replaced-parent":
+        alias = tmp_path / "alias"
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(scratch)], check=True)
+        worktree = alias / "checkout"
+    else:
+        subprocess.run(["icacls.exe", str(scratch), "/grant", "*S-1-1-0:(WD)"], check=True)
+    failed = subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
+    monkeypatch.setattr(workbench_remediation, "git_command", lambda *args, **kwargs: failed)
+    with ExitStack() as pins:
+        selected = windows.pin_replay_metadata(pins, metadata, scratch)
+        if change == "writable-scratch":
+            assert selected is None
+            with pytest.raises(SystemExit, match="Could not bind"):
+                workbench_remediation.reverse_reviewed_patch(
+                    tmp_path, worktree, metadata, selected, expected, pins, patch, "."
+                )
+            assert not marker.exists()
+            return
+        with pytest.raises(SystemExit, match="Could not verify|Patch digest does not match"):
+            workbench_remediation.reverse_reviewed_patch(
+                tmp_path, worktree, metadata, selected, expected, pins, patch, "."
+            )
+    if change == "foreign-pointer":
+        assert marker.read_bytes() == b"gitdir: foreign\n"
+    if change == "replaced-parent":
+        assert not marker.exists()
 
 
 @pytest.mark.parametrize(
@@ -290,6 +524,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
     populated: bool,
 ) -> None:
     import workbench_db
+    import workbench_remediation
 
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
@@ -307,7 +542,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
     junction = nested / "linked"
     junction_factory(junction, outside)
     relative_junction = junction.relative_to(repository)
-    original_command = workbench_db.git_command
+    original_command = workbench_remediation.git_command
     original_restore = workbench_db.restore_directory_junctions
     reversed_roots: list[Path] = []
     restored: list[Path] = []
@@ -331,7 +566,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
         original_restore(source, destination, junctions)
         restored.append(destination)
 
-    monkeypatch.setattr(workbench_db, "git_command", command)
+    monkeypatch.setattr(workbench_remediation, "git_command", command)
     monkeypatch.setattr(workbench_db, "restore_directory_junctions", restore)
     assert_reviewed_change(
         target,
@@ -491,10 +726,43 @@ def test_reviewed_patch_restores_junction_git_context(
         assert (source / patched).read_bytes() == after.replace("\n", newline).encode()
 
 
-@pytest.mark.cross_platform
-def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "short_reference",
+    [
+        pytest.param(False, marks=pytest.mark.cross_platform),
+        pytest.param(
+            True,
+            marks=[
+                pytest.mark.native_windows,
+                pytest.mark.skipif(os.name != "nt", reason="requires Windows replay binding"),
+            ],
+        ),
+    ],
+    ids=["ordinary", "short-reference"],
+)
+def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(
+    tmp_path: Path, short_reference: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_remediation
+
     repository = tmp_path / "repository"
     initialize_unborn_git_repository(repository)
+    references = []
+    reverse = workbench_remediation.reverse_reviewed_patch
+    git = workbench_remediation.git_command
+
+    def record_references(*args, **kwargs):
+        selected = reverse(*args, **kwargs)
+        references.append(selected)
+        return selected
+
+    def require_short_reference(target, *args, **kwargs):
+        if short_reference and kwargs.get("git_dir") == repository / ".git":
+            return subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
+        return git(target, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_remediation, "reverse_reviewed_patch", record_references)
+    monkeypatch.setattr(workbench_remediation, "git_command", require_short_reference)
     attributes = tmp_path / "attributes"
     attributes.write_text("*.txt text eol=crlf\n")
     subprocess.run(
@@ -506,6 +774,8 @@ def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(tmp_path: Path) -> None
     assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n", newline="\n")
 
     assert (source / "app.txt").read_bytes() == b"after\n"
+    if short_reference:
+        assert references[0][0] is not None
 
 
 def assert_reviewed_change(
@@ -1146,13 +1416,17 @@ def test_windows_directory_query_preserves_exclusions_with_inherited_noglob(
     assert dict(os.environ) == environment
 
 
-def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pathspec_mode", ["GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"])
+def test_directory_content_digest_uses_git_file_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pathspec_mode: str
+) -> None:
     target = tmp_path / "target"
     initialize_unborn_git_repository(target)
     (target / ".gitignore").write_text("ignored-cache/\n")
     source = target / "app.py"
     source.write_text("print('fixture')\n")
     original_digest = directory_content_digest(target)
+    monkeypatch.setenv(pathspec_mode, "1")
 
     source.write_text("print('changed')\n")
     assert directory_content_digest(target) != original_digest
@@ -1562,6 +1836,8 @@ def test_copy_git_worktree_preserves_dangling_windows_directory_symlink(tmp_path
         "case-marker",
         "relative-pointer",
         "conditional",
+        "scoped-conditional",
+        "deep-gitfile",
     ],
 )
 def test_windows_root_inventory_retries_the_selected_git_directory(
@@ -1588,12 +1864,29 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
         marker_name = ".GIT" if case == "case-marker" else ".git"
         (worktree / marker_name).write_text(f"gitdir: {spelling}\n", encoding="utf-8")
     cwd = worktree
-    if case == "scoped":
-        cwd = worktree / "subdir"
-        cwd.mkdir()
+    expected = b"README.md\0"
+    scoped = case in {"scoped", "scoped-conditional"}
+    if scoped:
+        scope = Path("component[ab]", "nested")
+        cwd = worktree / scope
+        cwd.mkdir(parents=True)
+        (source / scope).mkdir(parents=True)
+        (source / scope / "selected.txt").write_text("selected\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "--", (scope / "selected.txt").as_posix()], cwd=source, check=True
+        )
+        expected = b"selected.txt\0"
+    if case == "deep-gitfile":
+        while len(os.fsencode(os.path.relpath(worktree / ".git", cwd))) <= len(
+            os.fsencode(worktree / ".git")
+        ):
+            cwd /= "d"
+        cwd.mkdir(parents=True)
     native = workbench_target.git_command
     args = ("ls-files", "--cached", "-z", "--", ".")
-    expected = b"README.md\0"
+    marker = Path("..", "..", ".git") if scoped else Path(".git")
+    if case == "deep-gitfile":
+        marker = worktree / ".git"
     expected_status = 0
     input_data = None
     overrides = {"GIT_TRACE_SETUP": "1"}
@@ -1606,21 +1899,19 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
         overrides["GIT_NOGLOB_PATHSPECS"] = "0"
         expected_status = 1
         expected = b""
-    if case == "conditional":
+    if case in {"conditional", "scoped-conditional"}:
         excludes = tmp_path / "ignore"
         excludes.write_text("visible.fixture\n", encoding="utf-8")
         include = tmp_path / "included"
         include.write_text(f'[core]\n  excludesFile = "{excludes.as_posix()}"\n', encoding="utf-8")
         config = tmp_path / "gitconfig"
-        config.write_text(
-            '[includeIf "gitdir:./checkout/**"]\n  path = included\n',
-            encoding="utf-8",
-        )
+        pattern = "./source/.git" if scoped else "./checkout/**"
+        config.write_text(f'[includeIf "gitdir:{pattern}"]\n  path = included\n', encoding="utf-8")
         monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
         monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-        (worktree / "visible.fixture").write_text("selected\n", encoding="utf-8")
+        (cwd / "visible.fixture").write_text("selected\n", encoding="utf-8")
         args = ("ls-files", "--others", "--exclude-standard", "-z", "--", "visible.fixture")
-        expected = b"visible.fixture\0"
+        expected = b"" if scoped else b"visible.fixture\0"
     english = subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
     first = (
         subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' zu gro\xc3\x9f\n")
@@ -1637,16 +1928,22 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
             return (
                 english if (kwargs["environment_overrides"] or {}).get("LC_ALL") == "C" else first
             )
-        assert directory == Path(".git")
+        assert directory == marker
         assert kwargs["environment_overrides"] == overrides
         assert kwargs["input_data"] == input_data
         with pytest.raises(PermissionError):
             metadata.rename(source / "moved")
+        if scoped:
+            for pinned in (cwd, cwd.parent):
+                with pytest.raises(PermissionError):
+                    pinned.rename(pinned.with_name("moved"))
         if worktree != source:
             with pytest.raises(PermissionError), (worktree / ".git").open("r+b"):
                 pass
         if case == "failed-retry":
             return subprocess.CompletedProcess([], 1, b"", b"fixture read failed")
+        if case == "deep-gitfile":
+            return subprocess.CompletedProcess([], 0, expected, b"trace verified gitfile")
         return native(target, *args, **kwargs)
 
     monkeypatch.setattr(workbench_target, "git_command", reject_long_argument)
@@ -1658,11 +1955,11 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
         input_data=input_data,
         environment_overrides=overrides.copy(),
     )
-    if case in {"scoped", "different-pointer", "relative-pointer", "case-marker"}:
+    if case in {"different-pointer", "relative-pointer", "case-marker"}:
         assert result is first and calls == [metadata]
     else:
         initial = [metadata, metadata] if case == "localized" else [metadata]
-        assert calls == [*initial, Path(".git")]
+        assert calls == [*initial, marker]
         if case == "failed-retry":
             assert result is first
         else:
@@ -1677,7 +1974,9 @@ def test_root_git_marker_declines_unsupported_paths_without_opening_directories(
 ) -> None:
     import windows_scan_local_files as windows_files
 
-    monkeypatch.setattr(windows_files, "_GetDriveTypeW", lambda _anchor: 3)
+    monkeypatch.setattr(
+        windows_files, "_GetDriveTypeW", lambda anchor: 4 if anchor == "D:\\" else 3
+    )
 
     def unexpected_open(*_args, **_kwargs):
         pytest.fail("unsupported paths must be declined before opening directories")
@@ -1685,6 +1984,7 @@ def test_root_git_marker_declines_unsupported_paths_without_opening_directories(
     monkeypatch.setattr(windows_files, "_open_directory", unexpected_open)
     for target, metadata in (
         (r"C:\repo", r"D:\metadata"),
+        (r"C:\repo", r"\\server.invalid\share\metadata"),
         (r"\\?\C:\repo", r"\\?\C:\metadata"),
         (r"\\server.invalid\share\repo", r"\\server.invalid\share\metadata"),
         (r"C:checkout", r"C:\metadata"),
@@ -1692,12 +1992,63 @@ def test_root_git_marker_declines_unsupported_paths_without_opening_directories(
     ):
         with windows_files.pinned_root_git_marker(Path(target), Path(metadata)) as selected:
             assert selected is None
+    root = Path(r"C:\repo")
+    for cwd in (Path(r"C:\repo-other\scope"), root / ".." / "scope", Path(r"D:\repo\scope")):
+        with windows_files.pinned_root_git_marker(cwd, root / ".git", work_tree=root) as selected:
+            assert selected is None
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows drive semantics")
+def test_root_git_marker_pins_the_checkout_and_metadata_on_independent_fixed_drives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import MagicMock
+
+    import windows_scan_local_files as windows_files
+
+    root, metadata = Path(r"C:\worktree"), Path(r"D:\metadata")
+    scope = root / "selected"
+    marker = tmp_path / "gitfile"
+    marker.write_bytes(f"gitdir: {metadata.as_posix()}\n".encode())
+    drives = []
+    opened = []
+
+    def fixed_drive(anchor):
+        drives.append(anchor)
+        return 3
+
+    def open_fixture(path):
+        opened.append(path)
+        return MagicMock(value=path)
+
+    monkeypatch.setattr(windows_files, "_GetDriveTypeW", fixed_drive)
+    monkeypatch.setattr(windows_files, "_open_directory", open_fixture)
+
+    monkeypatch.setattr(windows_files, "_final_path", windows_files._extended_path)
+
+    def open_marker(parent, name, context):
+        assert (parent, name) == (root, ".git")
+        return os.open(marker, os.O_RDONLY | os.O_BINARY), name
+
+    monkeypatch.setattr(windows_files, "open_read_fd_with_path", open_marker)
+    with windows_files.pinned_root_git_marker(scope, metadata, work_tree=root) as selected:
+        assert selected == Path("..", ".git")
+        assert opened == [
+            Path(root.anchor),
+            root,
+            scope,
+            Path(metadata.anchor),
+            metadata,
+        ]
+    assert set(drives) == {root.anchor, metadata.anchor}
 
 
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+@pytest.mark.parametrize("inside_scope", [False, True])
 def test_root_git_marker_refuses_a_reparse_ancestor_before_descending(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inside_scope: bool
 ) -> None:
     import _winapi
     import ctypes
@@ -1710,8 +2061,12 @@ def test_root_git_marker_refuses_a_reparse_ancestor_before_descending(
     cwd.mkdir()
     ordinary = tmp_path / "ordinary"
     (ordinary / "metadata").mkdir(parents=True)
-    link = tmp_path / "link"
+    link = (cwd if inside_scope else tmp_path) / "link"
     _winapi.CreateJunction(str(ordinary), str(link))
+    metadata = cwd / ".git" if inside_scope else link / "metadata"
+    scope = link / "metadata" if inside_scope else cwd
+    if inside_scope:
+        metadata.mkdir()
     visited = []
     open_directory = windows_files._open_directory
     resolve = Path.resolve
@@ -1727,9 +2082,43 @@ def test_root_git_marker_refuses_a_reparse_ancestor_before_descending(
 
     monkeypatch.setattr(windows_files, "_open_directory", observe)
     monkeypatch.setattr(Path, "resolve", no_link_resolution)
-    with windows_files.pinned_root_git_marker(cwd, link / "metadata") as selected:
+    with windows_files.pinned_root_git_marker(scope, metadata, work_tree=cwd) as selected:
         assert selected is None
     assert link in visited
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows Git directory inventory")
+def test_long_git_metadata_keeps_nested_directory_inventory_scoped(tmp_path: Path) -> None:
+    import _winapi
+    import ctypes
+
+    import workbench_target
+
+    if len(tmp_path.drive) != 2 or ctypes.windll.kernel32.GetDriveTypeW(tmp_path.anchor) != 3:
+        pytest.skip("requires an ordinary fixed local drive")
+    seed = tmp_path / "seed"
+    initialize_git_repository(seed)
+    subprocess.run(["git", "config", "core.longpaths", "true"], cwd=seed, check=True)
+    # More than 220 UTF-8 bytes in --git-dir without requiring a long Win32 component.
+    checkout = tmp_path / ("界" * 75)
+    shutil.copytree(seed, checkout)
+    scope = checkout / "selected[ab]" / "component"
+    scope.mkdir(parents=True)
+    (scope / "source.txt").write_text("selected\n")
+    (checkout / "selecteda").mkdir()
+    (checkout / "selecteda" / "outside.txt").write_text("sibling\n")
+    (checkout / ".gitignore").write_text("ignored/\n")
+    (scope / "ignored").mkdir()
+    (scope / "ignored" / "excluded.txt").write_text("ignored\n")
+    external = tmp_path / "external"
+    external.mkdir()
+    _winapi.CreateJunction(str(external), str(scope / "empty-junction"))
+
+    assert set(workbench_target.git_directory_snapshot_paths(scope)) == {
+        scope / "source.txt",
+        scope / "empty-junction",
+    }
 
 
 def test_copy_skips_index_paths_under_a_directory_replaced_by_a_file(tmp_path: Path) -> None:

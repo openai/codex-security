@@ -54,6 +54,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
+from windows_scan_local_files import pin_replay_metadata
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -86,6 +87,8 @@ from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
     loaded_plugin_version,
+    prepare_cli_scan_target,
+    register_windows_resume_output,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -117,6 +120,7 @@ from workbench_source_scopes import (
     safe_source_path,
 )
 from workbench_target import (
+    checked_scan_target,
     clean_worktree_content_digest,
     copy_directory_excluding,
     copy_git_worktree_files,
@@ -1091,7 +1095,7 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
 def complete_budget_exhausted_scan(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
-    """Stop a running CLI Deep Scan and preserve its results after its budget is exhausted."""
+    """Stop a budget-exhausted Deep Scan."""
     scan_id = require_uuid(args.scan_id, "scan-id")
     cost_json = parse_scan_cost(args.cost_json)
     if cost_json is None:
@@ -1277,7 +1281,6 @@ def complete_scan_locked(
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
     if cost_stop is not None:
-        # The budget draft already contains the settled discovery and validation decisions.
         completion_binding["status"] = "failed"
     if scan["recipe_json"] is not None:
         missing_drafts = []
@@ -1458,7 +1461,8 @@ def complete_scan_locked(
             """
             UPDATE scans
             SET status = ?, failure_message = ?, phase = 'reporting', completed_at = ?, updated_at = ?,
-                seal_manifest_digest = ?, cost_json = ?, completion_warnings_json = ?
+                log_completed_at = ?, seal_manifest_digest = ?, cost_json = ?,
+                completion_warnings_json = ?
             WHERE id = ? AND status = 'running'
             """,
             (
@@ -1466,6 +1470,7 @@ def complete_scan_locked(
                 cost_stop,
                 timestamp,
                 timestamp,
+                now(),
                 manifest_digest,
                 cost_json,
                 json.dumps(warnings),
@@ -1508,6 +1513,17 @@ def register_cli_scan(
     an output directory, coordinate archiving with registration so previous results
     can still be located. Return the scan ID, contract, and target metadata.
     """
+    # A selected plugin may replace __main__ while delegating to this workbench.
+    before_output_change = before_archive or getattr(
+        sys, "_codex_security_before_output_change", None
+    )
+
+    def acknowledge_output_change() -> None:
+        nonlocal before_output_change
+        if before_output_change is not None:
+            before_output_change()
+            before_output_change = None
+
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = None
@@ -1558,7 +1574,9 @@ def register_cli_scan(
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
-    target_identity = scan_target_identity(repository, diff_target)
+    target_identity, resume_target = prepare_cli_scan_target(
+        repository, diff_target, mode, launch_kind
+    )
     source_scopes = capture_source_scopes(
         repository,
         target_identity,
@@ -1592,7 +1610,7 @@ def register_cli_scan(
                             scan_dir,
                             timestamp,
                             require_canonical_scan_directory,
-                            before_archive=before_archive,
+                            before_archive=acknowledge_output_change,
                         )
                     )
                     break
@@ -1611,7 +1629,6 @@ def register_cli_scan(
                     if remaining <= 0:
                         raise
                     connection.rollback()
-                    before_archive = None  # The host already acknowledged this registration.
                     scan_dir = None  # Revalidate the directory and its owner under the next lock.
                     time.sleep(min(0.05, remaining))
                     connection.execute("BEGIN IMMEDIATE")
@@ -1674,6 +1691,12 @@ def register_cli_scan(
             )
             if workflow_id is not None:
                 register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
+            if resume_target is not None:
+                archive.enter_context(
+                    register_windows_resume_output(
+                        connection, scan_id, scan_dir, resume_target, acknowledge_output_change
+                    )
+                )
             scan = connection.execute(
                 "SELECT scans.*, snapshot AS lifecycle_json FROM scans "
                 "JOIN scan_lifecycles ON scan_id = scans.id WHERE scans.id = ?",
@@ -2354,12 +2377,17 @@ def require_reviewed_patch_applied(
     excluded = (Path(scan["scan_dir"]),)
     # Unborn repositories still need their config while metadata junctions are deferred.
     git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
+    metadata = Path(git_dir) if git_dir is not None else None
     if not unversioned:
         repository, pathspec = git_worktree_context(target)
         if git_dir is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
         excluded += tuple(path for path, _ in git_submodule_entries(target))
-    with tempfile.TemporaryDirectory(prefix="codex-security-remediation-") as temporary:
+    with (
+        tempfile.TemporaryDirectory(prefix="codex-security-remediation-") as temporary,
+        ExitStack() as pins,
+    ):
+        pinned_metadata = pin_replay_metadata(pins, metadata, Path(temporary))
         reviewed_patch = Path(temporary) / "reviewed.patch"
         digest = hashlib.sha256()
         with open_scan_local_file(Path(scan["scan_dir"]), patch_path) as source:
@@ -2375,35 +2403,28 @@ def require_reviewed_patch_applied(
             junctions = copy_directory_excluding(target, checkout, excluded)
         else:
             _, junctions = copy_git_worktree_files(target, checkout_root, excluded)
-        arguments = ["apply", "--reverse", "--whitespace=nowarn"]
-        if unversioned:
-            arguments.append("--no-index")
-        elif pathspec != ".":
-            arguments.append(f"--directory={pathspec}")
-        arguments.append(str(reviewed_patch))
-        applied = git_command(
-            checkout if unversioned else checkout_root,
-            *arguments,
-            text=False,
-            git_dir=Path(git_dir) if git_dir is not None else None,
-            work_tree=checkout_root if git_dir is not None else None,
+        short, replay_root = remediation_state.reverse_reviewed_patch(
+            target,
+            checkout_root,
+            metadata,
+            pinned_metadata,
+            remediation["patch_digest"],
+            pins,
+            reviewed_patch,
+            None if unversioned else pathspec,
         )
-        if applied.returncode != 0:
-            raise SystemExit(
-                "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
-            )
         restore_directory_junctions(
             target if unversioned else repository,
             checkout if unversioned else checkout_root,
             junctions,
         )
         reverted_digest = (
-            directory_content_digest(checkout)
+            directory_content_digest(checkout, replay_git_dir=replay_root)
             if unversioned
             else worktree_content_digest_for_context(
                 checkout_root,
                 pathspec or ".",
-                git_dir=Path(git_dir),
+                git_dir=short or metadata,
                 work_tree=checkout_root,
             )
         )
@@ -2414,12 +2435,16 @@ def require_reviewed_patch_applied(
                 checkout,
                 "-c",
                 "core.autocrlf=input",
-                *arguments,
+                "apply",
+                "--reverse",
+                "--whitespace=nowarn",
+                "--no-index",
+                str(reviewed_patch),
                 text=True,
             )
             if applied_without_conversion.returncode == 0:
                 restore_directory_junctions(target, checkout, junctions)
-                reverted_digest = directory_content_digest(checkout)
+                reverted_digest = directory_content_digest(checkout, replay_git_dir=replay_root)
         if reverted_digest != remediation["base_content_digest"]:
             raise SystemExit(
                 "The selected checkout contains changes outside the reviewed patch. Remove them before recording the patch as applied."
@@ -2825,6 +2850,7 @@ def scan_result(
         "artifacts": artifacts,
         **model_fields,
         "canceledAt": scan["canceled_at"],
+        "logCompletedAt": scan["log_completed_at"],
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
@@ -2875,7 +2901,8 @@ def remediation_availability(scan: sqlite3.Row) -> tuple[bool, str | None]:
     if scan["status"] != "complete":
         return False, remediation_state.SCAN_STATUS_ERROR
     try:
-        current_revision = git_revision(require_scan_target_identity(scan))
+        with checked_scan_target(scan) as target:
+            current_revision = git_revision(target)
     except SystemExit as exc:
         return False, str(exc)
     expected_revision = scan["target_revision"]

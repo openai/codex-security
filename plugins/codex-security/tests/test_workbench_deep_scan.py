@@ -133,6 +133,9 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
         connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
         connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("ALTER TABLE scans DROP COLUMN windows_resume_target_identity")
+        connection.execute("ALTER TABLE scans DROP COLUMN windows_resume_output_identity")
+        connection.execute("ALTER TABLE scans DROP COLUMN log_completed_at")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_kind")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_plugin_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
@@ -3159,6 +3162,7 @@ def test_saturated_run_without_manifest_can_be_marked_failed_or_interrupted(
     assert scan["progress"]["status"] == "failed"
     assert scan["progress"]["independentReviews"]["consolidating"] is False
     assert scan["failureMessage"] == terminal["error"]
+    assert scan["logCompletedAt"] == terminal["completedAt"]
 
 
 def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path) -> None:

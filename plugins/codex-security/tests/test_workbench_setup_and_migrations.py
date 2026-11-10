@@ -108,6 +108,9 @@ EXPECTED_MIGRATIONS = [
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
     (63, "retain unverified Deep Scan worker attempts"),
+    (64, "persist scan log completion boundaries"),
+    (65, "bind Windows Deep Scan resume output directories"),
+    (66, "bind Windows Deep Scan resume checkouts"),
 ]
 
 
@@ -769,14 +772,31 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     assert "revision recorded by the parent repository" in str(failed["stderr"])
 
 
-def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("target_name", "outside_name"),
+    [
+        pytest.param(":(top,glob)**", "outside.py", id="top-glob", marks=pytest.mark.native_macos),
+        pytest.param(
+            "selected[ab]", "selecteda", id="bracket-glob", marks=pytest.mark.cross_platform
+        ),
+    ],
+)
+def test_nested_target_name_is_a_literal_git_pathspec(
+    tmp_path: Path, target_name: str, outside_name: str
+) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
-    target = repository / ":(top,glob)**"
-    target.mkdir()
+    target = repository / target_name
+    try:
+        target.mkdir()
+    except OSError as error:
+        if target_name == ":(top,glob)**" and error.errno == errno.EINVAL:
+            pytest.skip("The filesystem cannot create a directory with Git top/glob magic.")
+        raise
+    outside = repository / outside_name
     (target / "source.py").write_text("selected = True\n")
-    (repository / "outside.py").write_text("outside = 1\n")
+    outside.write_text("outside = 1\n")
     subprocess.run(["git", "add", "."], cwd=repository, check=True)
     subprocess.run(["git", "commit", "-qm", "Add selected target"], cwd=repository, check=True)
     revision = subprocess.check_output(
@@ -784,7 +804,8 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
     ).strip()
     workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
-    (repository / "outside.py").write_text("outside = 2\n")
+    outside.write_text("outside = 2\n")
+    assert get_scan(state_dir, scan_id, "--check-target")["scan"]["scanId"] == scan_id
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -1144,6 +1165,66 @@ def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
         "pluginVersion": None,
         "mock": None,
     }
+
+
+@pytest.mark.parametrize("preview_version", [48, 50, 63])
+def test_log_boundary_preview_preserves_saved_boundary_and_repairs_history(preview_version):
+    name = "persist scan log completion boundaries"
+    connection, apply_migrations = create_historical_database(
+        preview_version,
+        ((preview_version, name, "ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"),),
+    )
+    insert_historical_row(connection, "workspaces", "created", id="workspace")
+    insert_legacy_scan(
+        connection, "created", id="preview", workspace_id="workspace", log_completed_at="boundary"
+    )
+
+    apply_migrations(connection)
+    apply_migrations(connection)
+
+    assert (
+        connection.execute("SELECT log_completed_at FROM scans WHERE id = 'preview'").fetchone()[0]
+        == "boundary"
+    )
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (63,64) ORDER BY version"
+        )
+    ] == [(63, "retain unverified Deep Scan worker attempts"), (64, name)]
+    assert "worker_usage_gap" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
+
+
+def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
+    connection, apply_migrations = create_historical_database(64)
+    insert_historical_row(connection, "workspaces", "created", id="legacy-workspace")
+    for case in ("running", "complete", "failed", "canceled"):
+        insert_legacy_scan(
+            connection,
+            "later-edit",
+            id=case,
+            scan_dir=f"/legacy/{case}",
+            status="failed" if case == "canceled" else case,
+            completed_at=None if case == "running" else "artifact-time",
+            canceled_at="cancel-time" if case == "canceled" else None,
+        )
+    connection.commit()
+    before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+
+    apply_migrations(connection)
+
+    after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+    assert after == [
+        {
+            **row,
+            "log_completed_at": None,
+            "windows_resume_output_identity": None,
+            "windows_resume_target_identity": None,
+        }
+        for row in before
+    ]
 
 
 @pytest.mark.parametrize(
