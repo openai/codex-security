@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import (
     ContractError,
     _prepare_scan_finalization,
@@ -29,7 +30,7 @@ from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LO
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
-from workbench_target import git_output, require_scan_target_identity
+from workbench_target import git_output, require_remediation_target, require_scan_target_identity
 from workbench_validation import timestamp_key
 
 
@@ -68,6 +69,51 @@ def preserve_sealed_completion(
     return binding
 
 
+def _windows_resume_checkout(scan: sqlite3.Row) -> Path:
+    from windows_scan_local_files import pinned_resume_checkout
+
+    try:
+        repository = require_remediation_target(scan["target_path"])
+    except SystemExit as exc:
+        raise SystemExit(
+            "Cannot resume: the original checkout is missing or was replaced."
+        ) from exc
+
+    binding = scan["windows_resume_target_identity"]
+    stored = (scan["target_device"], scan["target_inode"])
+    snapshot = (scan["target_revision"], scan["target_snapshot_digest"])
+    if binding is None:
+        metadata = repository.stat()
+        if tuple(map(serialize_filesystem_identity, (metadata.st_dev, metadata.st_ino))) == stored:
+            if scan_target_identity(repository, None) != (*snapshot, *stored):
+                raise SystemExit(
+                    "Cannot resume: the original checkout revision or contents changed."
+                )
+            return repository
+
+    with pinned_resume_checkout(repository) as native:
+        if binding is not None:
+            if native is None:
+                raise SystemExit("Cannot verify the original Windows checkout identity.")
+            if list(native) != json.loads(binding):
+                raise SystemExit("Cannot resume: the original checkout is missing or was replaced.")
+        # An older record can prove the full identity when its values exceed the
+        # 32-bit volume or 64-bit file index returned by the old stat implementation.
+        elif (
+            native is None
+            or (native[0] < 1 << 32 and native[1] < 1 << 64)
+            or tuple(map(serialize_filesystem_identity, native)) != stored
+        ):
+            raise SystemExit(
+                "Cannot verify the saved Windows checkout identity with this Python runtime. "
+                "Resume with its original Python runtime or start a new scan with "
+                f"'codex-security scans rerun {scan['id']}'."
+            )
+        if scan_target_identity(repository, None)[:2] != snapshot:
+            raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
+    return repository
+
+
 def cli_scan_resume(
     wb: Any,
     connection: sqlite3.Connection,
@@ -97,19 +143,25 @@ def cli_scan_resume(
         run["status"] not in {"running", "succeeded"} or run["cancel_requested"]
     ):
         raise SystemExit("This Deep Scan has stopped and cannot resume.")
-    try:
-        repository = require_scan_target_identity(scan)
-    except SystemExit as exc:
-        raise SystemExit(
-            "Cannot resume: the original checkout is missing or was replaced."
-        ) from exc
-    if scan_target_identity(repository, None) != (
-        scan["target_revision"],
-        scan["target_snapshot_digest"],
-        scan["target_device"],
-        scan["target_inode"],
-    ):
-        raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
+    if os.name == "nt":
+        try:
+            repository = _windows_resume_checkout(scan)
+        except OSError as exc:
+            raise SystemExit(f"Cannot verify the original Windows checkout: {exc}") from exc
+    else:
+        try:
+            repository = require_scan_target_identity(scan)
+        except SystemExit as exc:
+            raise SystemExit(
+                "Cannot resume: the original checkout is missing or was replaced."
+            ) from exc
+        if scan_target_identity(repository, None) != (
+            scan["target_revision"],
+            scan["target_snapshot_digest"],
+            scan["target_device"],
+            scan["target_inode"],
+        ):
+            raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
     recipe = wb.parse_scan_recipe(scan["recipe_json"], repository)
     scan_dir = wb.require_canonical_scan_directory(Path(scan["scan_dir"]))
     if os.name == "nt":

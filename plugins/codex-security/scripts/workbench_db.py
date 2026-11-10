@@ -86,6 +86,7 @@ from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
     loaded_plugin_version,
+    prepare_cli_scan_target,
     register_windows_resume_output,
     safe_segment,
     scan_diff_identity,
@@ -1566,7 +1567,9 @@ def register_cli_scan(
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
-    target_identity = scan_target_identity(repository, diff_target)
+    target_identity, resume_target = prepare_cli_scan_target(
+        repository, diff_target, mode, launch_kind
+    )
     source_scopes = capture_source_scopes(
         repository,
         target_identity,
@@ -1681,9 +1684,12 @@ def register_cli_scan(
             )
             if workflow_id is not None:
                 register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
-            if os.name == "nt" and mode == "deep" and launch_kind == "scan":
-                acknowledge_output_change()
-                archive.enter_context(register_windows_resume_output(connection, scan_id, scan_dir))
+            if resume_target is not None:
+                archive.enter_context(
+                    register_windows_resume_output(
+                        connection, scan_id, scan_dir, resume_target, acknowledge_output_change
+                    )
+                )
             scan = connection.execute(
                 "SELECT scans.*, snapshot AS lifecycle_json FROM scans "
                 "JOIN scan_lifecycles ON scan_id = scans.id WHERE scans.id = ?",
