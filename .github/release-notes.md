@@ -36,6 +36,7 @@
 - register local marketplaces in Codex homes containing a hash ([#2547](https://github.com/openai/codex-security/pull/2547))
 - preserve whitespace in POSIX state directory overrides ([#2548](https://github.com/openai/codex-security/pull/2548))
 - record the Wolfi Canvas 1.1.0 source and Skia notice ([#2549](https://github.com/openai/codex-security/pull/2549))
+- preserve trailing whitespace in POSIX scan roots ([#2552](https://github.com/openai/codex-security/pull/2552))
 
 </details>
 
