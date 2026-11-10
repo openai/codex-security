@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -64,6 +65,20 @@ export function scanReadProof(): Record<string, boolean> {
       heldRoot.close();
       renameSync(scan, moved);
       renameSync(moved, scan);
+    }
+    if (process.platform === "linux") {
+      chmodSync(artifacts, 0o100);
+      chmodSync(scan, 0o100);
+      try {
+        const searchable = openRoot(scan);
+        assert.deepEqual(
+          chunks(openFile(searchable, "artifacts/receipt.json")),
+          payload,
+        );
+      } finally {
+        chmodSync(scan, 0o700);
+        chmodSync(artifacts, 0o700);
+      }
     }
     const root = openRoot(scan);
     assert.deepEqual(chunks(openFile(root, "artifacts/receipt.json")), payload);
