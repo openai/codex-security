@@ -11853,7 +11853,7 @@ async function readDeepScanStop(
     | undefined;
   if (state?.terminalReason === "saturated") {
     return {
-      reason: `The last ${state.noNewStreak} review rounds found no new issues. More issues may remain.`,
+      reason: `The last ${state.noNewStreak} review round${state.noNewStreak === 1 ? "" : "s"} found no new issues. More issues may remain.`,
     };
   }
   if (state?.terminalReason !== "capped") return undefined;
@@ -11864,7 +11864,7 @@ async function readDeepScanStop(
     state.dispatchedCount >= maxDiscoveryRuns
   ) {
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review round${maxDiscoveryRuns === 1 ? "" : "s"}. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
