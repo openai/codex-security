@@ -39,6 +39,7 @@ import * as deepScan from "../src/deep-scan.js";
 import type { Finding, SeverityLevel } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
 import * as runtime from "../src/runtime.js";
+import * as cyberAccess from "../src/scan-cyber-access.js";
 import { normalizeTarget, nullIfMissingFile } from "../src/targets.js";
 import {
   matchScanFindings,
@@ -974,19 +975,11 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
   ).toBe(true);
 });
 
-test("component matching requests Blue with the bundled model catalog", async () => {
-  const paths = await fixture();
+async function bundledScanOptions() {
   const catalog = fileURLToPath(
     new URL("./fixtures/native-skill-model-catalog.json", import.meta.url),
   );
-  using turn = spyOn(Thread.prototype, "run").mockResolvedValue({
-    finalResponse: JSON.stringify(noMatches),
-    items: [],
-    usage: null,
-  });
-  const result = await scan(paths, {
-    components: components.slice(0, 2),
-    matchFindings: undefined,
+  return {
     environment: {
       PATH: process.env["PATH"],
       SystemRoot: process.env["SystemRoot"],
@@ -1001,6 +994,20 @@ test("component matching requests Blue with the bundled model catalog", async ()
         openai_base_url: "http://127.0.0.1:1/v1",
       },
     },
+  };
+}
+
+test("component matching requests Blue with the bundled model catalog", async () => {
+  const paths = await fixture();
+  using turn = spyOn(Thread.prototype, "run").mockResolvedValue({
+    finalResponse: JSON.stringify(noMatches),
+    items: [],
+    usage: null,
+  });
+  const result = await scan(paths, {
+    components: components.slice(0, 2),
+    matchFindings: undefined,
+    ...(await bundledScanOptions()),
   });
   expect(result.deduplication?.error).toBeUndefined();
   expect(
@@ -1598,30 +1605,32 @@ test.each(["directories", "manifests", "root files"])(
 test("plans large inventories in separate contexts and fills omissions within each batch", async () => {
   const paths = await largePlanningFixture();
   const batches: string[][] = [];
-  let threads = 0;
-  const plan = await planComponents(paths.repository, {
-    cyberAccessProgram: "daybreak_red",
-    codex: {
-      startThread: () => {
-        threads++;
-        return {
-          run: async (prompt, options) => {
-            expect(options.cyberAccessProgram).toBe("daybreak_red");
-            expect(prompt.length).toBeLessThanOrEqual(1_048_576);
-            const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
-            batches.push(scopes);
-            return {
-              finalResponse: JSON.stringify({
-                components: [{ name: "Selected", paths: [scopes[0]] }],
-              }),
-            };
-          },
-        };
-      },
+  const threads = new Set<Thread>();
+  using discovery = spyOn(cyberAccess, "resolveScanCyberAccessProgram");
+  using _turn = spyOn(Thread.prototype, "run").mockImplementation(
+    async function (this: Thread, input, options) {
+      threads.add(this);
+      expect(options?.cyberAccessProgram).toBe("daybreak_blue");
+      const prompt = String(input);
+      expect(prompt.length).toBeLessThanOrEqual(1_048_576);
+      const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+      batches.push(scopes);
+      return {
+        finalResponse: JSON.stringify({
+          components: [{ name: "Selected", paths: [scopes[0]] }],
+        }),
+        items: [],
+        usage: null,
+      };
     },
-  });
-  expect(threads).toBeGreaterThan(1);
-  expect(threads).toBe(batches.length);
+  );
+  const plan = await planComponents(
+    paths.repository,
+    await bundledScanOptions(),
+  );
+  expect(discovery).toHaveBeenCalledTimes(1);
+  expect(threads.size).toBeGreaterThan(1);
+  expect(threads.size).toBe(batches.length);
   expect(plan.components.some(({ name }) => name === "Other files")).toBe(true);
   const contains = (parent: string, file: string) =>
     file === parent || file.startsWith(`${parent}/`);

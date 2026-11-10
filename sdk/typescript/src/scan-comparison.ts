@@ -164,6 +164,9 @@ interface ReadOnlyCodex {
   };
 }
 
+/** @internal */
+type StartReadOnlyThread = () => ReturnType<ReadOnlyCodex["startThread"]>;
+
 export interface ReadOnlyCodexOptions {
   /** @internal Repository being scanned when this helper plans or matches components. */
   componentRepository?: string;
@@ -340,12 +343,6 @@ export async function matchScanFindingsInternal(
       }
     }
   }
-  const { thread, cleanup, cyberAccessProgram } =
-    await startReadOnlyCodexThread(options, {
-      ...runtimeOptions,
-      command: "compare",
-      threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
-    });
   const remainingPages = new Set(pages.keys());
   remainingPages.delete(0);
   const evidenceCursors = new Map<string, EvidenceCursor>();
@@ -364,23 +361,19 @@ export async function matchScanFindingsInternal(
       }),
     );
   };
-  const turnOptions = {
-    // Native structured output requires every field; saved results can omit related.
-    outputSchema: z.toJSONSchema(matchingTurnSchema.required(), {
-      target: "draft-7",
-    }),
-    cyberAccessProgram,
-    signal: options.signal,
-  };
-  let prompt = comparisonPrompt(pages[0]!, 0, pages.length, crossModeSites);
-  progress("catalogue", 1);
-  try {
+  const compare = async (
+    startThread: StartReadOnlyThread,
+    turnOptions: TurnOptions,
+  ) => {
+    const thread = startThread();
+    let prompt = comparisonPrompt(pages[0]!, 0, pages.length, crossModeSites);
+    progress("catalogue", 1);
     for (;;) {
       options.signal?.throwIfAborted();
-      const turn = await thread.run(prompt, turnOptions);
+      const { finalResponse } = await thread.run(prompt, turnOptions);
       let response: unknown;
       try {
-        response = JSON.parse(turn.finalResponse);
+        response = JSON.parse(finalResponse);
       } catch (error) {
         throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
           cause: error,
@@ -552,21 +545,32 @@ export async function matchScanFindingsInternal(
       progress("complete");
       return expanded.comparison;
     }
-  } finally {
-    await cleanup?.();
-  }
+  };
+  return await withReadOnlyCodex(
+    options,
+    {
+      ...runtimeOptions,
+      command: "compare",
+      threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
+    },
+    // Native structured output requires every field; saved results can omit related.
+    z.toJSONSchema(matchingTurnSchema.required(), { target: "draft-7" }),
+    compare,
+  );
 }
 
-async function startReadOnlyCodexThread(
+/** @internal Prepare one read-only client. Each new thread starts with an empty conversation. */
+export async function withReadOnlyCodex<T>(
   options: ReadOnlyCodexOptions,
   runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
     nativeProviderEnvironment?: Record<string, string>;
   },
-): Promise<{
-  thread: ReturnType<ReadOnlyCodex["startThread"]>;
-  cyberAccessProgram?: CyberAccessProgram;
-  cleanup?: () => Promise<void>;
-}> {
+  outputSchema: unknown,
+  use: (
+    startThread: StartReadOnlyThread,
+    turnOptions: TurnOptions,
+  ) => Promise<T>,
+): Promise<T> {
   let source: NodeJS.ProcessEnv = {
     ...(options.environment ?? process.env),
     CODEX_HOME: scanCodexHome(options.environment ?? process.env),
@@ -592,12 +596,17 @@ async function startReadOnlyCodexThread(
     workingDirectory: options.workingDirectory ?? process.cwd(),
     skipGitRepoCheck: true,
   };
-  if (options.codex !== undefined) {
-    return {
-      thread: options.codex.startThread(threadOptions),
-      cyberAccessProgram: options.cyberAccessProgram,
-    };
-  }
+  const useClient = (
+    client: ReadOnlyCodex,
+    cyberAccessProgram?: CyberAccessProgram,
+  ) =>
+    use(() => client.startThread(threadOptions), {
+      outputSchema,
+      cyberAccessProgram,
+      signal: options.signal,
+    });
+  if (options.codex !== undefined)
+    return useClient(options.codex, options.cyberAccessProgram);
   const { componentRepository } = options;
   if (componentRepository !== undefined) {
     const root =
@@ -798,14 +807,9 @@ async function startReadOnlyCodexThread(
             profile.name,
             requestedPermissionProfile,
           );
-    return {
-      thread: codex.startThread(threadOptions),
-      cyberAccessProgram,
-      ...(ownProfile === undefined ? {} : { cleanup: ownProfile.cleanup }),
-    };
-  } catch (error) {
+    return await useClient(codex, cyberAccessProgram);
+  } finally {
     await ownProfile?.cleanup();
-    throw error;
   }
 }
 
@@ -819,18 +823,13 @@ export async function runReadOnlyCodex(
     threadSource: ReadOnlyCodexThreadSource;
   },
 ): Promise<string> {
-  const { thread, cleanup, cyberAccessProgram } =
-    await startReadOnlyCodexThread(options, runtimeOptions);
-  try {
-    const turn = await thread.run(prompt, {
-      outputSchema,
-      cyberAccessProgram,
-      signal: options.signal,
-    });
-    return turn.finalResponse;
-  } finally {
-    await cleanup?.();
-  }
+  const turn = await withReadOnlyCodex(
+    options,
+    runtimeOptions,
+    outputSchema,
+    (startThread, turnOptions) => startThread().run(prompt, turnOptions),
+  );
+  return turn.finalResponse;
 }
 
 export async function disabledMcpServers(
