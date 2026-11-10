@@ -1,4 +1,5 @@
 import { isUtf8 } from "node:buffer";
+import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import {
   basename,
@@ -207,11 +208,14 @@ export function projectConfigStarter(
     : `${relativeSchema.startsWith(".") ? "" : "./"}${encodeURI(
         relativeSchema.split(sep).join("/"),
       ).replace(/[#?]/gu, encodeURIComponent)}`;
+  const hasSchema = existsSync(schemaPath);
   if (projectConfigExtension(path) === ".json")
-    return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
+    return `${JSON.stringify(hasSchema ? { $schema: schema } : {}, null, 2)}\n`;
   return [
     "# This file is trusted like CLI options. Keep it outside untrusted inputs.",
-    `$schema: ${schema}`,
+    ...(hasSchema
+      ? [`$schema: ${schema}`]
+      : ["# Replace the empty mapping below when enabling settings.", "{}"]),
     "",
     "# Uncomment the settings you want to override. Defaults remain unpinned.",
     `# auth: ${DEFAULT_SCAN_AUTH}`,

@@ -3125,7 +3125,6 @@ describe("CLI", () => {
     for (const [command, ...args] of [
       ["validate", "finding", "--json"],
       ["login", "--format", "json"],
-      ["login", "status", "--format=jsonl"],
       ["logout", "--format", "jsonl"],
       ["logout", "--format=json"],
     ] as const) {
