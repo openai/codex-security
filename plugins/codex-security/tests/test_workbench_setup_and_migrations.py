@@ -110,6 +110,7 @@ EXPECTED_MIGRATIONS = [
     (63, "retain unverified Deep Scan worker attempts"),
     (64, "persist scan log completion boundaries"),
     (65, "bind Windows Deep Scan resume output directories"),
+    (66, "bind Windows Deep Scan resume checkouts"),
 ]
 
 
