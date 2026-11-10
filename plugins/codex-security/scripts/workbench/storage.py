@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any
+
+if os.name == "nt":
+    import windows_scan_local_files as windows_files
 
 
 def state_dir(*, canonical: bool = True) -> Path:
@@ -32,18 +36,37 @@ def worker_usage_directory(scan_id: str) -> Path:
     return state_dir() / "codex-home" / "worker-usage" / scan_id
 
 
+def short_archive_prefix(original_name: str) -> str:
+    """Bind a short archive name to the complete original filename."""
+    return f".previous-{hashlib.sha256(os.fsencode(original_name)).hexdigest()}-"
+
+
+def archive_source_directory(archive: Path, source: Path) -> Path | None:
+    """Return the original sibling when the archived name identifies it."""
+    if not source.is_relative_to(archive.parent):
+        return None
+    parts = source.relative_to(archive.parent).parts
+    if not parts or ".." in parts:
+        return None
+    name = parts[0]
+    if archive.name.startswith(f"{name}.previous-") or (
+        archive.name.startswith(".previous-")
+        and archive.name.startswith(short_archive_prefix(name))
+    ):
+        return archive.parent / name
+    return None
+
+
 def archived_deep_path(scan_dir: Path, value: str | None) -> str | None:
     """Resolve old archive rows that still name the original sibling output."""
     if value is None or ".previous-" not in scan_dir.name:
         return value
     path = Path(value)
-    if not path.is_relative_to(scan_dir.parent):
-        return value
-    parts = path.relative_to(scan_dir.parent).parts
-    if not parts or ".." in parts or not scan_dir.name.startswith(f"{parts[0]}.previous-"):
+    original = archive_source_directory(scan_dir, path)
+    if original is None:
         return value
     # Keep missing files inside the archive too. Never follow the replacement scan's output.
-    return str(scan_dir.joinpath(*parts[1:]))
+    return str(scan_dir / path.relative_to(original))
 
 
 def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[Any]:
@@ -66,92 +89,16 @@ def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> lis
     ]
 
 
-def _create_private_windows_directory(path: Path, *, exist_ok: bool) -> Path:
-    """Create one Windows directory with a protected inheritable DACL."""
-    import ctypes
-    import ctypes.wintypes
-
-    from windows_scan_local_files import verify_private_scan_root
-
-    class SecurityAttributes(ctypes.Structure):
-        _fields_ = [
-            ("length", ctypes.wintypes.DWORD),
-            ("descriptor", ctypes.wintypes.LPVOID),
-            ("inherit", ctypes.wintypes.BOOL),
-        ]
-
-    # Older supported Python releases ignore mkdir's 0700 mode on Windows.
-    # Apply the same owner/SYSTEM/Administrators policy at creation so a
-    # writable parent never becomes an inheritance window.
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    volume = ctypes.create_unicode_buffer(32768)
-    flags = ctypes.wintypes.DWORD()
-    if not kernel.GetVolumePathNameW(str(path.parent.resolve()), volume, len(volume)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if not kernel.GetVolumeInformationW(volume, None, 0, None, None, ctypes.byref(flags), None, 0):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if not flags.value & 0x8:  # FILE_PERSISTENT_ACLS
-        raise ValueError("Select a directory on a Windows volume that supports ACLs.")
-
-    security = ctypes.WinDLL("advapi32", use_last_error=True)
-    # GetCurrentProcessToken() is a Windows pseudo-handle and does not need closing.
-    token = ctypes.wintypes.HANDLE(-4)
-    token_user = 1  # TOKEN_INFORMATION_CLASS.TokenUser
-    size = ctypes.wintypes.DWORD()
-    security.GetTokenInformation(token, token_user, None, 0, ctypes.byref(size))
-    if ctypes.get_last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
-        raise ctypes.WinError(ctypes.get_last_error())
-    user = ctypes.create_string_buffer(size.value)
-    if not security.GetTokenInformation(token, token_user, user, size, ctypes.byref(size)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    # TOKEN_USER starts with SID_AND_ATTRIBUTES.Sid.
-    sid = ctypes.wintypes.LPWSTR()
-    if not security.ConvertSidToStringSidW(
-        ctypes.wintypes.LPVOID.from_buffer(user), ctypes.byref(sid)
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        owner = "" if exist_ok else f"O:{sid.value}"
-        dacl = f"{owner}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid.value})"
-    finally:
-        kernel.LocalFree(sid)
-
-    descriptor = ctypes.wintypes.LPVOID()
-    if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        dacl, 1, ctypes.byref(descriptor), None
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
-        if kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
-            if exist_ok:
-                return path
-            return verify_private_scan_root(path, descriptor)
-        error = ctypes.get_last_error()
-        if exist_ok and error == 183 and path.is_dir():  # ERROR_ALREADY_EXISTS
-            return path
-        raise ctypes.WinError(error)
-    finally:
-        kernel.LocalFree(descriptor)
-
-
-def create_private_directory(path: Path) -> None:
+def create_private_directory(path: Path, *, scan_output: bool = False) -> None:
     """Create missing directories privately without changing existing permissions."""
-    if os.name == "nt" and path.is_dir():
-        return
-    try:
-        if os.name == "nt":
-            _create_private_windows_directory(path, exist_ok=True)
-        else:
-            path.mkdir(mode=0o700, exist_ok=True)
-    except FileNotFoundError:
-        if path.parent == path:
-            raise
-        create_private_directory(path.parent)
-        if os.name == "nt":
-            _create_private_windows_directory(path, exist_ok=True)
-        else:
-            path.mkdir(mode=0o700, exist_ok=True)
+    if path.parent != path and not path.parent.is_dir():
+        create_private_directory(path.parent, scan_output=scan_output)
+    if os.name != "nt":
+        path.mkdir(mode=0o700, exist_ok=True)
+    elif not path.is_dir():
+        windows_files.create_private_directory(path, exist_ok=True, scan_output=scan_output)
+    elif scan_output:
+        windows_files.require_windows_output_path(path)
 
 
 def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
@@ -164,7 +111,7 @@ def create_private_temporary_directory(parent: Path, *, prefix: str) -> Path:
     for _ in range(100):
         path = parent / f"{prefix}{secrets.token_hex(4)}"
         try:
-            return _create_private_windows_directory(path, exist_ok=False)
+            return windows_files.create_private_directory(path, exist_ok=False, scan_output=True)
         except FileExistsError:
             continue
     raise FileExistsError(f"Could not create a unique directory beneath {parent}.")

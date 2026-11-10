@@ -1,5 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { isUtf8 } from "node:buffer";
+import { readFile, realpath } from "node:fs/promises";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -23,7 +25,7 @@ import {
   type ProjectConfigInput,
   type ProjectScope,
 } from "./project-config-schema.js";
-import { expandHome } from "./runtime.js";
+import { expandHomeForLookup } from "./runtime.js";
 import {
   DEFAULT_SCAN_AUTH,
   DEFAULT_SCAN_MODE,
@@ -132,10 +134,24 @@ export async function readProjectConfig(
   file: string,
   directory = process.cwd(),
 ): Promise<ProjectConfigSource> {
-  const path = resolve(directory, expandHome(file));
+  const selected = expandHomeForLookup(file);
+  const requested = isAbsolute(selected)
+    ? selected
+    : `${directory || "."}${sep}${selected}`;
+  const traversesParent = sep === "/" && requested.split("/").includes("..");
+  let path = traversesParent ? requested : resolve(directory, selected);
   const extension = projectConfigExtension(path);
   let text: string;
   try {
+    // Resolve the parent through the filesystem while retaining the selected filename.
+    if (traversesParent) {
+      const parent = await realpath(dirname(path), { encoding: "buffer" });
+      if (!isUtf8(parent))
+        throw new Error(
+          "The resolved configuration directory is not a valid UTF-8 path.",
+        );
+      path = resolve(parent.toString(), basename(path));
+    }
     text = await readFile(path, "utf8");
   } catch (error) {
     throw new ConfigurationError(

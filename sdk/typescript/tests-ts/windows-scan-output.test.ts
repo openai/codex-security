@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { symlinkSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -12,6 +13,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "bun:test";
+import { runComponentScans } from "../src/component-scan.js";
 import { loadContract } from "../src/contract.js";
 import { runMultiscan } from "../src/multiscan.js";
 import * as runtime from "../src/runtime.js";
@@ -27,6 +29,37 @@ const example = join(PLUGIN_ROOT, "examples", "completed-scan");
 
 const system = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32");
 const powershell = join(system, "WindowsPowerShell", "v1.0");
+
+windowsTest(
+  "a selected registration script keeps its ordinary entrypoint and stdin",
+  async () => {
+    const pluginRoot = await temporaryDirectory();
+    const scripts = join(pluginRoot, "scripts");
+    await mkdir(scripts);
+    await writeFile(
+      join(scripts, "workbench_db.py"),
+      [
+        "import json, sys",
+        "if __name__ == '__main__':",
+        "    print(json.dumps({'args': sys.argv[1:], 'fd': sys.stdin.fileno(), 'input': sys.stdin.buffer.read().decode('utf-8')}))",
+      ].join("\n"),
+    );
+    const args = ["register-cli-scan", "--plugin-option", "出力\0line\ntwo"];
+    const input = "\ncafé\r\nlast";
+    expect(
+      await runtime.runWorkbench(
+        {
+          python: await runtime.resolvePluginPython(),
+          pluginRoot,
+          environment: { SystemRoot: process.env["SystemRoot"] },
+          signal: new AbortController().signal,
+        },
+        args,
+        input,
+      ),
+    ).toEqual({ args, fd: 0, input });
+  },
+);
 
 async function icacls(path: string, ...args: string[]): Promise<void> {
   await exec(join(system, "icacls.exe"), [path, ...args]);
@@ -348,7 +381,12 @@ windowsTest("existing Windows scan ACLs are preserved", async () => {
   const output = join(root, "scan");
   await mkdir(output);
   // Built-in Users exists on every Windows host; only this fixture gets the grant.
-  await icacls(output, "/grant", "*S-1-5-32-545:(OI)(CI)M");
+  await icacls(
+    output,
+    "/grant",
+    "*S-1-5-32-545:(AD)",
+    "*S-1-5-32-545:(OI)(CI)(IO)M",
+  );
   const before = await descriptor(output);
   const permissions = await accessRules(output);
   expect(before).toContain(";;;BU)");
@@ -389,10 +427,97 @@ windowsTest(
     const root = paths.root;
     const output = join(root, "campaign");
     await mkdir(output);
-    await icacls(output, "/grant", "*S-1-5-32-545:(OI)(CI)M");
+    await icacls(
+      output,
+      "/grant",
+      "*S-1-5-32-545:(AD)",
+      "*S-1-5-32-545:(OI)(CI)(IO)M",
+    );
     const permissions = await accessRules(output);
     await createMultiscanCampaign(paths, output);
     expect(await accessRules(output)).toBe(permissions);
+  },
+);
+
+windowsTest.each([
+  "(RD,RA,REA,RC,S,WA)",
+  "(RD,RA,REA,RC,S,WD)",
+  "(RD,RA,REA,RC,S,WA,WD)",
+  "M",
+])(
+  "rejects component planning on an empty retaggable output with peer rights %s",
+  async (right) => {
+    const repository = await temporaryDirectory();
+    await writeFile(join(repository, "source.txt"), "Synthetic component");
+    const outputDir = await runtime.prepareOutputDir(
+      join(await temporaryDirectory(), "output"),
+      "fixture",
+    );
+    await icacls(outputDir, "/grant", `*S-1-1-0:${right}`);
+    const before = await descriptor(outputDir);
+    await expect(
+      runComponentScans({
+        repository,
+        outputDir,
+        components: [{ name: "Source", paths: ["source.txt"] }],
+        planOnly: true,
+      }),
+    ).rejects.toThrow("could not be trusted");
+    await expect(
+      lstat(join(outputDir, "components.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await descriptor(outputDir)).toBe(before);
+    await cp(example, outputDir, { recursive: true });
+    await loadContract(outputDir, { pluginRoot: PLUGIN_ROOT });
+  },
+);
+
+windowsTest(
+  "resumes a campaign whose retained artifacts keep it nonempty",
+  async () => {
+    const { paths } = await repositoryFixture("retained-campaign-source");
+    const configured = options(paths, client(completeRun), { maxAttempts: 1 });
+    await expect(runMultiscan(configured)).resolves.toMatchObject({
+      completed: 1,
+    });
+    await icacls(paths.output, "/grant", "*S-1-1-0:(WA)");
+    const before = await descriptor(paths.output);
+    await expect(runMultiscan(configured)).resolves.toMatchObject({
+      skipped: 1,
+      failed: 0,
+    });
+    expect(await descriptor(paths.output)).toBe(before);
+    await icacls(join(paths.output, "artifacts"), "/grant", "*S-1-1-0:(DE)");
+    await expect(runMultiscan(configured)).rejects.toThrow();
+  },
+);
+
+windowsTest("rejects a parent that can be emptied and retagged", async () => {
+  const root = await temporaryDirectory();
+  const parent = join(root, "directory");
+  const output = join(parent, "scan");
+  await mkdir(parent);
+  await runtime.prepareOutputDir(output, "fixture");
+  await icacls(parent, "/grant", "*S-1-1-0:(DC,WA)");
+  await expect(runtime.prepareOutputDir(output, "fixture")).rejects.toThrow();
+});
+
+windowsTest(
+  "output admission distinguishes effective parent delete-child grants",
+  async () => {
+    const root = await sharedRoot();
+    await icacls(root, "/grant", "*S-1-1-0:(AD)", "*S-1-1-0:(OI)(CI)(IO)(DC)");
+    const output = await runtime.prepareOutputDir(
+      join(root, "scan"),
+      "fixture",
+    );
+    expect(await descriptor(output)).toContain("D:P");
+
+    await icacls(root, "/grant", "*S-1-1-0:(DC)");
+    await expect(runtime.prepareOutputDir(output, "fixture")).rejects.toThrow();
+    const fresh = join(root, "fresh");
+    await expect(runtime.prepareOutputDir(fresh, "fixture")).rejects.toThrow();
+    await expect(lstat(fresh)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
 
@@ -437,22 +562,46 @@ windowsTest(
   },
 );
 
+windowsTest(
+  "creation keeps the output location selected during preflight",
+  async () => {
+    const root = await temporaryDirectory();
+    const destination = join(root, "destination");
+    const missing = join(root, "parent");
+    await mkdir(destination);
+    let selected = false;
+    await expect(
+      runtime.prepareOutputDir(join(missing, "scan"), "fixture", root, () => {
+        if (!selected) {
+          symlinkSync(destination, missing, "junction");
+          selected = true;
+        }
+      }),
+    ).rejects.toThrow();
+    expect(selected).toBe(true);
+    await expect(lstat(join(destination, "scan"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  },
+);
+
 // Creating a separate local account requires administrator rights and belongs on
 // the disposable hosted Windows runners, not a developer's workstation.
 test.skipIf(
   process.platform !== "win32" || process.env["GITHUB_ACTIONS"] !== "true",
 )(
-  "another local user cannot read or change new and archived scan output",
+  "private scan output excludes a second user and rejects replaceable directories",
   async () => {
     const { paths } = await repositoryFixture("campaign-source");
     const root = await sharedRoot(paths.root);
     const writableParent = join(root, "writable parent");
     await mkdir(writableParent);
-    await icacls(writableParent, "/grant", "*S-1-1-0:(OI)(CI)M");
+    await icacls(writableParent, "/grant", "*S-1-1-0:(AD)");
     const direct = await createDirectPluginOutput(writableParent);
     expect(await descriptor(direct.targetRoot)).toBe(direct.targetRootAcl);
     const shared = join(direct.targetRoot, "shared.txt");
     await writeFile(shared, "synthetic shared data");
+    await icacls(shared, "/grant", "*S-1-1-0:M");
     const explicit = await runtime.prepareOutputDir(
       join(root, "explicit"),
       "fixture",
@@ -476,11 +625,44 @@ test.skipIf(
       campaign,
       direct.scanDir,
     ].map((path) => join(path, "probe.txt"));
+
+    const selected = join(writableParent, "selected");
+    const replacement = selected + ".replacement";
+    const scan = join(selected, "scan");
+    await runtime.prepareOutputDir(scan, "fixture");
+    await cp(example, scan, { recursive: true });
+    await loadContract(scan, { pluginRoot: PLUGIN_ROOT });
+    await writeFile(join(selected, "marker.txt"), "original");
+    // Both trees contain a valid sealed scan. Grant the other user permission to
+    // rename these two directories within the create-only parent.
+    await mkdir(replacement);
+    await cp(example, join(replacement, "scan"), { recursive: true });
+    await writeFile(join(replacement, "marker.txt"), "");
+    await icacls(join(replacement, "marker.txt"), "/grant", "*S-1-1-0:M");
+    for (const path of [selected, replacement]) {
+      await icacls(path, "/grant", "*S-1-1-0:M");
+    }
+    await expect(
+      runtime.prepareOutputDir(join(selected, "new scan"), "fixture"),
+    ).rejects.toThrow();
+    await expect(lstat(join(selected, "new scan"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
     const script = await readFile(
-      join(import.meta.dir, "support", "windows-other-user-access.ps1"),
+      new URL(
+        "../../../plugins/codex-security/tests/windows-other-user-access.ps1",
+        import.meta.url,
+      ),
       "utf8",
     );
+    const denied = join(writableParent, "named-user grant");
+    await mkdir(denied);
     const result = await runPowerShell(script, {
+      CODEX_SECURITY_TEST_BUN: process.execPath,
+      CODEX_SECURITY_TEST_RUNTIME: new URL("../src/runtime.ts", import.meta.url)
+        .href,
+      CODEX_SECURITY_TEST_DENIED_DIRECTORY: denied,
+      CODEX_SECURITY_TEST_REPLACE_DIRECTORY: selected,
       CODEX_SECURITY_TEST_ACCESS_PATHS: JSON.stringify([
         shared,
         ...privateProbes,
@@ -490,6 +672,15 @@ test.skipIf(
       { read: true, write: true },
       ...privateProbes.map(() => ({ read: false, write: false })),
     ]);
+    expect(await readFile(join(selected, "marker.txt"), "utf8")).toBe(
+      "replacement",
+    );
+    expect(
+      await readFile(join(selected + ".retained", "marker.txt"), "utf8"),
+    ).toBe("original");
+    await expect(
+      loadContract(scan, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow();
     for (const path of privateProbes) {
       expect(await readFile(path, "utf8")).toBe("synthetic private data");
     }

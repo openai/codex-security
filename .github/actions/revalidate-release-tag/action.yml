@@ -1,0 +1,56 @@
+name: Revalidate release tag
+description: Check that the live npm release tag still points to the triggering commit.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        invalid_tag() {
+          echo "Protected npm release tag must still point to the verified commit." >&2
+          exit 1
+        }
+
+        if [[ "$GITHUB_REF_TYPE" != "tag" ||
+              "$GITHUB_REF" != "refs/tags/$GITHUB_REF_NAME" ]]; then
+          invalid_tag
+        fi
+
+        if ! tag_fields="$(
+          gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" \
+            --jq '[.object.type, .object.sha] | @tsv'
+        )"; then
+          invalid_tag
+        fi
+        IFS=$'\t' read -r tag_type tag_object <<< "$tag_fields"
+        if [[ ! "$tag_object" =~ ^[0-9a-f]{40}$ ]]; then
+          invalid_tag
+        fi
+
+        case "$tag_type" in
+          commit)
+            tag_commit="$tag_object"
+            ;;
+          tag)
+            if ! tag_commit="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+                --jq 'if .object.type == "commit" then .object.sha else empty end'
+            )"; then
+              invalid_tag
+            fi
+            ;;
+          *)
+            invalid_tag
+            ;;
+        esac
+
+        if [[ ! "$tag_commit" =~ ^[0-9a-f]{40}$ ||
+              "$tag_commit" != "$GITHUB_SHA" ]]; then
+          invalid_tag
+        fi
+        echo "Protected npm release tag matches the verified commit."

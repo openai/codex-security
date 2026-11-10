@@ -10,13 +10,14 @@ import * as core from '@actions/core';
 import { DefaultArtifactClient } from '@actions/artifact';
 import { BlobClient } from '@azure/storage-blob';
 import { runAction } from '../src/main.ts';
-import { INPUT_NAMES } from '../src/inputs.ts';
+import { parse } from 'yaml';
 import { gitEnvironment } from '../src/targets.ts';
 import { runtimeEnvironment, type Runtime } from '../src/runtime.ts';
 import type { ProcessResult } from '../src/process.ts';
 import { copyCompletedScan } from './fixtures.ts';
 
 type Scenario = 'schedule' | 'pr' | 'policy-pr' | 'empty-pr';
+const inputNames = Object.keys(parse(await readFile(new URL('../../action.yml', import.meta.url), 'utf8')).inputs);
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
 
 function assertAttribution(args: readonly string[], provider: string): void {
@@ -69,7 +70,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
     process.exitCode = previousExitCode;
     await rm(root, { recursive: true, force: true });
   });
-  for (const name of INPUT_NAMES) delete process.env[inputKey(name)];
+  for (const name of inputNames) delete process.env[inputKey(name)];
   const eventPath = join(root, 'event.json');
   const outputPath = join(root, 'outputs');
   const statePath = join(root, 'state');
@@ -768,6 +769,27 @@ test('valid empty findings publish zero counts', async (t) => {
   const result = await app.run();
   assert.equal(result.exitCode, 0);
   for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '0');
+  assert.doesNotMatch(result.summary, /Scope limitations/);
+});
+
+test('the job summary shows scope limitations from a completed scan with zero findings', async t => {
+  const app = await harness(t);
+  app.setInput('fail-on-severity', 'high');
+  app.configure({exitCode: 0, scanResult: value => {
+    value.findings.findings = [];
+    value.manifest.scan.scope.limitations = [
+      'Discovery stopped before any review completed.',
+      'Unreviewed directory: <example>.',
+    ];
+  }});
+  const result = await app.run();
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'passed');
+  assert.equal(result.outputs['sarif-upload-ready'], 'true');
+  assert.ok(result.summary.includes('**Scope limitations**'));
+  assert.ok(result.summary.includes('Discovery stopped before any review completed.'));
+  assert.ok(result.summary.includes('Unreviewed directory: &lt;example&gt;.'));
 });
 
 test('changed checkout during a committed diff scan fails', async (t) => {
