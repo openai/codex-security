@@ -231,14 +231,16 @@ export async function installUpdate(
     "bin",
     "npm-cli.js",
   );
-  // A project may itself supply a Node distribution or a linked npm script.
-  const { hasGitMetadata } = await import("./local-git-metadata.js");
-  if (
-    !existsSync(npm) ||
-    realpathSync(npm) !== npm ||
-    isWithin(realpathSync(process.cwd()), nodeBin) ||
-    (await hasGitMetadata(nodeBin))
-  )
+  // A checkout may supply a Node distribution or a linked npm script. Scope
+  // this check to the invoking project; nvm itself can be a separate checkout.
+  if (!existsSync(npm) || realpathSync(npm) !== npm) throw new Error(manual);
+  const cwd = realpathSync(process.cwd());
+  const { gitMarkerRoot } = await import("./targets.js");
+  const checkout = await gitMarkerRoot(cwd, undefined, "nearest");
+  const project =
+    checkout ??
+    (cwd === userInfo().homedir || cwd === dirname(cwd) ? null : cwd);
+  if (project && (isWithin(project, nodeBin) || isWithin(project, npm)))
     throw new Error(manual);
 
   process.stderr.write(
@@ -247,8 +249,7 @@ export async function installUpdate(
   await runGlobalNpm(node, npm, prefix);
 }
 
-/** @internal Install the official package using a verified Node and npm pair. */
-export async function runGlobalNpm(
+async function runGlobalNpm(
   node: string,
   npm: string,
   prefix: string,

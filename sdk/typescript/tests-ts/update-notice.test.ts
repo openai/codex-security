@@ -6,7 +6,6 @@ import {
   linkSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -17,7 +16,6 @@ import {
   checkForUpdate,
   formatUpdateNotice,
   installUpdate,
-  runGlobalNpm,
   updateCommand,
 } from "../src/version.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
@@ -260,9 +258,13 @@ describe("CLI update notice", () => {
     }
   });
 
-  test("global npm updates use bundled npm, an isolated working directory and no inherited secrets or hooks", async () => {
+  test("global npm updates support nvm checkouts and isolate npm from the invoking project", async () => {
     const directories = createTemporaryDirectoriesSync(true);
-    const prefix = realpathSync(directories.create("codex-update-global-"));
+    const root = directories.create("codex-update-global-");
+    const nvm = join(root, ".nvm");
+    const prefix = join(nvm, "versions", "node", "v24.0.0");
+    const project = join(root, "project");
+    const originalCwd = process.cwd();
     const windows = process.platform === "win32";
     const bin = windows ? prefix : join(prefix, "bin");
     const modules = join(
@@ -280,6 +282,9 @@ describe("CLI update notice", () => {
     );
     const record = join(prefix, "invocation.json");
     try {
+      mkdirSync(join(nvm, ".git"), { recursive: true });
+      mkdirSync(join(project, ".git"), { recursive: true });
+      process.chdir(project);
       mkdirSync(bin, { recursive: true });
       mkdirSync(npmBin, { recursive: true });
       try {
@@ -297,9 +302,7 @@ describe("CLI update notice", () => {
         NODE_OPTIONS: "--require=missing.cjs",
         npm_config_registry: "http://127.0.0.1:1/",
       };
-      // Exercise the subprocess even when the test runner's temporary directory
-      // is inside a checkout, where installUpdate intentionally declines it.
-      await runGlobalNpm(node, join(npmBin, "npm-cli.js"), prefix);
+      await installUpdate(env, entrypoint, node);
       const call = JSON.parse(readFileSync(record, "utf8"));
       expect(call.env.OPENAI_API_KEY).toBeUndefined();
       expect(call.env.NODE_OPTIONS).toBeUndefined();
@@ -321,11 +324,14 @@ describe("CLI update notice", () => {
         "--registry=https://registry.npmjs.org/",
         "--@openai:registry=https://registry.npmjs.org/",
       ]);
-      mkdirSync(join(prefix, ".git"));
+      // If this same distribution belongs to the checkout we are running in,
+      // the explicit update must give manual instructions instead.
+      process.chdir(join(nvm, "versions"));
       await expect(installUpdate(env, entrypoint, node)).rejects.toThrow(
         "Use the installation at",
       );
     } finally {
+      process.chdir(originalCwd);
       directories.cleanup();
     }
   });
