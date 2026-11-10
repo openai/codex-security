@@ -122,9 +122,12 @@ import { importScan } from "../src/import-scan.js";
 import { restoreScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { VERSION } from "../src/version.js";
 import { createProviderProfile } from "../src/provider-profile.js";
-import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
+import { nodeCommand, gitText } from "./support/shell.js";
+import { useTestPython } from "./support/python.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
+
+const pythonExecutable = useTestPython();
 
 async function registerEightFileScan(
   _options: unknown,
@@ -1689,6 +1692,17 @@ describe("CodexSecurity orchestration", () => {
                 forced_login_method: index % 2 ? "api" : "chatgpt",
                 forced_chatgpt_workspace_id: `synthetic-workspace-${index}`,
               };
+        // The user's Codex config applies below explicit scan overrides.
+        const ambientHome = join(root, `ambient-${index}`);
+        const ambientAuthentication: Record<string, string> = {
+          cli_auth_credentials_store: "file",
+          forced_chatgpt_workspace_id: "synthetic-ambient-workspace",
+        };
+        await mkdir(ambientHome, { mode: 0o700 });
+        await writeFile(
+          join(ambientHome, "config.toml"),
+          'cli_auth_credentials_store = "file"\nforced_chatgpt_workspace_id = "synthetic-ambient-workspace"\n',
+        );
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -1701,6 +1715,7 @@ describe("CodexSecurity orchestration", () => {
           },
           {
             environment: {
+              CODEX_HOME: ambientHome,
               CODEX_SECURITY_STATE_DIR: stateDirectory,
               AWS_BEARER_TOKEN_BEDROCK: `synthetic-bedrock-key-${index}`,
               AWS_REGION: index % 2 === 0 ? "us-east-2" : "us-west-2",
@@ -1828,6 +1843,7 @@ describe("CodexSecurity orchestration", () => {
                     "forced_chatgpt_workspace_id",
                   ] as const) {
                     const expected = (authentication[key] ??
+                      ambientAuthentication[key] ??
                       DEFAULT_CODEX_CONFIG[key]) as string | undefined;
                     expect(workerConfig[key]).toEqual(expected);
                     expect(options.config?.[key]).toEqual(expected);
@@ -2300,18 +2316,35 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each(
-    (["preparation", "empty", "commit", "rollback"] as const).flatMap(
+  test.each([
+    ...(["preparation", "empty", "commit", "rollback"] as const).flatMap(
       (boundary) =>
         (["real", "mock", "import"] as const).flatMap((mode) =>
           (mode === "import"
             ? (["signal"] as const)
             : (["signal", "close"] as const)
-          ).map((cancel) => ({ boundary, cancel, mode })),
+          ).map((cancel) => ({
+            registration: "archived registration",
+            boundary,
+            cancel,
+            mode,
+          })),
         ),
     ),
-  )(
-    "cancels archived registration at $boundary via $cancel, mode=$mode",
+    ...(process.platform === "win32"
+      ? (
+          [
+            { boundary: "before fresh guard", cancel: "signal", mode: "real" },
+            { boundary: "fresh guard", cancel: "signal", mode: "real" },
+            { boundary: "empty archive guard", cancel: "close", mode: "real" },
+          ] as const
+        ).map((entry) => ({
+          ...entry,
+          registration: "Windows Deep registration",
+        }))
+      : []),
+  ])(
+    "cancels $registration at $boundary via $cancel, mode=$mode",
     async ({ boundary, cancel, mode }) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const python = pythonExecutable()!;
@@ -2331,8 +2364,12 @@ describe("CodexSecurity orchestration", () => {
           join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
         ),
       );
+      const guardCreated =
+        boundary === "fresh guard" || boundary === "empty archive guard";
+      const deep = guardCreated || boundary === "before fresh guard";
+      const archiveExisting = !deep || boundary === "empty archive guard";
       let previousId: string | undefined;
-      if (boundary !== "empty") {
+      if (boundary !== "empty" && !deep) {
         const previous = await runWorkbench(workbenchOptions, [
           "register-cli-scan",
           "--repository",
@@ -2372,35 +2409,51 @@ describe("CodexSecurity orchestration", () => {
       const pluginRoot = join(root, "controlled-plugin");
       for (const file of [
         ".codex-plugin/plugin.json",
-        "skills/security-scan/SKILL.md",
+        `skills/${deep ? "deep-security-scan" : "security-scan"}/SKILL.md`,
         "schemas/findings.schema.json",
       ]) {
         await cp(join(PLUGIN_ROOT, file), join(pluginRoot, file));
       }
       await mkdir(join(pluginRoot, "scripts"), { recursive: true });
       const afterRename = boundary === "commit" || boundary === "rollback";
-      const hook = afterRename
-        ? "insert_running_scan"
-        : "directory_snapshot_regular_file_count";
+      const hook = guardCreated
+        ? "register_windows_resume_output"
+        : afterRename
+          ? "insert_running_scan"
+          : "directory_snapshot_regular_file_count";
       const framedArgument = "--fixture-message=出力\0literal\nsecond line";
+      const entrypoint = join(pluginRoot, "scripts", "workbench_db.py");
+      const controlledScript = guardCreated
+        ? join(pluginRoot, "scripts", "registration_fixture.py")
+        : entrypoint;
       await writeFile(
-        join(pluginRoot, "scripts", "workbench_db.py"),
+        controlledScript,
         `import io, runpy, socket, sys
+from contextlib import contextmanager
 from pathlib import Path
 
 workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})
 namespace = workbench["main"].__globals__
 original = namespace["${hook}"]
 
-def paused(*args, **options):
+def wait_at_boundary():
     with socket.create_connection(("127.0.0.1", ${address.port})) as connection:
         connection.sendall(b"ready")
         if connection.recv(1) == b"p":
             connection.sendall(b"alive")
             connection.recv(1)
+
+def paused(*args, **options):
+    wait_at_boundary()
     if ${JSON.stringify(boundary)} == "rollback":
         raise RuntimeError("synthetic registration failure after rename")
     return original(*args, **options)
+
+@contextmanager
+def paused_guard(*args, **options):
+    with original(*args, **options):
+        wait_at_boundary()
+        yield
 
 def main(**kwargs):
     sys.stdout.reconfigure(newline="\\r\\n")
@@ -2409,13 +2462,25 @@ def main(**kwargs):
         payload = sys.stdin.buffer.read()
         Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)
         sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")
-        namespace["${hook}"] = paused
+        namespace["${hook}"] = ${guardCreated ? "paused_guard" : "paused"}
     workbench["main"](**kwargs)
 
 if __name__ == "__main__":
     main()
 `,
       );
+      if (guardCreated) {
+        // Select a wrapper that starts the delegated workbench as a new __main__.
+        await writeFile(
+          entrypoint,
+          `import runpy
+def main(**kwargs):
+    runpy.run_path(${JSON.stringify(controlledScript)}, run_name="__main__")
+if __name__ == "__main__":
+    main()
+`,
+        );
+      }
       let submitted: string | undefined;
       const registration: typeof runWorkbench = async (
         options,
@@ -2454,7 +2519,7 @@ if __name__ == "__main__":
       const connected = once(server, "connection", { signal: deadline });
       const options = {
         outputDir: scanDir,
-        archiveExisting: true,
+        archiveExisting,
         signal: controller.signal,
       };
       const operation = (
@@ -2474,6 +2539,7 @@ if __name__ == "__main__":
             )
           : client.run(repository, {
               ...options,
+              mode: deep ? "deep" : "standard",
               mock: mode === "mock",
               scanPrompt: "Review café boundaries.\nPreserve the second line.",
             })
@@ -2514,9 +2580,9 @@ if __name__ == "__main__":
         });
         if (cancel === "close") closing = client.close();
         else controller.abort();
-        if (afterRename) {
-          // This child has already renamed the directory. A request/response
-          // proves it remains alive after cancellation until we let it settle.
+        if (afterRename || guardCreated) {
+          // The filesystem transaction has started. Prove the child remains
+          // alive after cancellation until we allow its commit or rollback.
           const alive = once(socket, "data", { signal: deadline });
           socket.write("p");
           expect(String((await alive)[0])).toBe("alive");
@@ -2533,8 +2599,11 @@ if __name__ == "__main__":
         const scans = (await runWorkbench(workbenchOptions, ["list-scans"]))[
           "scans"
         ] as Array<{ scanId: string; scanDir: string }>;
-        expect(scans).toHaveLength(
-          boundary === "empty" ? 0 : boundary === "commit" ? 2 : 1,
+        const registrations = scans.filter(
+          (scan) => scan.scanId !== previousId,
+        );
+        expect(registrations).toHaveLength(
+          boundary === "commit" || guardCreated ? 1 : 0,
         );
         if (previousId !== undefined) {
           const previous = scans.find((scan) => scan.scanId === previousId)!;
@@ -2548,6 +2617,33 @@ if __name__ == "__main__":
             name.startsWith("scan.previous-"),
           ),
         ).toHaveLength(boundary === "commit" ? 1 : 0);
+        if (deep) {
+          expect(await readdir(scanDir)).toEqual(
+            guardCreated ? [".codex-security-resume"] : [],
+          );
+          if (guardCreated)
+            expect(scans[0]).toMatchObject({
+              scanDir,
+              lifecycle: { status: "canceled" },
+            });
+          const retry = await runWorkbench(workbenchOptions, [
+            "register-cli-scan",
+            "--repository",
+            repository,
+            "--scan-dir",
+            scanDir,
+            ...(guardCreated ? ["--archive-existing"] : []),
+            "--recipe-json",
+            JSON.stringify({
+              repository,
+              target: { kind: "repository", paths: [] },
+              mode: "deep",
+              config: {},
+            }),
+          ]);
+          expect(retry["scanId"]).toBeString();
+          expect(retry["scanId"]).not.toBe(scans[0]?.scanId);
+        }
       } finally {
         cleaningUp = true;
         clearTimeout(guardTimer);
@@ -3125,6 +3221,201 @@ if __name__ == "__main__":
     expect(completionReceipt).not.toHaveProperty("cost");
     await client.close();
   });
+
+  test.each([false, true])(
+    "warns before completion when repository HEAD drifts (observer fails: %s)",
+    async (observerFails) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      let revision = "deadbeef";
+      let completed = false;
+      const details: unknown[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        repositoryRevision: async () => revision,
+        runWorkbench: async (_options, args, input) => {
+          const result = mockWorkbench(args, input);
+          if (args[0] === "register-cli-scan") revision = "changed";
+          return result;
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              expect(details).toEqual([undefined]);
+              expect(completed).toBe(false);
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onWarning: (message, detail) => {
+            if (!message.startsWith("Repository HEAD changed")) return;
+            expect(completed).toBe(false);
+            details.push(detail);
+            if (observerFails) throw new Error("Synthetic observer failure");
+          },
+          onObserverError: () => {
+            throw new Error("Synthetic observer error handler failure");
+          },
+        });
+        completed = true;
+        expect(details).toEqual([undefined]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each(["success", "failure"] as const)(
+    "stops HEAD monitoring before post-scan instructions after %s",
+    async (outcome) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const releaseRead = Promise.withResolvers<void>();
+      let revision = "deadbeef";
+      let reads = 0;
+      let monitorSignal: AbortSignal | undefined;
+      let turns = 0;
+      let finalization: string | undefined;
+      let finalizationAtFollowup: string | undefined;
+      let monitorAbortedAtFollowup: boolean | undefined;
+      const warnings: string[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        resolvePluginPython: async () => pythonExecutable()!,
+        repositoryRevision: async (_repository, signal) => {
+          if (++reads > 1) {
+            monitorSignal = signal;
+            await releaseRead.promise;
+          }
+          return revision;
+        },
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "complete-scan" || args[0] === "fail-scan") {
+            finalization = args[0];
+            return { scan: { warnings: [] }, targetWarnings: [] };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          if (++turns === 1) {
+            if (outcome === "failure")
+              return {
+                events: (async function* () {
+                  yield {
+                    type: "turn.failed" as const,
+                    error: { message: "SYNTHETIC_MAIN_SCAN_FAILURE" },
+                  };
+                })(),
+              };
+            await copyCompletedScan(root);
+            return { events: completedEvents() };
+          }
+          finalizationAtFollowup = finalization;
+          monitorAbortedAtFollowup = monitorSignal?.aborted;
+          revision = "temporary-follow-up-revision";
+          releaseRead.resolve();
+          // Let the pending read and warning observer settle without a polling delay.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          revision = "deadbeef";
+          return { events: completedEvents() };
+        }, "thread-1"),
+      });
+      try {
+        const result = client.run(repository, {
+          postScanPrompt:
+            "Inspect another local revision and restore the checkout.",
+          onWarning: (message) => {
+            if (message.startsWith("Repository HEAD changed"))
+              warnings.push(message);
+          },
+        });
+        if (outcome === "success")
+          expect((await result).manifest.scan.status).toBe("completed");
+        else
+          await expect(result).rejects.toThrow("SYNTHETIC_MAIN_SCAN_FAILURE");
+        expect(turns).toBe(2);
+        expect(finalizationAtFollowup).toBe(
+          outcome === "success" ? "complete-scan" : "fail-scan",
+        );
+        expect(monitorAbortedAtFollowup).toBe(true);
+        expect(revision).toBe("deadbeef");
+        expect(warnings).toEqual([]);
+      } finally {
+        releaseRead.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    ["repository", true, 2],
+    ["repository", false, 1],
+    ["worktree", true, 2],
+    ["working_tree", true, 2],
+    ["refs", true, 1],
+    ["unversioned", true, 1],
+  ] as const)(
+    "monitors HEAD only for mutable %s targets with a warning observer (observed: %s)",
+    async (kind, observed, expectedReads) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      if (kind === "refs" || kind === "working_tree") {
+        gitText(["init", "-q"], { cwd: repository });
+        gitText(
+          [
+            "-c",
+            "user.name=Synthetic Test",
+            "-c",
+            "user.email=synthetic@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Synthetic revision",
+          ],
+          { cwd: repository },
+        );
+      }
+      const readRevision = mock(async () =>
+        kind === "unversioned" ? null : "deadbeef",
+      );
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        repositoryRevision: readRevision,
+        runWorkbench: async (_options, args, input) => {
+          const result = mockWorkbench(args, input);
+          if (args[0] === "register-cli-scan" && kind === "worktree")
+            result["contract"] = {
+              target: {
+                allowedKinds: ["git_worktree"],
+                requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
+              },
+            };
+          return result;
+        },
+        createCodex: () => {
+          throw new Error("Synthetic scan boundary");
+        },
+      });
+      try {
+        await expect(
+          client.run(repository, {
+            onWarning: observed ? mock() : undefined,
+            target:
+              kind === "refs"
+                ? DiffTarget.refs({ base: "HEAD", head: "HEAD" })
+                : kind === "working_tree"
+                  ? DiffTarget.workingTree({ base: "HEAD" })
+                  : "repository",
+          }),
+        ).rejects.toThrow("Synthetic scan boundary");
+        expect(readRevision).toHaveBeenCalledTimes(expectedReads);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test("passes the workbench snapshot contract to dirty Git scans", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();
@@ -15460,9 +15751,11 @@ if __name__ == "__main__":
                 {},
                 { parent: "scan-thread" },
               );
-            await (options.signal.aborted
-              ? undefined
-              : once(options.signal, "abort"));
+            if (!options.signal.aborted) {
+              await once(options.signal, "abort", {
+                signal: AbortSignal.timeout(5_000),
+              });
+            }
             throw new DOMException("aborted", "AbortError");
           }
           return { events: events() };
@@ -15551,7 +15844,6 @@ if __name__ == "__main__":
           postScanPrompt: "Do not spend another model turn.",
           onLifecycle,
           onWarning: (warning) => warnings.push(warning),
-          signal: AbortSignal.timeout(5_000),
         });
         if (completion === "unavailable" || completion === "failed") {
           await expect(result).rejects.toBeInstanceOf(
@@ -16011,7 +16303,11 @@ if __name__ == "__main__":
       for (const operation of ["preflight", "run"] as const) {
         await expect(
           client[operation](repository, { outputDir: join(root, "output") }),
-        ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
+        ).rejects.toMatchObject({
+          name: OutputInsideProtectedRootError.name,
+          pathKind: "state",
+          message: expect.stringContaining("stateDirectory"),
+        });
       }
       if (stateDirectory !== root && stateDirectory !== linkedState)
         expect(existsSync(stateDirectory)).toBe(false);
@@ -16787,6 +17083,13 @@ if __name__ == "__main__":
     expect(policyCommand).toMatch(
       /^<plugin_dir>\/scripts\/launch_codex_security_mcp --helper resolve-security-md /,
     );
+    if (process.platform === "win32") {
+      const windowsCommand = policyReference.match(
+        /```powershell\r?\n([\s\S]+?)\r?\n```/u,
+      )?.[1];
+      expect(windowsCommand).toBeDefined();
+      expect(prompt).toContain(windowsCommand!.replaceAll("\r\n", "\n"));
+    }
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",
       "/scripts/launch_codex_security_mcp",
