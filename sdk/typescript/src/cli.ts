@@ -2611,16 +2611,17 @@ export async function main(
     }, selection);
   const useInteractiveHistory = (format: string) =>
     useDefaultOutput(format) && output.isTTY === true;
-  const presentHistory = (
-    result: JsonObject | undefined,
+  const presentHistory = <T extends JsonObject | undefined>(
+    result: T,
     command: HistoryCommand,
     format: string,
     settings: {
       repository?: string;
       scanRoot?: string;
       showLinkedFindings?: boolean;
+      missingRepositoryHistory?: boolean;
     } = {},
-  ): JsonObject | undefined => {
+  ): T => {
     if (result === undefined || !useInteractiveHistory(format)) {
       return result;
     }
@@ -2633,6 +2634,7 @@ export async function main(
       repository: settings.repository,
       scanRoot: settings.scanRoot,
       showLinkedFindings: settings.showLinkedFindings,
+      missingRepositoryHistory: settings.missingRepositoryHistory,
     });
     return result;
   };
@@ -2711,52 +2713,49 @@ export async function main(
       const repository = await realpath(requestedRepository).catch(
         () => requestedRepository,
       );
-      return presentHistory(
-        await history(
-          ["list-repositories", "--status", "scanned"],
-          async (value): Promise<JsonObject> => {
-            const repositories = value["repositories"] as JsonObject[];
-            let target = repositories.find(
-              (entry) => entry["targetPath"] === requestedRepository,
-            );
-            const canonicalTarget = repositories.find(
-              (entry) => entry["targetPath"] === repository,
-            );
-            if (
-              target === undefined &&
-              canonicalTarget !== undefined &&
-              (await sameFile(
-                canonicalTarget["targetPath"] as string,
-                requestedRepository,
-              ))
-            ) {
-              target = canonicalTarget;
-            }
-            if (target === undefined) {
-              for (const entry of repositories) {
-                const storedPath = entry["targetPath"] as string;
-                if (await sameFile(storedPath, requestedRepository)) {
-                  target = entry;
-                  break;
-                }
+      return await history(
+        ["list-repositories", "--status", "scanned"],
+        async (value): Promise<JsonObject> => {
+          const repositories = value["repositories"] as JsonObject[];
+          let target = repositories.find(
+            (entry) => entry["targetPath"] === requestedRepository,
+          );
+          const canonicalTarget = repositories.find(
+            (entry) => entry["targetPath"] === repository,
+          );
+          if (
+            target === undefined &&
+            canonicalTarget !== undefined &&
+            (await sameFile(
+              canonicalTarget["targetPath"] as string,
+              requestedRepository,
+            ))
+          ) {
+            target = canonicalTarget;
+          }
+          if (target === undefined) {
+            for (const entry of repositories) {
+              const storedPath = entry["targetPath"] as string;
+              if (await sameFile(storedPath, requestedRepository)) {
+                target = entry;
+                break;
               }
             }
-            const findings =
-              target === undefined
-                ? []
-                : await listRepositoryFindings(
-                    dependencies.runWorkbench,
-                    target["targetId"] as string,
-                  );
-            return {
-              repository: requestedRepository,
-              findings: findings ?? [],
-            };
-          },
-        ),
-        "findings",
-        format,
-        { repository: requestedRepository },
+          }
+          const findings =
+            target === undefined
+              ? []
+              : await listRepositoryFindings(
+                  dependencies.runWorkbench,
+                  target["targetId"] as string,
+                );
+          return presentHistory(
+            { repository: requestedRepository, findings: findings ?? [] },
+            "findings",
+            format,
+            { missingRepositoryHistory: target === undefined },
+          );
+        },
       );
     },
   });
@@ -5630,6 +5629,7 @@ export async function main(
         .object({
           scanId: z.string(),
           uniqueFindingIds: z.array(z.string()),
+          scanRepresentativeFindingIds: z.array(z.string()),
           duplicateGroups: z.array(z.array(z.string())),
           deduplicationStatus: z.enum(["completed", "completed_with_refusals"]),
           refusals: z

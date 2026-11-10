@@ -16,6 +16,7 @@ type RendererOptions = {
   repository?: string;
   scanRoot?: string;
   showLinkedFindings?: boolean;
+  missingRepositoryHistory?: boolean;
 };
 
 const STALE_SCAN_MILLISECONDS = 24 * 60 * 60 * 1_000;
@@ -194,16 +195,7 @@ export function renderScanHistory(
   };
 
   if (command === "list") {
-    const scans = (result["scans"] as JsonObject[]).filter((scan) => {
-      if ((scan["progress"] as JsonObject)["status"] !== "running") {
-        return true;
-      }
-      const updated = Date.parse(scan["updatedAt"] as string);
-      return (
-        !Number.isFinite(updated) ||
-        (options.now ?? Date.now()) - updated < STALE_SCAN_MILLISECONDS
-      );
-    });
+    const scans = result["scans"] as JsonObject[];
     const repository = basename(
       String(
         options.scanRoot ??
@@ -258,18 +250,36 @@ export function renderScanHistory(
           lines.push(line);
         }
       }
+      const updatedAt = scan["updatedAt"];
+      if (
+        status === "running" &&
+        typeof updatedAt === "string" &&
+        (options.now ?? Date.now()) - Date.parse(updatedAt) >=
+          STALE_SCAN_MILLISECONDS
+      ) {
+        lines.push(`    ${dim(`Last activity: ${clean(updatedAt)}`)}`);
+      }
     }
   } else if (command === "findings") {
     const findings = result["findings"] as JsonObject[];
-    lines.push(
-      `  ${strong(clean(basename(result["repository"] as string)))}  ${accent("·")}  ${findings.length} open finding${findings.length === 1 ? "" : "s"}`,
-    );
+    const repository = clean(result["repository"]);
+    if (options.missingRepositoryHistory) {
+      lines.push(`  No saved scan for ${repository}`);
+    } else {
+      lines.push(
+        `  ${strong(basename(repository))}  ${accent("·")}  ${findings.length} open finding${findings.length === 1 ? "" : "s"}`,
+      );
+    }
     for (const entry of findings) {
       lines.push(
         "",
         `  ${strong(entry["confirmedInLatestScan"] ? "Seen this scan" : "Not confirmed in latest scan")}`,
       );
       finding(entry);
+      if (typeof entry["occurrenceId"] === "string")
+        lines.push(
+          `              ${dim("Occurrence")} ${clean(entry["occurrenceId"])}`,
+        );
     }
   } else if (command === "show") {
     const status = clean((result["progress"] as JsonObject)["status"]);
