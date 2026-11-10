@@ -201,6 +201,12 @@ describe("semantic scan comparison", () => {
           },
         }),
       );
+      const environment = {
+        PATH: [repositoryBin, process.env["PATH"]].join(delimiter),
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: state,
+      };
       const options = {
         config: {
           codexOverrides: {
@@ -211,11 +217,11 @@ describe("semantic scan comparison", () => {
           },
         },
         environment: {
-          PATH: [repositoryBin, process.env["PATH"]].join(delimiter),
-          SystemRoot: process.env["SystemRoot"],
-          CODEX_HOME: home,
-          CODEX_SECURITY_STATE_DIR: state,
-          ...(surface === "sdk" && { OPENAI_API_KEY: "synthetic-key" }),
+          ...environment,
+          ...((surface === "sdk" || helper === "planning") && {
+            OPENAI_API_KEY: "synthetic-key",
+            CODEX_API_KEY: "synthetic-secondary",
+          }),
         },
       };
       let captured: CodexOptions | undefined;
@@ -239,8 +245,17 @@ describe("semantic scan comparison", () => {
         if (helper === "planning") {
           await planComponents(repository, {
             ...options,
-            ...(surface === "cli" ? { surface } : {}),
+            ...(surface === "cli" ? { surface, auth: "chatgpt" } : {}),
           });
+          if (surface === "cli") {
+            await expect(
+              planComponents(repository, {
+                ...options,
+                auth: "api-key",
+                environment,
+              }),
+            ).rejects.toThrow("API-key authentication requires");
+          }
         } else {
           const input = {
             before: [finding("before")],
@@ -297,14 +312,16 @@ describe("semantic scan comparison", () => {
       const home = await temporaryDirectory();
       const repository = await temporaryDirectory();
       await writeFile(join(repository, "source.ts"), "export {};\n");
-      const gateway = (env_key = "SYNTHETIC_GATEWAY_TOKEN") => ({
+      const gateway = (env_key: string | null = "SYNTHETIC_GATEWAY_TOKEN") => ({
         model_provider: "gateway",
         model_providers: {
           gateway: {
             name: "Synthetic",
             wire_api: "responses",
             base_url: "https://provider.example.test/v1",
-            env_key,
+            ...(env_key === null
+              ? { requires_openai_auth: true }
+              : { env_key }),
             env_http_headers: { "X-Gateway-Key": "CODEX_API_KEY" },
           },
         },
@@ -366,6 +383,14 @@ describe("semantic scan comparison", () => {
           },
         };
         if (withProfile) {
+          await planComponents(repository, {
+            ...options,
+            auth: "chatgpt",
+            config: { codexOverrides: gateway(null) },
+          });
+          expect(captured?.apiKey).toBeUndefined();
+          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           await planComponents(repository, options);
           await expect(
             planComponents(repository, { ...options, auth: "chatgpt" }),
@@ -379,7 +404,7 @@ describe("semantic scan comparison", () => {
               environment: { ...options.environment, CODEX_API_KEY: undefined },
             }),
           ).rejects.toThrow("Set CODEX_API_KEY");
-          expect(startThread).toHaveBeenCalledTimes(1);
+          expect(startThread).toHaveBeenCalledTimes(2);
         } else
           await matchScanFindings(
             { before: [finding("before")], after: [finding("after")] },
@@ -390,7 +415,7 @@ describe("semantic scan comparison", () => {
         profileClient.spy.mockRestore();
       }
       expect(captured).toBeDefined();
-      expect(profileClient.profiles).toHaveLength(withProfile ? 1 : 0);
+      expect(profileClient.profiles).toHaveLength(withProfile ? 2 : 0);
       const capture = new Codex({
         ...captured,
         codexPathOverride: nodeCommand().command,
@@ -1031,6 +1056,12 @@ describe("semantic scan comparison", () => {
                   ? { model_providers: {} }
                   : {
                       model_provider: "synthetic.provider",
+                      "model_providers.openai": {
+                        model_catalog_url:
+                          "https://chatgpt.com/synthetic-private-marker-table",
+                      },
+                      "model_providers.openai.model_catalog_url":
+                        "https://chatgpt.com/synthetic-private-marker-leaf",
                       model_providers: {
                         "synthetic.provider": {
                           name: "Synthetic provider",

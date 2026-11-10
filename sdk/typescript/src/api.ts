@@ -2849,9 +2849,12 @@ export class CodexSecurity {
               options.resumeScanId,
             ])
           : undefined;
-      if (resumeRegistration !== undefined) {
+      if (
+        resumeRegistration !== undefined ||
+        inputs.retryRecipe !== undefined
+      ) {
         cyberAccessProgram ??= savedCyberAccessProgram(
-          resumeRegistration["recipe"],
+          resumeRegistration?.["recipe"] ?? inputs.retryRecipe,
         );
       } else if (
         cyberAccessProgram === undefined &&
@@ -6769,6 +6772,25 @@ function withoutProviderKey(
     if (name.toUpperCase() === key.toUpperCase()) delete child[name];
   }
   return child;
+}
+
+/** @internal Validate helper authentication and select its credential environment. */
+export function scanHelperEnvironment(
+  environment: ProcessEnvironment,
+  auth: ScanAuthMode | undefined,
+  config: JsonObject,
+) {
+  const provider = scanModelProvider(config);
+  const key = scanProviderEnvKey(config);
+  scanAuthentication(
+    environment,
+    auth,
+    provider,
+    hasCommandAuth(config),
+    false,
+    key,
+  );
+  return selectedScanEnvironment(environment, auth, provider, key, config);
 }
 
 /** @internal */

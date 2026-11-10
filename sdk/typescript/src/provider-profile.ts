@@ -251,7 +251,10 @@ export async function preflightReadOnlyProfileCodex(
       codexPath: executablePathForSpawn(command),
       cwd,
       configOverrides: [
-        ...client.profileConfigOverrides(options.config ?? {}),
+        // The metadata table below replaces any literal provider overrides.
+        ...client
+          .profileConfigOverrides(options.config ?? {})
+          .filter((flag: string) => !flag.startsWith("model_providers.")),
         ...configOverrides,
       ],
       providerConfigOverrides: modelProviderConfigOverride({

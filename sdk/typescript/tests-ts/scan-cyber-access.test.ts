@@ -1,7 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { resolveBundledCodexExecutable } from "../src/codex-sdk-environment.js";
+import { planComponents } from "../src/component-plan.js";
 import type { JsonObject } from "../src/config.js";
 import { resolveScanCyberAccessProgram } from "../src/scan-cyber-access.js";
 import * as runtime from "../src/runtime.js";
@@ -42,6 +44,17 @@ beforeEach(async () => {
 });
 afterEach(cleanup);
 
+function keyEnvironment() {
+  return {
+    PATH: process.env["PATH"] ?? "",
+    ...(process.env["SystemRoot"] && { SystemRoot: process.env["SystemRoot"] }),
+    HOME: home,
+    USERPROFILE: home,
+    CODEX_HOME: home,
+    CODEX_API_KEY: "synthetic-scan-key",
+  };
+}
+
 type SelectorOptions = Pick<
   Parameters<typeof resolveScanCyberAccessProgram>[0],
   "command" | "environment"
@@ -54,17 +67,7 @@ function select(
   return resolveScanCyberAccessProgram({
     cwd: home,
     command: options.command ?? { command: resolveBundledCodexExecutable() },
-    environment: {
-      PATH: process.env["PATH"] ?? "",
-      ...(process.env["SystemRoot"] && {
-        SystemRoot: process.env["SystemRoot"],
-      }),
-      HOME: home,
-      USERPROFILE: home,
-      CODEX_HOME: home,
-      CODEX_API_KEY: "synthetic-scan-key",
-      ...options.environment,
-    },
+    environment: { ...keyEnvironment(), ...options.environment },
     model,
     config: {
       model_catalog_json: catalog,
@@ -142,11 +145,8 @@ test("native catalog routing follows the scan's selected identity", async () => 
 
 test("the remote catalog subprocess uses only the project key and its private route", async () => {
   const route = "https://chatgpt.com/custom/models";
-  const run = runtime.runCodexCommand;
   using probe = spyOn(runtime, "runCodexCommand").mockImplementation(
-    async (...inputs) => {
-      const [command, args, env] = inputs;
-      if (!env["CODEX_API_KEY"]) return run(...inputs);
+    async (command, args, env) => {
       expect(env["CODEX_API_KEY"]).toBe("synthetic-scan-key");
       expect(env["OPENAI_API_KEY"]).toBeUndefined();
       const keyHome = env["CODEX_HOME"]!;
@@ -177,10 +177,10 @@ test("the remote catalog subprocess uses only the project key and its private ro
       { environment: { OPENAI_API_KEY: "unused-ambient-key" } },
     ),
   ).toBe("daybreak_blue");
-  expect(probe).toHaveBeenCalled();
+  expect(probe).toHaveBeenCalledTimes(1);
 });
 
-test("managed policy uses the saved login on its own endpoint and disables Blue for a project key", async () => {
+test("catalog reads and component planning use the saved login for workspace policy", async () => {
   const account = "synthetic-workspace";
   const claims = Buffer.from(
     JSON.stringify({
@@ -203,6 +203,7 @@ test("managed policy uses the saved login on its own endpoint and disables Blue 
   });
   let servedPolicy = false;
   const paths: string[] = [];
+  const projectRequests: [string, string | null][] = [];
   const policy = {
     id: "managed",
     name: "Disabled Daybreak",
@@ -214,6 +215,13 @@ test("managed policy uses the saved login on its own endpoint and disables Blue 
     fetch(request) {
       const path = new URL(request.url).pathname;
       paths.push(path);
+      if (path.startsWith("/project/")) {
+        projectRequests.push([path, request.headers.get("authorization")]);
+        return Response.json(
+          { error: { message: "synthetic inference" } },
+          { status: 400 },
+        );
+      }
       if (path !== "/backend-api/wham/config/bundle")
         return new Response(null, { status: 404 });
       if (
@@ -229,11 +237,14 @@ test("managed policy uses the saved login on its own endpoint and disables Blue 
     },
   });
   const origin = server.url.origin;
-  await writeFile(join(home, "auth.json"), login, { mode: 0o600 });
   await writeFile(
     join(home, "config.toml"),
-    `chatgpt_base_url="${origin}/backend-api"\n`,
+    `chatgpt_base_url="${origin}/backend-api"\nopenai_base_url="${origin}/v1"\n[features]\nplugins=true\n`,
   );
+  expect(await select("gpt-test", { chatgpt_base_url: origin }, stored)).toBe(
+    "daybreak_blue",
+  );
+  await writeFile(join(home, "auth.json"), login, { mode: 0o600 });
   expect(
     await select("gpt-test", {
       chatgpt_base_url: origin + "/project",
@@ -242,6 +253,32 @@ test("managed policy uses the saved login on its own endpoint and disables Blue 
   ).toBeUndefined();
   expect(servedPolicy).toBe(true);
   expect(paths.some((path) => path.startsWith("/project"))).toBe(false);
+  expect(paths.filter((path) => path.includes("/plugins/"))).toEqual([]);
+  const repository = await temporaryDirectory();
+  execFileSync("git", ["init", "-q", repository]);
+  await writeFile(join(repository, "source.ts"), "export {};\n");
+  await expect(
+    planComponents(repository, {
+      auth: "api-key",
+      config: {
+        codexOverrides: {
+          model: "gpt-test",
+          chatgpt_base_url: origin + "/project",
+          openai_base_url: origin + "/project/v1",
+          model_providers: {
+            extra: { name: "Synthetic", wire_api: "responses" },
+          },
+        },
+      },
+      environment: keyEnvironment(),
+    }),
+  ).rejects.toThrow("synthetic inference");
+  expect(projectRequests).toContainEqual([
+    "/project/v1/responses",
+    "Bearer synthetic-scan-key",
+  ]);
+  for (const [, authorization] of projectRequests)
+    expect(authorization).toBe("Bearer synthetic-scan-key");
   expect(await readFile(join(home, "auth.json"), "utf8")).toBe(login);
 });
 

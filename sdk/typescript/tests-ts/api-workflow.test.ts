@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import type { JsonObject } from "../src/config.js";
 import type { ScanOptions } from "../src/index.js";
 import {
   OperationTelemetry,
@@ -40,6 +41,7 @@ test.each([
   "completed",
   "receipt-lost",
   "scan-interrupted",
+  "scan-interrupted-without-program",
   "prompt-files",
   "knowledge-snapshot",
   "legacy-knowledge",
@@ -84,6 +86,11 @@ test.each([
     const ownerScenario = scenario.startsWith("owner-");
     const ownerFailure = scenario.startsWith("owner-failure");
     const receiptLost = scenario.endsWith("receipt-lost");
+    const interrupted = scenario.startsWith("scan-interrupted");
+    const selectedProgram =
+      scenario === "completed" || scenario === "scan-interrupted"
+        ? "daybreak_blue"
+        : undefined;
     const ownerPath = join(scanDir, "owner-suggestions.json");
     const ownerSpy = ownerScenario
       ? spyOn(ownerArtifacts, "writeScanOwnerSuggestions").mockImplementation(
@@ -95,6 +102,7 @@ test.each([
         )
       : undefined;
     let modelCalls = 0;
+    let registeredRecipe: JsonObject = {};
     let completed = false;
     let loseReceipt = receiptLost;
     const makeClient = async (attempt: number) => {
@@ -103,13 +111,10 @@ test.each([
       return TestClient.withDependencies({
         environment,
         ...scanRuntimeDependencies(codexHome, scanDir),
-        resolveScanCyberAccessProgram:
-          scenario === "completed"
-            ? async () => {
-                expect(attempt).toBe(1);
-                return "daybreak_blue";
-              }
-            : undefined,
+        resolveScanCyberAccessProgram: async () => {
+          expect(attempt).toBe(1);
+          return selectedProgram;
+        },
         createOperationTelemetry: (options) => new OperationTelemetry(options),
         runWorkbench: async (options, args, input) => {
           if (args[0] === "finding-workflow") {
@@ -131,6 +136,7 @@ test.each([
             if (scenario === "completed" && attempt === 2)
               throw new Error("Synthetic unavailable scan history");
             return {
+              recipe: registeredRecipe,
               scan: {
                 progress: { status: completed ? "complete" : "failed" },
                 continuationThreadId: "thread-1",
@@ -138,8 +144,10 @@ test.each([
             };
           }
           if (args[0] === "register-cli-scan") {
-            expect(JSON.parse(input!).workflowId).toBe(workflowId);
-            expect(JSON.parse(input!).recipe.ownerSuggestions).toBe(
+            const payload = JSON.parse(input!);
+            registeredRecipe = payload.recipe;
+            expect(payload.workflowId).toBe(workflowId);
+            expect(registeredRecipe["ownerSuggestions"]).toBe(
               ownerScenario || undefined,
             );
             const registration = mockScanRegistration(args, input);
@@ -155,7 +163,7 @@ test.each([
         createCodex: codexFactory(async (input: string) => {
           modelCalls++;
           if (scenario === "prompt-files") expect(input).toContain(scanPrompt);
-          if (scenario === "scan-interrupted" && modelCalls === 1)
+          if (interrupted && modelCalls === 1)
             throw new Error("Synthetic interrupted scan");
           await copyCompletedScan(root);
           return { events: completedEvents() };
@@ -171,7 +179,7 @@ test.each([
         ownerSuggestions: ownerScenario || undefined,
         ...(scenario === "prompt-files" ? { scanPromptFile: promptFile } : {}),
       };
-      if (receiptLost || scenario === "scan-interrupted")
+      if (receiptLost || interrupted)
         await expect(first.run(repository, options)).rejects.toThrow(
           "Synthetic",
         );
@@ -213,7 +221,7 @@ test.each([
         if (!ownerFailure)
           expect(await readFile(ownerPath, "utf8")).toBe("{}\n");
       }
-      expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
+      expect(modelCalls).toBe(interrupted ? 2 : 1);
       const { events } = await readOperationTelemetry(
         environment.CODEX_SECURITY_STATE_DIR,
       );
@@ -229,10 +237,10 @@ test.each([
         ).toMatchObject({ operationId: start.operationId });
       }
       expect(summarizeOperationTelemetry(events).reusedAttempts).toBe(
-        scenario === "scan-interrupted" ? 0 : 1,
+        interrupted ? 0 : 1,
       );
       const reused = terminal.find((event) => event.reusedResult === true);
-      if (scenario === "scan-interrupted") {
+      if (interrupted) {
         expect(terminal.every((event) => event.reusedResult === false)).toBe(
           true,
         );
@@ -247,12 +255,11 @@ test.each([
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
           .status,
       ).toBe("completed");
-      if (scenario === "completed") {
-        expect(result.requestedCyberAccessProgram).toBe("daybreak_blue");
+      expect(result.requestedCyberAccessProgram).toBe(selectedProgram);
+      if (scenario === "completed")
         await expect(
           resumed.run(repository, { workflowId, mode: "deep" }),
         ).rejects.toThrow("already bound to a different");
-      }
       if (knowledge) {
         if (scenario === "knowledge-snapshot")
           await writeFile(promptFile, "Changed synthetic project guidance.");

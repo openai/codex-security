@@ -1,4 +1,4 @@
-import { rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
@@ -22,6 +22,7 @@ import {
   hasCommandAuth,
   inlineToml,
   resolveCodexProfile,
+  workspacePolicyConfig,
   writeCodexConfig,
   type JsonObject,
   type JsonValue,
@@ -38,7 +39,6 @@ import {
   prepareOutputDir,
   runCodexCommand,
   type CodexCommand,
-  type ProcessEnvironment,
 } from "./runtime.js";
 
 interface ScanCyberAccessOptions {
@@ -184,6 +184,10 @@ function selectedProgram(model: string, programs: unknown): CyberAccessProgram {
   return "standard";
 }
 
+async function storedCatalogProgram(model: string, request: AppServerRequest) {
+  return selectedProgram(model, await modelCyberAccessPrograms(model, request));
+}
+
 type CatalogModel = {
   slug: string;
   priority: number;
@@ -201,10 +205,11 @@ function apiKeyCatalogProgram(raw: string, model: string) {
   return selectedProgram(model, selected?.available_access_programs?.cyber);
 }
 
-/** Read workspace policy using its configured identity before choosing a catalog. */
-async function readCatalogPolicy(
+/** Use the workspace catalog directly when it belongs to the scan's identity. */
+async function readWorkspaceCatalog(
   request: AppServerRequest,
   cwd: string,
+  model: string,
   projectKey: boolean,
   masked: boolean,
 ) {
@@ -239,6 +244,11 @@ async function readCatalogPolicy(
       return undefined;
   } else if (accountType !== "chatgpt") return undefined;
 
+  const selectedModel =
+    typeof settings["model"] === "string" ? settings["model"] : model;
+  if (!projectKey && !masked)
+    return storedCatalogProgram(selectedModel, request);
+
   const layers = ((response["layers"] ?? []) as ConfigLayer[]).filter(
     ({ config }) => isRecord(config),
   );
@@ -254,6 +264,7 @@ async function readCatalogPolicy(
           )?.config["model_catalog_json"]
         : settings["model_catalog_json"];
   return {
+    model: selectedModel,
     settings,
     features,
     file,
@@ -299,12 +310,6 @@ export async function resolveScanCyberAccessProgram({
       cwd,
       expandHome(projected["model_catalog_json"], env),
     );
-  const policyConfig = { ...projected };
-  if (apiKey) {
-    // Workspace policy uses the saved login. Never point it at a project key's endpoints.
-    delete policyConfig["openai_base_url"];
-    delete policyConfig["chatgpt_base_url"];
-  }
   const route = catalogRoute(resolved, nativeProfile);
   const maskCatalog =
     Boolean(apiKey || route) && !projected["model_catalog_json"];
@@ -328,31 +333,14 @@ export async function resolveScanCyberAccessProgram({
     });
     const policyOverrides = await preflightConfigOverrides(
       {
-        ...policyConfig,
+        ...workspacePolicyConfig(projected, apiKey),
         ...pickSettings(resolved, ["analytics", "analytics.enabled"]),
         sqlite_home: sqliteHome,
+        // A catalog read needs no background refresh of the user's plugins.
+        "features.plugins": false,
       },
       nativeProfile,
     );
-    const debugModels = async (
-      identity: ProcessEnvironment,
-      bundled = false,
-    ) => {
-      const args = bundled
-        ? ["-c", "analytics.enabled=false", "debug", "models", "--bundled"]
-        : ["debug", "models"];
-      const result = await runCodexCommand(
-        command,
-        args,
-        identity,
-        undefined,
-        signal,
-        { cwd: scratch },
-      );
-      if (!result.success)
-        throw new ConfigurationError(result.stderr || result.stdout);
-      return result.stdout;
-    };
     const native = await nativePermissionPreflight();
     const probe = <T>(
       overrides: string[],
@@ -372,84 +360,70 @@ export async function resolveScanCyberAccessProgram({
           operation(client.request.bind(client)),
       );
 
-    const bootstrap = [...policyOverrides];
-    if (maskCatalog) {
-      // Ask the saved workspace for policy without loading a catalog under the wrong identity or route.
-      const path = join(scratch, "bootstrap-models.json");
-      const bootstrapEnv = {
-        HOME: scratch,
-        USERPROFILE: scratch,
-        CODEX_HOME: scratch,
-        SystemRoot: environmentEntry(env, "SystemRoot"),
-      };
-      await writeFile(path, await debugModels(bootstrapEnv, true), {
-        mode: 0o600,
-      });
-      bootstrap.push(`model_catalog_json=${inlineToml(path)}`);
+    // Native startup requires a nonempty catalog. This offline file lets the
+    // workspace report policy before the selected credentials load their catalog.
+    const policyCatalog = fileURLToPath(
+      new URL("./scan-policy-catalog.json", import.meta.url),
+    );
+    const overrides = maskCatalog
+      ? [...policyOverrides, `model_catalog_json=${inlineToml(policyCatalog)}`]
+      : policyOverrides;
+    const workspace = await probe(overrides, (request) =>
+      readWorkspaceCatalog(request, cwd, model, Boolean(apiKey), maskCatalog),
+    );
+    if (typeof workspace !== "object") return workspace;
+    const { settings, features, file, requiredProvider } = workspace;
+    const catalogFile =
+      typeof file === "string"
+        ? resolve(cwd, expandHome(file, env))
+        : undefined;
+    const nativeUrl = (requiredProvider ??
+      openAiProvider(settings["model_providers"]))?.["model_catalog_url"];
+    const catalogUrl = requiredProvider || !route ? nativeUrl : route.url;
+    if (!apiKey) {
+      if (catalogFile)
+        policyOverrides.push(`model_catalog_json=${inlineToml(catalogFile)}`);
+      else if (catalogUrl !== nativeUrl) return "standard";
+      return await probe(policyOverrides, (request) =>
+        storedCatalogProgram(workspace.model, request),
+      );
     }
+    if (!catalogFile && !workspace.canDiscover) return "standard";
 
-    return await probe(bootstrap, async (request) => {
-      const access = await readCatalogPolicy(
-        request,
-        cwd,
-        Boolean(apiKey),
-        maskCatalog,
-      );
-      if (!access) return undefined;
-      const { settings, features, file, requiredProvider } = access;
-      const selectedModel =
-        typeof settings["model"] === "string" ? settings["model"] : model;
-      const select = async (rpc: AppServerRequest) =>
-        selectedProgram(
-          selectedModel,
-          await modelCyberAccessPrograms(selectedModel, rpc),
-        );
-      if (!apiKey && !maskCatalog) return select(request);
-      const catalogFile =
-        typeof file === "string"
-          ? resolve(cwd, expandHome(file, env))
-          : undefined;
-      const nativeUrl = (requiredProvider ??
-        openAiProvider(settings["model_providers"]))?.["model_catalog_url"];
-      const catalogUrl = requiredProvider || !route ? nativeUrl : route.url;
-      if (!apiKey) {
-        if (catalogFile)
-          policyOverrides.push(`model_catalog_json=${inlineToml(catalogFile)}`);
-        else if (catalogUrl !== nativeUrl) return "standard";
-        return probe(policyOverrides, select);
-      }
-      if (!catalogFile && !access.canDiscover) return "standard";
-
-      // Replay the effective native policy exactly once, in a private home without the saved login
-      // or a second set of project layers. Keep the scan key in the environment and its route in the file.
-      const keyConfig: JsonObject = {
-        ...catalogConfig(settings),
-        ...pickSettings(settings, ["analytics", "responses_api_metadata"]),
-        ...pickSettings(projected, endpoints),
-        features,
-        model_provider: "openai",
-        model_catalog_json: catalogFile ?? null,
-        ...(catalogFile === undefined &&
-          typeof catalogUrl === "string" && {
-            model_providers: { openai: { model_catalog_url: catalogUrl } },
-          }),
-        project_root_markers: [],
-      };
-      await writeCodexConfig(join(scratch, "config.toml"), keyConfig);
-      // The project key uses a private home with no ambient login.
-      const isolated = Object.fromEntries(
-        Object.entries(env).filter(
-          ([name]) =>
-            !["CODEX_ACCESS_TOKEN", "CODEX_HOME"].includes(name.toUpperCase()),
-        ),
-      );
-      const raw = await debugModels({
-        ...isolated,
-        CODEX_HOME: scratch,
-        CODEX_API_KEY: apiKey,
-      });
-      return apiKeyCatalogProgram(raw, selectedModel);
-    });
+    // Replay the effective native policy exactly once, in a private home without the saved login
+    // or a second set of project layers. Keep the scan key in the environment and its route in the file.
+    const keyConfig: JsonObject = {
+      ...catalogConfig(settings),
+      ...pickSettings(settings, ["analytics", "responses_api_metadata"]),
+      ...pickSettings(projected, endpoints),
+      features,
+      model_provider: "openai",
+      model_catalog_json: catalogFile ?? null,
+      ...(catalogFile === undefined &&
+        typeof catalogUrl === "string" && {
+          model_providers: { openai: { model_catalog_url: catalogUrl } },
+        }),
+      project_root_markers: [],
+    };
+    await writeCodexConfig(join(scratch, "config.toml"), keyConfig);
+    // The project key uses a private home with no ambient login.
+    const isolated = Object.fromEntries(
+      Object.entries(env).filter(
+        ([name]) =>
+          !["CODEX_ACCESS_TOKEN", "CODEX_HOME"].includes(name.toUpperCase()),
+      ),
+    );
+    const result = await runCodexCommand(
+      command,
+      ["debug", "models"],
+      { ...isolated, CODEX_HOME: scratch, CODEX_API_KEY: apiKey },
+      undefined,
+      signal,
+      { cwd: scratch },
+    );
+    if (!result.success)
+      throw new ConfigurationError(result.stderr || result.stdout);
+    return apiKeyCatalogProgram(result.stdout, workspace.model);
   } catch (error) {
     signal.throwIfAborted();
     throw error;

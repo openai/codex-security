@@ -1,0 +1,17 @@
+{
+  "models": [
+    {
+      "slug": "codex-security-policy-preflight",
+      "display_name": "Policy preflight",
+      "base_instructions": "",
+      "supported_reasoning_levels": [],
+      "shell_type": "disabled",
+      "visibility": "hide",
+      "supported_in_api": false,
+      "priority": 0,
+      "support_verbosity": false,
+      "truncation_policy": { "mode": "tokens", "limit": 1 },
+      "experimental_supported_tools": []
+    }
+  ]
+}

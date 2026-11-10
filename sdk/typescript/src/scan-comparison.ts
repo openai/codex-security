@@ -15,8 +15,7 @@ import { z } from "zod";
 import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import {
   scanCodexHome,
-  scanAuthentication,
-  selectedScanEnvironment,
+  scanHelperEnvironment,
   definedEnvironment,
   type CodexSecuritySurface,
   type ScanAuthMode,
@@ -43,6 +42,7 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   structuredCodexConfig,
+  workspacePolicyConfig,
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
@@ -689,8 +689,9 @@ export async function withReadOnlyCodex<T>(
     options.auth,
   );
   const command = resolveCodexCommand(environment);
-  const codexOptions: CodexOptions = {
-    configOverrides: [requestContext.configOverride],
+  const configOverrides: string[] = [requestContext.configOverride];
+  const codexOptions = {
+    configOverrides,
     codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
@@ -732,7 +733,11 @@ export async function withReadOnlyCodex<T>(
         exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
       },
     } as NonNullable<CodexOptions["config"]>,
-  };
+  } satisfies CodexOptions;
+  const projectKey =
+    (modelProvider ?? "openai") === "openai" ? codexOptions.apiKey : undefined;
+  // Native exec uses the saved login for workspace policy even with a project key.
+  if (projectKey) delete codexOptions.config["chatgpt_base_url"];
   const providers = resolveCodexProfile(providerSettings)["model_providers"];
   const ownProfile =
     options.nativeProfile === undefined &&
@@ -749,7 +754,14 @@ export async function withReadOnlyCodex<T>(
     if (profile !== undefined) {
       delete threadOptions.sandboxMode;
       const permissions = await preflightReadOnlyProfileCodex(
-        codexOptions,
+        {
+          ...codexOptions,
+          ...(projectKey && {
+            apiKey: undefined,
+            env: withoutOpenAiApiKeys(environment),
+          }),
+          config: workspacePolicyConfig(codexOptions.config, projectKey),
+        },
         {
           extends: ":read-only",
           filesystem: {
@@ -782,13 +794,13 @@ export async function withReadOnlyCodex<T>(
     ) {
       // The helper may use a different credential home than the caller.
       // Only send configuration that this Codex process actually receives.
-      const nativeEnvironment = codexOptions.env ?? environment;
       cyberAccessProgram = await resolveScanCyberAccessProgram({
         command,
         cwd: threadOptions.workingDirectory!,
-        environment: codexOptions.apiKey
-          ? { ...nativeEnvironment, CODEX_API_KEY: codexOptions.apiKey }
-          : nativeEnvironment,
+        environment: {
+          ...codexOptions.env,
+          ...(codexOptions.apiKey && { CODEX_API_KEY: codexOptions.apiKey }),
+        },
         config: {
           ...(codexOptions.config as JsonObject),
           responses_api_metadata: requestContext.metadata,
@@ -1293,14 +1305,10 @@ export async function comparisonEnvironment(
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
   config?: JsonObject,
   nativeKey?: string,
-  auth: ScanAuthMode = "api-key",
+  auth?: ScanAuthMode,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
-  const environment = Object.fromEntries(
-    Object.entries(source).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
+  let environment = definedEnvironment(source);
   const home = configuredCodexHome(environment);
   for (const key of Object.keys(environment)) {
     const name = process.platform === "win32" ? key.toUpperCase() : key;
@@ -1308,17 +1316,22 @@ export async function comparisonEnvironment(
       environment[key] = home;
     }
   }
-  if (nativeKey !== undefined && config !== undefined) {
-    const provider = scanModelProvider(config);
-    scanAuthentication(environment, auth, provider, false, false, nativeKey);
+  const effectiveConfig =
+    config ?? (await readCodexHomeConfig(environment, signal));
+  if (hasCommandAuth(effectiveConfig)) {
+    return withoutOpenAiApiKeys(environment);
+  }
+  const provider = scanModelProvider(effectiveConfig) ?? "openai";
+  if (
+    nativeKey !== undefined ||
+    (auth === "api-key" && provider === "openai")
+  ) {
     return definedEnvironment(
-      selectedScanEnvironment(environment, auth, provider, nativeKey, config),
+      scanHelperEnvironment(environment, auth, effectiveConfig),
     );
   }
-  if (
-    hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
-  ) {
-    return withoutOpenAiApiKeys(environment);
+  if (auth === "chatgpt" && !isExternalModelProvider(provider)) {
+    environment = withoutOpenAiApiKeys(environment);
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;
