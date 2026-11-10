@@ -144,26 +144,11 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Use the same SDK version throughout a submission when possible.
-
-For hosted Semgrep or Snyk imports, finish any pending request before sending
-updated evidence for the same finding IDs. Selections with distinct
-scanner-issued IDs can proceed independently. If the checkpoint records
-only the source, finish that request before starting another for the same
-source and destination.
-
-**Resuming across SDK versions.** Keep the SDK input that produced the
-checkpoint, including report context and caller-added fields. Serializing it
-as JSON can change the values used to identify the approved request. Retry on
-the original deployment. If the SDK can verify the saved selection, it reuses
-the request IDs and skips batches with receipts. Otherwise it preserves the
-checkpoint and stops before uploading. If it cannot identify the approved
-findings, a new submission for the same source and destination can also be blocked.
-
-After a repository rename, a checkpoint that records only the repository ID
-can still be retried with the original normalized findings and report metadata.
-Omit supplemental repository declarations for that retry. A new declaration
-requires a matching catalog entry or a URL recorded in the approval.
+Use the same SDK version throughout a pending submission. If the CLI identifies
+a pending request from an older SDK, resume it with the build that created it.
+The CLI reuses approved request IDs and skips batches with receipts. For hosted
+Semgrep and Snyk imports, finish a pending submission before changing the
+evidence for one of its findings. Other findings can proceed independently.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

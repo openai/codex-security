@@ -207,12 +207,10 @@ export function cloneImportPreview<T extends ExternalFindings>(input: T): T {
   };
 }
 
-/** @internal Keep earlier provider projections only for immutable request replay. */
+/** @internal Provider evidence and the stable input identity for retries. */
 export interface ExternalPublicationInput {
   current: ExternalFindings;
-  legacy: ExternalFindings;
   currentIdentity: unknown;
-  legacyIdentity: unknown;
 }
 
 /** Capture the caller's import settings before reading an export or resolving its destination. */
