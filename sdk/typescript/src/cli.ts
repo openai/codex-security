@@ -9587,30 +9587,27 @@ async function runSkill(
         "Finding file URLs must refer to local files.",
       );
     }
-    const candidate = explicitFile ? fileURLToPath(explicitFile) : input;
     const windowsNamespace =
-      process.platform === "win32" || candidate.startsWith("\\");
-    const rawDeviceRoot = WINDOWS_LOCAL_DEVICE_ROOT.exec(candidate)?.[0];
+      process.platform === "win32" || input.startsWith("\\");
+    const rawDeviceRoot = WINDOWS_LOCAL_DEVICE_ROOT.exec(input)?.[0];
     const localDeviceRoot = rawDeviceRoot?.replaceAll("/", "\\").toLowerCase();
     const normalizedDeviceRoot =
       localDeviceRoot === undefined
         ? undefined
-        : WINDOWS_LOCAL_DEVICE_ROOT.exec(win32.resolve(candidate))?.[0]
+        : WINDOWS_LOCAL_DEVICE_ROOT.exec(win32.resolve(input))?.[0]
             .replaceAll("/", "\\")
             .toLowerCase();
     const windowsNetworkPath =
       windowsNamespace &&
-      WINDOWS_NETWORK_PATH.test(candidate) &&
+      WINDOWS_NETWORK_PATH.test(input) &&
       (rawDeviceRoot === undefined ||
-        !staysWithinWindowsDeviceRoot(candidate, rawDeviceRoot) ||
+        !staysWithinWindowsDeviceRoot(input, rawDeviceRoot) ||
         localDeviceRoot !== normalizedDeviceRoot);
-    if (explicitFile && windowsNetworkPath) {
-      throw new CodexSecurityError(
-        "Finding file URLs must refer to local files.",
-      );
-    }
     if (!windowsNetworkPath) {
-      const path = resolveCliPath(directory, candidate);
+      const path = resolveCliPath(
+        directory,
+        explicitFile ? fileURLToPath(explicitFile) : input,
+      );
       const metadata = await lstat(path, { bigint: true }).catch(
         (error: unknown) => {
           if (explicitFile) throw error;

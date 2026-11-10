@@ -1721,10 +1721,7 @@ export class CodexSecurity {
         ? basename(inputs.repository)
         : undefined,
     );
-    return {
-      ...(await this.#preflightInputs(inputs, options)),
-      stateDirectory: inputs.stateDirectory,
-    };
+    return await this.#preflightInputs(inputs, options);
   }
 
   async #preflightInputs(
@@ -1771,6 +1768,7 @@ export class CodexSecurity {
         ? { knowledgeBasePaths: options.knowledgeBasePaths }
         : {}),
       outputDir: inputs.outputDir,
+      stateDirectory: inputs.stateDirectory,
       ...(archiveDir === null ? {} : { archiveDir }),
       authentication: scanAuthentication(
         this.#dependencies.environment,
