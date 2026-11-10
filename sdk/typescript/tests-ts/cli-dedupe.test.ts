@@ -25,6 +25,7 @@ test("asynchronous stderr failures do not discard successful dedupe results", as
   const result = {
     scanId: "scan-example",
     uniqueFindingIds: [],
+    scanRepresentativeFindingIds: [],
     duplicateGroups: [],
     deduplicationStatus: "completed" as const,
   };
@@ -59,6 +60,7 @@ test.each([false, true])(
     const result = {
       scanId: "scan-example",
       uniqueFindingIds: [],
+      scanRepresentativeFindingIds: [],
       duplicateGroups: [],
       deduplicationStatus: "completed" as const,
     };
@@ -112,6 +114,7 @@ test.each([false, true])(
     const result = {
       scanId: "scan-example",
       uniqueFindingIds: ["finding-one", "finding-two"],
+      scanRepresentativeFindingIds: ["finding-one", "finding-two"],
       duplicateGroups: [],
       deduplicationStatus: "completed_with_refusals" as const,
       refusals: [
@@ -164,6 +167,7 @@ test.each([
     return {
       scanId,
       uniqueFindingIds: [],
+      scanRepresentativeFindingIds: [],
       duplicateGroups: [],
       deduplicationStatus: "completed",
     };
@@ -185,6 +189,7 @@ test.each([
   expect(JSON.parse(stdout.text())).toEqual({
     scanId: "exact-scan",
     uniqueFindingIds: [],
+    scanRepresentativeFindingIds: [],
     duplicateGroups: [],
     deduplicationStatus: "completed",
   });
@@ -199,6 +204,7 @@ test.each([false, true])(
     const result = {
       scanId: "scan-example",
       uniqueFindingIds: ["finding-example"],
+      scanRepresentativeFindingIds: ["finding-example"],
       duplicateGroups: [],
       deduplicationStatus: "completed" as const,
     };
@@ -239,6 +245,7 @@ test.each([
     return {
       scanId,
       uniqueFindingIds: [],
+      scanRepresentativeFindingIds: [],
       duplicateGroups: [],
       deduplicationStatus: "completed",
     };
@@ -313,6 +320,7 @@ test("dedupe defaults to local storage without a findings URL", async () => {
     return {
       scanId,
       uniqueFindingIds: [],
+      scanRepresentativeFindingIds: [],
       duplicateGroups: [],
       deduplicationStatus: "completed",
     };
