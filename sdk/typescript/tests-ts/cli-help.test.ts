@@ -283,6 +283,21 @@ describe("CLI help", () => {
     },
   );
 
+  test.each([
+    ["imports", "--json"],
+    ["--json", "./import"],
+  ])(
+    "inspects repository scans with shared flags in either position (%s, %s)",
+    async (first, second) => {
+      const args = ["scan", first, second];
+      expect(await help([...args, "--help"])).toContain(
+        "Usage: codex-security scan [repository]",
+      );
+      const schema = JSON.parse(await help([...args, "--schema"]));
+      expect(schema.args.properties.repository.type).toBe("string");
+    },
+  );
+
   test("links both file import routes and keeps the vendor preview copyable", async () => {
     const menu = (await help(["import", "--help"])).replace(/\s+/gu, " ");
     expect(menu).toContain("publish findings --help");
@@ -302,7 +317,7 @@ describe("CLI help", () => {
     }
   });
 
-  test("exposes the scan and its import child in both manifests and the import schema", async () => {
+  test("exposes the scan and its import child in both manifests", async () => {
     for (const flag of ["--llms", "--llms-full"]) {
       const manifest = JSON.parse(await help([flag, "--format", "json"]));
       const names = manifest.commands.map(({ name }: { name: string }) => name);
@@ -311,11 +326,6 @@ describe("CLI help", () => {
         names.filter((name: string) => name === "scan import"),
       ).toHaveLength(1);
     }
-    const schema = JSON.parse(
-      await help(["scan", "import", "--schema", "--json"]),
-    );
-    expect(schema.options.properties.csv.type).toBe("string");
-    expect(schema.options.properties.json.type).toBe("string");
   });
 
   test("publishes runnable examples with the same flags in help and the full manifest", async () => {

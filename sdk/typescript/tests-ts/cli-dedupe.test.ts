@@ -20,15 +20,19 @@ const args = [
   "--json",
 ];
 
-test("asynchronous stderr failures do not discard successful dedupe results", async () => {
-  const deps = dependencies();
-  const result = {
-    scanId: "scan-example",
+function emptyDedupeResult(scanId: string) {
+  return {
+    scanId,
     uniqueFindingIds: [],
     scanRepresentativeFindingIds: [],
     duplicateGroups: [],
     deduplicationStatus: "completed" as const,
   };
+}
+
+test("asynchronous stderr failures do not discard successful dedupe results", async () => {
+  const deps = dependencies();
+  const result = emptyDedupeResult("scan-example");
   deps.deduplicateScan = async (_scan, options) => {
     options.onDiagnostic?.({
       event: "review.started",
@@ -57,13 +61,7 @@ test.each([false, true])(
   async (debug) => {
     const deps = dependencies();
     if (debug) deps.environment["CODEX_SECURITY_LOG_LEVEL"] = "debug";
-    const result = {
-      scanId: "scan-example",
-      uniqueFindingIds: [],
-      scanRepresentativeFindingIds: [],
-      duplicateGroups: [],
-      deduplicationStatus: "completed" as const,
-    };
+    const result = emptyDedupeResult("scan-example");
     deps.deduplicateScan = async (_id, options) => {
       options.onDiagnostic?.({
         event: "review.started",
@@ -164,13 +162,7 @@ test.each([
   deps.deduplicateScan = async (scanId, options) => {
     expect(scanId).toBe("exact-scan");
     expect(options.workflowId).toBe("workflow-example");
-    return {
-      scanId,
-      uniqueFindingIds: [],
-      scanRepresentativeFindingIds: [],
-      duplicateGroups: [],
-      deduplicationStatus: "completed",
-    };
+    return emptyDedupeResult(scanId);
   };
   const stdout = captureCli(main, "stdout");
   expect(
@@ -186,13 +178,7 @@ test.each([
       deps,
     ),
   ).toBe(0);
-  expect(JSON.parse(stdout.text())).toEqual({
-    scanId: "exact-scan",
-    uniqueFindingIds: [],
-    scanRepresentativeFindingIds: [],
-    duplicateGroups: [],
-    deduplicationStatus: "completed",
-  });
+  expect(JSON.parse(stdout.text())).toEqual(emptyDedupeResult("exact-scan"));
 });
 
 test.each([false, true])(
@@ -242,13 +228,7 @@ test.each([
   deps.deduplicateScan = async (scanId, options) => {
     called = true;
     expect(options.concurrency).toBe(expected);
-    return {
-      scanId,
-      uniqueFindingIds: [],
-      scanRepresentativeFindingIds: [],
-      duplicateGroups: [],
-      deduplicationStatus: "completed",
-    };
+    return emptyDedupeResult(scanId);
   };
   expect(await runCapturedCli(main, [...args, ...flags], deps)).toBe(0);
   expect(called).toBe(true);
@@ -317,13 +297,7 @@ test("dedupe defaults to local storage without a findings URL", async () => {
     expect(scanId).toBe("latest");
     expect(options.findingsUrl).toBeUndefined();
     expect(dependencies?.surface).toBe("cli");
-    return {
-      scanId,
-      uniqueFindingIds: [],
-      scanRepresentativeFindingIds: [],
-      duplicateGroups: [],
-      deduplicationStatus: "completed",
-    };
+    return emptyDedupeResult(scanId);
   };
   expect(
     await runCapturedCli(main, ["dedupe", "--scan", "latest", "--json"], deps),

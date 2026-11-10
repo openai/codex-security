@@ -255,10 +255,7 @@ describe("scan import", () => {
     expect(help.text()).toContain("--format json");
     const schema = captureCli(main, "stdout");
     expect(
-      await schema.run(
-        ["scan", "import", "--schema", "--format", "json"],
-        deps,
-      ),
+      await schema.run(["scan", "import", "--schema", "--json"], deps),
     ).toBe(0);
     expect(JSON.parse(schema.text())).toMatchObject({
       options: {
