@@ -173,6 +173,7 @@ test.each(["completed", "failed", "interrupted", "preview"] as const)(
       runTestInSubprocess(
         import.meta.path,
         `scratch cleanup failure preserves the ${outcome} import outcome`,
+        { PYTHON: pythonExecutable() ?? undefined },
       )
     )
       return;
@@ -637,6 +638,7 @@ test.each(["regular file", "symbolic link"])(
       runTestInSubprocess(
         import.meta.path,
         `import rejects a source replaced with a ${replacement} before reading`,
+        { PYTHON: pythonExecutable() ?? undefined },
       )
     )
       return;

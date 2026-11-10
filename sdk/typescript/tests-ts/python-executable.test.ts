@@ -43,11 +43,14 @@ test.skipIf(process.platform !== "win32")(
     );
     const fixture = join(root, "python.test.ts");
     const helper = new URL("./support/python.ts", import.meta.url).href;
+    const isolated = new URL("./support/test-subprocess.ts", import.meta.url)
+      .href;
     await writeFile(
       fixture,
       [
         'import { expect, test } from "bun:test";',
         `import { useTestPython } from ${JSON.stringify(helper)};`,
+        `import { runTestInSubprocess } from ${JSON.stringify(isolated)};`,
         "const resolve = useTestPython();",
         'test("uses the prepared Python", () => {',
         "  expect(resolve()).toBe(process.env.EXPECTED_PYTHON);",
@@ -59,6 +62,10 @@ test.skipIf(process.platform !== "win32")(
         "    expect(resolve()).toBe(process.env.EXPECTED_PYTHON);",
         "  }",
         "});",
+        'test("isolated child reuses the prepared Python", () => {',
+        '  if (runTestInSubprocess(import.meta.path, "isolated child reuses the prepared Python", { PYTHON: resolve() ?? undefined })) return;',
+        "  expect(resolve()).toBe(process.env.EXPECTED_PYTHON);",
+        "}, 1000);",
       ].join("\n"),
     );
     for (const configured of [python, ""]) {
