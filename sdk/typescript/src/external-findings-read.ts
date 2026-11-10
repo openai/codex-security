@@ -82,8 +82,6 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
 } as const satisfies Record<string, LocalFindingProvider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
-export type CloudFindingsReader = ExternalFindingsReader;
-
 export const EXTERNAL_FINDINGS_READERS = Object.keys(
   EXTERNAL_FINDINGS_PROVIDERS,
 ) as ExternalFindingsReader[];

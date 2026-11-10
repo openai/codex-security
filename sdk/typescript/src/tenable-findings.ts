@@ -83,13 +83,12 @@ export function tenableSourceRepository(
   references: readonly ExternalSourceRepository[],
   target: ExternalImportTarget = "local",
 ) {
-  const first = input.findings[0]?.evidence.source_data;
-  const reportless = target === "cloud" && input.report === undefined;
-  const asset = asRecord(
-    input.report?.["asset"] ?? (reportless ? first?.["asset"] : undefined),
-  );
+  const first =
+    target === "cloud" ? input.findings[0]?.evidence.source_data : undefined;
+  const header = input.report ?? first;
+  const asset = asRecord(header?.["asset"]);
   if (
-    (!reportless && input.report?.["format"] !== tenableReportFormat) ||
+    header?.["format"] !== tenableReportFormat ||
     asset?.["asset_class"] !== "CODE_REPOSITORY" ||
     !(target === "cloud" ? assetId : nonblank).safeParse(asset["asset_id"])
       .success

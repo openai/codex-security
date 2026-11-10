@@ -59,7 +59,7 @@ import {
   readExternalFindings,
   semgrepSarifRepositories,
   snykFileRepositories,
-  type CloudFindingsReader,
+  type ExternalFindingsReader,
 } from "./external-findings-read.js";
 import {
   canSnapshotWithoutGetters,
@@ -186,7 +186,7 @@ export interface NormalizedExternalPublicationOptions {
 
 /** File readers accepted by the Cloud publisher. */
 export interface ExternalPublicationOptions extends LocalExternalImportOptions {
-  provider: CloudFindingsReader;
+  provider: ExternalFindingsReader;
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */
