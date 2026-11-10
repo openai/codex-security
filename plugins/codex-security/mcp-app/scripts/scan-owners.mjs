@@ -1211,10 +1211,35 @@ async function ownerRepository(repository2, environment, signal2) {
     };
   };
   let codeowners;
+  const recentAuthors = /* @__PURE__ */ new Map();
+  async function lastFileAuthor(path) {
+    let record = recentAuthors.get(path);
+    if (!record) {
+      record = (
+        await git2(
+          "log",
+          "-1",
+          "--no-merges",
+          "--no-use-mailmap",
+          "--no-show-signature",
+          "--no-notes",
+          "--format=%H%x00%an%x00%ae",
+          revision2,
+          "--",
+          path,
+        )
+      )
+        .trimEnd()
+        .split("\0");
+      recentAuthors.set(path, record);
+    }
+    return record;
+  }
   return {
     git: git2,
     revision: revision2,
     hasFile,
+    lastFileAuthor,
     shallow,
     // Keep the load lazy so failures remain inside per-finding error handling.
     codeowners: () => (codeowners ??= loadCodeowners()),
@@ -1313,25 +1338,22 @@ async function collectOwnerEvidence(finding, repository2, policy) {
     context.limitations.push(
       "CODEOWNERS identities are declarations; their existence and repository access are not verified.",
     );
-  if (context.declaredOwners.length > 0) return context;
-  if (policy === "scan" && !hasScanOwnerHint(finding)) return context;
-  await collectGitOwnerEvidence(finding, repository2, context, stale);
+  if (policy === "standalone" && !context.declaredOwners.length)
+    await collectGitOwnerEvidence(finding, repository2, context, stale, policy);
   return context;
-}
-function hasScanOwnerHint(finding) {
-  const value = finding.extensions?.["ownerSuggestion"];
-  if (value == null) return false;
-  if (typeof value !== "object" || Array.isArray(value)) return true;
-  return Object.keys(value).some(
-    (key) => key !== "revision" && key !== "suggestions",
-  );
 }
 function addOwnerEvidence(context, item) {
   const evidence = { id: `e${context.evidence.length + 1}`, ...item };
   context.evidence.push(evidence);
   return evidence;
 }
-async function collectGitOwnerEvidence(finding, repository2, context, stale) {
+async function collectGitOwnerEvidence(
+  finding,
+  repository2,
+  context,
+  stale,
+  policy,
+) {
   const { git: git2, revision: revision2, hasFile } = repository2;
   const identityIndex = (name, email) => {
     const index = context.identities.findIndex(
@@ -1348,17 +1370,36 @@ async function collectGitOwnerEvidence(finding, repository2, context, stale) {
       context.limitations.push(`Not a regular file at HEAD: ${path}`);
       continue;
     }
+    const locations = stale
+      ? [{ path }]
+      : finding.locations.filter((location) => location.path === path);
+    const lineLocations = locations.filter(
+      (location) => location.startLine !== void 0,
+    );
+    if (policy === "scan" && !lineLocations.length) {
+      const [commit, name, email] = await repository2.lastFileAuthor(path);
+      if (commit && name && email)
+        add({
+          kind: "history",
+          path,
+          commit,
+          content: "",
+          identityIndex: identityIndex(name, email),
+        });
+      continue;
+    }
     const source = await git2("cat-file", "blob", `${revision2}:${path}`);
     if (!source || source.includes("\0")) {
       context.limitations.push(`Source is empty or binary: ${path}`);
       continue;
     }
     const lines = source.replace(/\n$/u, "").split("\n");
-    const locations = stale
-      ? [{ path }]
-      : finding.locations.filter((location) => location.path === path);
-    for (const location of locations) {
+    for (const location of policy === "scan" ? lineLocations : locations) {
       const start = location.startLine ?? 1;
+      if (policy === "scan" && (location.endLine ?? start) > lines.length)
+        throw new CodexSecurityError(
+          `Finding lines are outside the committed file: ${path}`,
+        );
       if (start > lines.length) {
         context.limitations.push(
           `Finding line is outside the committed file: ${path}:${start}`,
@@ -1371,18 +1412,19 @@ async function collectGitOwnerEvidence(finding, repository2, context, stale) {
       );
       const excerptStart = Math.max(1, start - 10);
       const excerptEnd = Math.min(lines.length, end + 10);
-      add({
-        kind: "source",
-        path,
-        commit: revision2,
-        startLine: excerptStart,
-        endLine: excerptEnd,
-        content: lines
-          .slice(excerptStart - 1, excerptEnd)
-          .map((line2, index) => `${excerptStart + index}: ${line2}`)
-          .join("\n"),
-        identityIndex: null,
-      });
+      if (policy === "standalone")
+        add({
+          kind: "source",
+          path,
+          commit: revision2,
+          startLine: excerptStart,
+          endLine: excerptEnd,
+          content: lines
+            .slice(excerptStart - 1, excerptEnd)
+            .map((line2, index) => `${excerptStart + index}: ${line2}`)
+            .join("\n"),
+          identityIndex: null,
+        });
       const blame = await git2(
         "blame",
         "--line-porcelain",
@@ -1410,6 +1452,7 @@ async function collectGitOwnerEvidence(finding, repository2, context, stale) {
           const previous = context.evidence.at(-1);
           if (
             previous?.kind === "blame" &&
+            previous.path === path &&
             previous.blameCommit === commit &&
             previous.identityIndex === index &&
             previous.endLine === line - 1
@@ -1430,6 +1473,7 @@ async function collectGitOwnerEvidence(finding, repository2, context, stale) {
         }
       }
     }
+    if (policy === "scan") continue;
     const history = (
       await git2(
         "log",
@@ -1523,13 +1567,40 @@ async function ownerResult(repository2, finding, signal2, policy) {
             ),
           ),
         });
-    } else if (policy.kind === "scan") {
-      if (hasScanOwnerHint(finding)) {
-        const candidate = verifiedGitCandidate(finding, context);
-        result.suggestions.push(candidate);
-      } else
-        result.reason = "The scan did not record a supported owner suggestion.";
+    }
+    if (policy.kind === "scan") {
+      const stale =
+        finding.sourceRevision !== void 0 &&
+        finding.sourceRevision !== repository2.revision;
+      await collectGitOwnerEvidence(
+        finding,
+        repository2,
+        context,
+        stale,
+        "scan",
+      );
+      const gitEvidence = context.evidence.filter(
+        (e) => e.kind === "blame" || e.kind === "history",
+      );
+      const authors = new Set(
+        context.identities.map(({ email }) => email.toLowerCase()),
+      );
+      const citedPaths = new Set(gitEvidence.map(({ path }) => path));
+      if (
+        authors.size === 1 &&
+        finding.locations.every(({ path }) => citedPaths.has(path))
+      ) {
+        addSuggestion(result.suggestions, {
+          owner: context.identities[0],
+          reason: "Git attributes the affected source to this contributor.",
+          evidence: publicEvidence(gitEvidence),
+        });
+      } else {
+        result.reason =
+          "Git did not identify a single contributor across the affected source.";
+      }
     } else if (
+      !result.suggestions.length &&
       context.identities.length &&
       context.evidence.some(({ kind }) => kind === "source")
     ) {
@@ -1565,39 +1636,19 @@ async function ownerResult(repository2, finding, signal2, policy) {
       result.reason = result.suggestions[0].reason;
     }
   } catch (error) {
-    signal2?.throwIfAborted();
-    result.status = "error";
-    result.reason = errorMessage(error);
+    if (result.suggestions.length) {
+      result.status = "identified";
+      result.reason = result.suggestions[0].reason;
+      const warning = `Git owner lookup failed: ${errorMessage(error)}`;
+      result.limitations.push(warning);
+      if (policy.kind === "scan") policy.onWarning?.(warning);
+    } else {
+      signal2?.throwIfAborted();
+      result.status = "error";
+      result.reason = errorMessage(error);
+    }
   }
   return result;
-}
-function verifiedGitCandidate(finding, context) {
-  const hint = z
-    .object({ email: text, commit: text, reason: text })
-    .parse(finding.extensions?.["ownerSuggestion"]);
-  const supports = (item) =>
-    item.kind === "blame"
-      ? item.blameCommit === hint.commit
-      : item.commit === hint.commit;
-  const identityIndex = context.identities.findIndex(
-    (identity, index) =>
-      identity.email.toLowerCase() === hint.email.toLowerCase() &&
-      context.evidence.some(
-        (item) => item.identityIndex === index && supports(item),
-      ),
-  );
-  const cited = context.evidence.filter(
-    (item) => item.identityIndex === identityIndex && supports(item),
-  );
-  if (identityIndex < 0 || cited.length === 0)
-    throw new CodexSecurityError(
-      "The scan owner is not supported by the finding's Git evidence.",
-    );
-  return {
-    owner: context.identities[identityIndex],
-    reason: hint.reason,
-    evidence: publicEvidence(cited),
-  };
 }
 function publicEvidence(evidence) {
   return evidence.map(
@@ -1611,7 +1662,7 @@ function publicEvidence(evidence) {
 }
 function ownerKey(owner) {
   return "email" in owner
-    ? `email:${owner.email}`
+    ? `email:${owner.email.toLowerCase()}`
     : `github:${owner.handle.toLowerCase()}`;
 }
 function addSuggestion(suggestions, candidate) {
@@ -1641,12 +1692,24 @@ var git = await ownerRepository(repository, process.env, signal);
 if (git.revision !== revision)
   throw new Error("Owner checkout differs from the scan revision.");
 for (const finding of findings) {
+  let warning;
   const { findingId, occurrenceId, status, reason, suggestions } =
-    await ownerResult(git, finding, signal, { kind: "scan" });
+    await ownerResult(git, finding, signal, {
+      kind: "scan",
+      onWarning: (message) => {
+        warning = message;
+      },
+    });
   if (
     !process.stdout.write(
-      JSON.stringify({ findingId, occurrenceId, status, reason, suggestions }) +
-        "\n",
+      JSON.stringify({
+        findingId,
+        occurrenceId,
+        status,
+        reason,
+        suggestions,
+        warning,
+      }) + "\n",
     )
   )
     await once(process.stdout, "drain", { signal });

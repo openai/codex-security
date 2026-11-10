@@ -520,10 +520,10 @@ candidates in `extensions.ownerSuggestion.suggestions` when it first seals
 the findings. Workbench callers can also request this on first completion.
 Replaying completion preserves the sealed finding bytes. Deep Scan automatic
 completion and committed-diff scans use the separate owner report. This option is unsupported for working-tree and
-directory snapshots. It works with `--max-cost`: hints are recorded within the
-existing scan execution and budget, and the report is finalized without another
-model call. Missing hints abstain; invalid hints produce per-finding owner errors.
-Use the separate `suggest-owners` command for explicit owner-only jobs.
+directory snapshots. With `--max-cost`, completion still resolves owners from the checkout without
+another model call. It lists declared CODEOWNERS first, then checks Git blame for the reported
+lines or the most recent non-merge file commit for path-only locations. Git
+evidence must agree on one author across affected paths.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   collectOwnerEvidence,
-  hasScanOwnerHint,
+  collectGitOwnerEvidence,
   type ownerRepository,
   type OwnerContext,
   type OwnerEvidence,
@@ -46,7 +46,8 @@ export const decisionSchema = z.strictObject({
 
 type ModelDecision = (finding: OwnerFinding, context: OwnerContext) => unknown;
 type OwnerPolicy =
-  { kind: "scan" } | { kind: "standalone"; decide: ModelDecision };
+  | { kind: "scan"; onWarning?: (warning: string) => void }
+  | { kind: "standalone"; decide: ModelDecision };
 type RankedResult = Pick<
   OwnerSuggestion,
   | "findingId"
@@ -91,13 +92,40 @@ export async function ownerResult(
             ),
           ),
         });
-    } else if (policy.kind === "scan") {
-      if (hasScanOwnerHint(finding)) {
-        const candidate = verifiedGitCandidate(finding, context);
-        result.suggestions.push(candidate);
-      } else
-        result.reason = "The scan did not record a supported owner suggestion.";
+    }
+    if (policy.kind === "scan") {
+      const stale =
+        finding.sourceRevision !== undefined &&
+        finding.sourceRevision !== repository.revision;
+      await collectGitOwnerEvidence(
+        finding,
+        repository,
+        context,
+        stale,
+        "scan",
+      );
+      const gitEvidence = context.evidence.filter(
+        (e) => e.kind === "blame" || e.kind === "history",
+      );
+      const authors = new Set(
+        context.identities.map(({ email }) => email.toLowerCase()),
+      );
+      const citedPaths = new Set(gitEvidence.map(({ path }) => path));
+      if (
+        authors.size === 1 &&
+        finding.locations.every(({ path }) => citedPaths.has(path))
+      ) {
+        addSuggestion(result.suggestions, {
+          owner: context.identities[0]!,
+          reason: "Git attributes the affected source to this contributor.",
+          evidence: publicEvidence(gitEvidence),
+        });
+      } else {
+        result.reason =
+          "Git did not identify a single contributor across the affected source.";
+      }
     } else if (
+      !result.suggestions.length &&
       context.identities.length &&
       context.evidence.some(({ kind }) => kind === "source")
     ) {
@@ -137,9 +165,17 @@ export async function ownerResult(
       result.reason = result.suggestions[0]!.reason;
     }
   } catch (error) {
-    signal?.throwIfAborted();
-    result.status = "error";
-    result.reason = errorMessage(error);
+    if (result.suggestions.length) {
+      result.status = "identified";
+      result.reason = result.suggestions[0]!.reason;
+      const warning = `Git owner lookup failed: ${errorMessage(error)}`;
+      result.limitations.push(warning);
+      if (policy.kind === "scan") policy.onWarning?.(warning);
+    } else {
+      signal?.throwIfAborted();
+      result.status = "error";
+      result.reason = errorMessage(error);
+    }
   }
   return result;
 }
@@ -164,39 +200,6 @@ export async function ownerResults(
   return results;
 }
 
-function verifiedGitCandidate(
-  finding: OwnerFinding,
-  context: OwnerContext,
-): OwnerCandidate {
-  const hint = z
-    .object({ email: text, commit: text, reason: text })
-    .parse(finding.extensions?.["ownerSuggestion"]);
-  const supports = (item: OwnerEvidence) =>
-    item.kind === "blame"
-      ? item.blameCommit === hint.commit
-      : item.commit === hint.commit;
-  // Git keeps emails that differ only in case as separate identities.
-  const identityIndex = context.identities.findIndex(
-    (identity, index) =>
-      identity.email.toLowerCase() === hint.email.toLowerCase() &&
-      context.evidence.some(
-        (item) => item.identityIndex === index && supports(item),
-      ),
-  );
-  const cited = context.evidence.filter(
-    (item) => item.identityIndex === identityIndex && supports(item),
-  );
-  if (identityIndex < 0 || cited.length === 0)
-    throw new CodexSecurityError(
-      "The scan owner is not supported by the finding's Git evidence.",
-    );
-  return {
-    owner: context.identities[identityIndex]!,
-    reason: hint.reason,
-    evidence: publicEvidence(cited),
-  };
-}
-
 function publicEvidence(
   evidence: readonly OwnerEvidence[],
 ): OwnerCandidate["evidence"] {
@@ -212,7 +215,7 @@ function publicEvidence(
 
 function ownerKey(owner: OwnerCandidate["owner"]): string {
   return "email" in owner
-    ? `email:${owner.email}`
+    ? `email:${owner.email.toLowerCase()}`
     : `github:${owner.handle.toLowerCase()}`;
 }
 

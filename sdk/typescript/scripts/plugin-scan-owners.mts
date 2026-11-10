@@ -22,13 +22,25 @@ const git = await ownerRepository(repository, process.env, signal);
 if (git.revision !== revision)
   throw new Error("Owner checkout differs from the scan revision.");
 for (const finding of findings) {
+  let warning: string | undefined;
   const { findingId, occurrenceId, status, reason, suggestions } =
-    await ownerResult(git, finding, signal, { kind: "scan" });
+    await ownerResult(git, finding, signal, {
+      kind: "scan",
+      onWarning: (message) => {
+        warning = message;
+      },
+    });
   // Flush each completed occurrence so a later timeout cannot discard its result.
   if (
     !process.stdout.write(
-      JSON.stringify({ findingId, occurrenceId, status, reason, suggestions }) +
-        "\n",
+      JSON.stringify({
+        findingId,
+        occurrenceId,
+        status,
+        reason,
+        suggestions,
+        warning,
+      }) + "\n",
     )
   )
     await once(process.stdout, "drain", { signal });

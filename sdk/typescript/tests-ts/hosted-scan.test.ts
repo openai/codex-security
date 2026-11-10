@@ -93,46 +93,58 @@ test("hosted owner artifact is opt-in and included in the completed receipt", as
   }
 });
 
-test("a hosted path scan seals the candidates from the repository CODEOWNERS", async () => {
-  const input = await fixture();
-  writeSource(
-    input.repository,
-    ".github/CODEOWNERS",
-    "/service-a/ @service-owner\n",
-  );
-  git(input.repository, "add", ".github/CODEOWNERS");
-  git(input.repository, "commit", "-qm", "declare component owner");
-  input.revision = git(input.repository, "rev-parse", "HEAD");
-  const executor = draftExecutor(async (request) => {
-    const example = await readJson<FindingsDocument>(
-      join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+test.each([true, false])(
+  "a hosted path scan seals candidates with a matching CODEOWNERS rule: %s",
+  async (declared) => {
+    const input = await fixture();
+    writeSource(
+      input.repository,
+      ".github/CODEOWNERS",
+      declared
+        ? "/service-a/ @service-owner\n"
+        : "/service-b/ @service-owner\n",
     );
-    const finding = example.findings[0]!;
-    finding.locations = [
-      { path: "service-a/index.ts", role: "sink", startLine: 1 },
-    ];
-    await writeJson(join(request.runtime.outputDirectory, "findings.json"), {
-      findings: [finding],
+    git(input.repository, "add", ".github/CODEOWNERS");
+    git(input.repository, "commit", "-qm", "declare component owner");
+    input.revision = git(input.repository, "rev-parse", "HEAD");
+    const executor = draftExecutor(async (request) => {
+      const example = await readJson<FindingsDocument>(
+        join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+      );
+      const finding = example.findings[0]!;
+      finding.locations = [
+        { path: "service-a/index.ts", role: "sink", startLine: 1 },
+      ];
+      await writeJson(join(request.runtime.outputDirectory, "findings.json"), {
+        findings: [finding],
+      });
     });
-  });
-  const result = await runHostedScan(
-    { ...input, ownerSuggestions: true },
-    { executor },
-  );
-  if (result.status !== "completed") throw new Error(result.error);
-  const output = await readJson<FindingsDocument>(
-    join(input.outputDirectory, "findings.json"),
-  );
-  expect(output.findings[0]?.extensions?.["ownerSuggestion"]).toMatchObject({
-    revision: input.revision,
-    suggestions: [
-      {
-        owner: { handle: "service-owner" },
-        evidence: [{ kind: "codeowners", matchedPath: "service-a/index.ts" }],
+    const result = await runHostedScan(
+      { ...input, ownerSuggestions: true },
+      { executor },
+    );
+    if (result.status !== "completed") throw new Error(result.error);
+    const output = await readJson<FindingsDocument>(
+      join(input.outputDirectory, "findings.json"),
+    );
+    const gitCandidate = {
+      owner: {
+        email: git(input.repository, "show", "-s", "--format=%ae", "HEAD^"),
       },
-    ],
-  });
-});
+      evidence: [
+        { kind: "blame", path: "service-a/index.ts", startLine: 1, endLine: 1 },
+      ],
+    };
+    const declaration = {
+      owner: { handle: "service-owner" },
+      evidence: [{ kind: "codeowners", matchedPath: "service-a/index.ts" }],
+    };
+    expect(output.findings[0]?.extensions?.["ownerSuggestion"]).toMatchObject({
+      revision: input.revision,
+      suggestions: declared ? [declaration, gitCandidate] : [gitCandidate],
+    });
+  },
+);
 
 test.each([false, true])(
   "owner failure preserves the completed hosted scan (cancel=%p)",

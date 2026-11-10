@@ -167,10 +167,35 @@ export async function ownerRepository(
     };
   };
   let codeowners: ReturnType<typeof loadCodeowners> | undefined;
+  const recentAuthors = new Map<string, string[]>();
+  async function lastFileAuthor(path: string) {
+    let record = recentAuthors.get(path);
+    if (!record) {
+      record = (
+        await git(
+          "log",
+          "-1",
+          "--no-merges",
+          "--no-use-mailmap",
+          "--no-show-signature",
+          "--no-notes",
+          "--format=%H%x00%an%x00%ae",
+          revision,
+          "--",
+          path,
+        )
+      )
+        .trimEnd()
+        .split("\0");
+      recentAuthors.set(path, record);
+    }
+    return record;
+  }
   return {
     git,
     revision,
     hasFile,
+    lastFileAuthor,
     shallow,
     // Keep the load lazy so failures remain inside per-finding error handling.
     codeowners: () => (codeowners ??= loadCodeowners()),
@@ -274,19 +299,9 @@ export async function collectOwnerEvidence(
     context.limitations.push(
       "CODEOWNERS identities are declarations; their existence and repository access are not verified.",
     );
-  if (context.declaredOwners.length > 0) return context;
-  if (policy === "scan" && !hasScanOwnerHint(finding)) return context;
-  await collectGitOwnerEvidence(finding, repository, context, stale);
+  if (policy === "standalone" && !context.declaredOwners.length)
+    await collectGitOwnerEvidence(finding, repository, context, stale, policy);
   return context;
-}
-
-export function hasScanOwnerHint(finding: OwnerFinding): boolean {
-  const value = finding.extensions?.["ownerSuggestion"];
-  if (value == null) return false;
-  if (typeof value !== "object" || Array.isArray(value)) return true;
-  return Object.keys(value).some(
-    (key) => key !== "revision" && key !== "suggestions",
-  );
 }
 
 function addOwnerEvidence(
@@ -298,11 +313,12 @@ function addOwnerEvidence(
   return evidence;
 }
 
-async function collectGitOwnerEvidence(
+export async function collectGitOwnerEvidence(
   finding: OwnerFinding,
   repository: Awaited<ReturnType<typeof ownerRepository>>,
   context: OwnerContext,
   stale: boolean,
+  policy: "scan" | "standalone",
 ): Promise<void> {
   const { git, revision, hasFile } = repository;
   const identityIndex = (name: string, email: string) => {
@@ -319,17 +335,36 @@ async function collectGitOwnerEvidence(
       context.limitations.push(`Not a regular file at HEAD: ${path}`);
       continue;
     }
+    const locations = stale
+      ? [{ path }]
+      : finding.locations.filter((location) => location.path === path);
+    const lineLocations = locations.filter(
+      (location) => location.startLine !== undefined,
+    );
+    if (policy === "scan" && !lineLocations.length) {
+      const [commit, name, email] = await repository.lastFileAuthor(path);
+      if (commit && name && email)
+        add({
+          kind: "history",
+          path,
+          commit,
+          content: "",
+          identityIndex: identityIndex(name, email),
+        });
+      continue;
+    }
     const source = await git("cat-file", "blob", `${revision}:${path}`);
     if (!source || source.includes("\0")) {
       context.limitations.push(`Source is empty or binary: ${path}`);
       continue;
     }
     const lines = source.replace(/\n$/u, "").split("\n");
-    const locations = stale
-      ? [{ path }]
-      : finding.locations.filter((location) => location.path === path);
-    for (const location of locations) {
+    for (const location of policy === "scan" ? lineLocations : locations) {
       const start = location.startLine ?? 1;
+      if (policy === "scan" && (location.endLine ?? start) > lines.length)
+        throw new CodexSecurityError(
+          `Finding lines are outside the committed file: ${path}`,
+        );
       if (start > lines.length) {
         context.limitations.push(
           `Finding line is outside the committed file: ${path}:${start}`,
@@ -343,18 +378,19 @@ async function collectGitOwnerEvidence(
       );
       const excerptStart = Math.max(1, start - 10);
       const excerptEnd = Math.min(lines.length, end + 10);
-      add({
-        kind: "source",
-        path,
-        commit: revision,
-        startLine: excerptStart,
-        endLine: excerptEnd,
-        content: lines
-          .slice(excerptStart - 1, excerptEnd)
-          .map((line, index) => `${excerptStart + index}: ${line}`)
-          .join("\n"),
-        identityIndex: null,
-      });
+      if (policy === "standalone")
+        add({
+          kind: "source",
+          path,
+          commit: revision,
+          startLine: excerptStart,
+          endLine: excerptEnd,
+          content: lines
+            .slice(excerptStart - 1, excerptEnd)
+            .map((line, index) => `${excerptStart + index}: ${line}`)
+            .join("\n"),
+          identityIndex: null,
+        });
       const blame = await git(
         "blame",
         "--line-porcelain",
@@ -382,6 +418,7 @@ async function collectGitOwnerEvidence(
           const previous = context.evidence.at(-1);
           if (
             previous?.kind === "blame" &&
+            previous.path === path &&
             previous.blameCommit === commit &&
             previous.identityIndex === index &&
             previous.endLine === line - 1
@@ -402,6 +439,7 @@ async function collectGitOwnerEvidence(
         }
       }
     }
+    if (policy === "scan") continue;
     const history = (
       await git(
         "log",

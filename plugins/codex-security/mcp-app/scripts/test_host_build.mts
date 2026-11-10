@@ -99,8 +99,9 @@ test("builds and loads the host runtime from standalone plugin source", async (t
       .every(
         (entry, index) =>
           entry.occurrenceId === String(index + 1) &&
-          entry.status === "abstained" &&
-          entry.suggestions.length === 0,
+          entry.status === "identified" &&
+          entry.suggestions[0].owner.email === "reviewer@example.test" &&
+          entry.suggestions[0].evidence[0].kind === "history",
       ),
   );
 

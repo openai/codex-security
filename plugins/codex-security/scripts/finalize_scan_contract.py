@@ -3120,6 +3120,8 @@ def _record_owner_results(
             finding = by_occurrence.pop(item["occurrenceId"])
             if item["findingId"] != finding["findingId"]:
                 raise ValueError("Owner result identities differ from the scan")
+            if item.get("warning"):
+                warnings.append(f"Owner verification for {item['occurrenceId']}: {item['warning']}")
             if item["status"] == "error":
                 warnings.append(f"Skipped owner for {item['occurrenceId']}: {item['reason']}")
                 continue
