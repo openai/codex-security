@@ -12,7 +12,7 @@ import {
 import type { DeduplicationReviewer } from "../src/deduplication/deduplication-reviewer.js";
 import type { ScanManifest } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { selectClassificationFindings } from "../src/classify-scan-severity.js";
+import { prepareScanPublication } from "../src/publication.js";
 import { scriptedWorkbench } from "./support/workbench-fakes.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
 import { rejecting } from "./support/errors.js";
@@ -448,12 +448,15 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
       fetch: rejecting("Reading a completed workflow made an HTTP request"),
     });
     expect(cached).toEqual(result);
-    expect(
-      selectClassificationFindings(
-        document.findings,
-        cached.scanRepresentativeFindingIds,
-      ),
-    ).toEqual(document.findings);
+    const publication = await prepareScanPublication(scanDir, {
+      destination: "linear",
+      teamId: "fixture-team",
+      findingIds: cached.scanRepresentativeFindingIds,
+      environment,
+    });
+    expect(publication.issues.map((issue) => issue.findingId)).toEqual(
+      cached.scanRepresentativeFindingIds,
+    );
     expect(bodies).toHaveLength(
       failure === "before-post"
         ? 1
