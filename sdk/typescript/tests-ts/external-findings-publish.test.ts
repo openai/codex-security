@@ -4115,7 +4115,7 @@ test("publishing an Inspector retry adopts its project map without changing the 
     "Supply the verified Inspector project binding",
   );
   await expect(withoutMap.publish()).rejects.toThrow(
-    "Another publication prepared this input",
+    "Supply the verified Inspector project binding",
   );
   expect((await (await prepare(mappedOptions)).publish()).verified).toBe(1);
   expect(f.posts).toEqual([body, body, body]);
