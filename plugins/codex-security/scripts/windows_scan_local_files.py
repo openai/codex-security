@@ -71,6 +71,7 @@ _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
@@ -78,6 +79,7 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_RENAME_INFO_CLASS = 3
 _FILE_DISPOSITION_INFO_CLASS = 4
 _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
+_FILE_ID_INFO_CLASS = 18
 
 _FILE_TYPE_DISK = 0x0001
 _FILE_NAME_OPENED = 0x00000008
@@ -127,6 +129,25 @@ class _FileAttributeTagInfo(ctypes.Structure):
     _fields_ = [
         ("FileAttributes", wintypes.DWORD),
         ("ReparseTag", wintypes.DWORD),
+    ]
+
+
+class _FileIdInfo(ctypes.Structure):
+    _fields_ = [("VolumeSerialNumber", ctypes.c_uint64), ("FileId", ctypes.c_ubyte * 16)]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
     ]
 
 
@@ -230,6 +251,12 @@ if os.name == "nt":
         wintypes.DWORD,
     ]
     _GetFileInformationByHandleEx.restype = wintypes.BOOL
+    _GetFileInformationByHandle = _kernel32.GetFileInformationByHandle
+    _GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    ]
+    _GetFileInformationByHandle.restype = wintypes.BOOL
 
     _GetFileType = _kernel32.GetFileType
     _GetFileType.argtypes = [wintypes.HANDLE]
@@ -442,9 +469,11 @@ def _verify_handle_path(handle: int, expected_path: Path, *, opened_name: bool =
         raise _invalid_path(expected_path, "opened file resolved outside its verified scan path")
 
 
-def _verify_directory(handle: int, expected_path: Path) -> None:
+def _verify_directory(handle: int, expected_path: Path, checkout: bool = False) -> None:
     info = _attributes(handle)
-    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT and (
+        not checkout or not info.ReparseTag or info.ReparseTag & _REPARSE_TAG_NAME_SURROGATE
+    ):
         raise _invalid_path(expected_path, "scan-local directories must not be reparse points")
     if not info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY:
         raise _invalid_path(expected_path, "expected a scan-local directory")
@@ -480,6 +509,7 @@ def _open_directory(
     missing_ok: bool = False,
     missing_is_path_error: bool = True,
     movable: bool = False,
+    checkout: bool = False,
 ) -> _OwnedHandle | None:
     try:
         handle = _create_file(
@@ -500,7 +530,7 @@ def _open_directory(
     if handle is not None:
         try:
             assert handle.value is not None
-            _verify_directory(handle.value, path)
+            _verify_directory(handle.value, path, checkout)
         except BaseException:
             handle.close()
             raise
@@ -550,7 +580,7 @@ def _current_user_sid() -> str:
     return _sid_text(wintypes.LPVOID.from_buffer(user))
 
 
-def _output_directory_grants(handle: int, path: Path) -> int:
+def _output_directory_grants(handle: int, path: Path, *, expected_descriptor=None) -> int:
     """Inspect the descriptor of the opened directory, even if its pathname changes."""
     owner, acl, descriptor = wintypes.LPVOID(), wintypes.LPVOID(), wintypes.LPVOID()
     status = _advapi32.GetSecurityInfo(
@@ -566,6 +596,10 @@ def _output_directory_grants(handle: int, path: Path) -> int:
     if status:
         raise ctypes.WinError(status)
     try:
+        if expected_descriptor is not None and _generated_directory_policy(
+            descriptor
+        ) != _generated_directory_policy(expected_descriptor):
+            raise _invalid_path(path, "new scan directory lacks its private owner or DACL")
         trusted = {
             _current_user_sid(),
             "S-1-5-18",
@@ -651,8 +685,8 @@ def _require_stable_output(path: Path, parent_grants: int, child_grants: int = 0
 
 
 @contextlib.contextmanager
-def _checked_output_directory(path: Path) -> Iterator[tuple[int, int]]:
-    """Hold the checked canonical chain and expose its final directory handle and grants."""
+def _checked_output_directory(path: Path) -> Iterator[tuple[int | None, int, int]]:
+    """Hold the checked chain and expose its parent, final directory handle and grants."""
     parent_grants = 0
     parent = None
     with contextlib.ExitStack() as pins:
@@ -678,16 +712,75 @@ def _checked_output_directory(path: Path) -> Iterator[tuple[int, int]]:
             _verify_directory(handle.value, directory)
             grants = _output_directory_grants(handle.value, directory)
             _require_stable_output(directory, parent_grants, grants)
-            parent, parent_grants = handle.value, grants
-        yield parent, parent_grants
+            containing, parent, parent_grants = parent, handle.value, grants
+        yield containing, parent, parent_grants
 
 
 def require_windows_output_path(path: Path, *, writable_output: bool = False) -> None:
-    with _checked_output_directory(path) as (_, grants):
+    with _checked_output_directory(path) as (_, _, grants):
         if writable_output and grants & _SET_REPARSE_POINT:
             raise _invalid_path(
                 path, "Another user can turn the output directory into a reparse point when empty."
             )
+
+
+DEEP_RESUME_DIRECTORY = ".codex-security-resume"
+
+
+def deep_resume_output_identity(scan_dir: Path) -> list[int]:
+    """Bind the output and its protected child while every directory is pinned."""
+    retained = scan_dir / DEEP_RESUME_DIRECTORY
+    with _checked_output_directory(retained) as (parent, child, grants):
+        assert parent is not None
+        return _pinned_resume_identity(parent, child, retained, grants)
+
+
+def _full_directory_id(handle: int, path: Path) -> tuple[int, int] | None:
+    info = _FileIdInfo()
+    if not _GetFileInformationByHandleEx(
+        handle, _FILE_ID_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        if ctypes.get_last_error() in {50, 87}:  # ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER.
+            return None
+        _raise_last_error("GetFileInformationByHandleEx(FileIdInfo)", path)
+    file_id = int.from_bytes(info.FileId, "little")
+    if not file_id:
+        raise _invalid_path(path, "The resume directory has no stable file identity.")
+    return info.VolumeSerialNumber, file_id
+
+
+def _resume_directory_id(handle: int, path: Path) -> tuple[int, int]:
+    if (identity := _full_directory_id(handle, path)) is not None:
+        return identity
+    # Some filesystems expose only the legacy 64-bit file index.
+    legacy = _ByHandleFileInformation()
+    if not _GetFileInformationByHandle(handle, ctypes.byref(legacy)):
+        _raise_last_error("GetFileInformationByHandle", path)
+    file_id = (legacy.nFileIndexHigh << 32) | legacy.nFileIndexLow
+    if not file_id:
+        raise _invalid_path(path, "The resume directory has no stable file identity.")
+    return legacy.dwVolumeSerialNumber, file_id
+
+
+@contextlib.contextmanager
+def pinned_resume_checkout(target: Path) -> Iterator[tuple[int, int] | None]:
+    """Keep the canonical checkout fixed while reading its full native identity and snapshot."""
+    with contextlib.ExitStack() as pins:
+        for directory in (*reversed(target.parents), target):
+            # A source provider directory may carry a reparse tag without redirecting its name.
+            handle = _open_directory(directory, checkout=True)
+            assert handle is not None
+            pins.enter_context(handle)
+        assert handle.value is not None
+        yield _full_directory_id(handle.value, target)
+
+
+def _pinned_resume_identity(parent: int, child: int, retained: Path, grants: int) -> list[int]:
+    # A nonreplaceable, protected child keeps the scan root nonempty after
+    # the sandbox receives Modify there. The caller holds both directories.
+    if grants:
+        raise _invalid_path(retained, "The retained resume directory must be protected.")
+    return [*_resume_directory_id(parent, retained.parent), *_resume_directory_id(child, retained)]
 
 
 class _UnicodeString(ctypes.Structure):
@@ -710,7 +803,7 @@ class _ObjectAttributes(ctypes.Structure):
 
 
 def _relative_output_directory(
-    parent: int, basename: str, descriptor=None
+    parent: int, basename: str, descriptor=None, *, rollback_handle: bool = False
 ) -> tuple[int, int | None]:
     """Open or create one component relative to its checked parent without reparsing it."""
     size = len(basename.encode("utf-16-le", errors="surrogatepass"))
@@ -729,12 +822,16 @@ def _relative_output_directory(
     io_status = (ctypes.c_void_p * 2)()  # IO_STATUS_BLOCK
     status = _ntdll.NtCreateFile(
         ctypes.byref(handle),
-        _FILE_TRAVERSE | _FILE_READ_ATTRIBUTES | _READ_CONTROL | 0x100000,
+        _FILE_TRAVERSE
+        | _FILE_READ_ATTRIBUTES
+        | _READ_CONTROL
+        | 0x100000
+        | (_DELETE if rollback_handle else 0),
         ctypes.byref(attributes),
         ctypes.byref(io_status),
         None,
         _FILE_ATTRIBUTE_NORMAL,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        0 if rollback_handle else _FILE_SHARE_READ | _FILE_SHARE_WRITE,
         1 if descriptor is None else 2,  # FILE_OPEN or FILE_CREATE
         0x200021,  # FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE
         None,
@@ -744,7 +841,7 @@ def _relative_output_directory(
 
 
 def create_windows_output_directory(path: Path, descriptor: wintypes.LPVOID) -> int:
-    with _checked_output_directory(path.parent) as (parent, grants):
+    with _checked_output_directory(path.parent) as (_, parent, grants):
         _require_stable_output(path, grants)
         error, handle = _relative_output_directory(parent, path.name, descriptor)
         if not error:
@@ -752,8 +849,8 @@ def create_windows_output_directory(path: Path, descriptor: wintypes.LPVOID) -> 
         return error
 
 
-def create_private_directory(path: Path, *, exist_ok: bool, scan_output: bool) -> Path:
-    """Create one Windows directory with a protected inheritable DACL."""
+@contextlib.contextmanager
+def _private_directory_descriptor(path: Path, *, explicit_owner: bool) -> Iterator[wintypes.LPVOID]:
     _require_windows()
     # Older supported Python releases ignore mkdir's 0700 mode on Windows.
     # Apply the same owner/SYSTEM/Administrators policy at creation so a
@@ -770,7 +867,7 @@ def create_private_directory(path: Path, *, exist_ok: bool, scan_output: bool) -
         raise ValueError("Select a directory on a Windows volume that supports ACLs.")
 
     sid = _current_user_sid()
-    owner = "" if exist_ok else f"O:{sid}"
+    owner = f"O:{sid}" if explicit_owner else ""
     dacl = f"{owner}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
 
     descriptor = wintypes.LPVOID()
@@ -779,6 +876,14 @@ def create_private_directory(path: Path, *, exist_ok: bool, scan_output: bool) -
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
+        yield descriptor
+    finally:
+        _kernel32.LocalFree(descriptor)
+
+
+def create_private_directory(path: Path, *, exist_ok: bool, scan_output: bool) -> Path:
+    """Create one Windows directory with a protected inheritable DACL."""
+    with _private_directory_descriptor(path, explicit_owner=not exist_ok) as descriptor:
         if scan_output:
             error = create_windows_output_directory(path, descriptor)
         else:
@@ -795,8 +900,34 @@ def create_private_directory(path: Path, *, exist_ok: bool, scan_output: bool) -
                 require_windows_output_path(path)
             return path
         raise ctypes.WinError(error)
-    finally:
-        _kernel32.LocalFree(descriptor)
+
+
+@contextlib.contextmanager
+def create_deep_resume_output(scan_dir: Path, committed: Callable[[], bool]) -> Iterator[list[int]]:
+    """Retain the exact creation handle through verification and database commit."""
+    retained = scan_dir / DEEP_RESUME_DIRECTORY
+    with (
+        _private_directory_descriptor(retained, explicit_owner=True) as descriptor,
+        _checked_output_directory(scan_dir) as (_, parent, grants),
+    ):
+        _require_stable_output(retained, grants)
+        error, child = _relative_output_directory(
+            parent, retained.name, descriptor, rollback_handle=True
+        )
+        if error:
+            raise ctypes.WinError(error)
+        assert child is not None
+        with _OwnedHandle(child):
+            try:
+                _verify_directory(child, retained)
+                child_grants = _output_directory_grants(
+                    child, retained, expected_descriptor=descriptor
+                )
+                yield _pinned_resume_identity(parent, child, retained, child_grants)
+            except BaseException:
+                if not committed():
+                    _mark_handle_for_deletion(child)
+                raise
 
 
 def create_directory_with_same_dacl(path: Path, source: Path) -> None:
@@ -903,14 +1034,19 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 
 
 @contextlib.contextmanager
-def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
-    """Bind a canonical worktree beneath a fixed-drive root to its exact .git marker."""
+def pinned_root_git_marker(
+    cwd: Path, metadata: Path, *, work_tree: Path | None = None
+) -> Iterator[Path | None]:
+    """Return a short explicit worktree marker while its cwd and Git metadata are pinned."""
+    if work_tree is None:
+        work_tree = cwd
     if (
         not cwd.is_absolute()
         or not metadata.is_absolute()
         or len(cwd.drive) != 2
         or cwd.drive != metadata.drive
-        or len(cwd.parts) < 2
+        or len(work_tree.parts) < 2
+        or cwd.parts[: len(work_tree.parts)] != work_tree.parts
         or len(metadata.parts) < 2
         or _GetDriveTypeW(cwd.anchor) != _DRIVE_FIXED
     ):
@@ -930,9 +1066,11 @@ def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
                 assert handle.value is not None
                 if _final_path(handle.value) != _extended_path(path):
                     raise ValueError("the selected Git directory spelling is not canonical")
-            if str(cwd / ".git") != str(metadata):
+            root_marker = work_tree / ".git"
+            reference = Path(os.path.relpath(root_marker, cwd))
+            if str(root_marker) != str(metadata):
                 # The literal canonical root is already pinned before opening its regular file.
-                fd, leaf = open_read_fd_with_path(cwd, ".git", "Git metadata pointer")
+                fd, leaf = open_read_fd_with_path(work_tree, ".git", "Git metadata pointer")
                 pointer = pins.enter_context(os.fdopen(fd, "rb"))
                 if leaf != ".git":
                     raise ValueError("the root marker name does not match .git")
@@ -940,7 +1078,10 @@ def pinned_root_git_marker(cwd: Path, metadata: Path) -> Iterator[Path | None]:
                 value = pointer.read(len(expected) + 3).removesuffix(b"\n").removesuffix(b"\r")
                 if value.replace(b"/", b"\\") != expected:
                     raise ValueError("the root marker does not name the selected Git directory")
-            marker = Path(".git")
+                # A deep scope can make the relative spelling longer than the gitfile itself.
+                if len(os.fsencode(root_marker)) < len(os.fsencode(reference)):
+                    reference = root_marker
+            marker = reference
         except (OSError, ValueError):
             pins.close()
         yield marker

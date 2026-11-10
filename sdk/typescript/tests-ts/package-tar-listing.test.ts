@@ -2,6 +2,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -279,6 +280,94 @@ function runPackageCommand(
 }
 
 describe("npm package tar listings", () => {
+  const prefix = join(realpathSync(tmpdir()), "p");
+  const shortestManifest = join(`${prefix}XXXXXX`, "p", "package.json");
+  for (const length of [259, 260]) {
+    test.skipIf(shortestManifest.length > length)(
+      `packs the SDK's fresh output or fails before running an ancestor at manifest length ${length}`,
+      async () => {
+        const root = mkdtempSync(prefix);
+        try {
+          const sdk = join(
+            root,
+            "p".repeat(length - join(root, "package.json").length - 1),
+          );
+          const manifest = join(sdk, "package.json");
+          expect(manifest.length).toBe(length);
+          const output = join(root, "packages");
+          mkdirSync(output);
+          mkdirSync(join(sdk, "scripts"), { recursive: true });
+          mkdirSync(join(sdk, "dist"));
+          copyFileSync(
+            new URL("../scripts/check-prepack-path.mjs", import.meta.url),
+            join(sdk, "scripts", "check-prepack-path.mjs"),
+          );
+          writeFileSync(join(sdk, "dist", "built.txt"), "stale");
+          writeFileSync(
+            manifest,
+            JSON.stringify({
+              name: "sdk-prepack-fixture",
+              version: "1.0.0",
+              files: ["dist"],
+              scripts: {
+                prepack: packageJson.scripts.prepack,
+                build: `node -e "require('node:fs').writeFileSync('dist/built.txt','sdk')"`,
+                "build:plugin": `node -e "require('node:fs').appendFileSync('dist/built.txt','+plugin')"`,
+              },
+            }),
+          );
+          writeFileSync(
+            join(root, "package.json"),
+            JSON.stringify({
+              private: true,
+              scripts: {
+                build: `node -e "require('node:fs').writeFileSync('ancestor-ran','yes')"`,
+                "build:plugin": "node --version",
+              },
+            }),
+          );
+          const npm = await (fixtureNpm ??= resolveFixtureNpm());
+          const result = await runPackageCommand(
+            sdk,
+            npm.command,
+            [
+              ...npm.args,
+              "pack",
+              "--offline",
+              "--foreground-scripts",
+              "--ignore-scripts=false",
+              "--pack-destination",
+              output,
+            ],
+            {
+              ...process.env,
+              npm_config_cache: join(root, "npm-cache"),
+              npm_config_userconfig: join(root, "empty-npmrc"),
+            },
+          );
+          expect(existsSync(join(root, "ancestor-ran"))).toBe(false);
+          if (process.platform === "win32" && length === 260) {
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("Use a shorter checkout path");
+            expect(readdirSync(output)).toEqual([]);
+          } else {
+            expect(result.status, result.stderr).toBe(0);
+            const archives = readdirSync(output);
+            expect(archives).toHaveLength(1);
+            const { stdout } = await execFileAsync("tar", [
+              "-xOf",
+              join(output, archives[0]!),
+              "package/dist/built.txt",
+            ]);
+            expect(stdout).toBe("sdk+plugin");
+          }
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
+  }
+
   test("accepts regular entries with Unix or Windows line endings", () => {
     const file = "-rw-r--r-- package/package.json";
     const directory = "drwxr-xr-x package/dist/";
@@ -834,6 +923,37 @@ describe("npm package tar listings", () => {
           status: 0,
           stderr: "",
         });
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "explains the missing tar option on Alpine",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "codex-package-tar-option-"));
+      try {
+        const tools = join(root, "tools");
+        mkdirSync(tools);
+        writeFileSync(
+          join(tools, "tar"),
+          "#!/bin/sh\necho 'tar: unrecognized option: ignore-zeros' >&2\necho 'BusyBox multi-call binary.' >&2\nexit 1\n",
+          { mode: 0o755 },
+        );
+        const path = join(root, "package.tgz");
+        writeFileSync(path, gzipSync(packageTar(), { level: 0 }));
+        const contract = join(root, "contract.json");
+        writeFileSync(contract, JSON.stringify(pluginContract));
+        const checked = await checkPackage(root, path, contract, {
+          ...process.env,
+          PATH: tools + delimiter + process.env["PATH"],
+        });
+        expect(checked.status).toBe(1);
+        expect(checked.stderr).toContain("apk add tar");
+        expect(checked.stderr).toContain(
+          "tar: unrecognized option: ignore-zeros",
+        );
       } finally {
         rmSync(root, { force: true, recursive: true });
       }

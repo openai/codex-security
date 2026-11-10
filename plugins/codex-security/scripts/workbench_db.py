@@ -86,6 +86,8 @@ from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
     loaded_plugin_version,
+    prepare_cli_scan_target,
+    register_windows_resume_output,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -117,6 +119,7 @@ from workbench_source_scopes import (
     safe_source_path,
 )
 from workbench_target import (
+    checked_scan_target,
     clean_worktree_content_digest,
     copy_directory_excluding,
     copy_git_worktree_files,
@@ -1504,6 +1507,17 @@ def register_cli_scan(
     an output directory, coordinate archiving with registration so previous results
     can still be located. Return the scan ID, contract, and target metadata.
     """
+    # A selected plugin may replace __main__ while delegating to this workbench.
+    before_output_change = before_archive or getattr(
+        sys, "_codex_security_before_output_change", None
+    )
+
+    def acknowledge_output_change() -> None:
+        nonlocal before_output_change
+        if before_output_change is not None:
+            before_output_change()
+            before_output_change = None
+
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = None
@@ -1554,7 +1568,9 @@ def register_cli_scan(
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
-    target_identity = scan_target_identity(repository, diff_target)
+    target_identity, resume_target = prepare_cli_scan_target(
+        repository, diff_target, mode, launch_kind
+    )
     source_scopes = capture_source_scopes(
         repository,
         target_identity,
@@ -1588,7 +1604,7 @@ def register_cli_scan(
                             scan_dir,
                             timestamp,
                             require_canonical_scan_directory,
-                            before_archive=before_archive,
+                            before_archive=acknowledge_output_change,
                         )
                     )
                     break
@@ -1607,7 +1623,6 @@ def register_cli_scan(
                     if remaining <= 0:
                         raise
                     connection.rollback()
-                    before_archive = None  # The host already acknowledged this registration.
                     scan_dir = None  # Revalidate the directory and its owner under the next lock.
                     time.sleep(min(0.05, remaining))
                     connection.execute("BEGIN IMMEDIATE")
@@ -1670,6 +1685,12 @@ def register_cli_scan(
             )
             if workflow_id is not None:
                 register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
+            if resume_target is not None:
+                archive.enter_context(
+                    register_windows_resume_output(
+                        connection, scan_id, scan_dir, resume_target, acknowledge_output_change
+                    )
+                )
             scan = connection.execute(
                 "SELECT scans.*, snapshot AS lifecycle_json FROM scans "
                 "JOIN scan_lifecycles ON scan_id = scans.id WHERE scans.id = ?",
@@ -2872,7 +2893,8 @@ def remediation_availability(scan: sqlite3.Row) -> tuple[bool, str | None]:
     if scan["status"] != "complete":
         return False, remediation_state.SCAN_STATUS_ERROR
     try:
-        current_revision = git_revision(require_scan_target_identity(scan))
+        with checked_scan_target(scan) as target:
+            current_revision = git_revision(target)
     except SystemExit as exc:
         return False, str(exc)
     expected_revision = scan["target_revision"]

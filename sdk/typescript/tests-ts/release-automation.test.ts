@@ -3242,17 +3242,18 @@ ${steps[record]!.run}`;
       status: 0,
     },
     {
-      description: "a version becoming visible after npm processing",
-      missingAttempts: 4,
-      calls: 5,
-      waits: 4,
+      description:
+        "a version becoming visible after twenty minutes of npm processing",
+      missingAttempts: 40,
+      calls: 41,
+      waits: 40,
       status: 0,
     },
     {
       description: "a version remaining absent past the publication wait",
       missingAttempts: 100,
-      calls: 21,
-      waits: 20,
+      calls: 61,
+      waits: 60,
       status: 1,
     },
     {

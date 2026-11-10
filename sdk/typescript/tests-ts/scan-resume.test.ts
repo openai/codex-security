@@ -37,6 +37,7 @@ import {
   readOperationTelemetry,
 } from "../src/operation-telemetry.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { useTestPython } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
@@ -45,6 +46,10 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
+const pythonOnPath =
+  process.platform === "win32"
+    ? useTestPython(false)
+    : () => Bun.which("python3") ?? Bun.which("python");
 afterEach(cleanup);
 
 async function interruptedScan(
@@ -62,7 +67,7 @@ async function interruptedScan(
   resolvedDeep = false,
   modelProvider?: string,
   knowledgeState: "saved" | "legacy" = "saved",
-  separateSetupCommands = false,
+  setup: "batched" | "separate" | "before-checkpoint" = "batched",
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -139,7 +144,7 @@ async function interruptedScan(
       }) + "\n",
     );
   }
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonOnPath();
   if (python === null) throw new Error("Python is required for this test.");
   const environment = {
     PATH: process.env["PATH"],
@@ -227,7 +232,7 @@ async function interruptedScan(
       payload: { id: threadId, cwd: scanDir },
     }) + "\n",
   );
-  if (mode === "deep") {
+  if (mode === "deep" && setup !== "before-checkpoint") {
     setupCommands.push([
       "begin-deep-scan",
       "--scan-id",
@@ -258,13 +263,14 @@ async function interruptedScan(
       ]);
     }
   }
-  if (separateSetupCommands) {
+  if (setup === "separate") {
     for (const args of setupCommands) await command(args);
   } else {
     await runWorkbenchFixtureCommands(python, environment, setupCommands);
   }
   const checkpoint = join(scanDir, "checkpoint.json");
-  await writeFile(checkpoint, '{"completed":"setup"}\n');
+  if (setup !== "before-checkpoint")
+    await writeFile(checkpoint, '{"completed":"setup"}\n');
   return {
     root,
     repository,
@@ -292,7 +298,7 @@ test("resume resolves an interrupted scan without changing its ID, recipe, or co
     false,
     undefined,
     "saved",
-    true,
+    "separate",
   );
   const before = await f.command([
     "get-deep-scan",
@@ -322,6 +328,53 @@ test("resume resolves an interrupted scan without changing its ID, recipe, or co
   ).toEqual(before);
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
+
+test.skipIf(process.platform !== "win32")(
+  "CLI resumes the original Windows session before its first output checkpoint",
+  async () => {
+    const f = await interruptedScan(
+      "deep",
+      false,
+      {},
+      false,
+      undefined,
+      "saved",
+      "before-checkpoint",
+    );
+    const grant = Bun.spawnSync([
+      join(process.env["SystemRoot"]!, "System32", "icacls.exe"),
+      f.scanDir,
+      "/grant",
+      "*S-1-5-11:(OI)(CI)M",
+    ]);
+    expect(grant.exitCode, grant.stderr.toString()).toBe(0);
+    const { stderr, runCli } = createCliTest(main);
+    let resumedThread: string | undefined;
+    await runCli(
+      ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          resumedThread = threadId;
+          return {
+            id: threadId,
+            async runStreamed() {
+              throw new Error("Synthetic continuation reached");
+            },
+          };
+        },
+      })),
+    );
+    expect(stderr.text()).toContain("Synthetic continuation reached");
+    expect(resumedThread).toBe(f.threadId);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({
+      continuationThreadId: f.threadId,
+      progress: { status: "running" },
+    });
+  },
+);
 
 test.each([
   "failed",
@@ -1223,6 +1276,7 @@ test.each([
     const manifestPath = join(f.scanDir, "scan-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     expect(manifest.scan.producer.version).toBe(f.recipe.pluginVersion);
+    expect(JSON.stringify(manifest)).not.toContain(".codex-security-resume");
     if (scenario === "unsupported-schema") manifest.schemaVersion = "999.0";
     if (scenario === "wrong-producer")
       manifest.scan.producer.name = "different-producer";
@@ -1306,7 +1360,7 @@ test.each(["chatgpt", "api-key"] as const)(
     const promptFile = join(root, "post-scan.md");
     const postScanPrompt = "Keep these original post-scan instructions.\n";
     await writeFile(promptFile, postScanPrompt);
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     if (python === null) throw new Error("Python is required for this test.");
     const environment = {
       PATH: process.env["PATH"],
@@ -1709,14 +1763,27 @@ test("missing session logs do not create another session or fail the original sc
   await rm(f.sessionPath);
   const { stderr, runCli } = createCliTest(main);
 
-  const code = await runCli(
-    ["scans", "resume", f.scanId],
-    resumeDependencies(f, () =>
-      fail("Must not invoke Codex without the original session"),
-    ),
+  const deps = resumeDependencies(f, () =>
+    fail("Must not invoke Codex without the original session"),
   );
+  const code = await runCli(["scans", "resume", f.scanId], deps);
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("original Codex session");
+  const client = deps.createSecurity({});
+  const ready: string[] = [];
+  try {
+    await expect(
+      client.run(f.repository, {
+        mode: "deep",
+        outputDir: f.scanDir,
+        resumeScanId: f.scanId,
+        onOutputDirReady: (directory) => ready.push(directory),
+      }),
+    ).rejects.toThrow("original Codex session");
+    expect(ready).toEqual([]);
+  } finally {
+    await client.close();
+  }
   expect(
     (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
   ).toMatchObject({ progress: { status: "running" } });

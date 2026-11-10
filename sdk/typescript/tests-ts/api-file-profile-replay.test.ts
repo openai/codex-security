@@ -349,6 +349,20 @@ test.each(
     for (const path of [repository, home, runtimeHome, scanDir])
       await mkdir(path, { mode: 0o700 });
     const profilePath = join(home, "review.config.toml");
+    const ambientAuth = {
+      cli_auth_credentials_store: "file",
+      forced_login_method: "chatgpt",
+      forced_chatgpt_workspace_id: "synthetic-ambient-workspace",
+    };
+    await writeFile(join(home, "config.toml"), stringify(ambientAuth));
+    const authOverrides: JsonObject =
+      skills === "explicit"
+        ? {
+            cli_auth_credentials_store: "ephemeral",
+            forced_login_method: "api",
+            forced_chatgpt_workspace_id: "synthetic-explicit-workspace",
+          }
+        : {};
     const fileProfile = (version: string) => ({
       openai_base_url: `https://${version}.example.test/v1`,
       model: version === "first" ? "initial-model" : "updated-model",
@@ -372,6 +386,7 @@ test.each(
     });
     await writeFile(profilePath, stringify(fileProfile("first")));
     const explicit: JsonObject = {
+      ...authOverrides,
       profile: "review",
       analytics: { enabled: false },
       shell_environment_policy: {
@@ -451,6 +466,8 @@ test.each(
         await mergedCodexConfig({ codexOverrides: replay }, home),
       );
       expect(restored).toMatchObject({
+        ...ambientAuth,
+        ...authOverrides,
         openai_base_url: explicitEndpoint ?? "https://reloaded.example.test/v1",
         model: "updated-model",
         model_reasoning_effort: "high",
