@@ -222,12 +222,15 @@ def test_exclusive_rename_without_a_libc_wrapper(tmp_path, monkeypatch):
     target = tmp_path / "résumé.patch"
     staged.write_bytes(b"first")
     original = staged.stat()
-    with writer.managed_fd(os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)) as parent_fd:
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
         writer._rename_exclusive(parent_fd, staged.name, target.name)
         assert os.path.samestat(target.stat(), original)
         staged.write_bytes(b"second")
         with pytest.raises(FileExistsError):
             writer._rename_exclusive(parent_fd, staged.name, target.name)
+    finally:
+        os.close(parent_fd)
     assert target.read_bytes() == b"first"
     assert staged.read_bytes() == b"second"
 
