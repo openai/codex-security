@@ -74,18 +74,19 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
             }
         }
         self.write_scan()
-        with (
-            mock.patch.object(FINALIZER.subprocess, "run", side_effect=OSError("git unavailable")),
-            mock.patch.dict(FINALIZER.os.environ, {"CODEX_MCP_NODE_PATH": "/missing/node"}),
-        ):
+        missing_node = str(self.scan_dir / "missing-owner-node")
+        with mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": missing_node}):
             prepared = FINALIZER._prepare_scan_finalization(
                 self.scan_dir, owner_repository=self.scan_dir
             )
+            FINALIZER._write_prepared_scan_finalization(prepared)
+        self.assertTrue(any("missing-owner-node" in warning for warning in prepared.warnings))
+        manifest, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+        self.assertEqual(manifest["scan"]["status"], "completed")
         self.assertEqual(
-            prepared.findings["findings"][0]["extensions"]["ownerSuggestion"],
+            findings["findings"][0]["extensions"]["ownerSuggestion"],
             {"email": "dev@example.test"},
         )
-        self.assertTrue(any("git unavailable" in warning for warning in prepared.warnings))
 
     def test_first_seal_records_abstention_and_replay_preserves_bytes(self) -> None:
         target = self.manifest["scan"]["target"]
