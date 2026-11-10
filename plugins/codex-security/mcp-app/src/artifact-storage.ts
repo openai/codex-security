@@ -100,7 +100,10 @@ async function storageContext(
   create: boolean,
 ): Promise<ArtifactContext> {
   if (storage === "persistent") return context;
-  const identity = createHash("sha256").update(context.root).digest("hex");
+  // A scan keeps its ID when its output directory is archived and reused.
+  const identity = createHash("sha256")
+    .update(context.scanId ?? context.root)
+    .digest("hex");
   const root = join(
     await fs.realpath(tmpdir()),
     `codex-security-artifacts-${identity}`,
@@ -223,6 +226,7 @@ export async function saveCodexSecurityArtifact(
         scanId: context.scanId,
         artifactPath: parts.join("/"),
         claimToken: context.handoffClaimToken || undefined,
+        modelThreadId: context.modelThreadId,
       }),
       bytes,
     );

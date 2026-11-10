@@ -37,6 +37,8 @@
     "WITH input AS (SELECT :history AS history),",
     "previews AS (",
     "    SELECT version, CASE",
+    "        WHEN version IN (48, 50, 63) AND name = 'persist scan log completion boundaries'",
+    "            THEN 'UPDATE schema_migrations SET version = 64'",
     "        WHEN version IN (58, 59) AND name = 'record classification rubric provenance'",
     "            THEN 'UPDATE schema_migrations SET version = 60'",
     "        WHEN version IN (47, 48, 50, 52, 53, 54) AND name = 'freeze stopped scan checkpoint selections'",

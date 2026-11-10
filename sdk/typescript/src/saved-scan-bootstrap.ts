@@ -3,9 +3,7 @@ import { compareTimestamps } from "./timestamps.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { sqliteFilename } from "./windows-path.js";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -19,21 +17,14 @@ import {
   runWorkbench,
   workbenchEnvironment,
   type ProcessEnvironment,
+  sqliteDatabaseOpener,
+  type RuntimeDatabase,
 } from "./runtime.js";
 
 interface ScanTarget {
   id: string;
   target_path: string;
   target_id?: string | null;
-}
-
-interface BootstrapDatabase {
-  exec(sql: string): unknown;
-  prepare(sql: string): {
-    all(...parameters: (string | number)[]): unknown[];
-    finalize?(): void;
-  };
-  close(): void;
 }
 
 /** Read only enough history to protect Python discovery; the workbench still validates the scan. */
@@ -188,33 +179,10 @@ export async function savedScanWorkbench(
 
 function openSavedScanDatabase(
   environment: ProcessEnvironment,
-): BootstrapDatabase {
-  const require = createRequire(import.meta.url);
-  const bun = process.versions["bun"] !== undefined;
-  const Database = (
-    bun ? require("bun:sqlite").Database : require("node:sqlite").DatabaseSync
-  ) as new (
-    path: string,
-    options: {
-      readonly?: boolean;
-      readOnly?: boolean;
-      readwrite?: boolean;
-      create?: boolean;
-    },
-  ) => BootstrapDatabase;
-  return new Database(
-    sqliteFilename(
-      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
-    ),
-    // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
-    // Open only an existing file there; query_only still prevents SQL data/schema writes.
-    bun
-      ? {
-          readonly: process.platform !== "darwin",
-          readwrite: process.platform === "darwin",
-          create: false,
-        }
-      : { readOnly: true },
+): RuntimeDatabase {
+  const openDatabase = sqliteDatabaseOpener("read-existing");
+  return openDatabase(
+    join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
   );
 }
 
@@ -243,7 +211,7 @@ async function readTargets(
   currentDirectory: string,
   signal?: AbortSignal,
 ): Promise<ScanTarget[]> {
-  let database: BootstrapDatabase | undefined;
+  let database: RuntimeDatabase | undefined;
   try {
     database = openSavedScanDatabase(environment);
     database.exec("PRAGMA busy_timeout = 5000");
@@ -309,7 +277,7 @@ async function readTargets(
 }
 
 function readRows<T>(
-  database: BootstrapDatabase,
+  database: RuntimeDatabase,
   sql: string,
   ...parameters: (string | number)[]
 ): T[] {
@@ -324,7 +292,7 @@ function readRows<T>(
 }
 
 async function latestTargets(
-  database: BootstrapDatabase,
+  database: RuntimeDatabase,
   directory: string,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
