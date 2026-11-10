@@ -10472,6 +10472,7 @@ async function executeScan(
   let patchDaybreakFeatures: JsonObject = {};
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
+  let runningMockScan = false;
   let failed = false;
   let failure: unknown;
   try {
@@ -11115,7 +11116,9 @@ async function executeScan(
     if (arguments_.dryRun) {
       preflight = await security.preflight(repository, options);
     } else {
+      runningMockScan = arguments_.mock === true;
       result = await security.run(repository, options);
+      runningMockScan = false;
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
       if (arguments_.validate) {
@@ -11313,7 +11316,9 @@ async function executeScan(
   if (failed) {
     const costLimitFailure =
       failure instanceof ScanCostLimitExceededError ? failure : undefined;
-    const classification = classifyScanFailure(failure);
+    const classification = runningMockScan
+      ? "local"
+      : classifyScanFailure(failure);
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
