@@ -7770,13 +7770,7 @@ export async function main(
       },
     };
     if (
-      !(await serveIntegration(
-        frameworkArgv,
-        cli,
-        cliOptions.description!,
-        cliOptions.mcp!.command!,
-        serveOptions,
-      ))
+      !(await serveIntegration(frameworkArgv, cli, cliOptions, serveOptions))
     ) {
       await cli.serve(frameworkArgv, serveOptions);
     }

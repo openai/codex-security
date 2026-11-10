@@ -30,7 +30,7 @@ const groupOptions = {
   }),
   "mcp doctor": z.object({}),
   "skills add": z.object({ depth, noGlobal }),
-  "skills list": z.object({}),
+  "skills list": z.object({ depth }),
 };
 const groupDescriptions = {
   mcp: "Register the read-only info tool or check its server startup and catalog.",
@@ -45,7 +45,7 @@ const descriptions: Record<keyof typeof groupOptions, string> = {
   "skills add":
     "Install generated CLI command guidance in the user profile or current project.",
   "skills list":
-    "List generated CLI guidance and whether each skill is installed.",
+    "List generated CLI guidance for one grouping depth. Use the same depth as skills add to check an installation.",
 };
 const outputOptions = {
   help: { type: "boolean", short: "h" },
@@ -66,10 +66,10 @@ const outputOptions = {
 export async function serveIntegration(
   argv: string[],
   cli: Cli.Cli,
-  description: string,
-  defaultMcpCommand: string,
+  cliOptions: Cli.create.Options,
   output: Cli.serve.Options,
 ): Promise<boolean> {
+  const { description } = cliOptions;
   if (
     (argv.includes("--llms") || argv.includes("--llms-full")) &&
     !argv.some((arg) => ["--help", "-h", "--version", "--schema"].includes(arg))
@@ -160,7 +160,7 @@ export async function serveIntegration(
     options: {
       ...outputOptions,
       ...(verb === "add" ? { "no-global": { type: "boolean" as const } } : {}),
-      ...(path === "skills add" ? { depth: { type: "string" as const } } : {}),
+      ...(group === "skills" ? { depth: { type: "string" as const } } : {}),
       ...(path === "mcp add"
         ? {
             agent: { type: "string" as const, multiple: true },
@@ -231,6 +231,7 @@ export async function serveIntegration(
   }
 
   const commands = Cli.toCommands.get(cli)!;
+  const groupingDepth = "depth" in local ? local.depth : undefined;
   const project = "noGlobal" in local && local.noGlobal === true;
   const targets =
     "agent" in local && local.agent ? [...new Set(local.agent)] : undefined;
@@ -246,8 +247,13 @@ export async function serveIntegration(
     // values because the native installer does not understand every equals form.
     const nativeArgs = [group, verb!];
     if (project) nativeArgs.push("--no-global");
-    if ("depth" in local && local.depth !== undefined)
-      nativeArgs.push("--depth", String(local.depth));
+    if (path === "skills list") {
+      output.stdout?.(`Skill grouping depth: ${groupingDepth ?? 1}\n`);
+      if (groupingDepth !== undefined)
+        cliOptions.sync = { ...(cliOptions.sync || {}), depth: groupingDepth };
+    } else if (groupingDepth !== undefined) {
+      nativeArgs.push("--depth", String(groupingDepth));
+    }
     await cli.serve(nativeArgs, output);
     return true;
   }
@@ -258,11 +264,14 @@ export async function serveIntegration(
   }).command(verb!, {
     async run() {
       if (path === "skills list")
-        return SyncSkills.list(cliName, commands, { description });
+        return SyncSkills.list(cliName, commands, {
+          description,
+          depth: groupingDepth,
+        });
       if (path === "skills add") {
         const result = await SyncSkills.sync(cliName, commands, {
           global: !project,
-          depth: "depth" in local ? local.depth : undefined,
+          depth: groupingDepth,
           description,
         });
         return {
@@ -271,7 +280,8 @@ export async function serveIntegration(
         };
       }
       const command =
-        ("command" in local ? local.command : undefined) ?? defaultMcpCommand;
+        ("command" in local ? local.command : undefined) ??
+        cliOptions.mcp!.command!;
       const result = defaultProjectInstall
         ? await registerProjectMcp(command)
         : await SyncMcp.register(cliName, {

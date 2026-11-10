@@ -44,6 +44,7 @@ describe("integration command dispatch", () => {
     { args: ["mcp", "add", "--agent", "amp", "--version"], mode: "version" },
     { args: ["skills", "add", "--no-glboal"], mode: "error" },
     { args: ["skills", "add", "--depth", "NaN"], mode: "error" },
+    { args: ["skills", "list", "--depth=NaN"], mode: "error" },
     { args: ["mcp", "add", "--agent", "amp", "--no-global"], mode: "error" },
     { args: ["--mcp", "--help"], mode: "help" },
   ])(
@@ -134,9 +135,9 @@ describe("integration command dispatch", () => {
     expect(await readdir(home)).toEqual([]);
   }, 30_000);
 
-  test("explicit JSON returns parseable installer and list results", async () => {
+  test("explicit JSON returns a parseable MCP installer result", async () => {
     await using temp = await scopedTemporaryDirectory("cli-integrations-");
-    const { home, project, run } = await isolatedCli(temp.path);
+    const { home, run } = await isolatedCli(temp.path);
     const mcp = await run(
       "mcp",
       "add",
@@ -159,6 +160,11 @@ describe("integration command dispatch", () => {
       command: "my-tool",
       args: ["--mcp"],
     });
+  }, 30_000);
+
+  test("lists installed guidance at the selected grouping depth", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-skill-grouping-");
+    const { project, run } = await isolatedCli(temp.path);
     const skills = await run(
       "skill",
       "add",
@@ -170,8 +176,15 @@ describe("integration command dispatch", () => {
     const installed = JSON.parse(skills.stdout).skills;
     expect(installed).toHaveLength(1);
     expect(installed[0]).toStartWith(project);
-    const list = await run("skill", "ls", "--json");
+    const list = await run("skill", "ls", "--depth=0", "--json");
     expect(list.status).toBe(0);
-    expect(JSON.parse(list.stdout)[0]).toHaveProperty("installed");
+    expect(JSON.parse(list.stdout)).toMatchObject([
+      { name: "codex-security", installed: true },
+    ]);
+    const human = await run("skills", "list", "--depth", "0");
+    expect(human.status).toBe(0);
+    expect(human.stdout).toContain("1 skill (1 installed)");
+    const defaultList = await run("skills", "list");
+    expect(defaultList.stdout).toContain("Skill grouping depth: 1");
   }, 30_000);
 });

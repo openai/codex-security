@@ -2700,7 +2700,9 @@ scan, triage, patch, and verification workflows, see the
 
 Use `skills add --no-global` to write generated guidance to the current project.
 `--depth 0` creates a single skill; the default depth of 1 groups guidance by
-top-level command. `skills list --json` includes each skill's installed status.
+top-level command. `skills list` checks installation status at depth 1 by
+default. To inspect a different grouping, pass the installation depth, for
+example `skills list --depth 0 --json`.
 For both installers, `--help`, `--schema`, and `--version` can be inspected
 before writing any configuration.
 
