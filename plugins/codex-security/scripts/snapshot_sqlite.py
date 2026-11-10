@@ -4,9 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 from pathlib import Path
 from urllib.parse import quote
+
+
+def readonly_sqlite_uri(path: Path) -> str:
+    """Escape the native filename, including separators, without introducing a URI authority."""
+    filename = os.fsencode(path) if os.name == "posix" else str(path)
+    return f"file:{quote(filename, safe='')}?mode=ro"
 
 
 def main() -> None:
@@ -21,8 +28,7 @@ def main() -> None:
     if destination.exists() and destination.samefile(source):
         parser.error(f"Destination must not be the same file as source: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    source_uri = f"file:{quote(str(source), safe='')}?mode=ro"
-    with sqlite3.connect(source_uri, uri=True) as source_connection:
+    with sqlite3.connect(readonly_sqlite_uri(source), uri=True) as source_connection:
         creation_destination = destination.resolve()
         try:
             creation_destination.touch(mode=0o600, exist_ok=False)

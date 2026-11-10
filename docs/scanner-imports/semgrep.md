@@ -6,7 +6,7 @@ source of finding IDs.
 | Starting point                                                   | What to collect                                                                                                                                                                                | Destination    |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
 | [CLI or CI report](#quick-start)                                 | A Code-only JSON or self-contained SARIF 2.1.0 file, optionally gzipped. Native JSON keeps Semgrep severity and available snippets.                                                            | Local or Cloud |
-| [Guardian in Codex](#import-selected-guardian-findings)          | Selected Code or Supply Chain findings through the connected Guardian account.                                                                                                                 | Local only     |
+| [Guardian in Codex](#import-selected-guardian-findings)          | Selected Code or Supply Chain findings through the connected Guardian account.                                                                                                                 | Local or Cloud |
 | [Selected Web API IDs](#existing-platform-findings)              | Original project response and SAST findings pages for one full Git ref. Use the SDK to save a selection or [import it directly](#import-selected-semgrep-platform-sast-findings-with-the-sdk). | Local or Cloud |
 | [Whole Platform project](#collect-a-platform-project-and-branch) | All findings for one project, full ref and product using a Web API token.                                                                                                                      | Local or Cloud |
 
@@ -78,17 +78,17 @@ repository references in the third argument's `sourceRepositories`. Use
 
 ## Import selected Guardian findings
 
-Guardian captures can be saved only to the local workbench. Sign in to
+Sign in to
 [Semgrep Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/quickstart).
 Ask Codex to import the selected Code or Supply Chain findings from Guardian
-into the local workbench. Specify the deployment, repository and full Git ref.
+into the local workbench or the matching Cloud repository. Specify the deployment, repository and full Git ref.
 Guardian handles authentication through its existing connection.
 
 Codex calls `get_semgrep_sast_findings` or `get_semgrep_supply_chain_findings`
 with that scope. If you already selected rows from that tool, Codex can reuse
 the successful response. It saves the exact string IDs and original selected
 rows from `structuredContent.findings`. Guardian returns only the repository
-name, so confirm its SCM URL against the checkout before saving the capture.
+name, so verify its SCM URL before saving the capture. The importer checks that URL against the checkout or the selected Cloud repository.
 A missing or ambiguous selected ID stops the import. Guardian defaults to 20
 open or reviewing results and returns at most 1,000 per call.
 
@@ -121,19 +121,28 @@ await writeFile("guardian.json", JSON.stringify(capture), {
 });
 ```
 
-Preview the local import. After review, repeat the command without `--dry-run` and confirm. Reuse the same file and source key for a retry.
+Preview the selected findings for the intended destination.
 
 ```sh
 codex-security publish findings /path/to/private/guardian.json --provider semgrep \
   --to local --repository /path/to/project --source-key example/project/topic --dry-run --format json
 ```
 
+For Cloud, replace `--to local --repository /path/to/project` with
+`--to cloud --repository https://github.com/example/project`, using the URL
+or Cloud ID of the repository you verified. After reviewing the destination,
+findings and exclusions, repeat without `--dry-run` and confirm. Keep the
+same capture and source key for a retry.
+
 For normalized SDK imports, select the `semgrep` provider and keep each generated
 Guardian ID with its original finding and collection scope. The repository URL
 in each finding must agree with the report's mapping.
 
-Guardian records retain the original MCP fields. The summary omits end lines,
-CWEs, package versions and fix versions. Guardian and Web API records keep
+In the preview, check the rule and message in `evidence.title` and
+`evidence.description`, the selected ref in `branch`, and the file and
+starting line in `locations`. The verified SCM URL identifies the repository.
+The original Guardian row is in `source_data.finding`. Guardian supplies
+no end line, CWE IDs, package versions or fix versions in this summary. Guardian and Web API records keep
 separate identities even when their IDs look identical. To verify a pair,
 identify the same occurrence independently by deployment, mapped project,
 product, full ref, rule and location. Then compare the complete ID strings,

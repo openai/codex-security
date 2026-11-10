@@ -8,7 +8,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_workbench import require_current_coordinator
-from workbench.handoff import require_current_continuation
+from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench_constants import PHASES
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
@@ -87,6 +87,7 @@ def update_progress(
     with connection:
         timestamp = wb.now()
         scan = wb.require_scan(connection, scan_id)
+        require_tokenless_scan_owner(connection, scan, getattr(args, "model_thread_id", None))
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can update progress.")
         if scan["mode"] == "deep":
