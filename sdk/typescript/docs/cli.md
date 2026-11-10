@@ -1665,9 +1665,9 @@ retrying. Some records may already have reached Cloud.
 - **Private inbox.** In `privateJob`, check the job `status`, `counts.error`
   and `counts.unprocessed`. The receipt also identifies the job (`id`) and the
   uploaded file (`input.file_id`). The CLI reads the job receipt, so a
-  successful import can show `verified: 0`. To share a finding, open it in
-  your inbox, assess it against a pinned repository revision and publish the
-  reportable assessment.
+  successful import can show `verified: 0`. Open the finding in your inbox to
+  assess it against a pinned repository revision. When Cloud offers shared
+  publication for the scanner and workspace, you can publish the assessment.
 - **Repository publisher.** `verified` counts records whose identity the CLI
   confirmed by reading them back. If the version matches the receipt, the CLI
   also checks the evidence. A newer version can have different evidence and
@@ -1675,8 +1675,7 @@ retrying. Some records may already have reached Cloud.
   including records Cloud accepted if the response was lost. Use `client_id`
   to match a receipt item to its request and `source_finding_id` in `failures`
   to find a failed vendor record. Counts include earlier batches with receipts.
-  When present, `cloudUrl` opens the repository. Assessment and sharing are
-  separate steps.
+  When present, `cloudUrl` opens the repository's imported findings.
 
 With `--format json` or `--format jsonl`, add `--full-output` for an envelope.
 Failed and interrupted imports set `ok` to `false` and `error.code` to

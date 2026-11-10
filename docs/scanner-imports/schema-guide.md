@@ -87,8 +87,9 @@ all locations and the complete saved evidence. Each record includes
 
 **Private Cloud inbox.** Check the format, size and digest under
 `privateImport` in the preview, then inspect the job receipt for errors and
-unprocessed findings. Open a finding in the inbox to assess it and publish
-the assessment when you're ready to share it.
+unprocessed findings. Open a finding in the inbox to review its evidence and
+assess it against the repository. Cloud offers shared publication for eligible
+scanners and workspaces.
 
 Reimporting identical evidence for the same occurrence leaves the saved
 observation in place. If the job reports `source_order_unknown`, Cloud

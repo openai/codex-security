@@ -6052,7 +6052,7 @@ test.each(["human", "json"])(
       expect(result.status).toBe("partial");
       expect(result.counts.created).toBe(1);
       expect(result.cloudUrl).toBe(
-        `https://chatgpt.com/mcp-app/connector_openai_defense_factory/open_defense_factory#/repositories/${options.repository}/findings`,
+        `https://chatgpt.com/mcp-app/connector_openai_defense_factory/open_defense_factory#/repositories/${options.repository}/findings?source=imported`,
       );
     } else {
       expect(cli.stdout.text()).toContain(
@@ -7831,7 +7831,7 @@ test("a separate Cloud app URL follows the resolved repository without changing 
       },
     },
   );
-  const link = `http://localhost:4200/security?preview=true#/repositories/${options.repository}/findings`;
+  const link = `http://localhost:4200/security?preview=true#/repositories/${options.repository}/findings?source=imported`;
   expect(prepared.preview.cloudUrl).toBe(link);
   expect((await prepared.publish()).cloudUrl).toBe(link);
   expect(

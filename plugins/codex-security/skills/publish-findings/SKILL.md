@@ -171,7 +171,7 @@ Read the structured result even when the process exits nonzero. Progress appears
 
 For the repository publisher, report `verified` for findings the CLI confirmed by readback and `unacknowledged` for records without a receipt. Use `failures` to identify records the publisher rejected. For either destination, include exclusions and any `savedSubmission` checkpoint. [Result fields and exit codes](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#results-and-exit-codes)
 
-A private finding can be assessed against the repository and published to shared Findings. Link to the returned `cloudUrl` when available.
+Open a private finding in the inbox to assess it against the repository. Shared publication depends on the scanner and workspace. For repository imports, link to the imported findings using the returned `cloudUrl` when available.
 
 ### Resume an interrupted upload
 
