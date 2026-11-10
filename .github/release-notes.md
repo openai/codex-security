@@ -12,6 +12,7 @@
 - select a SQLite-capable Node runtime on Linux ([#2499](https://github.com/openai/codex-security/pull/2499))
 - prevent stale SDK archives on long Windows paths ([#2511](https://github.com/openai/codex-security/pull/2511))
 - follow directory links in selected project config paths ([#2514](https://github.com/openai/codex-security/pull/2514))
+- report filesystem module failures during output validation ([#2516](https://github.com/openai/codex-security/pull/2516))
 
 </details>
 
