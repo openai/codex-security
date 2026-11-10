@@ -163,6 +163,35 @@ test("reads the weakness Continuum names in subCategory for its own findings", (
   ).toEqual([]);
 });
 
+test("an inferred weakness cannot exclude a Cloud finding at its evidence limit", () => {
+  const { cweIds: _, ...detail } = continuumDetail();
+  const finding = {
+    ...detail,
+    type: "CONTINUUM_CODE_VULN",
+    subCategory: "CWE-89: SQL Injection",
+    vulnerabilities: [],
+    stepsToReproduce: Array<string>(31).fill("x".repeat(8192)).concat(""),
+  };
+  const original = normalizePreviousContinuumFindings(
+    finding,
+    continuumRepository,
+  ).findings[0]!.evidence;
+  const bytes = Buffer.byteLength(JSON.stringify(original));
+  finding.stepsToReproduce[31] = "x".repeat(256 * 1024 - bytes);
+  const result = normalize(finding);
+  expect(result.excluded).toEqual([]);
+  expect(result.findings[0]!.evidence).toMatchObject({
+    details: { weakness_ids: [] },
+    source_data: { finding },
+  });
+  // Leave room for the status timestamp, but not both it and the inferred CWE.
+  finding.stepsToReproduce[31] = finding.stepsToReproduce[31]!.slice(10);
+  expect(normalize(finding).findings[0]!.evidence).toMatchObject({
+    source_updated_at: Date.parse(finding.statusUpdatedAt) / 1000,
+    details: { weakness_ids: [] },
+  });
+});
+
 test("keeps package-manager selectors in the native finding", () => {
   const finding = {
     ...continuumSummary(),

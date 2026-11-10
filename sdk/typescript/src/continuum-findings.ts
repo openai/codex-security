@@ -170,12 +170,39 @@ function reportRows(input: unknown, previous: boolean) {
   };
 }
 
-// Continuum's own findings name their weakness only as "CWE-89: ..." in subCategory.
-function weaknessIds(row: Record<string, unknown>) {
-  const ids = strings(row["cweIds"]);
-  if (ids.length > 0) return ids;
-  const named = /^(CWE-[1-9]\d*):/u.exec(text(row["subCategory"]) ?? "")?.[1];
-  return named ? [named] : [];
+function subcategoryCwe(row: Record<string, unknown>) {
+  return /^(CWE-[1-9]\d*):/u.exec(text(row["subCategory"]) ?? "")?.[1];
+}
+
+/** @internal Match 0.9.x checkpoints for both raw imports and saved SDK output. */
+export function previousContinuumCweProjection(
+  current: ExternalFindings,
+): ExternalFindings {
+  let changed = false;
+  const findings = current.findings.map((finding) => {
+    const { details, source_data } = finding.evidence;
+    const native = source_data?.["finding"];
+    // Remove only the inferred field. Caller edits and all other evidence must
+    // still match the immutable checkpoint before it can be resumed.
+    if (
+      source_data?.["format"] !== format ||
+      !isRecord(native) ||
+      details?.kind !== "sast" ||
+      details.weakness_ids?.length !== 1 ||
+      strings(native["cweIds"]).length ||
+      details.weakness_ids[0] !== subcategoryCwe(native)
+    )
+      return finding;
+    changed = true;
+    return {
+      ...finding,
+      evidence: {
+        ...finding.evidence,
+        details: { ...details, weakness_ids: [] },
+      },
+    };
+  });
+  return changed ? { ...current, findings } : current;
 }
 
 function statusUpdatedAt(value: unknown) {
@@ -301,8 +328,7 @@ function normalize(
             scanner_origin: source,
             scanner_verdict: text(validation["verdict"]),
             source_status: status,
-            // Earlier releases read cweIds only; keep their replay projection.
-            weakness_ids: previous ? strings(row["cweIds"]) : weaknessIds(row),
+            weakness_ids: strings(row["cweIds"]),
             remediation_instructions: text(row["mitigation"]),
             code,
           },
@@ -316,19 +342,30 @@ function normalize(
       const updatedAt = previous
         ? null
         : statusUpdatedAt(row["statusUpdatedAt"]);
-      // Keep the status timestamp when structured packages exceed the Cloud budget.
+      const enrichment = previous
+        ? undefined
+        : {
+            packages: affectedPackages(packages, target),
+            source_updated_at: updatedAt,
+          };
+      // Native code findings can identify a CWE only in subCategory.
+      const namedCwe =
+        !previous && evidence.details?.weakness_ids.length === 0
+          ? subcategoryCwe(row)
+          : undefined;
+      const inferred = namedCwe
+        ? { details: { ...evidence.details, weakness_ids: [namedCwe] } }
+        : undefined;
+      // Keep previously admissible evidence if an optional projection exceeds the Cloud budget.
       return validateEnrichedExternalEvidence(
         evidence,
         target,
-        previous
-          ? undefined
-          : {
-              packages: affectedPackages(packages, target),
-              source_updated_at: updatedAt,
-            },
+        inferred ? { ...enrichment, ...inferred } : undefined,
+        enrichment,
         packages.length && updatedAt !== null
           ? { source_updated_at: updatedAt }
           : undefined,
+        inferred,
       );
     },
     (value) => {
