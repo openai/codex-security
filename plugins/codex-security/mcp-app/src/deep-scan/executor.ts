@@ -567,7 +567,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
     } catch (error) {
       // Pin checks throw the caller's reason directly; keep SDK worker errors intact.
-      if (request.signal.aborted && error === request.signal.reason) throw error;
+      if (request.signal.aborted && error === request.signal.reason)
+        throw error;
       throw classifyCodexWorkerError(error);
     } finally {
       if (includePathsFile !== undefined)
