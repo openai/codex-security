@@ -168,7 +168,10 @@ def stage_write(
                     if matches:
                         yield lambda _directory=None: (opened, opened.st_ctime_ns)
                         return
-    candidate = f".{name}.{secrets.token_hex(8)}.tmp"
+    # A valid destination may already occupy the filesystem's entire name limit.
+    candidate = f".{secrets.token_hex(8)}.tmp"
+    if name.casefold() == candidate:
+        candidate = "." + candidate
 
     with stage_file(parent_fd, candidate, payload, owner_read_write) as staged_fd:
         staged = os.fstat(staged_fd)
