@@ -10,6 +10,7 @@ const distModules = [
   "auth",
   "bulk-scan-discovery",
   "cli",
+  "cli-argument",
   "cli-daybreak",
   "cli-help",
   "cli-scan-logs-json",
