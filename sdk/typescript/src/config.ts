@@ -265,16 +265,6 @@ export function structuredCodexConfig(config: JsonObject = {}): JsonObject {
   return structured;
 }
 
-/** @internal Native Windows trust lookup folds only ASCII letters. */
-export function projectTrustKey(
-  path: string,
-  platform: NodeJS.Platform = process.platform,
-): string {
-  return platform === "win32"
-    ? path.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
-    : path;
-}
-
 /** @internal Quote a TOML string without changing its contents. */
 export function quoteTomlString(value: string): string {
   return JSON.stringify(value).replaceAll("\u007f", "\\u007f");

@@ -745,7 +745,6 @@ function malformedPreflightError(context?: PreflightContext): Error {
 function unsupportedCodexApiError(
   codexPath: string,
   api: string,
-  cause: unknown,
   context?: PreflightContext,
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
@@ -760,7 +759,6 @@ function unsupportedCodexApiError(
       " " +
       subject(context) +
       " did not run.",
-    { cause },
   );
 }
 
@@ -776,7 +774,7 @@ function jsonRpcPreflightError(
       ? error.code
       : undefined;
   if (code === -32601) {
-    const failure = unsupportedCodexApiError(codexPath, method, value, context);
+    const failure = unsupportedCodexApiError(codexPath, method, context);
     if (typeof error?.message === "string")
       failure.message += "\n" + error.message;
     return failure;

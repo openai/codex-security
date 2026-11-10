@@ -241,9 +241,8 @@ remove every safeguard or guarantee that a scan will complete.
 To explicitly select an approved Cyber access program, add
 `cyber-access-program: daybreak_blue` to the scan step's `with` settings.
 The input also accepts `standard` and `daybreak_red`; choose a program supported
-by your model and API project. Leaving it unset uses the pinned CLI's scan
-default. CLI releases with [automatic Blue selection](../sdk/typescript/docs/cli.md#select-a-cyber-access-program)
-request Blue when the selected OpenAI model advertises it for the project key.
+by your model and API project. Leaving it unset uses the pinned CLI's
+[scan default](../sdk/typescript/docs/cli.md#select-a-cyber-access-program).
 Selecting `standard` does not require Daybreak approval. Selecting a Daybreak
 program does not grant access; an unavailable program or incompatible model
 causes the scan to fail.

@@ -57,10 +57,9 @@ keep their native spelling; names and values are not converted.
 YAML anchors are supported; the parser retains its guard against excessive nested
 alias expansion.
 
-OpenAI scans request Daybreak Blue when the selected model advertises it for
-the scan credentials. To request Standard or opt in to Red, set
-`scan.cyber_access_program` to `standard` or `daybreak_red`. An explicit
-program takes precedence over the native `codex.daybreak` toggle. See
+With bundled Codex, OpenAI scans request Daybreak Blue when the model advertises
+it for the scan credentials. Set `scan.cyber_access_program` to request a
+specific program. It takes precedence over the native `codex.daybreak` toggle. See
 [Cyber access programs](../sdk/typescript/docs/cli.md#select-a-cyber-access-program).
 
 ### Try the checked-in examples
@@ -139,7 +138,7 @@ load the same config also use that setting. The usual config file is
 | `auth`                         | Credential source: `auto`, `chatgpt`, or `api-key`; never a credential value         | `auto`                             |
 | `scan.mode`                    | `standard` or `deep`                                                                 | `standard`                         |
 | `scan.max_time_minutes`        | Advisory Standard investigation allowance; enforced Deep discovery limit, in minutes | Unset in Standard; 5760 in Deep    |
-| `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`          | Automatic Blue when advertised     |
+| `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`          | Blue when bundled Codex offers it  |
 | `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`           | Whole repository                   |
 | `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
 | `scan.instructions_file`       | Additional scan instructions                                                         | Unset                              |

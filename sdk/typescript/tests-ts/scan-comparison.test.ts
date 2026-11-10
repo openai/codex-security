@@ -172,8 +172,6 @@ describe("semantic scan comparison", () => {
   test.each([
     ["sdk", "matching"],
     ["cli", "matching"],
-    ["sdk", "component matching"],
-    ["cli", "component matching"],
     ["sdk", "planning"],
     ["cli", "planning"],
   ] as const)(
@@ -189,9 +187,14 @@ describe("semantic scan comparison", () => {
       const repositoryBin = join(checkout, "node_modules", ".bin");
       await mkdir(repositoryBin, { recursive: true });
       await writeFile(join(repository, "source.ts"), "export {};\n");
+      const state = join(root, "state");
+      const privateHome = join(state, "codex-home");
+      await mkdir(privateHome, { recursive: true, mode: 0o700 });
       await writeFile(
         join(home, "config.toml"),
         stringify({
+          openai_base_url: "http://127.0.0.1:1",
+          chatgpt_base_url: "http://127.0.0.1:1",
           responses_api_metadata: {
             synthetic_home: "preserved",
             codex_security_surface: "previous",
@@ -213,8 +216,8 @@ describe("semantic scan comparison", () => {
           ),
           SystemRoot: process.env["SystemRoot"],
           CODEX_HOME: home,
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-key",
+          CODEX_SECURITY_STATE_DIR: state,
+          ...(surface === "sdk" && { OPENAI_API_KEY: "synthetic-key" }),
         },
       };
       let captured: CodexOptions | undefined;
@@ -223,6 +226,10 @@ describe("semantic scan comparison", () => {
           ? { components: [{ name: "Source", paths: ["source.ts"] }] }
           : { matches: [], uncertain: [] },
       );
+      const login = spyOn(auth, "accountStatus").mockResolvedValue({
+        authenticated: true,
+        details: "Logged in using ChatGPT",
+      });
       const discovery = spyOn(
         cyberAccess,
         "resolveScanCyberAccessProgram",
@@ -241,12 +248,7 @@ describe("semantic scan comparison", () => {
             before: [finding("before")],
             after: [finding("after")],
           };
-          if (helper === "component matching") {
-            await matchScanFindingsInternal(input, options, {
-              surface,
-              componentRepository: repository,
-            });
-          } else if (surface === "sdk") await matchScanFindings(input, options);
+          if (surface === "sdk") await matchScanFindings(input, options);
           else await matchScanFindingsInternal(input, options, { surface });
         }
         const requestMetadata = parse(captured!.configOverrides!.join("\n"))[
@@ -255,7 +257,14 @@ describe("semantic scan comparison", () => {
         expect(discovery).toHaveBeenCalledTimes(helper === "matching" ? 0 : 1);
         if (helper !== "matching") {
           const probe = discovery.mock.calls[0]![0];
-          expect(probe.environment["CODEX_API_KEY"]).toBe("synthetic-key");
+          expect(probe.environment["CODEX_API_KEY"]).toBe(
+            surface === "sdk" ? "synthetic-key" : undefined,
+          );
+          expect(await realpath(probe.environment["CODEX_HOME"]!)).toBe(
+            await realpath(surface === "sdk" ? home : privateHome),
+          );
+          expect(probe.config).not.toHaveProperty("openai_base_url");
+          expect(probe.config).not.toHaveProperty("chatgpt_base_url");
           expect(probe.environment["PATH"]?.split(delimiter)).not.toContain(
             await realpath(repositoryBin),
           );
@@ -279,100 +288,10 @@ describe("semantic scan comparison", () => {
           codex_security_package_version: VERSION,
         });
       } finally {
+        login.mockRestore();
         discovery.mockRestore();
         startThread.mockRestore();
       }
-    },
-  );
-
-  test("component catalog discovery uses the helper's credential home and execution overrides", async () => {
-    const root = await temporaryDirectory();
-    const ambientHome = join(root, "ambient");
-    const state = join(root, "state");
-    const privateHome = join(state, "codex-home");
-    const repository = join(root, "repo");
-    for (const directory of [ambientHome, privateHome, repository])
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-    await writeFile(join(repository, "component.ts"), "");
-    await writeFile(
-      join(ambientHome, "config.toml"),
-      stringify({
-        openai_base_url: "http://127.0.0.1:1/ambient",
-        chatgpt_base_url: "http://127.0.0.1:1/ambient",
-      }),
-    );
-    const discovery = spyOn(
-      cyberAccess,
-      "resolveScanCyberAccessProgram",
-    ).mockResolvedValue("daybreak_blue");
-    const login = spyOn(auth, "accountStatus").mockResolvedValue({
-      authenticated: true,
-      details: "Logged in using ChatGPT",
-    });
-    const command = spyOn(runtimeCommands, "runCodexCommand").mockResolvedValue(
-      { success: true, exitCode: 0, stdout: "[]", stderr: "" },
-    );
-    const { codex, calls } = fakeCodex({
-      components: [{ name: "Component", paths: ["component.ts"] }],
-    });
-    const thread = observeCodexOptions(codex, () => {});
-    try {
-      await planComponents(repository, {
-        auth: "chatgpt",
-        config: {
-          codexOverrides: { model_catalog_json: "relative-catalog.json" },
-        },
-        environment: {
-          CODEX_HOME: ambientHome,
-          CODEX_SECURITY_STATE_DIR: state,
-        },
-      });
-      const [probe] = discovery.mock.calls[0]!;
-      expect(probe.credentialType).toBe("chatgpt");
-      expect(await realpath(probe.environment["CODEX_HOME"]!)).toBe(
-        await realpath(privateHome),
-      );
-      expect(probe.config).not.toHaveProperty("openai_base_url");
-      expect(probe.config).not.toHaveProperty("chatgpt_base_url");
-      expect(probe.config["model_catalog_json"]).toBe(
-        join(calls.threadOptions!.workingDirectory!, "relative-catalog.json"),
-      );
-      expect(calls.turnOptions?.cyberAccessProgram).toBe("daybreak_blue");
-    } finally {
-      thread.mockRestore();
-      command.mockRestore();
-      login.mockRestore();
-      discovery.mockRestore();
-    }
-  });
-
-  test.each([
-    ["chatgpt", "file", "chatgpt"],
-    ["apikey", "file", "api_key"],
-    ["chatgpt", "keyring", undefined],
-  ] as const)(
-    "classifies an ambient %s credential file with %s storage",
-    async (mode, store, expected) => {
-      const home = await temporaryDirectory();
-      await writeFile(
-        join(home, "auth.json"),
-        JSON.stringify({ auth_mode: mode }),
-      );
-      let observed: string | undefined;
-      const selected = await comparisonEnvironment(
-        { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: join(home, "state") },
-        undefined,
-        undefined,
-        undefined,
-        { cli_auth_credentials_store: store },
-        undefined,
-        "auto",
-        (type) => {
-          observed = type;
-        },
-      );
-      expect(selected["CODEX_HOME"]).toBe(home);
-      expect(observed).toBe(expected);
     },
   );
 

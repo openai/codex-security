@@ -5906,10 +5906,7 @@ export async function main(
             },
             createSecurity: dependencies.createSecurity,
             planComponents: dependencies.planComponents,
-            matchFindings:
-              dependencies.matchFindings === DEFAULT_DEPENDENCIES.matchFindings
-                ? undefined
-                : dependencies.matchFindings,
+            matchFindings: dependencies.matchFindings,
             onPlan: (components) => {
               for (const component of components)
                 componentNames.set(component.id, component.name);

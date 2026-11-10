@@ -244,12 +244,10 @@ The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
 For a custom `pluginPath`, check [custom plugin compatibility](#custom-plugins).
 
-With the built-in OpenAI provider, `security.run()` requests Daybreak Blue
-when Codex advertises it for the selected model and credentials. To request
-Standard or opt in to Red, pass `cyberAccessProgram: "standard"` or
-`cyberAccessProgram: "daybreak_red"` in the scan options. See
-[Cyber access programs](docs/cli.md#select-a-cyber-access-program) for defaults
-and [Daybreak opt-in](docs/cli.md#daybreak-opt-in) for the native Codex toggle.
+With bundled Codex and the built-in OpenAI provider, `security.run()` requests
+Daybreak Blue when the model advertises it for the scan credentials. To request
+a specific program, set `cyberAccessProgram` in the scan options. See
+[Cyber access programs](docs/cli.md#select-a-cyber-access-program).
 
 Deep Scan workers, including resumed workers, inherit per-scan provider,
 authentication, environment, and executable settings with read-only permissions.

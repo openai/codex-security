@@ -134,12 +134,15 @@ export async function readDeepScanParentConfig(
   ];
   // Subcommand help does not load a project. A global --cd is ignored by
   // older app-servers, so require support on the subcommand itself.
-  const supportsCd = await nativeAppServerSupportsCd(
+  const help = await runCodexCommand(
     command,
-    options.scanDir,
+    ["app-server", "--cd", options.scanDir, "--help"],
     environment,
+    undefined,
     options.signal,
   );
+  const supportsCd =
+    help.success && /^\s*(?:-C,\s*)?--cd\s+<[^>\n]+>/mu.test(help.stdout);
   if (!supportsCd) {
     // The bundled command is the native executable itself. A custom launcher
     // can use its own working directory to resolve scripts and other inputs.
@@ -174,22 +177,6 @@ export async function readDeepScanParentConfig(
       ) => inspectFilteredPeers(config, options.pluginServers, hasEmptyCatalog),
     ),
   );
-}
-
-export async function nativeAppServerSupportsCd(
-  command: CodexCommand & { cwd?: string },
-  directory: string,
-  environment: Record<string, string>,
-  signal: AbortSignal,
-) {
-  const help = await runCodexCommand(
-    command,
-    ["app-server", "--cd", directory, "--help"],
-    environment,
-    undefined,
-    signal,
-  );
-  return help.success && /^\s*(?:-C,\s*)?--cd\s+<[^>\n]+>/mu.test(help.stdout);
 }
 
 export function isBundledExecutable(command: string): boolean {

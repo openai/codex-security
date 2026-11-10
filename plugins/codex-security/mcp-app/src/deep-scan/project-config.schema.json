@@ -27,7 +27,7 @@
           "exclusiveMinimum": 0
         },
         "cyber_access_program": {
-          "description": "Experimental Cyber access program for OpenAI scan turns. By default, scans request Daybreak Blue when advertised for the selected model and credentials. Red requires opt-in.",
+          "description": "Experimental Cyber access program for OpenAI scan turns. With bundled Codex, scans request Daybreak Blue when the selected model advertises it for the scan credentials.",
           "type": "string",
           "enum": ["standard", "daybreak_blue", "daybreak_red"]
         },

@@ -72,7 +72,6 @@ import {
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
-  readStoredFileCredentialType,
   withoutOpenAiApiKeys,
   type AccountStatus,
 } from "./auth.js";
@@ -87,7 +86,6 @@ import {
   isExternalModelProvider,
   hasCommandAuth,
   mergedCodexConfig,
-  projectTrustKey,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   MODEL_FILE_SETTINGS,
@@ -1548,7 +1546,11 @@ export class CodexSecurity {
       );
       // Pin an untrusted root before --cd can trust it and load repository MCP
       // servers. An inline table keeps the path out of CLI dotted-key parsing.
-      const repositoryKey = projectTrustKey(repository);
+      // Codex prefers an exact ASCII-lowercase trust key on Windows.
+      const projectTrustKey =
+        process.platform === "win32"
+          ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+          : repository;
       const configured = scanModelConfiguration(session.effectiveConfig);
       const { pricingContext } = session;
       const model = options.model ?? configured.model;
@@ -1572,7 +1574,7 @@ export class CodexSecurity {
         [
           `permissions.${SCAN_PERMISSION_PROFILE}.network.enabled=false`,
           "project_root_markers=[]",
-          `projects=${inlineToml({ [repositoryKey]: { trust_level: "untrusted" } })}`,
+          `projects=${inlineToml({ [projectTrustKey]: { trust_level: "untrusted" } })}`,
         ],
       );
       tracker = new ScanCostTracker({
@@ -2474,16 +2476,6 @@ export class CodexSecurity {
             await this.#dependencies.resolveScanCyberAccessProgram({
               command: this.#codexCommand(),
               cwd: archiveWorkspace ?? scanDir,
-              // auth.json identifies the stored account only when the scan uses it.
-              credentialType:
-                authentication.method === "stored_credentials" &&
-                workerRuntimeConfig["cli_auth_credentials_store"] === "file" &&
-                !environmentEntry(
-                  workerProviderEnvironment,
-                  "CODEX_ACCESS_TOKEN",
-                )?.trim()
-                  ? authentication.credentialType
-                  : undefined,
               nativeProfile: runtime.providerProfile !== undefined,
               environment: definedEnvironment({
                 ...environmentWithGit(workerProviderEnvironment, git),
@@ -6609,10 +6601,24 @@ export async function runtimeScanAuthentication(
   );
   if (authentication.method !== "stored_credentials") return authentication;
 
-  const credentialType = await readStoredFileCredentialType(codexHome);
-  return credentialType === "chatgpt" || credentialType === "api_key"
-    ? { ...authentication, credentialType }
-    : authentication;
+  try {
+    const stored = JSON.parse(
+      await readFile(join(codexHome, "auth.json"), "utf8"),
+    ) as unknown;
+    if (!isRecord(stored)) return authentication;
+
+    const mode = stored["auth_mode"];
+    if (mode === "apikey" || mode === "api_key") {
+      return { ...authentication, credentialType: "api_key" };
+    }
+    if (mode === "chatgpt") {
+      return { ...authentication, credentialType: "chatgpt" };
+    }
+  } catch {
+    return authentication;
+  }
+
+  return authentication;
 }
 
 /** Local helpers do not authenticate model requests. */

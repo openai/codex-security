@@ -2265,20 +2265,12 @@ describe("CodexSecurity orchestration", () => {
       );
       const onAuthentication =
         mock<(authentication: ScanAuthentication) => void>();
-      const catalogCredentialTypes: Array<string | undefined> = [];
-      const client = new TestClient(
-        { codexOverrides: { cli_auth_credentials_store: "file" } },
-        {
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          repositoryRevision: async () => null,
-          resolveScanCyberAccessProgram: async ({ credentialType }) => {
-            catalogCredentialTypes.push(credentialType);
-            return "standard";
-          },
-          createCodex: codexFactory(scanDidNotStart),
-        },
-      );
+      const client = TestClient.withDependencies({
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: codexFactory(scanDidNotStart),
+      });
 
       await expect(
         client.run(repository, {
@@ -2287,9 +2279,6 @@ describe("CodexSecurity orchestration", () => {
         }),
       ).rejects.toThrow("scan did not start");
       expect(onAuthentication.mock.lastCall?.[0]).toEqual(expected);
-      expect(catalogCredentialTypes).toEqual([
-        "credentialType" in expected ? expected.credentialType : undefined,
-      ]);
       expect(JSON.stringify(onAuthentication.mock.lastCall?.[0])).not.toContain(
         "SYNTHETIC",
       );
@@ -2306,47 +2295,6 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     }
   });
-
-  test.each([
-    ["keyring", false],
-    ["auto", false],
-    ["ephemeral", false],
-    ["file", true],
-  ] as const)(
-    "ignores a stale file login for catalog selection with %s storage (access token %p)",
-    async (store, accessToken) => {
-      const { repository, codexHome, scanDir } = await scanDirectories();
-      await writeFile(
-        join(codexHome, "auth.json"),
-        JSON.stringify({ auth_mode: "chatgpt" }),
-      );
-      const environment: Record<string, string> = accessToken
-        ? { CODEX_ACCESS_TOKEN: "synthetic" }
-        : {};
-      await using client = new TestClient(
-        {
-          codexOverrides: {
-            cli_auth_credentials_store: "file",
-            profile: "selected",
-            profiles: { selected: { cli_auth_credentials_store: store } },
-          },
-        },
-        {
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          environment,
-          prepareRuntime: async () => ({
-            ...preparedRuntime(codexHome),
-            environment,
-          }),
-          resolveScanCyberAccessProgram: async ({ credentialType }) => {
-            expect(credentialType).toBeUndefined();
-            throw new Error("catalog inspected");
-          },
-        },
-      );
-      await expect(client.run(repository)).rejects.toThrow("catalog inspected");
-    },
-  );
 
   test("previews an existing output archive without changing files", async () => {
     const root = await temporaryDirectory();

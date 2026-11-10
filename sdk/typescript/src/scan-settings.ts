@@ -105,7 +105,7 @@ export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
     .enum(["standard", "daybreak_blue", "daybreak_red"])
     .optional()
     .describe(
-      "Experimental Cyber access program for OpenAI scan turns. By default, scans request Daybreak Blue when advertised for the selected model and credentials. Red requires opt-in.",
+      "Experimental Cyber access program for OpenAI scan turns. With bundled Codex, scans request Daybreak Blue when the selected model advertises it for the scan credentials.",
     ),
   mode: z.enum(SCAN_MODES).optional().meta({ default: DEFAULT_SCAN_MODE }),
   maxTimeMinutes: z

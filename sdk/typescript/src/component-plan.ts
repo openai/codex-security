@@ -82,11 +82,15 @@ export async function planComponents(
     const response = await runReadOnlyCodex(
       batch.prompt,
       z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
-      { ...options, config: options.config ?? {}, workingDirectory: tmpdir() },
+      {
+        ...options,
+        config: options.config ?? {},
+        componentRepository: repository,
+        workingDirectory: tmpdir(),
+      },
       {
         surface: options.surface ?? "sdk",
         command: "scan-components",
-        componentRepository: repository,
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
       },
     );

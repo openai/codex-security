@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { notify } from "./value.js";
-import { realpath, rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import {
   CodexSecurity,
   DEFAULT_DEPENDENCIES,
@@ -438,14 +438,6 @@ async function deduplicateFindings(
     }));
   const previous = first === undefined ? [] : componentFindings(first);
   let error: string | undefined;
-  let catalogHome: string | undefined;
-  const getKeyCatalogHome = async (parent: string) => {
-    const directory = await realpath(parent);
-    if (catalogHome && dirname(catalogHome) === directory) return catalogHome;
-    if (catalogHome) await rm(catalogHome, { recursive: true, force: true });
-    catalogHome = await prepareOutputDir(undefined, "catalog", directory);
-    return catalogHome;
-  };
   try {
     options.signal?.throwIfAborted();
     if (remaining.length) notify(() => options.onDeduplicationStarted?.());
@@ -456,6 +448,7 @@ async function deduplicateFindings(
       )(
         { before: [...previous], after: current },
         {
+          componentRepository: options.repository,
           allowHistoricalUncertainty: true,
           auth: options.scanOptions?.auth,
           cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
@@ -464,11 +457,7 @@ async function deduplicateFindings(
           signal: options.signal,
           workingDirectory: tmpdir(),
         },
-        {
-          surface: options.surface ?? "sdk",
-          componentRepository: options.repository,
-          getKeyCatalogHome,
-        },
+        { surface: options.surface ?? "sdk" },
       );
       matching.matches.push(...comparison.matches);
       matching.uncertain.push(...comparison.uncertain);
@@ -488,13 +477,6 @@ async function deduplicateFindings(
     error = options.signal?.aborted
       ? "Cross-component matching was canceled."
       : errorMessage(failure);
-  } finally {
-    if (catalogHome)
-      await rm(catalogHome, { recursive: true, force: true }).catch(
-        (failure: unknown) => {
-          error ??= errorMessage(failure);
-        },
-      );
   }
   const remainSeparate = ({
     beforeOccurrenceId,

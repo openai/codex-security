@@ -9,7 +9,6 @@ import {
   inlineToml,
   quoteTomlString,
   modelProviderConfigOverride,
-  projectTrustKey,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   scanPricingContext,
@@ -44,12 +43,6 @@ afterEach(async () => {
     sandboxFixtureUsed = false;
   }
   await cleanup();
-});
-
-test("project trust keys fold only ASCII letters on Windows", () => {
-  const path = "C:\\Work\\ÉQUIPE";
-  expect(projectTrustKey(path, "win32")).toBe("c:\\work\\Équipe");
-  expect(projectTrustKey("/Work/ÉQUIPE", "linux")).toBe("/Work/ÉQUIPE");
 });
 
 test("inline Codex overrides preserve literal keys and string values", () => {

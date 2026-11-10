@@ -18,13 +18,9 @@ import {
 import { delimiter, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
-import { Codex, Thread } from "@openai/codex-sdk";
+import { Thread } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
-import {
-  CodexSecurity,
-  DEFAULT_DEPENDENCIES,
-  type ScanOptions,
-} from "../src/api.js";
+import type { ScanOptions } from "../src/api.js";
 import { writeThreatModel } from "../src/artifact-export.js";
 import { main } from "../src/cli.js";
 import {
@@ -961,151 +957,42 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
   ).toBe(true);
 });
 
-test.each(["blue", "red-only"])(
-  "default CLI matches component findings with a %s catalog",
-  async (catalogType) => {
-    const name = `default CLI matches component findings with a ${catalogType} catalog`;
-    if (runTestInSubprocess(import.meta.path, name)) return;
-    const paths = await fixture();
-    const home = await temporaryDirectory();
-    const models = await json(
-      fileURLToPath(
-        new URL("./fixtures/native-skill-model-catalog.json", import.meta.url),
-      ),
-    );
-    if (catalogType === "red-only")
-      models.models[0].available_access_programs.cyber = ["daybreak_red"];
-    const catalog = join(home, "models.json");
-    await writeFile(catalog, JSON.stringify(models));
-    await writeFile(
-      join(home, "config.toml"),
-      `model_catalog_json=${JSON.stringify(catalog)}\nchatgpt_base_url="http://127.0.0.1:1"\nopenai_base_url="http://127.0.0.1:1/v1"\n`,
-    );
-    const original = { ...process.env };
-    const scan = spyOn(CodexSecurity.prototype, "run").mockImplementation(
-      (repository, options = {}) => completed(repository, options),
-    );
-    const turn = spyOn(Thread.prototype, "run").mockResolvedValue({
-      finalResponse: JSON.stringify(noMatches),
-      items: [],
-      usage: null,
-    });
-    try {
-      for (const key of Object.keys(process.env)) {
-        if (/^(?:CODEX|OPENAI)_/iu.test(key)) delete process.env[key];
-      }
-      Object.assign(process.env, {
-        CODEX_HOME: home,
-        CODEX_SECURITY_STATE_DIR: join(home, "state"),
-        OPENAI_API_KEY: "synthetic-key",
-        CODEX_SECURITY_NO_UPDATE_NOTICE: "1",
-      });
-      const { runCli, stdout, stderr } = createCliTest(main);
-      const exitCode = await runCli(
-        [
-          "scan-components",
-          paths.repository,
-          "--output-dir",
-          paths.outputDir,
-          "--component",
-          "apps/api",
-          "--component",
-          "apps/web",
-          "--model",
-          "gpt-test",
-          "--json",
-        ],
-        undefined,
-      );
-      expect(scan).toHaveBeenCalledTimes(2);
-      const summary = JSON.parse(stdout.text());
-      if (catalogType === "blue") {
-        expect(exitCode, stderr.text()).toBe(0);
-        expect(summary.deduplication.status).toBe("completed");
-        expect(
-          turn.mock.calls.map(([, options]) => options?.cyberAccessProgram),
-        ).toEqual(["daybreak_blue"]);
-      } else {
-        expect(exitCode).toBe(2);
-        expect(summary.deduplication.error).toContain(
-          "--cyber-access-program daybreak_red",
-        );
-        expect(turn).not.toHaveBeenCalled();
-      }
-    } finally {
-      scan.mockRestore();
-      turn.mockRestore();
-      for (const key of Object.keys(process.env)) {
-        if (!(key in original)) delete process.env[key];
-      }
-      Object.assign(process.env, original);
-    }
-  },
-);
-
-test("serial component matches isolate the native model cache by credential home", async () => {
+test("component matching requests Blue with the bundled model catalog", async () => {
   const paths = await fixture();
-  const first = await temporaryDirectory();
-  const second = await temporaryDirectory();
-  const environment = {
-    CODEX_HOME: first,
-    OPENAI_API_KEY: "synthetic-first",
-    PATH: process.env["PATH"],
-    SystemRoot: process.env["SystemRoot"],
-  };
-  const lookups: { home: string; key: string }[] = [];
-  const run = runtime.runCodexCommand;
-  const command = spyOn(runtime, "runCodexCommand").mockImplementation(
-    async (...args) => {
-      const [, argv, env] = args;
-      if (argv.at(-2) !== "debug" || argv.at(-1) !== "models")
-        return run(...args);
-      lookups.push({ home: env["CODEX_HOME"]!, key: env["CODEX_API_KEY"]! });
-      return {
-        success: true,
-        exitCode: 0,
-        stdout: '{"models":[]}',
-        stderr: "",
-      };
-    },
+  const home = await temporaryDirectory();
+  const catalog = fileURLToPath(
+    new URL("./fixtures/native-skill-model-catalog.json", import.meta.url),
   );
-  const codex = fakeCodex(() => {
-    if (lookups.length === 1) environment.OPENAI_API_KEY = "synthetic-second";
-    if (lookups.length === 2) environment.CODEX_HOME = second;
-    if (lookups.length === 3) throw new Error("Synthetic matching failure.");
-    return noMatches;
+  const turn = spyOn(Thread.prototype, "run").mockResolvedValue({
+    finalResponse: JSON.stringify(noMatches),
+    items: [],
+    usage: null,
   });
-  const thread = spyOn(Codex.prototype, "startThread").mockImplementation(
-    (options) =>
-      codex.startThread(options!) as ReturnType<Codex["startThread"]>,
-  );
   try {
-    const scanResult = await scan(paths, {
-      components: [
-        ...components,
-        { name: "Manifest", paths: ["package.json"] },
-      ],
-      environment,
+    const result = await scan(paths, {
+      components: components.slice(0, 2),
       matchFindings: undefined,
+      environment: {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: home,
+        OPENAI_API_KEY: "synthetic-key",
+      },
+      config: {
+        codexOverrides: {
+          model: "gpt-test",
+          model_catalog_json: catalog,
+          chatgpt_base_url: "http://127.0.0.1:1",
+          openai_base_url: "http://127.0.0.1:1/v1",
+        },
+      },
     });
-    expect(scanResult.deduplication?.error).toContain(
-      "Synthetic matching failure.",
-    );
-    expect(lookups.map(({ key }) => key)).toEqual([
-      "synthetic-first",
-      "synthetic-second",
-      "synthetic-second",
-    ]);
-    const homes = lookups.map(({ home }) => home);
-    expect(homes[0]).toBe(homes[1]);
-    expect(dirname(homes[0]!)).toBe(await realpath(first));
-    expect(dirname(homes[2]!)).toBe(await realpath(second));
-    for (const home of new Set(homes)) {
-      await expect(stat(home)).rejects.toMatchObject({ code: "ENOENT" });
-    }
+    expect(result.deduplication?.error).toBeUndefined();
+    expect(
+      turn.mock.calls.map(([, options]) => options?.cyberAccessProgram),
+    ).toEqual(["daybreak_blue"]);
   } finally {
-    thread.mockRestore();
-    command.mockRestore();
+    turn.mockRestore();
   }
 });
 
@@ -2208,14 +2095,6 @@ test.each([
       }),
       spyOn(runtime, "probeCodexSandbox").mockImplementation(async () => {}),
       // The Node child below implements only `codex exec`.
-      spyOn(
-        DEFAULT_DEPENDENCIES,
-        "resolveScanCyberAccessProgram",
-      ).mockImplementation(async ({ environment }) =>
-        environment["SYNTHETIC_COMPONENT"] === "first"
-          ? "daybreak_blue"
-          : "standard",
-      ),
       spyOn(deepScan, "readDeepScanParentConfig").mockImplementation(
         async ({ codexOptions }) => codexOptions.config ?? {},
       ),
@@ -2269,7 +2148,7 @@ test.each([
               'const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
               'manifest.scan.mode = "scoped_path"; writeFileSync(manifestPath, JSON.stringify(manifest));',
               'const authPath = join(process.env.CODEX_HOME, "auth.json");',
-              `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, program: process.argv[process.argv.indexOf("--cyber-access-program") + 1], python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
+              `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
               'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',
               'console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "scan complete" } }));',
               'console.log(JSON.stringify({ type: "turn.completed", usage: null }));',
@@ -2302,7 +2181,6 @@ test.each([
             key: auth === "api-key" ? environment.OPENAI_API_KEY : null,
             auth: auth === "chatgpt" ? storedAuthentication : null,
             value,
-            program: value === "first" ? "daybreak_blue" : "standard",
             python: "/managed/python",
           });
           if (mode === "deep") {
