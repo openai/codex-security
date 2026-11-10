@@ -32,10 +32,11 @@ merge whose first parent is the current tip of that same branch. A stale merge
 or a retarget with different parents needs a fresh PR event after the merge ref
 updates. Reopening the PR or pushing a commit starts one.
 Only the original source run and an uninterrupted sequence of successful edits
-can carry a green result. A cancelled or retried run, a changed target, missing
-evidence or conflicting results require full qualification. Use **Re-run all
-jobs** to retry an edit. A partial retry cannot refresh a previous attempt's
-required checks.
+can carry a green result. A failed source run stays red if all subsequent edits
+failed or were cancelled for that same target. A cancelled source run, a retry,
+a changed target, missing evidence or conflicting results require full
+qualification. Use **Re-run all jobs** to retry an edit. A partial retry cannot
+refresh a previous attempt's required checks.
 
 ## Required gate
 

@@ -84,6 +84,28 @@ def _rename_exclusive(parent_fd: int, source: str, destination: str) -> None:
         if rename(parent_fd, os.fsencode(source), parent_fd, os.fsencode(destination), flag) == 0:
             return
         code = ctypes.get_errno()
+    elif sys.platform == "linux":
+        import sysconfig
+
+        # musl omits the renameat2 wrapper. Select the syscall for the Python
+        # process's ABI, which can differ from the host kernel's architecture.
+        arch = (sysconfig.get_config_var("MULTIARCH") or "").partition("-")[0]
+        number = {"x86_64": 316, "aarch64": 276}.get(arch)
+        syscall = getattr(libc, "syscall", None)
+        if number is not None and ctypes.sizeof(ctypes.c_void_p) == 8 and syscall is not None:
+            syscall.argtypes = [ctypes.c_long]
+            syscall.restype = ctypes.c_long
+            result = syscall(
+                number,
+                ctypes.c_long(parent_fd),
+                ctypes.c_char_p(os.fsencode(source)),
+                ctypes.c_long(parent_fd),
+                ctypes.c_char_p(os.fsencode(destination)),
+                ctypes.c_long(flag),
+            )
+            if result == 0:
+                return
+            code = ctypes.get_errno()
     detail = os.strerror(code)
     if code in {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL}:
         detail = f"cannot publish a new file atomically without hard links or exclusive rename ({detail})"
@@ -168,7 +190,10 @@ def stage_write(
                     if matches:
                         yield lambda _directory=None: (opened, opened.st_ctime_ns)
                         return
-    candidate = f".{name}.{secrets.token_hex(8)}.tmp"
+    # A valid destination may already occupy the filesystem's entire name limit.
+    candidate = f".{secrets.token_hex(8)}.tmp"
+    if name.casefold() == candidate:
+        candidate = "." + candidate
 
     with stage_file(parent_fd, candidate, payload, owner_read_write) as staged_fd:
         staged = os.fstat(staged_fd)

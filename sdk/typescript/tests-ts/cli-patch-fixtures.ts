@@ -100,8 +100,7 @@ export function patchRiskSummary() {
   ].join("\n");
 }
 
-export function patchRiskAssessment() {
-  const summary = patchRiskSummary();
+export function patchRiskAssessment(summary = patchRiskSummary()) {
   return {
     report: [
       "<!-- codex-security:patch-risk-summary:start -->",
@@ -115,9 +114,9 @@ export function patchRiskAssessment() {
   };
 }
 
-export function patchRiskReport() {
+export function patchRiskReport(summary = patchRiskSummary()) {
   return [
-    patchRiskSummary(),
+    summary,
     "",
     "```json",
     '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
@@ -165,6 +164,7 @@ export async function runWorkflow(
     interactive?: boolean;
     review?: boolean;
     localHosting?: boolean;
+    hostingOrigin?: string;
     configure?: (value: ReturnType<typeof dependencies>) => void;
   } = {},
 ) {
@@ -243,7 +243,9 @@ export async function runWorkflow(
           ([, local]) => local === remote,
         )?.[0];
         if (!hosted) {
-          hosted = `https://github.example.test/example/repository-${localRemotes.size}.git`;
+          hosted =
+            options.hostingOrigin ??
+            `https://github.example.test/example/repository-${localRemotes.size}.git`;
           localRemotes.set(hosted, remote);
         }
         return hosted;

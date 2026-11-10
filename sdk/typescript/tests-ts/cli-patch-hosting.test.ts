@@ -1498,10 +1498,9 @@ describe("patch change tracking", () => {
                   "push",
                   "--no-signed",
                   "--recurse-submodules=check",
-                  "--set-upstream",
                   `--force-with-lease=refs/heads/${branch}:`,
                   "origin",
-                  branch,
+                  `${git("rev-parse", branch)}:refs/heads/${branch}`,
                 ]);
                 return runGitRepositoryCommand(
                   command,
@@ -1509,10 +1508,9 @@ describe("patch change tracking", () => {
                     "push",
                     "--no-signed",
                     "--recurse-submodules=check",
-                    "--set-upstream",
                     `--force-with-lease=refs/heads/${branch}:`,
                     remote,
-                    branch,
+                    `${git("rev-parse", branch)}:refs/heads/${branch}`,
                   ],
                   cwd,
                   options,

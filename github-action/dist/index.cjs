@@ -54506,6 +54506,8 @@ async function analyzeResults(options) {
     result.errors.push(error2.message);
     return result;
   }
+  const limitations = value.manifest.scan.scope?.limitations;
+  if (Array.isArray(limitations)) result.scopeLimitations = limitations.filter((item) => typeof item === "string");
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
   const usage = value.turn?.usage;
@@ -97526,6 +97528,9 @@ function resultSummary(result, inputs, target, artifactUrl) {
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
+  if (result.scopeLimitations?.length) {
+    parts.push("**Scope limitations**\n\n" + result.scopeLimitations.map((note) => `- ${esc(note)}`).join("\n"));
+  }
   if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
   if (result.scanStatus !== "completed") parts.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
   for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
