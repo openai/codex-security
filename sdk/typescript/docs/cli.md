@@ -37,6 +37,20 @@ codex-security info --json
 - [Use a hosted executor](#hosted-standard-scan) or
   [run bulk scans in containers](#containerized-bulk-scans).
 
+## Updating the CLI
+
+Use `cs --update` for a package-manager installation. The command runs the
+package manager for that installation and prints its command and working
+directory to stderr. Project-local updates run in the project that declares
+the CLI dependency. An indirect or hoisted dependency may require running the
+displayed command in its owning workspace. For an npx invocation, use
+`npx @openai/codex-security@latest` on the next run. For a standalone release,
+download and extract the latest release.
+
+Interactive update notices use the same installation detection. Set
+`CODEX_SECURITY_NO_UPDATE_NOTICE=1` to disable these notices. Explicit updates
+are available with notifications disabled.
+
 ## Authentication
 
 Sign in with ChatGPT, or supply an API key for CI:
@@ -1770,7 +1784,8 @@ Select one completed scan by ID, prefix, `latest`, or directory; omit the select
 for the picker. Live publication and `--skip-existing` require local history.
 A directory-only dry run does not.
 
-`--linear-project PROJECT_ID` (`--project`) selects a project. Flags override
+`--linear-project PROJECT_ID` selects a project. Existing scripts using the deprecated
+`--project PROJECT_ID` spelling continue to work. Flags override
 `CODEX_SECURITY_LINEAR_TEAM` and `CODEX_SECURITY_LINEAR_PROJECT`. `--dry-run`
 previews titles offline; `--json` returns structured output.
 
@@ -1782,10 +1797,10 @@ Keys are omitted from saved results; diagnostic messages remain unchanged.
 
 ```bash
 codex-security publish check /path/to/completed-scan \
-  --to linear --linear-team TEAM_ID --json
+  --linear-team TEAM_ID --json
 ```
 
-`publish check` verifies artifacts and recorded publications. With an API key,
+`publish check` defaults to `--to linear`. It verifies artifacts and recorded publications. With an API key,
 it also checks authentication and destination access. It does not test issue
 creation; connected-app access is reported as `not-checked`.
 

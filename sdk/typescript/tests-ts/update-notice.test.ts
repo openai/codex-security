@@ -1,12 +1,20 @@
 import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 import { once } from "node:events";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { resolving } from "./support/promises.js";
 import { describe, expect, test, mock } from "bun:test";
 import {
   checkForUpdate,
   formatUpdateNotice,
+  installUpdate,
   updateCommand,
 } from "../src/version.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
@@ -160,6 +168,114 @@ describe("CLI update notice", () => {
     }
   });
 
+  test("updates the declaring installation using its package manager", async () => {
+    const temporaryDirectories = createTemporaryDirectoriesSync(true);
+    const root = realpathSync(
+      temporaryDirectories.create("codex-update-install-"),
+    );
+    const bin = join(root, "stub bin");
+    const project = join(root, "project");
+    const record = join(root, "record.json");
+    const entrypoint = join(
+      project,
+      "node_modules",
+      "@openai",
+      "codex-security",
+      "dist",
+      "version.js",
+    );
+    try {
+      mkdirSync(project);
+      mkdirSync(bin);
+      writeFileSync(
+        join(project, "package.json"),
+        JSON.stringify({
+          packageManager: "yarn@1.22.0",
+          devDependencies: { "@openai/codex-security": "0.9.0" },
+        }),
+      );
+      writeFileSync(
+        join(bin, "record.cjs"),
+        'require("node:fs").writeFileSync(process.env.UPDATE_RECORD, JSON.stringify([process.cwd(), process.env.npm_config_prefix || "", ...process.argv.slice(2)]));',
+      );
+      const windows = process.platform === "win32";
+      writeFileSync(
+        join(bin, windows ? "yarn.cmd" : "yarn"),
+        windows
+          ? '@echo off\r\n"%UPDATE_NODE%" "%~dp0record.cjs" %*\r\n'
+          : '#!/bin/sh\nexec "$UPDATE_NODE" "$UPDATE_SCRIPT" "$@"\n',
+        { mode: 0o755 },
+      );
+      const env: NodeJS.ProcessEnv = {
+        PATH: bin,
+        UPDATE_RECORD: record,
+        UPDATE_NODE: process.execPath,
+        UPDATE_SCRIPT: join(bin, "record.cjs"),
+        // Commands are often run from an npm script in an unrelated repository.
+        npm_config_user_agent: "npm/11.0",
+        ...(windows
+          ? {
+              SystemRoot: process.env["SystemRoot"],
+              ComSpec: process.env["ComSpec"],
+              PATHEXT: ".CMD;.EXE",
+            }
+          : {}),
+      };
+      await installUpdate(env, entrypoint);
+      expect(JSON.parse(readFileSync(record, "utf8"))).toEqual([
+        project,
+        "",
+        "add",
+        "-D",
+        "@openai/codex-security@latest",
+      ]);
+      const prefix = windows
+        ? join(root, "AppData", "Roaming", "npm")
+        : join(root, "npm-prefix");
+      const owner = windows ? prefix : join(prefix, "lib");
+      mkdirSync(owner, { recursive: true });
+      copyFileSync(
+        join(bin, windows ? "yarn.cmd" : "yarn"),
+        join(bin, windows ? "npm.cmd" : "npm"),
+      );
+      await installUpdate(
+        { ...env, npm_config_prefix: join(root, "unrelated") },
+        join(owner, "node_modules", "pkg", "dist", "version.js"),
+      );
+      const [cwd, selectedPrefix, ...args] = JSON.parse(
+        readFileSync(record, "utf8"),
+      ) as string[];
+      expect(cwd).toBe(owner);
+      expect(realpathSync(selectedPrefix!)).toBe(prefix);
+      expect(args).toEqual(["install", "-g", "@openai/codex-security@latest"]);
+      writeFileSync(join(project, "package.json"), "{}");
+      await expect(installUpdate(env, entrypoint)).rejects.toThrow(
+        "from the project that declares",
+      );
+      await expect(
+        installUpdate({ ...env, npm_command: "exec" }, entrypoint),
+      ).rejects.toThrow("npx @openai/codex-security@latest");
+    } finally {
+      temporaryDirectories.cleanup();
+    }
+  });
+
+  test("metadata takes precedence over an explicit update", async () => {
+    for (const flag of ["--help", "--version", "--schema", "--llms"]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["--update", flag],
+          dependencies({
+            environment: { npm_command: "exec" },
+          }),
+        ),
+      ).toBe(0);
+      expect(stdout.text()).not.toBe("");
+      expect(stderr.text()).toBe("");
+    }
+  });
+
   test("recognizes Windows globals through a linked Node directory", () => {
     const temporaryDirectories = createTemporaryDirectoriesSync(true);
     const root = temporaryDirectories.create("codex-update-notice-");
@@ -260,6 +376,7 @@ describe("CLI update notice", () => {
     for (const environment of [
       { CODEX_SECURITY_NO_UPDATE_NOTICE: "1" },
       { NO_UPDATE_NOTIFIER: "1" },
+      { npm_config_update_notifier: "false" },
       { CI: "true" },
     ]) {
       expect(

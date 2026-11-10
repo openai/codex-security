@@ -53829,7 +53829,7 @@ function scanArguments(inputs, target, resultsDirectory) {
     ["--diff", target.diffBase],
     ["--head", target.diffHead],
     ["--max-cost", inputs.maxCost],
-    ["--max-time-hours", inputs.maxTimeHours]
+    ["--max-time", inputs.maxTimeHours === void 0 ? void 0 : inputs.maxTimeHours * 60]
   ];
   for (const [name, value] of options) if (value !== void 0) args.push(name, String(value));
   if (inputs.failOnSeverity !== "none") args.push("--fail-on-severity", inputs.failOnSeverity);

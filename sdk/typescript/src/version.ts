@@ -1,6 +1,7 @@
 import { isNonEmptyString } from "./value.js";
-import { readFileSync, realpathSync } from "node:fs";
-import { win32 } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join, normalize, win32 } from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import semverGt from "semver/functions/gt.js";
 
@@ -25,6 +26,7 @@ export function updateNoticeEnabled(environment: NodeJS.ProcessEnv): boolean {
   return (
     environment["CODEX_SECURITY_NO_UPDATE_NOTICE"] === undefined &&
     environment["NO_UPDATE_NOTIFIER"] === undefined &&
+    environment["npm_config_update_notifier"] !== "false" &&
     environment["CI"] === undefined
   );
 }
@@ -41,26 +43,27 @@ export function invokedWithNpx(
   );
 }
 
-export function updateCommand(
+function resolveUpdate(
   environment: NodeJS.ProcessEnv = process.env,
   entrypoint: string = fileURLToPath(import.meta.url),
   nodeExecutable: string | undefined = process.platform === "win32"
     ? realpathSync(process.execPath)
     : undefined,
-): string {
+) {
   const windowsPath =
     !entrypoint.startsWith("/") && win32.isAbsolute(entrypoint);
   const path =
     process.platform === "linux" && !windowsPath
       ? entrypoint
       : entrypoint.replaceAll("\\", "/").toLowerCase();
-  const agent = (environment["npm_config_user_agent"] ?? "").toLowerCase();
 
   if (invokedWithNpx(environment, path)) {
-    return `npx ${PACKAGE_NAME}@latest`;
+    return { command: `npx ${PACKAGE_NAME}@latest` } as const;
   }
   if (path.includes("/.install/node_modules/")) {
-    return "download and extract the latest Codex Security release";
+    return {
+      command: "download and extract the latest Codex Security release",
+    } as const;
   }
 
   const nodeModulesDirectory =
@@ -70,35 +73,166 @@ export function updateCommand(
           .join(win32.dirname(nodeExecutable), "node_modules")
           .replaceAll("\\", "/")
           .toLowerCase();
+  const modules = path.indexOf("/node_modules/");
+  const directory =
+    modules < 0 ? dirname(entrypoint) : entrypoint.slice(0, modules + 1);
+  const installRoot = modules < 0 ? path : path.slice(0, modules + 1);
+  let manifest: Record<string, unknown> | undefined;
+  if (modules >= 0) {
+    try {
+      manifest = JSON.parse(
+        readFileSync(join(directory, "package.json"), "utf8"),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  const fields = [
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+  ].filter((key) => Object.hasOwn(manifest?.[key] ?? {}, PACKAGE_NAME));
   const global =
-    environment["npm_config_global"] === "true" ||
-    path.includes("/lib/node_modules/") ||
-    path.includes("/appdata/roaming/npm/node_modules/") ||
+    (installRoot.endsWith("/lib/") && !fields.length) ||
+    installRoot.endsWith("/appdata/roaming/npm/") ||
     (nodeModulesDirectory !== undefined &&
       path.startsWith(`${nodeModulesDirectory}/`)) ||
-    path.includes("/pnpm/global/") ||
-    path.includes("/.bun/install/global/") ||
-    path.includes("/.yarn/global/") ||
-    path.includes("/yarn/global/") ||
-    path.includes("/yarn/data/global/");
+    installRoot.includes("/pnpm/global/") ||
+    installRoot.includes("/.bun/install/global/") ||
+    installRoot.includes("/.yarn/global/") ||
+    installRoot.includes("/yarn/global/") ||
+    installRoot.includes("/yarn/data/global/");
+  if (!global && modules < 0)
+    return { command: `npx ${PACKAGE_NAME}@latest` } as const;
+  // Plain node_modules layouts do not distinguish npm, Yarn and Bun.
+  const packageManager = manifest?.["packageManager"];
+  const lockfiles = [
+    ["pnpm-lock.yaml", "pnpm"],
+    ["yarn.lock", "yarn"],
+    ["bun.lock", "bun"],
+    ["bun.lockb", "bun"],
+    ["package-lock.json", "npm"],
+  ] as const;
+  const agent =
+    (typeof packageManager === "string"
+      ? packageManager.split("@")[0]
+      : undefined) ??
+    (global
+      ? undefined
+      : lockfiles.find(([lock]) => existsSync(join(directory, lock)))?.[1]) ??
+    (environment["npm_config_user_agent"] ?? "").toLowerCase().split("/")[0];
 
-  if (agent.startsWith("pnpm/") || path.includes("/.pnpm/")) {
-    return `pnpm add${global ? " -g" : ""} ${PACKAGE_NAME}@latest`;
-  }
+  let manager = "npm";
+  let args = global ? ["install", "-g"] : ["install"];
   if (
-    agent.startsWith("yarn/") ||
+    path.includes("/.pnpm/") ||
+    path.includes("/pnpm/global/") ||
+    (!global && agent === "pnpm")
+  ) {
+    manager = "pnpm";
+    args = global ? ["add", "-g"] : ["add"];
+  } else if (
     path.includes("/.yarn/") ||
     path.includes("/yarn/global/") ||
-    path.includes("/yarn/data/global/")
+    path.includes("/yarn/data/global/") ||
+    (!global && agent === "yarn")
   ) {
-    return `yarn${global ? " global" : ""} add ${PACKAGE_NAME}@latest`;
+    manager = "yarn";
+    args = global ? ["global", "add"] : ["add"];
+  } else if (path.includes("/.bun/") || (!global && agent === "bun")) {
+    manager = "bun";
+    args = global ? ["add", "-g"] : ["add"];
   }
-  if (agent.startsWith("bun/") || path.includes("/.bun/")) {
-    return `bun add${global ? " -g" : ""} ${PACKAGE_NAME}@latest`;
+  if (fields.length === 1) {
+    switch (fields[0]) {
+      case "devDependencies":
+        args.push("-D");
+        break;
+      case "optionalDependencies":
+        args.push("-O");
+        break;
+      case "peerDependencies":
+        args.push(manager === "npm" ? "--save-peer" : "--peer");
+        break;
+    }
   }
-  return agent.startsWith("npm/") || path.includes("/node_modules/")
-    ? `npm install${global ? " -g" : ""} ${PACKAGE_NAME}@latest`
-    : `npx ${PACKAGE_NAME}@latest`;
+  args.push(`${PACKAGE_NAME}@latest`);
+  return {
+    command: [manager, ...args].join(" "),
+    manager,
+    args,
+    global,
+    directory,
+    direct: fields.length === 1,
+  } as const;
+}
+
+export function updateCommand(
+  environment?: NodeJS.ProcessEnv,
+  entrypoint?: string,
+  nodeExecutable?: string,
+): string {
+  return resolveUpdate(environment, entrypoint, nodeExecutable).command;
+}
+
+/** Run the package manager in the installation that owns this CLI. */
+export async function installUpdate(
+  environment: NodeJS.ProcessEnv,
+  entrypoint = fileURLToPath(import.meta.url),
+): Promise<void> {
+  const update = resolveUpdate(environment, entrypoint);
+  if (!update.manager)
+    throw new Error(`To use the latest version, ${update.command}.`);
+  // Hoisted and transitive dependencies can have multiple workspace consumers.
+  if (!update.global && !update.direct) {
+    throw new Error(
+      `Run ${update.command} from the project that declares ${PACKAGE_NAME}.`,
+    );
+  }
+  // Pin npm to the same global prefix, even when the invoking shell selects a
+  // different default. A local install must also ignore npm_config_global.
+  const env = { ...environment };
+  delete env["NPM_CONFIG_GLOBAL"];
+  env["npm_config_global"] = String(update.global);
+  if (update.manager === "npm") {
+    delete env["NPM_CONFIG_PREFIX"];
+    env["npm_config_prefix"] =
+      update.global && process.platform !== "win32"
+        ? dirname(update.directory)
+        : normalize(update.directory);
+  } else if (update.global && update.manager === "bun") {
+    env["BUN_INSTALL_GLOBAL_DIR"] = update.directory;
+  } else if (update.global && update.manager === "yarn") {
+    env["YARN_GLOBAL_FOLDER"] = update.directory;
+  } else if (update.global && update.manager === "pnpm") {
+    env["npm_config_global_dir"] = dirname(update.directory);
+  }
+  process.stderr.write(
+    `Running ${update.command} in ${JSON.stringify(update.directory)}\n`,
+  );
+  await new Promise<void>((resolve, reject) => {
+    // Windows package-manager launchers are usually .cmd files. Only fixed
+    // manager names, flags and the constant package name enter the shell.
+    const windows = process.platform === "win32";
+    const child = spawn(
+      windows ? update.command : update.manager,
+      windows ? [] : update.args,
+      {
+        cwd: update.directory,
+        env,
+        shell: windows,
+        stdio: ["ignore", process.stderr, process.stderr],
+      },
+    );
+
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolve();
+      else
+        reject(new Error(`${update.command} exited with ${signal ?? code}.`));
+    });
+  });
 }
 
 export async function checkForUpdate({

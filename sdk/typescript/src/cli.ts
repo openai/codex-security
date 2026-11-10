@@ -401,6 +401,7 @@ import {
   CODEX_EXECUTABLE_VERSION,
   CODEX_SDK_VERSION,
   formatUpdateNotice,
+  installUpdate,
   invokedWithNpx,
   updateNoticeEnabled,
   type UpdateNotice,
@@ -4267,7 +4268,11 @@ export async function main(
       args: z.object({
         scanDir: z.string().describe("Completed scan directory."),
       }),
-      options: PUBLICATION_DESTINATION_OPTIONS,
+      options: PUBLICATION_DESTINATION_OPTIONS.extend({
+        to: PUBLICATION_DESTINATION_OPTIONS.shape.to
+          .default("linear")
+          .describe("Publication destination."),
+      }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         return await withTerminalErrorsHandled(errorOutput, async () => {
@@ -4862,6 +4867,14 @@ export async function main(
 
   const cliOptions: Cli.create.Options = {
     aliases: ["cs"],
+    // The SDK owns update notices and uses the same installation resolver for
+    // the explicit update action. Avoid Incur's second, global npm updater.
+    update: argv.includes("--update")
+      ? {
+          package: "@openai/codex-security",
+          install: () => installUpdate(dependencies.environment),
+        }
+      : false,
     description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
@@ -7607,9 +7620,15 @@ export async function main(
     }
   }
   const firstImportOption = scanImport ? commandIndex + 2 : argv.length;
+  const inspecting = argv.some((arg) =>
+    ["-h", "--help", "--version", "--schema", "--llms", "--llms-full"].includes(
+      arg,
+    ),
+  );
   const frameworkArgv: string[] = [];
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]!;
+    if (inspecting && argument === "--update") continue;
     const next = argv[index + 1];
     const separator = argument.indexOf("=");
     if (
@@ -7656,6 +7675,7 @@ export async function main(
         "--llms-full",
         "--schema",
         "--dry-run",
+        "--update",
       ].includes(argument),
     ) &&
     updateNoticeEnabled(dependencies.environment)
