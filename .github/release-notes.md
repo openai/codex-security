@@ -57,6 +57,7 @@
 - read deep sealed artifacts under Linux descriptor limits ([#2570](https://github.com/openai/codex-security/pull/2570))
 - update semver to 7.8.6 across SDK and tooling ([#2562](https://github.com/openai/codex-security/pull/2562))
 - update install-action to v2.90.0 ([#2561](https://github.com/openai/codex-security/pull/2561))
+- isolate Git display settings in content snapshots ([#2568](https://github.com/openai/codex-security/pull/2568))
 
 </details>
 

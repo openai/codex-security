@@ -1457,6 +1457,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
+    "GIT_DIFF_OPTS",
     "GIT_GLOB_PATHSPECS",
     "GIT_ICASE_PATHSPECS",
     "CODEX_CLI_PATH",
