@@ -96,6 +96,12 @@ that omits your scanner, use the CLI receipt and its readback counts to verify
 publication. For a private import, check the `privateJob` receipt and open your
 private imported-findings inbox in Cloud to inspect the saved evidence.
 
+To share a private finding, assess it against the intended repository and commit.
+If the assessment is reportable and your workspace has enabled sharing for that
+scanner, select the destination environment and choose a severity if the scanner
+supplied none. Choose **Publish to shared findings**, then **View shared finding**
+on the receipt to open the workspace finding and its source evidence.
+
 If the repository publisher requires a reported severity, the preview excludes
 findings whose severity the scanner left unknown. You can keep those findings
 in a local import or a private inbox when available.

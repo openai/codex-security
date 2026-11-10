@@ -171,7 +171,9 @@ Read the structured result even when the process exits nonzero. Progress appears
 
 For the repository publisher, report `verified` for findings the CLI confirmed by readback and `unacknowledged` for records without a receipt. Use `failures` to identify records the publisher rejected. For either destination, include exclusions and any `savedSubmission` checkpoint. [Result fields and exit codes](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#results-and-exit-codes)
 
-Open a private finding in the inbox to assess it against the repository. Shared publication depends on the scanner and workspace. For repository imports, link to the imported findings using the returned `cloudUrl` when available.
+For repository imports, link to the imported findings using the returned `cloudUrl` when available. For a private import, direct the user to the private inbox to assess the finding against the intended repository and commit.
+
+If the user wants to share a reportable assessment and their workspace has enabled sharing for that scanner, have them select the destination environment and choose a severity if the scanner supplied none. They can then choose **Publish to shared findings** and open the published evidence with **View shared finding** on the receipt.
 
 ### Resume an interrupted upload
 
