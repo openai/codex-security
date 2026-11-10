@@ -1580,10 +1580,12 @@ def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> 
         ("diff.mnemonicPrefix", "true"),
         ("diff.context", "0"),
         ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
         ("diff.interHunkContext", "20"),
         ("diff.suppressBlankEmpty", "true"),
         ("diff.orderFile", "order"),
         ("diff.renames", "false"),
+        ("diff.renameLimit", "1"),
         ("core.quotePath", "false"),
         ("GIT_DIFF_OPTS", "--unified=0"),
     ],
@@ -1602,12 +1604,21 @@ def test_git_diff_display_settings_preserve_selected_working_content(
     lines = target / "z-lines.txt"
     original_lines = ["start", "", *(f"line {n}" for n in range(20)), "end"]
     lines.write_text("\n".join(original_lines) + "\n", encoding="utf-8")
-    (target / "previous-name.txt").write_bytes(b"uniquely renamed fixture\n")
-    subprocess.run(
-        ["git", "add", "--", path.name, lines.name, "previous-name.txt"], cwd=target, check=True
-    )
+    indent = target / "indent.txt"
+    indent.write_bytes(b"\ndone()\ndef sample():\n")
+    moved = [("first.txt", "new-first.txt"), ("second.txt", "new-second.txt")]
+    for name, _ in moved:
+        (target / name).write_text(
+            "".join(f"{name} line {n}\n" for n in range(20)), encoding="utf-8"
+        )
+    subprocess.run(["git", "add", "--", "."], cwd=target, check=True)
     subprocess.run(["git", "commit", "-qm", "Track fixture"], cwd=target, check=True)
-    subprocess.run(["git", "mv", "previous-name.txt", "renamed.txt"], cwd=target, check=True)
+    indent.write_bytes(b"\ndone()\ndone()\ndef sample():\n")
+    for name, destination in moved:
+        subprocess.run(["git", "mv", name, destination], cwd=target, check=True)
+        with (target / destination).open("ab") as stream:
+            stream.write(b"added line\n")
+        subprocess.run(["git", "add", "--", destination], cwd=target, check=True)
     path.write_bytes(b"heading\none\nB\nC\nC\nthree\n")
     original_lines[0] = "changed start"
     original_lines[-1] = "changed end"
@@ -1646,6 +1657,37 @@ def test_git_diff_display_settings_preserve_selected_working_content(
     for digest in (selected["contentDigest"], legacy):
         with pytest.raises(SystemExit, match="contents changed"):
             validate(digest)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("display", ["log", "diff"])
+def test_git_submodule_display_preserves_selected_working_content(
+    tmp_path: Path, workbench_api: dict[str, Any], display: str
+) -> None:
+    target = tmp_path / "parent"
+    initialize_git_repository(target)
+    child = target / "submodule"
+    initial = initialize_git_repository(child)
+    add_submodule_gitlink(target, initial, ".")
+    subprocess.run(["git", "commit", "-qm", "Pin child"], cwd=target, check=True)
+
+    def advance_child(content: str) -> None:
+        (child / "README.md").write_text(content + "\n", encoding="utf-8")
+        subprocess.run(["git", "commit", "-qam", content], cwd=child, check=True)
+        subprocess.run(["git", "add", "--", "submodule"], cwd=target, check=True)
+
+    advance_child("Selected child")
+    require_target = workbench_api["require_diff_target"]
+    selected = require_target(target, "working_tree", None, None, None)["contentDigest"]
+    diff = ["git", "diff", "HEAD", "--", "submodule"]
+    original = subprocess.check_output(diff, cwd=target)
+    subprocess.run(["git", "config", "--local", "diff.submodule", display], cwd=target, check=True)
+    assert subprocess.check_output(diff, cwd=target) != original
+    assert require_target(target, "working_tree", None, None, selected)["contentDigest"] == selected
+
+    advance_child("Changed child")
+    with pytest.raises(SystemExit, match="contents changed"):
+        require_target(target, "working_tree", None, None, selected)
 
 
 def test_worktree_content_digest_streams_tracked_binary_patch(

@@ -776,8 +776,11 @@ def _git_content_digest(
             "--dst-prefix=b/",
             "--unified=3",
             "--diff-algorithm=myers",
+            "--indent-heuristic",
             "--inter-hunk-context=0",
             "--find-renames=50%",
+            "-l1000",  # Git's default inexact rename limit.
+            "--submodule=short",
             "-O",
             os.devnull,
         )
