@@ -3940,13 +3940,11 @@ export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
   const environment = options.environment ?? process.env;
-  const requestedRoots = options.protectedRoot ?? process.cwd();
+  const cwd = process.cwd();
+  const requestedRoots = options.protectedRoot ?? cwd;
   const protectedRoot =
     typeof requestedRoots === "string" ? [requestedRoots] : [...requestedRoots];
-  const callerDirectories = [
-    process.cwd(),
-    options.currentDirectory ?? process.cwd(),
-  ];
+  const callerDirectories = new Set([cwd, options.currentDirectory ?? cwd]);
   // Preserve target and enclosing-checkout protection for every interpreter.
   for (const directory of new Set([...callerDirectories, ...protectedRoot])) {
     for (const checkout of await gitProtectionRoots(directory, options.signal))
@@ -3954,7 +3952,21 @@ export async function resolvePluginPython(
   }
   // Named interpreters are ambient PATH discovery, even when PYTHON names one.
   // Explicit trusted paths and managed runtimes retain their existing precedence.
-  const discoveryRoots = [...protectedRoot, ...callerDirectories];
+  const discoveryRoots = [...protectedRoot];
+  for (const directory of callerDirectories) {
+    const physical =
+      directory === cwd
+        ? cwd
+        : await realpath(directory).catch(() => undefined);
+    // A filesystem-root launch directory also contains the operator's installed tools.
+    // Explicit scan roots and enclosing checkouts are already in protectedRoot.
+    if (
+      protectedRoot.length === 0 ||
+      physical === undefined ||
+      dirname(physical) !== physical
+    )
+      discoveryRoots.push(directory);
+  }
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,

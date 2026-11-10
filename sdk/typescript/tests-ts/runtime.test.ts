@@ -7023,6 +7023,64 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   testPosix(
+    "discovers Python outside explicit targets from a filesystem-root working directory",
+    async () => {
+      if (
+        runTestInSubprocess(
+          fileURLToPath(import.meta.url),
+          "discovers Python outside explicit targets from a filesystem-root working directory",
+        )
+      )
+        return;
+      const target = await temporaryDirectory();
+      const tools = await temporaryDirectory();
+      const system = pythonWithLauncher();
+      expect(system).not.toBeNull();
+      const name = "fixture-python";
+      await symlink(system!, join(tools, name));
+      await symlink(system!, join(target, name));
+      const alias = join(tools, "root-directory");
+      await symlink("/", alias, "dir");
+      const previous = process.cwd();
+      try {
+        process.chdir("/");
+        const environment = { PATH: [target, tools].join(":"), PYTHON: name };
+        for (const caller of ["/", alias]) {
+          const selected = await resolvePluginPython({
+            currentDirectory: caller,
+            protectedRoot: target,
+            environment,
+          });
+          expect(selected).toBe(join(tools, name));
+        }
+        await expect(
+          resolvePluginPython({
+            currentDirectory: `/${basename(target)}-missing/..`,
+            protectedRoot: target,
+            environment,
+          }),
+        ).rejects.toThrow("unavailable");
+        await expect(resolvePluginPython({ environment })).rejects.toThrow(
+          "unavailable",
+        );
+        for (const protectedRoot of [[], "/"]) {
+          await expect(
+            resolvePluginPython({ protectedRoot, environment }),
+          ).rejects.toThrow("unavailable");
+        }
+        await expect(
+          resolvePluginPython({
+            protectedRoot: target,
+            environment: { PATH: target, PYTHON: name },
+          }),
+        ).rejects.toThrow("unavailable");
+      } finally {
+        process.chdir(previous);
+      }
+    },
+  );
+
+  testPosix(
     "preserves literal executable override names and accepts padding",
     async () => {
       const tools = await realpath(await temporaryDirectory());
