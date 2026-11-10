@@ -4,8 +4,9 @@ This is a deliberately insecure, self-contained application for Codex Security
 QA. All people, workspaces, invoices, and credentials are synthetic. Run it only
 locally; do not deploy it or supply real data or credentials.
 
-The application has **ten seeded finding scenarios**. It looks and behaves like
-an ordinary invoice application, with no vulnerability labels, answer keys,
+The application has **ten seeded scenarios, with ID-009 remediated**. Nine
+weaknesses remain; profile mass assignment is now a regression case. It looks and
+behaves like an ordinary invoice application, with no vulnerability labels, answer keys,
 sample banners, or test-mode branches in its application code. This README and
 the nested [QA guide](qa/README.md) explain the sample and its expected findings.
 The [threat model](SECURITY.md) describes the app's assets, trust boundaries, and
@@ -45,11 +46,12 @@ node --test examples/invoice-desk/qa/app.test.mjs
 ```
 
 The tests start their own loopback servers on available ports and clean them up.
-They exercise all ten seeded behaviors, ordinary application workflows, and
-secure controls. **Passing scenario tests mean the intended weaknesses remain
-present.** They do not mean the application is secure or that a scanner found
-ten issues. The repository's Invoice Desk workflow runs this suite in CI without
-installing dependencies.
+They exercise nine seeded weaknesses, the repaired profile boundary, ordinary
+application workflows, and secure controls. **Passing vulnerability scenario tests
+mean the remaining intended weaknesses are present.** ID-009 instead requires the
+profile boundary to hold. Passing tests do not mean the application is secure or
+that a scanner found nine issues. The repository's Invoice Desk workflow runs this
+suite in CI without installing dependencies.
 
 ## CI and OpenAI scans
 
@@ -147,7 +149,7 @@ alerts or post PR comments.
 
 Findings are report-only. Execution and required-reporting errors fail the job, with
 available reports retained. A successful job means the scan completed; it does
-not establish that the application is secure or that all ten scenarios were
+not establish that the application is secure or that all remaining weaknesses were
 found. Compare distinct root causes with the QA manifest and review extra
 findings and duplicates separately. There is no exact-count or recall gate yet.
 

@@ -16,13 +16,18 @@ scanner. The application contains no QA-specific branches or vulnerability label
 | ID-006 | Credential destination confusion    | A different connection owner receives the Ledger credential.        |
 | ID-007 | Shared mutable security policy      | Changing one workspace's nested policy changes another's.           |
 | ID-008 | Validation and consumption mismatch | Import checks and persistence select different ownership metadata.  |
-| ID-009 | Mass assignment                     | Profile updates reach the administrative role.                      |
+| ID-009 | Mass assignment (remediated)         | Profile updates change only the display name, preserving the role.   |
 | ID-010 | Stored HTML injection               | Notes become unescaped HTML in another user's invoice view.         |
 
 These are ten distinct root causes, not ten disjoint OWASP Top Ten groups. Some
 share broader authorization or disclosure classifications. The manifest gives
 suggested CWE tags and source symbols; equivalent, more precise classifications
 are acceptable. Multiple reports of the same root cause count once.
+
+ID-009 is remediated and retained as a regression scenario. Its assertions require
+display-name updates to preserve the caller's role and administrator restrictions.
+The other nine scenarios remain expected findings. Exclude ID-009 from expected
+detection counts.
 
 The approval case is a deterministic version-binding error, not a timing race.
 The import mismatch uses outer document metadata and nested invoice metadata;
@@ -69,7 +74,7 @@ that is absent from the ordinary invoice and connection views.
 Some controls and finding scenarios share application features. Read a report's
 claimed boundary carefully: an ownership check on preview requests does not
 remove the separate cache-isolation defect. Run the harness after changes to
-confirm that all ten intended scenarios are still reachable.
+confirm that the nine remaining weaknesses and the ID-009 regression are covered.
 
 No model scan runs as part of this HTTP suite, and no detection score is asserted
 until actual scanner output has been reviewed.

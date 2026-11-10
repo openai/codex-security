@@ -280,13 +280,88 @@ scenario("ID-009", async (t) => {
   );
   const profile = await alex("/api/profile", {
     method: "PATCH",
-    body: { name: "Alex", role: "admin" },
+    body: { name: "Alex Updated", role: "admin" },
   });
   assert.equal(profile.status, 200);
-  assert.equal((await alex("/api/me")).body.profile.role, "admin");
+  assert.deepEqual(profile.body.profile, {
+    name: "Alex Updated",
+    role: "member",
+  });
+  assert.deepEqual((await alex("/api/me")).body, profile.body);
   assert.equal(
     (
       await alex("/api/invoices/inv-north-1/approve", {
+        method: "POST",
+        body: {},
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await alex("/api/import-policy", {
+        method: "PATCH",
+        body: { maxAmountCents: 200_000 },
+      })
+    ).status,
+    403,
+  );
+});
+
+test("profile updates ignore alternate role and prototype payloads", async (t) => {
+  const { login } = await app(t);
+  const alex = await login("alex");
+  const original = (await alex("/api/me")).body;
+  for (const body of [
+    JSON.parse('{"ro\\u006ce":"admin"}'),
+    JSON.parse('{"__proto__":{"role":"admin"}}'),
+    { constructor: { prototype: { role: "admin" } } },
+    { name: { role: "admin" }, profile: { role: "admin" }, workspaceId: "cedar" },
+  ]) {
+    const updated = await alex("/api/profile", { method: "PATCH", body });
+    assert.equal(updated.status, 200);
+    assert.deepEqual(updated.body, original);
+    assert.deepEqual((await alex("/api/me")).body, original);
+    assert.equal(
+      (
+        await alex("/api/invoices/inv-north-1/approve", {
+          method: "POST",
+          body: {},
+        })
+      ).status,
+      403,
+    );
+  }
+});
+
+test("members and administrators can update names without changing roles", async (t) => {
+  const { login } = await app(t);
+  for (const account of ["alex", "jules"]) {
+    const request = await login(account);
+    const original = (await request("/api/me")).body;
+    for (const name of ["Updated Name", ""]) {
+      const updated = await request("/api/profile", {
+        method: "PATCH",
+        body: { name },
+      });
+      const expected = { ...original, profile: { ...original.profile, name } };
+      assert.equal(updated.status, 200);
+      assert.deepEqual(updated.body, expected);
+      for (const body of [{}, { name: null }, { name: 42 }]) {
+        const unchanged = await request("/api/profile", {
+          method: "PATCH",
+          body,
+        });
+        assert.equal(unchanged.status, 200);
+        assert.deepEqual(unchanged.body, expected);
+      }
+      assert.deepEqual((await request("/api/me")).body, expected);
+    }
+  }
+  const jules = await login("jules");
+  assert.equal(
+    (
+      await jules("/api/invoices/inv-north-1/approve", {
         method: "POST",
         body: {},
       })
@@ -547,7 +622,8 @@ test("new app instances reset invoices, credentials, profiles, and import polici
   const alex = await first.login("alex");
   const jules = await first.login("jules");
   const token = (await alex("/api/support-report")).body.connector.accessToken;
-  await alex("/api/profile", { method: "PATCH", body: { role: "admin" } });
+  await alex("/api/profile", { method: "PATCH", body: { name: "Alex Updated" } });
+  assert.equal((await alex("/api/me")).body.profile.name, "Alex Updated");
   await alex("/api/invoices/inv-north-1", {
     method: "PATCH",
     body: { amountCents: 1 },
@@ -559,6 +635,7 @@ test("new app instances reset invoices, credentials, profiles, and import polici
   const second = await app(t);
   const fresh = await second.login("alex");
   assert.equal((await fresh("/api/me")).body.profile.role, "member");
+  assert.equal((await fresh("/api/me")).body.profile.name, "Alex");
   assert.equal(
     (await fresh("/api/invoices/inv-north-1")).body.amountCents,
     48_500,
