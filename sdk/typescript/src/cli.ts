@@ -587,7 +587,10 @@ function linearApiKeyOption() {
 }
 
 const PUBLICATION_DESTINATION_OPTIONS = z.object({
-  to: z.literal("linear").describe("Publication destination."),
+  to: z
+    .literal("linear")
+    .default("linear")
+    .describe("Publication destination."),
   linearTeam: optionValue("--linear-team")
     .optional()
     .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
@@ -4268,11 +4271,7 @@ export async function main(
       args: z.object({
         scanDir: z.string().describe("Completed scan directory."),
       }),
-      options: PUBLICATION_DESTINATION_OPTIONS.extend({
-        to: PUBLICATION_DESTINATION_OPTIONS.shape.to
-          .default("linear")
-          .describe("Publication destination."),
-      }),
+      options: PUBLICATION_DESTINATION_OPTIONS,
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         return await withTerminalErrorsHandled(errorOutput, async () => {
@@ -7666,18 +7665,9 @@ export async function main(
     errorOutput.isTTY === true &&
     argv.length > 0 &&
     argv[0] !== "completions" &&
-    !argv.some((argument) =>
-      [
-        "--help",
-        "-h",
-        "--version",
-        "--llms",
-        "--llms-full",
-        "--schema",
-        "--dry-run",
-        "--update",
-      ].includes(argument),
-    ) &&
+    !inspecting &&
+    !argv.includes("--dry-run") &&
+    !argv.includes("--update") &&
     updateNoticeEnabled(dependencies.environment)
       ? dependencies
           .checkForUpdate(updateController.signal)

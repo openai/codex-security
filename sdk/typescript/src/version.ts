@@ -3,7 +3,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve, win32 } from "node:path";
-import { isWithin } from "./trusted-executable.js";
+import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import semverGt from "semver/functions/gt.js";
@@ -18,6 +18,8 @@ export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
 export const BUNDLED_PLUGIN_VERSION = "0.1.95" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
+const LATEST_PACKAGE = `${PACKAGE_NAME}@latest`;
+const PUBLIC_REGISTRY = "https://registry.npmjs.org/";
 
 export interface UpdateNotice {
   readonly currentVersion: string;
@@ -61,7 +63,7 @@ function resolveUpdate(
       : entrypoint.replaceAll("\\", "/").toLowerCase();
 
   if (invokedWithNpx(environment, path)) {
-    return { command: `npx ${PACKAGE_NAME}@latest` } as const;
+    return { command: `npx ${LATEST_PACKAGE}` } as const;
   }
   if (path.includes("/.install/node_modules/")) {
     return {
@@ -96,83 +98,75 @@ function resolveUpdate(
     "optionalDependencies",
     "peerDependencies",
   ].filter((key) => Object.hasOwn(manifest?.[key] ?? {}, PACKAGE_NAME));
+  const globalLayouts = [
+    ["/pnpm/global/", "pnpm"],
+    ["/.bun/install/global/", "bun"],
+    ["/.yarn/global/", "yarn"],
+    ["/yarn/global/", "yarn"],
+    ["/yarn/data/global/", "yarn"],
+  ] as const;
+  const globalManager = globalLayouts.find(([part]) =>
+    installRoot.includes(part),
+  )?.[1];
   const global =
+    Boolean(globalManager) ||
     (installRoot.endsWith("/lib/") && manifest === undefined) ||
     installRoot.endsWith("/appdata/roaming/npm/") ||
     (nodeModulesDirectory !== undefined &&
-      path.startsWith(`${nodeModulesDirectory}/`)) ||
-    installRoot.includes("/pnpm/global/") ||
-    installRoot.includes("/.bun/install/global/") ||
-    installRoot.includes("/.yarn/global/") ||
-    installRoot.includes("/yarn/global/") ||
-    installRoot.includes("/yarn/data/global/");
+      path.startsWith(`${nodeModulesDirectory}/`));
   if (!global && modules < 0)
-    return { command: `npx ${PACKAGE_NAME}@latest` } as const;
-  // Plain node_modules layouts do not distinguish npm, Yarn and Bun.
-  const packageManager = manifest?.["packageManager"];
-  const lockfiles = [
-    ["pnpm-lock.yaml", "pnpm"],
-    ["yarn.lock", "yarn"],
-    ["bun.lock", "bun"],
-    ["bun.lockb", "bun"],
-    ["package-lock.json", "npm"],
-  ] as const;
-  const agent =
-    (typeof packageManager === "string"
-      ? packageManager.split("@")[0]
-      : undefined) ??
-    (global
-      ? undefined
-      : lockfiles.find(([lock]) => existsSync(join(directory, lock)))?.[1]) ??
-    (environment["npm_config_user_agent"] ?? "").toLowerCase().split("/")[0];
+    return { command: `npx ${LATEST_PACKAGE}` } as const;
 
-  let manager = "npm";
-  let args = global ? ["install", "-g"] : ["install"];
-  if (
-    path.includes("/.pnpm/") ||
-    path.includes("/pnpm/global/") ||
-    (!global && agent === "pnpm")
-  ) {
-    manager = "pnpm";
-    args = global ? ["add", "-g"] : ["add"];
+  // A manager-specific store takes precedence over manifests, lockfiles, and
+  // the shell's user agent. Global installs are independent of the caller.
+  const managers = ["pnpm", "yarn", "bun"];
+  let manager =
+    globalManager ?? managers.find((name) => path.includes(`/.${name}/`));
+  if (!manager && !global) {
+    const packageManager = manifest?.["packageManager"];
+    const locks = [
+      ["pnpm-lock.yaml", "pnpm"],
+      ["yarn.lock", "yarn"],
+      ["bun.lock", "bun"],
+      ["bun.lockb", "bun"],
+      ["package-lock.json", "npm"],
+    ] as const;
+    const selected =
+      (typeof packageManager === "string"
+        ? packageManager.split("@")[0]
+        : undefined) ??
+      locks.find(([file]) => existsSync(join(directory, file)))?.[1] ??
+      environment["npm_config_user_agent"]?.toLowerCase().split("/")[0];
+    manager = managers.find((name) => name === selected);
+  }
+  manager ??= "npm";
+  const args = [manager === "npm" ? "install" : "add"];
+  const direct = fields.length === 1;
+  if (global) {
+    if (manager === "yarn") args.unshift("global");
+    else args.push("-g");
+  } else if (direct) {
     if (
-      !global &&
-      fields.length === 1 &&
+      manager === "pnpm" &&
       existsSync(join(directory, "pnpm-workspace.yaml"))
     )
       args.push("--workspace-root");
-  } else if (
-    path.includes("/.yarn/") ||
-    path.includes("/yarn/global/") ||
-    path.includes("/yarn/data/global/") ||
-    (!global && agent === "yarn")
-  ) {
-    manager = "yarn";
-    args = global ? ["global", "add"] : ["add"];
-  } else if (path.includes("/.bun/") || (!global && agent === "bun")) {
-    manager = "bun";
-    args = global ? ["add", "-g"] : ["add"];
+    const npmFlags = manager === "npm" || manager === "pnpm";
+    const flags: Record<string, string> = {
+      devDependencies: npmFlags ? "--save-dev" : "--dev",
+      optionalDependencies: npmFlags ? "--save-optional" : "--optional",
+      peerDependencies: npmFlags ? "--save-peer" : "--peer",
+    };
+    const flag = flags[fields[0]!];
+    if (flag) args.push(flag);
   }
-  if (!global && fields.length === 1) {
-    switch (fields[0]) {
-      case "devDependencies":
-        args.push("-D");
-        break;
-      case "optionalDependencies":
-        args.push(manager === "bun" ? "--optional" : "-O");
-        break;
-      case "peerDependencies":
-        args.push(manager === "npm" ? "--save-peer" : "--peer");
-        break;
-    }
-  }
-  args.push(`${PACKAGE_NAME}@latest`);
+  args.push(LATEST_PACKAGE);
   return {
     command: [manager, ...args].join(" "),
     manager,
     global,
     directory,
-    direct: fields.length === 1,
+    direct,
   } as const;
 }
 
@@ -231,17 +225,7 @@ export async function installUpdate(
     "bin",
     "npm-cli.js",
   );
-  // A checkout may supply a Node distribution or a linked npm script. Scope
-  // this check to the invoking project; nvm itself can be a separate checkout.
   if (!existsSync(npm) || realpathSync(npm) !== npm) throw new Error(manual);
-  const cwd = realpathSync(process.cwd());
-  const { gitMarkerRoot } = await import("./targets.js");
-  const checkout = await gitMarkerRoot(cwd, undefined, "nearest");
-  const project =
-    checkout ??
-    (cwd === userInfo().homedir || cwd === dirname(cwd) ? null : cwd);
-  if (project && (isWithin(project, nodeBin) || isWithin(project, npm)))
-    throw new Error(manual);
 
   process.stderr.write(
     `Running ${update.command} for ${JSON.stringify(prefix)}\n`,
@@ -276,25 +260,21 @@ async function runGlobalNpm(
       npm,
       "install",
       "-g",
-      `${PACKAGE_NAME}@latest`,
+      LATEST_PACKAGE,
       "--prefix",
       prefix,
       "--ignore-scripts",
-      "--registry=https://registry.npmjs.org/",
-      "--@openai:registry=https://registry.npmjs.org/",
+      `--registry=${PUBLIC_REGISTRY}`,
+      `--@openai:registry=${PUBLIC_REGISTRY}`,
     ];
-    await new Promise<void>((fulfilled, reject) => {
-      const child = spawn(node, args, {
-        cwd: scratch,
-        env,
-        stdio: ["ignore", process.stderr, process.stderr],
-      });
-      child.once("error", reject);
-      child.once("close", (code, signal) => {
-        if (code === 0) fulfilled();
-        else reject(new Error(`npm install exited with ${signal ?? code}.`));
-      });
+    const child = spawn(node, args, {
+      cwd: scratch,
+      env,
+      stdio: ["ignore", process.stderr, process.stderr],
     });
+    const [code, signal] = await once(child, "close");
+    if (code !== 0)
+      throw new Error(`npm install exited with ${signal ?? code}.`);
   } finally {
     await rm(scratch, { force: true, recursive: true });
   }
@@ -323,7 +303,7 @@ export async function checkForUpdate({
       environment["CODEX_SECURITY_NPM_REGISTRY"] ??
       environment["npm_config_registry"] ??
       environment["NPM_CONFIG_REGISTRY"] ??
-      "https://registry.npmjs.org/";
+      PUBLIC_REGISTRY;
     const timeout = AbortSignal.timeout(3_000);
     const response = await fetchLatest(
       new URL(

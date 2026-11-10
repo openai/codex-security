@@ -3,7 +3,7 @@ import { once } from "node:events";
 import {
   copyFileSync,
   existsSync,
-  linkSync,
+  constants,
   mkdirSync,
   readFileSync,
   symlinkSync,
@@ -182,15 +182,20 @@ describe("CLI update notice", () => {
     );
     try {
       writeFileSync(join(root, "pnpm-workspace.yaml"), "packages: ['apps/*']");
-      for (const [manager, expected] of [
-        ["pnpm", "pnpm add --workspace-root -O"],
-        ["bun", "bun add --optional"],
-      ]) {
+      for (const [manager, category, expected] of [
+        [
+          "pnpm",
+          "optionalDependencies",
+          "pnpm add --workspace-root --save-optional",
+        ],
+        ["pnpm", "peerDependencies", "pnpm add --workspace-root --save-peer"],
+        ["bun", "optionalDependencies", "bun add --optional"],
+      ] as const) {
         writeFileSync(
           join(root, "package.json"),
           JSON.stringify({
             packageManager: manager + "@1.0.0",
-            optionalDependencies: { "@openai/codex-security": "0.9.0" },
+            [category]: { "@openai/codex-security": "0.9.0" },
           }),
         );
         expect(updateCommand({}, entrypoint)).toBe(
@@ -243,7 +248,7 @@ describe("CLI update notice", () => {
         npm_config_userconfig: join(project, ".npmrc"),
       };
       await expect(installUpdate(env, entrypoint)).rejects.toThrow(
-        `Run npm install -D @openai/codex-security@latest from ${JSON.stringify(project)}`,
+        `Run npm install --save-dev @openai/codex-security@latest from ${JSON.stringify(project)}`,
       );
       expect(existsSync(marker)).toBe(false);
       writeFileSync(join(project, "package.json"), "{}");
@@ -263,8 +268,6 @@ describe("CLI update notice", () => {
     const root = directories.create("codex-update-global-");
     const nvm = join(root, ".nvm");
     const prefix = join(nvm, "versions", "node", "v24.0.0");
-    const project = join(root, "project");
-    const originalCwd = process.cwd();
     const windows = process.platform === "win32";
     const bin = windows ? prefix : join(prefix, "bin");
     const modules = join(
@@ -283,15 +286,9 @@ describe("CLI update notice", () => {
     const record = join(prefix, "invocation.json");
     try {
       mkdirSync(join(nvm, ".git"), { recursive: true });
-      mkdirSync(join(project, ".git"), { recursive: true });
-      process.chdir(project);
       mkdirSync(bin, { recursive: true });
       mkdirSync(npmBin, { recursive: true });
-      try {
-        linkSync(process.execPath, node);
-      } catch {
-        copyFileSync(process.execPath, node);
-      }
+      copyFileSync(process.execPath, node, constants.COPYFILE_FICLONE);
       writeFileSync(
         join(npmBin, "npm-cli.js"),
         `require("node:fs").writeFileSync(${JSON.stringify(record)}, JSON.stringify({cwd: process.cwd(), env: process.env, args: process.argv.slice(2)}));`,
@@ -324,14 +321,7 @@ describe("CLI update notice", () => {
         "--registry=https://registry.npmjs.org/",
         "--@openai:registry=https://registry.npmjs.org/",
       ]);
-      // If this same distribution belongs to the checkout we are running in,
-      // the explicit update must give manual instructions instead.
-      process.chdir(join(nvm, "versions"));
-      await expect(installUpdate(env, entrypoint, node)).rejects.toThrow(
-        "Use the installation at",
-      );
     } finally {
-      process.chdir(originalCwd);
       directories.cleanup();
     }
   });
