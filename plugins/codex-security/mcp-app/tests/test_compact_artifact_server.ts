@@ -96,6 +96,65 @@ try {
   }
   await test("shipped: claimed parent operations", () =>
     testClaimedParentArtifactOperations(shipped, "shipped"));
+  await test("shipped: a desktop retry rejoins its prompt-only checkpoint", async () => {
+    const { repoRoot, environment } = await createScanFixture("desktop-retry");
+    const client = await startClient(shipped, environment);
+    const call = toolCaller(client, "desktop-retry");
+    const selection = {
+      targetPath: repoRoot,
+      scope: ".",
+      mode: "standard",
+      userContext: "Review the fixture",
+    };
+    try {
+      const desktopTool = "start_codex_security_prompt_only_scan";
+      const first = await call(desktopTool, selection);
+      const started = requireSuccessfulTool<WorkspaceResult>(first);
+      assert.match(
+        (first.content as TextContent[])[0].text,
+        /Skip it for Amazon Bedrock or API-key-only scans/,
+      );
+      const { scanId, scanDir } = started.workspace.results;
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...workerDraft([]),
+          scanId,
+          complete: false,
+        }),
+      );
+      const head = path.join(scanDir, "checkpoint-head.json");
+      const checkpoint = await readFile(head, "utf8");
+      // Exercise the retry tool selected by the current desktop skill.
+      const instructions = await readFile(
+        path.join(bundledPluginRoot, "skills/security-scan/SKILL.md"),
+        "utf8",
+      );
+      const desktopRoute = /desktop[^.\n]*?`(start_codex_security_\w+)`/i.exec(
+        instructions,
+      );
+      assert.ok(desktopRoute);
+      const retry = await call(desktopRoute[1], selection);
+      const joined = requireSuccessfulTool<
+        WorkspaceResult & { startDisposition: string }
+      >(retry);
+      assert.doesNotMatch(
+        (retry.content as TextContent[])[0].text,
+        /access-advisory/,
+      );
+      assert.equal(joined.startDisposition, "joined");
+      assert.equal(joined.workspace.results.scanId, scanId);
+      assert.equal(await readFile(head, "utf8"), checkpoint);
+      const { scans } = requireSuccessfulTool<{ scans: { scanId: string }[] }>(
+        await call("list_codex_security_scans", { status: "running" }),
+      );
+      assert.deepEqual(
+        scans.map(({ scanId }) => scanId),
+        [scanId],
+      );
+    } finally {
+      await client.close();
+    }
+  });
   await test("shipped: registered scan uses its attached thread", () =>
     testRegisteredScanOwner(shipped));
   await test("shipped: semantic scan draft completion", () =>
@@ -872,14 +931,14 @@ async function testSemanticScanDraftCompletion(
           handoffClaimToken,
         }),
       ).scan.progress;
-    assert.equal((await progress()).phase, "preflight");
+    assert.equal((await progress()).phase, "threat_model");
     requireSuccessfulTool(
       await call("update_codex_security_scan_progress", {
         scanId,
         handoffClaimToken,
         phaseItemsTotal: 1,
         phaseItemsCompleted: 1,
-        phaseProgressUnit: "checks",
+        phaseProgressUnit: "threat_surfaces",
       }),
     );
     const checkpoint = {
@@ -895,6 +954,15 @@ async function testSemanticScanDraftCompletion(
     const checkpointDeferred = (
       await readJson(scanDirectory, "scan-manifest.json")
     ).scan.reviewState.deferred;
+    const [resubmitted, ...remaining] = checkpointDeferred;
+    const resumed = requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        ...checkpoint,
+        reviewState: { ...reviewState, deferred: [resubmitted] },
+      }),
+    );
+    assert.equal(resumed.deferredCount, checkpointDeferred.length);
+    assert.deepEqual(resumed.retainedDeferred, remaining);
     const generatedIds = checkpointDeferred
       .slice(5, 9)
       .map(({ id }: { id: string }) => id);
@@ -940,23 +1008,16 @@ async function testSemanticScanDraftCompletion(
       `${runtimeLabel}: correct the same scan and accept exactly one draft`,
     );
     const savedManifest = await readJson(scanDirectory, "scan-manifest.json");
-    const savedCoverage = {
-      ...savedManifest.scan.reviewState,
-      mode: savedManifest.scan.mode,
-      inventoryStrategy: "directory",
-      openQuestions: [
-        { question: "Can a neighboring query API bypass parameterization?" },
-        reviewState.openQuestions[1],
-      ],
-      includePaths: savedManifest.scan.scope.includePaths,
-      excludePaths: savedManifest.scan.scope.excludePaths,
-    };
     assert.equal(savedManifest.scan.id, scanId);
+    const { deferred } = savedManifest.scan.reviewState;
     assert.deepEqual(drafted, {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      reviewState: savedCoverage,
+      deferredCount: deferred.length,
+      assignedDeferred: reviewState.deferred.flatMap((row, index) =>
+        "id" in row ? [] : [{ index, id: deferred[index].id }],
+      ),
       operation: "replace",
       status: "draft_written",
     });
@@ -1034,7 +1095,10 @@ async function testSemanticScanDraftCompletion(
         (row: { candidateId?: string }) => row.candidateId !== undefined,
       ),
     });
-    assert.deepEqual(retained.openQuestions, savedCoverage.openQuestions);
+    assert.deepEqual(retained.openQuestions, [
+      { question: "Can a neighboring query API bypass parameterization?" },
+      reviewState.openQuestions[1],
+    ]);
     assert.ok(
       (await readFile(path.join(scanDirectory, "report.md"), "utf8")).length >
         0,
@@ -1567,9 +1631,11 @@ async function testDiscoveryPeerNotes(bundle: string) {
 
 async function testDiscoveryWorkerToolList(bundle: string) {
   const repoRoot = path.join(temporaryRoot, "discovery-repository");
-  const artifactRoot = await mkdtemp(
-    path.join(temporaryRoot, "discovery-output-"),
+  const workerRoot = await mkdtemp(
+    path.join(temporaryRoot, "discovery-worker-"),
   );
+  const artifactRoot = path.join(workerRoot, "output");
+  await mkdir(artifactRoot);
   const scanId = randomUUID();
   const resultPath = path.join(artifactRoot, "result.json");
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
@@ -1578,13 +1644,14 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     "print('fixture')\n",
   );
 
-  const client = await startClient(bundle, {
+  const environment = {
     CODEX_SECURITY_ARTIFACT_ROOT: artifactRoot,
     CODEX_SECURITY_REPO_ROOT: repoRoot,
     CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
     CODEX_SECURITY_SCAN_ID: scanId,
     CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
-  });
+  };
+  let client = await startClient(bundle, environment);
   try {
     const tools = await listSandboxAwareTools(client, "discovery worker");
     assert.deepEqual(
@@ -1602,11 +1669,18 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     assert.equal(tool.inputSchema.additionalProperties, false);
     assertNoArtifactDestination(tool);
 
+    const followUp = {
+      id: "uploads",
+      label: "Uploads",
+      disposition: "needs_follow_up",
+      notes: "Check the upload handler.",
+    };
     const input = {
       scanId,
       findings: [],
       reviewState: {
         ...workerDraft([]).reviewState,
+        surfaces: [{ label: "API", disposition: "no_issue_found" }, followUp],
         explicitExclusions: [
           { pattern: "vendor/**", reason: "Third-party source." },
         ],
@@ -1648,15 +1722,87 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     await assert.rejects(readFile(resultPath), { code: "ENOENT" });
 
     const result = await client.callTool({ name: tool.name, arguments: input });
+    const saved = await readJson(resultPath);
+    const savedSurface = saved.reviewState.surfaces[0];
+    assert.equal(typeof savedSurface.id, "string");
     assert.deepEqual(result.structuredContent, {
       scanId,
       findingCount: 0,
-      surfaceCount: 0,
-      reviewState: (await readJson(resultPath)).reviewState,
+      surfaceCount: 2,
+      deferredCount: 1,
+      assignedSurfaces: [{ index: 0, id: savedSurface.id }],
       operation: "replace",
       status: "draft_written",
     });
-    assert.deepEqual(await readJson(resultPath), input);
+    assert.deepEqual(
+      JSON.parse((result.content as TextContent[])[0].text),
+      result.structuredContent,
+    );
+    assert.deepEqual(saved, {
+      ...input,
+      reviewState: {
+        ...input.reviewState,
+        surfaces: [
+          {
+            ...input.reviewState.surfaces[0],
+            id: savedSurface.id,
+            receiptRefs: [],
+          },
+          { ...followUp, receiptRefs: [] },
+        ],
+      },
+    });
+    // The coordinator moves the previous output to attempts before relaunching.
+    await client.close();
+    const attempts = path.join(workerRoot, "attempts");
+    await mkdir(attempts);
+    await rename(artifactRoot, path.join(attempts, "attempt-1"));
+    await mkdir(artifactRoot);
+    client = await startClient(bundle, environment);
+    const next = await client.callTool({
+      name: tool.name,
+      arguments: {
+        ...input,
+        reviewState: { ...input.reviewState, surfaces: [], deferred: [] },
+      },
+    });
+    assert.deepEqual(next.structuredContent, {
+      scanId,
+      findingCount: 0,
+      surfaceCount: 2,
+      deferredCount: 1,
+      retainedDeferred: input.reviewState.deferred,
+      retainedSurfaces: [{ ...followUp, receiptRefs: [] }],
+      operation: "replace",
+      status: "draft_written",
+    });
+    assert.deepEqual(
+      (await readJson(resultPath)).reviewState,
+      saved.reviewState,
+    );
+    const closed = requireSuccessfulTool(
+      await client.callTool({
+        name: tool.name,
+        arguments: {
+          ...input,
+          complete: true,
+          reviewState: {
+            ...input.reviewState,
+            surfaces: [{ ...followUp, disposition: "no_issue_found" }],
+            deferred: [],
+            resolvedDeferred: [
+              {
+                id: next.structuredContent.retainedDeferred[0].id,
+                reason: "Checked the runtime behavior.",
+              },
+            ],
+          },
+        },
+      }),
+    );
+    assert.equal(closed.deferredCount, 0);
+    assert.equal(closed.retainedDeferred, undefined);
+    assert.equal(closed.retainedSurfaces, undefined);
     for (const canonicalName of [
       "scan-manifest.json",
       "findings.json",
