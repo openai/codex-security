@@ -113,7 +113,8 @@ test("rejects unsupported Sonar full-output formats before collecting findings",
   expect(collectSonarIssues).not.toHaveBeenCalled();
 });
 
-const installedSkills = "stale installed skills preserve collector output";
+const installedSkills =
+  "stale installed skills preserve raw result objects and arrays";
 test(installedSkills, async () => {
   if (runTestInSubprocess(import.meta.path, installedSkills)) return;
   const root = await temporaryDirectory("import-skills-");
@@ -149,6 +150,13 @@ test(installedSkills, async () => {
     const yaml = createCliTest(main);
     expect(await yaml.runCli([...args, "--format=yaml"], deps)).toBe(0);
     expect(Bun.YAML.parse(yaml.stdout.text())).toEqual(advisories);
+    const scan = createCliTest(main);
+    expect(await scan.runCli(["scan", ".", "--dry-run", "--json"], deps)).toBe(
+      0,
+    );
+    const preflight = JSON.parse(scan.stdout.text());
+    expect(preflight.dryRun).toBe(true);
+    expect(preflight).not.toHaveProperty("cta");
   } finally {
     await removeTemporaryDirectory(root);
   }

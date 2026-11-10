@@ -598,8 +598,10 @@ available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an importe
 scan uses `SCAN_IMPORT_FAILED` if the import fails. YAML and TOON failures remain
 on stderr without `--full-output`, or when retained results are unavailable.
 
-Diagnostics stay on stderr. Each command's `--schema --format json` describes
-its successful output and failure codes.
+Scan argument errors with `--full-output` and JSON or JSONL use an `ok: false`
+envelope with `error.code` and `error.message`. Diagnostics stay on stderr.
+`scan --schema --format json` describes optional caller inputs before defaults
+and the fields returned by preflight, completed scans and execution failures.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
 
 ### Follow-up finding validation
@@ -2673,7 +2675,10 @@ SDK's local `validate()` and `patch()` methods use the same fallback.
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
-`--json` returns structured output. Exit codes are `0` when all findings are
+Without output options, each finding prints a verdict and its evidence.
+Explicit output formats, field selection and token controls operate on the
+structured result containing `repository`, optional `scanId`, and `results`.
+Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
 With `--json` or `--format jsonl`, authentication and execution failures return
 `status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message`. With
