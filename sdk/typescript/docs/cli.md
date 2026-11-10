@@ -2060,7 +2060,9 @@ least eight characters.
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
 
 In the terminal, `findings list` shows the occurrence ID for each open finding.
-Copy that ID into `findings false-positive` with your reason. The list identifies
+Copy that ID into `findings false-positive` with your reason. Subsequent scans can
+use the explanation while it applies. In `scans show SCAN_ID --json`, each
+displayed occurrence has its saved rationale in `triage.note` after dismissal. The list identifies
 a repository with no saved scan history separately from one with zero open findings.
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
@@ -2137,7 +2139,8 @@ codex-security scans resume SCAN_ID
 ```
 
 The terminal list shows the full scan ID and labels the last activity of a
-`running` scan after 24 hours without an update.
+`running` scan after 24 hours without an update. For a Deep Scan with its
+original session, it also shows the resume command to use after interruption.
 
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and

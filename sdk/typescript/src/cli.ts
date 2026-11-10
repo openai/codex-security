@@ -371,6 +371,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
+import { quoteCliPath } from "./cli-argument.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import type { PatchSelection } from "./patch-tui.js";
@@ -2665,6 +2666,15 @@ export async function main(
     description: "Review saved findings (default: list).",
   }).command("false-positive", {
     description: "Mark a finding as a false positive for future scans.",
+    examples: [
+      {
+        args: { occurrenceId: "occurrence_abc123" },
+        options: { reason: "unreachable" },
+        description:
+          "Use the occurrence ID from findings list and explain why it does not apply.",
+      },
+    ],
+    hint: "Future scans of the repository can reuse the reason while it applies. Read the occurrence’s triage.note in codex-security scans show SCAN_ID --json.",
     destructive: true,
     args: z.object({
       occurrenceId: z
@@ -4125,7 +4135,7 @@ export async function main(
               const summary =
                 disposition === "empty"
                   ? "The report contains no findings. Nothing was stored.\n"
-                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
+                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nStored evidence: ${importedFindingsCommand(preview.repository)}\n`;
               if (humanSummary) renderedOutput = summary;
               else if (!structured) writeDiagnostic(summary);
               return { ...result };
@@ -4824,7 +4834,7 @@ export async function main(
               );
             if (humanSummary) {
               const { created, updated, unchanged } = result.local.counts;
-              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\n`;
+              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\nStored evidence: ${importedFindingsCommand(info.repository)}\n`;
               if (result.cloud)
                 renderedOutput += renderExternalPublicationSummary(
                   result.cloud,
@@ -12172,11 +12182,10 @@ function suggestedOutputDirectory(protectedRoot: string): string | undefined {
   return undefined;
 }
 
-function quoteCliPath(path: string): string {
-  if (/^[A-Za-z0-9_./:\\-]+$/u.test(path)) return path;
-  return process.platform === "win32"
-    ? `"${path}"`
-    : `'${path.replaceAll("'", `'"'"'`)}'`;
+function importedFindingsCommand(repository: string): string {
+  if (diagnosticValue(repository) !== repository)
+    return "From the repository directory, run codex-security findings imported.";
+  return `codex-security findings imported ${quoteCliPath(repository)}`;
 }
 
 async function selectedProjectConfig(

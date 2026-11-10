@@ -1,5 +1,6 @@
 import { basename, relative } from "node:path";
 import stringWidth from "string-width";
+import { quoteCliPath } from "./cli-argument.js";
 import { fitCell, graphemes } from "./terminal-columns.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -258,6 +259,14 @@ export function renderScanHistory(
           STALE_SCAN_MILLISECONDS
       ) {
         lines.push(`    ${dim(`Last activity: ${clean(updatedAt)}`)}`);
+        if (
+          scan["mode"] === "deep" &&
+          scan["handoffStatus"] === "delivered" &&
+          scan["continuationThreadId"]
+        ) {
+          const id = quoteCliPath(clean(scan["scanId"]));
+          lines.push(`    If interrupted: codex-security scans resume ${id}`);
+        }
       }
     }
   } else if (command === "findings") {
