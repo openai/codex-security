@@ -4564,6 +4564,14 @@ test("explains a Cloud account or deployment without the import catalog", async 
     "Cloud import failed (HTTP 404). Not found. Cloud import is not available for this account or deployment.",
   );
   await expect(
+    prepareExternalPublication(f.file, selected, {
+      ...f.deps,
+      fetch: async () => new Response(null, { status: 404 }),
+    }),
+  ).rejects.toThrow(
+    "Cloud import failed (HTTP 404). Cloud import is not available for this account or deployment.",
+  );
+  await expect(
     prepareExternalPublication(f.file, selected, missing(500)),
   ).rejects.toThrow(/^Cloud import failed \(HTTP 500\)\. Not found$/u);
 });

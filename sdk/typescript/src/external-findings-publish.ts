@@ -1651,15 +1651,15 @@ async function preparePublicationInput(
       } | null;
       const retryAfter = response.headers.get("Retry-After");
       const detail = payload?.error?.message ?? response.statusText;
-      // The catalog is the first request, so this is the account or deployment.
-      const unavailable =
-        repositoryCatalog && response.status === 404
-          ? `${/[.!?]$/u.test(detail) ? "" : "."} Cloud import is not available for this account or deployment.`
-          : "";
-      throw new CloudImportError(
-        response.status,
-        `Cloud import failed (HTTP ${response.status}). ${detail}${unavailable}${retryAfter ? ` Retry-After: ${retryAfter}.` : ""}`,
-      );
+      let message = `Cloud import failed (HTTP ${response.status}).`;
+      if (detail) message += ` ${detail}`;
+      if (repositoryCatalog && response.status === 404) {
+        if (!/[.!?]$/u.test(message)) message += ".";
+        message +=
+          " Cloud import is not available for this account or deployment.";
+      }
+      if (retryAfter) message += ` Retry-After: ${retryAfter}.`;
+      throw new CloudImportError(response.status, message);
     }
     if (repositoryCatalog) {
       const advertised = (header: string) =>
