@@ -268,19 +268,26 @@ describe("scan import", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("ordinary scan retains repository arguments and the --json output shortcut", async () => {
-    const { stdout, runCli } = createCliTest(main);
+  test.each([
+    ["./import", "--json"],
+    ["imports", "--json"],
+    ["--json", "./import"],
+  ])(
+    "ordinary scan retains repository arguments and the JSON output shortcut (%s, %s)",
+    async (first, second) => {
+      const { stdout, runCli } = createCliTest(main);
 
-    const onRun = mock();
-    const deps = dependencies({
-      onRun,
-    });
-    expect(await runCli(["scan", "./import", "--json"], deps)).toBe(0);
-    expect(onRun).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(stdout.text())).toMatchObject({
-      manifest: { scan: { id: "scan" } },
-    });
-  });
+      const onRun = mock();
+      const deps = dependencies({
+        onRun,
+      });
+      expect(await runCli(["scan", first, second], deps)).toBe(0);
+      expect(onRun).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        manifest: { scan: { id: "scan" } },
+      });
+    },
+  );
 
   test("preserves the global JSON shortcut before the scan command", async () => {
     const { deps, calls } = importDependencies();
