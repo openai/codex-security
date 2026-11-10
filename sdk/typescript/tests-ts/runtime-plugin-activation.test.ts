@@ -67,6 +67,7 @@ const fakeCli = `
     process.exit(step.exit);
   }
   const installedPath = join(home, "installed");
+  fs.rmSync(installedPath, { recursive: true, force: true });
   fs.cpSync(staged, installedPath, { recursive: true });
   if (step.stale) fs.writeFileSync(join(installedPath, "marker.txt"), "previous");
   if (step.extraSkill === "installed") addSkill(installedPath, "skills/unselected");
@@ -267,6 +268,42 @@ test("rechecks the full marketplace selection and the recovered installed files"
   );
   await f.install();
   expect(await f.remaining()).toHaveLength(0);
+  expect(resolver).toHaveBeenCalled();
+});
+
+test("preserves runtime files when the selection already contains the native command output", async () => {
+  const f = await fixture([{}, {}, {}, {}]);
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.command);
+  const { installedRoot } = await f.install();
+  const migration = join(".codex-plugin", "migrated-command-skills");
+  const generated = join(installedRoot, migration);
+  await cp(generated, join(f.selected, migration), { recursive: true });
+  await f.install();
+  const receipt = await readFile(f.record, "utf8");
+  expect(JSON.parse(receipt).nativeCommandMigration).toMatch(/^sha256:/u);
+  const bytecode = join(installedRoot, "scripts", "__pycache__");
+  await mkdir(bytecode, { recursive: true });
+  const cached = join(bytecode, "helper.cpython-312.pyc");
+  await writeFile(cached, "runtime-generated");
+
+  expect((await f.install()).installedRoot).toBe(installedRoot);
+  expect(await f.remaining()).toHaveLength(2);
+  expect(await readFile(cached, "utf8")).toBe("runtime-generated");
+  expect(await readFile(f.record, "utf8")).toBe(receipt);
+
+  const skill = join(generated, "source-command-sample", "SKILL.md");
+  await rm(skill);
+  await f.install();
+  expect(await f.remaining()).toHaveLength(1);
+  expect(await readFile(skill, "utf8")).toBe("synthetic skill");
+  await mkdir(join(generated, "foreign-command"));
+  await writeFile(join(generated, "foreign-command", "SKILL.md"), "foreign");
+  await f.install();
+  expect(await f.remaining()).toHaveLength(0);
+  expect(await readdir(generated)).toEqual(["source-command-sample"]);
   expect(resolver).toHaveBeenCalled();
 });
 

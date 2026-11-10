@@ -3133,17 +3133,23 @@ export async function bootstrapPlugin(
     );
   const stagedMatches =
     staged?.version === version && (await matchesSelected(stagedRoot));
-  const matchesNativeInstall = async (installedRoot: string) =>
+  const matchesNativeInstall = async (
+    installedRoot: string,
+    allowRuntimeFiles = false,
+  ) =>
     (await matchesSelected(stagedRoot)) &&
-    (await matchesSelected(
-      installedRoot,
-      false,
-      migratedCommands(installedRoot),
-    ));
-  const nativeMigration = (installedRoot: string) =>
+    // Ordinary reuse permits runtime files when all selected bytes are present.
+    // The native receipt still verifies the complete generated command output.
+    ((allowRuntimeFiles && (await matchesSelected(installedRoot, true))) ||
+      (await matchesSelected(
+        installedRoot,
+        false,
+        migratedCommands(installedRoot),
+      )));
+  const nativeMigration = (installedRoot: string, allowRuntimeFiles = false) =>
     verifiedCommandMigration(
       installedRoot,
-      matchesNativeInstall,
+      (path) => matchesNativeInstall(path, allowRuntimeFiles),
       options.signal,
     );
   const matchesReceipt = async (installedRoot: string, migration: unknown) => {
@@ -3152,7 +3158,7 @@ export async function bootstrapPlugin(
       options.runCodex === undefined &&
       (await isBundledPluginInstaller(command))
     ) {
-      return (await nativeMigration(installedRoot)) === migration;
+      return (await nativeMigration(installedRoot, true)) === migration;
     }
     return matchesSelected(installedRoot, true);
   };
