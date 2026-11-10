@@ -3133,6 +3133,15 @@ export async function bootstrapPlugin(
     );
   const stagedMatches =
     staged?.version === version && (await matchesSelected(stagedRoot));
+  const migratedCommands = (plugin: string) =>
+    join(plugin, ".codex-plugin", "migrated-command-skills");
+  const matchesNativeInstall = async (installedRoot: string) =>
+    (await matchesSelected(stagedRoot)) &&
+    (await matchesSelected(
+      installedRoot,
+      false,
+      migratedCommands(installedRoot),
+    ));
 
   if (!stagedMatches) {
     if (existing !== null) {
@@ -3211,7 +3220,11 @@ export async function bootstrapPlugin(
     isRecord(previous) &&
     typeof previous["installedPath"] === "string" &&
     previous["version"] === version &&
-    (await matchesSelected(previous["installedPath"], true))
+    ((await matchesSelected(previous["installedPath"], true)) ||
+      (previous["nativeCommandMigration"] === true &&
+        options.runCodex === undefined &&
+        (await isBundledPluginInstaller(command)) &&
+        (await matchesNativeInstall(previous["installedPath"]))))
   ) {
     return {
       pluginRoot: root,
@@ -3237,13 +3250,7 @@ export async function bootstrapPlugin(
   } catch (first) {
     if (!isRolledBackPluginActivation(first)) throw first;
     throwIfSignalAborted(options.signal);
-    let bundled: string;
-    try {
-      bundled = resolveBundledCodexExecutable();
-    } catch {
-      throw first;
-    }
-    if (!(await sameFile(command.command, bundled))) throw first;
+    if (!(await isBundledPluginInstaller(command))) throw first;
     // The bundled CLI restored the old cache. A short-lived Windows reader
     // of the new tree can release it before a fresh installation attempt.
     try {
@@ -3284,22 +3291,25 @@ export async function bootstrapPlugin(
     );
   }
 
-  if (retried) {
-    const installedRoot = installed["installedPath"];
-    // The pinned local installer converts plugin commands into skills here.
-    const migratedCommands = join(
-      installedRoot,
-      ".codex-plugin",
-      "migrated-command-skills",
-    );
-    if (
-      !(await matchesSelected(stagedRoot)) ||
-      !(await matchesSelected(installedRoot, false, migratedCommands))
-    ) {
+  // The bundled installer removes stale command skills before regenerating them.
+  const bundledInstaller =
+    retried ||
+    (options.runCodex === undefined &&
+      (await isBundledPluginInstaller(command)));
+  const hasSourceMigration =
+    bundledInstaller &&
+    (
+      await lstat(migratedCommands(root)).catch(nullIfMissingFileError)
+    )?.isDirectory() === true;
+  let nativeCommandMigration = false;
+  if (retried || hasSourceMigration) {
+    const verified = await matchesNativeInstall(installed["installedPath"]);
+    if (retried && !verified) {
       throw new PluginBootstrapError(
         "The retried Codex plugin install did not install the selected plugin contents.",
       );
     }
+    nativeCommandMigration = hasSourceMigration && verified;
   }
 
   await writeFile(
@@ -3307,6 +3317,7 @@ export async function bootstrapPlugin(
     JSON.stringify({
       installedPath: installed["installedPath"],
       version,
+      ...(nativeCommandMigration ? { nativeCommandMigration } : {}),
     }),
     { mode: 0o600, signal: options.signal },
   );
@@ -3319,6 +3330,16 @@ export async function bootstrapPlugin(
     name,
     version,
   };
+}
+
+async function isBundledPluginInstaller(
+  command: CodexCommand,
+): Promise<boolean> {
+  try {
+    return await sameFile(command.command, resolveBundledCodexExecutable());
+  } catch {
+    return false;
+  }
 }
 
 async function pluginContentsMatch(
